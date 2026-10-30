@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use crate::PreflightError;
 
 const MAX_PART: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_READS: usize = 512;
 
 struct Entry<'a> {
     name: &'a [u8],
@@ -18,6 +19,7 @@ pub(crate) struct Zip<'a> {
     entries: Vec<Entry<'a>>,
     directory: usize,
     remaining: usize,
+    reads: usize,
 }
 
 fn slice(bytes: &[u8], offset: usize, len: usize) -> Result<&[u8], PreflightError> {
@@ -87,23 +89,29 @@ impl<'a> Zip<'a> {
         if at != central.len() {
             return Err(PreflightError::Zip);
         }
+        entries.sort_unstable_by(|a, b| a.name.cmp(b.name));
+        if entries.windows(2).any(|pair| pair[0].name == pair[1].name) {
+            return Err(PreflightError::Zip);
+        }
         Ok(Self {
             bytes,
             entries,
             directory,
             remaining: 64 * 1024 * 1024,
+            reads: MAX_READS,
         })
     }
 
     pub(crate) fn read(&mut self, name: &str) -> Result<Option<Cow<'a, [u8]>>, PreflightError> {
-        let mut matches = self
+        self.reads = self.reads.checked_sub(1).ok_or(PreflightError::Limit)?;
+        let Ok(index) = self
             .entries
-            .iter()
-            .filter(|entry| entry.name == name.as_bytes());
-        let Some(entry) = matches.next() else {
+            .binary_search_by(|entry| entry.name.cmp(name.as_bytes()))
+        else {
             return Ok(None);
         };
-        if matches.next().is_some() || entry.flags & 0x41 != 0 {
+        let entry = &self.entries[index];
+        if entry.flags & 0x41 != 0 {
             return Err(PreflightError::Zip);
         }
         if entry.size > MAX_PART || entry.size > self.remaining {
@@ -145,12 +153,24 @@ impl<'a> Zip<'a> {
 
 #[cfg(test)]
 pub(crate) fn crc32(bytes: &[u8]) -> u32 {
+    const TABLE: [u32; 256] = {
+        let mut table = [0; 256];
+        let mut index = 0;
+        while index < 256 {
+            let mut crc = index as u32;
+            let mut bit = 0;
+            while bit < 8 {
+                crc = (crc >> 1) ^ (0xedb88320 & 0u32.wrapping_sub(crc & 1));
+                bit += 1;
+            }
+            table[index] = crc;
+            index += 1;
+        }
+        table
+    };
     let mut crc = !0u32;
     for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb88320 & 0u32.wrapping_sub(crc & 1));
-        }
+        crc = (crc >> 8) ^ TABLE[usize::from((crc as u8) ^ byte)];
     }
     !crc
 }

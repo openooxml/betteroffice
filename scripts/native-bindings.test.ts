@@ -372,7 +372,7 @@ describe('native package release wiring', () => {
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
-      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts'
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/docx-native/parity.test.ts bindings/xlsx-native/engine.test.ts'
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
@@ -382,6 +382,8 @@ describe('native package release wiring', () => {
     expect(xlsx.run).toContain(
       'BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts'
     );
+    expect(xlsx.run).toContain('bun run build:docx-wasm');
+    expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');

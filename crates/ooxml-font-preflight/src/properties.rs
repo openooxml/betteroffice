@@ -1,11 +1,13 @@
+use std::rc::Rc;
+
 use crate::map::Map;
 use crate::xml::Node;
 
 #[derive(Clone, Default)]
 pub(crate) struct Props {
-    pub(crate) fonts: [Option<String>; 4],
-    pub(crate) family_override: Option<String>,
-    pub(crate) hint: Option<String>,
+    pub(crate) fonts: [Option<Rc<str>>; 4],
+    pub(crate) family_override: Option<Rc<str>>,
+    pub(crate) hint: Option<Rc<str>>,
     pub(crate) bold: Option<bool>,
     pub(crate) italic: Option<bool>,
     pub(crate) bold_cs: Option<bool>,
@@ -13,7 +15,7 @@ pub(crate) struct Props {
     pub(crate) cs: Option<bool>,
     pub(crate) rtl: Option<bool>,
     pub(crate) hidden: Option<bool>,
-    pub(crate) style: Option<String>,
+    pub(crate) style: Option<Rc<str>>,
 }
 
 pub(crate) fn on_off(value: &str) -> Option<bool> {
@@ -31,6 +33,26 @@ pub(crate) fn on_off(value: &str) -> Option<bool> {
 }
 
 impl Props {
+    pub(crate) fn allocation_cost(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .fonts
+                .iter()
+                .chain([&self.family_override, &self.hint, &self.style])
+                .flatten()
+                .map(|value| value.len())
+                .sum::<usize>()
+    }
+
+    pub(crate) fn apply_defaults(&mut self, mark: &Self) {
+        if self.fonts.iter().all(Option::is_none) {
+            self.fonts.clone_from(&mark.fonts);
+        }
+        self.bold_cs = self.bold_cs.or(mark.bold_cs);
+        self.italic_cs = self.italic_cs.or(mark.italic_cs);
+        self.cs = self.cs.or(mark.cs);
+    }
+
     #[inline(never)]
     pub(crate) fn parse(node: Option<&Node>, theme: &Theme) -> Self {
         let Some(node) = node else {
@@ -47,7 +69,7 @@ impl Props {
             .into_iter()
             .enumerate()
             {
-                props.fonts[index] = fonts.attr(explicit).map(str::to_owned);
+                props.fonts[index] = fonts.attr(explicit).map(Rc::from);
                 if props.fonts[index].as_deref().is_none_or(str::is_empty)
                     && let Some(reference) = fonts.attr(reference).filter(|value| !value.is_empty())
                 {
@@ -57,7 +79,7 @@ impl Props {
             props.hint = fonts
                 .attr("hint")
                 .filter(|hint| matches!(*hint, "default" | "eastAsia" | "cs"))
-                .map(str::to_owned);
+                .map(Rc::from);
         }
         let flag = |name| {
             node.child(name)
@@ -70,7 +92,7 @@ impl Props {
         props.cs = flag("w:cs");
         props.rtl = flag("w:rtl");
         props.hidden = flag("w:vanish");
-        props.style = node.val("w:rStyle").map(str::to_owned);
+        props.style = node.val("w:rStyle").map(Rc::from);
         props
     }
 
@@ -125,15 +147,15 @@ impl Props {
 }
 
 pub(crate) struct Theme {
-    fonts: [[String; 3]; 2],
+    fonts: [[Rc<str>; 3]; 2],
 }
 
 impl Theme {
     pub(crate) fn parse(theme: Option<&Node>, settings: Option<&Node>) -> Self {
         let mut result = Self {
             fonts: [
-                ["Calibri Light".into(), String::new(), String::new()],
-                ["Calibri".into(), String::new(), String::new()],
+                ["Calibri Light".into(), "".into(), "".into()],
+                ["Calibri".into(), "".into(), "".into()],
             ],
         };
         let language = settings.and_then(|node| node.child("w:themeFontLang"));
@@ -144,11 +166,11 @@ impl Theme {
                 continue;
             };
             for (slot, name) in ["a:latin", "a:ea", "a:cs"].into_iter().enumerate() {
-                result.fonts[index][slot] = font
-                    .child(name)
-                    .and_then(|node| node.attr("typeface"))
-                    .unwrap_or_default()
-                    .to_owned();
+                result.fonts[index][slot] = Rc::from(
+                    font.child(name)
+                        .and_then(|node| node.attr("typeface"))
+                        .unwrap_or_default(),
+                );
             }
             for (slot, key) in [(1, "eastAsia"), (2, "bidi")] {
                 let script = language
@@ -161,15 +183,14 @@ impl Theme {
                         .iter()
                         .find(|node| node.name == "a:font" && node.attr("script") == Some(script))
                 {
-                    result.fonts[index][slot] =
-                        face.attr("typeface").unwrap_or_default().to_owned();
+                    result.fonts[index][slot] = Rc::from(face.attr("typeface").unwrap_or_default());
                 }
             }
         }
         result
     }
 
-    pub(crate) fn resolve(&self, reference: &str) -> String {
+    pub(crate) fn resolve(&self, reference: &str) -> Rc<str> {
         let lower = reference.trim_start_matches('+').to_ascii_lowercase();
         let (major, script, drawing) = match lower.split_once('-') {
             Some((slot @ ("mj" | "mn"), script)) => (slot == "mj", script, true),
@@ -191,7 +212,7 @@ impl Theme {
         let family = &self.fonts[index][slot];
         if family.is_empty() && (slot == 0 || drawing) {
             if self.fonts[index][0].is_empty() {
-                if major { "Calibri Light" } else { "Calibri" }.to_owned()
+                if major { "Calibri Light" } else { "Calibri" }.into()
             } else {
                 self.fonts[index][0].clone()
             }
@@ -267,7 +288,16 @@ impl Styles {
             root.path(&["w:docDefaults", "w:rPrDefault", "w:rPr"]),
             theme,
         );
-        for node in root.children.iter().filter(|node| node.name == "w:style") {
+        for (index, node) in root
+            .children
+            .iter()
+            .filter(|node| node.name == "w:style")
+            .enumerate()
+        {
+            if index == 2048 {
+                *complete = false;
+                break;
+            }
             let Some(id) = node.attr("styleId") else {
                 continue;
             };
@@ -285,7 +315,24 @@ impl Styles {
                 .iter()
                 .filter(|node| node.name == "w:tblStylePr")
             {
-                if let Some(kind) = conditional.attr("type") {
+                if let Some(kind) = conditional.attr("type").filter(|kind| {
+                    matches!(
+                        *kind,
+                        "wholeTable"
+                            | "firstRow"
+                            | "lastRow"
+                            | "firstCol"
+                            | "lastCol"
+                            | "band1Horz"
+                            | "band2Horz"
+                            | "band1Vert"
+                            | "band2Vert"
+                            | "nwCell"
+                            | "neCell"
+                            | "swCell"
+                            | "seCell"
+                    )
+                }) {
                     conditionals.insert(
                         kind.to_owned(),
                         Props::parse(conditional.child("w:rPr"), theme),

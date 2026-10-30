@@ -1,18 +1,37 @@
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
 use crate::PreflightFace;
 use crate::properties::{Props, Styles, Theme, num_pr, number};
 use crate::xml::Node;
 
+pub(crate) const MAX_FACES: usize = 512;
+pub(crate) const MAX_DERIVED_BYTES: usize = 4 * 1024 * 1024;
+
+type Run<'a> = (Rc<Props>, Option<Cow<'a, str>>);
+
 #[derive(Default)]
-pub(crate) struct Collector {
-    named: Vec<(PreflightFace, bool)>,
-    implicit: Vec<PreflightFace>,
+struct FaceState {
+    named: Option<PreflightFace>,
+    implicit: Option<PreflightFace>,
+    reached: bool,
 }
 
-fn matches(face: &PreflightFace, family: &str, bold: bool, italic: bool) -> bool {
-    face.bold == bold
-        && face.italic == italic
-        && (face.family.eq_ignore_ascii_case(family)
-            || face.family.chars().map(fold).eq(family.chars().map(fold)))
+pub(crate) struct Collector {
+    faces: BTreeMap<(String, bool, bool), FaceState>,
+    remaining: usize,
+    pub(crate) limited: bool,
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        Self {
+            faces: BTreeMap::new(),
+            remaining: MAX_DERIVED_BYTES,
+            limited: false,
+        }
+    }
 }
 
 fn fold(ch: char) -> char {
@@ -32,68 +51,67 @@ fn merge_scripts(face: &mut PreflightFace, scripts: &[String]) {
 }
 
 impl Collector {
-    fn name(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String], reached: bool) {
-        if let Some((face, used)) = self
-            .named
-            .iter_mut()
-            .find(|(face, _)| matches(face, family, bold, italic))
-        {
-            merge_scripts(face, scripts);
-            *used |= reached;
+    fn charge(&mut self, bytes: usize) -> bool {
+        if let Some(remaining) = self.remaining.checked_sub(bytes) {
+            self.remaining = remaining;
+            true
         } else {
-            self.named.push((
-                PreflightFace {
-                    family: family.to_owned(),
-                    bold,
-                    italic,
-                    scripts: scripts.to_vec(),
-                },
-                reached,
-            ));
+            self.limited = true;
+            false
         }
+    }
+
+    fn face(&mut self, family: &str, bold: bool, italic: bool) -> Option<&mut FaceState> {
+        if family.len() > crate::xml::MAX_VALUE_BYTES {
+            self.limited = true;
+            return None;
+        }
+        let key = (family.chars().map(fold).collect(), bold, italic);
+        if self.faces.len() == MAX_FACES && !self.faces.contains_key(&key) {
+            self.limited = true;
+            return None;
+        }
+        Some(self.faces.entry(key).or_default())
+    }
+
+    fn name(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String], reached: bool) {
+        let Some(state) = self.face(family, bold, italic) else {
+            return;
+        };
+        let face = state.named.get_or_insert_with(|| PreflightFace {
+            family: family.to_owned(),
+            bold,
+            italic,
+            scripts: Vec::new(),
+        });
+        merge_scripts(face, scripts);
+        state.reached |= reached;
     }
 
     fn reach(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String]) {
-        if let Some(face) = self
-            .implicit
-            .iter_mut()
-            .find(|face| matches(face, family, bold, italic))
-        {
-            merge_scripts(face, scripts);
-        } else {
-            self.implicit.push(PreflightFace {
-                family: family.to_owned(),
-                bold,
-                italic,
-                scripts: scripts.to_vec(),
-            });
-        }
+        let Some(state) = self.face(family, bold, italic) else {
+            return;
+        };
+        let face = state.implicit.get_or_insert_with(|| PreflightFace {
+            family: family.to_owned(),
+            bold,
+            italic,
+            scripts: Vec::new(),
+        });
+        merge_scripts(face, scripts);
     }
 
-    pub(crate) fn finish(mut self) -> Vec<PreflightFace> {
-        let mut result = Vec::new();
-        for (face, used) in self.named {
-            if let Some(index) = self
-                .implicit
-                .iter()
-                .position(|implicit| matches(implicit, &face.family, face.bold, face.italic))
-            {
-                self.implicit.swap_remove(index);
-                result.push(face);
-            } else if used {
-                result.push(face);
-            }
-        }
-        result.extend(self.implicit);
-        result.sort_by(|a, b| {
-            a.family
-                .chars()
-                .map(fold)
-                .cmp(b.family.chars().map(fold))
-                .then(a.bold.cmp(&b.bold))
-                .then(a.italic.cmp(&b.italic))
-        });
-        result
+    pub(crate) fn finish(self) -> Vec<PreflightFace> {
+        self.faces
+            .into_values()
+            .filter_map(|state| {
+                if state.reached || state.implicit.is_some() {
+                    state.named.or(state.implicit)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     #[inline(never)]
@@ -185,7 +203,7 @@ fn slot_use(text: &str, complex: bool, hint: Option<&str>) -> (bool, bool) {
     (east_asia, cs)
 }
 
-fn scripts(runs: &[(Props, Option<String>)]) -> Vec<String> {
+fn scripts(runs: &[Run<'_>]) -> Vec<String> {
     let mut flags = [false; 5];
     for (_, text) in runs {
         for ch in text.as_deref().unwrap_or_default().chars() {
@@ -234,6 +252,9 @@ pub(crate) struct Scan<'a> {
 
 impl Scan<'_> {
     pub(crate) fn walk(&mut self, node: &Node, table: &Props) {
+        if self.collector.limited {
+            return;
+        }
         match node.name {
             "w:p" | "m:oMathPara" => self.paragraph(node, table),
             "w:body" | "w:hdr" | "w:ftr" | "w:footnote" | "w:endnote"
@@ -335,19 +356,11 @@ impl Scan<'_> {
         }
         let default = mark.latin().unwrap_or("Calibri").to_owned();
         let mut runs = Vec::new();
-        self.runs(node, &base, &mut runs);
-        for (props, _) in &mut runs {
-            if props.fonts.iter().all(Option::is_none) {
-                props.fonts.clone_from(&mark.fonts);
-            }
-            props.bold_cs = props.bold_cs.or(mark.bold_cs);
-            props.italic_cs = props.italic_cs.or(mark.italic_cs);
-            props.cs = props.cs.or(mark.cs);
-        }
+        self.runs(node, &base, &mark, &mut runs);
         if runs.is_empty() && mark.hidden == Some(true) {
             return;
         }
-        let generated_label = self.note_label;
+        let mut generated_label = self.note_label;
         if generated_label {
             self.note_label = false;
             let family = runs
@@ -357,17 +370,19 @@ impl Scan<'_> {
                         .and_then(|_| props.family())
                         .filter(|family| !family.is_empty())
                 })
-                .map(str::to_owned);
-            runs.insert(
-                0,
-                (
-                    Props {
-                        family_override: family,
-                        ..Props::default()
-                    },
-                    Some("1  ".into()),
-                ),
-            );
+                .map(Rc::from);
+            let props = Rc::new(Props {
+                family_override: family,
+                ..Props::default()
+            });
+            if self
+                .collector
+                .charge(props.allocation_cost() + std::mem::size_of::<Run<'_>>() + 3)
+            {
+                runs.insert(0, (props, Some("1  ".into())));
+            } else {
+                generated_label = false;
+            }
         }
         let scripts = scripts(&runs);
         self.collector.name(&default, false, false, &scripts, true);
@@ -380,12 +395,15 @@ impl Scan<'_> {
                     || props.cs != mark.cs)
             {
                 *self.complete = false;
-                let mut seeded = props.clone();
+                let mut seeded = (**props).clone();
                 seeded.bold_cs = mark.bold_cs;
                 seeded.italic_cs = mark.italic_cs;
                 seeded.cs = mark.cs;
                 self.collector
                     .run(&seeded, text.as_deref(), &default, &scripts);
+            }
+            if self.collector.limited {
+                break;
             }
         }
         let num = if self.shape {
@@ -430,6 +448,9 @@ impl Scan<'_> {
 
     fn nested(&mut self, node: &Node, table: &Props) {
         for child in &node.children {
+            if self.collector.limited {
+                break;
+            }
             if matches!(
                 child.name,
                 "w:p" | "w:tbl" | "w:txbxContent" | "AlternateContent"
@@ -442,8 +463,25 @@ impl Scan<'_> {
     }
 
     #[inline(never)]
-    fn runs(&mut self, node: &Node, base: &Props, runs: &mut Vec<(Props, Option<String>)>) {
+    fn push_run<'n>(
+        &mut self,
+        runs: &mut Vec<Run<'n>>,
+        props: Rc<Props>,
+        text: Option<Cow<'n, str>>,
+    ) {
+        let cost = props.allocation_cost()
+            + std::mem::size_of::<Run<'_>>()
+            + text.as_ref().map_or(0, |text| text.len());
+        if self.collector.charge(cost) {
+            runs.push((props, text));
+        }
+    }
+
+    fn runs<'n>(&mut self, node: &'n Node, base: &Props, mark: &Props, runs: &mut Vec<Run<'n>>) {
         for child in &node.children {
+            if self.collector.limited {
+                break;
+            }
             match child.name {
                 "m:oMath" => {
                     let mut text = String::new();
@@ -451,14 +489,13 @@ impl Scan<'_> {
                     if text.is_empty() {
                         text.push_str("[equation]");
                     }
-                    runs.push((
-                        Props {
-                            family_override: Some("Cambria Math".into()),
-                            italic: Some(true),
-                            ..Props::default()
-                        },
-                        Some(text),
-                    ));
+                    let mut props = Props {
+                        family_override: Some("Cambria Math".into()),
+                        italic: Some(true),
+                        ..Props::default()
+                    };
+                    props.apply_defaults(mark);
+                    self.push_run(runs, Rc::new(props), Some(Cow::Owned(text)));
                 }
                 "w:r" => {
                     let direct = Props::parse(child.child("w:rPr"), self.theme);
@@ -476,36 +513,52 @@ impl Scan<'_> {
                     if props.hidden == Some(true) {
                         continue;
                     }
+                    props.apply_defaults(mark);
+                    let props = Rc::new(props);
                     for content in &child.children {
+                        if self.collector.limited {
+                            break;
+                        }
                         match content.name {
                             "w:t" | "w:delText" => {
                                 if !content.text.is_empty() {
-                                    runs.push((props.clone(), Some(content.text.clone())));
+                                    self.push_run(
+                                        runs,
+                                        props.clone(),
+                                        Some(Cow::Borrowed(&content.text)),
+                                    );
                                 }
                             }
-                            "w:tab" => runs.push((props.clone(), None)),
+                            "w:tab" => self.push_run(runs, props.clone(), None),
                             "w:noBreakHyphen" => {
-                                runs.push((props.clone(), Some("\u{2011}".into())))
+                                self.push_run(runs, props.clone(), Some(Cow::Borrowed("\u{2011}")))
                             }
-                            "w:softHyphen" => runs.push((props.clone(), Some("\u{00ad}".into()))),
+                            "w:softHyphen" => {
+                                self.push_run(runs, props.clone(), Some(Cow::Borrowed("\u{00ad}")))
+                            }
                             "w:sym" if !self.shape => {
                                 if let Some(ch) = content
                                     .attr("char")
                                     .and_then(|value| u32::from_str_radix(value, 16).ok())
                                     .and_then(char::from_u32)
                                 {
-                                    let mut symbol = props.clone();
+                                    let mut symbol = (*props).clone();
                                     if let Some(font) =
                                         content.attr("font").filter(|value| !value.is_empty())
                                     {
+                                        let family = Rc::<str>::from(font);
                                         symbol.fonts =
-                                            std::array::from_fn(|_| Some(font.to_owned()));
+                                            std::array::from_fn(|_| Some(family.clone()));
                                     }
-                                    runs.push((symbol, Some(ch.to_string())));
+                                    self.push_run(
+                                        runs,
+                                        Rc::new(symbol),
+                                        Some(Cow::Owned(ch.to_string())),
+                                    );
                                 }
                             }
                             "w:footnoteReference" | "w:endnoteReference" => {
-                                runs.push((props.clone(), Some("1".into())))
+                                self.push_run(runs, props.clone(), Some(Cow::Borrowed("1")))
                             }
                             "w:fldChar" | "w:instrText" | "w:drawing" | "w:pict" => {
                                 *self.complete = false;
@@ -517,15 +570,15 @@ impl Scan<'_> {
                 "w:pPr" | "w:tbl" | "w:p" | "w:rPr" => {}
                 "w:sdt" | "w:fldSimple" | "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => {
                     *self.complete = false;
-                    self.runs(child, base, runs);
+                    self.runs(child, base, mark, runs);
                 }
                 "AlternateContent" => {
                     *self.complete = false;
                     if let Some(choice) = child.children.first() {
-                        self.runs(choice, base, runs);
+                        self.runs(choice, base, mark, runs);
                     }
                 }
-                _ => self.runs(child, base, runs),
+                _ => self.runs(child, base, mark, runs),
             }
         }
     }
@@ -610,12 +663,18 @@ impl Scan<'_> {
                     .unwrap_or(0)
             });
         for (row_index, row) in rows.iter().enumerate() {
+            if self.collector.limited {
+                break;
+            }
             let mut column = number(
                 row.path(&["w:trPr"])
                     .and_then(|node| node.val("w:gridBefore")),
             )
             .unwrap_or(0);
             for cell in wrapped_children(row, "w:tc") {
+                if self.collector.limited {
+                    break;
+                }
                 let span = number(
                     cell.path(&["w:tcPr"])
                         .and_then(|node| node.val("w:gridSpan")),

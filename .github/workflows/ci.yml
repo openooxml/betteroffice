@@ -479,7 +479,7 @@ jobs:
       - name: Check native and wasm parity
         env:
           BETTEROFFICE_ENGINE: wasm
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/docx-native/parity.test.ts bindings/xlsx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'

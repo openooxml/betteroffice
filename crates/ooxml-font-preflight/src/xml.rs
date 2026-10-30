@@ -1,7 +1,14 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use crate::PreflightError;
+
+pub(crate) const MAX_NODES: usize = 250_000;
+pub(crate) const MAX_VALUE_BYTES: usize = 256;
+pub(crate) const MAX_NAMESPACE_DECLARATIONS: usize = 64;
+pub(crate) const MAX_NAMESPACES: usize = 256;
 
 #[derive(Default)]
 pub(crate) struct Node {
@@ -9,6 +16,7 @@ pub(crate) struct Node {
     attrs: Vec<(&'static str, String)>,
     pub(crate) children: Vec<Node>,
     pub(crate) text: String,
+    pub(crate) incomplete: bool,
 }
 
 impl Node {
@@ -186,36 +194,56 @@ fn namespace(uri: &[u8]) -> u8 {
 }
 
 #[inline(never)]
-pub(crate) fn parse(bytes: &[u8]) -> Result<Node, PreflightError> {
+pub(crate) fn parse(bytes: &[u8], nodes: &mut usize) -> Result<Node, PreflightError> {
     std::str::from_utf8(bytes).map_err(|_| PreflightError::Xml)?;
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().expand_empty_elements = true;
     let mut stack = vec![(Node::default(), 0)];
-    let mut bindings = Vec::<(Vec<u8>, u8)>::new();
-    let mut count = 0usize;
+    let mut bindings = BTreeMap::<Vec<u8>, u8>::new();
+    let mut history = Vec::new();
+    let mut incomplete = false;
     loop {
         match reader.read_event().map_err(|_| PreflightError::Xml)? {
             Event::Start(start) => {
-                count += 1;
-                if stack.len() > 128 || count > 250_000 {
+                *nodes = nodes.checked_sub(1).ok_or(PreflightError::Limit)?;
+                if stack.len() > 128 {
                     return Err(PreflightError::Limit);
                 }
-                let scope = bindings.len();
-                for attr in start.attributes() {
+                let scope = history.len();
+                let mut names = BTreeSet::new();
+                for (index, attr) in start.attributes().with_checks(false).enumerate() {
+                    if index == 128 {
+                        return Err(PreflightError::Limit);
+                    }
                     let attr = attr.map_err(|_| PreflightError::Xml)?;
+                    if attr.key.as_ref().len() > 128 {
+                        return Err(PreflightError::Limit);
+                    }
+                    if !names.insert(attr.key.0) {
+                        return Err(PreflightError::Xml);
+                    }
                     let prefix = if attr.key.as_ref() == b"xmlns" {
                         Some(&b""[..])
                     } else {
                         attr.key.as_ref().strip_prefix(b"xmlns:")
                     };
                     if let Some(prefix) = prefix {
+                        if history.len() == MAX_NAMESPACES
+                            || history.len() - scope == MAX_NAMESPACE_DECLARATIONS
+                            || prefix.len() > 64
+                            || attr.value.len() > 512
+                        {
+                            return Err(PreflightError::Limit);
+                        }
                         let value = attr
                             .decoded_and_normalized_value(
                                 quick_xml::XmlVersion::Implicit1_0,
                                 reader.decoder(),
                             )
                             .map_err(|_| PreflightError::Xml)?;
-                        bindings.push((prefix.to_vec(), namespace(value.as_bytes())));
+                        let prefix = prefix.to_vec();
+                        let previous = bindings.insert(prefix.clone(), namespace(value.as_bytes()));
+                        history.push((prefix, previous));
                     }
                 }
                 let qualified = start.name();
@@ -224,17 +252,13 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Node, PreflightError> {
                     Some(at) => (&qualified[..at], &qualified[at + 1..]),
                     None => (&b""[..], qualified),
                 };
-                let ns = bindings
-                    .iter()
-                    .rev()
-                    .find(|(bound, _)| bound.as_slice() == prefix)
-                    .map_or(0, |(_, ns)| *ns);
+                let ns = bindings.get(prefix).copied().unwrap_or(0);
                 let mut node = Node {
                     name: name(ns, local),
                     ..Node::default()
                 };
                 if !node.name.is_empty() {
-                    for attr in start.attributes() {
+                    for attr in start.attributes().with_checks(false) {
                         let attr = attr.map_err(|_| PreflightError::Xml)?;
                         if attr.key.as_ref() == b"xmlns" || attr.key.as_ref().starts_with(b"xmlns:")
                         {
@@ -243,13 +267,21 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Node, PreflightError> {
                         let Some(key) = attribute(attr.key.local_name().as_ref()) else {
                             continue;
                         };
+                        if attr.value.len() > MAX_VALUE_BYTES * 8 {
+                            incomplete = true;
+                            continue;
+                        }
                         let value = attr
                             .decoded_and_normalized_value(
                                 quick_xml::XmlVersion::Implicit1_0,
                                 reader.decoder(),
                             )
                             .map_err(|_| PreflightError::Xml)?;
-                        node.attrs.push((key, value.into_owned()));
+                        if value.len() > MAX_VALUE_BYTES {
+                            incomplete = true;
+                        } else {
+                            node.attrs.push((key, value.into_owned()));
+                        }
                     }
                 }
                 stack.push((node, scope));
@@ -262,7 +294,14 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Node, PreflightError> {
                 if stack.len() == 1 && node.name.is_empty() {
                     return Err(PreflightError::Xml);
                 }
-                bindings.truncate(scope);
+                while history.len() > scope {
+                    let (prefix, previous) = history.pop().ok_or(PreflightError::Xml)?;
+                    if let Some(previous) = previous {
+                        bindings.insert(prefix, previous);
+                    } else {
+                        bindings.remove(&prefix);
+                    }
+                }
                 let (parent, _) = stack.last_mut().ok_or(PreflightError::Xml)?;
                 if node.name.is_empty() {
                     parent.children.extend(node.children);
@@ -321,5 +360,9 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Node, PreflightError> {
     stack
         .pop()
         .and_then(|(mut root, _)| root.children.pop())
+        .map(|mut root| {
+            root.incomplete = incomplete;
+            root
+        })
         .ok_or(PreflightError::Xml)
 }

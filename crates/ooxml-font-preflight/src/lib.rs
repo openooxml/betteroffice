@@ -4,6 +4,7 @@ mod properties;
 mod xml;
 mod zip;
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 #[cfg(feature = "wasm")]
@@ -105,9 +106,24 @@ fn json_string(output: &mut String, value: &str) {
     output.push('"');
 }
 
-fn part(zip: &mut Zip<'_>, name: &str) -> Result<Option<Node>, PreflightError> {
-    zip.read(name)?.map(|bytes| xml::parse(&bytes)).transpose()
+struct Parts<'a> {
+    zip: Zip<'a>,
+    nodes: usize,
 }
+
+impl Parts<'_> {
+    fn part(&mut self, name: &str, complete: &mut bool) -> Result<Option<Node>, PreflightError> {
+        let Some(bytes) = self.zip.read(name)? else {
+            return Ok(None);
+        };
+        let node = xml::parse(&bytes, &mut self.nodes)?;
+        *complete &= !node.incomplete;
+        Ok(Some(node))
+    }
+}
+
+pub(crate) const MAX_RELATIONSHIPS: usize = 4096;
+const MAX_REFERENCES: usize = 4096;
 
 struct Relationship {
     id: String,
@@ -117,7 +133,12 @@ struct Relationship {
 
 fn relationships(root: Option<&Node>, complete: &mut bool) -> Vec<Relationship> {
     let mut result = Vec::new();
-    for node in root.into_iter().flat_map(|node| &node.children) {
+    let mut ids = BTreeSet::new();
+    for (index, node) in root.into_iter().flat_map(|node| &node.children).enumerate() {
+        if index == MAX_RELATIONSHIPS {
+            *complete = false;
+            break;
+        }
         if node.name != "Relationship" || node.attr("TargetMode") == Some("External") {
             continue;
         }
@@ -127,6 +148,10 @@ fn relationships(root: Option<&Node>, complete: &mut bool) -> Vec<Relationship> 
             *complete = false;
             continue;
         };
+        if !ids.insert(id) {
+            *complete = false;
+            continue;
+        }
         let mut segments = if target.starts_with('/') {
             Vec::new()
         } else {
@@ -155,12 +180,24 @@ fn relationships(root: Option<&Node>, complete: &mut bool) -> Vec<Relationship> 
     result
 }
 
-fn references(node: &Node, header_footer: &mut Vec<String>, notes: &mut Vec<String>) {
+fn reference(set: &mut BTreeSet<String>, key: String, complete: &mut bool) {
+    if set.len() < MAX_REFERENCES || set.contains(&key) {
+        set.insert(key);
+    } else {
+        *complete = false;
+    }
+}
+
+fn references(
+    node: &Node,
+    header_footer: &mut BTreeSet<String>,
+    notes: &mut BTreeSet<String>,
+    complete: &mut bool,
+) {
     if matches!(node.name, "w:headerReference" | "w:footerReference")
         && let Some(id) = node.attr("id")
-        && !header_footer.iter().any(|value| value == id)
     {
-        header_footer.push(id.to_owned());
+        reference(header_footer, id.to_owned(), complete);
     }
     if matches!(node.name, "w:footnoteReference" | "w:endnoteReference")
         && let Some(id) = node.attr("id")
@@ -168,12 +205,10 @@ fn references(node: &Node, header_footer: &mut Vec<String>, notes: &mut Vec<Stri
         let mut key = node.name.to_owned();
         key.push(':');
         key.push_str(id);
-        if !notes.contains(&key) {
-            notes.push(key);
-        }
+        reference(notes, key, complete);
     }
     for child in &node.children {
-        references(child, header_footer, notes);
+        references(child, header_footer, notes, complete);
     }
 }
 
@@ -198,13 +233,18 @@ fn uses_numbering(node: &Node, styles: &Styles, complete: &mut bool) -> bool {
 }
 
 pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError> {
-    let mut zip = Zip::new(bytes)?;
-    let document = part(&mut zip, "word/document.xml")?.ok_or(PreflightError::MissingDocument)?;
+    let mut parts = Parts {
+        zip: Zip::new(bytes)?,
+        nodes: xml::MAX_NODES,
+    };
+    let mut complete = true;
+    let document = parts
+        .part("word/document.xml", &mut complete)?
+        .ok_or(PreflightError::MissingDocument)?;
     if document.name != "w:document" || document.child("w:body").is_none() {
         return Err(PreflightError::Xml);
     }
-    let mut complete = true;
-    let rels = part(&mut zip, "word/_rels/document.xml.rels")?;
+    let rels = parts.part("word/_rels/document.xml.rels", &mut complete)?;
     let rels = relationships(rels.as_ref(), &mut complete);
     let target = |kind, default: &str| {
         rels.iter()
@@ -216,7 +256,7 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
     if theme_path != "word/theme/theme1.xml" {
         complete = false;
     }
-    let theme_xml = part(&mut zip, &theme_path)?;
+    let theme_xml = parts.part(&theme_path, &mut complete)?;
     if theme_xml.is_none() && rels.iter().any(|rel| rel.kind == "theme") {
         complete = false;
     }
@@ -224,23 +264,29 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
     if settings_path != "word/settings.xml" {
         complete = false;
     }
-    let settings = part(&mut zip, &settings_path)?;
+    let settings = parts.part(&settings_path, &mut complete)?;
     let theme = Theme::parse(theme_xml.as_ref(), settings.as_ref());
     let styles_path = target("styles", "word/styles.xml");
     if styles_path != "word/styles.xml" {
         complete = false;
     }
-    let styles_xml = part(&mut zip, &styles_path)?;
+    let styles_xml = parts.part(&styles_path, &mut complete)?;
     let styles = Styles::parse(styles_xml.as_ref(), &theme, &mut complete);
     let mut related = Vec::new();
-    let mut header_footer = Vec::new();
-    let mut notes = Vec::new();
-    references(&document, &mut header_footer, &mut notes);
+    let mut header_footer = BTreeSet::new();
+    let mut notes = BTreeSet::new();
+    references(&document, &mut header_footer, &mut notes, &mut complete);
+    let mut visited = BTreeSet::new();
+    let mut loaded = BTreeSet::new();
     for rel in &rels {
         if (matches!(rel.kind.as_str(), "header" | "footer") && header_footer.contains(&rel.id))
             || matches!(rel.kind.as_str(), "footnotes" | "endnotes")
         {
-            if let Some(root) = part(&mut zip, &rel.target)? {
+            if !visited.insert(rel.target.clone()) {
+                continue;
+            }
+            if let Some(root) = parts.part(&rel.target, &mut complete)? {
+                loaded.insert(rel.target.clone());
                 related.push((rel, root));
             } else {
                 complete = false;
@@ -256,7 +302,7 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         if numbering_path != "word/numbering.xml" {
             complete = false;
         }
-        part(&mut zip, &numbering_path)?
+        parts.part(&numbering_path, &mut complete)?
     } else {
         None
     };
@@ -283,13 +329,17 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             .walk(separator, &Props::default());
         }
     }
-    let mut visited = Vec::new();
+    let resolved_headers: BTreeSet<_> = rels
+        .iter()
+        .filter(|rel| {
+            matches!(rel.kind.as_str(), "header" | "footer") && loaded.contains(&rel.target)
+        })
+        .map(|rel| rel.id.clone())
+        .collect();
+    let mut resolved_notes = BTreeSet::new();
+    let mut story_count = 1;
     for (rel, root) in &related {
         let is_notes = matches!(rel.kind.as_str(), "footnotes" | "endnotes");
-        if visited.contains(&rel.target) {
-            continue;
-        }
-        visited.push(rel.target.clone());
         if is_notes {
             if rel.target
                 != if rel.kind == "footnotes" {
@@ -308,10 +358,26 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             for note in &root.children {
                 let id = note.attr("id").unwrap_or_default();
                 if normal_note(note) {
+                    if story_count == MAX_REFERENCES {
+                        complete = false;
+                        break;
+                    }
+                    story_count += 1;
+                    let reference = if rel.kind == "footnotes" {
+                        "w:footnoteReference:"
+                    } else {
+                        "w:endnoteReference:"
+                    };
+                    resolved_notes.insert(join(reference, id));
                     stories.insert(join(prefix, id), note);
                 }
             }
         } else {
+            if story_count == MAX_REFERENCES {
+                complete = false;
+                break;
+            }
+            story_count += 1;
             stories.insert(join("hf:", &rel.id), root);
         }
     }
@@ -330,24 +396,9 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         }
         .walk(story, &Props::default());
     }
-    if header_footer.iter().any(|id| {
-        !rels
-            .iter()
-            .any(|rel| &rel.id == id && matches!(rel.kind.as_str(), "header" | "footer"))
-    }) || notes.iter().any(|reference| {
-        !related.iter().any(|(rel, root)| {
-            let prefix = match rel.kind.as_str() {
-                "footnotes" => "w:footnoteReference:",
-                "endnotes" => "w:endnoteReference:",
-                _ => return false,
-            };
-            reference
-                .strip_prefix(prefix)
-                .is_some_and(|id| root.children.iter().any(|node| node.attr("id") == Some(id)))
-        })
-    }) {
-        complete = false;
-    }
+    complete &= !collector.limited
+        && header_footer.is_subset(&resolved_headers)
+        && notes.is_subset(&resolved_notes);
     Ok(FontPreflight {
         faces: collector.finish(),
         complete,

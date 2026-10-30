@@ -524,3 +524,224 @@ fn json_escapes_families() {
     assert_eq!(parsed["faces"][0]["family"], result.faces[0].family);
     assert_eq!(parsed["complete"], false);
 }
+
+#[test]
+fn oversized_font_names_are_ignored_before_run_property_expansion() {
+    let font = "X".repeat(1024 * 1024);
+    let styles = format!(
+        r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{font}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+    );
+    let body = document(&format!(
+        "<w:p>{}</w:p>",
+        "<w:r><w:t>x</w:t></w:r>".repeat(5000)
+    ));
+    let bytes = zip(
+        &[
+            ("word/document.xml", body.as_bytes()),
+            ("word/styles.xml", styles.as_bytes()),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(!result.complete);
+    assert_eq!(keys(&result), [("Calibri", false, false)]);
+}
+
+#[test]
+fn bounded_font_names_work_across_many_runs() {
+    let font = "X".repeat(xml::MAX_VALUE_BYTES);
+    let styles = format!(
+        r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{font}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+    );
+    let body = document(&format!(
+        "<w:p>{}</w:p>",
+        "<w:r><w:t>x</w:t></w:r>".repeat(5000)
+    ));
+    let bytes = zip(
+        &[
+            ("word/document.xml", body.as_bytes()),
+            ("word/styles.xml", styles.as_bytes()),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [(font.as_str(), false, false)]);
+}
+
+#[test]
+fn derived_run_budget_returns_partial_faces() {
+    let count = collect::MAX_DERIVED_BYTES / std::mem::size_of::<Props>() + 1;
+    let body = format!("<w:p><w:r>{}</w:r></w:p>", "<w:t>x</w:t>".repeat(count));
+    let result = scan("", &body);
+    assert!(!result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+}
+
+#[test]
+fn distinct_font_faces_stop_at_the_face_budget() {
+    let mut body = String::from("<w:p>");
+    for index in 0..collect::MAX_FACES + 64 {
+        body.push_str(&format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Face{index}"/></w:rPr><w:t>x</w:t></w:r>"#
+        ));
+    }
+    body.push_str("</w:p>");
+    let result = scan("", &body);
+    assert!(!result.complete);
+    assert!(!result.faces.is_empty());
+    assert!(result.faces.len() <= collect::MAX_FACES);
+}
+
+#[test]
+fn excessive_namespace_declarations_are_rejected() {
+    let mut doc = String::from(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+    );
+    for index in 0..xml::MAX_NAMESPACE_DECLARATIONS {
+        doc.push_str(&format!(r#" xmlns:n{index}="urn:synthetic:{index}""#));
+    }
+    doc.push_str("><w:body>");
+    doc.push_str(&"<w:p/>".repeat(1000));
+    doc.push_str("</w:body></w:document>");
+    let bytes = zip(&[("word/document.xml", doc.as_bytes())], false);
+    assert_eq!(
+        docx_font_preflight(&bytes).err(),
+        Some(PreflightError::Limit)
+    );
+}
+
+#[test]
+fn namespace_scope_has_a_cumulative_limit() {
+    let mut body = String::new();
+    for level in 0..=xml::MAX_NAMESPACES / xml::MAX_NAMESPACE_DECLARATIONS {
+        body.push_str("<wrapper");
+        for index in 0..xml::MAX_NAMESPACE_DECLARATIONS {
+            body.push_str(&format!(
+                r#" xmlns:n{level}_{index}="urn:synthetic:{index}""#
+            ));
+        }
+        body.push('>');
+    }
+    for _ in 0..=xml::MAX_NAMESPACES / xml::MAX_NAMESPACE_DECLARATIONS {
+        body.push_str("</wrapper>");
+    }
+    let bytes = fixture("", &body, &[], false);
+    assert_eq!(
+        docx_font_preflight(&bytes).err(),
+        Some(PreflightError::Limit)
+    );
+}
+
+#[test]
+fn indexed_namespaces_keep_wordprocessing_prefixes() {
+    let mut doc = String::from(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+    );
+    for index in 1..xml::MAX_NAMESPACE_DECLARATIONS {
+        doc.push_str(&format!(r#" xmlns:n{index}="urn:synthetic:{index}""#));
+    }
+    doc.push_str("><w:body>");
+    doc.push_str(&"<w:p><w:r><w:t>x</w:t></w:r></w:p>".repeat(1000));
+    doc.push_str("</w:body></w:document>");
+    let styles = styles("");
+    let bytes = zip(
+        &[
+            ("word/document.xml", doc.as_bytes()),
+            ("word/styles.xml", styles.as_bytes()),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+}
+
+#[test]
+fn xml_node_budget_is_shared_across_parts() {
+    let bytes = fixture("", "<w:p/>", &[], false);
+    let mut parts = Parts {
+        zip: Zip::new(&bytes).unwrap(),
+        nodes: 3,
+    };
+    let mut complete = true;
+    assert!(
+        parts
+            .part("word/document.xml", &mut complete)
+            .unwrap()
+            .is_some()
+    );
+    assert!(matches!(
+        parts.part("word/styles.xml", &mut complete),
+        Err(PreflightError::Limit)
+    ));
+}
+
+#[test]
+fn zip_index_and_missing_reads_have_bounded_work() {
+    let names: Vec<_> = (0..4096)
+        .rev()
+        .map(|index| format!("ignored-{index:05}"))
+        .collect();
+    let entries: Vec<_> = names
+        .iter()
+        .map(|name| (name.as_str(), &b"x"[..]))
+        .collect();
+    let bytes = zip(&entries, false);
+    let mut archive = Zip::new(&bytes).unwrap();
+    assert_eq!(
+        archive.read("ignored-04095").unwrap().as_deref(),
+        Some(&b"x"[..])
+    );
+    for _ in 1..zip::MAX_READS {
+        assert!(archive.read("missing").unwrap().is_none());
+    }
+    assert!(matches!(
+        archive.read("missing"),
+        Err(PreflightError::Limit)
+    ));
+}
+
+#[test]
+fn relationship_targets_are_read_once_including_missing_parts() {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for index in 0..zip::MAX_READS + 32 {
+        rels.push_str(&format!(r#"<Relationship Id="note{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>"#));
+    }
+    rels.push_str("</Relationships>");
+    let notes = r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:rPr><w:rFonts w:ascii="Note" w:hAnsi="Note"/></w:rPr><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>"#;
+    for present in [false, true] {
+        let mut extra = vec![("word/_rels/document.xml.rels", rels.as_str())];
+        if present {
+            extra.push(("word/footnotes.xml", notes));
+        }
+        let bytes = fixture("", "<w:p/>", &extra, false);
+        let result = docx_font_preflight(&bytes).unwrap();
+        assert_eq!(result.complete, present);
+        assert!(result.faces.len() <= 2);
+    }
+}
+
+#[test]
+fn excessive_relationships_return_partial_faces() {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for index in 0..=MAX_RELATIONSHIPS {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rel{index}" Type="unused" Target="unused.xml"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    let bytes = fixture(
+        "",
+        "<w:p/>",
+        &[("word/_rels/document.xml.rels", &rels)],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(!result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+}
