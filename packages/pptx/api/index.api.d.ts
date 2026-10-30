@@ -942,7 +942,7 @@ export type EditorPosition = {
 export type EditorBaseline = EditorPosition & {
     state: PresentationSessionState;
     hydration: string;
-    module: WebAssembly.Module;
+    module: WebAssembly.Module | undefined;
 };
 export type EditorReplayReply = PresentationReplayReply & {
     projection: PresentationSessionState;

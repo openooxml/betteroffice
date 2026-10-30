@@ -70,6 +70,9 @@ jobs:
       - name: Build the JS entries
         run: bun run --cwd bindings/${{ matrix.binding }}-native --if-present build:js
 
+      - name: Pin workspace dependencies
+        run: bun scripts/rewrite-workspace-deps.ts
+
       - name: Make the root publishable
         working-directory: bindings/${{ matrix.binding }}-native
         run: npm pkg delete private

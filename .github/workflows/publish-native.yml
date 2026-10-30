@@ -86,6 +86,9 @@ jobs:
             exit 1
           fi
 
+      - name: Pin workspace dependencies
+        run: bun scripts/rewrite-workspace-deps.ts
+
       # The repository copy is private so changeset publish skips it.
       - name: Make the root publishable
         working-directory: bindings/${{ inputs.binding }}-native

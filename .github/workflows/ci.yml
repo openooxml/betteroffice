@@ -117,6 +117,7 @@ jobs:
           bun scripts/api-surface.ts --check xlsx
           bun scripts/api-surface.ts --check pptx
           bun scripts/api-surface.ts --check xlsx-native
+          bun scripts/api-surface.ts --check pptx-native
 
       # What `bun run test` builds; the tests themselves run in the package-tests shards.
       - name: Build the Wasm modules
@@ -475,6 +476,10 @@ jobs:
           ls packages/xlsx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/wasm-declarations"
           ls bindings/xlsx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/wasm-declarations" -
           while read -r file; do cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"; done < "$RUNNER_TEMP/wasm-declarations"
+          (cd packages/pptx && bunx tsup)
+          ls packages/pptx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/pptx-wasm-declarations"
+          ls bindings/pptx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/pptx-wasm-declarations" -
+          while read -r file; do cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"; done < "$RUNNER_TEMP/pptx-wasm-declarations"
 
       - name: Test the xlsx packages on the native engine
         run: |

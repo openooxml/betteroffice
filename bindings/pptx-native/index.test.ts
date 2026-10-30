@@ -1,76 +1,93 @@
-import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'bun:test';
+import { readFileSync, readdirSync } from 'node:fs';
+import { describe, expect, spyOn, test } from 'bun:test';
 
-import { openPresentation } from './index.js';
+const manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+const wasmManifest = JSON.parse(readFileSync(new URL('../../packages/pptx/package.json', import.meta.url), 'utf8'));
+const fixture = readFileSync(new URL('../../apps/demo/public/betteroffice-demo.pptx', import.meta.url));
+const dist = new URL('./dist/', import.meta.url);
 
-const fixture = readFileSync(
-  new URL('../../apps/demo/public/betteroffice-demo.pptx', import.meta.url)
-);
-const font = readFileSync(
-  new URL('../../crates/pptx-raster/tests/assets/Carlito-Regular.ttf', import.meta.url)
-);
+async function entry(name: string) {
+  return import(new URL(manifest.exports[name].import, import.meta.url).href);
+}
 
 describe('@betteroffice/pptx-native', () => {
-  test('opens, inspects, renders, and saves a presentation', async () => {
-    const presentation = await openPresentation(fixture);
-    expect(presentation.author).toBe('node');
-    expect(presentation.origin).toBe('local');
-    const snapshot = await presentation.snapshot();
-
-    expect(snapshot.slides.length).toBeGreaterThan(0);
-    expect(await presentation.slideCount).toBe(snapshot.slides.length);
-    expect(await presentation.slideIds).toEqual(snapshot.slides.map((slide) => slide.id));
-    expect((await presentation.slide(0)).id).toBe(snapshot.slides[0].id);
-    expect(await presentation.canUndo).toBe(false);
-    await Promise.all([
-      presentation.registerFont({ family: 'Arial', data: font }),
-      presentation.registerFont({ family: 'Calibri', data: font })
-    ]);
-    const rendered = await presentation.renderSlide(0);
-
-    expect(rendered.data.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    expect((await presentation.save()).subarray(0, 2)).toEqual(Buffer.from('PK'));
+  test('exposes the entries of @betteroffice/pptx and refuses browsers', () => {
+    expect(Object.keys(manifest.exports)).toEqual(Object.keys(wasmManifest.exports));
+    for (const [name, conditions] of Object.entries(wasmManifest.exports) as [string, Record<string, string>][]) {
+      expect(manifest.exports[name]).toEqual({
+        types: conditions.types,
+        browser: './dist/browser.js',
+        import: conditions.import,
+      });
+    }
+    expect(manifest.dependencies).toEqual(wasmManifest.dependencies);
+    expect(manifest.sideEffects).toEqual(wasmManifest.sideEffects);
+    expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({ type: 'module' });
   });
 
-  test('guards collaboration methods on standalone presentations', async () => {
-    const presentation = await openPresentation(fixture);
-    await expect(presentation.encodeStateVector()).rejects.toThrow('collaborative presentation');
-  });
-
-  test('rejects invalid shadow pixel limits', async () => {
-    const presentation = await openPresentation(fixture);
-
-    await expect(presentation.renderSlide(0, { maxShadowPixels: -1 })).rejects.toThrow(
-      'maxShadowPixels must be a non-negative safe integer'
-    );
-    await expect(presentation.renderSlide(0, { maxShadowPixels: Number.NaN })).rejects.toThrow(
-      'maxShadowPixels must be a non-negative safe integer'
+  test('the browser entry throws', async () => {
+    await expect(import(new URL('browser.js', dist).href)).rejects.toThrow(
+      'use @betteroffice/pptx in browsers'
     );
   });
 
-  test('preserves explicit edit context and rejects unknown origins and text enums', async () => {
-    const presentation = await openPresentation(fixture, { author: 'editor', origin: 'agent' });
-    expect(presentation.author).toBe('editor');
-    expect(presentation.origin).toBe('agent');
-    await expect((async () => openPresentation(fixture, { origin: 'bogus' }))()).rejects.toThrow();
-    expect(() => { presentation.origin = 'bogus'; }).toThrow();
-    const slideId = (await presentation.slideIds)[0];
-    await expect((async () => presentation.addTextBox(slideId, {
-      name: 'Invalid style', rect: { x: 0, y: 0, width: 1000000, height: 1000000 },
-      text: 'text', style: { caps: 'bogus' }
-    }))()).rejects.toThrow();
+  test('ships no wasm engine', () => {
+    for (const file of readdirSync(dist)) {
+      expect(file.endsWith('.wasm')).toBe(false);
+      const text = readFileSync(new URL(file, dist), 'utf8');
+      expect(text).not.toContain('__wbindgen');
+      expect(text).not.toContain('_bg.wasm');
+    }
   });
 
-  test('requires an explicit comment status', async () => {
-    const presentation = await openPresentation(fixture);
-    await presentation.setCommentFlavor('modern');
-    const comment = await presentation.addComment({
-      slideId: (await presentation.slideIds)[0], author: 'editor',
-      text: 'comment', created: '2026-01-01T00:00:00Z'
-    });
-    const before = await presentation.comments;
-    await expect((async () => presentation.setCommentStatus(comment.commentId, undefined as unknown as boolean))()).rejects.toThrow();
-    expect(await presentation.comments).toEqual(before);
-    await presentation.setCommentStatus(comment.commentId, true);
+  test('opens, edits, saves and reopens on the native engine', async () => {
+    const instantiate = spyOn(WebAssembly, 'instantiate');
+    const compile = spyOn(WebAssembly, 'compile');
+    try {
+      const pptx = await entry('.') as typeof import('../../packages/pptx/src/index');
+      await pptx.initWasm();
+      const presentation = pptx.openPresentation(fixture);
+      try {
+        const snapshot = presentation.snapshot();
+        expect(snapshot.slides.length).toBeGreaterThan(0);
+        const added = presentation.addTextBox(snapshot.slides[0].id, {
+          name: 'Native API', rect: { x: 100000, y: 200000, width: 3000000, height: 1000000 },
+          text: 'Native', style: { fontFamily: 'Arial', fontSizePt: 18 },
+        });
+        const shape = presentation.snapshot().slides[0].shapes.find(shape => shape.id === added.shapeId)!;
+        presentation.insertText(shape.textStories[0].id, 6, ' package API');
+        const reopened = pptx.openPresentation(presentation.save());
+        try {
+          const saved = reopened.snapshot();
+          expect(saved.slides.length).toBe(snapshot.slides.length);
+          const textBox = saved.slides[0].shapes.find(shape => shape.name === 'Native API')!;
+          const story = reopened.story(textBox.textStories[0].id);
+          expect(story.paragraphs.flatMap(paragraph => paragraph.runs.map(run => run.text)).join(''))
+            .toBe('Native package API');
+        } finally {
+          reopened.dispose();
+        }
+      } finally {
+        presentation.dispose();
+      }
+      expect(instantiate).not.toHaveBeenCalled();
+      expect(compile).not.toHaveBeenCalled();
+    } finally {
+      instantiate.mockRestore();
+      compile.mockRestore();
+    }
+  });
+
+  test('runs a worker session on the native engine', async () => {
+    const { openPresentationSession } = await entry('./worker') as typeof import('../../packages/pptx/src/worker');
+    const session = await openPresentationSession(fixture);
+    try {
+      expect(session.state.slides.length).toBeGreaterThan(0);
+      expect(await session.call.slides()).toEqual(session.state.slides);
+      expect((await session.call.readContent()).ok).toBe(true);
+      expect((await session.save()).subarray(0, 2)).toEqual(new Uint8Array([0x50, 0x4b]));
+    } finally {
+      await session.dispose();
+    }
   });
 });

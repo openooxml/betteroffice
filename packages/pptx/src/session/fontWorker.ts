@@ -1,6 +1,7 @@
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { shipsWasmAsset } from '../wasm/asset';
 import type { PresentationCommandMethods } from './commandProtocol';
 
 type Methods = Pick<PresentationCommandMethods, 'decodeFontFace'>;
@@ -56,7 +57,7 @@ function createPreparedFontWorker() {
   const rpc = createSessionClient<Methods, {}>(connection, {
     methods: { decodeFontFace: true },
   });
-  requestWasmCompile(connection);
+  if (shipsWasmAsset) requestWasmCompile(connection);
   function release(): void {
     if (!retired) { detach(); void rpc.dispose(); transport.close(); }
   }
