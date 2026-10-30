@@ -4,6 +4,7 @@ import {
   resolveScriptFallbackFace,
   resolveLastResortChoice,
   resolveGlyphFallbackFace,
+  resolveLightVariantFace,
   type BundledFontFace,
   type LastResortOffice,
   type BundledFontScript,
@@ -46,6 +47,12 @@ export interface BundledFontSource {
     italic: boolean,
     office?: LastResortOffice,
   ): BundledFontLoader;
+  /** A lighter member of a bundled family, such as `Calibri Light`, drawn with its regular face. */
+  resolveLightVariant?(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+  ): (() => Promise<ArrayBuffer>) | undefined;
 }
 
 export function fontProvider(
@@ -79,6 +86,10 @@ export function fontProvider(
     },
     resolveGlyphFallback(family, bold, italic, office = 'powerpoint') {
       const face = resolveGlyphFallbackFace(family, bold, italic, office);
+      return face ? load(face) : undefined;
+    },
+    resolveLightVariant(family, bold, italic) {
+      const face = resolveLightVariantFace(family, bold, italic);
       return face ? load(face) : undefined;
     },
     resolveLastResort(family, bold, italic, office) {

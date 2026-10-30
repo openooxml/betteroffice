@@ -23,7 +23,7 @@ import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
 import { useSaveRequest } from '../commands/useSaveRequest';
 import { usePeerlessWorkerXlsxCommands } from '../commands/usePeerlessWorkerXlsxCommands';
-import { WorkerInputRefusal } from '../commands/workerInputCoordinator';
+import { WorkerInputRefusal } from '../commands/workerInputErrors';
 import { readWorkerCellInput } from './WorkerCellInputReader';
 import {
   createPeerlessWorkerInputCoordinator, PeerlessWorkerCommandRefusal, type PeerlessWorkerCommandInput,
