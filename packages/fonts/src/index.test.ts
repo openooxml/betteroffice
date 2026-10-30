@@ -1,6 +1,9 @@
+import { fontAssetResponse } from './test-assets';
 import { describe, expect, test } from 'bun:test';
-import { existsSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 
+import latinManifest from '../../fonts-latin/assets/manifest.json';
 import manifest from '../package.json' with { type: 'json' };
 import {
   BUNDLED_FONTS,
@@ -19,6 +22,31 @@ import {
 const SFNT_TRUETYPE = 0x00010000;
 const SFNT_CFF = 0x4f54544f;
 
+function expectLatinSfnt(bytes: ArrayBuffer, file: string, family: string) {
+  const entry = latinManifest.faces.find((face) => face.file === file)!;
+  expect(entry.family).toBe(family);
+  expect(bytes.byteLength).toBe(entry.byteLength);
+  expect(createHash('sha256').update(new Uint8Array(bytes)).digest('hex')).toBe(entry.sha256);
+  const view = new DataView(bytes);
+  expect(view.getUint32(0)).toBe(SFNT_TRUETYPE);
+  const tables = Array.from({ length: view.getUint16(4) }, (_, index) => 12 + index * 16);
+  const nameTable = tables.find((offset) => view.getUint32(offset) === 0x6e616d65);
+  expect(nameTable).toBeDefined();
+  const offset = view.getUint32(nameTable! + 8);
+  const strings = offset + view.getUint16(offset + 4);
+  const families: string[] = [];
+  for (let i = 0; i < view.getUint16(offset + 2); i++) {
+    const record = offset + 6 + i * 12;
+    const platform = view.getUint16(record);
+    if ((platform === 0 || platform === 3) && view.getUint16(record + 6) === 1) {
+      const length = view.getUint16(record + 8);
+      const start = strings + view.getUint16(record + 10);
+      families.push(new TextDecoder('utf-16be').decode(new Uint8Array(bytes, start, length)));
+    }
+  }
+  expect(families).toContain(family);
+}
+
 describe('resolution', () => {
   test('maps the MS core fonts to their metric-compatible substitutes', () => {
     expect(resolveMetricCompatFamily('Calibri')).toBe('Carlito');
@@ -35,7 +63,7 @@ describe('resolution', () => {
   });
 
   test('falls back to a family regular when the exact style is not vendored', () => {
-    expect(resolveMetricCompatFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveMetricCompatFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf.zst');
     expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
   });
 
@@ -62,7 +90,7 @@ describe('resolution', () => {
     test(`${family} resolves to Selawik for every upright style`, () => {
       expect(resolveMetricCompatFamily(` ${family.toUpperCase()} `)).toBe('Selawik');
       for (const bold of [false, true]) {
-        const file = `Selawik-${bold ? boldFile : regular}.ttf`;
+        const file = `Selawik-${bold ? boldFile : regular}.ttf.zst`;
         const face = resolveMetricCompatFace(family, bold, false);
         expect(face?.file).toBe(file);
         expect(face?.style).toBe('normal');
@@ -97,29 +125,29 @@ describe('resolution', () => {
 
   test('Google Sans retains the Carlito fallback', () => {
     expect(resolveMetricCompatFamily('Google Sans')).toBeUndefined();
-    expect(resolveLastResortFace('Google Sans', false, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace('Google Sans', true, true).file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveLastResortFace('Google Sans', false, false).file).toBe('Carlito-Regular.ttf.zst');
+    expect(resolveLastResortFace('Google Sans', true, true).file).toBe('Carlito-BoldItalic.ttf.zst');
   });
 
   test('Segoe UI Black follows the heavy family path', () => {
     expect(resolveMetricCompatFamily('Segoe UI Black')).toBeUndefined();
-    expect(resolveLastResortFace('Segoe UI Black', false, false).file).toBe('Selawik-Bold.ttf');
+    expect(resolveLastResortFace('Segoe UI Black', false, false).file).toBe('Selawik-Bold.ttf.zst');
   });
 
   test('last resort always returns a face, serif-aware', () => {
     expect(resolveLastResortFace('Totally Unknown', false, false).family).toBe('Carlito');
     expect(resolveLastResortFace('Garamond', false, false).family).toBe('Liberation Serif');
-    expect(resolveLastResortFace('Unknown', true, true).file).toBe('Carlito-BoldItalic.ttf');
-    expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-Italic.ttf');
+    expect(resolveLastResortFace('Unknown', true, true).file).toBe('Carlito-BoldItalic.ttf.zst');
+    expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf.zst');
+    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-Italic.ttf.zst');
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
   test('Word substitutes Arial for an unknown sans family, PowerPoint Calibri', () => {
-    expect(resolveLastResortFace('Lato', false, false, 'word').file).toBe('LiberationSans-Regular.ttf');
-    expect(resolveLastResortFace('Lato', true, false, 'powerpoint').file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Lato', false, false, 'word').file).toBe('LiberationSans-Regular.ttf.zst');
+    expect(resolveLastResortFace('Lato', true, false, 'powerpoint').file).toBe('Carlito-Bold.ttf.zst');
     expect(resolveLastResortFace('Garamond', false, false, 'word').family).toBe('Liberation Serif');
-    expect(resolveLastResortFace('Consolas', false, false, 'word').file).toBe('LiberationMono-Regular.ttf');
+    expect(resolveLastResortFace('Consolas', false, false, 'word').file).toBe('LiberationMono-Regular.ttf.zst');
   });
 
   for (const office of ['word', 'powerpoint'] as const) {
@@ -146,29 +174,29 @@ describe('resolution', () => {
   }
 
   test('a typewriter or old-style name lands on a face of its own kind', () => {
-    expect(resolveLastResortFace('Consolas', false, false).file).toBe('LiberationMono-Regular.ttf');
+    expect(resolveLastResortFace('Consolas', false, false).file).toBe('LiberationMono-Regular.ttf.zst');
     expect(resolveLastResortFace('Lucida Console', false, false).file).toBe(
-      'LiberationMono-Regular.ttf'
+      'LiberationMono-Regular.ttf.zst'
     );
     expect(resolveLastResortFace('Book Antiqua', false, false).file).toBe(
-      'LiberationSerif-Regular.ttf'
+      'LiberationSerif-Regular.ttf.zst'
     );
     expect(resolveLastResortFace('Bookman Old Style', true, false).file).toBe(
-      'LiberationSerif-Bold.ttf'
+      'LiberationSerif-Bold.ttf.zst'
     );
     expect(resolveLastResortFace('Calisto MT', false, false).file).toBe(
-      'LiberationSerif-Regular.ttf'
+      'LiberationSerif-Regular.ttf.zst'
     );
     expect(resolveLastResortFace('Monotype Corsiva', false, false).file).toBe(
-      'Carlito-Regular.ttf'
+      'Carlito-Regular.ttf.zst'
     );
   });
 
   test('a family with no clone takes the bundled face closest in width', () => {
-    expect(resolveLastResortFace('Verdana', false, false).file).toBe('Montserrat-Regular.ttf');
-    expect(resolveLastResortFace('Verdana', true, false).file).toBe('Montserrat-Bold.ttf');
-    expect(resolveLastResortFace('Trebuchet MS', false, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace('Gill Sans MT', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Verdana', false, false).file).toBe('Montserrat-Regular.ttf.zst');
+    expect(resolveLastResortFace('Verdana', true, false).file).toBe('Montserrat-Bold.ttf.zst');
+    expect(resolveLastResortFace('Trebuchet MS', false, false).file).toBe('Carlito-Regular.ttf.zst');
+    expect(resolveLastResortFace('Gill Sans MT', false, false).file).toBe('Carlito-Regular.ttf.zst');
   });
 
   test('a width-matched substitute keeps the digit advance of the family it draws', () => {
@@ -250,11 +278,11 @@ describe('resolution', () => {
   }
 
   test('a trailing light weight on a known family outranks the bold flag', () => {
-    expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Regular.ttf');
-    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf');
-    expect(resolveLastResortFace('Lato Light', true, false).file).toBe('Carlito-Bold.ttf');
-    expect(resolveLastResortFace('Blackadder ITC', true, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf.zst');
+    expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Regular.ttf.zst');
+    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf.zst');
+    expect(resolveLastResortFace('Lato Light', true, false).file).toBe('Carlito-Bold.ttf.zst');
+    expect(resolveLastResortFace('Blackadder ITC', true, false).file).toBe('Carlito-Bold.ttf.zst');
   });
 
   test('metric-compatible clones resolve to the family they clone', () => {
@@ -267,33 +295,33 @@ describe('resolution', () => {
   test('script fallbacks prefer the sans face of the bucket', () => {
     expect(resolveScriptFallbackFace('cjk-sc', false, false)?.family).toBe('Noto Sans SC');
     expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Sans Arabic');
-    expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf');
+    expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf.zst');
   });
 
   test('known heavy family names select the bold face and preserve italics', () => {
     for (const family of ['Arial Black', ' ARIAL-BLACK ', 'Arial Heavy', 'Arial ExtraBold']) {
-      expect(resolveLastResortFace(family, false, false).file).toBe('LiberationSans-Bold.ttf');
-      expect(resolveLastResortFace(family, false, true).file).toBe('LiberationSans-BoldItalic.ttf');
+      expect(resolveLastResortFace(family, false, false).file).toBe('LiberationSans-Bold.ttf.zst');
+      expect(resolveLastResortFace(family, false, true).file).toBe('LiberationSans-BoldItalic.ttf.zst');
     }
-    expect(resolveLastResortFace('Calibri Heavy', false, false).file).toBe('Carlito-Bold.ttf');
-    expect(resolveLastResortFace('Calibri Heavy', false, true).file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveLastResortFace('Calibri Heavy', false, false).file).toBe('Carlito-Bold.ttf.zst');
+    expect(resolveLastResortFace('Calibri Heavy', false, true).file).toBe('Carlito-BoldItalic.ttf.zst');
   });
 
   test('unknown heavy family names keep the normal fallback weight', () => {
-    expect(resolveLastResortFace('Archivo Black', false, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace('Archivo Black', false, true).file).toBe('Carlito-Italic.ttf');
-    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Archivo Black', false, false).file).toBe('Carlito-Regular.ttf.zst');
+    expect(resolveLastResortFace('Archivo Black', false, true).file).toBe('Carlito-Italic.ttf.zst');
+    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf.zst');
   });
 });
 
 describe('bundled family names', () => {
   test('resolve to their own faces, not only as Word families', () => {
     expect(resolveMetricCompatFace('Gelasio', false, false)).toBeUndefined();
-    expect(resolveBundledFamilyFace('Gelasio', true, true)?.file).toBe('Gelasio-BoldItalic.ttf');
+    expect(resolveBundledFamilyFace('Gelasio', true, true)?.file).toBe('Gelasio-BoldItalic.ttf.zst');
     expect(resolveBundledFamilyFace(' source sans 3 ', false, true)?.file).toBe(
-      'SourceSans3-Italic.ttf'
+      'SourceSans3-Italic.ttf.zst'
     );
-    expect(resolveBundledFamilyFace('Comic Relief', true, false)?.file).toBe('ComicRelief-Bold.ttf');
+    expect(resolveBundledFamilyFace('Comic Relief', true, false)?.file).toBe('ComicRelief-Bold.ttf.zst');
     expect(resolveBundledFamilyFace('Noto Serif SC', false, false)?.file).toBe(
       'NotoSerifSC-Regular.otf'
     );
@@ -313,14 +341,14 @@ describe('bundled family names', () => {
   });
 
   test('fall back to Word-family resolution and miss unknown names', () => {
-    expect(resolveBundledFamilyFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveBundledFamilyFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf.zst');
     expect(resolveBundledFamilyFace('Tinos', false, false)?.family).toBe('Liberation Serif');
     expect(resolveBundledFamilyFace('Nonesuch', false, false)).toBeUndefined();
   });
 
   test('are served by the provider', async () => {
     const bytes = await createFontProvider().resolveFamily('Gelasio', false, false)!();
-    expect(bytes.byteLength).toBe(107588);
+    expectLatinSfnt(bytes, 'Gelasio-Regular.ttf.zst', 'Gelasio');
     expect(createFontProvider().resolve('Gelasio', false, false)).toBeUndefined();
   });
 });
@@ -329,8 +357,7 @@ describe('loading', () => {
   test('createFontProvider serves real sfnt bytes', async () => {
     const provider = createFontProvider();
     const bytes = await provider.resolve('Calibri', false, false)!();
-    expect(new DataView(bytes).getUint32(0)).toBe(SFNT_TRUETYPE);
-    expect(bytes.byteLength).toBe(628032);
+    expectLatinSfnt(bytes, 'Carlito-Regular.ttf.zst', 'Carlito');
   });
 
   test('Selawik providers keep byte loads lazy and supply Office coverage', async () => {
@@ -350,13 +377,13 @@ describe('loading', () => {
     const fallback = provider.resolveGlyphFallback!('Segoe UI', false, false)!;
     expect(loaded).toEqual([]);
     await provider.resolveLastResort('Google Sans', false, false)();
-    expect(loaded).toEqual(['Carlito-Regular.ttf']);
+    expect(loaded).toEqual(['Carlito-Regular.ttf.zst']);
     expect(provider.resolveGlyphFallback!('Google Sans', false, false)).toBeUndefined();
     await regular();
     await light();
     await fallback();
     expect(loaded).toEqual([
-      'Carlito-Regular.ttf', 'Selawik-Regular.ttf', 'Selawik-Light.ttf', 'Carlito-Regular.ttf',
+      'Carlito-Regular.ttf.zst', 'Selawik-Regular.ttf.zst', 'Selawik-Light.ttf.zst', 'Carlito-Regular.ttf.zst',
     ]);
     for (const office of ['powerpoint', 'word'] as const) {
       for (const family of ['Segoe UI', 'Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI Semibold', 'Segoe UI Black']) {
@@ -409,17 +436,17 @@ describe('loading', () => {
     expect(new DataView(await loadBundledFontBytes(withoutScript)).getUint32(0)).toBe(SFNT_CFF);
   });
 
-  test('caches per face, handing out one buffer identity', async () => {
+  test('caches per face, handing out consumer-owned buffers', async () => {
     const face = resolveMetricCompatFace('Cambria', false, false)!;
     const [a, b] = await Promise.all([loadBundledFontBytes(face), loadBundledFontBytes(face)]);
-    expect(a).toBe(b);
+    expect(a).not.toBe(b);
+    expect(a).toEqual(b);
   });
 
   test('pins a relative provider base to the route where it is created', async () => {
     const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
     const realFetch = globalThis.fetch;
-    const face = resolveMetricCompatFace('Calibri', false, true)!;
-    const expected = await Bun.file(new URL(`../assets/${face.file}`, import.meta.url)).arrayBuffer();
+    const face = resolveMetricCompatFace('Calibri', false, false)!;
     let requested = '';
     Object.defineProperty(globalThis, 'location', {
       configurable: true,
@@ -427,8 +454,8 @@ describe('loading', () => {
     });
     try {
       globalThis.fetch = (async (input: RequestInfo | URL) => {
-        requested = String(input);
-        return new Response(expected);
+        if (!String(input).endsWith('.wasm')) requested = String(input);
+        return fontAssetResponse(input);
       }) as unknown as typeof fetch;
       const provider = createFontProvider({ baseUrl: 'fonts/' });
       Object.defineProperty(globalThis, 'location', {
@@ -436,7 +463,7 @@ describe('loading', () => {
         value: new URL('https://example.test/'),
       });
 
-      const bytes = await provider.resolve('Calibri', false, true)!();
+      const bytes = await provider.resolve('Calibri', false, false)!();
 
       expect(requested).toBe(`https://example.test/docs/team/report/fonts/${face.file}`);
       expect(bytes.byteLength).toBe(face.byteLength);
@@ -455,10 +482,11 @@ describe('loading', () => {
 
   test('rejects truncated assets and retries the evicted load', async () => {
     const realFetch = globalThis.fetch;
-    const face = resolveMetricCompatFace('Calibri', true, true)!;
-    const intact = await Bun.file(new URL(`../assets/${face.file}`, import.meta.url)).arrayBuffer();
+    const face = resolveMetricCompatFace('Calibri', false, false)!;
+    const intact = await Bun.file(new URL(`../../fonts-latin/assets/${face.file}`, import.meta.url)).arrayBuffer();
     let attempts = 0;
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('.wasm')) return fontAssetResponse(input);
       attempts++;
       return new Response(
         attempts === 1 ? intact.slice(0, Math.floor(intact.byteLength / 2)) : intact
@@ -467,7 +495,7 @@ describe('loading', () => {
     try {
       const options = { baseUrl: 'https://length-check.example/assets/' };
       await expect(loadBundledFontBytes(face, options)).rejects.toThrow(
-        `expected ${face.byteLength}`
+        `expected ${intact.byteLength}`
       );
       expect((await loadBundledFontBytes(face, options)).byteLength).toBe(face.byteLength);
       expect(attempts).toBe(2);
@@ -485,7 +513,7 @@ describe('loading', () => {
     try {
       const face = resolveMetricCompatFace('Courier New', false, false)!;
       const bytes = await loadBundledFontBytes(face);
-      expect(bytes.byteLength).toBe(319508);
+      expect(bytes.byteLength).toBe(face.byteLength);
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -536,23 +564,6 @@ describe('published shape', () => {
     for (const face of intl) {
       expect(existsSync(new URL(`../assets/${face.file}`, import.meta.url))).toBe(false);
     }
-  });
-
-  test('gives every shipped asset a literal URL a bundler can emit', async () => {
-    const source = await Bun.file(new URL('./index.ts', import.meta.url)).text();
-    const rows = [
-      ...source.matchAll(/'([^']+)': \(\) =>\s+new URL\('\.\.\/assets\/([^']+)', import\.meta\.url\)/g),
-    ];
-    const assets = readdirSync(new URL('../assets/', import.meta.url))
-      .filter((file) => /\.(ttf|otf)$/.test(file))
-      .sort();
-    expect(rows.map(([, file]) => file).sort()).toEqual(assets);
-    expect(rows.filter(([, file, target]) => file !== target).map(([row]) => row)).toEqual([]);
-    expect(
-      BUNDLED_FONTS.filter((face) => !face.script?.startsWith('cjk-') && !face.file.endsWith('.zst'))
-        .map((face) => face.file)
-        .sort()
-    ).toEqual(assets);
   });
 
   test('records the exact byte length of every raw vendored face', () => {

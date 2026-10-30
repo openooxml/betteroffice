@@ -32,9 +32,9 @@ test('missing CJK assets fall back without hiding unknown asset errors', async (
       cjk.family.includes('Serif') ? 'Times New Roman' : 'Arial', false, false
     )!;
     const bytes = await loadBundledFontBytes(cjk);
-    expect(bytes).toBe(await loadBundledFontBytes(fallback));
+    expect(bytes).toEqual(await loadBundledFontBytes(fallback));
     const { script: _script, ...withoutScript } = cjk;
-    expect(await loadBundledFontBytes(withoutScript)).toBe(bytes);
+    expect(await loadBundledFontBytes(withoutScript)).toEqual(bytes);
   }
 });
 
@@ -55,7 +55,7 @@ test('CJK provider loaders return shipped bytes without changing resolver metada
         resolveMetricCompatFace(family, bold, italic) ??
         resolveLastResortFace(family, bold, italic);
       const load = provider.resolve(family, bold, italic) ?? provider.resolveLastResort(family, bold, italic);
-      expect(await load()).toBe(await provider.resolve('Arial', false, false)!());
+      expect(await load()).toEqual(await provider.resolve('Arial', false, false)!());
       expect(
         resolveMetricCompatFace(family, bold, italic) ??
         resolveLastResortFace(family, bold, italic)
@@ -67,8 +67,8 @@ test('CJK provider loaders return shipped bytes without changing resolver metada
   expect(resolveScriptFallbackFace('cjk-sc', false, false)?.file).toBe('NotoSansSC-Regular.otf');
   expect(provider.resolveFamily('Noto Sans SC', true, true)).toBeUndefined();
   const sans = await provider.resolve('Arial', false, false)!();
-  expect(await provider.resolveFamily('Noto Sans SC', false, false)!()).toBe(sans);
-  expect(await provider.resolveScriptFallback('cjk-sc', true, true)!()).toBe(sans);
+  expect(await provider.resolveFamily('Noto Sans SC', false, false)!()).toEqual(sans);
+  expect(await provider.resolveScriptFallback('cjk-sc', true, true)!()).toEqual(sans);
 });
 
 test('invalid CJK add-on exports reject without Latin fallback and remain retryable', async () => {
