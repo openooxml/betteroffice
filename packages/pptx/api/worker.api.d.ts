@@ -611,6 +611,7 @@ export {};
 // ---- session/commandProtocol.d.ts ----
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
+import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
@@ -861,7 +862,11 @@ export declare class CommandOutcomeUnknown extends Error {
     };
     constructor(seq: number, message: string);
 }
-export type PresentationCommandFailure = Error;
+/** Opening needed more than an engine budget allows (today: more than 256 distinct font faces). */
+export declare class PptxResourceLimitError extends Error {
+    constructor(message: string);
+}
+export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure | PptxResourceLimitError;
 export interface PresentationCommandOutcome {
     seq: number;
     status: 'applied' | 'noop' | 'refused' | 'cancelled';
@@ -4233,7 +4238,7 @@ export type { PptxWorkerSession, PptxWorkerSessionOptions } from './session/comm
 /** @internal */
 export { presentationSharedInputs } from './session/commandSharedInput';
 /** @internal */
-export { CommandOutcomeUnknown, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
+export { CommandOutcomeUnknown, PptxResourceLimitError, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
 /** @internal */
 export { frameAssetIds } from './session/frame';
 /** @internal */
