@@ -1,4 +1,4 @@
-import { test, expect, type FrameLocator, type Page, type TestInfo } from "playwright/test";
+import { test, expect, type FrameLocator, type Page, type Route, type TestInfo } from "playwright/test";
 import JSZip from "jszip";
 
 type Format = "docx" | "xlsx" | "pptx";
@@ -156,8 +156,15 @@ async function sendSave(page: Page, format: Format): Promise<void> {
   }, { timeout: 10_000 }).toBeGreaterThan(0);
 }
 
-async function savedText(page: Page, format: Format): Promise<string> {
-  const base64 = await (await page.request.get(`/debug/file?format=${format}`)).text();
+async function closeMessages(page: Page): Promise<unknown[]> {
+  return page.evaluate(() => {
+    const messages = (window as unknown as { __wopiMessages: Array<{ MessageId: string }> }).__wopiMessages;
+    return messages.filter((message) => message.MessageId === "UI_Close");
+  });
+}
+
+async function savedText(page: Page, format: Format, fileId = `file-${format}`): Promise<string> {
+  const base64 = await (await page.request.get(`/debug/file?format=${format}&file=${encodeURIComponent(fileId)}`)).text();
   const zip = await JSZip.loadAsync(Buffer.from(base64, "base64"));
   const parts = Object.values(zip.files).filter((part) => !part.dir && part.name.endsWith(".xml"));
   const xml = await Promise.all(parts.map((part) => part.async("string")));
@@ -204,3 +211,54 @@ for (const format of FORMATS) {
     }
   });
 }
+
+test("docx: ClosePostMessage saves the final edit before one UI_Close", async ({ page }, info) => {
+  const diagnostics = await instrument(page);
+  try {
+    const marker = "WopiCloseMessageFinal";
+    await page.goto("/host-page?format=docx&close=message");
+    await expect.poll(() => loadedCount(page), { timeout: 120_000 }).toBe(2);
+    const frame = page.frameLocator("iframe[title='Alice']");
+    await edit(frame, page, "docx", marker);
+
+    let onSave!: (route: Route) => void;
+    const saving = new Promise<Route>((resolve) => { onSave = resolve; });
+    await page.route("**/api/session/save", (route) => { onSave(route); });
+    await frame.getByRole("button", { name: "Close", exact: true }).click();
+    const request = await saving;
+    expect(await closeMessages(page)).toHaveLength(0);
+    expect(await savedText(page, "docx", "file-docx-message")).not.toContain(marker);
+    const response = await request.fetch();
+    expect(response.ok()).toBe(true);
+    expect(await savedText(page, "docx", "file-docx-message")).toContain(marker);
+    expect(await closeMessages(page)).toHaveLength(0);
+    await request.fulfill({ response });
+
+    await expect(frame.getByRole("status")).toHaveText("Document closed.");
+    await expect.poll(() => closeMessages(page)).toHaveLength(1);
+  } catch (error) {
+    await dumpDiagnostics(page, diagnostics, info);
+    throw error;
+  }
+});
+
+test("docx: CloseUrl saves the final edit before navigating the top page", async ({ page }, info) => {
+  const diagnostics = await instrument(page);
+  try {
+    const marker = "WopiCloseUrlFinal";
+    await page.goto("/host-page?format=docx&close=url");
+    await expect.poll(() => loadedCount(page), { timeout: 120_000 }).toBe(2);
+    const frame = page.frameLocator("iframe[title='Alice']");
+    await edit(frame, page, "docx", marker);
+    expect(await savedText(page, "docx", "file-docx-url")).not.toContain(marker);
+
+    await Promise.all([
+      page.waitForURL(new URL("/closed", page.url()).href),
+      frame.getByRole("button", { name: "Close", exact: true }).click(),
+    ]);
+    expect(await savedText(page, "docx", "file-docx-url")).toContain(marker);
+  } catch (error) {
+    await dumpDiagnostics(page, diagnostics, info);
+    throw error;
+  }
+});

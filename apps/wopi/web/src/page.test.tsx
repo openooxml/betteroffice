@@ -133,6 +133,7 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
   canWrite?: boolean;
   credentialCanWrite?: boolean;
   readOnlyRelay?: boolean;
+  tokenExpiresAt?: number | null;
   snapshot?: { canWrite: boolean; viewOnlyReason: string | null };
 } = {}) {
   let canWrite = options.canWrite ?? true;
@@ -181,7 +182,7 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
   });
   const config = parseWopiConfig({
     sessionHandle: "same-handle", format, fileName: `file.${format}`, canWrite: options.credentialCanWrite ?? true,
-    postMessageOrigin: "https://host.example", userFriendlyName: "Peer", closePostMessage: true,
+    postMessageOrigin: "https://host.example", userFriendlyName: "Peer", closePostMessage: true, tokenExpiresAt: options.tokenExpiresAt,
   });
   const bridge = new PostMessageBridge({
     parent: { postMessage(message) { messages.push(JSON.parse(message)); } },
@@ -228,6 +229,63 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
 
 const compositionSaves = (["docx", "xlsx", "pptx"] as const).flatMap((format) =>
   (["Action_Save", "Save button", "Close"] as const).map((action) => [format, action] as const));
+
+test.each(["expiry", "unmount"] as const)("a 40-day token timer handles %s after rearming", async (finish) => {
+  const maxDelay = 2_147_483_647;
+  const lifetime = 40 * 24 * 60 * 60 * 1000;
+  let now = Date.now();
+  const expiresAt = now + lifetime;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const deadlines = new Map<ReturnType<typeof setTimeout>, { callback: () => void; delay: number }>();
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    if (delay === undefined || delay < 100_000) return schedule(callback, delay);
+    const timer = schedule(() => {}, 0);
+    cancel(timer);
+    deadlines.set(timer, { callback, delay });
+    return timer;
+  }) as typeof setTimeout);
+  const cancellations = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: ReturnType<typeof setTimeout>) => {
+    deadlines.delete(timer);
+    cancel(timer);
+  }) as typeof clearTimeout);
+  try {
+    const h = await mount(false, "docx", { tokenExpiresAt: expiresAt });
+    expect(h.view.getByTestId("editor").dataset.readonly).toBe("false");
+    expect(deadlines.size).toBe(1);
+    const [first, chunk] = [...deadlines][0]!;
+    expect(chunk.delay).toBe(maxDelay);
+    deadlines.delete(first);
+    now += chunk.delay;
+    await act(async () => chunk.callback());
+    expect(h.view.getByTestId("editor").dataset.readonly).toBe("false");
+    expect(deadlines.size).toBe(1);
+    const [latest, remaining] = [...deadlines][0]!;
+    expect(remaining.delay).toBe(lifetime - maxDelay);
+    expect(timers.mock.calls.every(([, delay]) => delay === undefined || delay <= maxDelay)).toBe(true);
+    if (finish === "unmount") {
+      h.view.unmount();
+      expect(cancellations).toHaveBeenCalledWith(latest);
+      expect(deadlines.size).toBe(0);
+    } else {
+      now = expiresAt - 1;
+      await act(async () => h.writableEvent());
+      expect(h.view.getByTestId("editor").dataset.readonly).toBe("false");
+      deadlines.delete(latest);
+      now += 1;
+      await act(async () => remaining.callback());
+      expect(h.view.getByTestId("editor").dataset.readonly).toBe("true");
+      expect(deadlines.size).toBe(0);
+      h.view.unmount();
+    }
+  } finally {
+    cleanup();
+    timers.mockRestore();
+    cancellations.mockRestore();
+    clock.mockRestore();
+  }
+});
 
 test.each(["docx", "xlsx", "pptx"] as const)("%s initially view-only joins reject Save and complete Close without outbound resync", async (format) => {
   const h = await mount(false, format, { canWrite: false, readOnlyRelay: true });

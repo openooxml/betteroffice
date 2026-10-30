@@ -10,6 +10,7 @@ import { createWopiTransport, type WopiTransport } from "./transport";
 type SaveState = "idle" | "saving" | "saved" | "failed";
 const COMPOSITION_ACTIVE_MESSAGE = "Finish typing before saving or closing the document.";
 const LOCKED_ELSEWHERE_MESSAGE = "This file is being edited elsewhere. You are viewing a live read-only copy.";
+const MAX_TIMER_MS = 2_147_483_647;
 
 /** Records page progress for diagnostics. */
 export function wopiDebug(patch: Record<string, unknown>): void {
@@ -396,14 +397,19 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   }, [api, closed, lifetime, loaded.join.baselineGeneration, rejoin, endSession, setWritable]);
 
   useEffect(() => {
-    if (config.tokenExpiresAt === null) return;
-    const delay = config.tokenExpiresAt - Date.now();
-    if (delay <= 0) {
-      setWritable(false);
-      return;
-    }
-    const timer = setTimeout(() => setWritable(false), delay);
-    return () => clearTimeout(timer);
+    const target = config.tokenExpiresAt;
+    if (target === null) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      const delay = target - Date.now();
+      if (delay <= 0) {
+        setWritable(false);
+        return;
+      }
+      timer = setTimeout(schedule, Math.min(delay, MAX_TIMER_MS));
+    };
+    schedule();
+    return () => { if (timer !== null) clearTimeout(timer); };
   }, [config.tokenExpiresAt, setWritable]);
 
   const createTransport = useCallback(
