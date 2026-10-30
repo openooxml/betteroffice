@@ -2,8 +2,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    CHART_FONT_FAMILY, ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect,
-    PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, plot_chart_into,
+    CHART_FONT_FAMILY, ChartLabelRun, ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont,
+    PlotOp, PlotRect, PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, plot_chart_into,
 };
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
@@ -69,10 +69,10 @@ pub(crate) fn chart_primitive<'a>(
 pub(crate) fn visit_chart_fonts(
     space: &ChartSpace,
     default_font: &str,
-    visit: &mut dyn FnMut(&str, bool, bool),
+    visit: &mut dyn FnMut(&str, bool, bool, &str),
 ) {
     let chart = plot_model_with_font(space, default_font);
-    let mut collect = |style: PlotTextStyle<'_>, bold| {
+    let mut collect = |style: PlotTextStyle<'_>, bold, text: &str| {
         let family = style
             .font
             .or(chart.text.chart.font)
@@ -80,34 +80,91 @@ pub(crate) fn visit_chart_fonts(
             .unwrap_or(CHART_FONT_FAMILY);
         let bold = style.bold.or(chart.text.chart.bold).unwrap_or(bold);
         let italic = style.italic.or(chart.text.chart.italic).unwrap_or(false);
-        visit(family, bold, italic);
+        visit(family, bold, italic, text);
     };
-    collect(PlotTextStyle::default(), false);
-    if chart.title.is_some_and(|title| !title.is_empty()) {
-        collect(chart.text.title, true);
+    collect(PlotTextStyle::default(), false, "");
+    if let Some(title) = chart.title.filter(|title| !title.is_empty()) {
+        collect(chart.text.title, true, title);
     }
+    let series = || {
+        chart.series.iter().chain(
+            chart
+                .plot_groups
+                .iter()
+                .flat_map(|group| group.series.iter()),
+        )
+    };
     if chart
         .legend
         .is_some_and(|legend| legend.visible != Some(false))
     {
-        collect(chart.text.legend, false);
+        collect(chart.text.legend, false, "");
+        for name in series().filter_map(|series| series.name) {
+            collect(chart.text.legend, false, name);
+        }
     }
     for axis in &chart.axes {
-        collect(axis.text, false);
+        collect(axis.text, false, "");
+        if let Some(title) = axis.title {
+            collect(axis.text, false, title);
+        }
     }
-    for series in chart.series.iter().chain(
-        chart
-            .plot_groups
-            .iter()
-            .flat_map(|group| group.series.iter()),
-    ) {
+    for title in [chart.axis_titles.category, chart.axis_titles.value]
+        .into_iter()
+        .flatten()
+    {
+        collect(PlotTextStyle::default(), false, title);
+    }
+    for series in series() {
+        for category in series.categories {
+            collect(PlotTextStyle::default(), false, category);
+            for axis in &chart.axes {
+                collect(axis.text, false, category);
+            }
+        }
         for labels in series.labels.iter().chain(
             series
                 .points
                 .iter()
                 .filter_map(|point| point.labels.as_ref()),
         ) {
-            collect(labels.text, false);
+            collect(labels.text, false, "");
+            if labels.show_series_name
+                && let Some(name) = series.name
+            {
+                collect(labels.text, false, name);
+            }
+            if labels.show_category_name {
+                for category in series.categories {
+                    collect(labels.text, false, category);
+                }
+            }
+        }
+        for point in &series.points {
+            let label = point.label_runs.map(|runs| {
+                runs.iter()
+                    .map(|run| match run {
+                        ChartLabelRun::Text(text) => text.as_str(),
+                        ChartLabelRun::Field(field) if field == "SERIESNAME" => {
+                            series.name.unwrap_or_default()
+                        }
+                        ChartLabelRun::Field(field) if field == "CATEGORYNAME" => point
+                            .index
+                            .and_then(|index| series.categories.get(index))
+                            .map(String::as_str)
+                            .unwrap_or_default(),
+                        _ => "",
+                    })
+                    .collect::<String>()
+            });
+            if let Some(label) = label.as_deref().or(point.label) {
+                let style = point
+                    .labels
+                    .or(series.labels)
+                    .map(|labels| labels.text)
+                    .unwrap_or_default();
+                collect(style, false, label);
+            }
         }
     }
 }

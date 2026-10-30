@@ -72,7 +72,7 @@ impl PptxRenderer {
         self.inner.set_browser_coverage_fallback(enabled);
     }
 
-    /// requested font faces before layout, for one slide or the whole deck.
+    /// Requested faces with optional script coverage buckets, before layout.
     #[wasm_bindgen(js_name = requestedFontFacesJson)]
     pub fn requested_font_faces_json(
         &self,

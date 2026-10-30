@@ -770,3 +770,174 @@ fn diagram_drawing_text_agrees_with_layout() {
         ])
     );
 }
+
+#[test]
+fn script_requests_follow_run_families_styles_and_paragraph_context() {
+    let japanese = shape(
+        2,
+        "",
+        "",
+        r#"<a:p><a:r><a:rPr b="1" i="1"><a:latin typeface="BIZ UD明朝"/></a:rPr><a:t>日本語かな</a:t></a:r></a:p>"#,
+    );
+    let indic = shape(
+        3,
+        "",
+        "",
+        &format!("<a:p>{}</a:p>", font_run("नमस्ते", "Unknown Indic")),
+    );
+    let mixed = shape(
+        4,
+        "",
+        "",
+        &format!(
+            "<a:p>{}{}</a:p><a:p>{}</a:p>",
+            font_run("Latin 日本語", "Calibri"),
+            font_run("かな", "Kana Face"),
+            font_run("العربية", "CALIBRI"),
+        ),
+    );
+    let slide = format!("{japanese}{indic}{mixed}");
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([
+            {"family":"BIZ UD明朝","bold":true,"italic":true,"scripts":["cjk-jp"]},
+            {"family":"Unknown Indic","bold":false,"italic":false,"scripts":["devanagari"]},
+            {"family":"Calibri","bold":false,"italic":false,"scripts":["cjk-jp","arabic"]},
+            {"family":"Kana Face","bold":false,"italic":false,"scripts":["cjk-jp"]},
+        ])
+    );
+}
+
+#[test]
+fn inherited_and_edited_shapes_keep_script_requests() {
+    let master = shape(
+        10,
+        "",
+        "",
+        &format!("<a:p>{}</a:p>", font_run("日本語かな", "Inherited Face")),
+    );
+    let slide = text_shape(2, "Edited Face");
+    let session = Fixture {
+        slides: &[&slide],
+        master: &master,
+        ..Fixture::default()
+    }
+    .session();
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    session
+        .insert_text(
+            &EditCtx::local("fonts"),
+            &story.id,
+            0,
+            "नमस्ते ",
+            &pptx_edit::TextStyle {
+                font_family: Some("Edited Face".to_owned()),
+                ..pptx_edit::TextStyle::default()
+            },
+        )
+        .unwrap();
+    let requests = faces(&Renderer::new(), &session, None);
+    assert_eq!(
+        requests,
+        json!([
+            {"family":"Inherited Face","bold":false,"italic":false,"scripts":["cjk-jp"]},
+            {"family":"Edited Face","bold":false,"italic":false,"scripts":["devanagari"]},
+        ])
+    );
+}
+
+#[test]
+fn chart_title_legend_and_categories_report_scripts() {
+    use pptx_parse::{ChartLegend, ChartSeries, ChartSpace, ChartTextProperties};
+
+    let session = chart_session(
+        ChartSpace {
+            chart_type: "column".to_owned(),
+            title: Some("日本語かな".to_owned()),
+            title_text: Some(ChartTextProperties {
+                font: Some("Chart Japanese".to_owned()),
+                italic: Some(true),
+                ..ChartTextProperties::default()
+            }),
+            legend: Some(ChartLegend {
+                visible: true,
+                text: Some(ChartTextProperties {
+                    font: Some("Chart Indic".to_owned()),
+                    ..ChartTextProperties::default()
+                }),
+                ..ChartLegend::default()
+            }),
+            series: vec![ChartSeries {
+                name: Some("नमस्ते".to_owned()),
+                categories: vec!["한글".to_owned()],
+                values: vec![1.0],
+                ..ChartSeries::default()
+            }],
+            ..ChartSpace::default()
+        },
+        10_000_000,
+    );
+    let requests = faces(&Renderer::new(), &session, None);
+    let requests = requests.as_array().unwrap();
+    assert!(requests.contains(&json!({
+        "family":"Chart Japanese","bold":true,"italic":true,"scripts":["cjk-jp"],
+    })));
+    assert!(requests.contains(&json!({
+        "family":"Chart Indic","bold":false,"italic":false,"scripts":["devanagari"],
+    })));
+    assert!(requests.iter().any(|face| face["scripts"] == json!(["cjk-kr"])));
+}
+
+#[test]
+fn coverage_only_deck_shapes_and_measures_without_a_primary_font() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!("<a:p>{}</a:p>", font_run("日本語かな", "BIZ UD明朝")),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    for browser_coverage in [false, true] {
+        let mut renderer = Renderer::new();
+        renderer.set_browser_coverage_fallback(browser_coverage);
+        let id = renderer
+            .register_fallback_font(
+                "Noto Sans JP",
+                false,
+                false,
+                include_bytes!("../../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf"),
+            )
+            .unwrap();
+        let layout: Value =
+            serde_json::from_str(&renderer.layout_slide_json(&session, 0).unwrap()).unwrap();
+        let text = layout["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "textBox")
+            .unwrap();
+        let lines = text["lines"].as_array().unwrap();
+        assert!(!lines.is_empty());
+        let runs = lines[0]["runs"].as_array().unwrap();
+        assert!(!runs.is_empty());
+        assert_eq!(runs[0]["fontId"], id);
+        let glyphs = runs[0]["glyphs"].as_array().unwrap();
+        assert!(!glyphs.is_empty());
+        assert!(
+            glyphs
+                .iter()
+                .all(|glyph| glyph["glyphId"].as_u64().unwrap() > 0)
+        );
+        assert!(lines[0]["width"].as_f64().unwrap() > 0.0);
+    }
+}

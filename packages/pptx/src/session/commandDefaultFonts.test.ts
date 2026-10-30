@@ -1,19 +1,24 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts } from './commandDefaultFonts';
 
 const restorers: (() => void)[] = [];
 const regular = { family: 'Calibri', bold: false, italic: false };
 const bytes = new Uint8Array([1, 2, 3]).buffer;
 
-function provider(load: (family: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined) {
+function provider(
+  load: (family: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined,
+  script: (script: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
+) {
   const resolve = mock(load);
   const resolveFamily = mock(() => undefined);
-  const source = { resolve, resolveFamily, resolveScriptFallback: () => undefined,
+  const resolveScriptFallback = mock(script);
+  const source = { resolve, resolveFamily, resolveScriptFallback,
     resolveLastResort: () => { throw new Error('Unrelated substitution'); } };
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue(source);
   restorers.push(() => imported.mockRestore());
-  return { imported, resolve, resolveFamily };
+  return { imported, resolve, resolveFamily, resolveScriptFallback };
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
@@ -135,4 +140,79 @@ test('default font plumbing stays out of all package entries', async () => {
     const source = await readFile(new URL(entry, import.meta.url), 'utf8');
     expect(source).not.toMatch(/commandDefaultFonts|pptxDefaultFonts|presentationRequestedFontFaces|presentationEnableBrowserCoverageFallback|defaultFontInstaller|installDefaultFonts/);
   }
+});
+
+test('script requests keep traits, fall back to regular and deduplicate across families and concurrent loads', async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const source = provider(() => undefined, (script, bold, italic) =>
+    script === 'arabic' && !bold && !italic ? async () => arabic : undefined);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const requested = { ...regular, bold: true, italic: true, scripts: ['arabic', 'arabic'] };
+  const fonts = createCommandDefaultFonts([{ family: 'Calibri' }], () => [requested,
+    { ...requested, family: 'Unknown Family' }], register, settled, install);
+  try {
+    expect(fonts.hasPending()).toBe(true);
+    const results = await Promise.all([fonts.load(), fonts.load()]);
+    expect(source.resolve.mock.calls).toEqual([['Unknown Family', true, true]]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([['arabic', true, true], ['arabic', false, false]]);
+    expect(results.flat()).toMatchObject([{ family: 'Noto Sans Arabic', bold: false, italic: false, kind: 'coverage' }]);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(install.mock.calls[0][0][0].kind).toBe('coverage');
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(fonts.hasPending()).toBe(false);
+    expect(await fonts.load()).toEqual([]);
+  } finally { fonts.dispose(); }
+});
+
+test('script collection requests each style separately even when no script pack is available', async () => {
+  const source = provider(() => undefined);
+  const fonts = createCommandDefaultFonts([], () => [
+    { ...regular, family: 'BIZ UD明朝', bold: true, scripts: ['cjk-jp'] },
+    { ...regular, family: 'Unknown Indic', italic: true, scripts: ['devanagari'] },
+  ], () => {}, () => {});
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([
+      ['cjk-jp', true, false], ['cjk-jp', false, false],
+      ['devanagari', false, true], ['devanagari', false, false],
+    ]);
+    expect(await fonts.load()).toEqual([]);
+    expect(source.resolveScriptFallback).toHaveBeenCalledTimes(4);
+  } finally { fonts.dispose(); }
+});
+
+test('missing CJK packs never install Latin substitute bytes as coverage', async () => {
+  const latin = new Uint8Array(await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url))).buffer;
+  const source = provider((family) => family === 'Calibri' ? async () => latin : undefined, () => async () => latin);
+  const register = mock((_face: DefaultFontFace) => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const fonts = createCommandDefaultFonts([], () => [
+    { ...regular, scripts: ['cjk-jp'] }, { ...regular, family: 'BIZ UD明朝', scripts: ['cjk-jp'] },
+  ], register, () => {}, install);
+  try {
+    expect(await fonts.load()).toMatchObject([{ family: 'Calibri' }]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(register.mock.calls[0][0]).not.toHaveProperty('kind', 'coverage');
+  } finally { fonts.dispose(); }
+});
+
+test('browser refusal prevents coverage registration and settlement', async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  provider(() => undefined, () => async () => arabic);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const beforeRegister = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [{ ...regular, scripts: ['arabic'] }],
+    register, settled, async () => [], beforeRegister);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(register).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+    expect(beforeRegister).not.toHaveBeenCalled();
+  } finally { fonts.dispose(); }
 });

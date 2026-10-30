@@ -22,7 +22,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function deck(families = ['Calibri', 'Cambria'], text = 'alpha'): Promise<Uint8Array> {
+async function deck(families = ['Calibri', 'Cambria'], text = 'alpha', traits = ''): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -30,18 +30,22 @@ async function deck(families = ['Calibri', 'Cambria'], text = 'alpha'): Promise<
   zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
   zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst>${families.map((_, index) => `<p:sldId id="${256 + index}" r:id="rId${index + 1}"/>`).join('')}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
   zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${families.map((_, index) => `<Relationship Id="rId${index + 1}" Type="${rel}/slide" Target="slides/slide${index + 1}.xml"/>`).join('')}</Relationships>`);
-  for (const [index, family] of families.entries()) zip.file(`ppt/slides/slide${index + 1}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"><a:latin typeface="${family}"/></a:rPr><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+  for (const [index, family] of families.entries()) zip.file(`ppt/slides/slide${index + 1}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400" ${traits}><a:latin typeface="${family}"/></a:rPr><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-function source(loaders: Record<string, () => Promise<ArrayBuffer>>) {
+function source(
+  loaders: Record<string, () => Promise<ArrayBuffer>>,
+  script: (script: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
+) {
   const resolve = mock((family: string) => loaders[family]);
+  const resolveScriptFallback = mock(script);
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue({ resolve, resolveFamily: () => undefined,
-    resolveScriptFallback: () => undefined, resolveLastResort: () => { throw new Error('Unrelated substitution'); } });
+    resolveScriptFallback, resolveLastResort: () => { throw new Error('Unrelated substitution'); } });
   restorers.push(() => imported.mockRestore());
   const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
   restorers.push(() => fetch.mockRestore());
-  return { imported, resolve, fetch };
+  return { imported, resolve, resolveScriptFallback, fetch };
 }
 
 function connection() {
@@ -144,7 +148,7 @@ for (const shared of [false, true]) test(`navigation waits only for target pendi
   expect(ack.outcomes[0].status).toBe('applied');
 });
 
-test('app supplied fonts keep uncovered text in registered faces without defaults', async () => {
+test('app supplied fonts request missing script coverage without replacing primary faces', async () => {
   const manager = source({ Calibri: async () => font });
   const coverage = spyOn(PptxRenderer.prototype, 'setBrowserCoverageFallback');
   restorers.push(() => coverage.mockRestore());
@@ -153,7 +157,9 @@ test('app supplied fonts keep uncovered text in registered faces without default
     ...options, fonts: [{ family: ' calibri ', bold: true, bytes: font.slice(0) }],
   }, wire.transport);
   clients.push(client);
-  expect(manager.imported).not.toHaveBeenCalled();
+  expect(manager.imported).toHaveBeenCalledTimes(1);
+  expect(manager.resolve).not.toHaveBeenCalled();
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('devanagari', false, false);
   expect(manager.fetch).not.toHaveBeenCalled();
   expect(coverage).not.toHaveBeenCalled();
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
@@ -290,4 +296,103 @@ test('registered coverage fonts still precede the browser fallback', async () =>
   const runs = boxes.flatMap((box) => box.lines.flatMap((line) => line.runs));
   expect(runs.some((run) => /[\u0600-\u06ff]/.test(run.text) && run.fontFamily === 'Noto Sans Arabic' && run.fontId !== 0xffffffff)).toBe(true);
   expect(runs.filter((run) => /[\u0900-\u097f]/.test(run.text)).every((run) => run.fontId === 0xffffffff)).toBe(true);
+});
+
+for (const supplied of [false, true]) test(`script defaults install in the coverage chain with supplied primary ${supplied}`, async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const manager = source({}, (script) => script === 'arabic' ? async () => arabic : undefined);
+  const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
+  const primary = spyOn(PptxRenderer.prototype, 'registerFont');
+  restorers.push(() => { fallback.mockRestore(); primary.mockRestore(); });
+  const installed: DefaultFontFace[] = [];
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(['Unknown Arabic'], 'مرحبا'), Object.assign({
+    ...options, fonts: supplied ? [{ family: 'Unknown Arabic', bytes: font.slice(0) }] : [],
+  }, {
+    [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
+  }), wire.transport);
+  clients.push(client);
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([['arabic', false, false]]);
+  expect(installed).toMatchObject([{ family: 'Noto Sans Arabic', kind: 'coverage' }]);
+  expect(fallback).toHaveBeenCalledTimes(1);
+  expect(primary).toHaveBeenCalledTimes(supplied ? 1 : 0);
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+    .flatMap((box) => box.lines.flatMap((line) => line.runs));
+  expect(runs.some((run) => run.fontFamily === 'Noto Sans Arabic' && run.fontId !== 0xffffffff)).toBe(true);
+  expect(runs.flatMap((run) => run.glyphs).every((glyph) => glyph.glyphId > 0)).toBe(true);
+  expect(runs.some((run) => run.width > 0)).toBe(true);
+});
+
+test('missing CJK pack substitutes leave browser rendering and coverage registration unchanged', async () => {
+  source({ Calibri: async () => font }, () => async () => font);
+  const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
+  restorers.push(() => fallback.mockRestore());
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(['Calibri'], 'Latin 日本語かな'), options, wire.transport);
+  clients.push(client);
+  expect(fallback).not.toHaveBeenCalled();
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+    .flatMap((box) => box.lines.flatMap((line) => line.runs));
+  expect(runs.some((run) => /[日本語かな]/.test(run.text) && run.fontId === 0xffffffff)).toBe(true);
+  expect(runs.some((run) => run.text.includes('Latin') && run.fontId !== 0xffffffff)).toBe(true);
+});
+
+test('Japanese coverage loads once for an unmapped family and mixed Latin text with matching requested traits', async () => {
+  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const manager = source({ Calibri: async () => font }, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
+  const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
+  restorers.push(() => fallback.mockRestore());
+  const wire = connection();
+  const client = await createPresentationCommandClient(
+    await deck(['BIZ UD明朝', 'Calibri'], 'Latin 日本語かな', 'b="1" i="1"'), options, wire.transport);
+  clients.push(client);
+  for (const slide of client.state.slides) {
+    if (slide.id !== client.state.activeSlideId) await client.dispatch({ kind: 'activateSlide', payload: { slideId: slide.id } });
+    const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+    const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+      .flatMap((box) => box.lines.flatMap((line) => line.runs));
+    const covered = runs.filter((run) => /[日本語かな]/.test(run.text));
+    expect(covered.length).toBeGreaterThan(0);
+    expect(covered.every((run) => run.fontFamily === 'Noto Sans JP' && run.fontId !== 0xffffffff)).toBe(true);
+    expect(covered.flatMap((run) => run.glyphs).every((glyph) => glyph.glyphId > 0)).toBe(true);
+  }
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', true, true]]);
+  expect(fallback).toHaveBeenCalledTimes(1);
+});
+
+test('inserting script text loads coverage after the family attempt and repaints the active slide', async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const requested = deferred<void>();
+  const loaded = deferred<ArrayBuffer>();
+  const manager = source({ Calibri: async () => font }, (script) => script === 'arabic' ? () => {
+    requested.resolve();
+    return loaded.promise;
+  } : undefined);
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(['Calibri']), options, wire.transport);
+  clients.push(client);
+  expect(manager.resolveScriptFallback).not.toHaveBeenCalled();
+  const content = (await client.read()).result;
+  if (!content.ok) throw new Error(content.failure.message);
+  const story = content.stories[0];
+  const arrived = deferred<void>();
+  client.subscribe((ack) => {
+    if ((ack as DefaultFontPayload).defaultFonts?.some((face) => face.kind === 'coverage')) arrived.resolve();
+  });
+  await client.dispatch({ kind: 'insertText', payload: { inputTime: 1, undoGroup: 'script', text: 'مرحبا ',
+    style: { fontFamily: 'Calibri', bold: false, italic: false },
+    at: { source: 'confirmed', selection: { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId,
+      anchor: 0, focus: 0, affinity: 'downstream' } } } });
+  await requested.promise;
+  loaded.resolve(arabic);
+  await arrived.promise;
+  await client.flush();
+  expect(manager.resolve.mock.calls).toEqual([['Calibri']]);
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([['arabic', false, false]]);
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+    .flatMap((box) => box.lines.flatMap((line) => line.runs));
+  expect(runs.some((run) => /[\u0600-\u06ff]/.test(run.text) && run.fontFamily === 'Noto Sans Arabic')).toBe(true);
 });

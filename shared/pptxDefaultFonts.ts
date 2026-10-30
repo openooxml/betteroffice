@@ -1,8 +1,16 @@
+export interface RequestedFontFace {
+  family: string;
+  bold: boolean;
+  italic: boolean;
+  scripts?: string[];
+}
+
 export interface DefaultFontFace {
   family: string;
   bold: boolean;
   italic: boolean;
   bytes: ArrayBuffer;
+  kind?: 'primary' | 'coverage';
 }
 
 export interface DefaultFontPayload {

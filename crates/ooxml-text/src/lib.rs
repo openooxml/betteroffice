@@ -58,6 +58,7 @@ pub mod font_store;
 pub mod line_break;
 pub mod measure;
 pub mod outline;
+mod scripts;
 pub mod shape;
 pub mod word_fonts;
 pub mod word_metrics;
@@ -81,6 +82,7 @@ pub use measure::{
 };
 pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};
+pub use scripts::paragraph_scripts_with_han_fallback;
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
 pub use symbol_font::SymbolFont;
 pub use word_metrics::{
