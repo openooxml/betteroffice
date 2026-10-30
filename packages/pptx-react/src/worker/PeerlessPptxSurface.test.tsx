@@ -963,7 +963,6 @@ test('p2_read_only_false_true_false_enqueues_both_transitions', async () => {
 });
 
 async function thumbnailMediaTyping() {
-  const clock = stripClock();
   const value = session();
   value.client.hold = true;
   value.client.state.slides.push({ id: 'other', index: 1, name: null, layoutPartPath: null });
@@ -979,6 +978,7 @@ async function thumbnailMediaTyping() {
   await waitFor(() => expect(paints.some((frame) => frame.frame.slideId === 'other')).toBe(true));
   const input = view.container.querySelector('textarea');
   if (!input) throw new Error('Expected peer-less text input');
+  const clock = stripClock();
   await act(async () => { fireEvent.keyDown(input, { key: 'ArrowRight' }); });
   await act(async () => { value.client.ack(1, coveringFrame(value.client, 'abc', 1)); });
   await act(async () => { clock.advance(400); });
