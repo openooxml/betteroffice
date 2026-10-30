@@ -2327,7 +2327,7 @@ describe('XlsxEditor async API', () => {
     fireEvent.mouseDown(scroll, { clientX: 110, clientY: 30 });
     fireEvent.mouseUp(window);
     await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
-    expect(cursor).toHaveBeenLastCalledWith({ sheet: 'sheet:0', anchor: { row: 0, col: 0 }, head: { row: 2, col: 2 } });
+    await waitFor(() => expect(cursor).toHaveBeenLastCalledWith({ sheet: 'sheet:0', anchor: { row: 0, col: 0 }, head: { row: 2, col: 2 } }));
     expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B2');
   });
 
@@ -2359,6 +2359,7 @@ describe('XlsxEditor async API', () => {
     expect(host.open.mock.calls[0]![1]).toMatchObject({ collaborative: true, clientId: 101, initialUpdate: Uint8Array.of(7) });
     expect(replicas).toHaveBeenCalledWith(host.replica);
     expect(host.bindCollaboration).toHaveBeenCalled();
+    await waitFor(() => expect(view.queryByTestId('xlsx-presence-chip-202')).not.toBeNull());
     expect(view.getByTestId('xlsx-remote-selection-202').style.width).toBe('288px');
     expect(view.getByTestId('xlsx-presence-chip-202')).toBeTruthy();
     expect(cursor).toHaveBeenCalledWith({ sheet: 'sheet:0', anchor: { row: 0, col: 0 }, head: { row: 0, col: 0 } });
@@ -2398,6 +2399,7 @@ describe('XlsxEditor async API', () => {
     await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' }));
     const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'draft' } });
+    await waitFor(() => expect(view.queryByTestId('xlsx-remote-selection-202')).not.toBeNull());
     const remote = view.getByTestId('xlsx-remote-selection-202');
     const layer = remote.closest('[style*="pointer-events: none"]');
     expect(layer).not.toBeNull();

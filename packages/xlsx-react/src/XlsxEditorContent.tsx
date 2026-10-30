@@ -2,7 +2,7 @@ import {
   anchorSelection, clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges,
   workbookSelectionMerges,
 } from './selectionData';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import {
   buildA11yGrid,
@@ -78,13 +78,8 @@ import {
 } from '../../../shared/react-toolbar/theme';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
 import { ToolbarButtonBase } from './components/ui/ToolbarPrimitives';
-import {
-  expandRangeToMergedCells,
-  PresenceStrip,
-  RemoteSelections,
-} from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { cellInViewport, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
+import { cellInViewport, deriveLimits, expandRangeToMergedCells, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import type {
   XlsxAdmission,
   XlsxPluginEditorAccess,
@@ -102,6 +97,9 @@ import { WorkbookFailure } from './components/WorkbookFailure';
 
 import type { XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
+
+const PresenceStrip = lazy(() => import('./presence/Presence').then((module) => ({ default: module.PresenceStrip })));
+const RemoteSelections = lazy(() => import('./presence/Presence').then((module) => ({ default: module.RemoteSelections })));
 
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   return {
@@ -2264,12 +2262,14 @@ export function XlsxEditorContent({
       <div style={xlsxToolbarStyles.rail} role="group" aria-label={t('toolbar.formulaBarLabel')}>
         <EditorToolbar.FormulaBar />
         <div style={toolbarSeparatorStyle} aria-hidden="true" />
-        <PresenceStrip
-          peers={awarenessPeers}
-          sheetIds={sheetInfo?.sheetIds ?? []}
-          sheetNames={sheetInfo?.sheetNames ?? []}
-          activeSheet={activeSheet}
-        />
+        {collaborationProvider && <Suspense fallback={null}>
+          <PresenceStrip
+            peers={awarenessPeers}
+            sheetIds={sheetInfo?.sheetIds ?? []}
+            sheetNames={sheetInfo?.sheetNames ?? []}
+            activeSheet={activeSheet}
+          />
+        </Suspense>}
         {proposalsAvailable && (
           <div style={xlsxToolbarStyles.proposals}>
             <ProposalsButton />
@@ -2453,14 +2453,16 @@ export function XlsxEditorContent({
                     }}
                   />
                 )}
-                <RemoteSelections
-                  peers={awarenessPeers}
-                  grid={grid}
-                  sheetIds={sheetInfo?.sheetIds ?? []}
-                  activeSheet={activeSheet}
-                  zoom={zoom}
-                  mergedRanges={visibleMergedRanges}
-                />
+                {collaborationProvider && <Suspense fallback={null}>
+                  <RemoteSelections
+                    peers={awarenessPeers}
+                    grid={grid}
+                    sheetIds={sheetInfo?.sheetIds ?? []}
+                    activeSheet={activeSheet}
+                    zoom={zoom}
+                    mergedRanges={visibleMergedRanges}
+                  />
+                </Suspense>}
                 {!readOnly && editing && scaledEditRect && (
                   <input
                     ref={attachCellInput}

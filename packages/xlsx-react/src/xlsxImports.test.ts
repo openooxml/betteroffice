@@ -15,7 +15,8 @@ const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxA
   'worker/LegacyXlsxWorkerEditor.tsx', 'worker/useEditableSessionWorkbook.ts', 'worker/createWorkerEditorApi.ts',
   'worker/WorkerPaintSource.ts', 'commands/useWorkerXlsxCommands.ts', 'viewer/sessionGeometry.ts',
   'worker/XlsxPeerlessWorkerEditor.tsx', 'worker/usePeerlessSessionWorkbook.ts', 'worker/PeerlessWorkerPaintSource.ts',
-  'worker/PeerlessWorkerSurface.tsx', 'worker/PeerlessWorkerInputs.tsx', 'worker/WorkerDraftController.ts',
+  'worker/PeerlessPresence.tsx', 'worker/usePeerlessPresence.ts', 'worker/PeerlessWorkerSurface.tsx',
+  'worker/PeerlessWorkerInputs.tsx', 'worker/WorkerDraftController.ts',
   'worker/WorkerPresentationStore.ts', 'worker/createAsyncEditorApi.ts', 'commands/peerlessWorkerInputCoordinator.ts',
   'commands/usePeerlessWorkerXlsxCommands.ts', 'plugins/createPeerlessPluginDocument.ts', 'plugins/createPeerlessPluginClients.ts']
   .map((path) => `packages/xlsx-react/src/${path}`);
@@ -93,3 +94,41 @@ test('deferred editors have no runtime imports back into the editor shell', () =
     expect(seen.has(resolve(root, 'packages/xlsx-react/src/viewer/XlsxSessionViewer.tsx'))).toBe(path === 'LegacyXlsxEditor.tsx');
   }
 });
+
+for (const entry of ['packages/xlsx/src/session/client.ts', 'packages/xlsx/src/session/worker.ts',
+  'packages/xlsx-react/src/worker/XlsxPeerlessWorkerEditor.tsx']) {
+  test(`${entry} defers collaboration runtimes until a collaborative open`, async () => {
+    const result = await build({
+      absWorkingDir: root, entryPoints: [entry], bundle: true, minify: true, format: 'esm', splitting: true,
+      outdir: resolve(root, 'node_modules/.cache/xlsx-collaboration-imports'), write: false, metafile: true,
+      external: ['react', 'react-dom'],
+    });
+    const outputs = result.metafile.outputs;
+    const initial = Object.keys(outputs).find((path) => outputs[path].entryPoint === entry)!;
+    const seen = new Set<string>();
+    const visit = (path: string): void => {
+      if (seen.has(path)) return;
+      seen.add(path);
+      for (const dependency of outputs[path].imports) {
+        if (!dependency.external && dependency.kind !== 'dynamic-import') visit(dependency.path);
+      }
+    };
+    visit(initial);
+    const inputs = (paths: string[]) => new Set(paths.flatMap((path) => Object.entries(outputs[path].inputs)
+      .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path)));
+    const eager = inputs([...seen]);
+    const deferred = inputs(Object.keys(outputs).filter((path) => !seen.has(path)));
+    for (const path of ['shared/collaboration-pipe/main.ts', 'shared/collaboration-pipe/worker.ts',
+      'packages/xlsx/src/collaboration/provider.ts', 'packages/xlsx/src/collaboration/asyncReplica.ts',
+      'packages/xlsx/src/collaboration/protocol.ts', 'packages/xlsx/src/collaboration/awareness.ts',
+      'packages/xlsx/src/session/collaborationHost.ts', 'packages/xlsx/src/session/collaborationClient.ts',
+      'packages/xlsx-react/src/presence/Presence.tsx', 'packages/xlsx-react/src/worker/PeerlessPresence.tsx',
+      'packages/xlsx-react/src/worker/usePeerlessPresence.ts']) expect(eager.has(path)).toBe(false);
+    expect(deferred.has(entry.endsWith('/worker.ts') ? 'packages/xlsx/src/session/collaborationHost.ts'
+      : 'packages/xlsx/src/session/collaborationClient.ts')).toBe(true);
+    if (entry.includes('xlsx-react')) {
+      expect(deferred.has('packages/xlsx-react/src/presence/Presence.tsx')).toBe(true);
+      expect(deferred.has('packages/xlsx-react/src/worker/usePeerlessPresence.ts')).toBe(true);
+    }
+  });
+}

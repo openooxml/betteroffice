@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { buildA11yGrid, cellRect, normalizeRange, rangeRect } from '@betteroffice/xlsx';
 import type { WorkbookSheetSummary } from '@betteroffice/xlsx';
@@ -9,8 +9,8 @@ import { PeerlessWorkerCellInput, usePeerlessReadOnly } from './PeerlessWorkerIn
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerDraftController } from './WorkerDraftController';
 import { WorkerPresentationStore, useWorkerPresentation } from './WorkerPresentationStore';
-import { PresenceStrip, RemoteSelections } from '../presence/Presence';
-import { usePeerlessPresence } from './usePeerlessPresence';
+
+export const xlsxPeerlessPresenceLoader = { load: () => import('./PeerlessPresence') };
 
 const selectSelection = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.selection;
 const selectPainted = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.painted;
@@ -110,18 +110,10 @@ export function PeerlessWorkerPresence({ store, run, provider, active, sheets }:
   store: WorkerPresentationStore; run: PeerlessWorkbookSession | null;
   provider: CollaborationAwareness | null | undefined; active: number; sheets: WorkbookSheetSummary[];
 }) {
-  const painted = useWorkerPresentation(store, selectPainted);
-  const selection = useWorkerPresentation(store, selectSelection);
-  const peers = usePeerlessPresence(run, provider, active, selection, sheets);
-  const sheetIds = sheets.map((sheet) => sheet.id);
-  return <>
-    <div style={{ position: 'absolute', top: 8, left: 0, width: painted?.request.width ?? 0,
-      display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
-      <PresenceStrip peers={peers} sheetIds={sheetIds} sheetNames={sheets.map((sheet) => sheet.name)} activeSheet={active} />
-    </div>
-    {painted?.request.sheet === active && <div style={{ pointerEvents: 'none' }}>
-      <RemoteSelections peers={peers} sheetIds={sheetIds} activeSheet={active}
-        grid={painted.displayList.grid} zoom={painted.request.zoom} mergedRanges={painted.mergedRanges ?? []} />
-    </div>}
-  </>;
+  const Presence = useMemo(() => lazy(() => xlsxPeerlessPresenceLoader.load()
+    .then((module) => ({ default: module.PeerlessPresence }))), [xlsxPeerlessPresenceLoader.load]);
+  if (!provider) return null;
+  return <Suspense fallback={null}>
+    <Presence store={store} run={run} provider={provider} active={active} sheets={sheets} />
+  </Suspense>;
 }

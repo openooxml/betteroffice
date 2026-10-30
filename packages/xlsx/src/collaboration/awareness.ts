@@ -6,15 +6,15 @@ import type {
   CollaborationUser,
   CollaborationUserOptions,
 } from './types';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from './validation';
+
+export { MAX_AWARENESS_SHEET_LENGTH, validAwarenessCursor, XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from './validation';
 
 export const AWARENESS_BROADCAST_INTERVAL_MS = 80;
 export const AWARENESS_HEARTBEAT_INTERVAL_MS = 20_000;
 export const AWARENESS_PEER_TIMEOUT_MS = 45_000;
 export const AWARENESS_LABEL_DURATION_MS = 3_000;
-export const XLSX_MAX_ROWS = 1_048_576;
-export const XLSX_MAX_COLUMNS = 16_384;
 export const MAX_AWARENESS_NAME_LENGTH = 128;
-export const MAX_AWARENESS_SHEET_LENGTH = 256;
 export const MAX_TRACKED_AWARENESS_PEERS = 1024;
 
 export const AWARENESS_COLORS = [
@@ -216,14 +216,4 @@ export function resolveAwarenessCursor(
       right: Math.max(cursor.anchor.col, cursor.head.col),
     },
   };
-}
-
-/** @internal */
-export function validAwarenessCursor(value: unknown, _maxFrameBytes?: number): value is AwarenessCursor {
-  if (typeof value !== 'object' || value === null) return false;
-  const cursor = value as AwarenessCursor;
-  const cell = (point: AwarenessCursor['anchor'] | undefined) => !!point &&
-    Number.isSafeInteger(point.row) && point.row >= 0 && Number.isSafeInteger(point.col) && point.col >= 0;
-  return typeof cursor.sheet === 'string' && cursor.sheet.length > 0 &&
-    cursor.sheet.length <= MAX_AWARENESS_SHEET_LENGTH && cell(cursor.anchor) && cell(cursor.head);
 }

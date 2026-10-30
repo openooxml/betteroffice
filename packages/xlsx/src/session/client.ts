@@ -1,5 +1,5 @@
 import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
-import { pipeOpBuffers, type PipeCommandPayload, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
+import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import {
@@ -41,7 +41,7 @@ import type {
   WorkbookSharedAck, WorkbookSharedWireAck,
 } from './commandProtocol';
 import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
-import { attachCollaborationPipe, createAsyncCollaborationReplica, type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import type { AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
 
@@ -50,6 +50,7 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } &
   collaborationPipe: PipeOutputBatch<AwarenessPeer>[];
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
+export const workbookCollaborationClientLoader = { load: () => import('./collaborationClient') };
 const wasmModules = new Map<string, WebAssembly.Module>();
 const PEER_SNAPSHOT_BUDGET = { records: 256, bytes: 16 * 1024 } as const;
 const PEER_SNAPSHOT_SLICE_MS = 8;
@@ -351,6 +352,7 @@ export async function createWorkbookSession(
   let openedSelection: WorkbookCommandSelection | undefined;
   let pngExport = false;
   let clientId: number | undefined;
+  let collaboration: typeof import('./collaborationClient') | undefined;
   if (peerSource) client.on('peerOpened', (opened) => {
     initialVersion = opened.version;
     if (peerSource) peerSource.initialCalculation = opened.initialCalculation;
@@ -359,7 +361,9 @@ export async function createWorkbookSession(
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; losePipes('Collaboration worker failed'); });
   const signal = options.signal;
+  let rejectCollaborationLoad: ((error: SessionFailure) => void) | undefined;
   const abort = () => {
+    rejectCollaborationLoad?.(new SessionFailure('disposed', 'Session was disposed'));
     if (peerSource) peerSource.disposed = true;
     void client.dispose().catch(() => {});
     try { transport.close(); } catch {}
@@ -379,6 +383,14 @@ export async function createWorkbookSession(
     commandContext = openedCommands;
     initialVersion ??= openedCommands?.basis.version;
     state = projection;
+    if (client.failure) throw client.failure;
+    if (clientId !== undefined && !peerSource) {
+      const stopped = new Promise<never>((_, reject) => { rejectCollaborationLoad = reject; });
+      const offFailure = client.onFailure((error) => rejectCollaborationLoad?.(error));
+      try { collaboration = await Promise.race([workbookCollaborationClientLoader.load(), stopped]); }
+      finally { offFailure(); rejectCollaborationLoad = undefined; }
+    }
+    if (client.failure) throw client.failure;
     if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
     if (peerSource && !peerSource.module) {
       throw new WorkbookPeerHydrationError('missing-module',
@@ -480,7 +492,8 @@ export async function createWorkbookSession(
           const compatibility = input.payload.compatibility;
           if (!compatibility || compatibility.kind === 'applyUpdate' || compatibility.kind === 'collabPipe') {
             const payload = input.payload.payload;
-            const transfer = input.kind === 'collabPipe' && 'ops' in payload ? pipeOpBuffers(payload.ops) : [];
+            const transfer = input.kind === 'collabPipe' && 'ops' in payload
+              ? collaboration?.pipeOpBuffers(payload.ops) ?? [] : [];
             return decodeAck(await client.callWithTransfer('edit', [input], transfer));
           }
           const reply = await client.call.command(compatibility);
@@ -571,6 +584,7 @@ export async function createWorkbookSession(
     },
   };
   if (clientId !== undefined && !peerSource) {
+    const { attachCollaborationPipe, createAsyncCollaborationReplica } = collaboration!;
     let applyRemote: ((update: Uint8Array) => Promise<unknown>) | undefined;
     let applyRemoteChunks: ((updates: Uint8Array[]) => Promise<unknown>) | undefined;
     let applyRemotePipe: ((payload: PipeCommandPayload<AwarenessCursor>) => Promise<unknown>) | undefined;
