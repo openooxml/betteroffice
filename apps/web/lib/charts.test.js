@@ -39,6 +39,7 @@ describe("README chart embeds", () => {
       expect(alt).toBeTruthy();
       expect(alt.split(/\.\s/)).toHaveLength(1);
       expect(alt).not.toMatch(/[–—]/);
+      expect(README).toContain(`<img src="https://betteroffice.dev/api/charts/${name}.svg" alt="${alt}" width="100%">`);
     }
     const pictures = README.match(/<picture>[\s\S]*?<\/picture>/g);
     expect(pictures).toHaveLength(2);
@@ -92,6 +93,16 @@ describe("chart SVGs", () => {
     expect(svg).toContain(`>${Math.round((100 * pass) / runs)}%<`);
     for (const text of ["79%", "98%", "96%", "45%", "94%", "58%"]) expect(svg).toContain(`>${text}<`);
     expect(evalsChartSvg(BASIC, COMPLEX, "light")).toContain("Agent edits: pass rate by format");
+  });
+
+  test("the evals legend is one row and the footnote one line", () => {
+    const svg = evals("light");
+    const swatches = [...svg.matchAll(/<rect x="[\d.]+" y="(\d+)" width="11" height="11"/g)].map((m) => m[1]);
+    expect(swatches).toHaveLength(4);
+    expect(new Set(swatches)).toEqual(new Set(["24"]));
+    const height = Number(svg.match(/viewBox="0 0 560 (\d+)"/)[1]);
+    expect(svg).toContain(`<text x="0" y="${height - 6}" font-size="11" fill="#6b6b6b">Basic: single edits. Complex: multi-step tasks. Pass: right edit, no other change.</text>`);
+    expect(svg.match(/<text x="0" y="\d+" font-size="11" fill="#6b6b6b">[A-Z]/g)).toHaveLength(1);
   });
 
   test("basic bars are translucent with a full-colour outline, complex bars solid", () => {
@@ -151,12 +162,11 @@ describe("chart SVGs", () => {
     expect(error.ours.share).toBe(0);
     expect(error.theirs.share).toBe(1);
     const bench = benchmarksChartSvg(FORMATS, "light");
-    for (const label of ["Absolute page error", "Render time", "Recalc time"]) {
-      const at = bench.indexOf(`>${label}<`);
-      expect(at).toBeGreaterThan(0);
-      expect(bench.slice(at, at + 200)).toMatch(/<text x="0" y="[\d.]+" font-size="10" font-style="italic" fill="#6b6b6b">lower is better<\/text>/);
-    }
-    expect(bench.match(/>lower is better<\/text>/g)).toHaveLength(tableRows(FORMATS).filter((row) => row.better === "lower").length);
+    for (const label of ["Absolute page error", "Render time", "Recalc time"]) expect(bench).toContain(`>${label} <tspan fill="#6b6b6b">↓</tspan></text>`);
+    expect(bench.match(/>↓<\/tspan>/g)).toHaveLength(tableRows(FORMATS).filter((row) => row.better === "lower").length);
+    expect(bench).not.toMatch(/>(SSIM|Exact page counts|Recalc accuracy) <tspan/);
+    expect(bench.match(/>↓ lower is better<\/text>/g)).toHaveLength(1);
+    expect(bench).not.toContain("italic");
     expect(bench).not.toContain("(lower)");
     expect(bench).not.toContain("marks rows");
     expect(rows.find((row) => row.label === "SSIM").ours.share).toBeCloseTo(0.8519, 4);
@@ -165,17 +175,17 @@ describe("chart SVGs", () => {
 
   test("content is flush with the canvas edges: titles, legend and labels start at x = 0, nothing is end-anchored in the benchmarks chart", () => {
     for (const [name, svg] of SVGS()) {
-      expect(svg).toMatch(/<text x="0" y="12" font-size="12(\.8)?" font-weight="600"/);
+      expect(svg).toMatch(/<text x="0" y="1[23]" font-size="1[23](\.8)?" font-weight="600"/);
       const xs = [...svg.matchAll(/<text x="([\d.]+)"/g)].map((m) => Number(m[1]));
       expect(Math.min(...xs)).toBe(0);
       if (name === "benchmarks") {
-        const labels = [...svg.matchAll(/<text x="(\d+)" y="[\d.]+" font-size="11" text-anchor="end"[^>]*>([^<]*)<\/text>/g)];
+        const labels = [...svg.matchAll(/<text x="(\d+)" y="[\d.]+" font-size="10\.5" text-anchor="end"[^>]*>([^<]*)<\/text>/g)];
         expect(labels.length).toBe(tableRows(FORMATS).length * 2);
         expect(new Set(labels.map((m) => m[1]))).toEqual(new Set(["560"]));
-        const trackEnds = [...svg.matchAll(/<rect x="204" y="[\d.]+" width="(\d+)" height="15" fill="#(?:000000|ffffff)"/g)].map((m) => 204 + Number(m[1]));
+        const trackEnds = [...svg.matchAll(/<rect x="190" y="[\d.]+" width="(\d+)" height="8" fill="#(?:000000|ffffff)"/g)].map((m) => 190 + Number(m[1]));
         expect(trackEnds.length).toBe(labels.length);
-        expect(Math.max(...trackEnds)).toBeLessThanOrEqual(560 - 11 * 0.62 * "1351 ms".length);
-        expect(svg).not.toMatch(/<text x="[\d.]+" y="[\d.]+" font-size="11" fill="#[0-9a-f]{6}">(\d|1351)/);
+        expect(Math.max(...trackEnds)).toBeLessThanOrEqual(560 - 10.5 * 0.62 * "1351 ms".length);
+        expect(svg).not.toMatch(/<text x="[\d.]+" y="[\d.]+" font-size="10\.5" fill="#[0-9a-f]{6}">(\d|1351)/);
       }
     }
   });
