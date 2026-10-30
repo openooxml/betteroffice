@@ -322,6 +322,12 @@ pub struct Shape {
     pub shape_kind: String,
     pub shape_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawing_xml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawing_run_xml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawing_model: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub text_box: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -383,6 +389,9 @@ impl Shape {
         Self {
             shape_kind: "shape".into(),
             shape_type,
+            drawing_xml: None,
+            drawing_run_xml: None,
+            drawing_model: None,
             text_box: None,
             id: None,
             name: None,

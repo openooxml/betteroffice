@@ -1433,7 +1433,13 @@ fn retain_replayed_namespace_aliases(
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
     let row = element.name == "w:tr" && !element.attributes.is_empty();
-    if !row && !matches!(element.local_name(), "pict" | "object") {
+    let smart_art =
+        element.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(element);
+    let smart_art_run = element.local_name() == "r"
+        && element.child_elements().any(|child| {
+            child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
+        });
+    if !row && !smart_art && !smart_art_run && !matches!(element.local_name(), "pict" | "object") {
         return Ok(());
     }
     let mut bindings = IndexMap::new();
@@ -1492,7 +1498,10 @@ fn retain_replayed_namespace_aliases(
             }
         }
         if !row {
-            pending.extend(node.child_elements());
+            pending.extend(
+                node.child_elements()
+                    .filter(|child| !smart_art_run || child.local_name() != "drawing"),
+            );
         }
     }
     let mut attribute_bytes: usize = element

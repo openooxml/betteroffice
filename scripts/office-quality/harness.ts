@@ -265,9 +265,16 @@ function cell(value: string) {
 
 api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
   const bytes = new Uint8Array(input);
-  const fonts = useFonts ? await fontsFor(bytes) : [];
+  const params = new URLSearchParams(location.search);
+  const workerHost = format === 'pptx' ? params.get('pptxWorker') : null;
+  const fonts = useFonts && !workerHost ? await fontsFor(bytes) : [];
   let pages: number;
-  if (format === 'pptx') {
+  if (workerHost) {
+    const { openWorkerCapture } = await import('./pptx-worker-capture');
+    const opened = await openWorkerCapture(bytes, workerHost, fontProvider() as never, params.get('defaultFonts') !== '0');
+    pages = opened.pages;
+    capture = (index) => opened.capture(index);
+  } else if (format === 'pptx') {
     const {
       initWasm,
       openPresentation,

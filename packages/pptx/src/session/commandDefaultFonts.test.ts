@@ -72,12 +72,13 @@ test('resolves requested traits through manager mappings and skips unknown famil
     expect(source.resolveFamily).toHaveBeenCalledWith('Unknown Family', false, false);
     expect(faces).toHaveLength(1);
     expect(faces[0]).toMatchObject({ family: 'Calibri', bold: true, italic: true });
+    expect(faces[0].ownWeight).toBeUndefined();
     structuredClone(faces, { transfer: faces.map((face) => face.bytes) });
     expect(bytes.byteLength).toBe(3);
   } finally { fonts.dispose(); }
 });
 
-test('lighter members of bundled families load their regular face; other unknown names stay unregistered', async () => {
+test('lighter members of bundled families load their regular face at their own weight; other unknown names stay unregistered', async () => {
   const resolve = mock(() => undefined);
   const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
     family === 'Calibri Light' ? async () => bytes : undefined);
@@ -92,7 +93,7 @@ test('lighter members of bundled families load their regular face; other unknown
     const faces = await fonts.load();
     expect(resolveLightVariant.mock.calls).toEqual([['Calibri Light', true, false], ['BIZ UD明朝 Medium', false, false]]);
     expect(resolveLastResort).not.toHaveBeenCalled();
-    expect(faces.map((face) => [face.family, face.bold])).toEqual([['Calibri Light', true]]);
+    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true]]);
     expect(register).toHaveBeenCalledTimes(1);
   } finally { fonts.dispose(); }
 });

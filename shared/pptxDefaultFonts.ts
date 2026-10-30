@@ -3,6 +3,8 @@ export interface DefaultFontFace {
   bold: boolean;
   italic: boolean;
   bytes: ArrayBuffer;
+  /** A lighter family's regular face drawn at its own weight whatever weight the run claims. */
+  ownWeight?: boolean;
 }
 
 export interface DefaultFontPayload {

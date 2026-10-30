@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 
 use crate::drawingml::{ShapeFill, ShapeOutline, preset_geometry_to_path};
-use crate::image::ImageSize;
+use crate::image::{ImagePadding, ImageSize, ImageWrap, parse_anchor_position, parse_anchor_wrap};
 use crate::relationships::RelationshipMap;
 use crate::scalars::ColorValue;
 use crate::shape::{
@@ -68,7 +68,9 @@ pub fn parse_smart_art_from_drawing(
     {
         let parsed = parse_diagram_drawing_scene(drawing_xml, "SmartArt drawing", budget)?;
         if !parsed.shapes.is_empty() {
-            return Ok(Some(diagram_group(size, parsed.shapes, parsed.scene)));
+            let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
+            retain_drawing_source(&mut shape, drawing);
+            return Ok(Some(shape));
         }
     }
 
@@ -87,7 +89,125 @@ pub fn parse_smart_art_from_drawing(
         return Ok(None);
     };
     let fallback = layout_basic_diagram(&data_xml, layout_xml.as_deref(), &size, context, budget)?;
-    Ok((!fallback.is_empty()).then(|| diagram_group(size, fallback, None)))
+    Ok((!fallback.is_empty()).then(|| {
+        let mut shape = diagram_group(size, fallback, None);
+        retain_drawing_source(&mut shape, drawing);
+        shape
+    }))
+}
+
+pub(crate) const FRAME_FIELDS: &[&str] = &[
+    "size",
+    "position",
+    "wrap",
+    "effectExtent",
+    "id",
+    "name",
+    "title",
+    "description",
+    "decorative",
+    "hidden",
+    "relativeHeight",
+];
+
+fn wire_model(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Number(number) => number.as_f64().map_or(Value::Null, |number| {
+            serde_json::from_str(ryu_js::Buffer::new().format(number)).expect("finite model number")
+        }),
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| (key, wire_model(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(wire_model).collect()),
+        value => value,
+    }
+}
+
+pub(crate) fn frame_model(shape: &Shape) -> serde_json::Value {
+    wire_model(serde_json::json!({
+        "size": &shape.size, "position": &shape.position, "wrap": &shape.wrap,
+        "effectExtent": &shape.effect_extent, "id": &shape.id, "name": &shape.name,
+        "title": &shape.title, "description": &shape.description, "decorative": &shape.decorative,
+        "hidden": &shape.hidden, "relativeHeight": &shape.relative_height,
+    }))
+}
+
+pub(crate) fn other_model_sha256(shape: &Shape) -> String {
+    use sha2::{Digest, Sha256};
+    let mut model = serde_json::to_value(shape).expect("shape model");
+    let object = model.as_object_mut().expect("shape object");
+    for key in FRAME_FIELDS
+        .iter()
+        .copied()
+        .chain(["drawingXml", "drawingRunXml", "drawingModel"])
+    {
+        object.remove(key);
+    }
+    if let Some(scene) = object
+        .get_mut("scene")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for key in ["title", "description", "decorative", "hidden"] {
+            scene.remove(key);
+        }
+    }
+    format!(
+        "{:x}",
+        Sha256::digest(crate::paragraph_patch::canonical_json_v1(&wire_model(model)).as_bytes())
+    )
+}
+
+pub(crate) fn apply_frame_metadata(shape: &mut Shape, drawing: &XmlElement) {
+    let Some(container) = drawing
+        .child_elements()
+        .find(|node| matches!(node.local_name(), "inline" | "anchor"))
+    else {
+        return;
+    };
+    shape.size = get_drawing_extent(drawing);
+    shape.position = if container.local_name() == "anchor" {
+        parse_anchor_position(container)
+    } else {
+        None
+    };
+    shape.wrap = Some(if container.local_name() == "anchor" {
+        parse_anchor_wrap(container)
+    } else {
+        ImageWrap {
+            wrap_type: "inline".to_owned(),
+            wrap_text: None,
+            polygon: None,
+            dist_t: container.parse_numeric_attribute(None, "distT", 1.0),
+            dist_b: container.parse_numeric_attribute(None, "distB", 1.0),
+            dist_l: container.parse_numeric_attribute(None, "distL", 1.0),
+            dist_r: container.parse_numeric_attribute(None, "distR", 1.0),
+        }
+    });
+    shape.effect_extent = container
+        .child_by_local_name("effectExtent")
+        .map(|node| ImagePadding {
+            left: node.parse_numeric_attribute(None, "l", 1.0),
+            top: node.parse_numeric_attribute(None, "t", 1.0),
+            right: node.parse_numeric_attribute(None, "r", 1.0),
+            bottom: node.parse_numeric_attribute(None, "b", 1.0),
+        });
+    if let Some(properties) = container.child_by_local_name("docPr") {
+        shape.id = properties.attribute(None, "id").map(str::to_owned);
+        shape.name = properties.attribute(None, "name").map(str::to_owned);
+    }
+    crate::paragraph::apply_shape_metadata(shape, drawing);
+}
+
+fn retain_drawing_source(shape: &mut Shape, drawing: &XmlElement) {
+    apply_frame_metadata(shape, drawing);
+    shape.drawing_xml = Some(drawing.to_raw_inline_xml());
+    shape.drawing_model = Some(
+        serde_json::json!({"frame": frame_model(shape), "otherSha256": other_model_sha256(shape)}),
+    );
 }
 
 pub struct DiagramDrawing {
