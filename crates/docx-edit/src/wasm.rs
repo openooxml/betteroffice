@@ -2665,9 +2665,10 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
-    /// Caches save seed states without reseeding.
-    pub fn prime_save_seed_states(&self) -> bool {
-        self.core.prime_save_seed_states()
+    /// Caches save seed states without reseeding, within the paragraph and
+    /// inflated package budgets.
+    pub fn prime_save_seed_states(&self, paragraphs: u32, inflated: u32) -> bool {
+        self.core.prime_save_seed_states(paragraphs, inflated)
     }
 
     /// The paragraph IDs a save applies, as the package writer's

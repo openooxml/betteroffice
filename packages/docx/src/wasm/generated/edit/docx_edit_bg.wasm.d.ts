@@ -149,7 +149,7 @@ export const editsession_paragraph_unit: (a: number, b: number, c: number, d: nu
 export const editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_part_metadata_json: (a: number) => [number, number];
 export const editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
-export const editsession_prime_save_seed_states: (a: number) => number;
+export const editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
 export const editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];

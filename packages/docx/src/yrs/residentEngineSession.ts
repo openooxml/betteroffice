@@ -253,7 +253,8 @@ export type ResidentEngineSession = Pick<
   decodeFont(bytes: Uint8Array): Uint8Array;
   openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
-  primeSaveSeedStates(): boolean;
+  /** Caches save seed states while unchanged, within a paragraph and inflated package budget. */
+  primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
@@ -963,7 +964,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       markProjectionStories(session.story_ids());
       parsedStoryRevision = syncStoryRevisions();
     },
-    primeSaveSeedStates: () => session.prime_save_seed_states(),
+    primeSaveSeedStates: (maxParagraphs, maxInflatedBytes) => session.prime_save_seed_states(maxParagraphs, maxInflatedBytes),
     saveDocument: async (host, comments, record) => {
       if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');

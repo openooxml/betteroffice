@@ -3068,8 +3068,10 @@ impl EditingDoc {
         }
     }
 
-    /// Caches save seed states without reseeding; returns whether they are known.
-    pub fn prime_save_seed_states(&self) -> bool {
+    /// Caches save seed states without reseeding, declining a document of
+    /// more than `max_paragraphs` paragraphs or a package declaring more than
+    /// `max_inflated_bytes` inflated bytes; returns whether they are known.
+    pub fn prime_save_seed_states(&self, max_paragraphs: u32, max_inflated_bytes: u32) -> bool {
         let Some(source) = self.source_index() else {
             return false;
         };
@@ -3079,9 +3081,20 @@ impl EditingDoc {
         if !self.unchanged_since_seeded() || !source.opened_under_own_digest() {
             return false;
         }
+        let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(source.bytes()) else {
+            return false;
+        };
+        let inflated = package.parts().map(|(_, size)| size);
+        if inflated.fold(0u64, u64::saturating_add) > u64::from(max_inflated_bytes) {
+            return false;
+        }
+        let txn = self.yrs_doc().transact();
+        if self.committed_scan(&txn).pilcrows.len() > max_paragraphs as usize {
+            return false;
+        }
         source.seed_states_or(|| {
-            let txn = self.yrs_doc().transact();
-            self.live_save_seed_states(story_states_in(self, &txn))
+            let stories = story_states_in(self, &txn);
+            self.live_save_seed_states(stories)
         });
         true
     }
@@ -3876,8 +3889,8 @@ mod tests {
         let source = primed.engine.doc().source_index().unwrap();
         assert!(source.opened_under_own_digest());
         assert!(!source.seed_states_initialized());
-        assert!(primed.prime_save_seed_states());
-        assert!(primed.prime_save_seed_states());
+        assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
+        assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
         assert!(source.seed_states_initialized());
         for session in [&primed, &fallback] {
             session
@@ -3891,7 +3904,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(primed.prime_save_seed_states());
+        assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
         let plan = primed.paragraph_save_plan().unwrap();
         assert_eq!(plan, fallback.paragraph_save_plan().unwrap());
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
@@ -3913,7 +3926,7 @@ mod tests {
     fn priming_after_an_edit_declines_without_reseeding() {
         let session = save_seed_session();
         let expected = save_seed_session();
-        assert!(expected.prime_save_seed_states());
+        assert!(expected.prime_save_seed_states(u32::MAX, u32::MAX));
         for session in [&session, &expected] {
             session
                 .engine
@@ -3927,7 +3940,7 @@ mod tests {
                 .unwrap();
         }
         let source = session.engine.doc().source_index().unwrap();
-        assert!(!session.prime_save_seed_states());
+        assert!(!session.prime_save_seed_states(u32::MAX, u32::MAX));
         assert!(!source.seed_states_initialized());
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
         assert_eq!(
@@ -3935,7 +3948,27 @@ mod tests {
             expected.paragraph_save_plan().unwrap()
         );
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 1);
-        assert!(session.prime_save_seed_states());
+        assert!(session.prime_save_seed_states(u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn priming_declines_past_the_paragraph_or_inflated_budget() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        let source = doc.source_index().unwrap();
+        let paragraphs = {
+            let txn = doc.yrs_doc().transact();
+            doc.committed_scan(&txn).pilcrows.len() as u32
+        };
+        let package = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).unwrap();
+        let inflated = package.parts().map(|(_, size)| size).sum::<u64>() as u32;
+        assert!(paragraphs > 0 && inflated > 0);
+        assert!(!session.prime_save_seed_states(paragraphs - 1, u32::MAX));
+        assert!(!session.prime_save_seed_states(u32::MAX, inflated - 1));
+        assert!(!source.seed_states_initialized());
+        assert!(session.prime_save_seed_states(paragraphs, inflated));
+        assert!(source.seed_states_initialized());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

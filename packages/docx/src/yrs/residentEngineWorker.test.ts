@@ -2515,6 +2515,7 @@ describe('document worker warmup', () => {
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
       expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
     } finally {
       client.destroy();
     }
@@ -2525,6 +2526,20 @@ describe('document worker warmup', () => {
     w.harness.now = () => now;
     try {
       await client.commandInit({ ...COMMAND_INIT, readOnly: true });
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('low heap headroom skips save seed priming', async () => {
+    const { w, client } = await commandWorker({ heapLimitBytes: 128 * 1024 * 1024 });
+    w.harness.now = () => now;
+    w.harness.memories[0].liveBytes = 65 * 1024 * 1024;
+    try {
+      await client.commandInit(COMMAND_INIT);
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
       expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();

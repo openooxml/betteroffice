@@ -1287,6 +1287,8 @@ const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
 const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
 const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
+const SAVE_SEED_MAX_PARAGRAPHS = 4096;
+const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -3906,7 +3908,9 @@ function scheduleSaveSeedStates(): void {
       if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
     },
     run: () => {
-      if (session === owner && canPreloadSaveWasm()) owner.primeSaveSeedStates();
+      if (session === owner && canPreloadSaveWasm() && saveWarmupHasHeadroom()) {
+        owner.primeSaveSeedStates(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
+      }
       return 'done';
     },
   });
