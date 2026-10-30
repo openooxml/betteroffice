@@ -193,14 +193,11 @@ export class TextMeasureFontRegistry {
    */
   private lastResortIds = new Map<string, Promise<number | null>>();
   /**
-   * Byte-identity dedupe across every registration path. Providers cache
-   * their fetches, so the same face requested under several chain keys (or
-   * as both a family face and a script fallback) resolves to one buffer —
-   * and must produce one engine id, not one copy of the bytes per key.
-   * Rejections are evicted. Weak so buffers of a cleared registry can be
-   * collected.
+   * Byte-identity dedupe across every registration path. Rejections are
+   * evicted. Weak so buffers of a cleared registry can be collected.
    */
   private bufferIds = new WeakMap<ArrayBuffer, Promise<number>>();
+  private loaderIds = new WeakMap<() => Promise<ArrayBuffer>, Promise<number>>();
   private scriptIds = new Map<FontScript, Promise<ScriptResolution>>();
   /** Settled per-script results for the synchronous view. */
   private scriptResults = new Map<FontScript, ScriptResolution>();
@@ -350,6 +347,7 @@ export class TextMeasureFontRegistry {
     this.bundledIds = new Map();
     this.lastResortIds = new Map();
     this.bufferIds = new WeakMap();
+    this.loaderIds = new WeakMap();
     this.scriptIds = new Map();
     this.scriptResults = new Map();
     this.chains = new Map();
@@ -519,6 +517,17 @@ export class TextMeasureFontRegistry {
     return pending;
   }
 
+  private registerLoader(loader: () => Promise<ArrayBuffer>): Promise<number> {
+    let pending = this.loaderIds.get(loader);
+    if (!pending) {
+      const ids = this.loaderIds;
+      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes));
+      evictFailedPromise(ids, loader, pending, () => false);
+      ids.set(loader, pending);
+    }
+    return pending;
+  }
+
   private registerFace(face: EmbeddedFaceInput): Promise<number | null> {
     let pending = this.faceIds.get(face);
     if (!pending) {
@@ -554,8 +563,7 @@ export class TextMeasureFontRegistry {
       const ids = this.bundledIds;
       pending = (async () => {
         try {
-          const bytes = await loader();
-          const base = await this.registerBuffer(bytes);
+          const base = await this.registerLoader(loader);
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
           this.warnFailure(
@@ -585,8 +593,7 @@ export class TextMeasureFontRegistry {
       const ids = this.lastResortIds;
       pending = (async () => {
         try {
-          const bytes = await loader();
-          return this.measuredAs(await this.registerBuffer(bytes), family);
+          return this.measuredAs(await this.registerLoader(loader), family);
         } catch {
           this.warnFailure(
             `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +
@@ -623,8 +630,7 @@ export class TextMeasureFontRegistry {
         }
         if (loader) {
           try {
-            const bytes = await loader();
-            id = await this.registerBuffer(bytes);
+            id = await this.registerLoader(loader);
           } catch (error) {
             retryable = true;
             this.warnFailure(
