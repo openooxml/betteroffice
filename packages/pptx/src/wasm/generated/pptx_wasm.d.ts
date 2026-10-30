@@ -172,6 +172,10 @@ export class PptxRenderer {
     requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
     setActiveSlide(document: PptxDocument, id: string, key: string): boolean;
+    /**
+     * Enables browser metrics for uncovered characters. Off by default.
+     */
+    setBrowserCoverageFallback(enabled: boolean): void;
     slideLayoutKey(document: PptxDocument, slide_index: number): string;
     snapshotWithLayoutKeysJson(document: PptxDocument): string;
 }
@@ -328,6 +332,7 @@ export interface InitOutput {
     readonly pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly pptxrenderer_setBrowserCoverageFallback: (a: number, b: number) => void;
     readonly pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_snapshotWithLayoutKeysJson: (a: number, b: number) => [number, number, number, number];
     readonly renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
