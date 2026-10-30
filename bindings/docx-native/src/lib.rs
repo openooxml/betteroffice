@@ -169,14 +169,12 @@ pub struct DocxContentControlsOptions {
     pub max_bytes: Option<u32>,
 }
 
-#[napi(object)]
-pub struct DocxContentControlQuery {
-    #[napi(ts_type = "'id' | 'tag' | 'ooxmlId' | 'alias'")]
-    pub kind: String,
-    pub control_id: Option<String>,
-    pub tag: Option<String>,
-    pub ooxml_id: Option<String>,
-    pub alias: Option<String>,
+#[napi(discriminant = "kind", discriminant_case = "camelCase")]
+pub enum DocxContentControlQuery {
+    Id { control_id: String },
+    Tag { tag: String },
+    OoxmlId { ooxml_id: String },
+    Alias { alias: String },
 }
 
 #[napi(object)]

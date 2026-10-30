@@ -55,13 +55,11 @@ export interface DocumentStructure {
   endnotes: number
 }
 
-export interface DocxContentControlQuery {
-  kind: 'id' | 'tag' | 'ooxmlId' | 'alias'
-  controlId?: string
-  tag?: string
-  ooxmlId?: string
-  alias?: string
-}
+export type DocxContentControlQuery =
+  | { kind: 'id'; controlId: string }
+  | { kind: 'tag'; tag: string }
+  | { kind: 'ooxmlId'; ooxmlId: string }
+  | { kind: 'alias'; alias: string }
 
 export interface DocxContentControlsOptions {
   stories?: ReadonlyArray<'body' | 'headers' | 'footers' | 'footnotes' | 'endnotes' | 'comments'>
