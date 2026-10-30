@@ -153,13 +153,13 @@ test('app supplied fonts request missing script coverage without replacing prima
   const coverage = spyOn(PptxRenderer.prototype, 'setBrowserCoverageFallback');
   restorers.push(() => coverage.mockRestore());
   const wire = connection();
-  const client = await createPresentationCommandClient(await deck(['Calibri'], 'alpha 👩‍💻 नमस्ते \uE000 ✓'), {
+  const client = await createPresentationCommandClient(await deck(['Calibri'], 'alpha 👩‍💻 こんにちは \uE000 ✓'), {
     ...options, fonts: [{ family: ' calibri ', bold: true, bytes: font.slice(0) }],
   }, wire.transport);
   clients.push(client);
   expect(manager.imported).toHaveBeenCalledTimes(1);
   expect(manager.resolve).not.toHaveBeenCalled();
-  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('devanagari', false, false);
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('cjk-jp', false, false);
   expect(manager.fetch).not.toHaveBeenCalled();
   expect(coverage).not.toHaveBeenCalled();
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
@@ -299,27 +299,27 @@ test('registered coverage fonts still precede the browser fallback', async () =>
 });
 
 for (const supplied of [false, true]) test(`script defaults install in the coverage chain with supplied primary ${supplied}`, async () => {
-  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
-  const manager = source({}, (script) => script === 'arabic' ? async () => arabic : undefined);
+  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const manager = source({}, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
   const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
   const primary = spyOn(PptxRenderer.prototype, 'registerFont');
   restorers.push(() => { fallback.mockRestore(); primary.mockRestore(); });
   const installed: DefaultFontFace[] = [];
   const wire = connection();
-  const client = await createPresentationCommandClient(await deck(['Unknown Arabic'], 'مرحبا'), Object.assign({
-    ...options, fonts: supplied ? [{ family: 'Unknown Arabic', bytes: font.slice(0) }] : [],
+  const client = await createPresentationCommandClient(await deck(['Unknown Japanese'], 'こんにちは'), Object.assign({
+    ...options, fonts: supplied ? [{ family: 'Unknown Japanese', bytes: font.slice(0) }] : [],
   }, {
     [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
   }), wire.transport);
   clients.push(client);
-  expect(manager.resolveScriptFallback.mock.calls).toEqual([['arabic', false, false]]);
-  expect(installed).toMatchObject([{ family: 'Noto Sans Arabic', kind: 'coverage' }]);
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+  expect(installed).toMatchObject([{ family: 'Noto Sans JP', kind: 'coverage' }]);
   expect(fallback).toHaveBeenCalledTimes(1);
   expect(primary).toHaveBeenCalledTimes(supplied ? 1 : 0);
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
   const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
     .flatMap((box) => box.lines.flatMap((line) => line.runs));
-  expect(runs.some((run) => run.fontFamily === 'Noto Sans Arabic' && run.fontId !== 0xffffffff)).toBe(true);
+  expect(runs.some((run) => run.fontFamily === 'Noto Sans JP' && run.fontId !== 0xffffffff)).toBe(true);
   expect(runs.flatMap((run) => run.glyphs).every((glyph) => glyph.glyphId > 0)).toBe(true);
   expect(runs.some((run) => run.width > 0)).toBe(true);
 });
@@ -389,10 +389,10 @@ test('four Japanese styles acknowledge one coverage installation and registratio
 });
 
 test('inserting script text loads coverage after the family attempt and repaints the active slide', async () => {
-  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
   const requested = deferred<void>();
   const loaded = deferred<ArrayBuffer>();
-  const manager = source({ Calibri: async () => font }, (script) => script === 'arabic' ? () => {
+  const manager = source({ Calibri: async () => font }, (script) => script === 'cjk-jp' ? () => {
     requested.resolve();
     return loaded.promise;
   } : undefined);
@@ -407,18 +407,32 @@ test('inserting script text loads coverage after the family attempt and repaints
   client.subscribe((ack) => {
     if ((ack as DefaultFontPayload).defaultFonts?.some((face) => face.kind === 'coverage')) arrived.resolve();
   });
-  await client.dispatch({ kind: 'insertText', payload: { inputTime: 1, undoGroup: 'script', text: 'مرحبا ',
+  await client.dispatch({ kind: 'insertText', payload: { inputTime: 1, undoGroup: 'script', text: 'こんにちは ',
     style: { fontFamily: 'Calibri', bold: false, italic: false },
     at: { source: 'confirmed', selection: { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId,
       anchor: 0, focus: 0, affinity: 'downstream' } } } });
   await requested.promise;
-  loaded.resolve(arabic);
+  loaded.resolve(japanese);
   await arrived.promise;
   await client.flush();
   expect(manager.resolve.mock.calls).toEqual([['Calibri', false, false]]);
-  expect(manager.resolveScriptFallback.mock.calls).toEqual([['arabic', false, false]]);
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
   const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
     .flatMap((box) => box.lines.flatMap((line) => line.runs));
-  expect(runs.some((run) => /[\u0600-\u06ff]/.test(run.text) && run.fontFamily === 'Noto Sans Arabic')).toBe(true);
+  expect(runs.some((run) => /[\u3040-\u309f]/.test(run.text) && run.fontFamily === 'Noto Sans JP')).toBe(true);
+});
+
+test('scripts other than CJK keep the browser font without a script default', async () => {
+  const carlito = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
+  const manager = source({ Calibri: async () => carlito }, () => async () => font);
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(['Calibri'], 'alpha مرحبا שלום नमस्ते ไทย'), options, wire.transport);
+  clients.push(client);
+  expect(manager.resolveScriptFallback).not.toHaveBeenCalled();
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+    .flatMap((box) => box.lines.flatMap((line) => line.runs)).filter((run) => /[\u0590-\u06ff\u0900-\u097f\u0e00-\u0e7f]/.test(run.text));
+  expect(runs.length).toBeGreaterThan(0);
+  expect(runs.every((run) => run.fontId === 0xffffffff)).toBe(true);
 });

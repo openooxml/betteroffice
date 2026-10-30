@@ -1530,7 +1530,8 @@ export function registerPresentationCommandHandlers(
           initialUpdate: input.initialUpdate, retainSource: false });
         if (input.defaultFonts !== false) {
           for (const face of input.fonts ?? []) suppliedFonts.push({ family: face.family });
-          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId);
+          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId).map((face) => face.scripts
+            ? { ...face, scripts: face.scripts.filter((script) => script.startsWith('cjk-')) } : face);
         }
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
