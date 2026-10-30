@@ -3,6 +3,7 @@ import { encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRus
 import { createResidentEngineSession, type ResidentEngineSession } from '../residentEngineSession';
 import { preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
 import { decodeDocxHostJson } from '../yrsSessionFacade';
+import { warmResidentSave } from '../residentSaveWarmup';
 import { wasmModuleMemories } from '../../wasm/loadWasmAsset';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
@@ -25,7 +26,7 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
 }
 
 const STUBS: Record<string, string> = {
-  '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
+  '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
   './residentEngineSession':
     'export const createResidentEngineSession = (heapLimitBytes, clientId) => testHarness.createSession(heapLimitBytes, clientId);',
   './wasm/index': `
@@ -34,6 +35,7 @@ const STUBS: Record<string, string> = {
   `,
   '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
   '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
+  './residentSaveWarmup': 'export const warmResidentSave = (yieldSave) => testHarness.warmResidentSave(yieldSave);',
   './yrsSessionFacade': 'export const decodeDocxHostJson = (...args) => testHarness.decodeDocxHostJson(...args);',
   '../layout/render/glyphCache': 'export class GlyphCache {}',
   '../layout/render/canvasBackend': `
@@ -225,6 +227,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
           return session;
         },
         preload: preloadEditWasm,
+        warmResidentSave,
         preloadFrom: preloadEditWasmFrom,
         preloadOpcWasm: () => import('../../wasm/opc').then((wasm) => wasm.preloadOpcWasm()),
         preloadParseWasm: () => import('../../wasm/parse').then((wasm) => wasm.preloadParseWasm()),
