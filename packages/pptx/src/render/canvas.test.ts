@@ -589,6 +589,26 @@ describe('PPTX canvas replay', () => {
     expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05b8\u05d1', x: 50 }]);
   });
 
+  test('keeps a right-to-left run whole when its second cluster opens with a dots glyph', async () => {
+    const run = syntheticPositionedRun('\u0648\u062a\u0645', [
+      [0, 135, 11], [1, 135, 0], [1, 127, 8], [2, 114, 13],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u0648\u062a\u0645', x: 114 }]);
+  });
+
+  test('keeps a right-to-left run whole when its second cluster opens with a point', async () => {
+    const run = syntheticPositionedRun('\u05d0\u05d1\u05b8\u05d2', [
+      [0, 90], [1, 90, 0], [1, 80], [3, 70],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05d1\u05b8\u05d2', x: 70 }]);
+  });
+
+  test('keeps a left-to-right run whose second cluster opens with a zero-width glyph', async () => {
+    const run = syntheticPositionedRun('ab', [[0, 40], [1, 50, 0], [1, 50]]);
+    run.width = 20;
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'ab', x: 40 }]);
+  });
+
   test('scales a word to the width the layout gave it when the browser draws it narrower', async () => {
     const calls: unknown[] = [];
     const state: Record<string, unknown> = {
