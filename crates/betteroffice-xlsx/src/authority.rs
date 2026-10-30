@@ -2109,27 +2109,23 @@ impl WorkbookAuthority {
             return Ok(false);
         }
         let (model, structure) = self.materialize_internal(false)?;
-        let features = structure
-            .sheet_keys
-            .iter()
-            .zip(&model.sheets)
-            .map(|(key, sheet)| {
-                let hyperlinks = serde_json::to_string(&sheet.hyperlinks)
-                    .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
-                let charts = serde_json::to_string(&sheet.charts)
-                    .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
-                Ok((
-                    key.clone(),
-                    (
-                        sheet.freeze_pane,
-                        hyperlinks,
-                        charts,
-                        sheet.col_widths.clone(),
-                        sheet.row_heights.clone(),
-                    ),
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        let mut features = BTreeMap::new();
+        for (key, sheet) in structure.sheet_keys.iter().zip(&model.sheets) {
+            let hyperlinks = serde_json::to_string(&sheet.hyperlinks)
+                .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
+            let charts = serde_json::to_string(&sheet.charts)
+                .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
+            features.insert(
+                key.clone(),
+                (
+                    sheet.freeze_pane,
+                    hyperlinks,
+                    charts,
+                    sheet.col_widths.clone(),
+                    sheet.row_heights.clone(),
+                ),
+            );
+        }
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
         if !current && fingerprint.as_deref().is_some_and(released_fingerprint) {
             migrate_pre_facet_formats(
