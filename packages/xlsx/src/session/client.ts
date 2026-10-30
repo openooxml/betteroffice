@@ -1,5 +1,5 @@
 import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
-import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
+import { pipeOpBuffers, type PipeCommandPayload, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import {
@@ -41,16 +41,16 @@ import type {
   WorkbookSharedAck, WorkbookSharedWireAck,
 } from './commandProtocol';
 import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
-import type { AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
+import { workbookCollaborationClientLoader } from './collaborationLoader';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
   collaborationPipe: PipeOutputBatch<AwarenessPeer>[];
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
-export const workbookCollaborationClientLoader = { load: () => import('./collaborationClient') };
 const wasmModules = new Map<string, WebAssembly.Module>();
 const PEER_SNAPSHOT_BUDGET = { records: 256, bytes: 16 * 1024 } as const;
 const PEER_SNAPSHOT_SLICE_MS = 8;
@@ -492,8 +492,7 @@ export async function createWorkbookSession(
           const compatibility = input.payload.compatibility;
           if (!compatibility || compatibility.kind === 'applyUpdate' || compatibility.kind === 'collabPipe') {
             const payload = input.payload.payload;
-            const transfer = input.kind === 'collabPipe' && 'ops' in payload
-              ? collaboration?.pipeOpBuffers(payload.ops) ?? [] : [];
+            const transfer = input.kind === 'collabPipe' && 'ops' in payload ? pipeOpBuffers(payload.ops) : [];
             return decodeAck(await client.callWithTransfer('edit', [input], transfer));
           }
           const reply = await client.call.command(compatibility);

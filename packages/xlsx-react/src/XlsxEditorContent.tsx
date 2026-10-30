@@ -98,8 +98,9 @@ import { WorkbookFailure } from './components/WorkbookFailure';
 import type { XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
 
-const PresenceStrip = lazy(() => import('./presence/Presence').then((module) => ({ default: module.PresenceStrip })));
-const RemoteSelections = lazy(() => import('./presence/Presence').then((module) => ({ default: module.RemoteSelections })));
+const presenceGeometry = { rangeRect, expandRangeToMergedCells };
+const PresenceStrip = lazy(() => import('./presence/PresenceView').then((module) => ({ default: module.PresenceStrip })));
+const RemoteSelections = lazy(() => import('./presence/PresenceView').then((module) => ({ default: module.RemoteSelections })));
 
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   return {
@@ -2264,6 +2265,7 @@ export function XlsxEditorContent({
         <div style={toolbarSeparatorStyle} aria-hidden="true" />
         {collaborationProvider && <Suspense fallback={null}>
           <PresenceStrip
+            t={t}
             peers={awarenessPeers}
             sheetIds={sheetInfo?.sheetIds ?? []}
             sheetNames={sheetInfo?.sheetNames ?? []}
@@ -2455,6 +2457,7 @@ export function XlsxEditorContent({
                 )}
                 {collaborationProvider && <Suspense fallback={null}>
                   <RemoteSelections
+                    geometry={presenceGeometry}
                     peers={awarenessPeers}
                     grid={grid}
                     sheetIds={sheetInfo?.sheetIds ?? []}

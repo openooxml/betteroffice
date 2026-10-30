@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 const STATIC_GZIP_BUDGET = 76_000;
 const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx',
   'viewer/XlsxSessionViewer.tsx', 'viewer/useSessionWorkbook.ts', 'createInThreadAsyncEditorApi.ts',
-  'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/Presence.tsx',
+  'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/PresenceView.tsx',
   'worker/LegacyXlsxWorkerEditor.tsx', 'worker/useEditableSessionWorkbook.ts', 'worker/createWorkerEditorApi.ts',
   'worker/WorkerPaintSource.ts', 'commands/useWorkerXlsxCommands.ts', 'viewer/sessionGeometry.ts',
   'worker/XlsxPeerlessWorkerEditor.tsx', 'worker/usePeerlessSessionWorkbook.ts', 'worker/PeerlessWorkerPaintSource.ts',
@@ -47,6 +47,7 @@ test('default editor static chunks exclude the legacy and in-thread editors', as
   expect(deferredModules.map((path) => [path, staticInputs.has(path), deferredInputs.has(path)]))
     .toEqual(deferredModules.map((path) => [path, false, true]));
   expect(staticInputs.has('packages/xlsx-react/src/worker/XlsxWorkerEditor.tsx')).toBe(true);
+  expect(staticInputs.has('packages/xlsx-react/src/presence/Presence.tsx')).toBe(false);
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
   expect(bytes).toBeLessThan(STATIC_GZIP_BUDGET);
@@ -122,12 +123,14 @@ for (const entry of ['packages/xlsx/src/session/client.ts', 'packages/xlsx/src/s
       'packages/xlsx/src/collaboration/provider.ts', 'packages/xlsx/src/collaboration/asyncReplica.ts',
       'packages/xlsx/src/collaboration/protocol.ts', 'packages/xlsx/src/collaboration/awareness.ts',
       'packages/xlsx/src/session/collaborationHost.ts', 'packages/xlsx/src/session/collaborationClient.ts',
-      'packages/xlsx-react/src/presence/Presence.tsx', 'packages/xlsx-react/src/worker/PeerlessPresence.tsx',
+      'packages/xlsx-react/src/presence/Presence.tsx', 'packages/xlsx-react/src/presence/PresenceView.tsx',
+      'packages/xlsx-react/src/worker/PeerlessPresence.tsx',
       'packages/xlsx-react/src/worker/usePeerlessPresence.ts']) expect(eager.has(path)).toBe(false);
     expect(deferred.has(entry.endsWith('/worker.ts') ? 'packages/xlsx/src/session/collaborationHost.ts'
-      : 'packages/xlsx/src/session/collaborationClient.ts')).toBe(true);
+      : 'packages/xlsx/src/collaboration/asyncReplica.ts')).toBe(true);
     if (entry.includes('xlsx-react')) {
-      expect(deferred.has('packages/xlsx-react/src/presence/Presence.tsx')).toBe(true);
+      expect(deferred.has('packages/xlsx-react/src/presence/PresenceView.tsx')).toBe(true);
+      expect(deferred.has('packages/xlsx/src/collaboration/awareness.ts')).toBe(true);
       expect(deferred.has('packages/xlsx-react/src/worker/usePeerlessPresence.ts')).toBe(true);
     }
   });

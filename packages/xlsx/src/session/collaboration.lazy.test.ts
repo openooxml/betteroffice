@@ -2,7 +2,8 @@ import { beforeAll, expect, spyOn, test } from 'bun:test';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import * as workbookWasm from '../wasm/loader';
-import { createWorkbookSession, workbookCollaborationClientLoader, type WorkbookSession } from './client';
+import { createWorkbookSession, type WorkbookSession } from './client';
+import { workbookCollaborationClientLoader } from './collaborationLoader';
 import { createWorkbookSessionHost, workbookCollaborationHostLoader } from './host';
 import { loadWorkbookSessionFixtures } from './testHelpers';
 

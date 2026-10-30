@@ -10,6 +10,8 @@ import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerDraftController } from './WorkerDraftController';
 import { WorkerPresentationStore, useWorkerPresentation } from './WorkerPresentationStore';
 
+const presenceGeometry = { normalizeRange, rangeRect, expandRangeToMergedCells };
+
 export const xlsxPeerlessPresenceLoader = { load: () => import('./PeerlessPresence') };
 
 const selectSelection = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.selection;
@@ -110,10 +112,14 @@ export function PeerlessWorkerPresence({ store, run, provider, active, sheets }:
   store: WorkerPresentationStore; run: PeerlessWorkbookSession | null;
   provider: CollaborationAwareness | null | undefined; active: number; sheets: WorkbookSheetSummary[];
 }) {
+  const { t } = useTranslation();
+  const painted = useWorkerPresentation(store, selectPainted);
+  const selection = useWorkerPresentation(store, selectSelection);
   const Presence = useMemo(() => lazy(() => xlsxPeerlessPresenceLoader.load()
     .then((module) => ({ default: module.PeerlessPresence }))), [xlsxPeerlessPresenceLoader.load]);
   if (!provider) return null;
   return <Suspense fallback={null}>
-    <Presence store={store} run={run} provider={provider} active={active} sheets={sheets} />
+    <Presence painted={painted} selection={selection} run={run} provider={provider} active={active}
+      sheets={sheets} t={t} geometry={presenceGeometry} />
   </Suspense>;
 }
