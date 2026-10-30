@@ -206,7 +206,6 @@ version = "0.5.1"
 dependencies = [
  "miniz_oxide",
  "quick-xml",
- "wasm-bindgen",
 ]
 
 [[package]]
