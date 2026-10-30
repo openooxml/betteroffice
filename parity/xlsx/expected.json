@@ -2024,5 +2024,192 @@
     "result": {
       "limitedCells": []
     }
+  },
+  {
+    "op": "open",
+    "result": null
+  },
+  {
+    "op": "searchText",
+    "result": [
+      {
+        "a1": "B1",
+        "col": 1,
+        "row": 0,
+        "sheet": 0,
+        "sheetId": "sheet:0",
+        "sheetName": "Charts",
+        "text": "Revenue"
+      }
+    ]
+  },
+  {
+    "op": "searchText",
+    "result": []
+  },
+  {
+    "op": "searchText",
+    "result": [
+      {
+        "a1": "A1",
+        "col": 0,
+        "row": 0,
+        "sheet": 0,
+        "sheetId": "sheet:0",
+        "sheetName": "Charts",
+        "text": "Quarter"
+      },
+      {
+        "a1": "A2",
+        "col": 0,
+        "row": 1,
+        "sheet": 0,
+        "sheetId": "sheet:0",
+        "sheetName": "Charts",
+        "text": "Q1"
+      }
+    ]
+  },
+  {
+    "op": "rangeCells",
+    "result": [
+      [
+        {
+          "a1": "A1",
+          "input": "Quarter",
+          "isFormula": false
+        },
+        {
+          "a1": "B1",
+          "input": "Revenue",
+          "isFormula": false
+        }
+      ],
+      [
+        {
+          "a1": "A2",
+          "input": "Q1",
+          "isFormula": false
+        },
+        {
+          "a1": "B2",
+          "input": "12",
+          "isFormula": false
+        }
+      ]
+    ]
+  },
+  {
+    "op": "selectionFormatting",
+    "result": {
+      "bold": false,
+      "borderPreset": "none",
+      "fillColor": "#ffffff",
+      "fontFamily": "Calibri",
+      "fontSize": 11,
+      "horizontalAlignment": "left",
+      "italic": false,
+      "numberFormat": "automatic",
+      "strikethrough": false,
+      "textColor": "#000000",
+      "textWrapping": "overflow",
+      "verticalAlignment": "bottom"
+    }
+  },
+  {
+    "op": "charts",
+    "result": [
+      {
+        "anchorRange": "B6:F19",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#0",
+        "index": 0,
+        "part": "xl/charts/chart1.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          },
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 1,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Revenue and costs",
+        "type": "barChart"
+      },
+      {
+        "anchorRange": "G6",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#1",
+        "index": 1,
+        "part": "xl/charts/chart2.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue trend",
+        "type": "lineChart"
+      },
+      {
+        "anchorRange": null,
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#2",
+        "index": 2,
+        "part": "xl/charts/chart3.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue share",
+        "type": "pieChart"
+      },
+      {
+        "anchorRange": "G21:M35",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#3",
+        "index": 3,
+        "part": "xl/charts/chart4.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Cost share",
+        "type": "doughnutChart"
+      }
+    ]
   }
 ]
