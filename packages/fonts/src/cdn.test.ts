@@ -43,13 +43,13 @@ describe('CDN font provider', () => {
   test('lazily loads Latin and Japanese faces from separately pinned packages', async () => {
     const requested: string[] = [];
     const latin = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-latin@${fontsLatinVersion}/assets/Carlito-Regular.ttf.zst`;
-    const japanese = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/NotoSansJP-Regular.otf`;
+    const japanese = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/NotoSansJP-Regular.otf.zst`;
     intercept(
       {
         [latin]: new URL('../../fonts-latin/assets/Carlito-Regular.ttf.zst', import.meta.url)
           .pathname,
         [japanese]: new URL(
-          '../../fonts-cjk/assets/NotoSansJP-Regular.otf',
+          '../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst',
           import.meta.url,
         ).pathname,
       },

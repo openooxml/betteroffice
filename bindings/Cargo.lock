@@ -132,6 +132,7 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-docx",
  "betteroffice-fonts",
+ "betteroffice-ooxml-font-preflight",
  "napi",
  "napi-build",
  "napi-derive",
@@ -213,6 +214,14 @@ dependencies = [
 [[package]]
 name = "betteroffice-ooxml-diff"
 version = "0.5.1"
+
+[[package]]
+name = "betteroffice-ooxml-font-preflight"
+version = "0.5.1"
+dependencies = [
+ "miniz_oxide",
+ "quick-xml",
+]
 
 [[package]]
 name = "betteroffice-ooxml-text"

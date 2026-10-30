@@ -96,11 +96,11 @@ test('registers a Regular-only CJK script fallback once at 400 and preserves ren
   const harness = await loadHarness();
   const faces = await harness.fallbackFontsFor(await deck('中文'));
   expect(harness.registrations).toEqual([
-    { family: 'Noto Sans SC', file: 'NotoSansSC-Regular.otf', weight: '400', style: 'normal' },
+    { family: 'Noto Sans SC', file: 'NotoSansSC-Regular.otf.zst', weight: '400', style: 'normal' },
   ]);
   expect(rendererFaces(faces)).toEqual([
-    { family: 'Noto Sans SC', bold: false, italic: false, file: 'NotoSansSC-Regular.otf' },
-    { family: 'Noto Sans SC', bold: true, italic: false, file: 'NotoSansSC-Regular.otf' },
+    { family: 'Noto Sans SC', bold: false, italic: false, file: 'NotoSansSC-Regular.otf.zst' },
+    { family: 'Noto Sans SC', bold: true, italic: false, file: 'NotoSansSC-Regular.otf.zst' },
   ]);
 });
 
@@ -108,13 +108,13 @@ test('registers a named Regular-only CJK family once without bold or italic alia
   const harness = await loadHarness();
   const faces = await harness.fontsFor(await deck('中文', 'Microsoft YaHei'));
   expect(harness.registrations.filter((face) => face.family === 'Microsoft YaHei')).toEqual([
-    { family: 'Microsoft YaHei', file: 'NotoSansSC-Regular.otf', weight: '400', style: 'normal' },
+    { family: 'Microsoft YaHei', file: 'NotoSansSC-Regular.otf.zst', weight: '400', style: 'normal' },
   ]);
   expect(rendererFaces(faces.filter((face) => face.family === 'Microsoft YaHei'))).toEqual([
-    { family: 'Microsoft YaHei', bold: false, italic: false, file: 'NotoSansSC-Regular.otf' },
-    { family: 'Microsoft YaHei', bold: true, italic: false, file: 'NotoSansSC-Regular.otf' },
-    { family: 'Microsoft YaHei', bold: false, italic: true, file: 'NotoSansSC-Regular.otf' },
-    { family: 'Microsoft YaHei', bold: true, italic: true, file: 'NotoSansSC-Regular.otf' },
+    { family: 'Microsoft YaHei', bold: false, italic: false, file: 'NotoSansSC-Regular.otf.zst' },
+    { family: 'Microsoft YaHei', bold: true, italic: false, file: 'NotoSansSC-Regular.otf.zst' },
+    { family: 'Microsoft YaHei', bold: false, italic: true, file: 'NotoSansSC-Regular.otf.zst' },
+    { family: 'Microsoft YaHei', bold: true, italic: true, file: 'NotoSansSC-Regular.otf.zst' },
   ]);
 });
 
@@ -187,7 +187,7 @@ for (const order of ['named first', 'fallback first'] as const) {
     if (order === 'named first') {
       const named = await harness.fontsFor(bytes);
       expect(rendererFaces(named.filter((face) => face.family === 'Noto Sans SC'))[0].file).not.toBe(
-        'NotoSansSC-Regular.otf'
+        'NotoSansSC-Regular.otf.zst'
       );
       await harness.fallbackFontsFor(bytes);
     } else {
@@ -195,7 +195,7 @@ for (const order of ['named first', 'fallback first'] as const) {
       await harness.fontsFor(bytes);
     }
     expect(harness.registrations.filter((face) => face.family === 'Noto Sans SC')).toEqual([
-      { family: 'Noto Sans SC', file: 'NotoSansSC-Regular.otf', weight: '400', style: 'normal' },
+      { family: 'Noto Sans SC', file: 'NotoSansSC-Regular.otf.zst', weight: '400', style: 'normal' },
     ]);
   });
 }

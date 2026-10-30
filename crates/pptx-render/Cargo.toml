@@ -29,6 +29,7 @@ thiserror = "2"
 unicode-segmentation = "1.12"
 
 [dev-dependencies]
+betteroffice-fonts.workspace = true
 libm.workspace = true
 ooxml-opc.workspace = true
 

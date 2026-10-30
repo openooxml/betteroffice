@@ -57,4 +57,5 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 
 [dev-dependencies]
+ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../ooxml-font-preflight" }
 docx-layout = { workspace = true, features = ["test-support"] }
