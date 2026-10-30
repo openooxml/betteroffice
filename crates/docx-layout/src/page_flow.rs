@@ -1031,7 +1031,7 @@ impl Paginator {
 
     /// Clears float bands below the cursor, in one pass over the bands (sorted
     /// by top), until `height` fits: the new cursor and whether it fits there.
-    fn clear_float_bands(&self, idx: usize, height: f64) -> (f64, bool) {
+    fn clear_float_bands(&self, idx: usize, height: f64, trailing: f64) -> (f64, bool) {
         let state = &self.states[idx];
         let mut pen_y = state.pen_y;
         let bands = self.float_bands(idx);
@@ -1045,7 +1045,7 @@ impl Paginator {
             }
             pen_y = band.bottom;
         }
-        (pen_y, state.content_limit - pen_y >= height)
+        (pen_y, state.content_limit - pen_y >= height - trailing)
     }
 
     fn column_capacity(&mut self, idx: usize) -> f64 {
@@ -1062,6 +1062,11 @@ impl Paginator {
         capacity
     }
 
+    pub(crate) fn allows_trailing_leading(&mut self) -> bool {
+        let idx = self.get_current();
+        self.available_height_of(idx) == self.states[idx].content_limit - self.states[idx].pen_y
+    }
+
     /// Returns the current state's available height.
     pub fn get_available_height(&mut self) -> f64 {
         let idx = self.get_current();
@@ -1071,6 +1076,21 @@ impl Paginator {
     pub fn get_column_capacity(&mut self) -> f64 {
         let idx = self.get_current();
         self.column_capacity(idx)
+    }
+
+    pub(crate) fn get_column_capacity_with_trailing(&mut self, trailing: f64) -> f64 {
+        let idx = self.get_current();
+        if trailing == 0.0 {
+            return self.column_capacity(idx);
+        }
+        let state = &self.states[idx];
+        let bottom_top = self
+            .float_bands(idx)
+            .iter()
+            .filter(|band| band.top < state.content_limit)
+            .fold(state.content_top, |top, band| top.max(band.bottom));
+        let bottom_capacity = (state.content_limit - bottom_top).max(0.0) + trailing;
+        self.column_capacity(idx).max(bottom_capacity)
     }
 
     /// Whether a fresh page after the current one can give the flow less room
@@ -1095,8 +1115,14 @@ impl Paginator {
         !self.float_bands(idx).is_empty()
     }
 
-    fn fits(&self, height: f64, idx: usize) -> bool {
-        self.available_height_of(idx) >= height
+    fn fits_with_trailing(&self, height: f64, trailing: f64, idx: usize) -> bool {
+        let available = self.available_height_of(idx);
+        let allowance = if available == self.states[idx].content_limit - self.states[idx].pen_y {
+            trailing
+        } else {
+            0.0
+        };
+        available >= height - allowance
     }
 
     /// Moves to the next column of the current region, or opens a new page once
@@ -1118,6 +1144,10 @@ impl Paginator {
 
     /// Advances until a height fits or an oversized fragment can overflow.
     pub fn ensure_fits(&mut self, height: f64) -> usize {
+        self.ensure_fits_with_trailing(height, 0.0)
+    }
+
+    pub(crate) fn ensure_fits_with_trailing(&mut self, height: f64, trailing: f64) -> usize {
         let mut idx = self.get_current();
         let safe_height = if height.is_finite() && height > 0.0 {
             height
@@ -1125,17 +1155,18 @@ impl Paginator {
             0.0
         };
 
-        while !self.fits(safe_height, idx) {
+        let trailing = trailing.max(0.0).min(safe_height);
+        while !self.fits_with_trailing(safe_height, trailing, idx) {
             // oversized-fragment guard, re-checked per iteration because a
             // queued continuous-section geometry can change page capacity
-            let column_capacity = self.column_capacity(idx);
+            let column_capacity = self.get_column_capacity_with_trailing(trailing);
             if safe_height > column_capacity {
                 if self.states[idx].pen_y != self.states[idx].content_top {
                     idx = self.advance_column(idx).0;
                 }
                 return idx;
             }
-            let (pen_y, fits) = self.clear_float_bands(idx, safe_height);
+            let (pen_y, fits) = self.clear_float_bands(idx, safe_height, trailing);
             self.states[idx].pen_y = pen_y;
             if fits {
                 return idx;
@@ -1150,10 +1181,21 @@ impl Paginator {
     /// returns its resolved `(x, y)`.
     pub fn add_fragment(
         &mut self,
+        fragment: Fragment,
+        height: f64,
+        space_before: f64,
+        space_after: f64,
+    ) -> (f64, f64) {
+        self.add_fragment_with_trailing(fragment, height, space_before, space_after, 0.0)
+    }
+
+    pub(crate) fn add_fragment_with_trailing(
+        &mut self,
         mut fragment: Fragment,
         height: f64,
         space_before: f64,
         space_after: f64,
+        trailing: f64,
     ) -> (f64, f64) {
         // Read deferred spacing before fitting can advance the state.
         let cur = self.get_current();
@@ -1161,10 +1203,10 @@ impl Paginator {
             .leading_spacing(space_before)
             .max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
-        let opening_geometry = (!self.fits(total_height, cur))
+        let opening_geometry = (!self.fits_with_trailing(total_height, trailing, cur))
             .then(|| Box::new(OpeningFragmentGeometry::capture(self, cur)));
 
-        let idx = self.ensure_fits(total_height);
+        let idx = self.ensure_fits_with_trailing(total_height, trailing);
 
         let actual_space_before = self
             .leading_spacing(space_before)
@@ -1754,7 +1796,7 @@ mod tests {
         crate::column_balancing::ColumnBalancePaginator::set_content_limit(&mut paginator, 200.0);
         assert_eq!(paginator.column_capacity(idx), 104.0);
         assert_eq!(paginator.available_height_of(idx), 104.0);
-        assert_eq!(paginator.clear_float_bands(idx, 104.0), (96.0, true));
+        assert_eq!(paginator.clear_float_bands(idx, 104.0, 0.0), (96.0, true));
         let mut new_columns = columns();
         new_columns.count = 2.0;
         paginator.update_columns(new_columns);

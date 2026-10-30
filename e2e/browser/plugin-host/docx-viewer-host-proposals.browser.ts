@@ -95,41 +95,49 @@ async function recordPosts(page: Page) {
   });
 }
 
-async function pixels(page: Page, shots: Buffer[]) {
-  return page.evaluate(async (data) => Promise.all(data.map(async (shot) => {
-    const image = new Image();
-    image.src = `data:image/png;base64,${shot}`;
-    await image.decode();
-    const canvas = document.createElement('canvas');
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const context = canvas.getContext('2d')!;
-    context.fillStyle = 'white';
-    context.fillRect(0, 0, image.width, image.height);
-    context.drawImage(image, 0, 0);
-    return { width: image.width, height: image.height, data: Array.from(context.getImageData(0, 0, image.width, image.height).data) };
-  })), shots.map(shot => shot.toString('base64')));
+async function pixelCounts(page: Page, shots: Buffer[]) {
+  return page.evaluate(async (data) => {
+    const images = await Promise.all(data.map(async (shot) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${shot}`;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext('2d')!;
+      context.fillStyle = 'white';
+      context.fillRect(0, 0, image.width, image.height);
+      context.drawImage(image, 0, 0);
+      return { width: image.width, height: image.height, data: context.getImageData(0, 0, image.width, image.height).data };
+    }));
+    const dark = images.map(({ data }) => {
+      let count = 0;
+      for (let index = 0; index < data.length; index += 4) if (data[index]! < 128) count += 1;
+      return count;
+    });
+    const [a, b] = images;
+    if (!b) return { dark, size: [a!.width, a!.height], differing: 0 };
+    if (a!.width !== b.width || a!.height !== b.height) return { dark, size: [a!.width, a!.height, b.width, b.height], differing: -1 };
+    let differing = 0;
+    for (let index = 0; index < a!.data.length; index += 4) {
+      const delta = Math.abs(a!.data[index]! - b.data[index]!) + Math.abs(a!.data[index + 1]! - b.data[index + 1]!) + Math.abs(a!.data[index + 2]! - b.data[index + 2]!);
+      if (delta > 96) differing += 1;
+    }
+    return { dark, size: [a!.width, a!.height], differing };
+  }, shots.map(shot => shot.toString('base64')));
 }
 
 async function previewShot(page: Page) {
   const preview = page.locator('[aria-label="Document preview"] canvas').first();
   await expect(preview).toBeVisible();
   const shot = await preview.screenshot();
-  const [image] = await pixels(page, [shot]);
-  let dark = 0;
-  for (let index = 0; index < image!.data.length; index += 4) if (image!.data[index]! < 128) dark += 1;
-  return { shot, dark };
+  const { dark: [dark] } = await pixelCounts(page, [shot]);
+  return { shot, dark: dark! };
 }
 
 async function differingPixels(page: Page, first: Buffer, second: Buffer) {
-  const [a, b] = await pixels(page, [first, second]);
-  if (a!.width !== b!.width || a!.height !== b!.height) return { size: [a!.width, a!.height, b!.width, b!.height], count: -1 };
-  let count = 0;
-  for (let index = 0; index < a!.data.length; index += 4) {
-    const delta = Math.abs(a!.data[index]! - b!.data[index]!) + Math.abs(a!.data[index + 1]! - b!.data[index + 1]!) + Math.abs(a!.data[index + 2]! - b!.data[index + 2]!);
-    if (delta > 96) count += 1;
-  }
-  return { size: [a!.width, a!.height], count };
+  const { size, differing } = await pixelCounts(page, [first, second]);
+  return { size, count: differing };
 }
 
 async function layoutCompletes(page: Page) {

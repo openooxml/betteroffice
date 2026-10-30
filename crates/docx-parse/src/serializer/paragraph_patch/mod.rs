@@ -41,13 +41,11 @@ use crate::paragraph_patch::{
 pub(crate) struct PatchContext {
     pub part: String,
     pub namespaces: BTreeMap<String, String>,
-    pub in_sdt: bool,
 }
 
 impl PatchContext {
     pub(crate) fn at(part: &str, source: &str, offset: usize) -> Self {
         let mut scopes = vec![BTreeMap::new()];
-        let mut ancestors = Vec::new();
         if let Some(tags) = tags(source) {
             for tag in tags {
                 if tag.range.start >= offset {
@@ -55,11 +53,12 @@ impl PatchContext {
                 }
                 if tag.end {
                     scopes.pop();
-                    ancestors.pop();
                 } else {
                     let mut scope = scopes.last().cloned().unwrap_or_default();
                     for (name, range) in tag.attributes {
-                        if let Some(prefix) = name.strip_prefix("xmlns:")
+                        if let Some(prefix) = name
+                            .strip_prefix("xmlns:")
+                            .or_else(|| (name == "xmlns").then_some(""))
                             && let Ok(value) = lower::decode(&source[range])
                         {
                             scope.insert(prefix.to_owned(), value);
@@ -67,7 +66,6 @@ impl PatchContext {
                     }
                     if !tag.empty {
                         scopes.push(scope);
-                        ancestors.push(tag.name.to_owned());
                     }
                 }
             }
@@ -75,9 +73,6 @@ impl PatchContext {
         Self {
             part: part.to_owned(),
             namespaces: scopes.pop().unwrap_or_default(),
-            in_sdt: ancestors
-                .iter()
-                .any(|name| name == "w:sdt" || name == "w:sdtContent"),
         }
     }
 
@@ -86,7 +81,6 @@ impl PatchContext {
         Self {
             part: "word/document.xml".to_owned(),
             namespaces: BTreeMap::from([("w".to_owned(), lower::WORD.to_owned())]),
-            in_sdt: false,
         }
     }
 }
@@ -143,7 +137,7 @@ fn patch_inner(
     patch: &ParagraphPatchV1,
     context: &PatchContext,
 ) -> Result<String, Failure> {
-    let mut lowered = lower::lower(source, context)?;
+    let mut lowered = lower::lower(source, context, &patch.seed.units)?;
     let source_units: Vec<_> = lowered.cells.iter().map(|cell| cell.unit.clone()).collect();
     if !same_content(&source_units, &patch.seed.units)
         || unit_sha256(&patch.seed.units) != patch.seed.unit_sha256
@@ -191,7 +185,7 @@ fn patch_inner(
             "result digest differs from plan",
         ));
     }
-    let verified = lower::lower(&output, context)?;
+    let verified = lower::lower(&output, context, &units)?;
     verify::markers(
         &output,
         &verified,
@@ -218,22 +212,24 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1, xml: &lower::Xml) -> Result<(
                 .is_some_and(|key| keys.contains(&key.as_str()))
         })
     };
-    let direct_style_only = matches!(patch.para_deltas.as_slice(), [delta]
+    let style_only = matches!(patch.para_deltas.as_slice(), [delta]
         if delta.path == ["pStyle"])
         && patch.text_edits.is_empty()
         && patch.run_edits.is_empty()
-        && patch
-            .seed
-            .properties
-            .get("numPr")
-            .is_some_and(Value::is_object)
-        && match xml.child(0, "pPr")? {
-            Some(ppr) => xml.child(ppr, "numPr")?.is_some(),
-            None => false,
+        && match patch.seed.properties.get("numPr") {
+            None => {
+                !patch.seed.inherit.paragraph.contains_key("numPr")
+                    && !patch.para_inherit.contains_key("numPr")
+            }
+            Some(Value::Object(_)) => match xml.child(0, "pPr")? {
+                Some(ppr) => xml.child(ppr, "numPr")?.is_some(),
+                None => false,
+            },
+            _ => false,
         };
-    let numbered_restyle = style_delta(&patch.para_deltas, &["pStyle"])
+    let paragraph_restyle = style_delta(&patch.para_deltas, &["pStyle"])
         && !style_delta(&patch.para_deltas, &["styleId", "numPr"])
-        && (direct_style_only
+        && (style_only
             || patch.para_inherit != patch.seed.inherit.paragraph
             || patch.mark_inherit != patch.seed.inherit.paragraph_mark
             || patch
@@ -242,8 +238,8 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1, xml: &lower::Xml) -> Result<(
                 .zip(patch.seed.inherit.runs.iter())
                 .any(|(edit, inherit)| edit.inherit != *inherit));
     if style_delta(&patch.para_deltas, &["styleId", "numPr"])
-        || (style_delta(&patch.para_deltas, &["pStyle"]) && !numbered_restyle)
-        || (!numbered_restyle
+        || (style_delta(&patch.para_deltas, &["pStyle"]) && !paragraph_restyle)
+        || (!paragraph_restyle
             && (patch.para_inherit != patch.seed.inherit.paragraph
                 || patch.mark_inherit != patch.seed.inherit.paragraph_mark))
         || (!patch.seed.inherit.runs.is_empty()
@@ -273,7 +269,7 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1, xml: &lower::Xml) -> Result<(
             || runs.iter().any(|(from, to, attrs, inherit)| {
                 *from < edit.to
                     && edit.from < *to
-                    && ((edit.inherit != **inherit && !numbered_restyle)
+                    && ((edit.inherit != **inherit && !paragraph_restyle)
                         || edit.target.get("runStyle") != attrs.get("runStyle"))
             })
         {
@@ -306,7 +302,7 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1, xml: &lower::Xml) -> Result<(
             }
         };
         if edit.insert.iter().any(|insert| {
-            (!numbered_restyle && insert.inherit != *inherit)
+            (!paragraph_restyle && insert.inherit != *inherit)
                 || insert.attrs.get("runStyle") != attrs.get("runStyle")
         }) {
             return Err(restyle());

@@ -706,6 +706,7 @@ fn paragraph_scripts_with_han_fallback(
     let mut hangul = false;
     let mut arabic = false;
     let mut hebrew = false;
+    let mut intl = Vec::new();
     for text in paragraph.runs.iter().filter_map(|run| match run {
         Run::Text(text) => Some(text.text.as_str()),
         _ => None,
@@ -734,6 +735,44 @@ fn paragraph_scripts_with_han_fallback(
                 | 0x20000..=0x3ffff => han = true,
                 _ => {}
             }
+            let script = match point {
+                0x0e00..=0x0e7f => Some("thai"),
+                0x0e80..=0x0eff => Some("lao"),
+                0x1780..=0x17ff | 0x19e0..=0x19ff => Some("khmer"),
+                0x1000..=0x109f | 0xa9e0..=0xa9ff | 0xaa60..=0xaa7f | 0x116d0..=0x116ff => {
+                    Some("myanmar")
+                }
+                0x0900..=0x097f | 0xa8e0..=0xa8ff | 0x11b00..=0x11b5f => Some("devanagari"),
+                0x0980..=0x09ff => Some("bengali"),
+                0x0a00..=0x0a7f => Some("gurmukhi"),
+                0x0a80..=0x0aff => Some("gujarati"),
+                0x0b00..=0x0b7f => Some("oriya"),
+                0x0b80..=0x0bff | 0x11fc0..=0x11fff => Some("tamil"),
+                0x0c00..=0x0c7f => Some("telugu"),
+                0x0c80..=0x0cff => Some("kannada"),
+                0x0d00..=0x0d7f => Some("malayalam"),
+                0x0d80..=0x0dff | 0x111e0..=0x111ff => Some("sinhala"),
+                0x0530..=0x058f | 0xfb13..=0xfb17 => Some("armenian"),
+                0x10a0..=0x10ff | 0x1c90..=0x1cbf | 0x2d00..=0x2d2f => Some("georgian"),
+                0x1200..=0x137f
+                | 0x1380..=0x139f
+                | 0x2d80..=0x2ddf
+                | 0xab00..=0xab2f
+                | 0x1e7e0..=0x1e7ff => Some("ethiopic"),
+                0x0f00..=0x0fff => Some("tibetan"),
+                0x1800..=0x18af | 0x11660..=0x1167f => Some("mongolian"),
+                0x0700..=0x074f | 0x0860..=0x086f => Some("syriac"),
+                0x0780..=0x07bf => Some("thaana"),
+                0x13a0..=0x13ff | 0xab70..=0xabbf => Some("cherokee"),
+                0x2d30..=0x2d7f => Some("tifinagh"),
+                _ => None,
+            };
+            let Some(script) = script else {
+                continue;
+            };
+            if !intl.contains(&script) {
+                intl.push(script);
+            }
         }
     }
     let mut scripts = Vec::new();
@@ -752,6 +791,7 @@ fn paragraph_scripts_with_han_fallback(
     if hebrew {
         scripts.push("hebrew".to_owned());
     }
+    scripts.extend(intl.into_iter().map(str::to_owned));
     scripts
 }
 
@@ -1714,6 +1754,8 @@ fn measure_paragraph_with_context(
     #[cfg(test)]
     EXTENT_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let (extent, dependencies) = FontChainDependencies::capture(|| {
+        let measured = crate::leading_inline_box::measurement_paragraph(paragraph);
+        let paragraph = measured.as_ref();
         let measure = |paragraph: &ParagraphBlock| {
             if !content_width.is_finite() || content_width <= 0.0 {
                 synthetic_paragraph_extent(paragraph, content_width)
@@ -1771,6 +1813,7 @@ fn measure_paragraph_with_context(
         extent
     });
     let mut extent = extent;
+    crate::leading_inline_box::restore_extent(paragraph, &mut extent);
     measure_horizontal_rules(paragraph, &mut extent);
     measure_rule_pictures(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
@@ -2003,6 +2046,13 @@ fn config_fingerprint(config: &MeasurementConfig) -> u64 {
 /// pictures at the tallest picture's height; the paragraph mark's font adds
 /// no room.
 fn measure_rule_pictures(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    if paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.leading_inline_box.is_some())
+    {
+        return;
+    }
     let rule_picture = |run: &crate::types::Run| match run {
         crate::types::Run::Image(image) if image.horizontal_rule == Some(true) => {
             (image.position.is_none()
@@ -3488,11 +3538,11 @@ fn table_content_widths(
     ) {
         return None;
     }
-    // Painting places each row's cells from column zero.
-    if table.rows.iter().any(|row| {
-        row.grid_before.is_some_and(|before| before > 0)
-            || row.cells.iter().any(|cell| cell.grid_start.is_some())
-    }) {
+    if table
+        .rows
+        .iter()
+        .any(|row| row.cells.iter().any(|cell| cell.grid_start.is_some()))
+    {
         return None;
     }
     Some(
@@ -4209,6 +4259,13 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
     else {
         return extent_height(measure);
     };
+    if paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.leading_inline_box.is_some())
+    {
+        return extent.total_height;
+    }
     let non_empty: Vec<_> = paragraph
         .runs
         .iter()
@@ -6401,7 +6458,7 @@ mod tests {
             for (attrs, grid_before, grid_start) in [
                 (json!({"indent": {"left": 0, "hanging": 20}}), None, None),
                 (json!(null), None, Some(0)),
-                (json!(null), Some(1), None),
+                (json!({"indent": {"left": 0, "hanging": 20}}), Some(1), None),
             ] {
                 let mut table = autofit_repro_table(
                     50.0,
@@ -7221,6 +7278,60 @@ mod tests {
                 "{wrap_type}, behindDoc={behind_doc}"
             );
         }
+    }
+
+    #[test]
+    fn collects_international_script_fallbacks() {
+        for (script, text) in [
+            ("thai", "ก"),
+            ("lao", "ກ"),
+            ("khmer", "ក"),
+            ("myanmar", "က"),
+            ("devanagari", "क"),
+            ("bengali", "ক"),
+            ("gurmukhi", "ਕ"),
+            ("gujarati", "ક"),
+            ("oriya", "କ"),
+            ("tamil", "க"),
+            ("telugu", "క"),
+            ("kannada", "ಕ"),
+            ("malayalam", "ക"),
+            ("sinhala", "ක"),
+            ("armenian", "Ա"),
+            ("georgian", "ა"),
+            ("ethiopic", "ሀ"),
+            ("tibetan", "ཀ"),
+            ("mongolian", "ᠠ"),
+            ("syriac", "ܐ"),
+            ("thaana", "ހ"),
+            ("cherokee", "Ꭰ"),
+            ("tifinagh", "ⴰ"),
+        ] {
+            let block: LayoutBlock = serde_json::from_value(json!({
+                "kind": "paragraph", "id": "intl", "runs": [{
+                    "kind": "text", "text": text, "fontFamily": "Arial"
+                }]
+            }))
+            .unwrap();
+            let LayoutBlock::Paragraph(paragraph) = block else {
+                panic!("paragraph");
+            };
+            assert_eq!(paragraph_scripts(&paragraph), [script], "{text}");
+        }
+    }
+
+    #[test]
+    fn keeps_nearby_scripts_out_of_international_fallbacks() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "latin", "runs": [{
+                "kind": "text", "text": "Latin Ελληνικά Кириллица", "fontFamily": "Arial"
+            }]
+        }))
+        .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = block else {
+            panic!("paragraph");
+        };
+        assert!(paragraph_scripts(&paragraph).is_empty());
     }
 
     #[test]

@@ -1,7 +1,8 @@
-use serde::{Serialize, ser};
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
+use crate::float_bits::float_bits;
 use crate::{EngineError, engine_error};
 
 /// stage latencies of one slide layout, in milliseconds. the clock comes from
@@ -114,6 +115,65 @@ impl Renderer {
         Ok(self
             .layout_slide_timed(session, slide_index, &mut || 0.0)?
             .0)
+    }
+
+    /// Enables browser metrics for uncovered characters. Off by default.
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
+        if self.renderer.set_browser_coverage_fallback(enabled) {
+            self.font_epoch += 1;
+            self.layout_keys.clear();
+            self.rendered.clear();
+            self.last_slide = None;
+        }
+    }
+
+    /// returns a superset of layout's requested faces as JSON, including faces
+    /// skipped by shape or operation budgets or chart labels with no room.
+    pub fn requested_font_faces_json(
+        &self,
+        session: &pptx_edit::DeckSession,
+        slide_id: Option<&str>,
+    ) -> Result<String, EngineError> {
+        let ids = session.slide_ids().map_err(engine_error)?;
+        let indices = match slide_id {
+            Some(id) => vec![
+                ids.iter()
+                    .position(|candidate| candidate == id)
+                    .ok_or_else(|| {
+                        engine_error(pptx_edit::EditError::SlideNotFound(id.to_owned()))
+                    })?,
+            ],
+            None => (0..ids.len()).collect(),
+        };
+        let scopes = indices
+            .into_iter()
+            .map(|index| slide_scope(session, index as u32))
+            .collect::<Result<Vec<_>, _>>()?;
+        let faces = self
+            .renderer
+            .requested_font_faces(session.package(), &scopes)
+            .map_err(engine_error)?;
+        #[derive(Serialize)]
+        struct Face {
+            family: String,
+            bold: bool,
+            italic: bool,
+        }
+        #[derive(Serialize)]
+        struct RequestedFaces {
+            faces: Vec<Face>,
+        }
+        serde_json::to_string(&RequestedFaces {
+            faces: faces
+                .into_iter()
+                .map(|(family, bold, italic)| Face {
+                    family,
+                    bold,
+                    italic,
+                })
+                .collect(),
+        })
+        .map_err(engine_error)
     }
 
     /// `layoutSlideJson` with its stages timed, returned as
@@ -335,8 +395,7 @@ impl Renderer {
                     && record.scope.index == index
                     && record.scope.width_emu == width
                     && record.scope.height_emu == height
-                    && float_bits(&record.scope.slide)
-                        .is_some_and(|bits| Some(bits) == float_bits(slide))))
+                    && float_bits(&record.scope.slide) == float_bits(slide)))
         {
             if record.validated_version != *version {
                 record.validated_version = Rc::clone(version);
@@ -456,202 +515,6 @@ impl Renderer {
     }
 }
 
-#[derive(Default)]
-struct FloatBits(Vec<u64>);
-
-fn float_bits(value: &impl Serialize) -> Option<Vec<u64>> {
-    let mut bits = FloatBits::default();
-    value.serialize(&mut bits).ok()?;
-    Some(bits.0)
-}
-
-macro_rules! ignore_primitives {
-    ($($method:ident($ty:ty)),* $(,)?) => {
-        $(fn $method(self, _: $ty) -> Result<(), Self::Error> { Ok(()) })*
-    };
-}
-
-impl ser::Serializer for &mut FloatBits {
-    type Ok = ();
-    type Error = serde::de::value::Error;
-    type SerializeSeq = Self;
-    type SerializeTuple = Self;
-    type SerializeTupleStruct = Self;
-    type SerializeTupleVariant = Self;
-    type SerializeMap = Self;
-    type SerializeStruct = Self;
-    type SerializeStructVariant = Self;
-
-    ignore_primitives! {
-        serialize_bool(bool),
-        serialize_i8(i8), serialize_i16(i16), serialize_i32(i32),
-        serialize_i64(i64), serialize_i128(i128),
-        serialize_u8(u8), serialize_u16(u16), serialize_u32(u32),
-        serialize_u64(u64), serialize_u128(u128),
-        serialize_char(char), serialize_str(&str), serialize_bytes(&[u8]),
-    }
-
-    fn serialize_f32(self, value: f32) -> Result<(), Self::Error> {
-        self.0.push(u64::from(value.to_bits()));
-        Ok(())
-    }
-
-    fn serialize_f64(self, value: f64) -> Result<(), Self::Error> {
-        self.0.push(value.to_bits());
-        Ok(())
-    }
-
-    fn serialize_none(self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<(), Self::Error> {
-        value.serialize(self)
-    }
-
-    fn serialize_unit(self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn serialize_unit_struct(self, _: &'static str) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn serialize_unit_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-    ) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(
-        self,
-        _: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error> {
-        value.serialize(self)
-    }
-
-    fn serialize_newtype_variant<T: ?Sized + Serialize>(
-        self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error> {
-        value.serialize(self)
-    }
-
-    fn serialize_seq(self, _: Option<usize>) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    fn serialize_tuple(self, _: usize) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    fn serialize_tuple_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-        _: usize,
-    ) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    fn serialize_map(self, _: Option<usize>) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    fn serialize_struct_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-        _: usize,
-    ) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    fn collect_str<T: ?Sized + std::fmt::Display>(self, _: &T) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-macro_rules! float_sequence {
-    ($trait:ident, $method:ident) => {
-        impl ser::$trait for &mut FloatBits {
-            type Ok = ();
-            type Error = serde::de::value::Error;
-
-            fn $method<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-                value.serialize(&mut **self)
-            }
-
-            fn end(self) -> Result<(), Self::Error> {
-                Ok(())
-            }
-        }
-    };
-}
-
-float_sequence!(SerializeSeq, serialize_element);
-float_sequence!(SerializeTuple, serialize_element);
-float_sequence!(SerializeTupleStruct, serialize_field);
-float_sequence!(SerializeTupleVariant, serialize_field);
-
-impl ser::SerializeMap for &mut FloatBits {
-    type Ok = ();
-    type Error = serde::de::value::Error;
-
-    fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Self::Error> {
-        key.serialize(&mut **self)
-    }
-
-    fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        value.serialize(&mut **self)
-    }
-
-    fn end(self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-macro_rules! float_struct {
-    ($trait:ident) => {
-        impl ser::$trait for &mut FloatBits {
-            type Ok = ();
-            type Error = serde::de::value::Error;
-
-            fn serialize_field<T: ?Sized + Serialize>(
-                &mut self,
-                _: &'static str,
-                value: &T,
-            ) -> Result<(), Self::Error> {
-                value.serialize(&mut **self)
-            }
-
-            fn end(self) -> Result<(), Self::Error> {
-                Ok(())
-            }
-        }
-    };
-}
-
-float_struct!(SerializeStruct);
-float_struct!(SerializeStructVariant);
-
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()
@@ -671,6 +534,9 @@ fn slide_scope(
             error => engine_error(error),
         })
 }
+
+#[cfg(test)]
+mod requested_fonts_tests;
 
 #[cfg(test)]
 mod tests {
@@ -947,6 +813,162 @@ mod tests {
             .layout_scoped_slide(session.package(), &negative)
             .unwrap();
         assert_eq!(frame, serde_json::to_string(&fresh.display_list).unwrap());
+    }
+
+    #[test]
+    fn browser_coverage_changes_invalidate_layouts_once() {
+        let document = pptx_edit::DeckSession::open(DECK, 925).unwrap();
+        let slide_id = document.slide_ids().unwrap().remove(0);
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        for (enabled, changed) in [(false, false), (true, true), (false, true)] {
+            let frame = renderer.layout_slide_json(&document, 0).unwrap();
+            let old = renderer.slide_layout_key(&document, 0).unwrap();
+            assert!(renderer.set_active_slide(&document, &slide_id, &old));
+            let epoch = renderer.font_epoch;
+            let layouts = renderer.layout_count;
+            renderer.set_browser_coverage_fallback(enabled);
+            if changed {
+                assert_eq!(renderer.font_epoch, epoch + 1);
+                assert!(renderer.layout_keys.is_empty());
+                assert!(renderer.rendered.is_empty());
+                assert!(renderer.last_slide.is_none());
+                assert!(!renderer.set_active_slide(&document, &slide_id, &old));
+                assert_ne!(renderer.slide_layout_key(&document, 0).unwrap(), old);
+                renderer.layout_slide_json(&document, 0).unwrap();
+                assert_eq!(renderer.layout_count, layouts + 1);
+            } else {
+                assert_eq!(renderer.font_epoch, epoch);
+                assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), old);
+                assert_eq!(renderer.layout_slide_json(&document, 0).unwrap(), frame);
+                assert_eq!(renderer.layout_count, layouts);
+            }
+            let current = renderer.slide_layout_key(&document, 0).unwrap();
+            let layouts = renderer.layout_count;
+            renderer.set_browser_coverage_fallback(enabled);
+            assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), current);
+            renderer.layout_slide_json(&document, 0).unwrap();
+            assert_eq!(renderer.layout_count, layouts);
+        }
+    }
+
+    #[test]
+    fn snapshot_float_fields_revalidate_keys_across_versions() {
+        let session = pptx_edit::DeckSession::open(DECK, 932).unwrap();
+        let mut scope = session.slide_scope(0).unwrap();
+        let shape = &mut scope.slide.shapes[0];
+        shape.inherited = Some(pptx_edit::InheritedGeometry::default());
+        shape.outline = Some(ooxml_drawingml::ShapeOutline::default());
+        shape.text_stories = vec![pptx_edit::StorySnapshot {
+            id: "story".to_owned(),
+            length: 4,
+            paragraphs: vec![pptx_edit::ParagraphSnapshot {
+                runs: vec![pptx_edit::TextRunSnapshot {
+                    text: "Text".to_owned(),
+                    style: TextStyle::default(),
+                }],
+                ..Default::default()
+            }],
+        }];
+        type SetFloat = fn(&mut pptx_edit::ShapeSnapshot, f64);
+        let fields: [(&str, SetFloat); 8] = [
+            ("rotation", |shape, value| shape.rotation_deg = value),
+            ("inherited rotation", |shape, value| {
+                shape.inherited.as_mut().unwrap().rotation_deg = value;
+            }),
+            ("adjustment", |shape, value| {
+                shape.adjust_values.insert("adj".to_owned(), value);
+            }),
+            ("font size", |shape, value| {
+                shape.text_stories[0].paragraphs[0].runs[0]
+                    .style
+                    .font_size_pt = Some(value);
+            }),
+            ("spacing", |shape, value| {
+                shape.text_stories[0].paragraphs[0].runs[0].style.spacing_pt = Some(value);
+            }),
+            ("baseline", |shape, value| {
+                shape.text_stories[0].paragraphs[0].runs[0]
+                    .style
+                    .baseline_pct = Some(value);
+            }),
+            ("kerning", |shape, value| {
+                shape.text_stories[0].paragraphs[0].runs[0].style.kern_pt = Some(value);
+            }),
+            ("stroke width", |shape, value| {
+                shape.outline.as_mut().unwrap().width = Some(value);
+            }),
+        ];
+        let key = |renderer: &mut Renderer, scope: &SlideScope, version: &str| {
+            renderer.slide_key(
+                &Rc::new(pptx_edit::DocumentVersion::from(version)),
+                &scope.slide,
+                scope.index,
+                scope.width_emu,
+                scope.height_emu,
+            )
+        };
+        for (name, set) in fields {
+            let mut positive = scope.clone();
+            set(&mut positive.slide.shapes[0], 0.0);
+            let mut negative = positive.clone();
+            set(&mut negative.slide.shapes[0], -0.0);
+            assert_eq!(positive, negative, "{name}");
+            let mut renderer = Renderer::new();
+            let original = key(&mut renderer, &positive, "positive");
+            assert_eq!(
+                key(&mut renderer, &positive, "unchanged"),
+                original,
+                "{name}"
+            );
+            let changed = key(&mut renderer, &negative, "negative");
+            assert_ne!(changed, original, "{name}");
+            assert_eq!(
+                key(&mut renderer, &negative, "unchanged negative"),
+                changed,
+                "{name}"
+            );
+            let mut ordinary = positive.clone();
+            set(&mut ordinary.slide.shapes[0], 12.5);
+            let changed = key(&mut renderer, &ordinary, "ordinary");
+            assert_ne!(changed, original, "{name}");
+            assert_eq!(
+                key(&mut renderer, &ordinary, "unchanged ordinary"),
+                changed,
+                "{name}"
+            );
+            let mut nan = positive.clone();
+            set(
+                &mut nan.slide.shapes[0],
+                f64::from_bits(0x7ff8_0000_0000_0001),
+            );
+            let first_nan = key(&mut renderer, &nan, "nan");
+            assert_ne!(first_nan, changed, "{name}");
+            assert_ne!(
+                key(&mut renderer, &nan, "unchanged nan"),
+                first_nan,
+                "{name}"
+            );
+            set(
+                &mut nan.slide.shapes[0],
+                f64::from_bits(0x7ff8_0000_0000_0002),
+            );
+            assert_ne!(key(&mut renderer, &nan, "other nan"), first_nan, "{name}");
+        }
+
+        let mut first = scope.clone();
+        let style = &mut first.slide.shapes[0].text_stories[0].paragraphs[0].runs[0].style;
+        style.font_size_pt = Some(-0.0);
+        let mut second = first.clone();
+        let style = &mut second.slide.shapes[0].text_stories[0].paragraphs[0].runs[0].style;
+        style.font_size_pt = None;
+        style.spacing_pt = Some(-0.0);
+        assert_eq!(float_bits(&first.slide), float_bits(&second.slide));
+        let mut renderer = Renderer::new();
+        assert_ne!(
+            key(&mut renderer, &first, "font size"),
+            key(&mut renderer, &second, "spacing"),
+        );
     }
 
     #[test]

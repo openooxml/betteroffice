@@ -96,6 +96,7 @@ export {
   isProposalsAvailable,
   openWorkbook,
   wasmVersion,
+  engineBackend,
   StaleProposalError,
   DisplayTooLargeError,
   getDisplayListCellLimit,
@@ -105,6 +106,8 @@ export {
 } from './wasm/loader';
 export type {
   WasmInitInput,
+  WasmInitOptions,
+  EngineBackend,
   OpenWorkbookOptions,
   WorkbookCalculationContext,
   Viewport,

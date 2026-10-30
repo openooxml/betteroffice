@@ -36,7 +36,7 @@ export default defineConfig([
       'collaboration/index': 'src/collaboration/index.ts',
       // Dedicated browser worker loaded relative to the yrs facade bundle.
       'yrs/docxWorker': 'src/yrs/residentEngineWorker.ts',
-      // The four wasm loaders are ROOT-NAMED entries on purpose: their
+      // The wasm loaders are ROOT-NAMED entries on purpose: their
       // `new URL('./generated/…', import.meta.url)` literals must resolve
       // against a root-level chunk next to dist/generated/ (copy-assets puts
       // the gitignored binaries there). Keep them at the dist root.
@@ -44,6 +44,7 @@ export default defineConfig([
       'wasm-layout': 'src/wasm/layout.ts',
       'wasm-edit': 'src/wasm/edit.ts',
       'wasm-parse': 'src/wasm/parse.ts',
+      'wasm-query': 'src/wasm/query.ts',
     },
     format: ['esm'],
     // cjs builds need the import.meta.url shim for the wasm asset URLs.

@@ -34,6 +34,8 @@ Published under the `@betteroffice` scope. The editors render inside your app wi
 - [@betteroffice/agents](https://www.npmjs.com/package/@betteroffice/agents): tools for agents to search, read, edit and preview DOCX, XLSX and PPTX files through a TypeScript SDK or a local MCP server. Use it to let an agent work through large Office files the way it works through source code.
 - [@betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts): bundled open fonts (metric-compatible Latin faces, common presentation families, Hebrew and Arabic coverage) for deterministic layout.
 - [@betteroffice/fonts-cjk](https://www.npmjs.com/package/@betteroffice/fonts-cjk): optional Chinese, Japanese and Korean coverage fonts.
+- [@betteroffice/fonts-intl](https://www.npmjs.com/package/@betteroffice/fonts-intl): optional international Noto coverage fonts.
+- [@betteroffice/fonts-latin](https://www.npmjs.com/package/@betteroffice/fonts-latin): Latin and RTL font pack installed with the manager.
 - [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n), [@betteroffice/xlsx-i18n](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the React editors.
 
 ## Rust crates

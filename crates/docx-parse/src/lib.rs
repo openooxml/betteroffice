@@ -35,6 +35,7 @@ pub mod comments;
 pub mod content_control;
 pub mod document;
 pub mod drawingml;
+mod fmath;
 pub mod fonts;
 pub mod formatting;
 pub mod header_footer;
@@ -73,6 +74,9 @@ pub mod xml;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm-layout")]
+pub use docx_layout as layout;
 
 pub use block::{BlockContent, BlockSdt, StoryParser, story_block_elements, table_part_elements};
 pub use borders::{

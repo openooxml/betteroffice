@@ -78,6 +78,7 @@
 //! to integers so the fields typed as integers survive a round trip through a
 //! host with a single number type.
 
+use crate::fmath;
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
@@ -2135,6 +2136,8 @@ struct FieldRunIn {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ParaAttrsIn {
     #[serde(default)]
+    leading_inline_box: Option<crate::types::LeadingInlineBox>,
+    #[serde(default)]
     horizontal_rules: Vec<crate::types::HorizontalRule>,
     #[serde(default)]
     alignment: Option<String>,
@@ -2286,6 +2289,10 @@ pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 pub(crate) struct TableRowIn {
     #[serde(default)]
     cells: Vec<TableCellIn>,
+    #[serde(default)]
+    grid_before: Option<u64>,
+    #[serde(default)]
+    grid_after: Option<u64>,
     #[serde(default)]
     is_header: Option<bool>,
     #[serde(default)]
@@ -6483,6 +6490,7 @@ fn authoritative_line_items<'a>(
     line: &LineIn,
     ctx: &RenderCtx<'_>,
     default_level: u8,
+    leading_inline_box: bool,
 ) -> Option<Vec<LinePaintItem<'a>>> {
     let mut slices: Vec<(usize, usize, usize, f64, u8, u64, Option<u64>)> = Vec::new();
     if !line.bidi_slices.is_empty() {
@@ -6591,7 +6599,7 @@ fn authoritative_line_items<'a>(
                     run: image,
                     pm_start: image.pm_start,
                     pm_end: image.pm_end,
-                    single_image_line: item_count == 1,
+                    single_image_line: item_count == 1 && !leading_inline_box,
                     level,
                     logical_order,
                 });
@@ -6671,7 +6679,12 @@ fn emit_line(
         attrs.and_then(|attrs| attrs.auto_space_dn),
     );
     let default_bidi_level = base_bidi_level(geom.is_rtl);
-    let authoritative_items = authoritative_line_items(block, line, ctx, default_bidi_level);
+    let leading_inline_box = geom.is_first_line
+        && attrs
+            .and_then(|attrs| attrs.leading_inline_box.as_ref())
+            .is_some();
+    let authoritative_items =
+        authoritative_line_items(block, line, ctx, default_bidi_level, leading_inline_box);
     let authoritative_active = authoritative_items.is_some();
     let authoritative_width = authoritative_items
         .as_ref()
@@ -7005,7 +7018,7 @@ fn emit_line(
                         run: imr,
                         pm_start: seg.pm_start,
                         pm_end: seg.pm_end,
-                        single_image_line: segments.len() == 1,
+                        single_image_line: segments.len() == 1 && !leading_inline_box,
                         level: default_bidi_level,
                         logical_order: None,
                     });
@@ -7319,7 +7332,9 @@ fn emit_line(
     // position, which is `pmStart + 1`. The fragment's own pmStart is the
     // paragraph boundary, and a caret cannot sit there — emitting it would land
     // every click and vertical move BEFORE the paragraph.
-    if !emitted_positioned_text {
+    if !emitted_positioned_text
+        && !(leading_inline_box && segments.is_empty() && !block.runs.is_empty())
+    {
         let pos = line_break_pos.or(geom.frag_pm_start.map(|p| p + 1));
         if let Some(p) = pos {
             let mut marker_attrs = block_ref.attrs();
@@ -8984,7 +8999,7 @@ fn shape_text_bounds(frag: &ShapeFragmentIn, block: &ShapeBlockIn) -> ClipRect {
         .as_ref()
         .and_then(|transform| transform.rotation)
         .unwrap_or(0.0);
-    let (sin, cos) = rotation.to_radians().sin_cos();
+    let (sin, cos) = fmath::sin_cos(rotation.to_radians());
     let width = frag.width * cos.abs() + frag.height * sin.abs();
     let height = frag.width * sin.abs() + frag.height * cos.abs();
     ClipRect {
@@ -9249,7 +9264,7 @@ fn rotate_shape_text(primitives: &mut [Primitive], center: (f64, f64), rotation:
     if rotation == 0.0 {
         return;
     }
-    let (sin, cos) = rotation.to_radians().sin_cos();
+    let (sin, cos) = fmath::sin_cos(rotation.to_radians());
     let delta = |x: f64, y: f64| {
         let dx = x - center.0;
         let dy = y - center.1;
@@ -10026,12 +10041,12 @@ fn compute_cell_grid(block: &TableBlockIn, column_widths: &[f64]) -> Vec<GridCel
     for (row_index, row) in block.rows.iter().enumerate() {
         let occ = occupied.remove(&row_index).unwrap_or_default();
         let is_occ = |c: usize| occ.contains(&c);
-        let mut column_index = 0;
+        let mut column_index = row.grid_before.unwrap_or(0).min(16_384) as usize;
         while is_occ(column_index) {
             column_index += 1;
         }
         for (cell_index, cell) in row.cells.iter().enumerate() {
-            let col_span = cell.col_span.unwrap_or(1).max(1) as usize;
+            let col_span = cell.col_span.unwrap_or(1).clamp(1, 16_384) as usize;
             let row_span = cell.row_span.unwrap_or(1).max(1) as usize;
             let mut x = 0.0;
             for c in 0..column_index {
@@ -10468,10 +10483,12 @@ impl TablePaintPlan {
 
 /// Whether a grid cell is on the table's outer leading edge, whose border insets content.
 fn is_first_grid_column(g: &GridCell, block: &TableBlockIn, measure: &TableExtentIn) -> bool {
+    let row = &block.rows[g.row_index];
     if block.bidi == Some(true) {
-        g.column_index + g.col_span >= measure.column_widths.len()
+        g.column_index + g.col_span + row.grid_after.unwrap_or(0).min(16_384) as usize
+            >= measure.column_widths.len()
     } else {
-        g.column_index == 0
+        g.column_index == row.grid_before.unwrap_or(0).min(16_384) as usize
     }
 }
 

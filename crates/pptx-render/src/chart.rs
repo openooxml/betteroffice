@@ -2,8 +2,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect, PlotSink,
-    PlotTextAlign, chart_aria_label, plot_chart_into,
+    CHART_FONT_FAMILY, ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect,
+    PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, plot_chart_into,
 };
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
@@ -39,10 +39,7 @@ pub(crate) fn chart_primitive<'a>(
     budget: usize,
     text: &mut dyn FnMut(ChartText<'_>) -> Result<Primitive, RenderError>,
 ) -> Result<Primitive, RenderError> {
-    let mut chart = plot_model(space);
-    if !default_font.is_empty() {
-        chart.text.chart.font.get_or_insert(default_font);
-    }
+    let chart = plot_model_with_font(space, default_font);
     let mut primitives = Vec::new();
     let mut sink = ChartSink {
         primitives: &mut primitives,
@@ -67,6 +64,60 @@ pub(crate) fn chart_primitive<'a>(
         primitives,
         transform: frame.transform,
     })
+}
+
+pub(crate) fn visit_chart_fonts(
+    space: &ChartSpace,
+    default_font: &str,
+    visit: &mut dyn FnMut(&str, bool, bool),
+) {
+    let chart = plot_model_with_font(space, default_font);
+    let mut collect = |style: PlotTextStyle<'_>, bold| {
+        let family = style
+            .font
+            .or(chart.text.chart.font)
+            .filter(|font| !font.is_empty())
+            .unwrap_or(CHART_FONT_FAMILY);
+        let bold = style.bold.or(chart.text.chart.bold).unwrap_or(bold);
+        let italic = style.italic.or(chart.text.chart.italic).unwrap_or(false);
+        visit(family, bold, italic);
+    };
+    collect(PlotTextStyle::default(), false);
+    if chart.title.is_some_and(|title| !title.is_empty()) {
+        collect(chart.text.title, true);
+    }
+    if chart
+        .legend
+        .is_some_and(|legend| legend.visible != Some(false))
+    {
+        collect(chart.text.legend, false);
+    }
+    for axis in &chart.axes {
+        collect(axis.text, false);
+    }
+    for series in chart.series.iter().chain(
+        chart
+            .plot_groups
+            .iter()
+            .flat_map(|group| group.series.iter()),
+    ) {
+        for labels in series.labels.iter().chain(
+            series
+                .points
+                .iter()
+                .filter_map(|point| point.labels.as_ref()),
+        ) {
+            collect(labels.text, false);
+        }
+    }
+}
+
+fn plot_model_with_font<'a>(space: &'a ChartSpace, default_font: &'a str) -> PlotChart<'a> {
+    let mut chart = plot_model(space);
+    if !default_font.is_empty() {
+        chart.text.chart.font.get_or_insert(default_font);
+    }
+    chart
 }
 
 /// Supplies value labels only for legacy charts without `c:dLbls`, and leaves

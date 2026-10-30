@@ -809,6 +809,7 @@ impl SnapshotValidation {
             atomic(&meta, &txn, BASE_FINGERPRINT)?;
             if order.len(&txn) as usize != model.sheets.len()
                 || base.date_system != model.date_system
+                || base.full_precision.unwrap_or(true) != model.full_precision
             {
                 return Err(invalid());
             }

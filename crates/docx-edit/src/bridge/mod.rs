@@ -432,7 +432,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
     }));
-    let mut list_state = ListState::new(source.map(|source| source.numbering()));
+    let numbering = source.as_ref().map(|source| source.numbering());
+    let mut list_state = ListState::new(numbering);
+    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     let txn = doc.yrs_doc().transact();
     local.block(
         txn.get_map(COMMENTS)
@@ -2170,6 +2172,24 @@ fn lower_table<T: ReadTxn>(
                 format!("row {row_index} is missing trPr"),
             )
         })?;
+        let row_formatting = tr_pr.get("_originalFormatting").and_then(any_map);
+        let grid_count = |key| {
+            row_formatting
+                .and_then(|value| map_number(value, key))
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.min(16_384.0) as u64)
+        };
+        let grid_before = grid_count("gridBefore");
+        let grid_after = grid_count("gridAfter");
+        let row_width = |key| {
+            row_formatting
+                .and_then(|value| value.get(key))
+                .and_then(any_map)
+                .map(|value| docx_layout::types::PreferredWidth {
+                    value: map_number(value, "value"),
+                    r#type: map_string(value, "type"),
+                })
+        };
         let cell_values = match row.get("cells") {
             Some(Any::Array(values)) => values,
             _ => {
@@ -2183,7 +2203,7 @@ fn lower_table<T: ReadTxn>(
 
         let mut cells = Vec::with_capacity(cell_values.len());
         let mut cell_pm_start = row_pm_start + 1;
-        let mut column = 0usize;
+        let mut column = grid_before.unwrap_or(0) as usize;
         for (cell_index, cell_value) in cell_values.iter().enumerate() {
             let cell = any_map(cell_value).ok_or_else(|| {
                 malformed_table(
@@ -2241,7 +2261,7 @@ fn lower_table<T: ReadTxn>(
             {
                 column += 1;
             }
-            let col_span = map_number(tc_pr, "colspan");
+            let col_span = map_number(tc_pr, "colspan").map(|span| span.min(16_384.0));
             let row_span = map_number(tc_pr, "rowspan");
             let colspan = col_span.unwrap_or(1.0) as usize;
             let width_type = map_string(tc_pr, "widthType");
@@ -2255,7 +2275,12 @@ fn lower_table<T: ReadTxn>(
                 && width_type.as_deref() == Some("pct")
                 && width_value.is_some()
                 && width_value
-                    == synthesized_cell_width(&grid_widths, total_grid_width, column, colspan);
+                    == synthesized_cell_width(
+                        &grid_widths,
+                        total_grid_width,
+                        column.saturating_sub(grid_before.unwrap_or(0) as usize),
+                        colspan,
+                    );
             let width_value =
                 width_value.filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
             let width =
@@ -2302,7 +2327,6 @@ fn lower_table<T: ReadTxn>(
         }
 
         let row_node_size = cell_pm_start + 1 - row_pm_start;
-        let original = tr_pr.get("_originalFormatting").and_then(any_map);
         rows.push(TableRow {
             id: BlockId::Str(format!("{table_id}:r{row_index}")),
             cells,
@@ -2311,13 +2335,17 @@ fn lower_table<T: ReadTxn>(
                 .map(twips_to_pixels),
             height_rule: map_string(tr_pr, "heightRule"),
             is_header: map_bool(tr_pr, "isHeader"),
-            cant_split: original
+            cant_split: row_formatting
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
-            grid_before: None,
-            grid_after: None,
-            width_before: None,
-            width_after: None,
+            grid_before,
+            grid_after,
+            width_before: grid_before
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthBefore")),
+            width_after: grid_after
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthAfter")),
             tracked_ins: tr_pr
                 .get("trIns")
                 .and_then(|value| paragraph_revision_value(value, env)),
@@ -2448,7 +2476,7 @@ fn automatic_text_needs_white(color: &str) -> bool {
         if channel <= 0.04045 {
             channel / 12.92
         } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
+            crate::fmath::pow((channel + 0.055) / 1.055, 2.4)
         }
     };
     let red = linearize((value >> 16) & 255);
@@ -2508,8 +2536,10 @@ fn image_transform_metrics(
         .unwrap_or(0.0)
         .rem_euclid(360.0);
     let radians = rotation.to_radians();
-    let bounds_width = width * radians.cos().abs() + height * radians.sin().abs();
-    let bounds_height = width * radians.sin().abs() + height * radians.cos().abs();
+    let bounds_width =
+        width * crate::fmath::cos(radians).abs() + height * crate::fmath::sin(radians).abs();
+    let bounds_height =
+        width * crate::fmath::sin(radians).abs() + height * crate::fmath::cos(radians).abs();
     let bounds = (rotation != 0.0).then(|| {
         serde_json::json!({
             "width": bounds_width,
@@ -4100,6 +4130,7 @@ fn inline_shared_drawings(
     carried: &[(u32, Vec<RawRun>)],
     drawings: &mut Vec<DrawingMarker>,
     show_hidden_text: bool,
+    leading_box: bool,
 ) {
     let convertible = |drawing: &DrawingMarker| {
         !drawing.anchored
@@ -4116,7 +4147,8 @@ fn inline_shared_drawings(
     if count == 0 {
         return;
     }
-    let shares = count > 1
+    let shares = leading_box
+        || count > 1
         || raw_runs
             .iter()
             .chain(carried.iter().flat_map(|(_, runs)| runs.iter()))
@@ -4124,7 +4156,8 @@ fn inline_shared_drawings(
     if !shares {
         return;
     }
-    if count == 1
+    if !leading_box
+        && count == 1
         && let Some(drawing) = drawings.iter().find(|drawing| convertible(drawing))
         && matches!(drawing.block, LayoutBlock::Shape(_))
     {
@@ -4223,7 +4256,16 @@ fn flush_paragraph_parts<T: ReadTxn>(
         }
     }
     let has_source_content = !drawings.is_empty();
-    inline_shared_drawings(&mut raw_runs, &carried, &mut drawings, env.show_hidden_text);
+    let leading_box = source == 0
+        && map.stories.first().is_some_and(|story| story == "body")
+        && list_state.first_picture_bullet().is_some();
+    inline_shared_drawings(
+        &mut raw_runs,
+        &carried,
+        &mut drawings,
+        env.show_hidden_text,
+        leading_box,
+    );
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
         map.spans.push(SourceSpan {
@@ -4260,6 +4302,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 .has_source_content = Some(true);
         }
         if paragraph.runs.is_empty()
+            && !leading_box
             && (hides_mark
                 || (!env.show_hidden_text
                     && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
@@ -4435,6 +4478,14 @@ fn flush_paragraph<T: ReadTxn>(
         clamp_toc_auxiliary_sizes(&mut raw_runs, defaults.font_size);
     }
     let raw_runs = coalesce_runs(raw_runs);
+    let leading_box = (source == 0
+        && map.stories.first().is_some_and(|story| story == "body")
+        && !map
+            .paragraph_blocks
+            .iter()
+            .any(|(_, previous)| *previous == source))
+    .then(|| list_state.first_picture_bullet().cloned())
+    .flatten();
     map.paragraph_blocks.push((paragraph_pm_start, source));
     let carried: Vec<_> = carried
         .into_iter()
@@ -4463,6 +4514,10 @@ fn flush_paragraph<T: ReadTxn>(
     let can_start_page = story_id == "body" || story_id.starts_with("body:");
     let mut attrs =
         lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state, can_start_page);
+    attrs.leading_inline_box = leading_box.map(|size| docx_layout::types::LeadingInlineBox {
+        width: size.width * 96.0 / 72.0,
+        height: size.height * 96.0 / 72.0,
+    });
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();

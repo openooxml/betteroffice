@@ -1,5 +1,6 @@
 //! Target-neutral PPTX engine boundary shared by the wasm and native backends.
 
+mod float_bits;
 mod renderer;
 
 use std::fmt;

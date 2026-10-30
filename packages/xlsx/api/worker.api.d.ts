@@ -1029,6 +1029,7 @@ import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
     worker?: () => Worker;
     wasm?: ArrayBuffer | WebAssembly.Module;
+    png?: boolean;
     /** Retain source bytes and a compiled module for edit peer hydration. */
     retainPeerHydration?: boolean;
     /** Aborting closes the session worker while the open is still in flight. */
@@ -1450,6 +1451,7 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
     wasm?: ArrayBuffer | WebAssembly.Module;
+    png?: boolean;
     initialViewport?: WorkbookInitialPaintRequest;
     includeEditState?: boolean;
     initialUpdate?: Uint8Array;
@@ -1522,7 +1524,7 @@ export interface WorkbookSessionEvents {
  */
 export type WorkbookSessionMethods = {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
-    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm'>): WorkbookSessionOpenReply;
+    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
     collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -3669,8 +3671,11 @@ export interface WorkbookHandle extends CollaborationReplica {
 /** @experimental */
 export declare function workbookDisplayListJson(handle: WorkbookHandle, viewport: Viewport, sheet?: number): string;
 export type WasmInitInput = InitInput | Promise<InitInput>;
+export interface WasmInitOptions {
+    png?: boolean;
+}
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
-export declare function initWasm(input?: WasmInitInput): Promise<void>;
+export declare function initWasm(input?: WasmInitInput, options?: WasmInitOptions): Promise<void>;
 /**
  * The allocation the engine could not get, if any. The core aborts when an
  * allocation fails, so a trap after one means the engine ran out of memory.
@@ -3685,6 +3690,9 @@ export declare function getDisplayListCellLimit(): number;
  * Whether this environment exposes the WebAssembly runtime required by the core.
  */
 export declare function isWasmAvailable(): boolean;
+export type EngineBackend = 'wasm' | 'native';
+/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
+export declare function engineBackend(): EngineBackend;
 /**
  * Whether the embedded wasm core was built with png export (the `raster` cargo
  * feature). The wasm-bindgen method only exists on the class when compiled in,

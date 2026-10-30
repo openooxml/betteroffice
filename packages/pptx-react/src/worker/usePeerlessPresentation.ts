@@ -13,7 +13,7 @@ import { flushSync } from 'react-dom';
 import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
-import { installFonts, useStableFonts } from './peerlessFonts';
+import { installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
@@ -85,7 +85,7 @@ export function usePeerlessPresentation(
     initialUpdate.current.length !== update.length || !initialUpdate.current.every((byte, index) => byte === update[index]))) {
     initialUpdate.current = update;
   }
-  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, Boolean(collaboration),
+  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.clientId, Boolean(collaboration),
     collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
   const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
@@ -137,8 +137,15 @@ export function usePeerlessPresentation(
       catch (error) { console.error('documentChange listener threw:', error); }
     };
     let cancelCheckpoint: (() => void) | undefined;
-    const recoveryBase = props.file instanceof Uint8Array ? props.file.slice() : new Uint8Array(props.file).slice();
+    const fileView = props.file instanceof Uint8Array ? props.file : new Uint8Array(props.file);
+    let recoveryBase: Blob | undefined = new Blob([fileView.buffer instanceof ArrayBuffer &&
+      !(fileView.buffer as ArrayBuffer & { resizable?: boolean }).resizable ? fileView as Uint8Array<ArrayBuffer> : new Uint8Array(fileView)]);
     const recovery = peerlessRecoveryFactory.create(recoveryBase);
+    const readRecoveryBase = async () => {
+      if (!recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+      try { return new Uint8Array(await recoveryBase.arrayBuffer()); }
+      catch { throw new Error('Recovery baseline is unavailable'); }
+    };
     let firstPainted = false;
     let published = false;
     let paintedFrame: PresentationCommandFrame | undefined;
@@ -153,6 +160,7 @@ export function usePeerlessPresentation(
     const vanished = new Set<string>();
     const pendingMedia = new Map<string, ArrayBuffer>();
     const installedFonts: FontFace[] = [];
+    const suppliedFamilies = new Set(fonts.map((font) => font.family.trim().toLowerCase()));
     const disposers: (() => void)[] = [];
     const failureListeners = new Set<() => void>();
     const visualListeners = new Set<() => void>();
@@ -372,11 +380,13 @@ export function usePeerlessPresentation(
     }
 
     try {
-      session = peerlessSessionOpener.open(props.file, {
-        fonts, clientId: props.clientId, collaboration: sessionCollaboration,
+      session = peerlessSessionOpener.open(props.file, Object.assign({
+        fonts, defaultFonts: props.defaultFonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
-      });
+      }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0], allowed?: (family: string) => boolean) =>
+        installDefaultFonts(faces, installedFonts, current, warnFonts,
+          (family) => !suppliedFamilies.has(family.trim().toLowerCase()) && (allowed?.(family) ?? true)) }));
       disposers.push(session.subscribeFailure(report));
       const owner = session;
       void owner.ready.then((client) => {
@@ -542,12 +552,20 @@ export function usePeerlessPresentation(
             if (!fatal) await saveCheckpoint(client);
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             const baseline = recovery.baseline && recovery.validate();
-            if (baseline?.kind === 'source' && !recoveryBase.byteLength) throw new Error('Recovery baseline is unavailable');
-            if (!recovery.hasUncheckpointedUpdates()) return { ...recovery.saved, bytes: recovery.saved.bytes.slice(), recovery: true };
+            if (baseline?.kind === 'source' && !recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+            if (!recovery.hasUncheckpointedUpdates()) {
+              const saved = recovery.saved;
+              const bytes = saved.bytes?.slice() ?? await readRecoveryBase();
+              if (!currentFile()) throw new PptxWorkerEditorDisposedError();
+              return { ...saved, bytes, recovery: true };
+            }
             if (!baseline) throw new Error('Recovery baseline is unavailable');
             const journal = recovery.journal.slice();
-            const recovering = peerlessSessionOpener.open(recoveryBase, { fonts,
+            let source: Uint8Array | undefined = await readRecoveryBase();
+            if (!currentFile()) throw new PptxWorkerEditorDisposedError();
+            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
+            source = undefined;
             try {
               const replay = await recovering.ready;
               if (baseline.kind === 'source' && replay.state.recoveryEngine !== baseline.engine) {
@@ -569,6 +587,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
+            suppliedFamilies.add(face.family.trim().toLowerCase());
             await installFonts([face], installedFonts, current, warnFonts);
             require();
           },
@@ -642,6 +661,7 @@ export function usePeerlessPresentation(
     } catch (error) { report(error); }
     return () => {
       alive = false;
+      recoveryBase = undefined;
       if (requestMode.current === setReadOnly) requestMode.current = null;
       signal();
       cancelIdle?.();
