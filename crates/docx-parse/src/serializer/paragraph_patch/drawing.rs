@@ -239,5 +239,22 @@ pub(super) fn validate_edits(
             return Err(Failure::structure("drawing: formatting touches SmartArt"));
         }
     }
+    let properties = |run: usize| {
+        lowered.runs[run]
+            .properties
+            .map(|at| &source[lowered.xml.nodes[at].span.clone()])
+    };
+    for edit in &patch.text_edits {
+        let mut runs = lowered
+            .cells
+            .iter()
+            .filter(|cell| edit.from <= cell.from && cell.to <= edit.to)
+            .map(|cell| cell.run);
+        if let Some(first) = runs.next()
+            && runs.any(|run| properties(run) != properties(first))
+        {
+            return Err(Failure::structure("drawing: text edit crosses source runs"));
+        }
+    }
     Ok(())
 }

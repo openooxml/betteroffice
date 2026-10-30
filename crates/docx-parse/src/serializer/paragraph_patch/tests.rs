@@ -2020,6 +2020,28 @@ fn smart_art_text_replacement_across_source_runs_keeps_the_drawing_run() {
 }
 
 #[test]
+fn smart_art_patch_refuses_text_replacement_across_different_source_runs() {
+    let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;
+    let atom = UnitV1::Atom {
+        atom_kind: "shape".to_owned(),
+        payload: attrs(json!({"shapeJson": json!({"drawingXml": drawing}).to_string()})),
+        attrs: Attrs::new(),
+    };
+    let mut plan = patch(
+        vec![text("before", json!({})), atom.clone()],
+        vec![text("ahead of", json!({})), atom],
+    );
+    replace(&mut plan, 0, 6, "ahead of", json!({}));
+    let source = format!(
+        "<w:p><w:r><w:t>be</w:t></w:r><w:r><w:rPr><w:lang w:val=\"de-DE\"/></w:rPr><w:t>fore</w:t></w:r><w:r>{drawing}</w:r></w:p>"
+    );
+    assert_eq!(
+        write(&source, &plan).unwrap_err().detail,
+        "drawing: text edit crosses source runs"
+    );
+}
+
+#[test]
 fn smart_art_many_drawings_patch_with_linear_work() {
     let measured = |drawings: usize| {
         let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;

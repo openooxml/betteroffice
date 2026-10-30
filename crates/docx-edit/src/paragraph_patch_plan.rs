@@ -634,11 +634,7 @@ fn preserved_drawing(kind: &str, payload: &Attrs) -> bool {
     }
 }
 
-fn drawing_text_alignment(
-    before: &[Token],
-    after: &[Token],
-    context: &PatchContext<'_>,
-) -> Option<Vec<(usize, usize)>> {
+fn drawing_text_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
     if !before.iter().any(|token| {
         matches!(&token.content,
         Content::Atom(kind, payload) if preserved_drawing(kind, payload))
@@ -666,10 +662,6 @@ fn drawing_text_alignment(
         .chain(new)
         .any(|token| !token.is_text() || !same_attrs(&token.attrs, &donor.attrs))
     {
-        return None;
-    }
-    let source = context.source_paragraph.and_then(|load| load())?;
-    if !homogeneous_source_replacement(&source, before, prefix..old_end) {
         return None;
     }
     Some(
@@ -1510,7 +1502,7 @@ pub(crate) fn diff_paragraph_v1(
     let retained = match alignment(&old, &new, &context) {
         Ok(retained) => retained,
         Err(detail @ "ambiguous: nonunique content alignment") => {
-            drawing_text_alignment(&old, &new, &context)
+            drawing_text_alignment(&old, &new)
                 .or_else(|| {
                     patchable_restyle
                         .then(|| single_run_insertion_alignment(&before, &after))
@@ -2294,39 +2286,11 @@ mod tests {
         };
         let before = with_drawing("Process overview before ");
         let after = with_drawing("Process overview ahead of ");
-        let source = |split: &str| {
-            let (head, tail) = "Process overview before ".split_at(19);
-            format!(
-                "<w:p><w:r><w:t>{head}</w:t></w:r><w:r>{split}<w:t xml:space=\"preserve\">{tail}</w:t></w:r><w:r><w:drawing/></w:r><w:r><w:t xml:space=\"preserve\"> and after the diagram.</w:t></w:r></w:p>"
-            )
-        };
-        let same = || Some(source(""));
-        let diff_with = |load: &dyn Fn() -> Option<String>| {
-            diff_paragraph_v1(
-                &before,
-                &after,
-                PatchContext {
-                    source_paragraph: Some(load),
-                    ..context()
-                },
-            )
-        };
-        let patch = diff_with(&same).unwrap();
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
         assert_eq!(patch.text_edits.len(), 1);
         assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (17, 23));
         assert_eq!(patch.text_edits[0].insert[0].text, "ahead of");
         assert!(patch.run_edits.is_empty());
-        let other_language = || Some(source("<w:rPr><w:lang w:val=\"de-DE\"/></w:rPr>"));
-        assert_eq!(
-            diff_with(&other_language).unwrap_err().code,
-            PatchErrorCode::AmbiguousAlignment
-        );
-        assert_eq!(
-            diff_paragraph_v1(&before, &after, context())
-                .unwrap_err()
-                .code,
-            PatchErrorCode::AmbiguousAlignment
-        );
         let mut changed = before.clone();
         changed[1]
             .attributes
