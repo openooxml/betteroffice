@@ -1162,16 +1162,16 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const positionedComments = useMemo(() => commentItems.map(item => {
     if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
     const previousY = commentPlacement.positions.get(item.id);
-    const pending = () => previousY !== undefined ? { ...item, fixedY: previousY } : { ...item, hidden: true };
-    if (!commentGeometryCurrent) return pending();
+    if (!commentGeometryCurrent && previousY !== undefined) return { ...item, fixedY: previousY };
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
     const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
-    const rect = (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
+    const rect = !documentReady ? undefined : (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
       (review && item.anchorKey?.startsWith('comment-') && firstPage !== undefined ? { pageIndex: firstPage, y: 0 } : undefined);
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
-    return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : pending();
-  }), [commentItems, commentPlacement, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, commentGeometryCurrent, shellState.view?.geometry, trackedChanges, geometry, zoom]);
+    if (bounds && rect) return { ...item, fixedY: bounds.y + rect.y };
+    return previousY !== undefined ? { ...item, fixedY: previousY } : { ...item, hidden: true };
+  }), [commentItems, commentPlacement, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, commentGeometryCurrent, documentReady, shellState.view?.geometry, trackedChanges, geometry, zoom]);
   useLayoutEffect(() => {
     if (review?.uiComments) commentPlacement.comments = review.uiComments;
     commentPlacement.positions = new Map(positionedComments.flatMap(item =>
