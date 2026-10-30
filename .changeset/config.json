@@ -20,7 +20,8 @@
     [
       "@betteroffice/fonts",
       "@betteroffice/fonts-cjk",
-      "@betteroffice/fonts-intl"
+      "@betteroffice/fonts-intl",
+      "@betteroffice/fonts-latin"
     ],
     [
       "@betteroffice/vsdx",

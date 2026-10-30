@@ -252,7 +252,7 @@ describe('internal font decoder', () => {
           entrypoints: [new URL('../dist/index.js', import.meta.url).pathname],
           target: 'browser',
           outdir: join(deployment, 'dist'),
-          external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
+          external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin'],
           define: { 'import.meta.url': JSON.stringify('https://consumer.example/dist/index.js') },
         });
         expect(build.success).toBe(true);
