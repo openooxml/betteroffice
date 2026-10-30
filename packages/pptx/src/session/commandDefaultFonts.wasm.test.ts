@@ -5,7 +5,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { initWasm } from '../wasm/loader';
-import { PptxRenderer } from '../wasm/generated/pptx_wasm.js';
+import { PptxRenderer } from '../wasm/engine';
 import type { SlideDisplayList } from '../types';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { commandFontProvider } from './commandDefaultFonts';
@@ -161,6 +161,45 @@ test('app supplied fonts keep uncovered text in registered faces without default
   const runs = boxes.flatMap((box) => box.lines.flatMap((line) => line.runs));
   expect(runs.some((run) => run.text.includes('👩‍💻'))).toBe(true);
   expect(runs.every((run) => run.fontId !== 0xffffffff)).toBe(true);
+});
+
+test('an app supplying only Arial still gets defaults for the other document families', async () => {
+  const manager = source({ Arial: async () => font, 'Times New Roman': async () => font, Calibri: async () => font,
+    'MS Mincho': async () => font });
+  const register = spyOn(PptxRenderer.prototype, 'registerFont');
+  restorers.push(() => register.mockRestore());
+  const wire = connection();
+  const arial = [false, true].flatMap((bold) => [false, true].map((italic) => ({ family: 'Arial', bold, italic, bytes: font.slice(0) })));
+  const faces: string[] = [];
+  const client = await createPresentationCommandClient(await deck(['Times New Roman', 'Calibri', 'MS Mincho'], 'alpha \u65e5\u672c'),
+    Object.assign({ ...options, fonts: arial }, {
+      [defaultFontInstaller]: async (additions: readonly DefaultFontFace[]) => { faces.push(...additions.map((face) => face.family)); },
+    }), wire.transport);
+  clients.push(client);
+  for (const slide of client.state.slides.slice(1)) await client.dispatch({ kind: 'activateSlide', payload: { slideId: slide.id } });
+  await client.flush();
+  const requested = manager.resolve.mock.calls.map(([family]) => family);
+  expect(requested).not.toContain('Arial');
+  for (const family of ['Times New Roman', 'Calibri', 'MS Mincho']) {
+    expect(requested).toContain(family);
+    expect(faces).toContain(family);
+  }
+  const registered = register.mock.calls.map(([family]) => family);
+  expect(registered.filter((family) => family === 'Arial')).toHaveLength(4);
+  expect(registered.filter((family) => family !== 'Arial').sort()).toEqual(['Calibri', 'MS Mincho', 'Times New Roman']);
+});
+
+test('opting out keeps app supplied sessions free of default fonts', async () => {
+  const manager = source({ Calibri: async () => font, Cambria: async () => font });
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(), {
+    ...options, fonts: [{ family: 'Arial', bytes: font.slice(0) }], defaultFonts: false,
+  }, wire.transport);
+  clients.push(client);
+  await client.dispatch({ kind: 'activateSlide', payload: { slideId: client.state.slides[1].id } });
+  await client.flush();
+  expect(manager.imported).not.toHaveBeenCalled();
+  expect(manager.fetch).not.toHaveBeenCalled();
 });
 
 test('default sessions enable browser coverage once before registering faces', async () => {

@@ -613,6 +613,65 @@ fn alignment(
         .collect())
 }
 
+fn preserved_drawing(kind: &str, payload: &Attrs) -> bool {
+    match kind {
+        "shape" => payload
+            .get("shapeJson")
+            .and_then(Value::as_str)
+            .and_then(|json| serde_json::from_str::<Value>(json).ok())
+            .is_some_and(|shape| {
+                ["drawingXml", "drawingRunXml"]
+                    .iter()
+                    .any(|key| shape.get(key).and_then(Value::as_str).is_some())
+            }),
+        "opaqueDrawing" => payload
+            .get("xml")
+            .and_then(Value::as_str)
+            .is_some_and(|xml| {
+                xml.contains("http://schemas.openxmlformats.org/drawingml/2006/diagram")
+            }),
+        _ => false,
+    }
+}
+
+fn drawing_text_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
+    if !before.iter().any(|token| {
+        matches!(&token.content,
+        Content::Atom(kind, payload) if preserved_drawing(kind, payload))
+    }) {
+        return None;
+    }
+    let prefix = before
+        .iter()
+        .zip(after)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let old_end = before.len() - suffix;
+    let new_end = after.len() - suffix;
+    let old = &before[prefix..old_end];
+    let new = &after[prefix..new_end];
+    let donor = old.first().or_else(|| new.first())?;
+    if old
+        .iter()
+        .chain(new)
+        .any(|token| !token.is_text() || !same_attrs(&token.attrs, &donor.attrs))
+    {
+        return None;
+    }
+    Some(
+        (0..prefix)
+            .map(|at| (at, at))
+            .chain((0..suffix).map(|at| (old_end + at, new_end + at)))
+            .collect(),
+    )
+}
+
 fn homogeneous_replacement(before: &[Token], after: &[Token]) -> bool {
     let homogeneous = |tokens: &[Token]| {
         tokens.first().is_some_and(|first| {
@@ -1442,8 +1501,13 @@ pub(crate) fn diff_paragraph_v1(
     let new_inherit = inherited_runs(&context, &after.properties, &new);
     let retained = match alignment(&old, &new, &context) {
         Ok(retained) => retained,
-        Err(detail @ "ambiguous: nonunique content alignment") if patchable_restyle => {
-            single_run_insertion_alignment(&before, &after)
+        Err(detail @ "ambiguous: nonunique content alignment") => {
+            drawing_text_alignment(&old, &new)
+                .or_else(|| {
+                    patchable_restyle
+                        .then(|| single_run_insertion_alignment(&before, &after))
+                        .flatten()
+                })
                 .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?
         }
         Err(detail) => return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
@@ -1582,7 +1646,7 @@ pub(crate) fn diff_paragraph_v1(
                 }
             }
             let inherit = &new_inherit[j];
-            if !run_changes.is_empty() && !marker_atom(&old[i]) {
+            if !run_changes.is_empty() && !readonly_atom(&old[i]) {
                 if let Some(last) = run_edits.last_mut()
                     && last.to == offsets[i]
                     && (same_run
@@ -1678,6 +1742,12 @@ fn verification_properties(snapshot: &Snapshot, markers: &[(u32, String, bool)])
         properties.insert("markers".to_owned(), json!(markers));
     }
     properties
+}
+
+fn readonly_atom(token: &Token) -> bool {
+    marker_atom(token)
+        || matches!(&token.content,
+        Content::Atom(kind, payload) if preserved_drawing(kind, payload))
 }
 
 fn marker_atom(token: &Token) -> bool {
@@ -2186,6 +2256,51 @@ mod tests {
                 DonorV1::At { at }
             );
         }
+    }
+
+    #[test]
+    fn smart_art_allows_an_ambiguous_text_replacement_beside_an_unchanged_atom() {
+        let drawing = StorySegment {
+            content: SegmentContent::OtherEmbed {
+                kind: "shape".to_owned(),
+                payload: BTreeMap::from([(
+                    "shapeJson".to_owned(),
+                    crate::seed::any_from_value(json!(
+                        json!({"drawingXml": "<w:drawing/>"}).to_string()
+                    ))
+                    .unwrap(),
+                )]),
+            },
+            attributes: BTreeMap::new(),
+        };
+        let with_drawing = |text| {
+            let mut segments = paragraph(text, json!({}));
+            let mark = segments.pop().unwrap();
+            segments.push(drawing.clone());
+            segments.push(StorySegment {
+                content: SegmentContent::Text(" and after the diagram.".to_owned()),
+                attributes: BTreeMap::new(),
+            });
+            segments.push(mark);
+            segments
+        };
+        let before = with_drawing("Process overview before ");
+        let after = with_drawing("Process overview ahead of ");
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        assert_eq!(patch.text_edits.len(), 1);
+        assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (17, 23));
+        assert_eq!(patch.text_edits[0].insert[0].text, "ahead of");
+        assert!(patch.run_edits.is_empty());
+        let mut changed = before.clone();
+        changed[1]
+            .attributes
+            .insert("bold".to_owned(), Any::Bool(true));
+        assert_eq!(
+            diff_paragraph_v1(&before, &changed, context())
+                .unwrap_err()
+                .detail,
+            "marker: formatting touches a marker atom"
+        );
     }
 
     #[test]

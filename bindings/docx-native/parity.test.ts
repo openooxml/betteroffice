@@ -1,11 +1,64 @@
 import { readFileSync } from 'node:fs';
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import JSZip from 'jszip';
+import {
+  exportDocxMarkdown,
+  exportDocxStructured,
+  findDocxContentControls,
+  listDocxContentControls,
+  type DocxExportOptions,
+} from '../../packages/docx/src/core';
+import { preloadEditWasm } from '../../packages/docx/src/wasm/edit';
 import {
   fontPreflight as wasmFontPreflight,
   preloadPreflightWasm,
 } from '../../packages/docx/src/wasm/preflight';
-import { fontPreflight } from './index.js';
+import { fontPreflight, openDocument } from './index.js';
+
+const exportFixture = readFileSync(
+  new URL('../../crates/docx-edit/tests/fixtures/structured-export/principal.docx', import.meta.url)
+);
+const controlsFixture = readFileSync(
+  new URL('../../packages/docx/src/yrs/__fixtures__/content-controls/template.docx', import.meta.url)
+);
+
+beforeAll(() =>
+  preloadEditWasm(
+    new Uint8Array(
+      readFileSync(
+        new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)
+      )
+    )
+  )
+);
+
+test('matches the WASM bytes-level exports and content controls', async () => {
+  for (const bytes of [exportFixture, controlsFixture]) {
+    const document = await openDocument(bytes);
+    for (const revisionView of ['accepted', 'original', 'markup'] as const) {
+      const options: DocxExportOptions = {
+        revisionView,
+        stories: ['body', 'headers', 'footers', 'footnotes', 'endnotes', 'comments'],
+        includeFormatting: false,
+        maxBlocks: 10_000,
+        maxBytes: 8_388_608,
+      };
+      expect(await document.exportStructured(options)).toEqual(
+        await exportDocxStructured(bytes, options)
+      );
+      expect(await document.exportMarkdown(options)).toEqual(await exportDocxMarkdown(bytes, options));
+    }
+    expect(await document.listContentControls()).toEqual(await listDocxContentControls(bytes));
+    const options = { stories: ['body', 'headers'] as const, maxControls: 10_000, maxBytes: 8_388_608 };
+    expect(await document.listContentControls(options)).toEqual(
+      await listDocxContentControls(bytes, options)
+    );
+    const query = { kind: 'tag', tag: 'account.reference' } as const;
+    expect(await document.findContentControls(query, options)).toEqual(
+      await findDocxContentControls(bytes, query, options)
+    );
+  }
+});
 
 test('native font preflight matches the standalone wasm on synthetic bytes', async () => {
   const zip = new JSZip();

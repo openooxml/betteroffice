@@ -72,8 +72,29 @@ test('resolves requested traits through manager mappings and skips unknown famil
     expect(source.resolveFamily).toHaveBeenCalledWith('Unknown Family', false, false);
     expect(faces).toHaveLength(1);
     expect(faces[0]).toMatchObject({ family: 'Calibri', bold: true, italic: true });
+    expect(faces[0].ownWeight).toBeUndefined();
     structuredClone(faces, { transfer: faces.map((face) => face.bytes) });
     expect(bytes.byteLength).toBe(3);
+  } finally { fonts.dispose(); }
+});
+
+test('lighter members of bundled families load their regular face at their own weight; other unknown names stay unregistered', async () => {
+  const resolve = mock(() => undefined);
+  const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
+    family === 'Calibri Light' ? async () => bytes : undefined);
+  const resolveLastResort = mock(() => { throw new Error('Unrelated substitution'); });
+  const imported = spyOn(commandFontProvider, 'load').mockResolvedValue({ resolve, resolveFamily: () => undefined,
+    resolveScriptFallback: () => undefined, resolveLastResort, resolveLightVariant });
+  restorers.push(() => imported.mockRestore());
+  const register = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [{ ...regular, family: 'Calibri Light', bold: true },
+    { ...regular, family: 'BIZ UD明朝 Medium' }], register, () => {});
+  try {
+    const faces = await fonts.load();
+    expect(resolveLightVariant.mock.calls).toEqual([['Calibri Light', true, false], ['BIZ UD明朝 Medium', false, false]]);
+    expect(resolveLastResort).not.toHaveBeenCalled();
+    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true]]);
+    expect(register).toHaveBeenCalledTimes(1);
   } finally { fonts.dispose(); }
 });
 
