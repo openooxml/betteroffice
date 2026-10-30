@@ -1,4 +1,6 @@
 import initWasmModule, {
+  backend,
+  decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
   exportPptxMarkdownJson,
   exportPptxStructuredJson,
@@ -8,10 +10,17 @@ import initWasmModule, {
   PptxRenderer,
   renderPptxMarkdownJson,
   rendererVersion,
-} from './generated/pptx_wasm.js';
+} from './engine';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { presentationContexts } from './presentationContext';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
@@ -496,6 +505,13 @@ export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
 }
 
+export type EngineBackend = 'wasm' | 'native';
+
+/** Which engine runs this presentation code ('native' when @betteroffice/pptx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
+export function engineBackend(): EngineBackend {
+  return backend;
+}
+
 export function wasmVersion(): string {
   requireInitialized();
   return rendererVersion();
@@ -599,15 +615,18 @@ function openPresentationInternal(
   try {
     renderer = construct(() => new PptxRenderer());
   } catch (error) {
-    if (peer) {
-      try { doc.free(); } catch {}
-      throw peerError(error);
-    }
-    throw error;
+    try { doc.free(); } catch {}
+    throw peer ? peerError(error) : error;
   }
   if (!peer) {
-    for (const face of options.fonts ?? []) registerFont(renderer, face);
-    for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+    try {
+      for (const face of options.fonts ?? []) registerFont(renderer, face);
+      for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+    } catch (error) {
+      try { renderer.free(); } catch {}
+      try { doc.free(); } catch {}
+      throw error;
+    }
   }
   const listeners = new Map<
     number,

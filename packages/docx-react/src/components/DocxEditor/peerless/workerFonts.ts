@@ -53,11 +53,12 @@ export async function prepareWorkerFontEnvironment(options: {
   requirements: ResidentFontRequirement[];
   families: string[];
   provider: DocxEditorProps['measurementFontProvider'];
+  runtime?: Parameters<typeof createRustMeasureSource>[0]['runtime'];
   compat: Parameters<ReturnType<typeof createRustMeasureSource>['setCompat']>[0];
   signal: AbortSignal;
 }): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
-  const measurement = createRustMeasureSource({ bundled: options.provider, engine: {
+  const measurement = createRustMeasureSource({ bundled: options.provider, runtime: options.runtime, engine: {
     registerFont(bytes) { options.signal.throwIfAborted(); return fonts.push(bytes.slice()) - 1; },
     registerSubstituteFont(substituteOf, family) { return fonts.push({ substituteOf, family }) - 1; },
     clearFonts() { fonts.length = 0; },

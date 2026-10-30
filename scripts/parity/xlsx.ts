@@ -6,6 +6,7 @@ import {
   openWorkbook,
   type EditResult,
   type WorkbookCalculationContext,
+  type XlsxDefinedNamesRequest,
   type XlsxEditRequest,
   type XlsxExportOptions,
   type XlsxFindRequest,
@@ -30,17 +31,37 @@ export const xlsx: Format = {
         new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)
       )
     );
-    const workbook = openWorkbook(bytes, {
+    const options = {
       calculation: script.calculation as WorkbookCalculationContext
-    });
+    };
+    let workbook = openWorkbook(bytes, options);
     return {
       operations: {
+        open: (args) => {
+          const next = openWorkbook(
+            readFileSync(new URL(`../../${String(args.fixture)}`, import.meta.url)),
+            options
+          );
+          workbook.dispose();
+          workbook = next;
+          return null;
+        },
         sheetNames: () => workbook.sheetInfo().sheetNames,
+        sheetInfo: () => workbook.sheetInfo(),
+        listDefinedNames: (args) => workbook.listDefinedNames(args as XlsxDefinedNamesRequest),
+        conditionalFormats: (args) => workbook.conditionalFormats(Number(args.sheet)),
+        calculationStatus: () => workbook.calculationStatus(),
+        cell: (args) => workbook.cell(Number(args.sheet), Number(args.row), Number(args.col)),
+        rangeCells: (args) => workbook.rangeCells(Number(args.sheet), String(args.range)),
+        searchText: (args) => workbook.searchText(String(args.query), args.options as { caseSensitive?: boolean; limit?: number }),
+        selectionFormatting: (args) => workbook.selectionFormatting(Number(args.sheet), String(args.range)),
+        charts: (args) => workbook.charts(Number(args.sheet)),
         version: () => workbook.version(),
         readCells: (args) => workbook.readCells(args as unknown as XlsxReadRequest),
         findText: (args) => workbook.findText(args as unknown as XlsxFindRequest),
         validateEdits: (args) => workbook.validateEdits(args as unknown as XlsxEditRequest),
         applyEdits: (args) => workbook.applyEdits(args as unknown as XlsxEditRequest),
+        applyOps: (args) => mutationResult(workbook.applyOps(args.ops as unknown[])),
         historyState: () => workbook.historyState(),
         undo: () => mutationResult(workbook.undo()),
         redo: () => mutationResult(workbook.redo()),

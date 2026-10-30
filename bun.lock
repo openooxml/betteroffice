@@ -403,6 +403,12 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
+      "peerDependencies": {
+        "@betteroffice/pptx-native": "workspace:^",
+      },
+      "optionalPeers": [
+        "@betteroffice/pptx-native",
+      ],
     },
     "packages/pptx-i18n": {
       "name": "@betteroffice/pptx-i18n",

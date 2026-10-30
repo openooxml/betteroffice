@@ -30,6 +30,7 @@ pub(super) struct Node {
     pub empty: bool,
     pub attributes: Vec<Attribute>,
     pub children: Vec<usize>,
+    pub parent: Option<usize>,
 }
 
 impl Node {
@@ -120,6 +121,7 @@ impl Xml {
                 empty: tag.empty,
                 attributes,
                 children: Vec::new(),
+                parent: stack.last().map(|(at, _)| *at),
             });
             if !tag.empty {
                 stack.push((at, scope));
