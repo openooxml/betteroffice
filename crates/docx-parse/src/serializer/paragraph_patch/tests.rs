@@ -2017,6 +2017,10 @@ fn smart_art_text_replacement_across_source_runs_keeps_the_drawing_run() {
     assert_eq!(output.matches("<dgm:relIds/>").count(), 1);
     assert!(output.contains("ahead of"));
     assert!(!output.contains(">be<") && !output.contains(">fore<"));
+    let empty_properties = source.replacen("<w:r><w:t>fore", "<w:r><w:rPr/><w:t>fore", 1);
+    let output = write(&empty_properties, &plan).unwrap();
+    assert!(output.contains("ahead of"));
+    assert_eq!(output.matches("<dgm:relIds/>").count(), 1);
 }
 
 #[test]
