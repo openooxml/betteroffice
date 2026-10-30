@@ -1,4 +1,4 @@
-import type { YrsRenderEnv } from '@betteroffice/docx/yrs';
+import type { DocxReservationsPayload, DocxResolvedReservations, YrsRenderEnv } from '@betteroffice/docx/yrs';
 
 const sourceVersions = new WeakMap<object, string>();
 
@@ -102,11 +102,18 @@ export function revisionPreviewKeyOf(target: object | null | undefined): string 
 
 const reservationsKeys = new WeakMap<object, string>();
 const resolvedReservationKeys = new WeakMap<object, string>();
+interface ReservationSet {
+  resolved?: Readonly<DocxResolvedReservations> | null;
+  payload?: DocxReservationsPayload | null;
+}
+const reservationSets = new WeakMap<object, ReservationSet>();
+const reservationOwnerKeys = new WeakMap<object, Map<string, string | null>>();
 
 /** Names a resolved reservation set laid out from the set computed at `version`. */
-export function keyResolvedReservations(resolved: object, version: string, serial: number): string {
+export function keyResolvedReservations(resolved: object, version: string, serial: number, payload?: DocxReservationsPayload): string {
   const key = JSON.stringify([version, serial]);
   resolvedReservationKeys.set(resolved, key);
+  reservationSets.set(resolved, { payload, resolved: resolved === payload ? null : resolved as DocxResolvedReservations });
   return key;
 }
 
@@ -116,13 +123,42 @@ export function resolvedReservationsKey(resolved: object | null | undefined): st
 }
 
 /** Records the reservations key a layout or query facade was rendered with. */
-export function stampReservationsKey(target: object, key: string): void {
+export function stampReservationsKey(target: object, key: string, source?: object | null): void {
   reservationsKeys.set(target, key);
+  const set = source && reservationSets.get(source);
+  if (set) reservationSets.set(target, set);
+  else reservationSets.delete(target);
 }
 
 /** The reservations key `target` was rendered with, or null when unstamped. */
 export function reservationsKeyOf(target: object | null | undefined): string | null {
   return target ? (reservationsKeys.get(target) ?? null) : null;
+}
+
+/** The reservations a layout or query facade shows. */
+export function reservationsOf(target: object | null | undefined): ReservationSet | null {
+  return target ? (reservationSets.get(target) ?? null) : null;
+}
+
+function reservationOwnerKey(set: ReservationSet, owner: string): string | null {
+  const source = set.resolved ?? set.payload;
+  if (!source) return null;
+  let keys = reservationOwnerKeys.get(source);
+  if (!keys) reservationOwnerKeys.set(source, keys = new Map());
+  if (keys.has(owner)) return keys.get(owner)!;
+  set = reservationSets.get(source) ?? set;
+  const owned = set.payload?.sets.find((entry) => entry.owner === owner);
+  const entries = Object.entries(set.resolved ?? {}).filter(([, entry]) => entry.owner === owner);
+  const key = owned || entries.length
+    ? JSON.stringify([set.resolved ? null : set.payload?.version, owned?.version, owned?.items, entries]) : null;
+  keys.set(owner, key);
+  return key;
+}
+
+/** Whether both sets contain the same reservations for `owner`. */
+export function sameReservationOwner(laidOut: ReservationSet | null, current: ReservationSet, owner: string): boolean {
+  const key = laidOut && reservationOwnerKey(laidOut, owner);
+  return key != null && key === reservationOwnerKey(current, owner);
 }
 
 /** The version of the reservation set a key names, or null for none. */

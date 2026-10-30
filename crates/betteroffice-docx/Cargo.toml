@@ -16,6 +16,7 @@ default = []
 raster = ["dep:docx-raster", "dep:ooxml-text", "dep:serde_json"]
 
 [dependencies]
+betteroffice-fonts = { workspace = true }
 docx-edit.workspace = true
 docx-layout.workspace = true
 docx-parse.workspace = true

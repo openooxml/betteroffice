@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { resolve } from 'node:path';
+import { engineBackend } from '../wasm/engine';
 import { sessionWasmFactory, type WasmTestWorker } from '../../../../shared/office-session/testing/wasmWorker';
 import type { ClientMessage } from '../../../../shared/office-session/protocol';
 import type { PresentationCommandOpenOptions } from './commandProtocol';
@@ -22,7 +23,7 @@ function compileRequests(worker: WasmTestWorker) {
   return worker.requests.filter((message) => message.kind === 'wasm-compile');
 }
 
-describe('peerless session wasm reuse', () => {
+describe.skipIf(engineBackend() === 'native')('peerless session wasm reuse', () => {
   test('compiles before payload copying and open, then reuses the advertised module after disposal', async () => {
     const h = factory();
     const bytes = new Uint8Array([1, 2, 3]);
@@ -114,6 +115,30 @@ describe('peerless session wasm reuse', () => {
     finally { await cached.dispose(); }
   });
 
+  for (const name of ['PptxResourceLimitError', 'PptxEditDecodeError']) test(`types a host open ${name} without a closed connection`, async () => {
+    const h = factory();
+    const original = Object.assign(new Error(name === 'PptxResourceLimitError'
+      ? 'render resource limit exceeded: more than 256 font faces' : 'invalid presentation'), { name });
+    h.rejectInitialize(original);
+    const session = h.client.createPptxWorkerSession(new Uint8Array());
+    const failures: Error[] = [];
+    session.subscribeFailure((error) => failures.push(error));
+    try {
+      const error = await session.ready.then(() => undefined, (error: unknown) => error);
+      if (!(error instanceof Error)) throw new Error('Expected an open error');
+      if (name === 'PptxResourceLimitError') expect(error.constructor.name).toBe('PptxResourceLimitError');
+      expect(error).toMatchObject(name === 'PptxResourceLimitError' ? { name } : { name: 'SessionFailure', code: 'crash' });
+      expect(error.message).toBe(original.message);
+      expect(error.message).not.toContain('connection closed');
+      expect(session.failure).toBe(error);
+      expect(failures).toEqual([error]);
+      const late: Error[] = [];
+      session.subscribeFailure((failure) => late.push(failure));
+      expect(late).toEqual([error]);
+    } finally { await session.dispose(); }
+    expect(h.workers[0]!.terminated).toBe(true);
+  });
+
   test('keys cached modules by asset URL', async () => {
     const h = factory();
     for (const url of ['https://example.test/first.wasm', 'https://example.test/second.wasm', 'https://example.test/first.wasm']) {
@@ -125,39 +150,39 @@ describe('peerless session wasm reuse', () => {
     expect(input(h.workers[2]!).wasm).toBe(h.workers[0]!.modules[0]);
     expect(h.compiles).toBe(2);
   });
+});
 
-  test('transfers copies of document, font views, fallback fonts, updates and explicit wasm', async () => {
-    const h = factory();
-    const document = new Uint8Array([0, 1, 2, 3, 4]);
-    const fonts = new Uint8Array([5, 6, 7, 8, 9]);
-    const fallback = new Uint8Array([10, 11, 12]).buffer;
-    const update = new Uint8Array([13, 14, 15]);
-    const wasm = new Uint8Array([16, 17, 18]).buffer;
-    const worker = h.worker();
-    const messages: ClientMessage[] = [];
-    const post = worker.postMessage.bind(worker);
-    const capture = spyOn(worker, 'postMessage').mockImplementation((message, transfer) => {
-      messages.push(structuredClone(message));
-      if (Array.isArray(transfer)) post(message, transfer);
-      else post(message, transfer);
-    });
-    const session = h.client.createPptxWorkerSession(document.subarray(1, 4), { worker: () => worker,
-      fonts: [{ family: 'test', bytes: fonts.subarray(1, 4) }],
-      fallbackFonts: [{ family: 'fallback', bytes: new Uint8Array(fallback) }], initialUpdate: update, wasm });
-    try {
-      const client = await session.ready;
-      const open = messages.find((message) => message.kind === 'call' && message.method === 'openCommandEditor');
-      if (!open || open.kind !== 'call') throw new Error('Missing open request');
-      const sent = open.args[1] as PresentationCommandOpenOptions;
-      expect(new Uint8Array(sent.fonts![0]!.bytes)).toEqual(new Uint8Array([6, 7, 8]));
-      expect(new Uint8Array(sent.fallbackFonts![0]!.bytes)).toEqual(new Uint8Array([10, 11, 12]));
-      expect(sent.initialUpdate).toEqual(update);
-      expect(await client.save()).toEqual(new Uint8Array([1, 2, 3]));
-      expect(document).toEqual(new Uint8Array([0, 1, 2, 3, 4]));
-      expect(fonts).toEqual(new Uint8Array([5, 6, 7, 8, 9]));
-      expect(new Uint8Array(fallback)).toEqual(new Uint8Array([10, 11, 12]));
-      expect(update).toEqual(new Uint8Array([13, 14, 15]));
-      expect(new Uint8Array(wasm)).toEqual(new Uint8Array([16, 17, 18]));
-    } finally { capture.mockRestore(); await session.dispose(); }
+test('transfers copies of document, font views, fallback fonts, updates and explicit wasm', async () => {
+  const h = factory();
+  const document = new Uint8Array([0, 1, 2, 3, 4]);
+  const fonts = new Uint8Array([5, 6, 7, 8, 9]);
+  const fallback = new Uint8Array([10, 11, 12]).buffer;
+  const update = new Uint8Array([13, 14, 15]);
+  const wasm = new Uint8Array([16, 17, 18]).buffer;
+  const worker = h.worker();
+  const messages: ClientMessage[] = [];
+  const post = worker.postMessage.bind(worker);
+  const capture = spyOn(worker, 'postMessage').mockImplementation((message, transfer) => {
+    messages.push(structuredClone(message));
+    if (Array.isArray(transfer)) post(message, transfer);
+    else post(message, transfer);
   });
+  const session = h.client.createPptxWorkerSession(document.subarray(1, 4), { worker: () => worker,
+    fonts: [{ family: 'test', bytes: fonts.subarray(1, 4) }],
+    fallbackFonts: [{ family: 'fallback', bytes: new Uint8Array(fallback) }], initialUpdate: update, wasm });
+  try {
+    const client = await session.ready;
+    const open = messages.find((message) => message.kind === 'call' && message.method === 'openCommandEditor');
+    if (!open || open.kind !== 'call') throw new Error('Missing open request');
+    const sent = open.args[1] as PresentationCommandOpenOptions;
+    expect(new Uint8Array(sent.fonts![0]!.bytes)).toEqual(new Uint8Array([6, 7, 8]));
+    expect(new Uint8Array(sent.fallbackFonts![0]!.bytes)).toEqual(new Uint8Array([10, 11, 12]));
+    expect(sent.initialUpdate).toEqual(update);
+    expect(await client.save()).toEqual(new Uint8Array([1, 2, 3]));
+    expect(document).toEqual(new Uint8Array([0, 1, 2, 3, 4]));
+    expect(fonts).toEqual(new Uint8Array([5, 6, 7, 8, 9]));
+    expect(new Uint8Array(fallback)).toEqual(new Uint8Array([10, 11, 12]));
+    expect(update).toEqual(new Uint8Array([13, 14, 15]));
+    expect(new Uint8Array(wasm)).toEqual(new Uint8Array([16, 17, 18]));
+  } finally { capture.mockRestore(); await session.dispose(); }
 });

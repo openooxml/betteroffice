@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
-// usage: bun scripts/api-surface.ts --write xlsx | bun scripts/api-surface.ts --check xlsx
-// Regenerate the snapshot with: bun scripts/api-surface.ts --write xlsx
+// usage: bun scripts/api-surface.ts --write <xlsx|pptx> | bun scripts/api-surface.ts --check <xlsx|pptx>
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -25,6 +24,15 @@ export const FORMATS: Record<string, FormatConfig> = {
     entries: {
       ".": "src/index.ts",
       "./headless": "src/headless.ts",
+      "./worker": "src/worker.ts",
+      "./collaboration": "src/collaboration/index.ts",
+    },
+  },
+  pptx: {
+    packageDir: "packages/pptx",
+    packageName: "@betteroffice/pptx",
+    entries: {
+      ".": "src/index.ts",
       "./worker": "src/worker.ts",
       "./collaboration": "src/collaboration/index.ts",
     },
@@ -118,7 +126,7 @@ export function buildSnapshot(
   const reachable = reachableFiles(entryDeclaration, files, options);
   const lines: string[] = [
     `// ${packageName} "${entry}" public API surface`,
-    "// Regenerate: bun scripts/api-surface.ts --write xlsx",
+    `// Regenerate: bun scripts/api-surface.ts --write ${packageName.replace(/^@betteroffice\//, "")}`,
   ];
   for (const file of reachable) {
     const content = (files.get(file) as string)

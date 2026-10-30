@@ -1,5 +1,8 @@
 //! Typed native facade for inspecting VSDX diagrams.
 
+/// The font pack decoder shared by every engine.
+pub use betteroffice_fonts as fonts;
+
 use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
 };

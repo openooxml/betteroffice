@@ -548,7 +548,8 @@ impl PptxDocument {
     }
 }
 
-fn to_js(error: EngineError) -> JsValue {
+/// The JS value an engine error throws as, typed by its kind.
+pub fn to_js(error: EngineError) -> JsValue {
     match error.kind {
         engine::ErrorKind::Message => JsValue::from_str(&error.message),
         engine::ErrorKind::Peer { code } => {
@@ -564,6 +565,11 @@ fn to_js(error: EngineError) -> JsValue {
         engine::ErrorKind::Decode => {
             let exception = js_sys::Error::new(&error.message);
             exception.set_name("PptxEditDecodeError");
+            exception.into()
+        }
+        engine::ErrorKind::ResourceLimit => {
+            let exception = js_sys::Error::new(&error.message);
+            exception.set_name("PptxResourceLimitError");
             exception.into()
         }
     }

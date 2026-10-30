@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
-import initWasm, { XlsxDocument as WasmDocument, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
+import initWasm, { XlsxDocument as WasmDocument, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
+import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 
 const native = require('./index.js');
 
@@ -80,6 +81,34 @@ function runScript(doc: EngineDocument) {
 }
 
 describe('xlsx native engine parity', () => {
+  test('linked font decoder returns known answers and matching native and wasm errors', () => {
+    expect(typeof wasmDecodeFontFace).toBe('function');
+    expect(typeof native.decodeFontFace).toBe('function');
+    for (const entry of fontCases()) {
+      const expected = wasmDecodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
+      const actual = native.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
+      expectFontFace(expected, entry);
+      expectFontFace(actual, entry);
+      expectPlainBytes(expected.font);
+      expectPlainBytes(actual.font);
+      expect(actual.font).toEqual(expected.font);
+      expect(actual.payload).toEqual(expected.payload);
+      expect('payload' in expected).toBe(entry.payload !== undefined);
+      if (expected.payload && actual.payload) {
+        expectPlainBytes(expected.payload);
+        expectPlainBytes(actual.payload);
+      }
+    }
+    for (const entry of fontErrorCases()) {
+      const error = expectThrownParity(
+        () => wasmDecodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput),
+        () => native.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput),
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({ name: 'Error', message: entry.message });
+    }
+  });
+
   test('native byte results are plain Uint8Arrays and drained slices are independent', () => {
     const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
     try {

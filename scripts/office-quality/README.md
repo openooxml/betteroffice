@@ -138,6 +138,8 @@ The scripts use local PDF export. For manual Word exports, choose **Best for pri
 
 Capture BetterOffice using the [DOCX instructions](../docx-quality/README.md). For PPTX/XLSX/VSDX, set `QUALITY_FORMAT=pptx`, `xlsx`, or `vsdx` on the shared server and use the matching `?format=` in the capture URL. Document bytes stay local; external browser requests are limited to pinned font files.
 
+Add `&pptxWorker=arial`, `bundled` or `none` to a PPTX capture URL to render through the default editor's command worker instead of an in-thread presentation, with the app supplying four Arial faces, every bundled face, or none; the worker loads default fonts for the other families as the editor does (`&defaultFonts=0` turns that off). Use it to measure changes to editor font loading.
+
 `reference.py` exports no Visio references and the benchmark run covers DOCX, PPTX, and XLSX only, so captured VSDX pages have no baseline to score against. `apps/demo/public/betteroffice-demo.vsdx` is a committed diagram to capture. Pages composite onto white because Visio pages carry no painted background.
 
 DOCX references record each PDF page's physical and raster bounds. The capture profile permits a one-pixel canvas extent difference on each axis, adding white space or clipping at the right/bottom edge without moving or resampling rendered content. Larger differences fail; extra renderer pages retain their native bounds. Captures record the original and output dimensions for each page.

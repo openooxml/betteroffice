@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os
 import re
 from pathlib import Path
 
@@ -59,14 +58,70 @@ def saved_bytes(workbook):
     return {"sha256": hashlib.sha256(data).hexdigest(), "byteLength": len(data)}
 
 
+def includes_target(step, target):
+    return "targets" not in step or target in step["targets"]
+
+
+def normalize_versions(value, expected, versions):
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}-[0-9]+", value):
+        for token, version in versions.items():
+            if version == value:
+                return token
+        if not isinstance(expected, str) or not re.fullmatch(r"<version:([1-9][0-9]*)>", expected):
+            raise AssertionError("Version is missing from the golden")
+        if expected in versions:
+            raise AssertionError("Different versions share a golden token")
+        versions[expected] = value
+        return expected
+    if isinstance(value, list):
+        reference = expected if isinstance(expected, list) else []
+        return [
+            normalize_versions(item, reference[index] if index < len(reference) else None, versions)
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        reference = expected if isinstance(expected, dict) else {}
+        return {
+            key: normalize_versions(value[key], reference.get(key), versions)
+            for key in sorted(value)
+        }
+    return value
+
+
 def run():
     script = json.loads((PARITY / "script.json").read_text(encoding="utf-8"))
+    expected = json.loads((PARITY / "expected.json").read_text(encoding="utf-8"))
+    assert len(expected) == len(script["steps"]), "Golden step count differs"
     now_serial = script["calculation"]["nowSerial"]
     workbook = Workbook.open_recalculated(
         (ROOT / script["fixture"]).read_bytes(), now_serial=now_serial
     )
+
+    def open_fixture(args):
+        nonlocal workbook
+        workbook = Workbook.open_recalculated(
+            (ROOT / args["fixture"]).read_bytes(), now_serial=now_serial
+        )
+        return None
+
     operations = {
+        "open": open_fixture,
         "sheetNames": lambda args: workbook.sheet_names,
+        "sheetInfo": lambda args: workbook.sheet_info(),
+        "calculationStatus": lambda args: workbook.calculation_status(),
+        "cell": lambda args: workbook.cell(args["sheet"], args["row"], args["col"]),
+        "listDefinedNames": lambda args: workbook.list_defined_names(args),
+        "conditionalFormats": lambda args: workbook.conditional_formats(args["sheet"]),
+        "rangeCells": lambda args: workbook.range_cells(args["sheet"], args["range"]),
+        "searchText": lambda args: workbook.search_text(
+            args["query"],
+            case_sensitive=args.get("options", {}).get("caseSensitive", False),
+            limit=args.get("options", {}).get("limit"),
+        ),
+        "selectionFormatting": lambda args: workbook.selection_formatting(
+            args["sheet"], args["range"]
+        ),
+        "charts": lambda args: workbook.charts(args["sheet"]),
         "version": lambda args: workbook.version(),
         "readCells": lambda args: workbook.read_cells(args),
         "findText": lambda args: workbook.find_text(args),
@@ -81,32 +136,29 @@ def run():
         ),
         "save": lambda args: saved_bytes(workbook),
     }
-    versions = []
-
-    def normalize(value):
-        if not re.fullmatch(r"[0-9a-f]{32}-[0-9]+", value):
-            return value
-        if value not in versions:
-            versions.append(value)
-        return f"<version:{versions.index(value) + 1}>"
+    versions = {}
 
     def resolve(value):
         match = re.fullmatch(r"<version:([1-9][0-9]*)>", value)
         if match is None:
             return value
-        index = int(match[1]) - 1
-        if index >= len(versions):
+        if value not in versions:
             raise ValueError(f"Unknown version reference {value}")
-        return versions[index]
+        return versions[value]
 
     results = []
     for index, step in enumerate(script["steps"]):
+        if not includes_target(step, "python"):
+            continue
         op = step["op"]
         if op not in operations:
             raise AssertionError(f"Unknown parity op {op} at step {index}")
         try:
             result = operations[op](map_strings(step["args"], resolve))
-            results.append({"op": op, "result": map_strings(result, normalize)})
+            results.append({
+                "op": op,
+                "result": normalize_versions(result, expected[index]["result"], versions),
+            })
         except Exception as error:
             raise AssertionError(f"Parity step {index} ({op}) failed") from error
     return results
@@ -166,10 +218,27 @@ def test_json_comparison_accepts_equal_numbers_and_booleans():
 
 def test_scripted_api_parity_matches_shared_golden():
     actual = run()
-    expected_path = PARITY / "expected.json"
-    if os.environ.get("BETTEROFFICE_PARITY_WRITE") == "1":
-        expected_path.write_text(
-            json.dumps(actual, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    script = json.loads((PARITY / "script.json").read_text(encoding="utf-8"))
+    expected = json.loads((PARITY / "expected.json").read_text(encoding="utf-8"))
+    expected = [
+        result for step, result in zip(script["steps"], expected)
+        if includes_target(step, "python")
+    ]
     assert_json_equal(expected, actual)
+
+
+def test_step_targets_default_to_all_and_filter_explicit_lists():
+    assert includes_target({"op": "version"}, "python")
+    assert includes_target({"op": "version", "targets": ["python"]}, "python")
+    assert not includes_target({"op": "cell", "targets": ["ts", "rust"]}, "python")
+
+
+def test_version_normalization_preserves_golden_tokens_after_skipped_steps():
+    version = "0123456789abcdef0123456789abcdef-0"
+    versions = {}
+    assert normalize_versions({"version": version}, {"version": "<version:3>"}, versions) == {
+        "version": "<version:3>"
+    }
+    assert versions == {"<version:3>": version}
+    with pytest.raises(AssertionError, match="Different versions"):
+        normalize_versions("abcdef0123456789abcdef0123456789-0", "<version:3>", versions)

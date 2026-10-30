@@ -2,10 +2,42 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use betteroffice_docx::{Document, EditCtx, EditOrigin, ImageScope, NoteKind, SaveOptions};
-use napi::bindgen_prelude::{AsyncTask, Buffer, Task, ToNapiValue, TypeName};
-use napi::{Env, Error, Result, ValueType, sys};
+use betteroffice_docx::{
+    Document, EditCtx, EditOrigin, ImageScope, NoteKind, ParseLimits, SaveOptions,
+    structured::ExportFailure,
+};
+use napi::bindgen_prelude::{
+    AsyncTask, Buffer, JsObjectValue, Task, ToNapiValue, TypeName, Uint8Array,
+};
+use napi::{Env, Error, JsTypeError, Result, Status, ValueType, sys};
 use napi_derive::napi;
+
+#[napi(object)]
+pub struct DecodedFontFace {
+    pub font: Uint8Array,
+    pub payload: Option<Uint8Array>,
+}
+
+/// Decodes one font pack face using this engine's linked decoder.
+#[napi(
+    js_name = "decodeFontFace",
+    ts_args_type = "bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null",
+    ts_return_type = "DecodedFontFace"
+)]
+pub fn decode_font_face(
+    bytes: Uint8Array,
+    codec: String,
+    dict: Option<Uint8Array>,
+    max_output: Option<f64>,
+) -> Result<DecodedFontFace> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
+            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+    Ok(DecodedFontFace {
+        font: Uint8Array::new(decoded.font),
+        payload: decoded.payload.map(Uint8Array::new),
+    })
+}
 
 fn error(reason: impl ToString) -> Error {
     Error::from_reason(reason.to_string())
@@ -35,6 +67,143 @@ pub struct OpenDocumentOptions {
     pub author: Option<String>,
     pub origin: Option<String>,
     pub timestamp: Option<String>,
+    pub limits: Option<OpenDocumentLimits>,
+}
+
+#[derive(Default)]
+#[napi(object)]
+pub struct OpenDocumentLimits {
+    pub max_xml_bytes: Option<f64>,
+    pub max_xml_events: Option<f64>,
+    pub max_xml_text_bytes: Option<f64>,
+    pub max_xml_depth: Option<f64>,
+    pub max_attributes_per_element: Option<f64>,
+    pub max_attribute_bytes: Option<f64>,
+    pub max_relationships: Option<f64>,
+    pub max_leaf_values: Option<f64>,
+    pub max_blocks: Option<f64>,
+    pub max_paragraphs: Option<f64>,
+    pub max_tables: Option<f64>,
+    pub max_table_rows: Option<f64>,
+    pub max_table_cells: Option<f64>,
+    pub max_notes: Option<f64>,
+    pub max_comments: Option<f64>,
+    pub max_nesting_depth: Option<f64>,
+}
+
+fn parse_limit(value: Option<f64>, default: usize, name: &str) -> Result<usize> {
+    match value {
+        None => Ok(default),
+        Some(value)
+            if value.is_finite()
+                && value.fract() == 0.0
+                && (0.0..=9_007_199_254_740_991.0).contains(&value)
+                && value <= usize::MAX as f64 =>
+        {
+            Ok(value as usize)
+        }
+        Some(_) => Err(error(format!("{name} must be a nonnegative safe integer"))),
+    }
+}
+
+impl OpenDocumentLimits {
+    fn parse(self) -> Result<ParseLimits> {
+        let defaults = ParseLimits::default();
+        Ok(ParseLimits {
+            max_xml_bytes: parse_limit(self.max_xml_bytes, defaults.max_xml_bytes, "maxXmlBytes")?,
+            max_xml_events: parse_limit(
+                self.max_xml_events,
+                defaults.max_xml_events,
+                "maxXmlEvents",
+            )?,
+            max_xml_text_bytes: parse_limit(
+                self.max_xml_text_bytes,
+                defaults.max_xml_text_bytes,
+                "maxXmlTextBytes",
+            )?,
+            max_xml_depth: parse_limit(self.max_xml_depth, defaults.max_xml_depth, "maxXmlDepth")?,
+            max_attributes_per_element: parse_limit(
+                self.max_attributes_per_element,
+                defaults.max_attributes_per_element,
+                "maxAttributesPerElement",
+            )?,
+            max_attribute_bytes: parse_limit(
+                self.max_attribute_bytes,
+                defaults.max_attribute_bytes,
+                "maxAttributeBytes",
+            )?,
+            max_relationships: parse_limit(
+                self.max_relationships,
+                defaults.max_relationships,
+                "maxRelationships",
+            )?,
+            max_leaf_values: parse_limit(
+                self.max_leaf_values,
+                defaults.max_leaf_values,
+                "maxLeafValues",
+            )?,
+            max_blocks: parse_limit(self.max_blocks, defaults.max_blocks, "maxBlocks")?,
+            max_paragraphs: parse_limit(
+                self.max_paragraphs,
+                defaults.max_paragraphs,
+                "maxParagraphs",
+            )?,
+            max_tables: parse_limit(self.max_tables, defaults.max_tables, "maxTables")?,
+            max_table_rows: parse_limit(
+                self.max_table_rows,
+                defaults.max_table_rows,
+                "maxTableRows",
+            )?,
+            max_table_cells: parse_limit(
+                self.max_table_cells,
+                defaults.max_table_cells,
+                "maxTableCells",
+            )?,
+            max_notes: parse_limit(self.max_notes, defaults.max_notes, "maxNotes")?,
+            max_comments: parse_limit(self.max_comments, defaults.max_comments, "maxComments")?,
+            max_nesting_depth: parse_limit(
+                self.max_nesting_depth,
+                defaults.max_nesting_depth,
+                "maxNestingDepth",
+            )?,
+        })
+    }
+}
+
+#[napi(object)]
+pub struct DocxExportOptions {
+    #[napi(ts_type = "'accepted' | 'original' | 'markup'")]
+    pub revision_view: String,
+    #[napi(
+        ts_type = "ReadonlyArray<'body' | 'headers' | 'footers' | 'footnotes' | 'endnotes' | 'comments'>"
+    )]
+    pub stories: Option<Vec<String>>,
+    pub include_formatting: Option<bool>,
+    pub max_blocks: Option<u32>,
+    pub max_bytes: Option<u32>,
+}
+
+#[napi(object)]
+pub struct DocxMarkdownOptions {
+    pub max_bytes: Option<u32>,
+}
+
+#[napi(object)]
+pub struct DocxContentControlsOptions {
+    #[napi(
+        ts_type = "ReadonlyArray<'body' | 'headers' | 'footers' | 'footnotes' | 'endnotes' | 'comments'>"
+    )]
+    pub stories: Option<Vec<String>>,
+    pub max_controls: Option<u32>,
+    pub max_bytes: Option<u32>,
+}
+
+#[napi(discriminant = "kind", discriminant_case = "camelCase")]
+pub enum DocxContentControlQuery {
+    Id { control_id: String },
+    Tag { tag: String },
+    OoxmlId { ooxml_id: String },
+    Alias { alias: String },
 }
 
 #[napi(object)]
@@ -56,6 +225,7 @@ pub struct ImageResource {
 #[napi(object)]
 pub struct SaveDocumentOptions {
     pub timestamp: Option<String>,
+    pub now: Option<String>,
     pub update_modified_date: Option<bool>,
     pub modified_by: Option<String>,
 }
@@ -108,6 +278,48 @@ impl TypeName for JsonValue {
 impl ToNapiValue for JsonValue {
     unsafe fn to_napi_value(env: sys::napi_env, value: Self) -> Result<sys::napi_value> {
         unsafe { serde_json::Value::to_napi_value(env, value.0) }
+    }
+}
+
+pub enum ReadValue {
+    Content(serde_json::Value),
+    Refused(ExportFailure, &'static str),
+}
+
+fn refusal_error(env: Env, failure: ExportFailure, name: &str) -> Result<Error> {
+    let mut exception = env.create_error(error(&failure.message))?;
+    exception.set_named_property("name", name)?;
+    exception.set_named_property("failure", serde_json::to_value(failure).map_err(error)?)?;
+    Ok(Error::from(exception.into_unknown(&env)?))
+}
+
+fn read_value(
+    result: betteroffice_docx::Result<serde_json::Result<serde_json::Value>>,
+    name: &'static str,
+) -> Result<ReadValue> {
+    match result {
+        Ok(value) => value.map(ReadValue::Content).map_err(error),
+        Err(betteroffice_docx::Error::Export(failure)) => Ok(ReadValue::Refused(failure, name)),
+        Err(reason) => Err(error(reason)),
+    }
+}
+
+impl TypeName for ReadValue {
+    fn type_name() -> &'static str {
+        "unknown"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Unknown
+    }
+}
+
+impl ToNapiValue for ReadValue {
+    unsafe fn to_napi_value(env: sys::napi_env, value: Self) -> Result<sys::napi_value> {
+        match value {
+            Self::Content(content) => unsafe { serde_json::Value::to_napi_value(env, content) },
+            Self::Refused(failure, name) => Err(refusal_error(Env::from_raw(env), failure, name)?),
+        }
     }
 }
 
@@ -167,10 +379,19 @@ where
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(output)
     }
+
+    fn reject(&mut self, env: Env, reason: Error) -> Result<Self::JsValue> {
+        if reason.status == Status::InvalidArg {
+            Err(Error::from(JsTypeError::from(reason).into_unknown(env)))
+        } else {
+            Err(reason)
+        }
+    }
 }
 
 pub struct OpenTask {
     bytes: Vec<u8>,
+    limits: ParseLimits,
     author: String,
     origin: EditOrigin,
     timestamp: String,
@@ -181,7 +402,7 @@ impl Task for OpenTask {
     type JsValue = DocxDocument;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Worker::start(Document::open(&self.bytes).map_err(error)?)
+        Worker::start(Document::open_with_limits(&self.bytes, &self.limits).map_err(error)?)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -191,6 +412,32 @@ impl Task for OpenTask {
             origin: self.origin,
             timestamp: self.timestamp.clone(),
         })
+    }
+}
+
+pub struct RenderMarkdownTask {
+    content: serde_json::Value,
+    options: Option<serde_json::Value>,
+}
+
+impl Task for RenderMarkdownTask {
+    type Output = ReadValue;
+    type JsValue = ReadValue;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let content = serde_json::from_value(std::mem::take(&mut self.content)).map_err(error)?;
+        let options =
+            serde_json::from_value(self.options.take().unwrap_or_else(|| serde_json::json!({})))
+                .map_err(error)?;
+        read_value(
+            betteroffice_docx::render_docx_markdown(&content, &options)
+                .map(|content| serde_json::to_value(content.markdown)),
+            "DocxExportError",
+        )
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
     }
 }
 
@@ -356,6 +603,80 @@ impl DocxDocument {
         })
     }
 
+    /// Same shape as DocxStructuredContent from @betteroffice/docx.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub fn export_structured(
+        &self,
+        #[napi(ts_arg_type = "DocxExportOptions")] options: serde_json::Value,
+    ) -> Result<AsyncTask<PendingTask<ReadValue>>> {
+        self.worker.submit(move |document| {
+            let options = serde_json::from_value(options).map_err(error)?;
+            read_value(
+                document
+                    .export_structured(&options)
+                    .map(serde_json::to_value),
+                "DocxExportError",
+            )
+        })
+    }
+
+    /// Same shape as DocxMarkdownContent from @betteroffice/docx.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub fn export_markdown(
+        &self,
+        #[napi(ts_arg_type = "DocxExportOptions")] options: serde_json::Value,
+    ) -> Result<AsyncTask<PendingTask<ReadValue>>> {
+        self.worker.submit(move |document| {
+            let options = serde_json::from_value(options).map_err(error)?;
+            read_value(
+                document.export_markdown(&options).map(serde_json::to_value),
+                "DocxExportError",
+            )
+        })
+    }
+
+    /// Same shape as DocxContentControlsSnapshot from @betteroffice/docx.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub fn list_content_controls(
+        &self,
+        #[napi(ts_arg_type = "DocxContentControlsOptions | undefined | null")] options: Option<
+            serde_json::Value,
+        >,
+    ) -> Result<AsyncTask<PendingTask<ReadValue>>> {
+        self.worker.submit(move |document| {
+            let options = serde_json::from_value(options.unwrap_or_else(|| serde_json::json!({})))
+                .map_err(error)?;
+            read_value(
+                document
+                    .list_content_controls(&options)
+                    .map(serde_json::to_value),
+                "DocxContentControlsError",
+            )
+        })
+    }
+
+    /// Same shape as DocxContentControlsSnapshot from @betteroffice/docx.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub fn find_content_controls(
+        &self,
+        #[napi(ts_arg_type = "DocxContentControlQuery")] query: serde_json::Value,
+        #[napi(ts_arg_type = "DocxContentControlsOptions | undefined | null")] options: Option<
+            serde_json::Value,
+        >,
+    ) -> Result<AsyncTask<PendingTask<ReadValue>>> {
+        self.worker.submit(move |document| {
+            let query = serde_json::from_value(query).map_err(error)?;
+            let options = serde_json::from_value(options.unwrap_or_else(|| serde_json::json!({})))
+                .map_err(error)?;
+            read_value(
+                document
+                    .find_content_controls(&query, &options)
+                    .map(serde_json::to_value),
+                "DocxContentControlsError",
+            )
+        })
+    }
+
     #[napi(ts_return_type = "Promise<EditReceipt>")]
     pub fn replace_paragraph_text(
         &self,
@@ -461,11 +782,25 @@ impl DocxDocument {
     ) -> Result<AsyncTask<PendingTask<Buffer>>> {
         let options = options.unwrap_or(SaveDocumentOptions {
             timestamp: None,
+            now: None,
             update_modified_date: None,
             modified_by: None,
         });
+        if let (Some(timestamp), Some(now)) = (&options.timestamp, &options.now)
+            && timestamp != now
+        {
+            return self.worker.submit(|_| {
+                Err(Error::new(
+                    Status::InvalidArg,
+                    "now and timestamp must match when both are provided",
+                ))
+            });
+        }
         let options = SaveOptions {
-            now: options.timestamp.unwrap_or_else(|| self.timestamp.clone()),
+            now: options
+                .timestamp
+                .or(options.now)
+                .unwrap_or_else(|| self.timestamp.clone()),
             update_modified_date: options.update_modified_date.unwrap_or(false),
             modified_by: options.modified_by,
         };
@@ -487,9 +822,11 @@ pub fn open_document(
         author: None,
         origin: None,
         timestamp: None,
+        limits: None,
     });
     Ok(AsyncTask::new(OpenTask {
         bytes: data.to_vec(),
+        limits: options.limits.unwrap_or_default().parse()?,
         author: options.author.unwrap_or_else(|| "node".to_owned()),
         origin: options
             .origin
@@ -501,4 +838,15 @@ pub fn open_document(
             .timestamp
             .unwrap_or_else(|| SaveOptions::default().now),
     }))
+}
+
+/// Input has the same shape as DocxStructuredContent from @betteroffice/docx.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn render_docx_markdown(
+    #[napi(ts_arg_type = "unknown")] content: serde_json::Value,
+    #[napi(ts_arg_type = "DocxMarkdownOptions | undefined | null")] options: Option<
+        serde_json::Value,
+    >,
+) -> AsyncTask<RenderMarkdownTask> {
+    AsyncTask::new(RenderMarkdownTask { content, options })
 }

@@ -16,6 +16,7 @@ default = ["raster"]
 raster = ["dep:xlsx-raster"]
 
 [dependencies]
+betteroffice-fonts = { workspace = true }
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-opc.workspace = true
 xlsx-model.workspace = true
