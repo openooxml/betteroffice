@@ -215,6 +215,26 @@ test('styled Japanese requests share installation by the resolved regular face',
   } finally { fonts.dispose(); }
 });
 
+test('a family requested as primary and as script coverage installs its face once', async () => {
+  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const source = provider((family) => family === 'Noto Sans JP' ? async () => japanese : undefined,
+    (script) => script === 'cjk-jp' ? async () => japanese : undefined);
+  const register = mock((_face: DefaultFontFace) => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const fonts = createCommandDefaultFonts([], () => [{ family: 'Noto Sans JP', bold: false, italic: false, scripts: ['cjk-jp'] }],
+    register, () => {}, install);
+  try {
+    expect(await fonts.load()).toMatchObject([
+      { family: 'Noto Sans JP', bold: false, italic: false },
+      { family: 'Noto Sans JP', bold: false, italic: false, kind: 'coverage' },
+    ]);
+    expect(source.resolve).toHaveBeenCalledTimes(1);
+    expect(source.resolveScriptFallback).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(2);
+  } finally { fonts.dispose(); }
+});
+
 test('missing CJK packs never install Latin substitute bytes as coverage', async () => {
   const latin = new Uint8Array(await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url))).buffer;
   const source = provider((family) => family === 'Calibri' ? async () => latin : undefined, () => async () => latin);

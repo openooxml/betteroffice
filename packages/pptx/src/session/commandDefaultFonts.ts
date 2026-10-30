@@ -21,7 +21,7 @@ export function createCommandDefaultFonts(
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
   const attempted = new Set<string>();
   const pending = new Map<string, Promise<DefaultFontFace | undefined>>();
-  const coverageInstallations = new Map<string, Promise<DefaultFontFace | undefined>>();
+  const installations = new Map<string, Promise<boolean>>();
   const registered = new Set<string>();
   let provider: ReturnType<typeof commandFontProvider.load> | undefined;
   let disposed = false;
@@ -74,21 +74,13 @@ export function createCommandDefaultFonts(
           ? await scriptFontFace(face.script, bold, italic, bytes)
           : { family: face.family, bold: face.bold, italic: face.italic, bytes };
         if (!loaded || disposed || finished) return undefined;
-        if (face.kind === 'coverage') {
-          const identity = JSON.stringify([loaded.family.trim().toLowerCase(), loaded.bold, loaded.italic]);
-          let installation = coverageInstallations.get(identity);
-          if (!installation) {
-            installation = Promise.resolve().then(async () => {
-              if (disposed) return undefined;
-              if (install && !(await install([loaded])).length) return undefined;
-              return loaded;
-            });
-            coverageInstallations.set(identity, installation);
-          }
-          return installation;
+        const identity = JSON.stringify([loaded.family.trim().toLowerCase(), loaded.bold, loaded.italic]);
+        let installation = installations.get(identity);
+        if (!installation) {
+          installation = Promise.resolve().then(async () => !disposed && (!install || (await install([loaded])).length > 0));
+          installations.set(identity, installation);
         }
-        if (install && !(await install([loaded])).length) return undefined;
-        return loaded;
+        return await installation && !disposed ? loaded : undefined;
       }).then(finish, () => finish());
     });
     pending.set(id, task);
@@ -145,7 +137,7 @@ export function createCommandDefaultFonts(
       disposed = true;
       for (const cancel of cancellations) cancel();
       pending.clear();
-      coverageInstallations.clear();
+      installations.clear();
     },
   };
 }
