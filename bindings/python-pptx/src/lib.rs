@@ -267,6 +267,30 @@ fn json_result(py: Python<'_>, value: serde_json::Result<String>) -> PyResult<Py
     Ok(py.import("json")?.call_method1("loads", (value,))?.unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (data, *, include_media = true))]
+fn inspect_presentation(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    include_media: bool,
+) -> PyResult<Py<PyAny>> {
+    let owned = borrow_bytes(data);
+    let data: &[u8] = &owned;
+    let payload = py
+        .detach(move || {
+            if include_media {
+                betteroffice_pptx::parse_pptx_json(data)
+            } else {
+                betteroffice_pptx::parse_pptx_json_without_media(data)
+            }
+        })
+        .map_err(|error| ParseError::new_err(error.to_string()))?;
+    Ok(py
+        .import("json")?
+        .call_method1("loads", (payload,))?
+        .unbind())
+}
+
 fn table_position(position: &str) -> PyResult<TableInsertPosition> {
     match position {
         "before" => Ok(TableInsertPosition::Before),
@@ -2469,6 +2493,38 @@ impl PyPresentation {
         .map_err(map_error)
     }
 
+    #[pyo3(signature = (family, data, *, bold = false, italic = false))]
+    fn register_fallback_font(
+        &mut self,
+        py: Python<'_>,
+        family: &str,
+        data: &Bound<'_, PyBytes>,
+        bold: bool,
+        italic: bool,
+    ) -> PyResult<u32> {
+        let family = family.to_owned();
+        let owned = borrow_bytes(data);
+        let data: &[u8] = &owned;
+        let deck = DetachedDeck(&mut self.presentation);
+        py.detach(move || {
+            let deck = deck;
+            deck.0.register_fallback_font(&family, bold, italic, data)
+        })
+        .map_err(map_error)
+    }
+
+    fn hit_test(
+        &self,
+        py: Python<'_>,
+        slide: &Bound<'_, PyAny>,
+        x: f32,
+        y: f32,
+    ) -> PyResult<Py<PyAny>> {
+        let index = self.resolve_slide_index(slide)?;
+        let result = self.presentation.hit_test(index, x, y).map_err(map_error)?;
+        json_result(py, serde_json::to_string(&result))
+    }
+
     fn render_slide(&self, py: Python<'_>, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {
         let index = self.resolve_slide_index(slide)?;
         let deck = DetachedDeck(&self.presentation);
@@ -2734,6 +2790,20 @@ impl PyPresentation {
         })
     }
 
+    fn layout_proposal_diff_slide(
+        &self,
+        py: Python<'_>,
+        id: &str,
+        slide: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let index = self.resolve_slide_index(slide)?;
+        let result = self
+            .presentation
+            .layout_proposal_diff_slide(id, index)
+            .map_err(map_error)?;
+        json_result(py, serde_json::to_string(&result))
+    }
+
     #[getter]
     fn can_undo(&self) -> bool {
         self.presentation.can_undo()
@@ -2844,6 +2914,7 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(export_pptx_structured_json, module)?)?;
     module.add_function(wrap_pyfunction!(export_pptx_markdown_json, module)?)?;
     module.add_function(wrap_pyfunction!(render_pptx_markdown_json, module)?)?;
+    module.add_function(wrap_pyfunction!(inspect_presentation, module)?)?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("RangeError", py.get_type::<RangeError>())?;
     module.add("RenderError", py.get_type::<RenderError>())?;

@@ -47,6 +47,10 @@ pub use workbook::batch::{
     EditRefusal, EditRequest, EditSource, EditStep, EditValidation, MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES, StepGuard, ValidationOutcome, outcome_json,
 };
+pub use workbook::reads::{
+    CalculationStatus, ConditionalFormatInfo, DefinedNameInfo, DefinedNamesRequest,
+    DefinedNamesResult,
+};
 pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,

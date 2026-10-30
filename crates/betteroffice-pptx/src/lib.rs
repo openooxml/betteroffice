@@ -10,6 +10,7 @@ mod render;
 mod types;
 
 pub use error::Error;
+pub use pptx_edit::engine::{parse_pptx_json, parse_pptx_json_without_media};
 pub use presentation::{
     Presentation, export_pptx_markdown, export_pptx_structured, render_pptx_markdown,
 };

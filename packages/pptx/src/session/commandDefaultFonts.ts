@@ -46,13 +46,14 @@ export function createCommandDefaultFonts(
       provider ??= commandFontProvider.load();
       void provider.then(async (source) => {
         if (disposed || finished) return undefined;
-        const load = source.resolve(face.family, face.bold, face.italic)
-          ?? source.resolveFamily(face.family, face.bold, face.italic)
-          ?? source.resolveLightVariant?.(face.family, face.bold, face.italic);
+        const named = source.resolve(face.family, face.bold, face.italic)
+          ?? source.resolveFamily(face.family, face.bold, face.italic);
+        const light = named ? undefined : source.resolveLightVariant?.(face.family, face.bold, face.italic);
+        const load = named ?? light;
         if (!load) return undefined;
         const bytes = await load();
         if (disposed || finished || families.has(face.family.trim().toLowerCase())) return undefined;
-        const loaded = { ...face, bytes };
+        const loaded: DefaultFontFace = light ? { ...face, bytes, ownWeight: true } : { ...face, bytes };
         if (install && !(await install([loaded])).length) return undefined;
         return loaded;
       }).then(finish, () => finish());
