@@ -96,6 +96,7 @@ export interface Harness {
 export function makeHarness(options: {
   journalDir?: string;
   maxEditorsPerFile?: number;
+  reconnectGraceMs?: number;
   instanceId?: string;
   quirks?: ReferenceHostQuirks;
   format?: Format;
@@ -169,6 +170,7 @@ export function makeHarness(options: {
     journalDir: options.journalDir,
     instanceId: options.instanceId ?? "inst-test",
     maxEditorsPerFile: options.maxEditorsPerFile ?? 50,
+    reconnectGraceMs: options.reconnectGraceMs,
   };
   const registry = new SessionRegistry({
     config,

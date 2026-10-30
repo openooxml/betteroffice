@@ -5,7 +5,15 @@ import { forwardRef, useEffect, useImperativeHandle } from "react";
 import type { XlsxAsyncEditorApi, XlsxAsyncEditorProps, XlsxCommandResult } from "@betteroffice/xlsx-react";
 import type { PptxAsyncEditorApi, PptxAsyncEditorProps } from "@betteroffice/pptx-react";
 import type { DocxErrorInfo } from "@betteroffice/docx-react";
+import type { AsyncReplicaAdapter } from "@betteroffice/docx/collaboration";
+import type { CollaborationReplica } from "./collaboration/types";
 import type { EditorApi } from "./Editor";
+import { Doc } from "yjs";
+import { SessionApi } from "../../apps/wopi/web/src/api";
+import { parseWopiConfig } from "../../apps/wopi/web/src/config";
+import type { Loaded } from "../../apps/wopi/web/src/page";
+import { PostMessageBridge } from "../../apps/wopi/web/src/postMessage";
+import * as wopiTransport from "../../apps/wopi/web/src/transport";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -14,16 +22,24 @@ interface DocxProps {
   documentBuffer: Uint8Array;
   onFirstPagePainted(): void;
   onSave(buffer: ArrayBuffer): void;
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   onError(error: Error, info?: DocxErrorInfo): void;
   mode?: "editing" | "viewing";
   readOnly?: boolean;
   legacySyncApi?: boolean;
   onChange?: () => void;
   onDocumentChange?: () => void;
+  collaboration?: { onReplica?(replica: CollaborationReplica | null): void };
 }
 let docxProps: DocxProps;
+let docxReplica: CollaborationReplica | null = null;
+let deferDocxPaint = false;
 const parseDocx = mock(async () => ({}));
 const flushDocxInput = mock(async () => {});
+const flushWorkbookInput = mock(async () => "version");
+const flushPresentationInput = mock(async () => {});
+let hydrateWorkbook = async () => {};
+let hydratePresentation = async () => {};
 let save: (props: DocxProps) => Promise<ArrayBuffer | null> = async () =>
   null;
 const workerOpens: Uint8Array[] = [];
@@ -42,6 +58,13 @@ let workbookSave: (props: XlsxAsyncEditorProps) => Promise<XlsxCommandResult>;
 let deferWorkbookReady = false;
 let readyWorkbook: (() => void) | undefined;
 let disposeWorkbookApi: (() => void) | undefined;
+const workbookReplica = {
+  clientId: 7,
+  encodeStateVector: () => Uint8Array.of(0),
+  encodeStateAsUpdate: () => Uint8Array.of(0, 0),
+  applyUpdate() {},
+  onUpdate: () => () => {},
+};
 mock.module("@betteroffice/xlsx-react", () => ({
   XlsxEditor: (props: XlsxAsyncEditorProps) => {
     workbookProps = props;
@@ -50,6 +73,9 @@ mock.module("@betteroffice/xlsx-react", () => ({
       readyWorkbook = () => {
         dispose = props.onReady?.({
           focus() {},
+          whenHydrated: () => hydrateWorkbook(),
+          version: flushWorkbookInput,
+          collaboration: { encodeStateVector: async () => Uint8Array.of(8) },
           commands: { execute: () => workbookSave(workbookProps) },
         } as unknown as XlsxAsyncEditorApi);
         disposeWorkbookApi = typeof dispose === "function" ? dispose : undefined;
@@ -57,7 +83,11 @@ mock.module("@betteroffice/xlsx-react", () => ({
       if (!deferWorkbookReady) readyWorkbook();
       return () => { if (typeof dispose === "function") dispose(); };
     }, []);
-    return null;
+    useEffect(() => {
+      props.collaboration?.onReplica?.(workbookReplica);
+      return () => props.collaboration?.onReplica?.(null);
+    }, [props.collaboration?.onReplica]);
+    return <input data-testid="xlsx-input" />;
   },
 }));
 const disposeWorkbook = mock(async () => {});
@@ -85,7 +115,7 @@ mock.module("@betteroffice/pptx-react", () => ({
     useEffect(() => {
       let dispose: void | (() => void);
       readyPresentation = () => {
-        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {} } as PptxAsyncEditorApi);
+        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {}, flushPendingInput: flushPresentationInput, whenHydrated: () => hydratePresentation() } as unknown as PptxAsyncEditorApi);
         disposePresentation = typeof dispose === "function" ? dispose : undefined;
       };
       if (!deferPresentationReady) readyPresentation();
@@ -98,19 +128,38 @@ mock.module("@betteroffice/pptx-react", () => ({
     return null;
   },
 }));
+let providerPendingBytes = 0;
 class Provider {
+  get pendingBytes() { return providerPendingBytes; }
   constructor(replica: unknown) { providerReplicas.push(replica); }
   onStatus() { return () => {}; }
   onError() { return () => {}; }
   connect() {}
   destroy() {}
 }
+
+test.each(["docx", "xlsx", "pptx"] as const)("%s save readiness reads the live provider queue", async (format) => {
+  docxReplica = {
+    clientId: 42, encodeStateVector: () => Uint8Array.of(0), encodeStateAsUpdate: () => Uint8Array.of(0, 0),
+    applyUpdate() {}, onUpdate: () => () => {},
+  };
+  const { api } = await mount(format, true);
+  expect(api.hasPendingUpdates()).toBe(false);
+  providerPendingBytes = 7;
+  try { expect(api.hasPendingUpdates()).toBe(true); }
+  finally { providerPendingBytes = 0; }
+});
 mock.module("@betteroffice/docx-react", () => ({
   DocxEditor: forwardRef<unknown, DocxProps>(function DocxEditor(props, ref) {
     docxProps = props;
     useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
     useEffect(() => {
-      if (props.legacySyncApi) return;
+      props.collaboration?.onReplica?.(docxReplica);
+      return () => props.collaboration?.onReplica?.(null);
+    }, [props.collaboration?.onReplica]);
+    useEffect(() => {
+      if (deferDocxPaint) return;
+      if (props.legacySyncApi) { props.onFirstPagePainted(); return; }
       const client = new ResidentEngineWorkerClient();
       let current = true;
       void client.openSource({ bytes: props.documentBuffer }).then(() => {
@@ -121,7 +170,7 @@ mock.module("@betteroffice/docx-react", () => ({
     return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
   }),
 }));
-const loadFont = mock(async (_face: unknown): Promise<Uint8Array> => Uint8Array.of(1));
+const loadFont = mock(async (_face: unknown, _options?: { baseUrl?: string }): Promise<Uint8Array> => Uint8Array.of(1));
 const openPresentationSession = mock(async (_bytes: Uint8Array, _options: unknown) => ({ dispose: async () => {} }));
 mock.module("@betteroffice/pptx/worker", () => ({ openPresentationSession }));
 
@@ -151,9 +200,14 @@ for (const [specifier, exports] of Object.entries({
 
 const { act, cleanup, render } = await import("@testing-library/react");
 const { default: Editor, prepareFile } = await import("./Editor");
+const { default: WopiApp } = await import("../../apps/wopi/web/src/page");
 
 afterEach(() => {
   cleanup();
+  docxReplica = null;
+  deferDocxPaint = false;
+  hydrateWorkbook = async () => {};
+  hydratePresentation = async () => {};
   deferWorkbookReady = false;
   readyWorkbook = undefined;
   disposeWorkbookApi = undefined;
@@ -165,7 +219,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}, readOnly = false) {
+async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}, readOnly = false, onLocalUpdate = () => {}, onSaveRequest?: () => Promise<boolean>) {
   const ready: { api?: EditorApi } = {};
   const errors: string[] = [];
   const saved: Uint8Array[] = [];
@@ -180,6 +234,8 @@ async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = 
         readOnly={readOnly}
         onSave={(bytes) => saved.push(bytes)}
         onChange={onChange}
+        onLocalUpdate={onLocalUpdate}
+        onSaveRequest={onSaveRequest}
         onError={(error) => errors.push(error.message)}
         onReady={(api) => {
           if (api) ready.api = api;
@@ -233,9 +289,163 @@ test("docx input flush reaches the mounted editor barrier", async () => {
   expect(flushDocxInput).toHaveBeenCalledTimes(1);
 });
 
-test.each(["xlsx", "pptx"] as const)("%s does not provide an input flush barrier", async (format) => {
+test.each(["xlsx", "pptx"] as const)("%s commits pending input through its public API", async (format) => {
+  const flush = format === "xlsx" ? flushWorkbookInput : flushPresentationInput;
+  flush.mockClear();
   const { api } = await mount(format);
-  expect(api.flushPendingInput).toBeUndefined();
+  await api.flushPendingInput();
+  expect(flush).toHaveBeenCalledTimes(1);
+});
+
+test.each([false, true])("xlsx Action_Save commits deferred text through version with DontTerminateEdit=%s", async (DontTerminateEdit) => {
+  const document = new Doc();
+  let deferredText = "";
+  let release!: () => void;
+  const deferred = new Promise<void>((resolve) => { release = resolve; });
+  flushWorkbookInput.mockClear();
+  flushWorkbookInput.mockImplementationOnce(async () => {
+    await deferred;
+    document.getText("body").insert(0, deferredText);
+    workbookProps.onChange?.();
+    return "committed";
+  });
+  const saved: string[] = [];
+  const replies: Array<{ MessageId: string; SendTime?: number; Values: Record<string, unknown> }> = [];
+  const barrier = { connectionId: crypto.randomUUID(), seq: 1 };
+  const captureSaveBarrier = mock(() => barrier);
+  const connection = spyOn(wopiTransport, "createWopiTransport").mockReturnValue({
+    connect() {}, disconnect() {}, send: () => true, onEvent: () => () => {},
+    hasPendingResync: () => false, hasUnacknowledgedUpdates: () => false, noteLocalUpdate() {},
+    captureSaveBarrier,
+  });
+  const api = new SessionApi("xlsx-handle", async (input, init) => {
+    if (String(input).endsWith("/save")) {
+      expect(JSON.parse(String(init?.body))).toEqual(barrier);
+      saved.push(document.getText("body").toString());
+      return Response.json({ itemVersion: "2" });
+    }
+    if (String(input).endsWith("/events")) {
+      return new Response(new ReadableStream({
+        start(controller) { init?.signal?.addEventListener("abort", () => controller.close(), { once: true }); },
+      }));
+    }
+    throw new Error(`Unexpected request: ${input}`);
+  });
+  let saving: Promise<void> | undefined;
+  const bridge = new PostMessageBridge({
+    parent: { postMessage(message) { replies.push(JSON.parse(message)); } },
+    addEventListener() {}, removeEventListener() {},
+  }, "https://host.example", {
+    onSave(options) {
+      saving = loaded.actions.save!(options);
+      return saving;
+    },
+    onClose() {}, onBlurFocus() {}, onGrabFocus() {}, onGetViews: () => [],
+  });
+  const loaded: Loaded = {
+    config: parseWopiConfig({ sessionHandle: "xlsx-handle", format: "xlsx", fileName: "book.xlsx", canWrite: true }),
+    api, bridge, file: { bytes: Uint8Array.of(0), format: "xlsx" },
+    join: { format: "xlsx", initialUpdate: Uint8Array.of(0, 0), baselineGeneration: 1, canWrite: true },
+    clientId: 7, actions: { views: [] },
+  };
+  let view: ReturnType<typeof render> | undefined;
+  try {
+    await act(async () => { view = render(<WopiApp loaded={loaded} />); });
+    const input = view!.getByTestId("xlsx-input");
+    input.addEventListener("compositionend", () => { deferredText = "変"; });
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    });
+    expect(document.getText("body").toString()).toBe("");
+    await act(async () => bridge.handleMessage({ origin: "https://host.example", data: {
+      MessageId: "Action_Save", Values: { Notify: true, DontTerminateEdit },
+    } }));
+    expect(flushWorkbookInput).toHaveBeenCalledTimes(1);
+    expect(captureSaveBarrier).not.toHaveBeenCalled();
+    expect(saved).toEqual([]);
+    expect(replies.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([]);
+    await act(async () => { release(); await saving; });
+    expect(saved).toEqual(["変"]);
+    expect(replies.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([
+      { MessageId: "Action_Save_Resp", SendTime: expect.any(Number), Values: { success: true } },
+    ]);
+  } finally {
+    release();
+    await saving?.catch(() => {});
+    await act(async () => view?.unmount());
+    connection.mockRestore();
+    flushWorkbookInput.mockReset();
+    flushWorkbookInput.mockImplementation(async () => "version");
+    document.destroy();
+  }
+});
+
+test.each(["xlsx", "pptx"] as const)("%s readiness waits for opening and hydration", async (format) => {
+  let hydrate!: () => void;
+  const pending = new Promise<void>((resolve) => { hydrate = resolve; });
+  if (format === "xlsx") { deferWorkbookReady = true; hydrateWorkbook = () => pending; }
+  else { deferPresentationReady = true; hydratePresentation = () => pending; }
+  const { api } = await mount(format);
+  let ready = false;
+  const waiting = api.whenReady().then(() => { ready = true; });
+  await act(async () => {});
+  expect(ready).toBe(false);
+  await act(async () => { if (format === "xlsx") readyWorkbook!(); else readyPresentation!(); });
+  expect(ready).toBe(false);
+  hydrate();
+  await waiting;
+  expect(ready).toBe(true);
+});
+
+test("xlsx state vector uses the asynchronous collaboration API", async () => {
+  const { api } = await mount("xlsx", true);
+  expect(await api.encodeStateVector()).toEqual(Uint8Array.of(8));
+});
+
+test("pptx state vector comes from the live replica", async () => {
+  const { api } = await mount("pptx", true);
+  expect(await api.encodeStateVector()).toEqual(Uint8Array.of(1));
+});
+
+test("docx ordered saves read the worker replica through its async API", async () => {
+  const vector = Uint8Array.of(1, 42, 3);
+  const readVector = mock(async () => vector);
+  const syncVector = mock((): Uint8Array => {
+    throw new Error("encodeStateVector is not available on a worker-hosted replica");
+  });
+  const replica: AsyncReplicaAdapter = {
+    clientId: 42,
+    encodeStateVector: syncVector,
+    encodeStateAsUpdate() { throw new Error("worker-hosted replica"); },
+    applyUpdate() {},
+    onUpdate: () => () => {},
+    async: {
+      clientId: 42,
+      encodeStateVector: readVector,
+      encodeStateAsUpdate: async () => Uint8Array.of(0),
+      applyUpdate: async () => {},
+      onUpdate: () => () => {},
+    },
+  };
+  docxReplica = replica;
+  const { api } = await mount("docx", true);
+  await api.flushPendingInput();
+  expect(await api.encodeStateVector()).toEqual(vector);
+  expect(readVector).toHaveBeenCalledTimes(1);
+  expect(syncVector).not.toHaveBeenCalled();
+});
+
+test("docx ordered saves support a legacy synchronous replica", async () => {
+  docxReplica = {
+    clientId: 42,
+    encodeStateVector: () => Uint8Array.of(1, 42, 3),
+    encodeStateAsUpdate: () => Uint8Array.of(0),
+    applyUpdate() {},
+    onUpdate: () => () => {},
+  };
+  const { api } = await mount("docx", true);
+  expect(await api.encodeStateVector()).toEqual(Uint8Array.of(1, 42, 3));
 });
 
 test.each(["", "&peerless=1", "&peerless=0"])("docx %s reports dirty state through document events", async (query) => {
@@ -567,10 +777,61 @@ test.each(["xlsx", "pptx"] as const)("%s receives readOnly in a collaboration ro
   expect(props.collaboration).toBeDefined();
 });
 
+test("pptx preparation loads fonts from a configured base url", async () => {
+  const descriptors = ["Worker", "OffscreenCanvas"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  loadFont.mockClear();
+  try {
+    for (const [key] of descriptors) Object.defineProperty(globalThis, key, { configurable: true, value: class {} });
+    await prepareFile(Uint8Array.of(1), "pptx", { fontBaseUrl: "/fonts/" });
+    expect(loadFont.mock.calls.length).toBeGreaterThan(0);
+    for (const call of loadFont.mock.calls) expect(call[1]).toEqual({ baseUrl: "/fonts/" });
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
 test("collaboration transport is created from the relay origin prop", async () => {
   roomTransportCalls.length = 0;
   await mount("pptx", true);
   expect(roomTransportCalls).toEqual([["https://relay.example.test", "test"]]);
+});
+
+test("createTransport replaces relayOrigin and receives the room id", async () => {
+  roomTransportCalls.length = 0;
+  presentationOptions.length = 0;
+  const createTransport = mock((_roomId: string) => ({
+    connect() {},
+    disconnect() {},
+    send: () => true,
+    onEvent: () => () => {},
+  }));
+  const initialUpdate = Uint8Array.of(9, 8);
+  await act(async () => {
+    render(
+      <Editor
+        file={{ bytes: new Uint8Array(), format: "pptx" }}
+        name="deck.pptx"
+        room={{ id: "wopi-room", name: "Alice A" }}
+        createTransport={createTransport}
+        initialUpdate={initialUpdate}
+        collaborationClientId={4242}
+        onSave={() => {}}
+        onChange={() => {}}
+        onError={() => {}}
+        onReady={() => {}}
+        onOpen={async () => {}}
+        onStatus={() => {}}
+      />
+    );
+  });
+  expect(createTransport).toHaveBeenCalledTimes(1);
+  expect(createTransport.mock.calls[0]).toEqual(["wopi-room"]);
+  expect(roomTransportCalls).toEqual([]);
+  const opening = presentationOptions.find((options) => options?.clientId === 4242);
+  expect(opening?.initialUpdate).toEqual(initialUpdate);
 });
 
 test("presentation collaboration connects the async replica and presence provider", async () => {
@@ -615,4 +876,52 @@ test.each([1, 4])("pptx preparation tolerates %i failed font faces", async (fail
       else Reflect.deleteProperty(globalThis, key);
     }
   }
+});
+
+test.each(["", "&peerless=0"])("docx %s waits for its first painted page", async (query) => {
+  const browser = window as unknown as GlobalWindow;
+  const previous = location.href;
+  browser.happyDOM.setURL(`http://localhost/?format=docx${query}`);
+  deferDocxPaint = true;
+  try {
+    const ready: Array<EditorApi | null> = [];
+    await act(async () => {
+      render(<Editor file={{ bytes: Uint8Array.of(1), format: "docx" }} name="file.docx" room={null}
+        onSave={() => {}} onChange={() => {}} onError={() => {}} onReady={(api) => { ready.push(api); }}
+        onOpen={async () => {}} onStatus={() => {}} />);
+    });
+    expect(ready).toEqual([]);
+    await act(async () => { docxProps.onFirstPagePainted(); });
+    expect(ready.filter(Boolean)).toHaveLength(1);
+  } finally {
+    browser.happyDOM.setURL(previous);
+  }
+});
+
+test("local replica updates are reported independently of provider queues and idle document events", async () => {
+  let update!: Parameters<CollaborationReplica["onUpdate"]>[0];
+  let unsubscribed = false;
+  docxReplica = {
+    clientId: 42, encodeStateVector: () => Uint8Array.of(0), encodeStateAsUpdate: () => Uint8Array.of(0, 0), applyUpdate() {},
+    onUpdate(listener) { update = listener; return () => { unsubscribed = true; }; },
+  };
+  const local = mock(() => {});
+  const h = await mount("docx", true, () => {}, false, local);
+  update(Uint8Array.of(1), "remote");
+  expect(local).not.toHaveBeenCalled();
+  update(Uint8Array.of(2), "local");
+  expect(local).toHaveBeenCalledTimes(1);
+  h.view.unmount();
+  expect(unsubscribed).toBe(true);
+});
+
+test("serializing a recovery copy bypasses the host save request", async () => {
+  const requested = mock(async () => { throw new Error("session is rejoining"); });
+  save = async (props) => {
+    if (props.onSaveRequest && await props.onSaveRequest() !== true) return null;
+    return Uint8Array.of(7).buffer;
+  };
+  const h = await mount("docx", false, () => {}, false, () => {}, requested);
+  expect(await h.api.serialize()).toEqual(Uint8Array.of(7));
+  expect(requested).not.toHaveBeenCalled();
 });

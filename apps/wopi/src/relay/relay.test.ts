@@ -22,6 +22,7 @@ import {
   encodeUpdateFrame,
 } from "./frames";
 import { CollabRelay, MAX_AWARENESS_CLIENTS_PER_SOCKET, type RelaySocket } from "./relay";
+import { decodeSequenceAck, encodeSequencedFrame, type SocketSaveBarrier } from "./sequence";
 import { CollaborationProvider as DocxProvider } from "../../../../packages/docx/src/collaboration/index";
 import { CollaborationProvider as XlsxProvider } from "../../../../packages/xlsx/src/collaboration/index";
 import { CollaborationProvider as PptxProvider } from "../../../../packages/pptx/src/collaboration/index";
@@ -33,6 +34,9 @@ import type {
 import { createYrsSession } from "../../../../packages/docx/src/yrs";
 import { openWorkbook } from "../../../../packages/xlsx/src/wasm/loader";
 import { openPresentation } from "../../../../packages/pptx/src/wasm/loader";
+import { createWopiTransport } from "../../web/src/transport";
+import { saveDocument } from "../../web/src/documentActions";
+import { SessionApi } from "../../web/src/api";
 
 beforeAll(async () => {
   await initEngines();
@@ -40,7 +44,10 @@ beforeAll(async () => {
 
 let servers: Array<{ stop: (close?: boolean) => void }> = [];
 let cleanups: Array<() => void | Promise<void>> = [];
+let frameClients: FrameClient[] = [];
 afterEach(async () => {
+  await Promise.all(frameClients.map((client) => client.disconnect()));
+  frameClients = [];
   for (const cleanup of cleanups.reverse()) {
     try {
       await cleanup();
@@ -105,6 +112,8 @@ class FrameClient {
   ws: WebSocket;
   closeCode: number | null = null;
   closeReason = "";
+  sequence: SocketSaveBarrier | null = null;
+  #onMessage: (event: MessageEvent) => void;
   #resolveClosed: () => void = () => {};
   #closed = new Promise<void>((resolve) => {
     this.#resolveClosed = resolve;
@@ -121,10 +130,11 @@ class FrameClient {
       destroy();
     };
     ws.binaryType = "arraybuffer";
-    ws.addEventListener("message", (event) => {
+    this.#onMessage = (event) => {
       const data = event.data;
       if (this.#detached || typeof data === "string") return;
       const frame = new Uint8Array(data as ArrayBuffer);
+      if (decodeSequenceAck(frame)) return;
       for (const message of decodeMessages(frame)) {
         if (message.type === "sync-step-1") {
           this.send(encodeSyncStep2(this.client.encodeStateAsUpdate(message.stateVector)));
@@ -132,27 +142,37 @@ class FrameClient {
           this.client.applyUpdate(message.update);
         }
       }
-    });
+    };
+    ws.addEventListener("message", this.#onMessage);
     ws.addEventListener("close", (event) => {
       this.closeCode = event.code;
       this.closeReason = event.reason;
       this.#resolveClosed();
     });
+    frameClients.push(this);
   }
 
-  static async connect(s: Setup, handle: string, client: HydratedClient): Promise<FrameClient> {
+  static async connect(s: Setup, handle: string, client: HydratedClient, sequenced = false): Promise<FrameClient> {
     const ws = new WebSocket(`${s.wsBase}/collab`, ["bo-wopi.v1", handle, `${BASELINE_GENERATION_PROTOCOL}${client.baselineGeneration}`]);
     const frameClient = new FrameClient(client, ws);
     await new Promise<void>((resolve, reject) => {
       ws.addEventListener("open", () => resolve(), { once: true });
       ws.addEventListener("error", () => reject(new Error("websocket error")), { once: true });
     });
+    if (sequenced) {
+      frameClient.sequence = { connectionId: crypto.randomUUID(), seq: 0 };
+      ws.send(encodeSequencedFrame(frameClient.sequence) as unknown as ArrayBuffer);
+    }
     frameClient.send(encodeSyncStep1(client.encodeStateVector()));
     return frameClient;
   }
 
   send(frame: Uint8Array): void {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(frame as unknown as ArrayBuffer);
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.sequence) {
+      this.sequence = { ...this.sequence, seq: this.sequence.seq + 1 };
+      this.ws.send(encodeSequencedFrame(this.sequence, frame) as unknown as ArrayBuffer);
+    } else this.ws.send(frame as unknown as ArrayBuffer);
   }
 
   editAndSend(marker: string, slot = 0): void {
@@ -162,6 +182,12 @@ class FrameClient {
 
   get closed(): Promise<void> {
     return this.#closed;
+  }
+
+  async disconnect(): Promise<void> {
+    this.ws.removeEventListener("message", this.#onMessage);
+    if (this.ws.readyState !== WebSocket.CLOSED) this.ws.close();
+    await this.closed;
   }
 
   kill(): void {
@@ -304,6 +330,8 @@ describe("collab relay", () => {
           expect(closed).toEqual([1013]);
           expect(attempts).toBe(1);
           await h.clock.drain();
+          expect(b.user.connected).toBe(true);
+          await h.clock.advance(30_000);
           expect(b.user.connected).toBe(false);
           expect(healthyFrames.some((frame) => decodeMessages(frame).some((message) => message.type === "awareness" && message.entries.some((entry) => entry.clientId === 909101 && entry.isNull)))).toBe(true);
           trigger();
@@ -355,7 +383,7 @@ describe("collab relay", () => {
 
       relay.handleMessage(viewer, encodeAwarenessFrame([announce(953101, 1)]));
       expect(closedB).toEqual([1008]);
-      await h.clock.drain();
+      await h.clock.advance(30_000);
       expect(b.user.connected).toBe(false);
       const removed = awarenessAt(framesA).filter((entry) => entry.isNull).map((entry) => entry.clientId);
       for (const id of [953100, ...ids.slice(1)]) expect(removed).toContain(id);
@@ -375,7 +403,7 @@ describe("collab relay", () => {
   });
 
   test("reconnecting saved handles cannot open more sockets than the editor limit", async () => {
-    const h = makeHarness({ maxEditorsPerFile: 2 });
+    const h = makeHarness({ maxEditorsPerFile: 2, reconnectGraceMs: 0 });
     addToken(h, TOKENS[0]!, "user-a");
     addToken(h, TOKENS[1]!, "viewer-b", { canWrite: false });
     const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[0]!, accessTokenTtl: 0, mode: "edit" });
@@ -564,7 +592,7 @@ describe("collab relay", () => {
     const s = setup("docx");
     const handleA = await joinPage(s, TOKENS[0]!);
     const handleB = await joinPage(s, TOKENS[1]!);
-    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 933001));
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 933001), true);
     const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 933101));
     cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -578,6 +606,7 @@ describe("collab relay", () => {
     const save = await fetch(`${s.base}/api/session/save`, {
       method: "POST",
       headers: { Authorization: `Bearer ${handleA}` },
+      body: JSON.stringify(a.sequence),
     });
     expect(save.status).toBe(200);
     await save.text();
@@ -595,7 +624,7 @@ describe("collab relay", () => {
     const s = setup("docx");
     const handleP = await joinPage(s, TOKENS[0]!);
     const handleA = await joinPage(s, TOKENS[1]!);
-    const peer = await FrameClient.connect(s, handleP, await hydrate(s, handleP, 935001));
+    const peer = await FrameClient.connect(s, handleP, await hydrate(s, handleP, 935001), true);
     const author = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 935101));
     cleanups.push(() => { peer.client.destroy(); author.client.destroy(); });
     const session = s.h.registry.list()[0]!;
@@ -610,6 +639,7 @@ describe("collab relay", () => {
     const save = await fetch(`${s.base}/api/session/save`, {
       method: "POST",
       headers: { Authorization: `Bearer ${handleP}` },
+      body: JSON.stringify(peer.sequence),
     });
     expect(save.status).toBe(200);
     await save.text();
@@ -1077,6 +1107,64 @@ async function providerClient(
 }
 
 describe("real CollaborationProvider clients", () => {
+  test("lock recovery resyncs a socket attached while read-only so Save includes its pending state", async () => {
+    const s = setup("xlsx");
+    const handle = await joinPage(s, TOKENS[0]!);
+    const session = s.h.registry.list()[0]!;
+    const generation = session.baselineGeneration;
+    const file = s.h.host.files.get("file1")!;
+    file.lock = "other-app-lock";
+    file.lockExpiresAt = s.h.clock.t + 30 * 60000;
+    for (let i = 0; i < 60 && !session.viewOnly; i += 1) {
+      session.heartbeat(handle);
+      await s.h.clock.advance(30000);
+    }
+    expect(session.viewOnlyReason).toBe("lockLost");
+    const workbook = openWorkbook(session.sourceBytes!.slice(), { collaborative: true, clientId: 980201 });
+    workbook.applyUpdate(session.replica!.joinPayload().initialUpdate.slice());
+    workbook.editCell(0, 25, 0, "pending during lock loss");
+    const transport = createWopiTransport({ handle, baselineGeneration: generation, origin: s.base });
+    transport.noteLocalUpdate();
+    const provider = new XlsxProvider(workbook as never, transport);
+    const requests: Uint8Array[] = [];
+    const unsubscribe = transport.onEvent((event) => {
+      if (event.type === "message" && decodeMessages(event.data).some((message) => message.type === "sync-step-1")) requests.push(event.data);
+    });
+    try {
+      provider.connect();
+      await waitFor(() => provider.synced, "read-only socket receives server state");
+      expect(transport.hasPendingResync()).toBe(true);
+      expect(transport.hasUnacknowledgedUpdates()).toBe(true);
+      expect(requests).toHaveLength(0);
+      file.lock = null;
+      file.lockExpiresAt = null;
+      for (let i = 0; i < 4 && session.viewOnly; i += 1) {
+        session.heartbeat(handle);
+        await s.h.clock.advance(30000);
+      }
+      expect(session.viewOnly).toBe(false);
+      expect(session.baselineGeneration).toBe(generation);
+      const api = new SessionApi(handle, (input, init) => fetch(`${s.base}${input}`, init));
+      await saveDocument({ flushPendingInput: async () => {}, hasPendingUpdates: () => provider.pendingBytes > 0 }, api, {
+        canWrite: () => !session.viewOnly,
+        hasPendingResync: () => transport.hasPendingResync(),
+        captureBarrier: () => transport.captureSaveBarrier(),
+        inputTimeoutMs: 500,
+      });
+      expect(requests).toHaveLength(1);
+      expect(transport.hasPendingResync()).toBe(false);
+      await waitFor(() => !transport.hasUnacknowledgedUpdates(), "pending state acknowledged");
+      const saved = await openFreshClient("xlsx", file.bytes, 980301);
+      try { expect(saved.contains("pending during lock loss")).toBe(true); }
+      finally { saved.destroy(); }
+    } finally {
+      unsubscribe();
+      provider.destroy();
+      workbook.dispose();
+      session.abandon();
+    }
+  });
+
   for (const format of ["docx", "xlsx", "pptx"] as Format[]) {
     test(`${format} provider converges with a frame client through the relay`, async () => {
       const s = setup(format);
@@ -1084,7 +1172,11 @@ describe("real CollaborationProvider clients", () => {
       const handleF = await joinPage(s, TOKENS[1]!);
       const provided = await providerClient(s, format, handleP, 980001);
       const frame = await FrameClient.connect(s, handleF, await hydrate(s, handleF, 980101));
-      cleanups.push(() => provided.provider.destroy(), () => frame.client.destroy(), () => provided.test.destroy());
+      cleanups.push(() => {
+        provided.provider.destroy();
+        provided.test.destroy();
+        frame.client.destroy();
+      });
       provided.provider.connect();
       await waitFor(() => provided.provider.synced, "provider synced");
 

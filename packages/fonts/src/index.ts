@@ -199,11 +199,9 @@ async function assetUrl(
     const cjk = await loadCjkAssetUrls();
     const resolveCjk = cjk?.[file];
     if (resolveCjk) return resolveCjk();
-    if (!cjk) {
-      throw new MissingCjkAddonError(
-        `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`,
-      );
-    }
+    throw new MissingCjkAddonError(cjk
+      ? `Bundled font ${file} needs a compressed @betteroffice/fonts-cjk release matching @betteroffice/fonts`
+      : `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
   }
   throw new Error(`Unknown bundled font asset: ${file}`);
 }
@@ -218,17 +216,16 @@ export function loadBundledFontBytes(
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
-  if (isLatinFont(face.file) || INTL_FILES.has(face.file)) {
-    return loadPackedFontBytes(
+  const bytes = isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
+    ? loadPackedFontBytes(
       face,
       (dependency) => assetUrl(dependency, baseUrl),
       undefined,
       baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
       undefined,
       runtime,
-    );
-  }
-  const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
+    )
+    : assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
   if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
   return bytes.catch((error) => {
     if (!(error instanceof MissingCjkAddonError)) throw error;

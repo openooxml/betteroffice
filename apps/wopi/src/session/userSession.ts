@@ -12,6 +12,7 @@ export interface UserSessionInit {
   joinedAt: number;
   postMessageOrigin?: string;
   closeUrl?: string;
+  closePostMessage?: boolean;
 }
 
 /** Per user handle inside a file session. The token is never serialized. */
@@ -27,6 +28,7 @@ export class UserSession {
   readonly joinedAt: number;
   readonly postMessageOrigin: string;
   readonly closeUrl: string;
+  readonly closePostMessage: boolean;
   lastSeen: number;
   connected: boolean;
   connectionGeneration = 0;
@@ -43,6 +45,7 @@ export class UserSession {
     this.joinedAt = init.joinedAt;
     this.postMessageOrigin = init.postMessageOrigin ?? "";
     this.closeUrl = init.closeUrl ?? "";
+    this.closePostMessage = init.closePostMessage === true;
     this.lastSeen = init.joinedAt;
     this.connected = true;
   }
@@ -64,6 +67,7 @@ export class UserSession {
       joinedAt: this.joinedAt,
       postMessageOrigin: this.postMessageOrigin,
       closeUrl: this.closeUrl,
+      closePostMessage: this.closePostMessage,
       lastSeen: this.lastSeen,
       connected: this.connected,
     };

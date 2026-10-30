@@ -65,7 +65,7 @@ describe('resolution', () => {
 
   test('falls back to a family regular when the exact style is not vendored', () => {
     expect(resolveMetricCompatFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf.zst');
-    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
+    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf.zst');
   });
 
   test('MS Japanese spellings resolve to the bundled Japanese face in every style', () => {
@@ -76,7 +76,7 @@ describe('resolution', () => {
       expect(resolveMetricCompatFamily(` ${family.toUpperCase()} `)).toBe('Noto Sans JP');
       for (const bold of [false, true]) {
         for (const italic of [false, true]) {
-          expect(resolveMetricCompatFace(family, bold, italic)?.file).toBe('NotoSansJP-Regular.otf');
+          expect(resolveMetricCompatFace(family, bold, italic)?.file).toBe('NotoSansJP-Regular.otf.zst');
         }
       }
     }
@@ -335,7 +335,7 @@ describe('bundled family names', () => {
     );
     expect(resolveBundledFamilyFace('Comic Relief', true, false)?.file).toBe('ComicRelief-Bold.ttf.zst');
     expect(resolveBundledFamilyFace('Noto Serif SC', false, false)?.file).toBe(
-      'NotoSerifSC-Regular.otf'
+      'NotoSerifSC-Regular.otf.zst'
     );
   });
 
@@ -343,7 +343,7 @@ describe('bundled family names', () => {
     expect(resolveBundledFamilyFace('Oswald', false, true)).toBeUndefined();
     expect(resolveBundledFamilyFace('Noto Serif SC', true, false)).toBeUndefined();
     expect(resolveBundledFamilyFace('SimSun', true, false)).toBeUndefined();
-    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
+    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf.zst');
   });
 
   test('cover the serif Noto families the package does not vendor with the sans face', () => {
@@ -530,12 +530,6 @@ describe('loading', () => {
       globalThis.fetch = realFetch;
     }
   });
-
-  test('loads every raw manifest face from the package without a base URL', async () => {
-    for (const face of BUNDLED_FONTS.filter((candidate) => !candidate.file.endsWith('.zst'))) {
-      expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
-    }
-  });
 });
 
 // Plain Node refuses to type-strip TypeScript under node_modules.
@@ -575,15 +569,6 @@ describe('published shape', () => {
     expect(intl.length).toBeGreaterThan(0);
     for (const face of intl) {
       expect(existsSync(new URL(`../assets/${face.file}`, import.meta.url))).toBe(false);
-    }
-  });
-
-  test('records the exact byte length of every raw vendored face', () => {
-    for (const face of BUNDLED_FONTS.filter((candidate) => !candidate.file.endsWith('.zst'))) {
-      const directory = face.script?.startsWith('cjk-') ? '../../fonts-cjk/assets/' : '../assets/';
-      expect(Bun.file(new URL(`${directory}${face.file}`, import.meta.url)).size).toBe(
-        face.byteLength
-      );
     }
   });
 });

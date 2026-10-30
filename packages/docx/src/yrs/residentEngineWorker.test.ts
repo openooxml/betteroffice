@@ -267,6 +267,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       initializeComments() {},
+      primeSaveSeedStates: mock(() => true),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -2522,6 +2523,51 @@ describe('document worker warmup', () => {
     await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
     return arm;
   }
+
+  test('save seed priming runs once when an editable open settles, without replying', async () => {
+    const { w, client, replies } = await commandWorker();
+    w.harness.now = () => now;
+    try {
+      await client.commandInit(COMMAND_INIT);
+      const before = replies.length;
+      await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
+      expect(replies).toHaveLength(before);
+      await client.edit(commandEnvelope(1));
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('read-only opens do not prime save seed states', async () => {
+    const { w, client } = await commandWorker();
+    w.harness.now = () => now;
+    try {
+      await client.commandInit({ ...COMMAND_INIT, readOnly: true });
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('low heap headroom skips save seed priming', async () => {
+    const { w, client } = await commandWorker({ heapLimitBytes: 128 * 1024 * 1024 });
+    w.harness.now = () => now;
+    w.harness.memories[0].liveBytes = 65 * 1024 * 1024;
+    try {
+      await client.commandInit(COMMAND_INIT);
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
 
   test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
     const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });
