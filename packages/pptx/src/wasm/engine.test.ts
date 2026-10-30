@@ -11,7 +11,7 @@ const server: BackendRuntime = {
 const pkg = '0.5.1';
 
 function nativeModule(version: string = pkg) {
-  return { PptxDocument: class {}, engineVersion: () => version };
+  return { PptxDocument: class {}, PptxRenderer: class {}, engineVersion: () => version };
 }
 
 describe('selectBackend', () => {
@@ -168,10 +168,33 @@ describe('selectBackend', () => {
     ).toThrow('BETTEROFFICE_ENGINE=native but @betteroffice/pptx-native does not export PptxDocument');
   });
 
+  test('a missing PptxRenderer export keeps the wasm engine', () => {
+    expect(
+      selectBackend({
+        env: undefined,
+        runtime: server,
+        loadNative: () => ({ PptxDocument: class {}, engineVersion: () => pkg }),
+        packageVersion: pkg,
+      })
+    ).toBe('wasm');
+  });
+
+  test('native forced throws when PptxRenderer is missing', () => {
+    expect(() =>
+      selectBackend({
+        env: 'native',
+        runtime: server,
+        loadNative: () => ({ PptxDocument: class {}, engineVersion: () => pkg }),
+        packageVersion: pkg,
+      })
+    ).toThrow('BETTEROFFICE_ENGINE=native but @betteroffice/pptx-native does not export PptxRenderer;');
+  });
+
   for (const [name, loadNative] of [
-    ['missing engineVersion', () => ({ PptxDocument: class {} })],
+    ['missing engineVersion', () => ({ PptxDocument: class {}, PptxRenderer: class {} })],
     ['throwing engineVersion', () => ({
       PptxDocument: class {},
+      PptxRenderer: class {},
       engineVersion: () => { throw new Error('version failed'); },
     })],
   ] as const) {

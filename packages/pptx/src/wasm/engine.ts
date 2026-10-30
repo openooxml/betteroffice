@@ -119,10 +119,13 @@ export function selectBackend(options: SelectBackendOptions): EngineBackend {
     return 'wasm';
   }
   const native = loaded as NativeEngineModule | null | undefined;
-  if (typeof native?.PptxDocument !== 'function') {
+  const missing = (['PptxDocument', 'PptxRenderer'] as const).filter(
+    (name) => typeof native?.[name] !== 'function'
+  );
+  if (native == null || missing.length > 0) {
     if (forced) {
       throw new Error(
-        'BETTEROFFICE_ENGINE=native but @betteroffice/pptx-native does not export PptxDocument; ' +
+        `BETTEROFFICE_ENGINE=native but @betteroffice/pptx-native does not export ${missing.join(' and ')}; ` +
           'the native engine is not installed or is incomplete'
       );
     }
