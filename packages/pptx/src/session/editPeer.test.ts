@@ -6,7 +6,7 @@ import { isClientMessage, isHostMessage } from '../../../../shared/office-sessio
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { initWasm, openPresentation } from '../wasm/loader';
-import { engineBackend, PptxDocument, PptxRenderer } from '../wasm/engine';
+import { engineKind, PptxDocument, PptxRenderer } from '../wasm/engine';
 import { createPresentationEditorSession } from './editorSession';
 import { createPresentationSessionHost } from './host';
 import type { PptxWorkerEditorOperation } from './replay';
@@ -445,7 +445,7 @@ test('recovery_serialization_failure_is_retryable', async () => {
   } finally { save.mockRestore(); free.mockRestore(); await context.owner.dispose(); }
 });
 
-test.skipIf(engineBackend() === 'native')('wasm handles unregister finalizers on disposal', () => {
+test.skipIf(engineKind === 'native')('wasm handles unregister finalizers on disposal', () => {
   expect(finalizationRegistrations.map(({ registry }) => registry))
     .toEqual(expect.arrayContaining(['pptxdocument', 'pptxrenderer']));
   const counts = finalizationRegistrations.map(({ registry, live }) => `${registry}: ${live}`).join('\n');

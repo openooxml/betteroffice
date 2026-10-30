@@ -1,10 +1,10 @@
 import { beforeAll, expect, test } from 'bun:test';
-import { engineBackend } from '../wasm/engine';
+import { engineKind } from '../wasm/engine';
 import { createTestWorkbookSession, exhaustEngineMemory, initRecordedWasm, numbersWorkbook } from './testHelpers';
 
 beforeAll(initRecordedWasm);
 
-test.skipIf(engineBackend() === 'native')('an engine out of memory in a cell edit after open fails the session as out-of-memory, not a bare trap', async () => {
+test.skipIf(engineKind === 'native')('an engine out of memory in a cell edit after open fails the session as out-of-memory, not a bare trap', async () => {
   const session = await createTestWorkbookSession(await numbersWorkbook(200));
   exhaustEngineMemory();
   const input = 'x'.repeat(30_000);

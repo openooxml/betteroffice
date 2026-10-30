@@ -4229,9 +4229,6 @@ export declare function presentationDisplayListJson(handle: PresentationHandle, 
 export declare function isProposalsAvailable(): boolean;
 export declare function initWasm(input?: WasmInitInput): Promise<void>;
 export declare function isWasmAvailable(): boolean;
-export type EngineBackend = 'wasm' | 'native';
-/** Which engine runs this presentation code ('native' when @betteroffice/pptx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export declare function engineBackend(): EngineBackend;
 export declare function wasmVersion(): string;
 export declare function inspectPresentation(bytes: Uint8Array, options?: InspectPresentationOptions): unknown;
 /**

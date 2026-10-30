@@ -5,7 +5,7 @@ import { createSessionClient } from '../../../../shared/office-session/client';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { initWasm } from '../wasm/loader';
-import { engineBackend, PptxDocument } from '../wasm/engine';
+import { engineKind, PptxDocument } from '../wasm/engine';
 import { createPresentationSession } from './client';
 import { createPptxWorkerEditorSession, createPresentationEditorSession } from './editorSession';
 import { createPresentationSessionHost } from './host';
@@ -125,7 +125,7 @@ test('collaboration_error_precedes_worker_creation', () => {
   } finally { initialize.mockRestore(); }
 });
 
-test.skipIf(engineBackend() === 'native')('cold_editor_hydration_reuses_worker_module', async () => {
+test.skipIf(engineKind === 'native')('cold_editor_hydration_reuses_worker_module', async () => {
   const script = `
     import assert from 'node:assert/strict';
     import { createInProcessPair } from ${JSON.stringify(resolve(import.meta.dir, '../../../../shared/office-session/testing/inProcessTransport.ts'))};
