@@ -12,7 +12,9 @@ extern crate alloc;
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
+#[cfg(not(target_arch = "wasm32"))]
 use core::ffi::{c_uint, c_void};
+#[cfg(not(target_arch = "wasm32"))]
 use core::ptr::{self, NonNull};
 
 #[cfg(any(
@@ -23,8 +25,10 @@ use core::ptr::{self, NonNull};
 ))]
 use core::fmt;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod allocator;
+#[cfg(any(target_arch = "wasm32", test))]
+mod rust_zstd;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 mod woff2t;
@@ -118,6 +122,7 @@ impl fmt::Display for DecodeError {
 ))]
 impl std::error::Error for DecodeError {}
 
+#[cfg(not(target_arch = "wasm32"))]
 unsafe extern "C" {
     #[link_name = "FONTPACK_ZSTD_getFrameContentSize"]
     fn frame_content_size(src: *const c_void, len: usize) -> u64;
@@ -143,14 +148,17 @@ unsafe extern "C" {
     ) -> usize;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Context(NonNull<c_void>);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Context {
     fn drop(&mut self) {
         unsafe { free_context(self.0.as_ptr()) };
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn check(code: usize) -> Result<usize, DecodeError> {
     if unsafe { is_error(code) } == 0 {
         return Ok(code);
@@ -168,6 +176,16 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
     bytes.starts_with(&ZSTD_MAGIC)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn decode(
+    frame: &[u8],
+    dict: Option<&[u8]>,
+    max_output: usize,
+) -> Result<Vec<u8>, DecodeError> {
+    rust_zstd::decode(frame, dict, max_output)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn decode(
     frame: &[u8],
     dict: Option<&[u8]>,

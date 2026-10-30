@@ -53,4 +53,7 @@ if (optimize.status !== 0) process.exit(optimize.status ?? 1);
 const destination = resolve(root, 'packages/fonts/dist/decoder/fontpack.wasm');
 await mkdir(dirname(destination), { recursive: true });
 await copyFile(optimized, destination);
+const sourceDestination = resolve(root, 'packages/fonts/src/decoder/fontpack.wasm');
+await mkdir(dirname(sourceDestination), { recursive: true });
+await copyFile(optimized, sourceDestination);
 console.log(`[wasm] fontpack: ${(await stat(destination)).size} bytes`);

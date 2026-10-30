@@ -94,10 +94,12 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-drawingml",
  "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "foldhash",
+ "libm",
  "ryu-js",
  "serde",
  "serde_json",
@@ -115,6 +117,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "foldhash",
  "js-sys",
+ "libm",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -141,6 +144,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
  "indexmap",
+ "libm",
  "memchr",
  "quick-xml",
  "ryu-js",
@@ -511,6 +515,7 @@ dependencies = [
  "betteroffice-xlsx-model",
  "quick-xml",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ use crate::drawingml::{
     parse_custom_geometry_path, parse_fill as parse_basic_fill, parse_gradient_fill,
     parse_line_end, parse_preset_geometry_path, parse_shape_type, parse_transform, rot_to_degrees,
 };
+use crate::fmath;
 use crate::image::{
     Image, ImagePadding, ImagePosition, ImageSize, ImageWrap, parse_anchor_position,
     parse_anchor_wrap, placeholder_image,
@@ -1238,7 +1239,7 @@ fn parse_scene_node(
         let matrix = local_shape_matrix(parent, &shape);
         let mut transform =
             matrix_contract(matrix, Some(shape.size.width), Some(shape.size.height));
-        let parent_rotation = parent.b.atan2(parent.a) * 180.0 / std::f64::consts::PI;
+        let parent_rotation = fmath::atan2(parent.b, parent.a) * 180.0 / std::f64::consts::PI;
         let parent_flipped = parent.a * parent.d - parent.b * parent.c < 0.0;
         shape.offset = Some(ShapeOffset {
             x: transform.offset_x.unwrap_or(0.0),
@@ -1275,9 +1276,9 @@ fn parse_scene_node(
             finite_attribute(off, "x").unwrap_or(0.0),
             finite_attribute(off, "y").unwrap_or(0.0),
         );
-        let scale_x = parent.a.hypot(parent.b);
-        let scale_y = parent.c.hypot(parent.d);
-        let parent_rotation = parent.b.atan2(parent.a) * 180.0 / std::f64::consts::PI;
+        let scale_x = fmath::hypot(parent.a, parent.b);
+        let scale_y = fmath::hypot(parent.c, parent.d);
+        let parent_rotation = fmath::atan2(parent.b, parent.a) * 180.0 / std::f64::consts::PI;
         let authored_flip = transform_element
             .and_then(|value| value.parse_boolean_attribute(None, "flipH"))
             == Some(true);
@@ -1445,10 +1446,10 @@ impl Matrix {
     fn rotate(degrees: f64) -> Self {
         let radians = degrees * std::f64::consts::PI / 180.0;
         Self {
-            a: radians.cos(),
-            b: radians.sin(),
-            c: -radians.sin(),
-            d: radians.cos(),
+            a: fmath::cos(radians),
+            b: fmath::sin(radians),
+            c: -fmath::sin(radians),
+            d: fmath::cos(radians),
             e: 0.0,
             f: 0.0,
         }
@@ -1510,14 +1511,14 @@ fn group_matrix(parent: Matrix, transform: Option<&XmlElement>) -> Matrix {
 }
 fn matrix_contract(matrix: Matrix, width: Option<f64>, height: Option<f64>) -> SceneTransform {
     let origin = matrix.apply(0.0, 0.0);
-    let scale_x = matrix.a.hypot(matrix.b);
-    let scale_y = matrix.c.hypot(matrix.d);
+    let scale_x = fmath::hypot(matrix.a, matrix.b);
+    let scale_y = fmath::hypot(matrix.c, matrix.d);
     SceneTransform {
         offset_x: Some(origin.0),
         offset_y: Some(origin.1),
         width: width.map(|value| (value * scale_x).abs()),
         height: height.map(|value| (value * scale_y).abs()),
-        rotation: Some(matrix.b.atan2(matrix.a) * 180.0 / std::f64::consts::PI),
+        rotation: Some(fmath::atan2(matrix.b, matrix.a) * 180.0 / std::f64::consts::PI),
         flip_h: (matrix.a * matrix.d - matrix.b * matrix.c < 0.0).then_some(true),
         ..SceneTransform::default()
     }
@@ -1899,13 +1900,13 @@ fn render_shape_transform(
     matrix: Matrix,
     parent_origin: (f64, f64),
 ) -> (f64, f64) {
-    let width = shape.size.width * matrix.a.hypot(matrix.b);
-    let height = shape.size.height * matrix.c.hypot(matrix.d);
+    let width = shape.size.width * fmath::hypot(matrix.a, matrix.b);
+    let height = shape.size.height * fmath::hypot(matrix.c, matrix.d);
     let center = matrix.apply(shape.size.width / 2.0, shape.size.height / 2.0);
     let origin = (center.0 - width / 2.0, center.1 - height / 2.0);
     let flip_h = matrix.a * matrix.d - matrix.b * matrix.c < 0.0;
     let sign = if flip_h { -1.0 } else { 1.0 };
-    let rotation = (sign * matrix.b).atan2(sign * matrix.a).to_degrees();
+    let rotation = fmath::atan2(sign * matrix.b, sign * matrix.a).to_degrees();
     shape.offset = Some(ShapeOffset {
         x: origin.0 - parent_origin.0,
         y: origin.1 - parent_origin.1,

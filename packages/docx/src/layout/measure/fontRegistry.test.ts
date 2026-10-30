@@ -20,6 +20,62 @@ test("an unknown family asks the provider for Word's last-resort face", async ()
   expect(offices).toEqual(['word']);
 });
 
+test('shared loaders register fresh buffers once across families and script fallbacks', async () => {
+  let loads = 0;
+  let registrations = 0;
+  const load = async () => { loads++; return new ArrayBuffer(16); };
+  const views: Array<[number, string]> = [];
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: () => ++registrations,
+      registerSubstituteFont: (id, family) => {
+        views.push([id, family]);
+        return family === 'First' ? 101 : 102;
+      },
+    },
+    {
+      bundled: {
+        resolve: () => load,
+        resolveLastResort: () => load,
+        resolveGlyphFallback: () => load,
+        resolveScriptFallback: () => load,
+      },
+    }
+  );
+  expect(await Promise.all([
+    registry.getFontIdChain('First', false, false),
+    registry.getFontIdChain('Second', false, false),
+    registry.getScriptFallbackIds(['arabic']),
+  ])).toEqual([[101], [102], [1]]);
+  expect(views).toContainEqual([1, 'First']);
+  expect(views).toContainEqual([1, 'Second']);
+  expect(loads).toBe(1);
+  expect(registrations).toBe(1);
+});
+
+test('shared loader registrations retry sink failures and reset with the engine', async () => {
+  let loads = 0;
+  let registrations = 0;
+  const load = async () => { loads++; return new ArrayBuffer(16); };
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: () => {
+        registrations++;
+        if (registrations === 1) throw new Error('registration unavailable');
+        return registrations;
+      },
+    },
+    { bundled: { resolve: () => load } }
+  );
+  expect(await registry.getFontIdChain('First', false, false)).toEqual([]);
+  expect(await registry.getFontIdChain('First', false, false)).toEqual([2]);
+  expect(await registry.getFontIdChain('Second', false, false)).toEqual([2]);
+  registry.clear();
+  expect(await registry.getFontIdChain('First', false, false)).toEqual([3]);
+  expect(loads).toBe(3);
+  expect(registrations).toBe(3);
+});
+
 for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe UI Semibold']) {
   for (const bold of [false, true]) {
     test(`${family} ${bold} italic measures and draws the true italic last resort, not Selawik`, async () => {

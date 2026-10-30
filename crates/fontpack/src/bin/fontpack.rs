@@ -20,12 +20,13 @@ struct Options {
     pack: String,
     version: String,
     level: i32,
-    codec: Codec,
+    codec: Option<Codec>,
 }
 
 #[derive(Serialize)]
 struct Manifest {
     format: u32,
+    schema: u32,
     pack: String,
     version: String,
     faces: Vec<Face>,
@@ -69,7 +70,7 @@ fn options() -> Result<Options> {
     if args.next().as_deref() != Some(std::ffi::OsStr::new("build")) {
         return Err(invalid(concat!(
             "usage: fontpack build --src <dir> --out <dir> ",
-            "--pack <name> --version <semver> [--level 19] [--codec zstd|woff2t]"
+            "--pack <name> --version <semver> [--level 19] [--codec zstd|woff2t|auto]"
         ))
         .into());
     }
@@ -124,9 +125,10 @@ fn options() -> Result<Options> {
         .transpose()?
         .unwrap_or_else(|| "zstd".to_owned());
     let codec = match codec.as_str() {
-        "zstd" => Codec::Zstd,
-        "woff2t" => Codec::Woff2tZstd,
-        _ => return Err(invalid("codec must be zstd or woff2t").into()),
+        "zstd" => Some(Codec::Zstd),
+        "woff2t" => Some(Codec::Woff2tZstd),
+        "auto" => None,
+        _ => return Err(invalid("codec must be zstd, woff2t or auto").into()),
     };
     Ok(Options {
         src,
@@ -165,7 +167,9 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
             return Err(invalid(format!("empty family in {file}")).into());
         }
         let bytes = fs::read(&path)?;
-        let (payload, reference) = if options.codec == Codec::Woff2tZstd {
+        let (payload, reference) = if options.codec != Some(Codec::Zstd)
+            && (options.codec.is_some() || extension.eq_ignore_ascii_case("ttf"))
+        {
             if !extension.eq_ignore_ascii_case("ttf") {
                 return Err(invalid(format!("woff2t requires TTF glyf/loca faces: {file}")).into());
             }
@@ -205,9 +209,13 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
             family: family.to_owned(),
             regular: style == "Regular",
             bytes,
+            codec: if payload.is_some() {
+                Codec::Woff2tZstd
+            } else {
+                Codec::Zstd
+            },
             payload,
             reference,
-            codec: options.codec,
         });
     }
     files.sort_by(|left, right| left.file.cmp(&right.file));
@@ -288,8 +296,42 @@ fn compress(bytes: &[u8], dict: Option<&[u8]>, level: i32) -> Result<Vec<u8>> {
     Ok(compressor.compress(bytes)?)
 }
 
+fn select_codecs(sources: &mut [Source], dictionaries: &[Option<usize>], level: i32) -> Result<()> {
+    let mut families = BTreeMap::<String, Vec<usize>>::new();
+    for (index, source) in sources.iter().enumerate() {
+        families
+            .entry(source.family.clone())
+            .or_default()
+            .push(index);
+    }
+    for indices in families.values() {
+        let mut plain_size = 0;
+        let mut transformed_size = 0;
+        for &index in indices {
+            let source = &sources[index];
+            let dict = dictionaries[index].map(|index| &sources[index]);
+            plain_size += compress(
+                &source.bytes,
+                dict.map(|source| source.bytes.as_slice()),
+                level,
+            )?
+            .len();
+            transformed_size +=
+                compress(source.payload(), dictionary_payload(source, dict)?, level)?.len();
+        }
+        if plain_size <= transformed_size {
+            for &index in indices {
+                sources[index].codec = Codec::Zstd;
+                sources[index].payload = None;
+                sources[index].reference = None;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build(options: Options) -> Result<()> {
-    let sources = sources(&options)?;
+    let mut sources = sources(&options)?;
     let mut families = BTreeMap::<&str, Vec<usize>>::new();
     for (index, face) in sources.iter().enumerate() {
         families.entry(&face.family).or_default().push(index);
@@ -312,6 +354,9 @@ fn build(options: Options) -> Result<()> {
                 dictionaries[index] = Some(*regular);
             }
         }
+    }
+    if options.codec.is_none() {
+        select_codecs(&mut sources, &dictionaries, options.level)?;
     }
     let name = options
         .out
@@ -408,6 +453,7 @@ fn write_pack(
     faces.sort_by(|left, right| left.file.cmp(&right.file));
     let manifest = Manifest {
         format: 1,
+        schema: 1,
         pack: options.pack.clone(),
         version: options.version.clone(),
         faces,
@@ -430,7 +476,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Source, dictionary_payload, verify_limit};
+    use super::{Manifest, Source, dictionary_payload, verify_limit};
     use fontpack::Codec;
 
     fn source(codec: Codec) -> Source {
@@ -443,6 +489,20 @@ mod tests {
             reference: None,
             codec,
         }
+    }
+
+    #[test]
+    fn manifest_has_independent_format_and_schema_versions() {
+        let manifest = Manifest {
+            format: 1,
+            schema: 1,
+            pack: "synthetic".to_owned(),
+            version: "1.2.3".to_owned(),
+            faces: Vec::new(),
+        };
+        let json = serde_json::to_value(manifest).unwrap();
+        assert_eq!(json["format"], 1);
+        assert_eq!(json["schema"], 1);
     }
 
     #[test]
