@@ -31,6 +31,11 @@ export const FORMATS: Record<string, FormatConfig> = {
     native: "bindings/xlsx-native/index.d.ts",
     classes: ["XlsxDocument", "XlsxSnapshotBuilder"],
   },
+  pptx: {
+    wasm: "packages/pptx/src/wasm/generated/pptx_wasm.d.ts",
+    native: "bindings/pptx-native/index.d.ts",
+    classes: ["PptxDocument", "PptxRenderer"],
+  },
 };
 
 const IGNORED_FUNCTIONS = new Set([

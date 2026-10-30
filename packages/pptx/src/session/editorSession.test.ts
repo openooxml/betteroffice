@@ -5,7 +5,7 @@ import { createSessionClient } from '../../../../shared/office-session/client';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { initWasm } from '../wasm/loader';
-import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import { engineBackend, PptxDocument } from '../wasm/engine';
 import { createPresentationSession } from './client';
 import { createPptxWorkerEditorSession, createPresentationEditorSession } from './editorSession';
 import { createPresentationSessionHost } from './host';
@@ -67,7 +67,7 @@ test('hydrates_exactly_one_peer_eagerly', async () => {
   const original = PptxDocument.openPeerDeckJson;
   const free = spyOn(PptxDocument.prototype, 'free');
   const peerOpen = spyOn(PptxDocument, 'openPeerDeckJson').mockImplementation((...args) => {
-    const doc = original(...args);
+    const doc = original.call(PptxDocument, ...args);
     queueMicrotask(() => { void cancelled.dispose(); });
     return doc;
   });
@@ -125,7 +125,7 @@ test('collaboration_error_precedes_worker_creation', () => {
   } finally { initialize.mockRestore(); }
 });
 
-test('cold_editor_hydration_reuses_worker_module', async () => {
+test.skipIf(engineBackend() === 'native')('cold_editor_hydration_reuses_worker_module', async () => {
   const script = `
     import assert from 'node:assert/strict';
     import { createInProcessPair } from ${JSON.stringify(resolve(import.meta.dir, '../../../../shared/office-session/testing/inProcessTransport.ts'))};
