@@ -13,6 +13,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 betteroffice-docx = { path = "../../crates/betteroffice-docx", features = ["raster"] }
+docx-engine = { package = "betteroffice-docx-engine", path = "../../crates/docx-engine" }
+getrandom = "0.3"
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.5"
 serde_json = "1"

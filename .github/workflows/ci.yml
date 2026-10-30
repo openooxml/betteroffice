@@ -479,6 +479,7 @@ jobs:
         run: |
           bun scripts/check-engine-surface.ts xlsx
           bun scripts/check-engine-surface.ts pptx
+          bun scripts/check-engine-surface.ts docx
 
       - name: Test the pptx packages on the native engine
         run: |
@@ -488,7 +489,7 @@ jobs:
       - name: Check native and wasm parity
         env:
           BETTEROFFICE_ENGINE: wasm
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
