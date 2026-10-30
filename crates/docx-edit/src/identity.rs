@@ -900,6 +900,16 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
 }
 
 fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, StoryState> {
+    story_states_within(doc, txn, None).unwrap_or_default()
+}
+
+/// [`story_states_in`] allocating at most `media_budget` bytes of media URLs
+/// when given one; `None` once it runs out.
+fn story_states_within(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
+    mut media_budget: Option<usize>,
+) -> Option<HashMap<String, StoryState>> {
     let (scan, mut comments) = {
         let scan = doc.committed_scan(txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
@@ -912,22 +922,26 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, S
             .collect();
         (scan, comments)
     };
-    scan.stories
-        .iter()
-        .filter_map(|story| {
-            let comments = comments.remove(story).unwrap_or_default();
-            let (fingerprint, units) = story_fingerprint_in(doc, txn, story, &comments)?;
-            Some((
-                story.clone(),
-                StoryState {
-                    root: scan.root(story).to_owned(),
-                    fingerprint,
-                    units,
-                    comments,
-                },
-            ))
-        })
-        .collect()
+    let mut states = HashMap::new();
+    for story in &scan.stories {
+        let comments = comments.remove(story).unwrap_or_default();
+        let fingerprint = story_fingerprint_within(doc, txn, story, &comments, &mut media_budget);
+        if media_budget == Some(0) {
+            return None;
+        }
+        let Some((fingerprint, units)) = fingerprint else {
+            continue;
+        };
+        let root = scan.root(story).to_owned();
+        let state = StoryState {
+            root,
+            fingerprint,
+            units,
+            comments,
+        };
+        states.insert(story.clone(), state);
+    }
+    Some(states)
 }
 
 fn ordered(value: &Any) -> serde_json::Value {
@@ -1262,13 +1276,35 @@ fn story_fingerprint_in(
     story: &str,
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
+    story_fingerprint_within(doc, txn, story, comments, &mut None)
+}
+
+/// [`story_fingerprint_in`] taking the media URLs it allocates off
+/// `media_budget` when given one, which it leaves at `Some(0)` once spent.
+fn story_fingerprint_within(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
+    story: &str,
+    comments: &BTreeMap<String, Vec<(u32, u32)>>,
+    media_budget: &mut Option<usize>,
+) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
     #[cfg(test)]
     STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
     let mut segments = doc.story_segments_in(txn, story).ok()?;
     strip_display_only_keys(&mut segments);
     if let Some(media) = doc.media_table() {
-        crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
+        match media_budget {
+            None => crate::media::write_segment_data_urls(&mut segments, &media).ok()?,
+            Some(budget) => {
+                let written =
+                    crate::media::write_segment_data_urls_within(&mut segments, &media, budget);
+                if !written.ok()? {
+                    *budget = 0;
+                    return None;
+                }
+            }
+        }
     }
     let mut boundaries: Vec<(u32, &str, bool)> = comments
         .iter()
@@ -3069,19 +3105,24 @@ impl EditingDoc {
     }
 
     /// Caches save seed states without reseeding, declining a document of
-    /// more than `max_paragraphs` paragraphs or a package declaring more than
-    /// `max_inflated_bytes` inflated bytes; returns whether they are known.
+    /// more than `max_paragraphs` paragraphs or a package of more than
+    /// `max_inflated_bytes` bytes, packed or as its parts declare them
+    /// inflated, and stopping once its media URLs would take more than twice
+    /// that; returns whether they are known.
     pub fn prime_save_seed_states(&self, max_paragraphs: u32, max_inflated_bytes: u32) -> bool {
-        let Some(source) = self.source_index() else {
-            return false;
+        let bytes = match self.source.lock().unwrap().as_ref() {
+            Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => return true,
+            Some(SourcePackage::Ready(index)) => index.bytes(),
+            Some(SourcePackage::Pending(bytes, _)) => bytes.clone(),
+            None => return false,
         };
-        if source.seed_states_initialized() {
-            return true;
-        }
-        if !self.unchanged_since_seeded() || !source.opened_under_own_digest() {
+        if !self.unchanged_since_seeded() {
             return false;
         }
-        let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(source.bytes()) else {
+        if bytes.as_ref().len() as u64 > u64::from(max_inflated_bytes) {
+            return false;
+        }
+        let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(bytes) else {
             return false;
         };
         let inflated = package.parts().map(|(_, size)| size);
@@ -3092,10 +3133,20 @@ impl EditingDoc {
         if self.committed_scan(&txn).pilcrows.len() > max_paragraphs as usize {
             return false;
         }
-        source.seed_states_or(|| {
-            let stories = story_states_in(self, &txn);
-            self.live_save_seed_states(stories)
-        });
+        let Some(source) = self.source_index() else {
+            return false;
+        };
+        if source.seed_states_initialized() {
+            return true;
+        }
+        if !source.opened_under_own_digest() {
+            return false;
+        }
+        let media_budget = (max_inflated_bytes as usize).saturating_mul(2).max(1);
+        let Some(stories) = story_states_within(self, &txn, Some(media_budget)) else {
+            return false;
+        };
+        source.seed_states_or(|| self.live_save_seed_states(stories));
         true
     }
 
@@ -3960,13 +4011,15 @@ mod tests {
             let txn = doc.yrs_doc().transact();
             doc.committed_scan(&txn).pilcrows.len() as u32
         };
+        let packed = source.bytes().as_ref().len() as u32;
         let package = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).unwrap();
         let inflated = package.parts().map(|(_, size)| size).sum::<u64>() as u32;
-        assert!(paragraphs > 0 && inflated > 0);
+        let size = packed.max(inflated);
+        assert!(paragraphs > 0 && size > 0);
         assert!(!session.prime_save_seed_states(paragraphs - 1, u32::MAX));
-        assert!(!session.prime_save_seed_states(u32::MAX, inflated - 1));
+        assert!(!session.prime_save_seed_states(u32::MAX, size - 1));
         assert!(!source.seed_states_initialized());
-        assert!(session.prime_save_seed_states(paragraphs, inflated));
+        assert!(session.prime_save_seed_states(paragraphs, size));
         assert!(source.seed_states_initialized());
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
     }

@@ -254,24 +254,65 @@ pub(crate) fn write_segment_data_urls(
     table: &MediaTable,
 ) -> Result<(), String> {
     let mut writer = DataUrls::new(table);
-    for segment in segments {
-        let payload = match &mut segment.content {
-            SegmentContent::Pilcrow(properties) => Some(&mut properties.values),
-            SegmentContent::OtherEmbed { payload, .. } => Some(payload),
-            SegmentContent::Text(_) => None,
-        };
-        if let Some(payload) = payload {
-            for (key, value) in payload.iter_mut() {
-                writer.any(key, value);
-            }
-        }
-        for (key, value) in segment.attributes.iter_mut() {
-            writer.any(key, value);
-        }
-    }
+    writer.segments(segments);
     match writer.error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+/// [`write_segment_data_urls`] allocating at most `budget` bytes of URLs and
+/// rewritten payloads, taking what it allocated off `budget`; false once it
+/// runs out, leaving `segments` partly written.
+pub(crate) fn write_segment_data_urls_within(
+    segments: &mut [StorySegment],
+    table: &MediaTable,
+    budget: &mut usize,
+) -> Result<bool, String> {
+    let mut writer = DataUrls::new(table);
+    writer.budget = Some(*budget);
+    writer.segments(segments);
+    *budget = writer.budget.unwrap_or(0);
+    match writer.error {
+        Some(error) => Err(error),
+        None => Ok(!writer.spent),
+    }
+}
+
+impl DataUrls<'_> {
+    fn segments(&mut self, segments: &mut [StorySegment]) {
+        for segment in segments {
+            let payload = match &mut segment.content {
+                SegmentContent::Pilcrow(properties) => Some(&mut properties.values),
+                SegmentContent::OtherEmbed { payload, .. } => Some(payload),
+                SegmentContent::Text(_) => None,
+            };
+            if let Some(payload) = payload {
+                for (key, value) in payload.iter_mut() {
+                    self.any(key, value);
+                }
+            }
+            for (key, value) in segment.attributes.iter_mut() {
+                self.any(key, value);
+            }
+        }
+    }
+}
+
+/// Takes `bytes` off `budget` when it has one; false, marking it `spent`, when they do not fit.
+fn spend(budget: &mut Option<usize>, spent: &mut bool, bytes: usize) -> bool {
+    let Some(left) = budget else {
+        return true;
+    };
+    match left.checked_sub(bytes) {
+        Some(rest) => {
+            *left = rest;
+            true
+        }
+        None => {
+            *spent = true;
+            false
+        }
     }
 }
 
@@ -279,6 +320,8 @@ struct DataUrls<'a> {
     table: &'a MediaTable,
     urls: HashMap<usize, Option<Arc<str>>>,
     error: Option<String>,
+    budget: Option<usize>,
+    spent: bool,
     keep_json_sources: bool,
     json_sources: HashMap<usize, (Arc<str>, Arc<str>)>,
 }
@@ -289,6 +332,8 @@ impl<'a> DataUrls<'a> {
             table,
             urls: HashMap::new(),
             error: None,
+            budget: None,
+            spent: false,
             keep_json_sources: false,
             json_sources: HashMap::new(),
         }
@@ -297,10 +342,12 @@ impl<'a> DataUrls<'a> {
     fn url(&mut self, index: usize) -> Option<Arc<str>> {
         let table = self.table;
         let error = &mut self.error;
+        let (budget, spent) = (&mut self.budget, &mut self.spent);
         self.urls
             .entry(index)
             .or_insert_with(|| match table.data_url(index) {
-                Ok(url) => Some(Arc::from(url)),
+                Ok(url) if spend(budget, spent, url.len()) => Some(Arc::from(url)),
+                Ok(_) => None,
                 Err(message) => {
                     error.get_or_insert(message);
                     None
@@ -379,6 +426,9 @@ impl<'a> DataUrls<'a> {
             }
             sources.push((&rest[..at + KEY.len()], &value[..end], url));
             rest = &value[end..];
+        }
+        if !spend(&mut self.budget, &mut self.spent, len) {
+            return String::new();
         }
         let mut out = String::with_capacity(len);
         for (before, token, url) in sources {
@@ -603,5 +653,31 @@ mod tests {
         assert!(writer.error.is_none());
         assert_eq!(writer.json(r#"{"src":"media:9"}"#), r#"{"src":"media:9"}"#);
         assert!(writer.error.is_some());
+    }
+
+    #[test]
+    fn a_budgeted_writer_spends_each_new_url_and_payload_once_and_stops_when_out() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3, 4]),
+            ("word/media/b.png".to_owned(), vec![5]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let a = (0..table.len())
+            .find(|&i| table.path(i) == Some("word/media/a.png"))
+            .unwrap();
+        let url = "data:image/png;base64,AQIDBA==";
+        let json = format!(r#"{{"src":"media:{a}"}}"#);
+        let rewritten = format!(r#"{{"src":"{url}"}}"#);
+        let mut writer = DataUrls::new(&table);
+        writer.budget = Some(url.len() + rewritten.len());
+        assert_eq!(writer.json(&json), rewritten);
+        assert_eq!(writer.budget, Some(0));
+        assert_eq!(writer.url(a).as_deref(), Some(url));
+        assert!(!writer.spent);
+        assert_eq!(writer.json(&json), "");
+        assert!(writer.spent);
+        assert!(writer.error.is_none());
     }
 }
