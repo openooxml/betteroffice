@@ -261,9 +261,10 @@ pub(crate) fn write_segment_data_urls(
     }
 }
 
-/// [`write_segment_data_urls`] allocating at most `budget` bytes of URLs and
-/// rewritten payloads, taking what it allocated off `budget`; false once it
-/// runs out, leaving `segments` partly written.
+/// [`write_segment_data_urls`] writing at most `budget` bytes of URLs, each
+/// counted at every value it is written into, and of rewritten payloads,
+/// taking them off `budget`; false once it runs out, leaving `segments`
+/// partly written.
 pub(crate) fn write_segment_data_urls_within(
     segments: &mut [StorySegment],
     table: &MediaTable,
@@ -342,12 +343,10 @@ impl<'a> DataUrls<'a> {
     fn url(&mut self, index: usize) -> Option<Arc<str>> {
         let table = self.table;
         let error = &mut self.error;
-        let (budget, spent) = (&mut self.budget, &mut self.spent);
         self.urls
             .entry(index)
             .or_insert_with(|| match table.data_url(index) {
-                Ok(url) if spend(budget, spent, url.len()) => Some(Arc::from(url)),
-                Ok(_) => None,
+                Ok(url) => Some(Arc::from(url)),
                 Err(message) => {
                     error.get_or_insert(message);
                     None
@@ -367,6 +366,7 @@ impl<'a> DataUrls<'a> {
         match value {
             Any::String(text) if key == "src" => media_token_index(text)
                 .and_then(|index| self.url(index))
+                .filter(|url| spend(&mut self.budget, &mut self.spent, url.len()))
                 .map(Any::String),
             Any::String(text)
                 if JSON_PAYLOADS.contains(&key) && text.contains("\"src\":\"media:") =>
@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn a_budgeted_writer_spends_each_new_url_and_payload_once_and_stops_when_out() {
+    fn a_budgeted_writer_spends_each_written_url_and_payload_and_stops_when_out() {
         let bytes = ooxml_opc::rezip_parts(&[
             ("word/media/a.png".to_owned(), vec![1, 2, 3, 4]),
             ("word/media/b.png".to_owned(), vec![5]),
@@ -668,13 +668,23 @@ mod tests {
             .find(|&i| table.path(i) == Some("word/media/a.png"))
             .unwrap();
         let url = "data:image/png;base64,AQIDBA==";
+        let token = Any::String(Arc::from(format!("media:{a}")));
+        let mut writer = DataUrls::new(&table);
+        writer.budget = Some(2 * url.len());
+        for _ in 0..2 {
+            let written = writer.written("src", &token);
+            assert!(matches!(written, Some(Any::String(ref text)) if text.as_ref() == url));
+        }
+        assert_eq!(writer.budget, Some(0));
+        assert!(!writer.spent);
+        assert!(writer.written("src", &token).is_none());
+        assert!(writer.spent);
+
         let json = format!(r#"{{"src":"media:{a}"}}"#);
         let rewritten = format!(r#"{{"src":"{url}"}}"#);
         let mut writer = DataUrls::new(&table);
-        writer.budget = Some(url.len() + rewritten.len());
+        writer.budget = Some(rewritten.len());
         assert_eq!(writer.json(&json), rewritten);
-        assert_eq!(writer.budget, Some(0));
-        assert_eq!(writer.url(a).as_deref(), Some(url));
         assert!(!writer.spent);
         assert_eq!(writer.json(&json), "");
         assert!(writer.spent);

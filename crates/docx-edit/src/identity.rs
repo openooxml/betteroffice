@@ -903,8 +903,8 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, S
     story_states_within(doc, txn, None).unwrap_or_default()
 }
 
-/// [`story_states_in`] allocating at most `media_budget` bytes of media URLs
-/// when given one; `None` once it runs out.
+/// [`story_states_in`] writing at most `media_budget` bytes of media URLs,
+/// counted at every use, when given one; `None` once it runs out.
 fn story_states_within(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
@@ -1279,7 +1279,7 @@ fn story_fingerprint_in(
     story_fingerprint_within(doc, txn, story, comments, &mut None)
 }
 
-/// [`story_fingerprint_in`] taking the media URLs it allocates off
+/// [`story_fingerprint_in`] taking the media URLs it writes off
 /// `media_budget` when given one, which it leaves at `Some(0)` once spent.
 fn story_fingerprint_within(
     doc: &EditingDoc,
@@ -3107,8 +3107,8 @@ impl EditingDoc {
     /// Caches save seed states without reseeding, declining a document of
     /// more than `max_paragraphs` paragraphs or a package of more than
     /// `max_inflated_bytes` bytes, packed or as its parts declare them
-    /// inflated, and stopping once its media URLs would take more than twice
-    /// that; returns whether they are known.
+    /// inflated, and stopping once the media URLs its stories reference would
+    /// take more than that; returns whether they are known.
     pub fn prime_save_seed_states(&self, max_paragraphs: u32, max_inflated_bytes: u32) -> bool {
         let bytes = match self.source.lock().unwrap().as_ref() {
             Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => return true,
@@ -3142,7 +3142,7 @@ impl EditingDoc {
         if !source.opened_under_own_digest() {
             return false;
         }
-        let media_budget = (max_inflated_bytes as usize).saturating_mul(2).max(1);
+        let media_budget = (max_inflated_bytes as usize).max(1);
         let Some(stories) = story_states_within(self, &txn, Some(media_budget)) else {
             return false;
         };
