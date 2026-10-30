@@ -103,7 +103,7 @@ function walkGraph(): { files: Set<string>; bare: Set<string> } {
     const file = stack.pop()!;
     if (files.has(file)) continue;
     files.add(file);
-    if (!isFile(file)) continue;
+    if (!isFile(file) || file.endsWith(".json")) continue;
     const text = readFileSync(join(repoRoot, file), "utf8");
     for (const match of text.matchAll(SPECIFIER)) {
       const isType = Boolean(match[1]);
