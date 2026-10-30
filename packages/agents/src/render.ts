@@ -14,7 +14,7 @@ export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   const requirements = JSON.parse(session.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
   await source.prepareFontRequirements(requirements);
   const measurement = source.measurementConfigForRequirements(requirements);
-  if (!measurement) throw new DocumentToolError('FONT_UNAVAILABLE', 'Required fonts could not be loaded. Install @betteroffice/fonts and, for CJK, @betteroffice/fonts-cjk.');
+  if (!measurement) throw new DocumentToolError('FONT_UNAVAILABLE', 'Required fonts could not be loaded. Install @betteroffice/fonts and the optional coverage packages @betteroffice/fonts-cjk and @betteroffice/fonts-intl as needed.');
   const { layout, notesConverged } = computeLayout({ document, pageGap: 0, session, renderEnv: {}, measurement });
   const kernel = getLayoutKernelInputs(layout)!;
   const display = await buildRustDisplayList({ ...kernel, layout, fontChains: measurement.fontChains }, session);

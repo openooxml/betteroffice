@@ -470,7 +470,7 @@ jobs:
         run: |
           bun run build:docx-wasm
           bun run build:fonts
-          BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx
+          BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts
           BETTEROFFICE_ENGINE=native bun test --isolate packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
 
       - name: Check engine surface

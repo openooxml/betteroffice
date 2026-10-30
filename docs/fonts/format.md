@@ -23,7 +23,10 @@ source TTF. For `woff2t`, each `<face>.source.sha256` sidecar lists the SHA-256
 of the `.ttf`, `.uw2` and `.woff2` in `sha256sum` format, one line each in that
 order; the builder rejects a face whose sidecar is missing or does not match all
 three current files. Regenerate companions with `scripts/fonts/woff2-transform.py`.
-The default `--codec zstd` preserves source bytes. File names stay
+`--codec auto` compares the encoded totals for each family and selects
+`woff2t+zstd` only when it is smaller, keeping dictionary codecs consistent.
+It requires the same companions for TTF faces. The default `--codec zstd`
+preserves source bytes. File names stay
 `<face>.ttf.zst` for both codecs.
 
 WOFF2 reconstruction produces a valid sfnt but does not preserve the source TTF
@@ -64,8 +67,12 @@ For plain zstd, the internal TypeScript decoder uses the built-in Node zstd
 decompressor when available, otherwise the standalone wasm decoder. An explicit
 `wasmUrl` selects wasm; without it the decoder loads `dist/decoder/fontpack.wasm`
 from the package root. `woff2t+zstd` always uses the full wasm pipeline,
-including in Node. Both codecs share one module, which links the
-decompression-only zstd C source and wuff 0.2.9 with default features disabled.
+including in Node. Both codecs share one module, which links `ruzstd` 0.9.1
+(a zstd decoder in Rust, so building it needs no C compiler with a wasm target)
+and wuff 0.2.9 with default features disabled. Native builds of the crate decode
+with the decompression-only zstd C source instead; both report the same errors.
+A raw-content dictionary reaches `ruzstd` wrapped as a formatted dictionary whose
+entropy tables a prefix-compressed frame never uses.
 Wuff reconstructs the font with `decompress_woff2_with_custom_brotli` and an
 identity callback; brotli and flate2 are absent from this wasm feature set. The
 builder alone enables brotli for reference verification.
@@ -115,6 +122,11 @@ their plain zstd behavior.
 
 ## Manifest schema
 
+`schema: 1` versions the manifest structure independently of the binary `format`.
+Consumers ignore unknown top-level and per-face fields. Optional additions do
+not require a schema bump. The per-face name `slices` is reserved for optional
+future data; format 1 loaders do not interpret it.
+
 `manifest.json` is UTF-8 JSON. `faces` is sorted by `file`. File names are
 relative to the pack directory. `family` is the source filename stem before its
 last `-`, or the entire stem when there is no `-`.
@@ -122,6 +134,7 @@ last `-`, or the entire stem when there is no `-`.
 ```json
 {
   "format": 1,
+  "schema": 1,
   "pack": "synthetic",
   "version": "1.2.3",
   "faces": [
