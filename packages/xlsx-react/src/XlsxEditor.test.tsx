@@ -12,6 +12,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { useEffect } from 'react';
 import {
   cellRect,
   initWasm,
@@ -2156,14 +2157,15 @@ describe('XlsxEditor commands', () => {
 
   it('reports the workbook lifecycle and fails commands of a replaced workbook', async () => {
     let api: XlsxEditorApi | undefined;
-    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} onReady={(ready) => void (api = ready)} />);
-    const store = await new Promise<XlsxCommandStore>((resolve) => {
-      function Probe() {
-        resolve(useXlsxCommands());
-        return null;
-      }
-      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} toolbar={<Probe />} />);
-    });
+    let committed: XlsxCommandStore | undefined;
+    function Probe() {
+      const store = useXlsxCommands();
+      useEffect(() => { committed = store; }, [store]);
+      return null;
+    }
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} toolbar={<Probe />} />);
+    await waitFor(() => expect(committed).toBeDefined());
+    const store = committed!;
     const code = (state: { enabled: boolean; disabledReason?: { code: string } }) =>
       state.enabled ? null : state.disabledReason!.code;
     expect(code(store.getState('save'))).toBe('no-document');

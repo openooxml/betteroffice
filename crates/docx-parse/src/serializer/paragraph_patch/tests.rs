@@ -1055,6 +1055,99 @@ fn paragraph_patch_preserves_proof_errors_and_smart_tags() {
 }
 
 #[test]
+fn paragraph_patch_keeps_complex_fields_beside_a_hyperlink_label_in_an_sdt() {
+    let field = concat!(
+        "<w:r w:rsidR='00112233'><w:fldChar w:fldCharType='begin' w:dirty='1'/></w:r>",
+        "<w:r><w:instrText xml:space='preserve'> PAGEREF _Toc1 \\h </w:instrText></w:r>",
+        "<w:r><w:fldChar w:fldCharType='separate'/></w:r>",
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>2</w:t></w:r>",
+        "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+    );
+    let source = format!(
+        "<w:p><w:hyperlink w:anchor='_Toc1' w:history='1'><w:r><w:t>Background</w:t></w:r><w:r><w:tab/></w:r>{field}</w:hyperlink></w:p>"
+    );
+    let story = format!(
+        "<w:document xmlns:w='{}'><w:body><w:sdt><w:sdtContent>{source}</w:sdtContent></w:sdt></w:body></w:document>",
+        super::lower::WORD
+    );
+    let context = PatchContext::at("word/document.xml", &story, story.find("<w:p>").unwrap());
+    let marks = json!({"hyperlink": {"href": "#_Toc1", "history": true}});
+    let mut plan = patch(
+        vec![text("Background\t2", marks.clone())],
+        vec![text("Context\t2", marks.clone())],
+    );
+    replace(&mut plan, 0, 10, "Context", marks.clone());
+    let written = patch_paragraph_v1(&source, &plan, &context).unwrap();
+    assert_eq!(written, source.replace("Background", "Context"));
+    assert!(written.contains(field));
+
+    let mut touched = patch(
+        vec![text("Background\t2", marks.clone())],
+        vec![text("Background\t3", marks.clone())],
+    );
+    replace(&mut touched, 11, 12, "3", marks.clone());
+    assert_eq!(
+        patch_paragraph_v1(&source, &touched, &context)
+            .unwrap_err()
+            .code,
+        PatchErrorCode::UnsupportedStructure
+    );
+    touched.text_edits.clear();
+    touched.run_edits.push(RunEditV1 {
+        from: 11,
+        to: 12,
+        deltas: vec![delta("bold", None, Some(json!(true)))],
+        target: attrs(json!({"hyperlink": marks["hyperlink"], "bold": true})),
+        inherit: Attrs::new(),
+    });
+    assert_eq!(
+        patch_paragraph_v1(&source, &touched, &context)
+            .unwrap_err()
+            .code,
+        PatchErrorCode::UnsupportedStructure
+    );
+}
+
+#[test]
+fn paragraph_patch_keeps_an_alternate_content_atom_and_its_nested_markup() {
+    let drawing = concat!(
+        "<w:r><w:rPr><w:noProof/></w:rPr>",
+        "<mc:AlternateContent xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' xmlns:v='urn:schemas-microsoft-com:vml'>",
+        "<mc:Choice Requires='v'><w:pict><v:shape id='choice'/></w:pict></mc:Choice>",
+        "<mc:Fallback><w:pict><v:shape id='fallback'><v:textbox><w:txbxContent>",
+        "<w:p><w:bookmarkStart w:id='4' w:name='box'/><w:r><w:t>Box</w:t></w:r><w:bookmarkEnd w:id='4'/></w:p>",
+        "</w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>"
+    );
+    let atom = UnitV1::Atom {
+        atom_kind: "shape".to_owned(),
+        payload: attrs(json!({"id": "choice"})),
+        attrs: Attrs::new(),
+    };
+    let source = format!("<w:p><w:r><w:t>Caption</w:t></w:r>{drawing}</w:p>");
+    let mut plan = patch(
+        vec![text("Caption", json!({})), atom.clone()],
+        vec![text("Title", json!({})), atom],
+    );
+    replace(&mut plan, 0, 7, "Title", json!({}));
+    let written = write(&source, &plan).unwrap();
+    assert_eq!(written, source.replace("Caption", "Title"));
+    assert!(written.contains(drawing));
+
+    plan.text_edits.clear();
+    plan.run_edits.push(RunEditV1 {
+        from: 7,
+        to: 8,
+        deltas: vec![delta("bold", None, Some(json!(true)))],
+        target: attrs(json!({"bold": true})),
+        inherit: Attrs::new(),
+    });
+    assert_eq!(
+        write(&source, &plan).unwrap_err().code,
+        PatchErrorCode::UnsupportedStructure
+    );
+}
+
+#[test]
 fn paragraph_patch_writer_advertises_version_one() {
     assert_eq!(crate::paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION, 1);
 }

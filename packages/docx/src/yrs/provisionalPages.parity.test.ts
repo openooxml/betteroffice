@@ -42,7 +42,8 @@ beforeAll(async () => {
       'export const preloadEditWasm = async () => {}; export const preloadEditWasmFrom = async () => {};',
     '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
     '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
-    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => [];',
+    './residentSaveWarmup': 'export const warmResidentSave = async () => {};',
+    '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => [];',
   };
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],

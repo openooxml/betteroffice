@@ -185,6 +185,7 @@ pub(super) struct Cell {
     pub node: usize,
     pub raw: Range<usize>,
     pub unit: UnitV1,
+    pub retained: bool,
 }
 
 pub(super) struct SourceRun {
@@ -203,35 +204,33 @@ pub(super) struct Lowered {
     pub markers: Vec<u32>,
     pub len: u32,
     pub ppr: Option<usize>,
+    fields: Vec<bool>,
 }
 
-pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Failure> {
+pub(super) fn lower(
+    source: &str,
+    context: &PatchContext,
+    units: &[UnitV1],
+) -> Result<Lowered, Failure> {
     let xml = Xml::parse(source, &context.namespaces)?;
-    if context.in_sdt {
-        return Err(Failure::structure(
-            "sdt: paragraph is inside a content control",
-        ));
-    }
     if !xml.nodes[0].word("p") {
         return Err(Failure::structure("paragraph is not an editable w:p"));
     }
     let mut drawing_end = 0;
     for node in &xml.nodes {
+        #[cfg(test)]
+        super::work::add(1);
         if node.span.start < drawing_end {
             continue;
         }
-        if super::drawing::is_smart_art(source, &xml, node) {
+        if drawing(node) {
             drawing_end = node.span.end;
             continue;
         }
-        #[cfg(test)]
-        super::work::add(1);
         let unsupported_word = node.namespace == WORD
             && matches!(
                 node.local.as_str(),
                 "fldSimple"
-                    | "fldChar"
-                    | "instrText"
                     | "ins"
                     | "del"
                     | "moveFrom"
@@ -242,8 +241,6 @@ pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Fai
                     | "moveToRangeEnd"
                     | "rPrChange"
                     | "pPrChange"
-                    | "drawing"
-                    | "pict"
                     | "txbxContent"
                     | "sdt"
             );
@@ -272,12 +269,28 @@ pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Fai
         markers: Vec::new(),
         len: 0,
         ppr,
+        fields: Vec::new(),
     };
-    visit(source, 0, 0, &mut result)?;
+    visit(source, 0, 0, &super::flatten(units), &mut result)?;
+    if !result.fields.is_empty() {
+        return Err(Failure::structure("field: unclosed complex field"));
+    }
     Ok(result)
 }
 
-fn visit(source: &str, parent: usize, scope: usize, result: &mut Lowered) -> Result<(), Failure> {
+fn drawing(node: &Node) -> bool {
+    node.word("drawing")
+        || node.word("pict")
+        || (node.namespace == crate::xml::namespaces::MC && node.local == "AlternateContent")
+}
+
+fn visit(
+    source: &str,
+    parent: usize,
+    scope: usize,
+    units: &[UnitV1],
+    result: &mut Lowered,
+) -> Result<(), Failure> {
     for at in result.xml.nodes[parent].children.clone() {
         #[cfg(test)]
         super::work::add(1);
@@ -286,13 +299,13 @@ fn visit(source: &str, parent: usize, scope: usize, result: &mut Lowered) -> Res
             continue;
         }
         if node.word("hyperlink") {
-            visit(source, at, at, result)?;
+            visit(source, at, at, units, result)?;
         } else if node.word("smartTag") {
-            visit(source, at, scope, result)?;
+            visit(source, at, scope, units, result)?;
         } else if node.word("proofErr") || node.word("smartTagPr") {
             continue;
         } else if node.word("r") {
-            lower_run(source, at, scope, result)?;
+            lower_run(source, at, scope, units, result)?;
         } else if node.namespace == WORD
             && matches!(
                 node.local.as_str(),
@@ -315,7 +328,13 @@ fn visit(source: &str, parent: usize, scope: usize, result: &mut Lowered) -> Res
     Ok(())
 }
 
-fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Result<(), Failure> {
+fn lower_run(
+    source: &str,
+    at: usize,
+    scope: usize,
+    units: &[UnitV1],
+    result: &mut Lowered,
+) -> Result<(), Failure> {
     let run = result.runs.len();
     let properties = result.xml.child(at, "rPr")?;
     let from = result.len;
@@ -324,6 +343,58 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
         super::work::add(1);
         let node = &result.xml.nodes[child];
         if node.word("rPr") {
+            continue;
+        }
+        if node.word("fldChar") {
+            match node.attr(source, "w:fldCharType").as_deref() {
+                Some("begin") => result.fields.push(false),
+                Some("separate") => {
+                    let mode = result
+                        .fields
+                        .last_mut()
+                        .ok_or_else(|| Failure::structure("field: unmatched separator"))?;
+                    *mode = true;
+                }
+                Some("end") => {
+                    result
+                        .fields
+                        .pop()
+                        .ok_or_else(|| Failure::structure("field: unmatched end"))?;
+                }
+                _ => return Err(Failure::structure("field: invalid field character")),
+            }
+            continue;
+        }
+        if node.word("instrText") {
+            if result.fields.is_empty() {
+                return Err(Failure::structure("field: instruction outside a field"));
+            }
+            continue;
+        }
+        if result.fields.contains(&false) {
+            return Err(Failure::structure("field: unsupported field code content"));
+        }
+        if drawing(node) {
+            // The part digest binds retained atoms to bytes that the patch never rewrites.
+            let unit = units
+                .get(result.cells.len())
+                .filter(|unit| {
+                    matches!(unit, UnitV1::Atom { atom_kind, .. } if matches!(
+                        atom_kind.as_str(),
+                        "image" | "shape" | "shapeGroup" | "chart" | "opaqueDrawing" | "horizontalRule"
+                    ))
+                })
+                .ok_or_else(|| Failure::structure("drawing: source differs from seeded atom"))?;
+            result.cells.push(Cell {
+                from: result.len,
+                to: result.len + 1,
+                run,
+                node: child,
+                raw: node.span.clone(),
+                unit: unit.clone(),
+                retained: true,
+            });
+            result.len += 1;
             continue;
         }
         if node.namespace != WORD {
@@ -378,11 +449,6 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
                 push_atom(result, run, child, "noteRef", payload);
                 continue;
             }
-            "drawing" if super::drawing::is_smart_art(source, &result.xml, node) => {
-                let payload = super::drawing::payload(source, node)?;
-                push_atom(result, run, child, "shape", payload);
-                continue;
-            }
             "commentReference" => {
                 let mut payload = json!({
                     "fieldType": "COMMENT", "instruction": "", "displayText": "",
@@ -425,6 +491,7 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
                     text,
                     attrs: Attrs::new(),
                 },
+                retained: !result.fields.is_empty(),
             });
             result.len += width;
         }
@@ -451,6 +518,7 @@ fn push_atom(result: &mut Lowered, run: usize, node: usize, kind: &str, payload:
             payload,
             attrs: Attrs::new(),
         },
+        retained: !result.fields.is_empty(),
     });
     result.len += 1;
 }

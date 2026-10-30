@@ -1,9 +1,9 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::paragraph_patch::{ParagraphPatchV1, PatchErrorCode, UnitV1};
 use crate::xml::{ParseBudget, ParseLimits, parse_xml};
 
-use super::lower::{Lowered, Node, Xml};
+use super::lower::{Cell, Lowered, Node, Xml};
 use super::{Failure, flatten};
 
 const DIAGRAM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
@@ -85,17 +85,42 @@ fn equivalent(source: &str, lowered: &Lowered, node: usize, left: &str, right: &
     }
 }
 
-pub(super) fn payload(source: &str, node: &Node) -> Result<super::Attrs, Failure> {
-    let xml = canonical(&source[node.span.clone()])
-        .ok_or_else(|| Failure::structure("drawing: invalid SmartArt XML"))?;
-    Ok(super::Attrs::from([("drawingXml".to_owned(), json!(xml))]))
+fn seeded_smart_art(unit: &UnitV1) -> bool {
+    let UnitV1::Atom {
+        atom_kind, payload, ..
+    } = unit
+    else {
+        return false;
+    };
+    match atom_kind.as_str() {
+        "shape" => payload
+            .get("shapeJson")
+            .and_then(Value::as_str)
+            .and_then(|json| serde_json::from_str::<Value>(json).ok())
+            .is_some_and(|shape| {
+                ["drawingXml", "drawingRunXml"]
+                    .iter()
+                    .any(|key| shape.get(key).and_then(Value::as_str).is_some())
+            }),
+        "opaqueDrawing" => payload
+            .get("xml")
+            .and_then(Value::as_str)
+            .is_some_and(|xml| xml.contains(DIAGRAM)),
+        _ => false,
+    }
 }
 
-pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Result<(), Failure> {
+fn smart_art_cell(source: &str, lowered: &Lowered, cell: &Cell) -> bool {
+    let node = &lowered.xml.nodes[cell.node];
+    node.word("drawing")
+        && (is_smart_art(source, &lowered.xml, node) || seeded_smart_art(&cell.unit))
+}
+
+pub(super) fn bind(source: &str, lowered: &Lowered, units: &[UnitV1]) -> Result<(), Failure> {
     if !lowered
         .cells
         .iter()
-        .any(|cell| lowered.xml.nodes[cell.node].word("drawing"))
+        .any(|cell| smart_art_cell(source, lowered, cell))
     {
         return Ok(());
     }
@@ -105,7 +130,7 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
         .take(lowered.cells.len())
     {
         let cell = &lowered.cells[at];
-        if !lowered.xml.nodes[cell.node].word("drawing") {
+        if !smart_art_cell(source, lowered, cell) {
             continue;
         }
         let UnitV1::Atom {
@@ -133,12 +158,7 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
             "opaqueDrawing" => payload.get("xml").and_then(Value::as_str),
             _ => None,
         };
-        let UnitV1::Atom {
-            payload: actual, ..
-        } = &cell.unit
-        else {
-            unreachable!()
-        };
+        let actual = canonical(&source[lowered.xml.nodes[cell.node].span.clone()]);
         let xml = xml.and_then(|xml| {
             let whole_run = shape
                 .as_ref()
@@ -167,7 +187,7 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
         });
         if !xml
             .as_deref()
-            .zip(actual.get("drawingXml").and_then(Value::as_str))
+            .zip(actual.as_deref())
             .is_some_and(|(expected, actual)| {
                 equivalent(source, lowered, cell.node, expected, actual)
             })
@@ -194,16 +214,19 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
                 "drawing: SmartArt run differs from seed",
             ));
         }
-        lowered.cells[at].unit = expected;
     }
     Ok(())
 }
 
-pub(super) fn validate_edits(lowered: &Lowered, patch: &ParagraphPatchV1) -> Result<(), Failure> {
+pub(super) fn validate_edits(
+    source: &str,
+    lowered: &Lowered,
+    patch: &ParagraphPatchV1,
+) -> Result<(), Failure> {
     let drawings: Vec<_> = lowered
         .cells
         .iter()
-        .filter(|cell| lowered.xml.nodes[cell.node].word("drawing"))
+        .filter(|cell| smart_art_cell(source, lowered, cell))
         .collect();
     if drawings.is_empty() {
         return Ok(());

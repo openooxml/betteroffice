@@ -41,6 +41,8 @@ import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount 
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
+import { recoverGroupedStorySeeds } from './groupedStorySeed';
+import { sessionMaterializedSource } from './sessionInternals';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -2191,9 +2193,10 @@ export function documentToYrs(
   document: Document,
   options: YrsOpeningOptions = {}
 ): void {
+  const restoreGroups = recoverGroupedStorySeeds(document, () => sessionMaterializedSource(session));
   const restore = seedFontNames(document);
   try { seedDocument(session, document, options); }
-  finally { restore(); }
+  finally { restore(); restoreGroups(); }
 }
 
 function seedDocument(
