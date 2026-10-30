@@ -79,7 +79,7 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
     const reopened = await openXlsx(await readFile(join(root, 'result.xlsx')));
     try { expect(reopened.listDefinedNames().items.find(name => name.name === 'Rate')).toMatchObject({ name: 'Rate', refersTo: '7' }); expect(reopened.readCells({ sheet: 'Budget', range: 'A101' }).cells[0].value).toEqual({ kind: 'text', value: 'alpha' }); }
     finally { reopened.close(); }
-    expect(stderr).toMatch(/^betteroffice-agents: xlsx engine (native|wasm)\n$/);
+    expect(stderr).toBe('');
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);
 

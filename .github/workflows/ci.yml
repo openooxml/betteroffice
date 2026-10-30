@@ -201,7 +201,6 @@ jobs:
 
       - name: Test
         env:
-          BETTEROFFICE_ENGINE: wasm
           BETTEROFFICE_PACKAGE_DECLARATIONS: skip
         run: bun run test --shard=${{ matrix.shard }}/2
 
@@ -472,8 +471,8 @@ jobs:
         run: |
           bun run build:docx-wasm
           bun run build:fonts
-          BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts
-          BETTEROFFICE_ENGINE=native bun test --isolate packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx scripts/parity/parity.test.ts scripts/native-engine.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
 
       - name: Check engine surface
         run: |
@@ -482,12 +481,10 @@ jobs:
 
       - name: Test the pptx packages on the native engine
         run: |
-          BETTEROFFICE_ENGINE=native bun test --isolate packages/pptx/
-          BETTEROFFICE_ENGINE=native bun test --isolate packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
 
       - name: Check native and wasm parity
-        env:
-          BETTEROFFICE_ENGINE: wasm
         run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts
 
       - name: Check generated declarations

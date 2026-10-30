@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test';
 import { resolve } from 'node:path';
-import { engineBackend } from './engine';
+import { engineKind } from './engine';
 
-test.skipIf(engineBackend() !== 'native')('native initialization ignores wasm inputs and opens a working handle', async () => {
+test.skipIf(engineKind !== 'native')('native initialization ignores wasm inputs and opens a working handle', async () => {
   const script = `
     import assert from 'node:assert/strict';
     const fixture = new Uint8Array(await Bun.file(${JSON.stringify(resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.pptx'))}).arrayBuffer());
@@ -15,9 +15,9 @@ test.skipIf(engineBackend() !== 'native')('native initialization ignores wasm in
     WebAssembly.compileStreaming = blocked;
     WebAssembly.instantiate = blocked;
     WebAssembly.instantiateStreaming = blocked;
-    const { default: initEngine, engineBackend } = await import(${JSON.stringify(resolve(import.meta.dir, 'engine.ts'))});
+    const { default: initEngine, engineKind } = await import(${JSON.stringify(resolve(import.meta.dir, 'engine.ts'))});
     const { initWasm, openPresentation, wasmVersion } = await import(${JSON.stringify(resolve(import.meta.dir, 'loader.ts'))});
-    assert.equal(engineBackend(), 'native');
+    assert.equal(engineKind, 'native');
     const inputs = [undefined, new URL('https://example.invalid/pptx.wasm'),
       new Uint8Array([1, 2, 3]), module, Promise.resolve(module), new Response('not wasm')];
     for (const input of inputs) {
@@ -37,7 +37,9 @@ test.skipIf(engineBackend() !== 'native')('native initialization ignores wasm in
       finally { reopened.dispose(); }
     } finally { handle.dispose(); }
   `;
-  const child = Bun.spawn([process.execPath, '--eval', script], {
+  const child = Bun.spawn([
+    process.execPath, '--preload', resolve(import.meta.dir, '../../../../scripts/native-engine-preload.ts'), '--eval', script,
+  ], {
     cwd: resolve(import.meta.dir, '../../../..'), stdout: 'ignore', stderr: 'pipe',
   });
   const error = await new Response(child.stderr).text();

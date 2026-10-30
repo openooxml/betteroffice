@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 
 import {
-  engineBackend,
   initWasm,
   openPresentation,
   type PptxEditRequest,
@@ -11,6 +10,7 @@ import {
   type StorySnapshot,
   type TextParagraphDraft
 } from '../../packages/pptx/src/index';
+import { engineKind } from '../../packages/pptx/src/wasm/engine';
 import type { Format } from './harness';
 
 function storyResult({ id, length, paragraphs }: StorySnapshot) {
@@ -43,7 +43,7 @@ function storyResult({ id, length, paragraphs }: StorySnapshot) {
 }
 
 export const pptx: Format = {
-  engineBackend,
+  engineKind,
   versionPattern: /^[0-9a-f]{16}-[0-9]+$/,
   async open(bytes, script) {
     await initWasm(

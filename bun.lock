@@ -268,9 +268,6 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "optionalDependencies": {
-        "@betteroffice/xlsx-native": "workspace:^",
-      },
     },
     "packages/docx": {
       "name": "@betteroffice/docx",
@@ -392,12 +389,6 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/pptx-native": "workspace:^",
-      },
-      "optionalPeers": [
-        "@betteroffice/pptx-native",
-      ],
     },
     "packages/pptx-i18n": {
       "name": "@betteroffice/pptx-i18n",
@@ -481,12 +472,6 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/xlsx-native": "workspace:^",
-      },
-      "optionalPeers": [
-        "@betteroffice/xlsx-native",
-      ],
     },
     "packages/xlsx-i18n": {
       "name": "@betteroffice/xlsx-i18n",

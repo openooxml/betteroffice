@@ -35,7 +35,7 @@ export type StyleProperty =
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
-/** @deprecated Use `openWorkbook` from `@betteroffice/xlsx`, which runs on this native engine when it is installed; this asynchronous facade is removed in 0.7. */
+/** @deprecated Use `openWorkbook` from `@betteroffice/xlsx`; this asynchronous facade is removed in 0.7. */
 export declare class Workbook {
   get clientId(): Promise<number>
   get collaborative(): Promise<boolean>
@@ -211,7 +211,7 @@ export interface MutationResult {
   limitedCells: Array<string>
 }
 
-/** @deprecated Use `openWorkbook` from `@betteroffice/xlsx`, which runs on this native engine when it is installed; this asynchronous facade is removed in 0.7. */
+/** @deprecated Use `openWorkbook` from `@betteroffice/xlsx`; this asynchronous facade is removed in 0.7. */
 export declare function openWorkbook(data: Buffer, options?: OpenWorkbookOptions | undefined | null): Promise<Workbook>
 
 export interface OpenWorkbookOptions {

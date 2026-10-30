@@ -7,7 +7,7 @@ const SHIPPED_ROOT_VALUES = [
   'CollaborationError', 'CollaborationProvider', 'PRESENCE_LABEL_DURATION_MS', 'PptxExportError', 'StaleProposalError',
   'decodePresentationImage', 'exportPptxMarkdown', 'exportPptxStructured', 'initWasm', 'inspectPresentation',
   'isProposalsAvailable', 'isWasmAvailable', 'needsElementDecode', 'openPresentation', 'paintSlide',
-  'presenceColorForClientId', 'presentationImageBlob', 'renderPptxMarkdown', 'sizeCanvasForSlide', 'slideToPng', 'wasmVersion', 'engineBackend',
+  'presenceColorForClientId', 'presentationImageBlob', 'renderPptxMarkdown', 'sizeCanvasForSlide', 'slideToPng', 'wasmVersion',
 ];
 
 const STATIC_EDITOR_INTERNALS = ['PptxPeerNotReadyError', 'PptxWorkerEditorDisposedError', 'openPresentationSession',

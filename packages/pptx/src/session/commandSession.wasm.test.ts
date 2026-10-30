@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { resolve } from 'node:path';
-import { engineBackend } from '../wasm/engine';
+import { engineKind } from '../wasm/engine';
 import { sessionWasmFactory, type WasmTestWorker } from '../../../../shared/office-session/testing/wasmWorker';
 import type { ClientMessage } from '../../../../shared/office-session/protocol';
 import type { PresentationCommandOpenOptions } from './commandProtocol';
@@ -23,7 +23,7 @@ function compileRequests(worker: WasmTestWorker) {
   return worker.requests.filter((message) => message.kind === 'wasm-compile');
 }
 
-describe.skipIf(engineBackend() === 'native')('peerless session wasm reuse', () => {
+describe.skipIf(engineKind === 'native')('peerless session wasm reuse', () => {
   test('compiles before payload copying and open, then reuses the advertised module after disposal', async () => {
     const h = factory();
     const bytes = new Uint8Array([1, 2, 3]);

@@ -1,5 +1,4 @@
 import initWasmModule, {
-  backend,
   decodeTiffPng,
   exportPptxMarkdownJson,
   exportPptxStructuredJson,
@@ -495,13 +494,6 @@ export function initWasm(
 
 export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
-}
-
-export type EngineBackend = 'wasm' | 'native';
-
-/** Which engine runs this presentation code ('native' when @betteroffice/pptx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export function engineBackend(): EngineBackend {
-  return backend;
 }
 
 export function wasmVersion(): string {
