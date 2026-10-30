@@ -22,7 +22,9 @@ import {
 } from '@betteroffice/docx/yrs';
 import {
   reservationsKeyOf,
+  reservationsOf,
   reservationsVersionOfKey,
+  sameReservationOwner,
   sourceVersionOf,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
@@ -811,7 +813,7 @@ export function createPluginGeometry(
       return anchorFailure('stale-version', 'The document changed after that version');
     }
     const current = live.reservations?.();
-    if (!current || reservationsKeyOf(queries) !== current.key) return unavailable();
+    if (!current || (reservationsKeyOf(queries) !== current.key && !sameReservationOwner(reservationsOf(queries), current, owner))) return unavailable();
     const entry = current.resolved?.[JSON.stringify([owner, id])];
     const item = current.payload?.sets.find((set) => set.owner === owner)?.items.find((item) => item.id === id);
     if (!entry && !item) return anchorFailure('missing-target', 'The reservation did not resolve');
