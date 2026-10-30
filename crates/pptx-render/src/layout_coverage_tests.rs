@@ -90,6 +90,40 @@ mod coverage_regressions {
     }
 
     #[test]
+    fn coverage_only_runs_keep_emoji_presentation_on_the_browser() {
+        let mut renderer = SlideRenderer::new();
+        let coverage = renderer
+            .register_fallback_font(
+                "Noto Sans JP",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf"),
+            )
+            .unwrap();
+        renderer.set_browser_coverage_fallback(true);
+        let face = renderer
+            .resolve_face("BIZ UD明朝", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(face.id.to_u32(), coverage);
+        for text in ["☀️", "A☀️B"] {
+            let pieces = renderer.browser_coverage_pieces(&face, text, false, false);
+            let emoji = pieces
+                .iter()
+                .find(|(index, _)| text[*index..].starts_with('☀'))
+                .unwrap();
+            assert_eq!(
+                emoji.1.as_ref().map(|face| face.id.to_u32()),
+                Some(BROWSER_FONT_ID),
+                "{text:?}"
+            );
+        }
+        for text in ["☀", "☀\u{FE0E}", "AB"] {
+            let pieces = renderer.browser_coverage_pieces(&face, text, false, false);
+            assert!(pieces.iter().all(|(_, piece)| piece.is_none()), "{text:?}");
+        }
+    }
+
+    #[test]
     fn text_presentation_selector_lets_coverage_faces_cover_default_emoji() {
         let mut renderer = SlideRenderer::new();
         let own = renderer

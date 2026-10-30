@@ -458,10 +458,15 @@ impl SlideRenderer {
         bold: bool,
         italic: bool,
     ) -> Vec<(usize, Option<FontFace>)> {
+        let promoted = self
+            .coverage_faces
+            .iter()
+            .any(|(_, _, coverage)| coverage.id == face.id);
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
         if text
             .chars()
             .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+            && !(promoted && text.graphemes(true).any(emoji_presentation_cluster))
         {
             return vec![(0, None)];
         }
@@ -470,7 +475,8 @@ impl SlideRenderer {
             let own = cluster
                 .chars()
                 .filter(|character| needs_visible_glyph(*character))
-                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true));
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+                && !(promoted && emoji_presentation_cluster(cluster));
             let neutral = cluster
                 .chars()
                 .all(|character| character.is_whitespace() || character.is_ascii_punctuation());
