@@ -87,7 +87,14 @@ mod tests {
             .map(|key| Entry(key, format!("entry {key}")))
             .collect();
         let pointers: Vec<_> = (0..6)
-            .map(|key| values.iter().find(|entry| entry.0 == key).unwrap().1.as_ptr())
+            .map(|key| {
+                values
+                    .iter()
+                    .find(|entry| entry.0 == key)
+                    .unwrap()
+                    .1
+                    .as_ptr()
+            })
             .collect();
         sort_by_shared(&mut values, |left, right| left.0.cmp(&right.0));
         for (index, entry) in values.iter().enumerate() {

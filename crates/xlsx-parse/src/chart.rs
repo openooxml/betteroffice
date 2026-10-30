@@ -1495,7 +1495,9 @@ pub(crate) fn patch_drawing_anchors(
     if edits.is_empty() {
         return Ok(part.to_vec());
     }
-    sort_by_shared(&mut edits, |(left, _), (right, _)| left.start.cmp(&right.start));
+    sort_by_shared(&mut edits, |(left, _), (right, _)| {
+        left.start.cmp(&right.start)
+    });
     source.splice(&edits)
 }
 

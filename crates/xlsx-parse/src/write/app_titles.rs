@@ -140,7 +140,9 @@ pub(super) fn patch(
     if edits.is_empty() {
         None
     } else {
-        sort_by_shared(&mut edits, |(left, _), (right, _)| left.start.cmp(&right.start));
+        sort_by_shared(&mut edits, |(left, _), (right, _)| {
+            left.start.cmp(&right.start)
+        });
         part.splice(&edits).ok()
     }
 }

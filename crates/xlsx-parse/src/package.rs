@@ -1308,7 +1308,9 @@ fn emit_pending(
         .iter()
         .filter(|(name, _)| !emitted.contains(name.as_str()))
         .collect::<Vec<_>>();
-    sort_by_shared(&mut pending, |(left, _), (right, _)| rank(left).cmp(&rank(right)));
+    sort_by_shared(&mut pending, |(left, _), (right, _)| {
+        rank(left).cmp(&rank(right))
+    });
     for (name, bytes) in pending {
         emitted.insert(name.clone());
         if let Some(bytes) = bytes {
