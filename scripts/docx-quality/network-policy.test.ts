@@ -11,7 +11,7 @@ import { isAllowedFontRequest } from './network-policy.mjs';
 const latin = (version = fontsLatinVersion, file = 'Carlito-Regular.ttf.zst') =>
   `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-latin@${version}/assets/${file}`;
 const cjk = (version = fontsCjkVersion) =>
-  `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${version}/assets/NotoSansJP-Regular.otf`;
+  `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${version}/assets/NotoSansJP-Regular.otf.zst`;
 const intl = (version = fontsIntlVersion) =>
   `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-intl@${version}/assets/NotoSansThai-Regular.ttf.zst`;
 const decoder = (version = fontsVersion) =>
@@ -63,6 +63,7 @@ describe('font network policy', () => {
       latin().replace('assets/Carlito-Regular.ttf', 'dist/cdn.js'),
       latin(fontsVersion, 'Carlito-Regular.woff2'),
       intl().replace('.ttf.zst', '.ttf'),
+      cjk().replace('.otf.zst', '.otf'),
       decoder().replace('cdn.jsdelivr.net/npm', 'unpkg.com'),
       decoder().replace('dist/decoder/', 'assets/decoder/'),
       decoder().replace('fontpack.wasm', 'other.wasm'),

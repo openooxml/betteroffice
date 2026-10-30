@@ -86,9 +86,9 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
 - Packed faces are checked against the manifest's lengths and SHA-256 hashes. A CDN can see which
   faces a document requests.
 - Latin, RTL and intl assets use `.ttf.zst` files decoded by the manager; keep those filenames when hosting them.
+- CJK assets use `.otf.zst` files decoded by the manager; keep those filenames when hosting them.
 - With a custom `baseUrl` in either entry, copy `node_modules/@betteroffice/fonts/dist/decoder/fontpack.wasm`
   to `<baseUrl>/decoder/fontpack.wasm` and serve it as `application/wasm`. The package build ships this decoder in `dist/decoder/`.
-- CJK assets remain raw OTF files and can use `br` or `gzip` encoding.
 
 ## Bundlers
 
@@ -115,7 +115,7 @@ packages external. Esbuild does not emit assets referenced only by
 
 Latin and RTL assets ship in the regular dependency `@betteroffice/fonts-latin`.
 The manager loads compressed faces on demand and returns decoded, independently
-owned sfnt buffers. `BundledFontFace.file` names the `.ttf.zst` asset. For a custom
+owned sfnt buffers. `BundledFontFace.file` names the `.ttf.zst` or `.otf.zst` asset. For a custom
 `baseUrl`, copy the Latin pack assets alongside international assets and serve
 `@betteroffice/fonts/dist/decoder/fontpack.wasm` at `<baseUrl>/decoder/fontpack.wasm`.
 

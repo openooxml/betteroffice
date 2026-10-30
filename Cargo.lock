@@ -138,6 +138,7 @@ name = "betteroffice-docx-layout"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-ooxml-text",
  "foldhash",
  "js-sys",
@@ -243,6 +244,7 @@ name = "betteroffice-ooxml-text"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "rustybuzz",
  "serde",
  "serde_json",
@@ -345,6 +347,7 @@ name = "betteroffice-pptx-render"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
