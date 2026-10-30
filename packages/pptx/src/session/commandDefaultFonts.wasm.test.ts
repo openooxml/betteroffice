@@ -389,7 +389,7 @@ test('inserting script text loads coverage after the family attempt and repaints
   loaded.resolve(arabic);
   await arrived.promise;
   await client.flush();
-  expect(manager.resolve.mock.calls).toEqual([['Calibri']]);
+  expect(manager.resolve.mock.calls).toEqual([['Calibri', false, false]]);
   expect(manager.resolveScriptFallback.mock.calls).toEqual([['arabic', false, false]]);
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
   const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')

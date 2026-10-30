@@ -891,7 +891,11 @@ fn chart_title_legend_and_categories_report_scripts() {
     assert!(requests.contains(&json!({
         "family":"Chart Indic","bold":false,"italic":false,"scripts":["devanagari"],
     })));
-    assert!(requests.iter().any(|face| face["scripts"] == json!(["cjk-kr"])));
+    assert!(
+        requests
+            .iter()
+            .any(|face| face["scripts"] == json!(["cjk-kr"]))
+    );
 }
 
 #[test]
