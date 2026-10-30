@@ -5,7 +5,6 @@ import type { WorkbookHandle, WorkbookSession, WorkbookSheetView } from '@better
 import type { WorkbookCommand, WorkbookCommandFrame, WorkbookEditState } from '@betteroffice/xlsx/worker';
 import { SessionFailure } from '../../../../shared/office-session';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
-import { workbookFontRuntimes } from '@betteroffice/xlsx/worker';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import { PLAIN_FORMATTING, testBinding, testSessionCommands } from '../commands/testing';
 import type { InputDraft } from '../commands/inputCoordinator';
@@ -159,20 +158,6 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('editable session workbook', () => {
-  test('peerless sessions retain the decoder bound to their worker', async () => {
-    const opened = session();
-    const decoder = mock(async () => ({ font: new ArrayBuffer(4) }));
-    const runtime = { decoder };
-    workbookFontRuntimes.set(opened.value, runtime);
-    const run = new PeerlessWorkbookSession(opened.value, 1, {
-      changed: () => {}, onError: () => {}, onReady: () => {}, isCurrent: () => true,
-    });
-    try {
-      expect(run.fontRuntime).toBe(runtime);
-      expect((await run.fontRuntime!.decoder(new Uint8Array([1]), { codec: 'zstd' })).font.byteLength).toBe(4);
-      expect(decoder).toHaveBeenCalledTimes(1);
-    } finally { await run.dispose(); }
-  });
   test('async recovery saving requires failure and preserves the failed editor', async () => {
     const opened = session();
     const save = mock(async () => new Uint8Array([7]));

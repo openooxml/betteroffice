@@ -36,6 +36,7 @@ use pptx_parse::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::fmath;
@@ -103,6 +104,31 @@ struct FontFace {
     line_id: FontId,
 }
 
+fn needs_visible_glyph(character: char) -> bool {
+    !character.is_control()
+        && !character.is_whitespace()
+        && !matches!(
+            character as u32,
+            0x00AD
+                | 0x034F
+                | 0x061C
+                | 0x115F..=0x1160
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x206F
+                | 0x3164
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0xFFA0
+                | 0xFFF0..=0xFFF8
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0000..=0xE0FFF
+        )
+}
+
 /// A font family the deck asked for that is not registered, the family drawn
 /// instead, and the first shape that asked for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +182,7 @@ pub struct SlideRenderer {
     /// Normalized fallback family.
     fallback_family: Option<String>,
     font_count: usize,
+    browser_coverage_fallback: bool,
     /// Laid-out text reused across display-list builds and slides.
     text_layouts: Mutex<TextLayoutCache>,
     baseline_stories: Mutex<HashMap<String, CachedBaselineStory>>,
@@ -176,9 +203,21 @@ impl SlideRenderer {
             fallback: None,
             fallback_family: None,
             font_count: 0,
+            browser_coverage_fallback: false,
             text_layouts: Mutex::new(TextLayoutCache::default()),
             baseline_stories: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) -> bool {
+        if self.browser_coverage_fallback == enabled {
+            return false;
+        }
+        self.browser_coverage_fallback = enabled;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
+        true
     }
 
     pub fn register_font(
@@ -340,30 +379,97 @@ impl SlideRenderer {
         pieces
     }
 
+    fn browser_coverage_face(
+        &self,
+        face: &FontFace,
+        cluster: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFace> {
+        let covering = || {
+            self.coverage_faces.iter().filter(|(_, _, candidate)| {
+                cluster
+                    .chars()
+                    .filter(|character| needs_visible_glyph(*character))
+                    .all(|character| self.fonts.covers(candidate.id, character).unwrap_or(false))
+            })
+        };
+        covering()
+            .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
+            .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
+            .or_else(|| covering().next())
+            .map(|(_, _, candidate)| FontFace {
+                line: face.line,
+                line_id: face.line_id,
+                ..candidate.clone()
+            })
+            .or_else(|| {
+                cluster.chars().any(needs_visible_glyph).then(|| FontFace {
+                    id: FontId::from_u32(BROWSER_FONT_ID),
+                    ..face.clone()
+                })
+            })
+    }
+
+    fn browser_coverage_pieces(
+        &self,
+        face: &FontFace,
+        text: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Vec<(usize, Option<FontFace>)> {
+        let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
+        if text
+            .chars()
+            .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+        {
+            return vec![(0, None)];
+        }
+        for (index, cluster) in text.grapheme_indices(true) {
+            let current = pieces.last().and_then(|(_, face)| face.as_ref());
+            let own = cluster
+                .chars()
+                .filter(|character| needs_visible_glyph(*character))
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true));
+            let neutral = cluster
+                .chars()
+                .all(|character| character.is_whitespace() || character.is_ascii_punctuation());
+            let chosen = match current {
+                Some(current)
+                    if neutral
+                        && cluster.chars().all(|character| {
+                            self.fonts.covers(current.id, character).unwrap_or(false)
+                        }) =>
+                {
+                    Some(current.clone())
+                }
+                _ if own => None,
+                _ => self.browser_coverage_face(face, cluster, bold, italic),
+            };
+            let same = pieces.last().is_some_and(|(_, last)| {
+                last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
+            });
+            if !same {
+                pieces.push((index, chosen));
+            }
+        }
+        pieces
+    }
+
     /// Splits `run` where its face has no glyph and a fallback does, so each
     /// part is shaped, measured and drawn in a face that can draw it.
     fn split_by_coverage(&self, run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
-        let pieces =
-            self.coverage_pieces(&run.style.face, &run.text, run.style.bold, run.style.italic);
-        if let [(0, None)] = pieces.as_slice() {
-            out.push(run);
-            return;
-        }
-        for (position, (start, face)) in pieces.iter().enumerate() {
-            let end = pieces
-                .get(position + 1)
-                .map_or(run.text.len(), |(next, _)| *next);
-            let mut style = run.style.clone();
-            if let Some(face) = face {
-                style.family = face.family.clone();
-                style.face = face.clone();
-            }
-            out.push(ResolvedRun {
-                text: run.text[*start..end].to_owned(),
-                start: run.start + utf16_len(&run.text[..*start]),
-                style,
-            });
-        }
+        let pieces = if self.browser_coverage_fallback {
+            self.browser_coverage_pieces(
+                &run.style.face,
+                &run.text,
+                run.style.bold,
+                run.style.italic,
+            )
+        } else {
+            self.coverage_pieces(&run.style.face, &run.text, run.style.bold, run.style.italic)
+        };
+        split_coverage_pieces(run, pieces, out);
     }
 
     /// The store holding every registered face, so a raster backend can resolve
@@ -4054,7 +4160,11 @@ fn chart_text_primitive(
             .map_err(|error| RenderError::Font(error.to_string()))?;
         single_line_box(metrics, size_px, &CompatFlags::default())
     };
-    let pieces = renderer.coverage_pieces(&face, text.text, bold, italic);
+    let pieces = if renderer.browser_coverage_fallback {
+        renderer.browser_coverage_pieces(&face, text.text, bold, italic)
+    } else {
+        renderer.coverage_pieces(&face, text.text, bold, italic)
+    };
     let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
     let mut cluster_advance = 0.0_f32;
@@ -4090,6 +4200,13 @@ fn chart_text_primitive(
         shaped_pieces.push((*start, end, piece_face, shaped, offsets, piece_x, cursor));
     }
     let advance = cursor;
+    let mut utf16_offsets = vec![0; text.text.len() + 1];
+    let mut utf16_end = 0;
+    for (index, character) in text.text.char_indices() {
+        utf16_offsets[index] = utf16_end;
+        utf16_end += character.len_utf16() as u32;
+    }
+    utf16_offsets[text.text.len()] = utf16_end;
     let box_x = safe_geometry(text.x as f32);
     let box_w = safe_geometry(text.width as f32);
     let align = match text.align {
@@ -4110,7 +4227,7 @@ fn chart_text_primitive(
                     .zip(&offsets)
                     .map(|(glyph, offset)| PositionedGlyph {
                         glyph_id: glyph.glyph_id,
-                        cluster: utf16_len(&text.text[..start + glyph.cluster as usize]),
+                        cluster: utf16_offsets[start + glyph.cluster as usize],
                         x: x + offset,
                         advance: glyph.x_advance,
                         x_offset: glyph.x_offset,
@@ -4119,8 +4236,8 @@ fn chart_text_primitive(
                     .collect();
                 PositionedTextRun {
                     text: text.text[start..end].to_owned(),
-                    start: utf16_len(&text.text[..start]),
-                    end: utf16_len(&text.text[..end]),
+                    start: utf16_offsets[start],
+                    end: utf16_offsets[end],
                     x: x + piece_x,
                     width: (piece_end - piece_x).max(0.0),
                     font_id: piece_face.id.to_u32(),
@@ -4138,7 +4255,7 @@ fn chart_text_primitive(
         )
         .collect();
     let width = advance.max(0.0);
-    let end = utf16_len(text.text);
+    let end = utf16_end;
     Ok(Primitive::TextBox {
         text_shadow: None,
         object_id: text.object_id,
@@ -5069,6 +5186,22 @@ struct SegmentShape<'a> {
     breaks: &'a HashMap<usize, bool>,
 }
 
+/// The em advance of a character the browser draws for a family without a
+/// width table: an East Asian full-width character fills its em box, anything
+/// else, halfwidth forms and kana voicing marks included, takes half of it.
+fn browser_default_advance(character: char) -> f32 {
+    if matches!(character as u32,
+        0x1100..=0x115f | 0x2e80..=0x303e | 0x3041..=0x3098 | 0x309b..=0x33ff | 0x3400..=0x4dbf |
+        0x4e00..=0x9fff | 0xa000..=0xa4cf | 0xa960..=0xa97f | 0xac00..=0xd7a3 |
+        0xf900..=0xfaff | 0xfe30..=0xfe4f | 0xff00..=0xff60 | 0xffe0..=0xffe6 |
+        0x20000..=0x3fffd)
+    {
+        1.0
+    } else {
+        0.5
+    }
+}
+
 fn shape_face(
     fonts: &FontStore,
     face: &FontFace,
@@ -5086,18 +5219,20 @@ fn shape_face(
         glyphs.push(ShapedGlyph {
             glyph_id: 0,
             cluster: index as u32,
-            x_advance: face
-                .widths
-                .and_then(|metrics| family_advance(metrics, character))
-                .unwrap_or(0.5)
-                * size_px,
+            x_advance: face.widths.map_or_else(
+                || browser_default_advance(character),
+                |metrics| family_advance(metrics, character).unwrap_or(0.5),
+            ) * size_px,
             x_offset: 0.0,
             y_offset: 0.0,
         });
         if let Some(&(_, mark)) = characters.peek()
-            && let Some(advance) = face
-                .widths
-                .and_then(|metrics| family_composed_kana_advance(metrics, character, mark))
+            && let Some(advance) = match face.widths {
+                Some(metrics) => family_composed_kana_advance(metrics, character, mark),
+                None => (matches!(mark, '\u{3099}' | '\u{309a}')
+                    && browser_default_advance(character) == 1.0)
+                    .then_some(1.0),
+            }
         {
             characters.next();
             glyphs.push(ShapedGlyph {
@@ -6780,10 +6915,25 @@ fn bullet_font_draws(
     if ooxml_text::SymbolFont::named(&family).is_some() || !renderer.has_face_for(&family) {
         return true;
     }
+    let requested = normalize_family(&family);
+    let substitute = renderer
+        .fonts
+        .declared_families(face)
+        .is_ok_and(|declared| {
+            !declared.is_empty()
+                && declared
+                    .iter()
+                    .all(|name| normalize_family(name) != requested)
+        });
     marker
         .chars()
         .filter(|character| !character.is_whitespace())
+        .filter(|character| !substitute || is_private_use(*character))
         .all(|character| renderer.fonts.covers(face, character).unwrap_or(true))
+}
+
+fn is_private_use(character: char) -> bool {
+    matches!(character as u32, 0xe000..=0xf8ff | 0xf_0000..=0x10_ffff)
 }
 
 /// A `buFont` symbol face reaches its glyphs by font position, so `buChar`
@@ -6855,8 +7005,39 @@ fn utf16_len(value: &str) -> u32 {
     value.encode_utf16().count() as u32
 }
 
+fn split_coverage_pieces(
+    run: ResolvedRun,
+    pieces: Vec<(usize, Option<FontFace>)>,
+    out: &mut Vec<ResolvedRun>,
+) {
+    if let [(0, None)] = pieces.as_slice() {
+        out.push(run);
+        return;
+    }
+    let mut offset = run.start;
+    for (position, (start, face)) in pieces.iter().enumerate() {
+        let end = pieces
+            .get(position + 1)
+            .map_or(run.text.len(), |(next, _)| *next);
+        let text = &run.text[*start..end];
+        let mut style = run.style.clone();
+        if let Some(face) = face {
+            style.family = face.family.clone();
+            style.face = face.clone();
+        }
+        out.push(ResolvedRun {
+            text: text.to_owned(),
+            start: offset,
+            style,
+        });
+        offset += utf16_len(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    include!("layout_coverage_tests.rs");
+
     use ooxml_drawingml::ThemeColorScheme;
     use std::collections::BTreeSet;
 
@@ -7406,6 +7587,138 @@ mod tests {
     }
 
     #[test]
+    fn browser_coverage_keeps_controls_and_ignorables_in_the_original_face() {
+        for registered_fallback in [false, true] {
+            let mut renderer = renderer();
+            if registered_fallback {
+                renderer
+                    .register_fallback_font("Liberation Sans", false, false, FONT)
+                    .unwrap();
+            }
+            let run = paragraph(
+                &renderer,
+                "l",
+                "\n\t\u{200B}\u{FE0F}Latin\u{FE0F}\u{200B}\t\n",
+            )
+            .runs
+            .remove(0);
+            let pieces = renderer.browser_coverage_pieces(&run.style.face, &run.text, false, false);
+            assert_eq!(pieces.len(), 1);
+            assert_eq!(pieces[0].0, 0);
+            assert!(pieces[0].1.is_none());
+
+            for character in (0..=0x1F)
+                .chain(0x7F..=0x9F)
+                .filter_map(char::from_u32)
+                .chain([
+                    '\u{00A0}',
+                    '\u{00AD}',
+                    '\u{034F}',
+                    '\u{061C}',
+                    '\u{115F}',
+                    '\u{1160}',
+                    '\u{17B4}',
+                    '\u{17B5}',
+                    '\u{180B}',
+                    '\u{180F}',
+                    '\u{200B}',
+                    '\u{200C}',
+                    '\u{200D}',
+                    '\u{200F}',
+                    '\u{2028}',
+                    '\u{2029}',
+                    '\u{202A}',
+                    '\u{202E}',
+                    '\u{2060}',
+                    '\u{206F}',
+                    '\u{3164}',
+                    '\u{FE00}',
+                    '\u{FE0F}',
+                    '\u{FEFF}',
+                    '\u{FFA0}',
+                    '\u{FFF0}',
+                    '\u{FFF8}',
+                    '\u{1BCA0}',
+                    '\u{1BCA3}',
+                    '\u{1D173}',
+                    '\u{1D17A}',
+                    '\u{E0000}',
+                    '\u{E0100}',
+                    '\u{E01EF}',
+                    '\u{E0FFF}',
+                ])
+            {
+                let text = format!("{character}Latin{character}");
+                let pieces = renderer.browser_coverage_pieces(&run.style.face, &text, false, false);
+                assert_eq!(pieces.len(), 1, "{character:?}");
+                assert_eq!(pieces[0].0, 0);
+                assert!(pieces[0].1.is_none(), "{character:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn browser_coverage_still_splits_an_uncovered_visible_character() {
+        for registered_fallback in [false, true] {
+            let mut renderer = renderer();
+            if registered_fallback {
+                renderer
+                    .register_fallback_font("Liberation Sans", false, false, FONT)
+                    .unwrap();
+            }
+            let run = paragraph(&renderer, "l", "A\u{0939}B").runs.remove(0);
+            assert_eq!(
+                renderer.fonts.covers(run.style.face.id, '\u{0939}'),
+                Ok(false)
+            );
+            for browser_fallback in [false, true] {
+                let pieces = if browser_fallback {
+                    renderer.browser_coverage_pieces(&run.style.face, &run.text, false, false)
+                } else {
+                    renderer.coverage_pieces(&run.style.face, &run.text, false, false)
+                };
+                let pieces: Vec<_> = pieces
+                    .iter()
+                    .map(|(start, face)| (*start, face.as_ref().map(|face| face.id.to_u32())))
+                    .collect();
+                if browser_fallback {
+                    assert_eq!(pieces, [(0, None), (1, Some(BROWSER_FONT_ID)), (4, None)]);
+                } else {
+                    assert_eq!(pieces, [(0, None)]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn browser_coverage_keeps_registered_fallback_nonbreaking_spaces() {
+        let mut renderer = renderer();
+        let arabic = renderer
+            .register_fallback_font(
+                "Noto Sans Arabic",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf"),
+            )
+            .unwrap();
+        let run = paragraph(&renderer, "l", "A\u{0645}\u{00A0}B")
+            .runs
+            .remove(0);
+        for browser_fallback in [false, true] {
+            let pieces = if browser_fallback {
+                renderer.browser_coverage_pieces(&run.style.face, &run.text, false, false)
+            } else {
+                renderer.coverage_pieces(&run.style.face, &run.text, false, false)
+            };
+            let pieces: Vec<_> = pieces
+                .iter()
+                .map(|(start, face)| (*start, face.as_ref().map(|face| face.id.to_u32())))
+                .collect();
+            assert_eq!(pieces, [(0, None), (1, Some(arabic)), (5, None)]);
+        }
+    }
+
+    #[test]
     fn a_character_its_face_cannot_draw_moves_to_a_fallback_that_can() {
         let arabic: &[u8] =
             include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
@@ -7427,6 +7740,7 @@ mod tests {
             &mut unchanged,
         );
         assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+        assert_eq!(unchanged[0].style.face.id, run.style.face.id);
 
         renderer
             .register_fallback_font("Noto Sans Arabic", false, false, arabic)
@@ -12742,11 +13056,16 @@ mod tests {
     fn a_bullet_font_without_the_marker_character_paints_no_marker() {
         let mut renderer = SlideRenderer::new();
         renderer
-            .register_font("Georgia", false, false, FONT)
+            .register_font("Liberation Sans", false, false, FONT)
             .unwrap();
         let theme = Theme::default();
         let face = renderer
-            .resolve_face("Georgia", false, false, &mut SubstitutionLog::default())
+            .resolve_face(
+                "Liberation Sans",
+                false,
+                false,
+                &mut SubstitutionLog::default(),
+            )
             .unwrap()
             .id;
         let draws = |family: Option<&str>, marker: &str| {
@@ -12754,11 +13073,62 @@ mod tests {
             bullet_font_draws(&renderer, &theme, font.as_ref(), face, marker)
         };
         assert!(!renderer.fonts.covers(face, '\u{2713}').unwrap());
-        assert!(draws(Some("Georgia"), "\u{2022}"));
-        assert!(!draws(Some("Georgia"), "\u{2713}"));
+        assert!(draws(Some("Liberation Sans"), "\u{2022}"));
+        assert!(!draws(Some("Liberation Sans"), "\u{2713}"));
         assert!(draws(Some("Wingdings"), "\u{2713}"));
         assert!(draws(Some("Futura"), "\u{2713}"));
         assert!(draws(None, "\u{2713}"));
+    }
+
+    #[test]
+    fn a_substitute_bullet_face_hides_only_private_use_markers() {
+        const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Calibri", false, false, CARLITO)
+            .unwrap();
+        renderer
+            .register_font("Carlito", false, false, CARLITO)
+            .unwrap();
+        let theme = Theme::default();
+        let draws = |family: &str, marker: &str| {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap()
+                .id;
+            assert!(!renderer.fonts.covers(face, '\u{25a0}').unwrap());
+            let font = BulletFont::Typeface(family.to_owned());
+            bullet_font_draws(&renderer, &theme, Some(&font), face, marker)
+        };
+        assert!(draws("Calibri", "\u{25a0}"));
+        assert!(draws("Calibri", "\u{2022}"));
+        assert!(!draws("Calibri", "\u{e83a}"));
+        assert!(!draws("Carlito", "\u{25a0}"));
+    }
+
+    #[test]
+    fn a_light_face_under_its_legacy_family_name_is_the_real_font() {
+        const SELAWIK_LIGHT: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/Selawik-Light.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Selawik Light", false, false, SELAWIK_LIGHT)
+            .unwrap();
+        let theme = Theme::default();
+        let face = renderer
+            .resolve_face(
+                "Selawik Light",
+                false,
+                false,
+                &mut SubstitutionLog::default(),
+            )
+            .unwrap()
+            .id;
+        assert!(!renderer.fonts.covers(face, '\u{2713}').unwrap());
+        let font = BulletFont::Typeface("Selawik Light".to_owned());
+        let draws = |marker: &str| bullet_font_draws(&renderer, &theme, Some(&font), face, marker);
+        assert!(!draws("\u{2713}"));
+        assert!(draws("\u{2022}"));
     }
 
     #[test]

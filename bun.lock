@@ -383,6 +383,9 @@
     "packages/pptx": {
       "name": "@betteroffice/pptx",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
+      },
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "@types/node": "^26.0.0",

@@ -5,7 +5,7 @@ import * as worker from './worker';
 const publicWorker = ['WorkbookEditPeerFailedError', 'WorkbookPeerHydrationError', 'WorkbookPngUnavailableError',
   'WorkbookRecoveryReplayError', 'createWorkbookEditSession', 'openWorkbookSession', 'workbookSessionRecovery'];
 const internalWorker = ['WorkbookRecoveryRefusal', 'createWorkbookEditPeer', 'createWorkbookRecoveryMutators',
-  'failWorkbookEditPeer', 'hydratePeer', 'localNowSerial', 'workbookEditPeerOperations', 'workbookFontRuntimes', 'workbookSessionInternals'];
+  'failWorkbookEditPeer', 'hydratePeer', 'localNowSerial', 'workbookEditPeerOperations', 'workbookSessionInternals'];
 
 test('root re-exports the public worker entry', () => {
   expect(Object.keys(worker).sort()).toEqual([...publicWorker, ...internalWorker].sort());

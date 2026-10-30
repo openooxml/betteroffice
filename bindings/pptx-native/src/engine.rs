@@ -939,6 +939,13 @@ impl PptxRenderer {
             .map_err(|error| map_error(env, error))
     }
 
+    /// Enables browser metrics for uncovered characters. Off by default.
+    #[napi(js_name = "setBrowserCoverageFallback")]
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) -> Result<()> {
+        self.renderer_mut()?.set_browser_coverage_fallback(enabled);
+        Ok(())
+    }
+
     #[napi(js_name = "requestedFontFacesJson")]
     pub fn requested_font_faces_json(
         &self,

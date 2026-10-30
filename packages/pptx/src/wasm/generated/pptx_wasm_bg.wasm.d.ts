@@ -123,6 +123,7 @@ export const pptxrenderer_registerFont: (a: number, b: number, c: number, d: num
 export const pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
 export const pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+export const pptxrenderer_setBrowserCoverageFallback: (a: number, b: number) => void;
 export const pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_snapshotWithLayoutKeysJson: (a: number, b: number) => [number, number, number, number];
 export const renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

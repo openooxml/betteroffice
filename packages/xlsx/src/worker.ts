@@ -9,7 +9,7 @@ export type {
   WorkbookCommandTicket, WorkbookEchoHooks, WorkbookSubmitOptions, WorkbookTicketOutcome,
 } from './session/commandProtocol';
 /** @internal */
-export { hydratePeer, workbookFontRuntimes } from './session/client';
+export { hydratePeer } from './session/client';
 /** @experimental */
 export { WorkbookPeerHydrationError } from './session/peerHydrationError';
 /** @internal */
