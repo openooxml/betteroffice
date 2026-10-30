@@ -50,6 +50,7 @@ fn map_error(env: Env, error: EngineError) -> Error {
             ErrorKind::Message => return env.throw(&error.message),
             ErrorKind::Peer { code } => ("PresentationPeerError", Some(code)),
             ErrorKind::Decode => ("PptxEditDecodeError", None),
+            ErrorKind::ResourceLimit => ("PptxResourceLimitError", None),
         };
         let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
         exception.set_named_property("name", name)?;

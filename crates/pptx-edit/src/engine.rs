@@ -103,6 +103,8 @@ pub enum ErrorKind {
     Peer { code: String },
     /// thrown as an Error named "PptxEditDecodeError" (today: validateEditsJson decode failure)
     Decode,
+    /// thrown as an Error named "PptxResourceLimitError" (a font, image or text budget refused)
+    ResourceLimit,
 }
 
 impl EngineError {
@@ -123,6 +125,13 @@ impl EngineError {
     pub fn decode(message: String) -> Self {
         Self {
             kind: ErrorKind::Decode,
+            message,
+        }
+    }
+
+    pub fn resource_limit(message: String) -> Self {
+        Self {
+            kind: ErrorKind::ResourceLimit,
             message,
         }
     }

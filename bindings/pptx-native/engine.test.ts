@@ -26,10 +26,12 @@ type Snapshot = {
   slides: { id: string; shapes: { textStories: { id: string }[] }[] }[];
 };
 
+let wasmMemory: WebAssembly.Memory;
+
 beforeAll(async () => {
-  await initWasm({
+  ({ memory: wasmMemory } = await initWasm({
     module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)),
-  });
+  }));
 });
 
 function storyId(doc: wasm.PptxDocument): string {
@@ -324,6 +326,44 @@ describe('pptx native engine parity', () => {
     } finally {
       wasmDoc.free();
       nativeDoc.free();
+    }
+  });
+
+  test('one face under many names is held once and a face past the budget throws the same typed error', () => {
+    const large = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/Carlito-BoldItalic.ttf', import.meta.url)));
+    const small = readFileSync(new URL('../../crates/docx-edit/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+    const face = (index: number) => {
+      const bytes = new Uint8Array(small.byteLength + 4);
+      bytes.set(small);
+      new DataView(bytes.buffer).setUint32(small.byteLength, index, true);
+      return bytes;
+    };
+    const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+    try {
+      const ids = renderers.map((renderer) => renderer.registerFont('Carlito', true, true, large));
+      const before = wasmMemory.buffer.byteLength;
+      for (let index = 0; index < 300; index++) {
+        ids.push(...renderers.map((renderer) => renderer.registerFont(`Alias ${index}`, index % 2 === 1, false, large)));
+      }
+      expect(wasmMemory.buffer.byteLength - before).toBeLessThan(2 * large.byteLength);
+      for (let index = 0; index < ids.length; index += 2) expect(ids[index + 1]).toBe(ids[index]);
+      for (let index = 1; index < 256; index++) {
+        for (const renderer of renderers) renderer.registerFont(`Face ${index}`, false, false, face(index));
+      }
+      const failure = expectThrownParity(
+        () => renderers[0].registerFont('Overflow', false, false, face(256)),
+        () => renderers[1].registerFont('Overflow', false, false, face(256)),
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).name).toBe('PptxResourceLimitError');
+      expect((failure as Error).message).toBe('render resource limit exceeded: more than 256 font faces');
+      expectThrownParity(
+        () => renderers[0].registerFallbackFont('Overflow', false, false, face(256)),
+        () => renderers[1].registerFallbackFont('Overflow', false, false, face(256)),
+      );
+      for (const renderer of renderers) renderer.registerFallbackFont('Overflow', false, false, face(7));
+    } finally {
+      for (const renderer of renderers) renderer.free();
     }
   });
 

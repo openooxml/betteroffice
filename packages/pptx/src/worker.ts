@@ -48,7 +48,7 @@ export type { PptxWorkerSession, PptxWorkerSessionOptions } from './session/comm
 /** @internal */
 export { presentationSharedInputs } from './session/commandSharedInput';
 /** @internal */
-export { CommandOutcomeUnknown, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
+export { CommandOutcomeUnknown, PptxResourceLimitError, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
 /** @internal */
 export { frameAssetIds } from './session/frame';
 /** @internal */

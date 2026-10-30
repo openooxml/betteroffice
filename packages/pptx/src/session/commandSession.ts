@@ -7,7 +7,7 @@ import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
-import { CommandOutcomeUnknown } from './commandProtocol';
+import { CommandOutcomeUnknown, PptxResourceLimitError } from './commandProtocol';
 import type { DefaultFontInstallation } from '../../../../shared/pptxDefaultFonts';
 import type {
   PresentationCommandClient, PresentationCommandFailure, PresentationCommandOpenResult,
@@ -80,7 +80,9 @@ export function createPptxWorkerSession(
 
   function fail(cause: unknown): void {
     if (disposed || failure) return;
-    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ? cause
+    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ||
+      cause instanceof PptxResourceLimitError ? cause
+      : cause instanceof Error && cause.name === 'PptxResourceLimitError' ? new PptxResourceLimitError(cause.message)
       : new SessionFailure(cause instanceof Error && cause.name === 'RuntimeError' ? 'trap' : 'crash',
         cause instanceof Error ? cause.message : String(cause));
     if (client) failedState = { ...client.state, editState: { ...client.state.editState, readOnly: true,
@@ -141,7 +143,7 @@ export function createPptxWorkerSession(
       return () => { connectionErrors.delete(listener); off(); };
     },
     close() {
-      if (!disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
+      if (client && !disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
       transport.close();
     },
   };
