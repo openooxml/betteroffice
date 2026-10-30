@@ -1017,7 +1017,6 @@ import { type PipeCommandPayload } from '../../../../shared/collaboration-pipe/p
 import type { AwarenessCursor } from '../collaboration/types';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type Promisified } from '../../../../shared/office-session/types';
-import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { type OpenWorkbookOptions, type Viewport, type WorkbookHandle } from '../wasm/loader';
 import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPaint, type WorkbookSessionEvents, type WorkbookSessionMethods, type WorkbookSessionOpenOptions, type WorkbookSessionState } from './methods';
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
@@ -1080,9 +1079,6 @@ export interface WorkbookSession {
     readonly failure: SessionFailure | undefined;
     dispose(): Promise<void>;
 }
-export declare const workbookFontRuntimes: WeakMap<WorkbookSession, {
-    decoder: FontDecoder;
-}>;
 /** @internal */
 export declare function hydratePeer(session: WorkbookSession): Promise<WorkbookHandle>;
 /**
@@ -3784,7 +3780,7 @@ export * from './workerSession';
 /** @internal */
 export type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandFrameRequest, WorkbookCommandKind, WorkbookCommandPayload, WorkbookCommandSelection, WorkbookEditState, WorkbookEditPayload, WorkbookEditConnection, WorkbookEditFrame, WorkbookSharedCommand, WorkbookSharedAck, WorkbookSharedWireAck, WorkbookSharedOutcome, WorkbookCommandTicket, WorkbookEchoHooks, WorkbookSubmitOptions, WorkbookTicketOutcome, } from './session/commandProtocol';
 /** @internal */
-export { hydratePeer, workbookFontRuntimes } from './session/client';
+export { hydratePeer } from './session/client';
 /** @experimental */
 export { WorkbookPeerHydrationError } from './session/peerHydrationError';
 /** @internal */
