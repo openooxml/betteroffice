@@ -216,18 +216,65 @@ for (const shared of [false, true]) for (const kind of ['undo', 'redo', 'applyRe
   });
 }
 
-test('app supplied opens and synchronous replies have no default font protocol traffic', async () => {
+test('opting out of default fonts opens with no default font protocol traffic', async () => {
   const wire = connection();
   const importing = spyOn(commandDefaultFontModule, 'load');
   restorers.push(() => importing.mockRestore());
   const sent: unknown[] = [];
   const client = await createPresentationCommandClient(Uint8Array.of(0), { session: 'fonts', incarnation: 'worker',
-    fonts: [{ ...regular, bytes }] }, { ...wire.transport, post(message, transfer) { sent.push(message); wire.transport.post(message, transfer); } });
+    fonts: [{ ...regular, bytes }], defaultFonts: false },
+  { ...wire.transport, post(message, transfer) { sent.push(message); wire.transport.post(message, transfer); } });
   clients.push(client);
   await client.dispatch({ kind: 'activateSlide', payload: { slideId: 'target' } });
+  await client.flush();
   expect(importing).not.toHaveBeenCalled();
   expect(wire.coverage).not.toHaveBeenCalled();
   expect(wire.collect).not.toHaveBeenCalled();
+  expect(wire.registered).toEqual([]);
   expect(sent.every((message) => isClientMessage(message))).toBe(true);
   expect(wire.messages.every((message) => !isHostMessage(message) || message.kind !== 'event')).toBe(true);
+});
+
+test('opting out with no app fonts loads nothing', async () => {
+  const wire = connection(['target']);
+  const importing = spyOn(commandDefaultFontModule, 'load');
+  restorers.push(() => importing.mockRestore());
+  const client = await createPresentationCommandClient(Uint8Array.of(0),
+    { session: 'fonts', incarnation: 'worker', fonts: [], defaultFonts: false }, wire.transport);
+  clients.push(client);
+  await client.flush();
+  expect(importing).not.toHaveBeenCalled();
+  expect(wire.collect).not.toHaveBeenCalled();
+  expect(wire.registered).toEqual([]);
+});
+
+test('app supplied families keep their faces while other document families load defaults', async () => {
+  const wire = connection(['target']);
+  wire.collect.mockImplementation(() => [
+    regular, { ...regular, bold: true }, { ...regular, family: 'Times New Roman' }, { ...regular, family: 'MS Mincho', italic: true },
+  ]);
+  const resolved: string[] = [];
+  const provider = spyOn(fontModule.commandFontProvider, 'load').mockResolvedValue({
+    resolve: (family: string) => { resolved.push(family); return async () => bytes; },
+    resolveFamily: () => undefined, resolveScriptFallback: () => undefined,
+    resolveLastResort: () => { throw new Error('Unexpected substitution'); },
+  });
+  restorers.push(() => provider.mockRestore());
+  const faces: string[] = [];
+  const options = Object.assign({ session: 'fonts', incarnation: 'worker', fonts: [{ family: ' calibri ', bold: false, italic: false, bytes }] }, {
+    [defaultFontInstaller]: async (additions: readonly { family: string }[]) => { faces.push(...additions.map((face) => face.family)); },
+  } satisfies DefaultFontInstallation);
+  const client = await createPresentationCommandClient(Uint8Array.of(0), options, wire.transport);
+  clients.push(client);
+  await client.flush();
+  expect(resolved.sort()).toEqual(['MS Mincho', 'Times New Roman']);
+  expect(faces.sort()).toEqual(['MS Mincho', 'Times New Roman']);
+  expect(wire.registered.sort()).toEqual(['MS Mincho', 'Times New Roman']);
+  expect(wire.coverage).toHaveBeenCalledTimes(1);
+});
+
+test('invalid default font options are refused', async () => {
+  const wire = connection();
+  await expect(createPresentationCommandClient(Uint8Array.of(0),
+    { session: 'fonts', incarnation: 'worker', fonts: [], defaultFonts: 'no' as unknown as boolean }, wire.transport)).rejects.toThrow();
 });

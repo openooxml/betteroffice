@@ -77,6 +77,26 @@ test('resolves requested traits through manager mappings and skips unknown famil
   } finally { fonts.dispose(); }
 });
 
+test('lighter members of bundled families load their regular face; other unknown names stay unregistered', async () => {
+  const resolve = mock(() => undefined);
+  const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
+    family === 'Calibri Light' ? async () => bytes : undefined);
+  const resolveLastResort = mock(() => { throw new Error('Unrelated substitution'); });
+  const imported = spyOn(commandFontProvider, 'load').mockResolvedValue({ resolve, resolveFamily: () => undefined,
+    resolveScriptFallback: () => undefined, resolveLastResort, resolveLightVariant });
+  restorers.push(() => imported.mockRestore());
+  const register = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [{ ...regular, family: 'Calibri Light', bold: true },
+    { ...regular, family: 'BIZ UD明朝 Medium' }], register, () => {});
+  try {
+    const faces = await fonts.load();
+    expect(resolveLightVariant.mock.calls).toEqual([['Calibri Light', true, false], ['BIZ UD明朝 Medium', false, false]]);
+    expect(resolveLastResort).not.toHaveBeenCalled();
+    expect(faces.map((face) => [face.family, face.bold])).toEqual([['Calibri Light', true]]);
+    expect(register).toHaveBeenCalledTimes(1);
+  } finally { fonts.dispose(); }
+});
+
 test('failed, invalid and timed out faces settle once without late registration', async () => {
   let finish!: (value: ArrayBuffer) => void;
   const slow = new Promise<ArrayBuffer>((resolve) => { finish = resolve; });
