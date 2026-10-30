@@ -317,6 +317,7 @@ dependencies = [
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libc",
  "libm",
  "serde",
  "serde_json",

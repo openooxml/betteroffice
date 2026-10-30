@@ -4,7 +4,7 @@ import { measuredFontProvider, type FontLoad } from './measured-fonts';
 
 test('the measured provider forwards and records glyph coverage loads', async () => {
   const provider = fontProvider(async (face) => {
-    if (face.file === 'Carlito-Bold.ttf') throw new Error('offline');
+    if (face.file === 'Carlito-Bold.ttf.zst') throw new Error('offline');
     return new ArrayBuffer(face.byteLength);
   });
   const fontLoads: FontLoad[] = [];
