@@ -49,6 +49,7 @@ import { CJK_FONT_ASSET_URLS } from '@betteroffice/fonts-cjk';
 ## Documentation
 
 - [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts)
+- [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl)
 - [Packages and fonts](https://docs.betteroffice.dev/docs/packages#fonts)
 
 ## Licensing

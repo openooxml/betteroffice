@@ -11,7 +11,7 @@ use pptx_edit::{
     ShapeRect, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideBackgroundReceipt,
     SlideReceipt, SlideScope, StorySnapshot, TableColumnWidth, TableEdit, TableInsertPosition,
     TableReceipt, TextParagraphDraft, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch,
-    TransformReceipt, UpdateEvent, UpdateSubscription, ValidationOutcome,
+    TransformReceipt, UndoCaptureMode, UpdateEvent, UpdateSubscription, ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -81,6 +81,20 @@ impl Presentation {
         Self::open_with_limits_internal(bytes, &ParseLimits::default(), client_id)
     }
 
+    pub fn open_from_update(update: &[u8], client_id: u64, source: Option<&[u8]>) -> Result<Self> {
+        let session = DeckSession::open_from_update(update, client_id)?;
+        let session = match source {
+            Some(source) => session.attach_source_if_matching(source)?,
+            None => session,
+        };
+        Ok(Self {
+            session,
+            renderer: SlideRenderer::new(),
+            #[cfg(feature = "raster")]
+            caches: crate::render::RenderCaches::default(),
+        })
+    }
+
     pub fn open_collaborative_with_limits(
         bytes: &[u8],
         client_id: u64,
@@ -106,6 +120,14 @@ impl Presentation {
 
     pub fn client_id(&self) -> u64 {
         self.session.client_id()
+    }
+
+    pub fn set_collaborative(&self) -> Result<()> {
+        Ok(self.session.set_collaborative()?)
+    }
+
+    pub fn is_collaborative(&self) -> bool {
+        self.session.is_collaborative()
     }
 
     pub fn package(&self) -> &PptxPackage {
@@ -793,6 +815,14 @@ impl Presentation {
 
     pub fn add_undo_barrier(&self) {
         self.session.add_undo_barrier();
+    }
+
+    pub fn undo_capture_mode(&self) -> UndoCaptureMode {
+        self.session.undo_capture_mode()
+    }
+
+    pub fn set_undo_capture_mode(&self, mode: UndoCaptureMode) {
+        self.session.set_undo_capture_mode(mode);
     }
 }
 

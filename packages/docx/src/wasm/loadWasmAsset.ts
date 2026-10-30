@@ -133,6 +133,7 @@ export interface WasmModuleMemory extends Partial<WasmHeapStats> {
    * high-water mark.
    */
   bufferBytes: number;
+  maximumBytes?: number;
 }
 
 /** The address space of a wasm32 memory: 4 GiB. */
@@ -152,9 +153,24 @@ export function wasmModuleMemories(): WasmModuleMemory[] {
   for (const module of registered) {
     const memory = module.memory();
     if (!memory) continue;
-    out.push({ label: module.label, bufferBytes: memory.buffer.byteLength, ...module.heap?.() });
+    const maximumBytes = memoryMaximumBytes(memory);
+    out.push({ label: module.label, bufferBytes: memory.buffer.byteLength,
+      ...(maximumBytes === undefined ? {} : { maximumBytes }), ...module.heap?.() });
   }
   return out;
+}
+
+function memoryMaximumBytes(memory: WebAssembly.Memory): number | undefined {
+  try {
+    const reflected = memory as WebAssembly.Memory & { type?(): { maximum?: number | bigint } };
+    const maximum = reflected.type?.().maximum;
+    if (maximum === undefined) return undefined;
+    const bytes = Number(maximum) * 65536;
+    return Number.isSafeInteger(bytes) && bytes > 0 && bytes < WASM32_MEMORY_LIMIT_BYTES ? bytes : undefined;
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    return undefined;
+  }
 }
 
 function exportedMemory(output: unknown): WebAssembly.Memory | null {

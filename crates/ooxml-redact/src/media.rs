@@ -206,8 +206,26 @@ struct SynthRng {
     state: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SEED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `run` with every synthetic placeholder on this thread seeded from `seed`.
+#[cfg(test)]
+pub(crate) fn with_seed<T>(seed: u64, run: impl FnOnce() -> T) -> T {
+    TEST_SEED.with(|cell| cell.set(Some(seed)));
+    let out = run();
+    TEST_SEED.with(|cell| cell.set(None));
+    out
+}
+
 impl SynthRng {
     fn new() -> Result<Self, RedactError> {
+        #[cfg(test)]
+        if let Some(seed) = TEST_SEED.with(std::cell::Cell::get) {
+            return Ok(Self { state: seed | 1 });
+        }
         let mut seed = [0u8; 8];
         getrandom::fill(&mut seed).map_err(|error| RedactError::Randomness(error.to_string()))?;
         let state = u64::from_le_bytes(seed) | 1;

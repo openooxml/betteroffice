@@ -1091,6 +1091,9 @@ fn parse_col(
     columns: &mut ColumnRuns,
     legacy: &mut LegacySheetDimensions,
 ) -> Result<(), ParseError> {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("parse_columns");
+    }
     let hidden = attr(e, b"hidden")?.is_some_and(|value| is_truthy(&value));
     let authored = attr(e, b"width")?.and_then(|v| v.parse::<f64>().ok());
     let style = attr(e, b"style")?.and_then(|v| v.parse::<u32>().ok());
@@ -1122,6 +1125,9 @@ fn parse_col(
         Some(w) => w.clamp(0.0, MAX_COL_WIDTH_CHARS),
         None => return Ok(()),
     };
+    xlsx_model::open_timing! {
+        xlsx_model::open_timing::count("parse_dimension_cols", u64::from(max - min + 1));
+    }
     for col in min..=max {
         sheet.col_widths.insert(col - 1, width);
         if hidden && let Some(authored) = authored.filter(|authored| *authored > 0.0) {
@@ -1214,6 +1220,9 @@ fn finalize_cell(
             .inherited_style_in(addr, columns)
             .is_some_and(|style| style != 0)
     {
+        xlsx_model::open_timing! {
+            xlsx_model::open_timing::count("parse_preserved_empty_cells", 1);
+        }
         cell.style = Some(0);
     }
     if cell != Cell::default() {

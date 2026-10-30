@@ -43,6 +43,7 @@ import * as reviewLayer from '../../sidebar/TrackedChangesReview';
 import * as sidebarView from '../../UnifiedSidebar';
 import { toast } from 'sonner';
 import { buildReportIssueUrl } from '../../reportIssue';
+import { ToolbarCommandButton } from '../../toolbar/ToolbarCommand';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -117,6 +118,7 @@ class FakeWorker {
   postMessage(message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule) {
     if (!('id' in message)) return;
     requests.push(message);
+    if (message.type === 'prepare-save') return;
     let response: DocxEngineWorkerResponse;
     if (this.outOfMemory) {
       response = { id: message.id, ok: false, error: 'Worker heap limit exceeded', terminal: true, outOfMemory: true };
@@ -1422,6 +1424,112 @@ test('worker shell save flushes pending edits and calls host callbacks without a
   expect(onSave).toHaveBeenCalledTimes(2);
   expect(requests.filter(({ type }) => type === 'save')).toHaveLength(2);
   expect(coreSession).not.toHaveBeenCalled();
+});
+
+test.each(['hover', 'focus', 'control', 'meta'])('save intent from %s is sent once per worker session', async (intent) => {
+  const ref = createRef<DocxEditorRef>();
+  const toolbar = <ToolbarCommandButton id="save" />;
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} toolbar={toolbar} />);
+  const prepared = () => requests.filter(request => request.type === 'prepare-save');
+  const trigger = () => {
+    const save = view.getByRole('button', { name: 'Save' });
+    if (intent === 'hover') fireEvent.pointerEnter(save);
+    else if (intent === 'focus') fireEvent.focus(save);
+    else fireEvent.keyDown(document, intent === 'control' ? { key: 'Control', ctrlKey: true } : { key: 'Meta', metaKey: true });
+  };
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  expect(prepared()).toHaveLength(0);
+  trigger();
+  trigger();
+  fireEvent.pointerEnter(view.getByRole('button', { name: 'Save' }));
+  fireEvent.focus(view.getByRole('button', { name: 'Save' }));
+  fireEvent.keyDown(document, { key: 'Control', ctrlKey: true });
+  expect(prepared()).toHaveLength(1);
+  view.rerender(<DocxEditor documentBuffer={Uint8Array.of(7, 8)} ref={ref} toolbar={toolbar} />);
+  await waitFor(() => expect(requests.filter(request => request.type === 'commandInit')).toHaveLength(2));
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  expect(prepared()).toHaveLength(1);
+  trigger();
+  trigger();
+  expect(prepared()).toHaveLength(2);
+});
+
+test.each(['hover', 'focus'])('the File menu Save control prepares saving on %s', async (intent) => {
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  fireEvent.click(view.getByRole('menuitem', { name: 'File' }));
+  const save = view.getByRole('menuitem', { name: /^Save/ });
+  expect(requests.filter(request => request.type === 'prepare-save')).toHaveLength(0);
+  if (intent === 'hover') fireEvent.pointerEnter(save);
+  else fireEvent.focus(save);
+  fireEvent.pointerEnter(save);
+  fireEvent.focus(save);
+  expect(requests.filter(request => request.type === 'prepare-save')).toHaveLength(1);
+});
+
+test('the first accepted edit prepares saving once per worker session', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const onDocumentChange = mock(() => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onDocumentChange={onDocumentChange} showToolbar={false} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  const prepared = () => requests.filter(request => request.type === 'prepare-save');
+  expect(prepared()).toHaveLength(0);
+  const edit = async () => {
+    await act(async () => {
+      const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: 'edited' } });
+      if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+      await submitted.ticket.ack;
+    });
+  };
+  workers[0]!.refuseNextEdit = true;
+  await edit();
+  expect(prepared()).toHaveLength(0);
+  await edit();
+  expect(onDocumentChange).toHaveBeenCalledTimes(1);
+  expect(prepared()).toHaveLength(1);
+  await edit();
+  fireEvent.keyDown(document, { key: 'Meta', metaKey: true });
+  expect(prepared()).toHaveLength(1);
+  view.rerender(<DocxEditor documentBuffer={Uint8Array.of(7, 8)} ref={ref} onDocumentChange={onDocumentChange} showToolbar={false} />);
+  await waitFor(() => expect(requests.filter(request => request.type === 'commandInit')).toHaveLength(2));
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  expect(prepared()).toHaveLength(1);
+  await edit();
+  expect(prepared()).toHaveLength(2);
+});
+
+test.each([{ readOnly: true }, { mode: 'viewing' as const }])('read-only save intent is ignored with %j', async (options) => {
+  const view = render(<DocxEditor {...peerlessProps} {...options} toolbar={<ToolbarCommandButton id="save" />} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  fireEvent.pointerEnter(view.getByRole('button', { name: 'Save' }));
+  fireEvent.focus(view.getByRole('button', { name: 'Save' }));
+  fireEvent.keyDown(document, { key: 'Control', ctrlKey: true });
+  fireEvent.keyDown(document, { key: 'Meta', metaKey: true });
+  expect(binding!.commands.submit({ kind: 'insertText', payload: { text: 'blocked' } })).toEqual({ status: 'ignored', reason: 'read-only' });
+  expect(requests.filter(request => request.type === 'prepare-save')).toHaveLength(0);
+});
+
+test('save intent is ignored during the first-page preview and after unmount', async () => {
+  holdInitial = true;
+  const view = render(<DocxEditor {...peerlessProps} previewFirstPage toolbar={<ToolbarCommandButton id="save" />} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  fireEvent.pointerEnter(view.getByRole('button', { name: 'Save' }));
+  fireEvent.focus(view.getByRole('button', { name: 'Save' }));
+  fireEvent.keyDown(document, { key: 'Control', ctrlKey: true });
+  expect(requests.filter(request => request.type === 'prepare-save')).toHaveLength(0);
+  view.unmount();
+  fireEvent.keyDown(document, { key: 'Meta', metaKey: true });
+  expect(requests.filter(request => request.type === 'prepare-save')).toHaveLength(0);
 });
 
 test('the worker editor shows editor notifications', async () => {
