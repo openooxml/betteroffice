@@ -26,6 +26,16 @@ retries. Failure screenshots, traces, reports, and saved files go under
 `bunx playwright test --config e2e/browser/playwright.config.ts` reruns
 just the browser tests.
 
+A few docx tests drive the editor through a browser harness that only a
+`DOCX_PEERLESS_HARNESS=1` build of `@betteroffice/docx-react` and the desktop
+app exposes. They are tagged `@harness` and skip unless the variable is set;
+with it set, a preview built without it fails them at once. Build both and run
+them with the variable set each time:
+`DOCX_PEERLESS_HARNESS=1 bun run --filter @betteroffice/docx-react build`,
+`DOCX_PEERLESS_HARNESS=1 bun run --filter @betteroffice/desktop build`, then
+`DOCX_PEERLESS_HARNESS=1 bunx playwright test --config e2e/browser/playwright.config.ts --grep @harness`.
+CI runs them in the third browser shard.
+
 CI splits both browser configs into shards by measured time per file
 (`e2e/browser/shard-weights.json`), set with `BETTEROFFICE_BROWSER_SHARD=1/3`.
 After the suite changes a lot, refresh the weights from a CI run's

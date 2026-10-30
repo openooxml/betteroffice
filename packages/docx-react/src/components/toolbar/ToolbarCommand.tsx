@@ -56,6 +56,7 @@ import { cn } from '../../lib/utils';
 import { restoreEditorFocus, restoreFocusAfterPointer } from './activation';
 import { ToolbarOverflowContext, useOverflowSource, type OverflowPrompt } from './overflowRegistry';
 import { ToolbarButton } from './ToolbarPrimitives';
+import { useEditorChrome } from '../EditorToolbarContext';
 
 const ICON_SIZE = 18;
 
@@ -704,6 +705,7 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
   const { id, children, label, className } = props;
   const args = (props as { args?: unknown }).args;
   const command = useDocxCommand(id as DocxCommandId, args as never);
+  const prepareSave = useEditorChrome()?.prepareSave;
   if (isPluginCommandId(id) && command.descriptor === null) return null;
   const icon = isPluginCommandId(id) ? undefined : iconFor(id, args);
   const name = label ?? command.label;
@@ -717,6 +719,8 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
       shortcut={command.shortcut ?? undefined}
       className={cn(!icon && !children && 'w-auto px-2 text-sm', className)}
       onClick={() => void command.execute()}
+      onPointerEnter={id === 'save' ? prepareSave : undefined}
+      onFocus={id === 'save' ? prepareSave : undefined}
     >
       {children ?? (icon ? <MaterialSymbol name={icon} size={ICON_SIZE} /> : name)}
     </ToolbarButton>

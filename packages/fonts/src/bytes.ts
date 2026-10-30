@@ -49,6 +49,29 @@ function validateByteLength(
   return bytes;
 }
 
+export async function readFontBytes(
+  file: string,
+  url: URL,
+  timeoutMs?: number,
+): Promise<ArrayBuffer> {
+  const onDisk = readFileAsset(url);
+  if (onDisk) return onDisk;
+  const response = await fetch(
+    url,
+    timeoutMs === undefined
+      ? undefined
+      : {
+          signal: AbortSignal.timeout(timeoutMs),
+          credentials: 'omit',
+          referrerPolicy: 'no-referrer',
+        },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch bundled font ${file}: HTTP ${response.status}`);
+  }
+  return response.arrayBuffer();
+}
+
 const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 
 export function loadFontBytes(
@@ -60,24 +83,7 @@ export function loadFontBytes(
   const cached = bytesCache.get(key);
   if (cached) return cached;
   const promise = (async () => {
-    const onDisk = readFileAsset(url);
-    if (onDisk) return validateByteLength(face, onDisk);
-    const response = await fetch(
-      url,
-      timeoutMs === undefined
-        ? undefined
-        : {
-            signal: AbortSignal.timeout(timeoutMs),
-            credentials: 'omit',
-            referrerPolicy: 'no-referrer',
-          },
-    );
-    if (!response.ok) {
-      throw new Error(
-        `Failed to fetch bundled font ${face.file}: HTTP ${response.status}`,
-      );
-    }
-    return validateByteLength(face, await response.arrayBuffer());
+    return validateByteLength(face, await readFontBytes(face.file, url, timeoutMs));
   })();
   promise.catch(() => {
     if (bytesCache.get(key) === promise) bytesCache.delete(key);
