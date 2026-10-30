@@ -107,6 +107,21 @@ def run():
     operations = {
         "open": open_fixture,
         "sheetNames": lambda args: workbook.sheet_names,
+        "sheetInfo": lambda args: workbook.sheet_info(),
+        "calculationStatus": lambda args: workbook.calculation_status(),
+        "cell": lambda args: workbook.cell(args["sheet"], args["row"], args["col"]),
+        "listDefinedNames": lambda args: workbook.list_defined_names(args),
+        "conditionalFormats": lambda args: workbook.conditional_formats(args["sheet"]),
+        "rangeCells": lambda args: workbook.range_cells(args["sheet"], args["range"]),
+        "searchText": lambda args: workbook.search_text(
+            args["query"],
+            case_sensitive=args.get("options", {}).get("caseSensitive", False),
+            limit=args.get("options", {}).get("limit"),
+        ),
+        "selectionFormatting": lambda args: workbook.selection_formatting(
+            args["sheet"], args["range"]
+        ),
+        "charts": lambda args: workbook.charts(args["sheet"]),
         "version": lambda args: workbook.version(),
         "readCells": lambda args: workbook.read_cells(args),
         "findText": lambda args: workbook.find_text(args),
