@@ -3,6 +3,8 @@ import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import { installFonts } from '../../packages/pptx-react/src/fontFaces';
 import { installDefaultFonts } from '../../packages/pptx-react/src/worker/peerlessFonts';
 import { BUNDLED_FONTS, WORD_FAMILY_ALIASES } from '../../packages/fonts/src/manifest';
+import { loadFontBytes } from '../../packages/fonts/src/bytes';
+import { loadPackedFontBytes } from '../../packages/fonts/src/packed';
 
 declare const __QUALITY_FONT_BASE__: string | null;
 declare const __QUALITY_FONT_BASE_CJK__: string | null;
@@ -22,11 +24,14 @@ async function hostFonts(host: string, provider: Provider): Promise<Face[]> {
     }
   } else if (host === 'bundled') {
     for (const face of BUNDLED_FONTS) {
-      const base = face.script?.startsWith('cjk-') ? __QUALITY_FONT_BASE_CJK__ : __QUALITY_FONT_BASE__;
-      if (typeof base !== 'string') throw new Error('The bundled host needs local font assets');
-      const response = await fetch(new URL(face.file, new URL(base, location.origin)));
-      if (!response.ok) throw new Error(`Font ${face.file}: ${response.status}`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (typeof __QUALITY_FONT_BASE__ !== 'string' || typeof __QUALITY_FONT_BASE_CJK__ !== 'string')
+        throw new Error('The bundled host needs local font assets');
+      const base = new URL(__QUALITY_FONT_BASE__, location.origin);
+      const bytes = new Uint8Array(face.file.endsWith('.ttf.zst')
+        ? await loadPackedFontBytes(face, async (dependency) => new URL(dependency.file, base), 30_000,
+          new URL('decoder/fontpack.wasm', base))
+        : await loadFontBytes(face,
+          new URL(face.file, face.script?.startsWith('cjk-') ? new URL(__QUALITY_FONT_BASE_CJK__, location.origin) : base), 30_000));
       const names = new Set([face.family]);
       if (face.metricCompatWith) names.add(face.metricCompatWith);
       const targets = new Set([...names].map((name) => name.toLowerCase()));
