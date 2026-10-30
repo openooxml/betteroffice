@@ -97,7 +97,7 @@ export interface WorkbookSession {
   markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
   whenPresented(seq: number): Promise<void>;
   readonly call: Promisified<Omit<WorkbookSessionMethods,
-    'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' |
+    'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' |
     'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
     renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
     renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;

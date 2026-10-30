@@ -513,6 +513,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
         signal.throwIfAborted();
         measurement ??= createRustMeasureSource({
+          runtime: client.fontRuntime,
           engine: {
             registerFont: (data) => {
               const slot = appendFont(data);
@@ -782,7 +783,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         if (!uncovered) { settle(); return; }
         requirements = uncovered;
         const embedded = await extractEmbeddedFontFaces(opened.document);
-        payload = await prepareWorkerFontEnvironment({ fonts, provider, embedded, requirements, families: opened.families,
+        payload = await prepareWorkerFontEnvironment({ fonts, provider, runtime: client.fontRuntime, embedded, requirements, families: opened.families,
           compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
       }
       if (!isCurrent()) return;
@@ -836,6 +837,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       }
       const embedded = await extractEmbeddedFontFaces(opened.document);
       const payload = await prepareWorkerFontEnvironment({ fonts: settings.current.fonts,
+        runtime: client.fontRuntime,
         provider: settings.current.measurementFontProvider, embedded, requirements, families: [...opened.families, family],
         compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
       if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');

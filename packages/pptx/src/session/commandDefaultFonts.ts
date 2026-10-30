@@ -1,9 +1,10 @@
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
+import { decodeFontFace } from '../wasm/loader';
 
 type RequestedFace = Omit<DefaultFontFace, 'bytes'>;
 
 export const commandFontProvider = {
-  async load() { return (await import('@betteroffice/fonts')).createFontProvider(); },
+  async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: decodeFontFace }); },
 };
 
 export function createCommandDefaultFonts(

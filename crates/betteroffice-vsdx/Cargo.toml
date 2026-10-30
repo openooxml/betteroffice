@@ -12,6 +12,7 @@ keywords = ["vsdx", "visio", "shapesheet"]
 categories = ["parser-implementations"]
 
 [dependencies]
+betteroffice-fonts = { workspace = true }
 vsdx-parse.workspace = true
 vsdx-resolve.workspace = true
 vsdx-validate = { workspace = true }
@@ -27,4 +28,3 @@ raster = ["dep:vsdx-raster"]
 [dev-dependencies]
 ooxml-opc.workspace = true
 vsdx-resolve.workspace = true
-

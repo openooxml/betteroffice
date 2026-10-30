@@ -483,7 +483,7 @@ export type { SlideToPngOptions } from './render/png';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type { CollaborationUser, CollaborationErrorCode, CollaborationErrorListener, CollaborationProviderOptions, AsyncCollaborationReplica, CollaborationReplica, CollaborationStatus, CollaborationStatusChange, CollaborationStatusListener, CollaborationTransport, CollaborationTransportEvent, CollaborationUpdateOrigin, PptxPresence, PptxPresenceCursor, PptxPresenceListener, PptxPresencePeer, PptxPresenceState, PptxPresenceUser, } from './collaboration';
 export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './collaboration';
-export { exportPptxMarkdown, exportPptxStructured, initWasm, inspectPresentation, isWasmAvailable, isProposalsAvailable, openPresentation, renderPptxMarkdown, wasmVersion, engineBackend, } from './wasm/loader';
+export { exportPptxMarkdown, exportPptxStructured, initWasm, decodeFontFace, inspectPresentation, isWasmAvailable, isProposalsAvailable, openPresentation, renderPptxMarkdown, wasmVersion, engineBackend, } from './wasm/loader';
 export { PptxExportError } from './structuredExport';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, PptxAnchor, PptxAnchorScope, PptxExportComment, PptxExportDiagnostic, PptxExportDiagnosticCode, PptxExportFailure, PptxExportFailureCode, PptxExportList, PptxExportMark, PptxExportNotes, PptxExportObject, PptxExportObjectKind, PptxExportOptions, PptxExportParagraph, PptxExportRefusal, PptxExportResult, PptxExportRun, PptxExportShape, PptxExportShapeKind, PptxExportSlide, PptxExportStory, PptxExportTable, PptxExportTableCell, PptxMarkdownContent, PptxMarkdownOptions, PptxSourceProvenance, PptxStructuredContent, PptxTextSpan, } from './structuredExport';
 export type { InspectPresentationOptions, OpenPresentationOptions, SavePresentationOptions, PresentationHandle, UndoCaptureMode, WasmInitInput, EngineBackend, } from './wasm/loader';
@@ -1478,6 +1478,26 @@ export interface SessionClient<M extends SessionMethods, E extends SessionEvents
 }
 /** Creates a typed client over an existing transport. */
 export declare function createSessionClient<M extends SessionMethods, E extends SessionEvents>(transport: SessionTransport, options: SessionClientOptions<M>): SessionClient<M, E>;
+
+// ---- shared/office-session/fontDecoder.d.ts ----
+export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
+    codec: string;
+    dict?: ArrayBuffer | Uint8Array;
+    maxOutput?: number;
+}) => Promise<{
+    font: ArrayBuffer;
+    payload?: ArrayBuffer;
+}>;
+export type FontDecodeResult = Awaited<ReturnType<FontDecoder>>;
+export type FontDecoderMethods = {
+    decodeFontFace(bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], wasm?: ArrayBuffer | WebAssembly.Module): FontDecodeResult;
+};
+export declare function rpcFontDecoder(call: (bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], transfer: Transferable[]) => Promise<FontDecodeResult>): FontDecoder;
+export declare function fontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer>;
+export declare function copyDecodedFace(face: {
+    font: Uint8Array;
+    payload?: Uint8Array;
+}): FontDecodeResult;
 
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
@@ -2663,6 +2683,8 @@ export {};
 // ---- wasm/generated/pptx_wasm.d.ts ----
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 export class PptxDocument {
     private constructor();
@@ -2845,6 +2867,13 @@ export class PptxRenderer {
 
 export function compileSlideJson(slide_json: string): string;
 
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
 /**
@@ -2884,6 +2913,7 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly exportPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -3026,6 +3056,8 @@ export default function __wbg_init (module_or_path?: { module_or_path: InitInput
 
 // ---- wasm/loader.d.ts ----
 import type { InitInput } from './generated/pptx_wasm.js';
+import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+export declare const decodeFontFace: FontDecoder;
 import type { PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxMarkdownOptions, PptxStructuredContent } from '../structuredExport';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxTextField, PptxValidationResult } from '../edits';

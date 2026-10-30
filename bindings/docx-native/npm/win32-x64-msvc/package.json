@@ -6,7 +6,9 @@
   ],
   "main": "betteroffice-docx-native.win32-x64-msvc.node",
   "files": [
-    "betteroffice-docx-native.win32-x64-msvc.node"
+    "betteroffice-docx-native.win32-x64-msvc.node",
+    "BSD-3-Clause-Zstandard.txt",
+    "MIT-wuff.txt"
   ],
   "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js, Bun and Deno.",
   "keywords": [

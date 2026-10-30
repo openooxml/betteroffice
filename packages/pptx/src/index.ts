@@ -32,6 +32,7 @@ export {
   exportPptxMarkdown,
   exportPptxStructured,
   initWasm,
+  decodeFontFace,
   inspectPresentation,
   isWasmAvailable,
   isProposalsAvailable,

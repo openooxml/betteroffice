@@ -1,3 +1,4 @@
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
@@ -298,7 +299,7 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
   result: PptxReadResult;
 }
 
-export type PresentationCommandMethods = {
+export type PresentationCommandMethods = FontDecoderMethods & {
   openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
   command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -335,6 +336,7 @@ export interface PresentationCommandClient {
 }
 
 export const PRESENTATION_COMMAND_METHODS = {
+  decodeFontFace: true,
   openCommandEditor: true,
   command: true,
   thumbnailFrame: true,

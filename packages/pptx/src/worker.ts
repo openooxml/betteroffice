@@ -9,6 +9,7 @@ export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatti
 export { browserFrameImages } from './render/browserFrameImages';
 /** @experimental */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { preparePresentationFontDecoder } from './session/fontWorker';
 /** @experimental */
 export type {
   PptxWorkerEditorOptions, PptxWorkerEditorRecovery, PptxWorkerEditorSession,

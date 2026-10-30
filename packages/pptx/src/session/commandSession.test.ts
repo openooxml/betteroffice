@@ -186,6 +186,25 @@ async function open(texts?: string[], readOnly = false, bytes?: Uint8Array) {
   }
 }
 
+test('font decoder RPC works before document open and preserves payload and decode errors', async () => {
+  const host = await engineHost();
+  const rpc: Rpc = createSessionClient<PresentationCommandMethods, PresentationCommandEvents>(host.transport,
+    { methods: PRESENTATION_COMMAND_METHODS });
+  const bytes = new Uint8Array([0, 1, 0, 0]).buffer;
+  const payload = new Uint8Array([5, 6]).buffer;
+  const decoded = spyOn(wasm, 'decodeFontFace').mockResolvedValueOnce({ font: bytes.slice(0), payload: payload.slice(0) });
+  try {
+    const result = await rpc.call.decodeFontFace(bytes, { codec: 'woff2t+zstd', dict: payload.slice(0), maxOutput: 1024 });
+    expect(result).toEqual({ font: bytes, payload });
+    expect(host.documents).toHaveLength(0);
+    await expect(rpc.call.decodeFontFace(bytes, { codec: 'unsupported' }))
+      .rejects.toThrow('unsupported font face codec: unsupported');
+    expect(host.documents).toHaveLength(0);
+    expect(new Uint8Array((await rpc.call.decodeFontFace(bytes, { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array(bytes));
+  } finally { decoded.mockRestore(); await rpc.dispose(); host.dispose(); }
+});
+
 test('pipe_commands_use_collab_lane_without_user_input', () => {
   const registration = registerPresentationCommandHandlers();
   try {

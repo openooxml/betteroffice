@@ -1,5 +1,8 @@
 //! Typed native facade for opening, editing, rendering, and saving PPTX files.
 
+/// The font pack decoder shared by every engine.
+pub use betteroffice_fonts as fonts;
+
 mod error;
 mod presentation;
 #[cfg(feature = "raster")]

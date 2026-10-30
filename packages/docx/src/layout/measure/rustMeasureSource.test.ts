@@ -1,12 +1,29 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { DEFAULT_COMPATIBILITY_FLAGS } from '../../docx/settingsParser';
-import { configureDefaultFonts } from './defaultFontProvider';
+import { configureDefaultFonts, resolveDefaultFontProvider } from './defaultFontProvider';
 import {
   createRustMeasureSource,
   type ResidentFontRequirement,
 } from './rustMeasureSource';
 
 afterEach(() => configureDefaultFonts({}));
+
+test('default providers retain the decoder of each editor runtime', async () => {
+  const first = { decoder: async () => ({ font: new ArrayBuffer(4) }) };
+  const second = { decoder: async () => ({ font: new ArrayBuffer(8) }) };
+  const seen: unknown[] = [];
+  configureDefaultFonts({ fonts: { createFontProvider(_options, runtime) {
+    seen.push(runtime);
+    return { resolve: () => async () => (await runtime!.decoder!(new ArrayBuffer(0), { codec: 'zstd' })).font };
+  } } });
+  const a = await resolveDefaultFontProvider(first);
+  const b = await resolveDefaultFontProvider(second);
+  expect(await resolveDefaultFontProvider(first)).toBe(a);
+  expect(a).not.toBe(b);
+  expect((await a!.resolve('Arial', false, false)!()).byteLength).toBe(4);
+  expect((await b!.resolve('Arial', false, false)!()).byteLength).toBe(8);
+  expect(seen).toEqual([first, second]);
+});
 
 test('a Japanese preflight settles atomically when font sources are unavailable', async () => {
   configureDefaultFonts({

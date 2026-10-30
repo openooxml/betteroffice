@@ -47,7 +47,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSES"
   ],
   "scripts": {
     "build": "bun run build:wasm && tsup",

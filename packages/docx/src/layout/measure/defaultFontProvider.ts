@@ -1,6 +1,8 @@
 /** Opt-in bundled-font provider resolution. @packageDocumentation */
 
 import type { BundledFontProvider } from './fontRegistry';
+import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import { decodeFontFace } from '../../wasm/fontDecoder';
 
 /**
  * The slice of `@betteroffice/fonts` this module consumes. Structural on
@@ -10,7 +12,7 @@ import type { BundledFontProvider } from './fontRegistry';
  * @public
  */
 export interface BundledFontModule {
-  createFontProvider(options?: { baseUrl?: string | URL }): BundledFontProvider;
+  createFontProvider(options?: { baseUrl?: string | URL }, runtime?: { decoder?: FontDecoder }): BundledFontProvider;
 }
 
 /**
@@ -29,7 +31,8 @@ export interface DefaultFontOptions {
 }
 
 let options: DefaultFontOptions = {};
-let resolved: Promise<BundledFontProvider | undefined> | undefined;
+const engineRuntime = { decoder: decodeFontFace };
+let resolved = new WeakMap<object, Promise<BundledFontProvider | undefined>>();
 
 function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
   if (baseUrl === undefined) return undefined;
@@ -56,7 +59,7 @@ export function hasDefaultFontSource(): boolean {
 /** Configure the default provider and reset its memoized resolution. @public */
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };
-  resolved = undefined;
+  resolved = new WeakMap();
   if (options.baseUrl !== undefined && !hasFontSource()) {
     console.warn(
       '[configureDefaultFonts] a baseUrl on its own loads nothing — the face manifest lives in ' +
@@ -65,11 +68,11 @@ export function configureDefaultFonts(next: DefaultFontOptions): void {
   }
 }
 
-async function load(): Promise<BundledFontProvider | undefined> {
+async function load(runtime: { decoder?: FontDecoder }): Promise<BundledFontProvider | undefined> {
   const { baseUrl, fonts, load: loader } = options;
   try {
     const module = fonts ?? ((await loader!()) as BundledFontModule);
-    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl });
+    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, runtime);
   } catch (error) {
     console.warn('[configureDefaultFonts] the configured font source failed to load', error);
     return undefined;
@@ -77,14 +80,16 @@ async function load(): Promise<BundledFontProvider | undefined> {
 }
 
 /** Resolve the configured provider, or `undefined` when no font source is set. @public */
-export function resolveDefaultFontProvider(): Promise<BundledFontProvider | undefined> {
+export function resolveDefaultFontProvider(runtime: { decoder?: FontDecoder } = engineRuntime): Promise<BundledFontProvider | undefined> {
   if (!hasFontSource()) return Promise.resolve(undefined);
-  if (resolved === undefined) {
-    const promise = load();
+  let pending = resolved.get(runtime);
+  if (pending === undefined) {
+    const promise = load(runtime);
     promise.then((provider) => {
-      if (provider === undefined && resolved === promise) resolved = undefined;
+      if (provider === undefined && resolved.get(runtime) === promise) resolved.delete(runtime);
     });
-    resolved = promise;
+    resolved.set(runtime, promise);
+    pending = promise;
   }
-  return resolved;
+  return pending;
 }
