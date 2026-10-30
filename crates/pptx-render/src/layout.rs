@@ -37,6 +37,7 @@ use pptx_parse::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_properties::{EmojiStatus, UnicodeEmoji};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
@@ -128,6 +129,29 @@ fn needs_visible_glyph(character: char) -> bool {
                 | 0x1D173..=0x1D17A
                 | 0xE0000..=0xE0FFF
         )
+}
+
+fn emoji_presentation_cluster(cluster: &str) -> bool {
+    cluster.chars().any(|character| {
+        matches!(
+            character as u32,
+            0xFE0F | 0x20E3 | 0x1F1E6..=0x1F1FF | 0x1F3FB..=0x1F3FF
+        ) || matches!(
+            character.emoji_status(),
+            EmojiStatus::EmojiPresentation
+                | EmojiStatus::EmojiPresentationAndModifierBase
+                | EmojiStatus::EmojiPresentationAndEmojiComponent
+                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+        )
+    }) || cluster.split('\u{200D}').skip(1).any(|part| {
+        let Some(character) = part.chars().next() else {
+            return false;
+        };
+        // GB11 identifies pictographs; the ordinary prefix excludes extending marks.
+        let pictographic = format!("😀\u{200D}{character}");
+        let ordinary = format!("a\u{200D}{character}");
+        pictographic.graphemes(true).count() == 1 && ordinary.graphemes(true).count() == 2
+    })
 }
 
 /// A font family the deck asked for that is not registered, the family drawn
@@ -404,6 +428,9 @@ impl SlideRenderer {
             .or_else(|| covering().next())
             .map(|(_, _, candidate)| candidate)
             .or_else(|| {
+                if emoji_presentation_cluster(cluster) {
+                    return None;
+                }
                 self.faces
                     .iter()
                     .filter(|(_, candidate)| covers(candidate))
@@ -1539,7 +1566,7 @@ impl FontRequestWalker<'_, '_> {
                     crate::chart::visit_chart_fonts(
                         &part.chart,
                         &default_font,
-                        &mut |family, bold, italic, text| {
+                        &mut |family, bold, italic, scripts| {
                             self.requests.record(
                                 RequestedFontFace {
                                     family: resolve_font_family(scope.theme, family),
@@ -1547,7 +1574,7 @@ impl FontRequestWalker<'_, '_> {
                                     italic,
                                     scripts: Vec::new(),
                                 },
-                                &paragraph_scripts_with_han_fallback([text], false),
+                                scripts,
                             );
                         },
                     );

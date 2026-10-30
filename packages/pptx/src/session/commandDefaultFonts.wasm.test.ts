@@ -362,6 +362,32 @@ test('Japanese coverage loads once for an unmapped family and mixed Latin text w
   expect(fallback).toHaveBeenCalledTimes(1);
 });
 
+test('four Japanese styles acknowledge one coverage installation and registration', async () => {
+  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const manager = source({}, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
+  const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
+  restorers.push(() => fallback.mockRestore());
+  const zip = await JSZip.loadAsync(await deck(['Calibri'], '日本語かな'));
+  const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
+  zip.file('ppt/slides/slide1.xml', slide.replace(/<a:r>.*?<\/a:r>/, (run) =>
+    ['', 'b="1"', 'i="1"', 'b="1" i="1"'].map((traits) => run.replace('sz="2400"', `sz="2400" ${traits}`)).join('')));
+  const install = mock(async (_faces: readonly DefaultFontFace[]) => {});
+  const wire = connection();
+  const client = await createPresentationCommandClient(await zip.generateAsync({ type: 'uint8array' }), Object.assign({
+    ...options, fonts: [{ family: 'Calibri', bytes: font.slice(0) }],
+  }, { [defaultFontInstaller]: install }), wire.transport);
+  clients.push(client);
+  expect(wire.acknowledged).toBe(true);
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([
+    ['cjk-jp', false, false], ['cjk-jp', true, false], ['cjk-jp', false, true], ['cjk-jp', true, true],
+  ]);
+  expect(install).toHaveBeenCalledTimes(1);
+  expect(install.mock.calls[0][0]).toMatchObject([
+    { family: 'Noto Sans JP', bold: false, italic: false, kind: 'coverage' },
+  ]);
+  expect(fallback).toHaveBeenCalledTimes(1);
+});
+
 test('inserting script text loads coverage after the family attempt and repaints the active slide', async () => {
   const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
   const requested = deferred<void>();

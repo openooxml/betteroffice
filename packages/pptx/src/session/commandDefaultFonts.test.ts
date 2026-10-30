@@ -184,6 +184,37 @@ test('script collection requests each style separately even when no script pack 
   } finally { fonts.dispose(); }
 });
 
+test('styled Japanese requests share installation by the resolved regular face', async () => {
+  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const source = provider(() => undefined, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
+  const register = mock((_face: DefaultFontFace) => {});
+  const settled = mock(() => {});
+  let finish!: () => void;
+  let started!: () => void;
+  const installing = new Promise<void>((resolve) => { finish = resolve; });
+  const requested = new Promise<void>((resolve) => { started = resolve; });
+  const install = mock(async (faces: readonly DefaultFontFace[]) => { started(); await installing; return faces; });
+  const traits = [[false, false], [true, false], [false, true], [true, true]] as const;
+  const fonts = createCommandDefaultFonts([{ family: 'Calibri' }], () => traits.map(([bold, italic]) =>
+    ({ ...regular, bold, italic, scripts: ['cjk-jp'] })), register, settled, install);
+  try {
+    const first = fonts.load();
+    const second = fonts.load();
+    await requested;
+    finish();
+    expect((await Promise.all([first, second])).flat()).toMatchObject([
+      { family: 'Noto Sans JP', bold: false, italic: false, kind: 'coverage' },
+    ]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual(traits.map(([bold, italic]) => ['cjk-jp', bold, italic]));
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(fonts.isLoading()).toBe(false);
+    expect(fonts.hasPending()).toBe(false);
+    expect(await fonts.load()).toEqual([]);
+  } finally { fonts.dispose(); }
+});
+
 test('missing CJK packs never install Latin substitute bytes as coverage', async () => {
   const latin = new Uint8Array(await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url))).buffer;
   const source = provider((family) => family === 'Calibri' ? async () => latin : undefined, () => async () => latin);

@@ -1,10 +1,13 @@
 //! Chart plotting: shared plot ops translated into slide primitives.
 
+use std::collections::{BTreeSet, HashMap};
+
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    CHART_FONT_FAMILY, ChartLabelRun, ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont,
-    PlotOp, PlotRect, PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, plot_chart_into,
+    CHART_FONT_FAMILY, ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect,
+    PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, plot_chart_into,
 };
+use ooxml_text::paragraph_scripts_with_han_fallback;
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
 
@@ -69,10 +72,25 @@ pub(crate) fn chart_primitive<'a>(
 pub(crate) fn visit_chart_fonts(
     space: &ChartSpace,
     default_font: &str,
-    visit: &mut dyn FnMut(&str, bool, bool, &str),
+    visit: &mut dyn FnMut(&str, bool, bool, &[String]),
+) {
+    visit_chart_fonts_with_classifier(space, default_font, visit, &mut |text| {
+        paragraph_scripts_with_han_fallback([text], false)
+    });
+}
+
+fn visit_chart_fonts_with_classifier(
+    space: &ChartSpace,
+    default_font: &str,
+    visit: &mut dyn FnMut(&str, bool, bool, &[String]),
+    classify: &mut dyn FnMut(&str) -> Vec<String>,
 ) {
     let chart = plot_model_with_font(space, default_font);
-    let mut collect = |style: PlotTextStyle<'_>, bold, text: &str| {
+    let mut scripts = ChartScripts {
+        classify,
+        cache: HashMap::new(),
+    };
+    let mut collect = |style: PlotTextStyle<'_>, bold, scripts: &[String]| {
         let family = style
             .font
             .or(chart.text.chart.font)
@@ -80,11 +98,11 @@ pub(crate) fn visit_chart_fonts(
             .unwrap_or(CHART_FONT_FAMILY);
         let bold = style.bold.or(chart.text.chart.bold).unwrap_or(bold);
         let italic = style.italic.or(chart.text.chart.italic).unwrap_or(false);
-        visit(family, bold, italic, text);
+        visit(family, bold, italic, scripts);
     };
-    collect(PlotTextStyle::default(), false, "");
+    collect(PlotTextStyle::default(), false, &[]);
     if let Some(title) = chart.title.filter(|title| !title.is_empty()) {
-        collect(chart.text.title, true, title);
+        collect(chart.text.title, true, scripts.text(title));
     }
     let series = || {
         chart.series.iter().chain(
@@ -98,29 +116,29 @@ pub(crate) fn visit_chart_fonts(
         .legend
         .is_some_and(|legend| legend.visible != Some(false))
     {
-        collect(chart.text.legend, false, "");
+        collect(chart.text.legend, false, &[]);
         for name in series().filter_map(|series| series.name) {
-            collect(chart.text.legend, false, name);
+            collect(chart.text.legend, false, scripts.text(name));
         }
     }
     for axis in &chart.axes {
-        collect(axis.text, false, "");
+        collect(axis.text, false, &[]);
         if let Some(title) = axis.title {
-            collect(axis.text, false, title);
+            collect(axis.text, false, scripts.text(title));
         }
     }
     for title in [chart.axis_titles.category, chart.axis_titles.value]
         .into_iter()
         .flatten()
     {
-        collect(PlotTextStyle::default(), false, title);
+        collect(PlotTextStyle::default(), false, scripts.text(title));
     }
     for series in series() {
-        for category in series.categories {
-            collect(PlotTextStyle::default(), false, category);
-            for axis in &chart.axes {
-                collect(axis.text, false, category);
-            }
+        let categories = scripts.aggregate(series.categories.iter().map(String::as_str));
+        let name = scripts.aggregate(series.name);
+        collect(PlotTextStyle::default(), false, &categories);
+        for axis in &chart.axes {
+            collect(axis.text, false, &categories);
         }
         for labels in series.labels.iter().chain(
             series
@@ -128,44 +146,83 @@ pub(crate) fn visit_chart_fonts(
                 .iter()
                 .filter_map(|point| point.labels.as_ref()),
         ) {
-            collect(labels.text, false, "");
-            if labels.show_series_name
-                && let Some(name) = series.name
-            {
-                collect(labels.text, false, name);
+            collect(labels.text, false, &[]);
+            if labels.show_series_name {
+                collect(labels.text, false, &name);
             }
             if labels.show_category_name {
-                for category in series.categories {
-                    collect(labels.text, false, category);
-                }
+                collect(labels.text, false, &categories);
             }
         }
-        for point in &series.points {
-            let label = point.label_runs.map(|runs| {
-                runs.iter()
-                    .map(|run| match run {
-                        ChartLabelRun::Text(text) => text.as_str(),
-                        ChartLabelRun::Field(field) if field == "SERIESNAME" => {
-                            series.name.unwrap_or_default()
-                        }
-                        ChartLabelRun::Field(field) if field == "CATEGORYNAME" => point
-                            .index
-                            .and_then(|index| series.categories.get(index))
-                            .map(String::as_str)
-                            .unwrap_or_default(),
-                        _ => "",
-                    })
-                    .collect::<String>()
-            });
-            if let Some(label) = label.as_deref().or(point.label) {
-                let style = point
-                    .labels
-                    .or(series.labels)
-                    .map(|labels| labels.text)
-                    .unwrap_or_default();
-                collect(style, false, label);
-            }
+    }
+    let mut sink = ChartFontSink {
+        scripts: &mut scripts,
+        visit,
+    };
+    plot_chart_into(
+        &chart,
+        PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 960.0,
+            h: 720.0,
+        },
+        &mut sink,
+    );
+}
+
+struct ChartScripts<'a> {
+    classify: &'a mut dyn FnMut(&str) -> Vec<String>,
+    cache: HashMap<String, Vec<String>>,
+}
+
+impl ChartScripts<'_> {
+    fn text(&mut self, text: &str) -> &[String] {
+        self.cache
+            .entry(text.to_owned())
+            .or_insert_with(|| (self.classify)(text))
+    }
+
+    fn aggregate<'a>(&mut self, texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut scripts = BTreeSet::new();
+        for text in texts {
+            scripts.extend(self.text(text).iter().cloned());
         }
+        scripts.into_iter().collect()
+    }
+}
+
+struct ChartFontSink<'a, 'b> {
+    scripts: &'a mut ChartScripts<'b>,
+    visit: &'a mut dyn FnMut(&str, bool, bool, &[String]),
+}
+
+impl ChartFontSink<'_, '_> {
+    fn text(&mut self, text: &str, font: &PlotFont) {
+        (self.visit)(
+            &font.family,
+            font.weight >= 600,
+            font.italic,
+            self.scripts.text(text),
+        );
+    }
+}
+
+impl PlotSink for ChartFontSink<'_, '_> {
+    fn turns_text(&self) -> bool {
+        true
+    }
+
+    fn measure_text(&mut self, text: &str, font: &PlotFont) -> Option<f64> {
+        self.text(text, font);
+        None
+    }
+
+    fn push_op(&mut self, op: PlotOp) -> bool {
+        if let PlotOp::Text { text, font, .. } = op {
+            self.text(&text, &font);
+        }
+        true
     }
 }
 
@@ -455,7 +512,7 @@ fn normalize(command: GeometryPathCommand, x: f64, y: f64, w: f64, h: f64) -> Ge
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ooxml_drawingml::chart::ChartFill;
+    use ooxml_drawingml::chart::{ChartFill, ChartLabelRun, ChartPointLabel, ChartTextProperties};
     use pptx_parse::{
         ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup,
         ChartPoint, ChartSeries,
@@ -501,6 +558,128 @@ mod tests {
                 .collect(),
             plot_groups: groups,
             ..ChartSpace::default()
+        }
+    }
+
+    #[test]
+    fn inherited_point_label_scripts_are_collected_in_linear_work() {
+        let count = 5_000;
+        let mut labelled = series("नमस्ते", &vec![7.0; count], "#112233");
+        labelled.categories = (0..count)
+            .map(|index| format!("かなไทย{index}"))
+            .collect();
+        labelled.points = Some(
+            (0..count)
+                .map(|index| ChartPoint {
+                    index: Some(index as f64),
+                    color: "#AABBCC".to_owned(),
+                    ..ChartPoint::default()
+                })
+                .collect(),
+        );
+        labelled.data_labels = Some(ChartDataLabels {
+            show_category_name: Some(true),
+            show_series_name: Some(true),
+            show_value: Some(true),
+            text: Some(ChartTextProperties {
+                font: Some("Label face".to_owned()),
+                bold: Some(true),
+                italic: Some(true),
+                ..ChartTextProperties::default()
+            }),
+            ..ChartDataLabels::default()
+        });
+        let space = space("bar", vec![group("bar", vec![labelled])]);
+        let mut classifications = 0;
+        let mut visits = 0;
+        let mut scripts = BTreeSet::new();
+        visit_chart_fonts_with_classifier(
+            &space,
+            "Arial",
+            &mut |family, bold, italic, collected| {
+                visits += 1;
+                if family == "Label face" {
+                    assert!(bold && italic);
+                    scripts.extend(collected.iter().cloned());
+                }
+            },
+            &mut |text| {
+                classifications += 1;
+                paragraph_scripts_with_han_fallback([text], false)
+            },
+        );
+        assert!(classifications <= 4 * count + 200, "{classifications}");
+        assert!(visits <= 20 * count + 1_000, "{visits}");
+        for script in ["cjk-jp", "devanagari", "thai"] {
+            assert!(scripts.contains(script), "{scripts:?}");
+        }
+    }
+
+    fn collected_scripts(space: &ChartSpace, family: &str) -> BTreeSet<String> {
+        let mut scripts = BTreeSet::new();
+        visit_chart_fonts(space, "Arial", &mut |font, _, _, collected| {
+            if font == family {
+                scripts.extend(collected.iter().cloned());
+            }
+        });
+        scripts
+    }
+
+    #[test]
+    fn axis_scripts_include_formatted_tick_literals() {
+        let mut group = group("column", vec![series("Revenue", &[3.0, 1.0], "#112233")]);
+        group.axis_ids = vec!["1".to_owned()];
+        let mut space = space("column", vec![group]);
+        space.axis_list = Some(vec![ChartAxis {
+            id: Some("1".to_owned()),
+            axis_type: "value".to_owned(),
+            min: Some(0.0),
+            max: Some(4.0),
+            number_format: Some("0\"円\"".to_owned()),
+            text: Some(ChartTextProperties {
+                font: Some("Axis face".to_owned()),
+                ..ChartTextProperties::default()
+            }),
+            ..ChartAxis::default()
+        }]);
+        assert!(texts(&plot(&space)).iter().any(|text| text.contains('円')));
+        let expected = paragraph_scripts_with_han_fallback(["4円"], false)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(collected_scripts(&space, "Axis face"), expected);
+    }
+
+    #[test]
+    fn data_label_scripts_include_formats_fields_and_separators() {
+        for field in [None, Some("VALUE"), Some("PERCENTAGE"), Some("separator")] {
+            let mut labelled = series("Revenue", &[3.0, 1.0], "#112233");
+            labelled.value_format = Some("0\"円\"".to_owned());
+            let separator = field == Some("separator");
+            labelled.data_labels = Some(ChartDataLabels {
+                show_value: Some(field.is_none()),
+                show_category_name: Some(separator),
+                show_series_name: Some(separator),
+                separator: separator.then(|| "かな".to_owned()),
+                number_format: field.map(|_| "0\"円\"".to_owned()),
+                text: Some(ChartTextProperties {
+                    font: Some("Label face".to_owned()),
+                    ..ChartTextProperties::default()
+                }),
+                points: field.filter(|_| !separator).map(|field| {
+                    vec![ChartPointLabel {
+                        index: Some(0.0),
+                        runs: Some(vec![ChartLabelRun::Field(field.to_owned())]),
+                        ..ChartPointLabel::default()
+                    }]
+                }),
+                ..ChartDataLabels::default()
+            });
+            let space = space("column", vec![group("column", vec![labelled])]);
+            let output = if separator { "RevenueかなQ1" } else { "3円" };
+            let expected = paragraph_scripts_with_han_fallback([output], false)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(collected_scripts(&space, "Label face"), expected, "{field:?}");
         }
     }
 
