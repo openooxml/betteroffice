@@ -283,6 +283,9 @@ pub(crate) fn write_segment_data_urls_within(
 impl DataUrls<'_> {
     fn segments(&mut self, segments: &mut [StorySegment]) {
         for segment in segments {
+            if self.spent {
+                return;
+            }
             let payload = match &mut segment.content {
                 SegmentContent::Pilcrow(properties) => Some(&mut properties.values),
                 SegmentContent::OtherEmbed { payload, .. } => Some(payload),
@@ -342,6 +345,13 @@ impl<'a> DataUrls<'a> {
 
     fn url(&mut self, index: usize) -> Option<Arc<str>> {
         let table = self.table;
+        if let Some(left) = self.budget
+            && !self.urls.contains_key(&index)
+            && table.data_url_len(index).is_none_or(|len| len > left)
+        {
+            self.spent = true;
+            return None;
+        }
         let error = &mut self.error;
         self.urls
             .entry(index)
@@ -363,6 +373,9 @@ impl<'a> DataUrls<'a> {
 
     /// `value` with its tokens written as URLs, or `None` when it has none.
     fn written(&mut self, key: &str, value: &Any) -> Option<Any> {
+        if self.spent {
+            return None;
+        }
         match value {
             Any::String(text) if key == "src" => media_token_index(text)
                 .and_then(|index| self.url(index))
@@ -416,20 +429,20 @@ impl<'a> DataUrls<'a> {
         const KEY: &str = "\"src\":\"";
         let mut sources = Vec::new();
         let mut len = json.len();
-        let mut expanded = json.len();
         let mut rest = json;
         while let Some(at) = rest.find(KEY) {
             let value = &rest[at + KEY.len()..];
             let end = value.find('"').unwrap_or(value.len());
-            let url = media_token_index(&value[..end]).and_then(|index| self.url(index));
+            let url = media_token_index(&value[..end])
+                .and_then(|index| self.url(index))
+                .filter(|url| spend(&mut self.budget, &mut self.spent, url.len()));
             if let Some(url) = &url {
                 len = len.wrapping_sub(end).wrapping_add(url.len());
-                expanded = expanded.saturating_add(url.len());
             }
             sources.push((&rest[..at + KEY.len()], &value[..end], url));
             rest = &value[end..];
         }
-        if !spend(&mut self.budget, &mut self.spent, expanded) {
+        if !spend(&mut self.budget, &mut self.spent, json.len()) {
             return String::new();
         }
         let mut out = String::with_capacity(len);
@@ -670,6 +683,12 @@ mod tests {
             .find(|&i| table.path(i) == Some("word/media/a.png"))
             .unwrap();
         let url = "data:image/png;base64,AQIDBA==";
+        assert_eq!(table.data_url_len(a), Some(url.len()));
+        let mut writer = DataUrls::new(&table);
+        writer.budget = Some(url.len() - 1);
+        assert!(writer.url(a).is_none());
+        assert!(writer.spent && writer.urls.is_empty());
+
         let token = Any::String(Arc::from(format!("media:{a}")));
         let mut writer = DataUrls::new(&table);
         writer.budget = Some(2 * url.len());

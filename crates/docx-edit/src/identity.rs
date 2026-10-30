@@ -3149,7 +3149,7 @@ impl EditingDoc {
             Some(SourcePackage::Pending(bytes, _)) => bytes.clone(),
             None => return false,
         };
-        if !self.unchanged_since_seeded() {
+        if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
             return false;
         }
         if bytes.as_ref().len() as u64 > u64::from(max_inflated_bytes) {
