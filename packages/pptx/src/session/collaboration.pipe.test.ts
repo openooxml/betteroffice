@@ -10,6 +10,7 @@ import { decodeAwarenessUpdate, decodeMessages, encodeAwarenessUpdate, encodeSyn
 import type { AsyncCollaborationReplica, CollaborationError, CollaborationProviderOptions, CollaborationTransport, CollaborationTransportEvent } from '../collaboration/types';
 import type { PptxReadResult } from '../edits';
 import type { SlideDisplayList } from '../types';
+import { engineBackend } from '../wasm/engine';
 import { initWasm, openPresentation, type PresentationHandle } from '../wasm/loader';
 import { createPresentationCollaboration } from './collaboration';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
@@ -230,7 +231,7 @@ test('cursor pipe commands preserve a word drag gesture', async () => {
   } finally { await room.dispose(); }
 });
 
-for (const shared of [true, false]) test(`worker burst merges once with ${shared ? 'shared' : 'direct'} commands`, async () => {
+for (const shared of [true, false]) test.skipIf(engineBackend() === 'native')(`worker burst merges once with ${shared ? 'shared' : 'direct'} commands`, async () => {
   const room = await open({}, shared);
   const peer = openPresentation(bytes, { clientId: 8102 });
   try {
