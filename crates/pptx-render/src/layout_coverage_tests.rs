@@ -193,6 +193,92 @@ mod coverage_regressions {
     }
 
     #[test]
+    fn coverage_faces_keep_emoji_presentation_on_the_browser() {
+        let mut renderer = SlideRenderer::new();
+        let own = renderer
+            .register_font(
+                "Segoe UI",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Selawik-Regular.ttf"),
+            )
+            .unwrap();
+        let coverage = renderer
+            .register_fallback_font(
+                "Noto Sans JP",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf"),
+            )
+            .unwrap();
+        renderer.set_browser_coverage_fallback(true);
+        let face = renderer
+            .resolve_face("Segoe UI", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(renderer.fonts.covers(FontId::from_u32(own), '☀'), Ok(false));
+        assert_eq!(
+            renderer.fonts.covers(FontId::from_u32(coverage), '☀'),
+            Ok(true)
+        );
+        for (cluster, expected) in [
+            ("☀️", BROWSER_FONT_ID),
+            ("☀", coverage),
+            ("☀\u{FE0E}", coverage),
+        ] {
+            let pieces = renderer.browser_coverage_pieces(&face, cluster, false, false);
+            assert_eq!(pieces.len(), 1, "{cluster:?}");
+            assert_eq!(
+                pieces[0].1.as_ref().unwrap().id.to_u32(),
+                expected,
+                "{cluster:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_presentation_selector_lets_registered_faces_cover_default_emoji() {
+        let mut renderer = SlideRenderer::new();
+        let own = renderer
+            .register_font(
+                "Segoe UI",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Selawik-Regular.ttf"),
+            )
+            .unwrap();
+        let covering = renderer
+            .register_font(
+                "Inter",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Inter-Regular.ttf"),
+            )
+            .unwrap();
+        renderer.set_browser_coverage_fallback(true);
+        let face = renderer
+            .resolve_face("Segoe UI", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(renderer.fonts.covers(FontId::from_u32(own), '⬜'), Ok(false));
+        assert_eq!(
+            renderer.fonts.covers(FontId::from_u32(covering), '⬜'),
+            Ok(true)
+        );
+        for (cluster, expected) in [
+            ("⬜", BROWSER_FONT_ID),
+            ("⬜\u{FE0F}", BROWSER_FONT_ID),
+            ("⬜\u{FE0E}", covering),
+        ] {
+            let pieces = renderer.browser_coverage_pieces(&face, cluster, false, false);
+            assert_eq!(pieces.len(), 1, "{cluster:?}");
+            assert_eq!(
+                pieces[0].1.as_ref().unwrap().id.to_u32(),
+                expected,
+                "{cluster:?}"
+            );
+        }
+    }
+
+    #[test]
     fn emoji_presentation_detection_keeps_text_and_indic_joiners() {
         for cluster in [
             "☀️",
@@ -201,12 +287,13 @@ mod coverage_regressions {
             "1\u{20E3}",
             "🇩🇪",
             "⌚",
+            "⬜",
             "☀‍☀",
             "\u{1F02C}\u{200D}\u{1F02C}",
         ] {
             assert!(emoji_presentation_cluster(cluster), "{cluster:?}");
         }
-        for cluster in ["☀", "☀\u{FE0E}", "Б", "क्‍ष"] {
+        for cluster in ["☀", "☀\u{FE0E}", "⬜\u{FE0E}", "Б", "क्‍ष"] {
             assert!(!emoji_presentation_cluster(cluster), "{cluster:?}");
         }
     }

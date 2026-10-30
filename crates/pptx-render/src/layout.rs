@@ -132,17 +132,12 @@ fn needs_visible_glyph(character: char) -> bool {
 }
 
 fn emoji_presentation_cluster(cluster: &str) -> bool {
+    let text_presentation = cluster.contains('\u{FE0E}');
     cluster.chars().any(|character| {
         matches!(
             character as u32,
             0xFE0F | 0x20E3 | 0x1F1E6..=0x1F1FF | 0x1F3FB..=0x1F3FF
-        ) || matches!(
-            character.emoji_status(),
-            EmojiStatus::EmojiPresentation
-                | EmojiStatus::EmojiPresentationAndModifierBase
-                | EmojiStatus::EmojiPresentationAndEmojiComponent
-                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
-        )
+        ) || (!text_presentation && default_emoji_presentation(character))
     }) || cluster.split('\u{200D}').skip(1).any(|part| {
         let Some(character) = part.chars().next() else {
             return false;
@@ -152,6 +147,16 @@ fn emoji_presentation_cluster(cluster: &str) -> bool {
         let ordinary = format!("a\u{200D}{character}");
         pictographic.graphemes(true).count() == 1 && ordinary.graphemes(true).count() == 2
     })
+}
+
+fn default_emoji_presentation(character: char) -> bool {
+    matches!(
+        character.emoji_status(),
+        EmojiStatus::EmojiPresentation
+            | EmojiStatus::EmojiPresentationAndModifierBase
+            | EmojiStatus::EmojiPresentationAndEmojiComponent
+            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+    )
 }
 
 /// A font family the deck asked for that is not registered, the family drawn
@@ -422,15 +427,15 @@ impl SlideRenderer {
                 .iter()
                 .filter(|(_, _, candidate)| covers(candidate))
         };
+        if emoji_presentation_cluster(cluster) {
+            return None;
+        }
         covering()
             .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
             .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
             .or_else(|| covering().next())
             .map(|(_, _, candidate)| candidate)
             .or_else(|| {
-                if emoji_presentation_cluster(cluster) {
-                    return None;
-                }
                 self.faces
                     .iter()
                     .filter(|(_, candidate)| covers(candidate))
