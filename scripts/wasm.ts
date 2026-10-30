@@ -18,6 +18,7 @@ export interface WasmModule {
   generated: string;
   /** Flags passed through to cargo. */
   cargoArgs?: string[];
+  variant?: string;
 }
 
 // `source` is what wasm-pack left in target/, `vendored` what was copied into the
@@ -171,10 +172,11 @@ export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
   requireWasmPack();
   const sources = await sourcesFingerprint();
 
-  for (const { crate, name, generated, cargoArgs = [] } of modules) {
+  for (const { crate, name, generated, cargoArgs = [], variant } of modules) {
     const dest = resolve(root, generated);
-    const output = resolve(root, 'target/wasm-pack', crate);
-    const stamp = resolve(root, 'target/wasm-pack', `${crate}.json`);
+    const buildName = variant ? `${crate}-${variant}` : crate;
+    const output = resolve(root, 'target/wasm-pack', buildName);
+    const stamp = resolve(root, 'target/wasm-pack', `${buildName}.json`);
     const files = [`${name}.js`, `${name}.d.ts`, `${name}_bg.wasm`, `${name}_bg.wasm.d.ts`];
     const key = createHash('sha256')
       .update(sources)
@@ -186,12 +188,12 @@ export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
       .catch(() => null);
     const current = recorded?.key === key;
     if (current && (await intact(dest, recorded?.vendored))) {
-      console.log(`[wasm] ${crate}: up to date`);
+      console.log(`[wasm] ${buildName}: up to date`);
       continue;
     }
 
     if (current && (await intact(output, recorded?.source))) {
-      console.log(`[wasm] ${crate}: vendoring the cached build`);
+      console.log(`[wasm] ${buildName}: vendoring the cached build`);
     } else {
       await rm(output, { recursive: true, force: true });
       // --locked must ride with the cargo pass-through: wasm-pack forwards its
