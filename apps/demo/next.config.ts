@@ -8,6 +8,7 @@ const nextConfig: NextConfig = {
     "@betteroffice/xlsx-react",
     "@betteroffice/fonts",
     "@betteroffice/fonts-cjk",
+    "@betteroffice/fonts-intl",
     "@betteroffice/vsdx",
     "@betteroffice/vsdx-react",
   ],

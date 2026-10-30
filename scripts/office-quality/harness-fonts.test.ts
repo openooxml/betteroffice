@@ -6,6 +6,7 @@ import { Window } from 'happy-dom';
 import JSZip from 'jszip';
 import * as manifest from '../../packages/fonts/src/manifest';
 import { fontProvider } from '../../packages/fonts/src/provider';
+import { SCRIPT_PATTERNS } from '../../packages/fonts/src/scripts';
 import { normalFontIndex } from './xlsx-styles';
 
 interface RendererFace {
@@ -34,6 +35,7 @@ async function loadHarness() {
     jszip: JSZip,
     '../../packages/fonts/src/cdn': { createFontProvider: () => provider },
     '../../packages/fonts/src/manifest': manifest,
+    '../../packages/fonts/src/scripts': { SCRIPT_PATTERNS },
     './xlsx-styles': { normalFontIndex },
   };
   const context = {
@@ -143,6 +145,19 @@ test('registers a script fallback with a real bundled bold file at 700', async (
   expect(rendererFaces(faces)).toEqual([
     { family: 'Noto Sans Arabic', bold: false, italic: false, file: 'NotoSansArabic-Regular.ttf' },
     { family: 'Noto Sans Arabic', bold: true, italic: false, file: 'NotoSansArabic-Bold.ttf' },
+  ]);
+});
+
+test('registers international script coverage beside Latin family fallbacks', async () => {
+  const harness = await loadHarness();
+  const faces = await harness.fallbackFontsFor(await deck('กকக', 'Arial'));
+  expect(rendererFaces(faces).map((face) => face.file)).toEqual([
+    'NotoSansThai-Regular.ttf.zst',
+    'NotoSansThai-Bold.ttf.zst',
+    'NotoSansBengali-Regular.ttf.zst',
+    'NotoSansBengali-Bold.ttf.zst',
+    'NotoSansTamil-Regular.ttf.zst',
+    'NotoSansTamil-Bold.ttf.zst',
   ]);
 });
 

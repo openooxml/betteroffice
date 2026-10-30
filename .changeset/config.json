@@ -19,7 +19,8 @@
     ],
     [
       "@betteroffice/fonts",
-      "@betteroffice/fonts-cjk"
+      "@betteroffice/fonts-cjk",
+      "@betteroffice/fonts-intl"
     ],
     [
       "@betteroffice/vsdx",
