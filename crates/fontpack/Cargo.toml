@@ -18,9 +18,10 @@ required-features = ["build"]
 [features]
 default = []
 wasm = ["dep:lol_alloc"]
-build = ["dep:zstd", "dep:serde", "dep:serde_json", "dep:sha2", "dep:semver"]
+build = ["dep:zstd", "dep:serde", "dep:serde_json", "dep:sha2", "dep:semver", "wuff/brotli"]
 
 [dependencies]
+wuff = { version = "=0.2.9", default-features = false }
 zstd = { version = "0.14.3", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 /** Journal contents read back from disk. The journal holds the full source at rest. */
@@ -28,6 +28,14 @@ function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function securePath(path: string, mode: number, follow: boolean): boolean {
+  const stat = follow ? statSync(path, { throwIfNoEntry: false }) : lstatSync(path, { throwIfNoEntry: false });
+  if (!stat) return false;
+  if (stat.isSymbolicLink()) throw new Error("journal path is a symlink");
+  if (!process.getuid || stat.uid === process.getuid()) chmodSync(path, mode);
+  return true;
+}
+
 /** Append only journal for one file key. It holds the full source at rest. */
 export class FileJournal {
   readonly path: string;
@@ -54,8 +62,9 @@ export class FileJournal {
   #ensureFd(): number {
     if (this.#broken) throw new Error("journal is broken");
     if (this.#fd === null) {
-      mkdirSync(this.dir, { recursive: true });
-      this.#fd = openSync(this.path, "a");
+      if (!securePath(this.dir, 0o700, true)) mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+      securePath(this.path, 0o600, false);
+      this.#fd = openSync(this.path, "a", 0o600);
       try {
         const data = readFileSync(this.path);
         if (data.length > 0) {
@@ -130,7 +139,7 @@ export class FileJournal {
 
   /** Reads the header, source, updates and written versions. */
   read(): JournalData | null {
-    if (!existsSync(this.path)) return null;
+    if (!securePath(this.dir, 0o700, true) || !securePath(this.path, 0o600, false)) return null;
     const data = readFileSync(this.path);
     const empty: JournalData = { fileKey: null, itemVersion: null, sha256: null, clientId: null, initialState: null, source: null, updates: [], writtenVersions: [] };
     if (data.length === 0) return empty;

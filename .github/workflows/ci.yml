@@ -47,7 +47,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ROUTE_GROUPS: packages python package_tests:2 rust native_viewer
-          ROUTE_PEER_SLOTS: 3
+          ROUTE_PEER_SLOTS: 5
           BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
           BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
           BO_CI_SPILL: ${{ vars.BO_CI_SPILL }}
@@ -142,6 +142,11 @@ jobs:
       - name: Build
         run: bun run build:packages
 
+      - name: Check plugin declarations against the built packages
+        env:
+          BETTEROFFICE_PACKAGE_DECLARATIONS: prebuilt
+        run: bun test scripts/docx-plugin-declarations.test.ts scripts/xlsx-plugin-declarations.test.ts scripts/pptx-plugin-declarations.test.ts
+
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: "24"
@@ -193,6 +198,9 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test
+        env:
+          BETTEROFFICE_ENGINE: wasm
+          BETTEROFFICE_PACKAGE_DECLARATIONS: skip
         run: bun run test --shard=${{ matrix.shard }}/2
 
   audit:
@@ -267,6 +275,7 @@ jobs:
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
+          cargo clippy -p fontpack --all-targets --features build -- -D warnings
 
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
@@ -297,6 +306,7 @@ jobs:
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
+          cargo test -p fontpack --features build
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
@@ -448,14 +458,27 @@ jobs:
       - name: Build and test
         run: |
           for package in $(node scripts/native-bindings.mjs --paths); do
-            bunx napi build --cwd "$package" --platform -- --locked
+            if [ "$package" = "bindings/xlsx-native" ]; then
+              bunx napi build --cwd "$package" --platform --release -- --locked
+            else
+              bunx napi build --cwd "$package" --platform -- --locked
+            fi
             bun test "$package/index.test.ts"
           done
+
+      - name: Test the xlsx packages on the native engine
+        run: |
+          bun run build:docx-wasm
+          bun run build:fonts
+          BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx
+          BETTEROFFICE_ENGINE=native bun test --isolate packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
 
       - name: Check engine surface
         run: bun scripts/check-engine-surface.ts xlsx
 
       - name: Check native and wasm parity
+        env:
+          BETTEROFFICE_ENGINE: wasm
         run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts
 
       - name: Check generated declarations

@@ -1196,6 +1196,9 @@ fn edited_run_formatting<T: ReadTxn>(
         let Any::Map(boundary) = boundary else {
             return Err(MISSING_RUN_PROVENANCE);
         };
+        if boundary.get("formatsRun") == Some(&Any::Bool(false)) {
+            continue;
+        }
         let formatting = boundary.get("formatting");
         let seeded = source
             .seeded_run_attrs(story, previous_style, formatting)
@@ -1329,12 +1332,43 @@ fn restyle_inheritance<'a>(
 fn carries_run_formatting<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
     match &chunk.kind {
         ChunkKind::Text(_) => true,
-        ChunkKind::Embed(Some(map)) => matches!(
-            crate::map_string(map, txn, KIND_KEY).as_deref(),
-            Some("noteRef" | "field" | "break")
-        ),
+        ChunkKind::Embed(Some(map)) => match crate::map_string(map, txn, KIND_KEY).as_deref() {
+            Some("noteRef" | "break") => true,
+            Some("field") => crate::map_string(map, txn, "modelKind").as_deref() == Some("field"),
+            _ => false,
+        },
         _ => false,
     }
+}
+
+fn field_run_formatting<T: ReadTxn>(chunk: &Chunk, txn: &T) -> Option<BTreeMap<String, Any>> {
+    let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+        return None;
+    };
+    if crate::map_string(map, txn, KIND_KEY).as_deref() != Some("field")
+        || crate::map_string(map, txn, "modelKind").as_deref() != Some("field")
+    {
+        return None;
+    }
+    let data = crate::map_string(map, txn, "fieldData")?;
+    let field: serde_json::Value = serde_json::from_str(&data).ok()?;
+    if !matches!(
+        field.get("type").and_then(serde_json::Value::as_str),
+        Some("simpleField" | "complexField")
+    ) {
+        return None;
+    }
+    let formatting = crate::seed::field_result_formatting(&field)
+        .cloned()
+        .map(crate::seed::any_from_value)
+        .transpose()
+        .ok()?;
+    Some(
+        formatting
+            .as_ref()
+            .map(direct_run_attrs)
+            .unwrap_or_default(),
+    )
 }
 
 fn is_note_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
@@ -1516,24 +1550,26 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
     if present(properties.get("pStyle")) != Some(&Any::from(style_id)) {
         changes.push(("pStyle".to_owned(), Some(Any::from(style_id))));
     }
-    if let Some(Any::Map(original)) = properties.get("_originalFormatting") {
-        let mut direct = (**original).clone();
-        if !direct_numbering {
-            for key in crate::seed::style_resolved_keys() {
-                direct.remove(formatting_key(key));
-            }
-            if clears_numbering {
-                direct.remove("numPr");
-                direct.remove("numPrFromStyle");
-            }
+    let original = match properties.get("_originalFormatting") {
+        Some(Any::Map(original)) => Some(original),
+        _ => None,
+    };
+    let mut direct = original.map_or_else(HashMap::new, |original| (**original).clone());
+    if !direct_numbering {
+        for key in crate::seed::style_resolved_keys() {
+            direct.remove(formatting_key(key));
         }
-        direct.insert("styleId".to_owned(), Any::from(style_id));
-        if direct != **original {
-            changes.push((
-                "_originalFormatting".to_owned(),
-                Some(Any::Map(Arc::new(direct))),
-            ));
+        if clears_numbering {
+            direct.remove("numPr");
+            direct.remove("numPrFromStyle");
         }
+    }
+    direct.insert("styleId".to_owned(), Any::from(style_id));
+    if original.is_none_or(|original| direct != **original) {
+        changes.push((
+            "_originalFormatting".to_owned(),
+            Some(Any::Map(Arc::new(direct))),
+        ));
     }
     let old_run: HashMap<&str, &Any> = previous
         .run
@@ -1588,13 +1624,22 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
     let mut inheritance = HashMap::new();
     let mut formats = Vec::new();
     for chunk in chunks {
+        if chunk.start < node_start || chunk.end() > pilcrow {
+            continue;
+        }
+        let field_formatting = field_run_formatting(chunk, txn);
         let formats_run = matches!(chunk.kind, ChunkKind::Text(_))
+            || field_formatting.is_some()
             || (direct_numbering && is_note_reference(chunk, txn));
-        if !formats_run || chunk.start < node_start || chunk.end() > pilcrow {
+        if !formats_run {
             continue;
         }
         let linked = chunk.attr_active(crate::format::HYPERLINK);
-        let run_style = match chunk.attrs.get("runStyle") {
+        let run_style = match chunk
+            .attrs
+            .get("runStyle")
+            .filter(|_| field_formatting.is_none())
+        {
             Some(Any::Map(style)) => match style.get("styleId") {
                 Some(Any::String(style)) => Some(style.as_ref()),
                 _ => None,
@@ -1611,8 +1656,13 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
             (attrs(previous_style), attrs(Some(style_id)))
         });
         let run_keys = restyle_run_keys(&keys, old_inherited, new_inherited, direct_numbering);
-        let ranges: Vec<_> = match &direct_runs {
-            Some(runs) => {
+        let run_keys: Vec<_> = run_keys
+            .into_iter()
+            .filter(|key| field_formatting.is_none() || !matches!(*key, "boldCs" | "italicCs"))
+            .collect();
+        let ranges: Vec<_> = match (&field_formatting, &direct_runs) {
+            (Some(direct), _) => vec![(chunk.start, chunk.end(), Some(direct))],
+            (None, Some(runs)) => {
                 let start = runs.partition_point(|run| run.end <= chunk.start);
                 let end = runs.partition_point(|run| run.start < chunk.end());
                 runs[start..end]
@@ -1626,7 +1676,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                     })
                     .collect()
             }
-            None => vec![(chunk.start, chunk.end(), None)],
+            (None, None) => vec![(chunk.start, chunk.end(), None)],
         };
         for (start, end, direct) in ranges {
             let mut attrs = Vec::new();
@@ -1635,7 +1685,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                     continue;
                 }
                 let current = present(chunk.attrs.get(*key));
-                let wanted = if direct_numbering {
+                let wanted = if direct_numbering || field_formatting.is_some() {
                     rebased_run_attr(
                         key,
                         current,

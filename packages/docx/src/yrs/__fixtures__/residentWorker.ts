@@ -32,6 +32,8 @@ const STUBS: Record<string, string> = {
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
   `,
+  '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
+  '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
   './yrsSessionFacade': 'export const decodeDocxHostJson = (...args) => testHarness.decodeDocxHostJson(...args);',
   '../layout/render/glyphCache': 'export class GlyphCache {}',
   '../layout/render/canvasBackend': `
@@ -224,6 +226,8 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
         },
         preload: preloadEditWasm,
         preloadFrom: preloadEditWasmFrom,
+        preloadOpcWasm: () => import('../../wasm/opc').then((wasm) => wasm.preloadOpcWasm()),
+        preloadParseWasm: () => import('../../wasm/parse').then((wasm) => wasm.preloadParseWasm()),
         decodeDocxHostJson,
         wasmModuleMemories,
       },

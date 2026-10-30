@@ -495,6 +495,55 @@ describe('Canvas text-run slot clipping', () => {
 });
 
 describe('Canvas substitute widths', () => {
+  it('paints corrected Japanese cluster positions without scaling CJK outlines', async () => {
+    const text = '1111111111中あア';
+    for (const effects of [{ allCaps: true }, { textShadow: 'shadow' as const }]) {
+      const { ctx, paints } = recordingContext(new Map([
+        [text, { width: 136.8, ascent: 12, descent: 4 }],
+        ['1', { width: 8.88, ascent: 12, descent: 4 }],
+        ...Array.from('中あア', character => [character, { width: 16, ascent: 12, descent: 4 }] as const),
+      ]));
+      Object.assign(ctx, { letterSpacing: '0px', wordSpacing: '0px' });
+      const run = textRun(text, 40, 128, 'MS Gothic');
+      Object.assign(run, effects);
+      run.canvasClusters = Array.from(text, (character, index) => ({
+        text: character,
+        offset: index < 10 ? index * 8 : 80 + (index - 10) * 16,
+      }));
+
+      await drawPrimitive(ctx, run);
+
+      expect(paints).toHaveLength(13);
+      for (let index = 0; index < 10; index++) {
+        expect(paints[index].naturalLeft).toBeCloseTo(40 + index * 8);
+        expect(paints[index].naturalRight - paints[index].naturalLeft).toBeCloseTo(8.88);
+      }
+      for (let index = 10; index < 13; index++) {
+        expect(paints[index].naturalLeft).toBeCloseTo(120 + (index - 10) * 16);
+        expect(paints[index].naturalRight - paints[index].naturalLeft).toBeCloseTo(16);
+      }
+      expect(paints.at(-1)!.naturalRight).toBeCloseTo(run.x + run.width);
+    }
+  });
+
+  it('keeps a decomposed kana cluster together at its positioned advance', async () => {
+    const cluster = 'か\u3099';
+    const { ctx, paints } = recordingContext(new Map([
+      [cluster, { width: 16, ascent: 12, descent: 4 }],
+      ['中', { width: 16, ascent: 12, descent: 4 }],
+    ]));
+    const run = textRun(`${cluster}中`, 40, 29.312, 'MS UI Gothic');
+    run.allCaps = true;
+    run.canvasClusters = [{ text: cluster, offset: 0 }, { text: '中', offset: 13.312 }];
+
+    await drawPrimitive(ctx, run);
+
+    expect(paints).toHaveLength(2);
+    expect(paints[0].naturalRight - paints[0].naturalLeft).toBeCloseTo(16);
+    expect(paints[1].naturalLeft).toBeCloseTo(53.312);
+    expect(paints[1].naturalRight).toBeCloseTo(run.x + run.width);
+  });
+
   it('scales around the text origin and preserves tracking and word spacing', async () => {
     for (const horizontalScale of [undefined, 150]) {
       const { ctx, paints } = recordingContext(
