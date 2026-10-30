@@ -10430,9 +10430,9 @@ mod tests {
         let mut best: Option<std::time::Duration> = None;
         let mut output = None;
         for _ in 0..3 {
-            let start = std::time::Instant::now();
+            let start = thread_cpu_time();
             let result = workload();
-            let elapsed = start.elapsed();
+            let elapsed = thread_cpu_time() - start;
             if best.is_none_or(|best_elapsed| elapsed < best_elapsed) {
                 best = Some(elapsed);
             }

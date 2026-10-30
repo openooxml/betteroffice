@@ -11,7 +11,7 @@ export interface StepResult {
 
 export interface Script {
   fixture: string;
-  steps: { op: string; args: Record<string, unknown> }[];
+  steps: { op: string; args: Record<string, unknown>; targets?: ('ts' | 'rust' | 'python')[] }[];
   [key: string]: unknown;
 }
 

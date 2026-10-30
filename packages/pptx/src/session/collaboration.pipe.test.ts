@@ -252,7 +252,8 @@ for (const shared of [true, false]) test(`worker burst merges once with ${shared
     expect(command.kind === 'collabPipe' && command.payload.ops.filter((op) => op.op === 'event')).toHaveLength(24);
     expect(room.transferred[room.transferred.length - 1]).toHaveLength(24);
     expect(room.transferred[room.transferred.length - 1].every((buffer) => buffer.byteLength === 0)).toBe(true);
-    expect(acks).toHaveLength(1);
+    expect(acks.map((ack) => ({ burstSeq: command.seq, throughSeq: ack.throughSeq, frame: ack.frame?.epoch,
+      outcomes: ack.outcomes.map((outcome) => outcome.status) }))).toHaveLength(1);
     expect(acks[0].frame?.epoch).toBe(before.frame + 1);
     expect(acks[0].version).not.toBe(before.version);
     expect(acks[0].outcomes).toMatchObject([{ status: 'applied', committed: true }]);

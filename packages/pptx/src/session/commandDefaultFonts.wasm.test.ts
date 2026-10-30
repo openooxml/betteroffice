@@ -5,7 +5,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { initWasm } from '../wasm/loader';
-import { PptxRenderer } from '../wasm/generated/pptx_wasm.js';
+import { PptxRenderer } from '../wasm/engine';
 import type { SlideDisplayList } from '../types';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { commandFontProvider } from './commandDefaultFonts';

@@ -3,7 +3,7 @@ import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
-import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import { PptxDocument } from '../wasm/engine';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
