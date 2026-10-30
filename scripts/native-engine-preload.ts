@@ -22,4 +22,7 @@ globalThis.Worker = class extends BaseWorker {
     super(url, { ...options, preload: [...preloads, preload] } as WorkerOptions);
   }
 } as typeof Worker;
-process.env.BUN_OPTIONS = [process.env.BUN_OPTIONS, `--preload ${preload}`].filter(Boolean).join(' ');
+const option = `--preload ${preload}`;
+if (!process.env.BUN_OPTIONS?.includes(option)) {
+  process.env.BUN_OPTIONS = [process.env.BUN_OPTIONS, option].filter(Boolean).join(' ');
+}

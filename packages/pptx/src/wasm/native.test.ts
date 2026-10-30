@@ -38,7 +38,7 @@ test.skipIf(engineKind !== 'native')('native initialization ignores wasm inputs 
     } finally { handle.dispose(); }
   `;
   const child = Bun.spawn([process.execPath, '--eval', script], {
-    cwd: resolve(import.meta.dir, '../../../..'), stdout: 'ignore', stderr: 'pipe',
+    cwd: resolve(import.meta.dir, '../../../..'), env: process.env, stdout: 'ignore', stderr: 'pipe',
   });
   const error = await new Response(child.stderr).text();
   expect({ exit: await child.exited, error }).toEqual({ exit: 0, error: '' });
