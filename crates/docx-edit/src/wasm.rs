@@ -45,15 +45,12 @@
 use std::sync::Arc;
 
 use js_sys::{Function, Uint8Array};
-use serde::Serialize;
+#[cfg(test)]
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
-use crate::batch::outcome_json;
-use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
 use crate::session::{EditSessionCore, EngineError, EngineErrorKind, Host};
-use crate::structured::ExportOptions;
 
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
@@ -2742,42 +2739,24 @@ impl EditSession {
     }
 }
 
-/// A snapshot export as `{"ok":true,"content"}` or `{"ok":false,"failure"}`; unreadable packages
-/// and malformed options throw.
-fn snapshot_json<T: Serialize>(
-    outcome: Result<T, crate::structured::ExportError>,
-) -> Result<String, JsValue> {
-    let outcome = match outcome {
-        Ok(content) => Ok(json!({ "content": content })),
-        Err(crate::structured::ExportError::Refused(failure)) => Err(json!({ "failure": failure })),
-        Err(crate::structured::ExportError::Parse(message)) => return Err(js_err(message)),
-    };
-    outcome_json(&outcome).map_err(js_err)
-}
-
 /// Structured export of DOCX bytes as a snapshot; `options` as for
 /// [`EditSession::export_structured_json`]. No session is created.
 #[wasm_bindgen]
 pub fn export_docx_structured_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
-    let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
-    snapshot_json(crate::structured::export_docx_structured(bytes, &options))
+    crate::session::free::export_docx_structured_json(bytes, options).map_err(js_err)
 }
 
 /// [`export_docx_structured_json`] rendered as Markdown.
 #[wasm_bindgen]
 pub fn export_docx_markdown_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
-    let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
-    snapshot_json(crate::structured::export_docx_markdown(bytes, &options))
+    crate::session::free::export_docx_markdown_json(bytes, options).map_err(js_err)
 }
 
 /// The content controls of DOCX bytes as a snapshot; `options` as for
 /// [`EditSession::list_content_controls_json`]. No session is created.
 #[wasm_bindgen]
 pub fn list_docx_content_controls_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
-    let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
-    snapshot_json(crate::content_controls::list_docx_content_controls(
-        bytes, &options,
-    ))
+    crate::session::free::list_docx_content_controls_json(bytes, options).map_err(js_err)
 }
 
 /// The content controls of DOCX bytes that match `query` exactly.
@@ -2787,25 +2766,14 @@ pub fn find_docx_content_controls_json(
     query: &str,
     options: &str,
 ) -> Result<String, JsValue> {
-    let query: ContentControlQuery = serde_json::from_str(query).map_err(js_err)?;
-    let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
-    snapshot_json(crate::content_controls::find_docx_content_controls(
-        bytes, &query, &options,
-    ))
+    crate::session::free::find_docx_content_controls_json(bytes, query, options).map_err(js_err)
 }
 
 /// Renders structured content as Markdown: `content` is a schema-version-1 export and
 /// `options` is `{"maxBytes"?}`.
 #[wasm_bindgen]
 pub fn render_docx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    let content: crate::structured::DocxStructuredContent =
-        serde_json::from_str(content).map_err(js_err)?;
-    let options: crate::structured::MarkdownOptions =
-        serde_json::from_str(options).map_err(js_err)?;
-    snapshot_json(
-        crate::structured::render_docx_markdown(&content, &options)
-            .map_err(crate::structured::ExportError::Refused),
-    )
+    crate::session::free::render_docx_markdown_json(content, options).map_err(js_err)
 }
 
 /// Renders a paged export as Markdown: `content` is `{"structured","layout"}` from a paged
@@ -2815,38 +2783,7 @@ pub fn render_docx_markdown_with_pages_json(
     content: &str,
     options: &str,
 ) -> Result<String, JsValue> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Layout {
-        #[serde(
-            rename = "schemaVersion",
-            deserialize_with = "crate::structured::pages::page_map_schema_version"
-        )]
-        _schema_version: u8,
-        export_fingerprint: String,
-        pages: Vec<crate::structured::ExportPage>,
-        fragments: Vec<crate::structured::PageFragment>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Paged {
-        structured: crate::structured::DocxStructuredContent,
-        layout: Layout,
-    }
-    let content: Paged = serde_json::from_str(content).map_err(js_err)?;
-    let options: crate::structured::PageMarkdownOptions =
-        serde_json::from_str(options).map_err(js_err)?;
-    snapshot_json(
-        crate::structured::render_docx_markdown_with_pages(
-            &content.structured,
-            crate::structured::PageAnnotations {
-                export_fingerprint: &content.layout.export_fingerprint,
-                pages: &content.layout.pages,
-                fragments: &content.layout.fragments,
-            },
-            &options,
-        )
-        .map_err(crate::structured::ExportError::Refused),
-    )
+    crate::session::free::render_docx_markdown_with_pages_json(content, options).map_err(js_err)
 }
 
 #[cfg(test)]

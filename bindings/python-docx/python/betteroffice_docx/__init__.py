@@ -184,6 +184,10 @@ class Document:
         """
         return self._inner.replace_text(para_id, text)
 
+    def replace_paragraph_text(self, para_id: str, text: str) -> Edit:
+        """Alias of ``replace_text``."""
+        return self._inner.replace_paragraph_text(para_id, text)
+
     def export_structured(
         self,
         *,
