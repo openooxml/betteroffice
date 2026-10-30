@@ -145,8 +145,8 @@ describe('resolution', () => {
   });
 
   test('light variants resolve only for families we bundle', () => {
-    expect(resolveLightVariantFace('Calibri Light', false, false)?.file).toBe('Carlito-Regular.ttf');
-    expect(resolveLightVariantFace(' calibri light ', true, true)?.file).toBe('Carlito-Italic.ttf');
+    expect(resolveLightVariantFace('Calibri Light', false, false)?.file).toBe('Carlito-Regular.ttf.zst');
+    expect(resolveLightVariantFace(' calibri light ', true, true)?.file).toBe('Carlito-Italic.ttf.zst');
     expect(resolveLightVariantFace('Segoe UI Semilight', false, false)?.family).toBe('Selawik');
     expect(resolveLightVariantFace('Calibri', false, false)).toBeUndefined();
     expect(resolveLightVariantFace('BIZ UD明朝 Medium', false, false)).toBeUndefined();
