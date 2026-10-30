@@ -11,6 +11,8 @@ use ooxml_text::paragraph_scripts_with_han_fallback;
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
 
+type FontVisitor<'a> = dyn FnMut(&str, bool, bool, &[String]) + 'a;
+
 /// The graphic frame a chart is drawn into.
 pub(crate) struct ChartFrame<'a> {
     pub object_id: u32,
@@ -72,7 +74,7 @@ pub(crate) fn chart_primitive<'a>(
 pub(crate) fn visit_chart_fonts(
     space: &ChartSpace,
     default_font: &str,
-    visit: &mut dyn FnMut(&str, bool, bool, &[String]),
+    visit: &mut FontVisitor<'_>,
 ) {
     visit_chart_fonts_with_classifier(space, default_font, visit, &mut |text| {
         paragraph_scripts_with_han_fallback([text], false)
@@ -82,7 +84,7 @@ pub(crate) fn visit_chart_fonts(
 fn visit_chart_fonts_with_classifier(
     space: &ChartSpace,
     default_font: &str,
-    visit: &mut dyn FnMut(&str, bool, bool, &[String]),
+    visit: &mut FontVisitor<'_>,
     classify: &mut dyn FnMut(&str) -> Vec<String>,
 ) {
     let chart = plot_model_with_font(space, default_font);
@@ -194,7 +196,7 @@ impl ChartScripts<'_> {
 
 struct ChartFontSink<'a, 'b> {
     scripts: &'a mut ChartScripts<'b>,
-    visit: &'a mut dyn FnMut(&str, bool, bool, &[String]),
+    visit: &'a mut FontVisitor<'a>,
 }
 
 impl ChartFontSink<'_, '_> {
@@ -565,9 +567,7 @@ mod tests {
     fn inherited_point_label_scripts_are_collected_in_linear_work() {
         let count = 5_000;
         let mut labelled = series("नमस्ते", &vec![7.0; count], "#112233");
-        labelled.categories = (0..count)
-            .map(|index| format!("かなไทย{index}"))
-            .collect();
+        labelled.categories = (0..count).map(|index| format!("かなไทย{index}")).collect();
         labelled.points = Some(
             (0..count)
                 .map(|index| ChartPoint {
@@ -679,7 +679,11 @@ mod tests {
             let expected = paragraph_scripts_with_han_fallback([output], false)
                 .into_iter()
                 .collect::<BTreeSet<_>>();
-            assert_eq!(collected_scripts(&space, "Label face"), expected, "{field:?}");
+            assert_eq!(
+                collected_scripts(&space, "Label face"),
+                expected,
+                "{field:?}"
+            );
         }
     }
 
