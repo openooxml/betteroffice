@@ -1,7 +1,7 @@
 import { createCanvas, loadImage, Path2D } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
 import { createFontProvider } from '@betteroffice/fonts';
-import { decodeFontFace } from '@betteroffice/docx';
+import { decodeFontFace } from '@betteroffice/docx/yrs';
 import { buildResidentRegionLayoutRequest, computeLayout, getLayoutKernelInputs } from '@betteroffice/docx/editor';
 import { createRustMeasureSource, type ResidentFontRequirement } from '@betteroffice/docx/layout';
 import { buildRustDisplayList, drawDisplayPage, GlyphCache } from '@betteroffice/docx/layout/render';
