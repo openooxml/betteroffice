@@ -6,7 +6,7 @@ import { isClientMessage, isHostMessage } from '../../../../shared/office-sessio
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { initWasm, openPresentation } from '../wasm/loader';
-import { PptxDocument, PptxRenderer } from '../wasm/generated/pptx_wasm.js';
+import { engineBackend, PptxDocument, PptxRenderer } from '../wasm/engine';
 import { createPresentationEditorSession } from './editorSession';
 import { createPresentationSessionHost } from './host';
 import type { PptxWorkerEditorOperation } from './replay';
@@ -27,14 +27,7 @@ beforeAll(async () => {
   font = face;
 });
 
-afterAll(() => {
-  try {
-    expect(finalizationRegistrations.map(({ registry }) => registry))
-      .toEqual(expect.arrayContaining(['pptxdocument', 'pptxrenderer']));
-    const counts = finalizationRegistrations.map(({ registry, live }) => `${registry}: ${live}`).join('\n');
-    expect(finalizationRegistrations.reduce((total, { live }) => total + live, 0), counts).toBe(0);
-  } finally { restoreFinalizationRegistry(); }
-});
+afterAll(restoreFinalizationRegistry);
 
 async function setup() {
   const pair = createInProcessPair();
@@ -450,4 +443,11 @@ test('recovery_serialization_failure_is_retryable', async () => {
     await recovery(context, 'retry recovery');
     expect(free).toHaveBeenCalledTimes(1);
   } finally { save.mockRestore(); free.mockRestore(); await context.owner.dispose(); }
+});
+
+test.skipIf(engineBackend() === 'native')('wasm handles unregister finalizers on disposal', () => {
+  expect(finalizationRegistrations.map(({ registry }) => registry))
+    .toEqual(expect.arrayContaining(['pptxdocument', 'pptxrenderer']));
+  const counts = finalizationRegistrations.map(({ registry, live }) => `${registry}: ${live}`).join('\n');
+  expect(finalizationRegistrations.reduce((total, { live }) => total + live, 0), counts).toBe(0);
 });

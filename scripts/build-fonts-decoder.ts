@@ -12,7 +12,7 @@ const build = spawnSync(
   [
     'build',
     '-p',
-    'fontpack',
+    'betteroffice-fonts',
     '--target',
     'wasm32-unknown-unknown',
     '--profile',
@@ -31,7 +31,7 @@ if (build.status !== 0) process.exit(build.status ?? 1);
 
 const artifact = resolve(
   root,
-  'target/fonts-decoder/wasm32-unknown-unknown/fonts-decoder/fontpack.wasm',
+  'target/fonts-decoder/wasm32-unknown-unknown/fonts-decoder/betteroffice_fonts.wasm',
 );
 const optimized = resolve(root, 'target/fonts-decoder/fontpack.wasm');
 const features = [

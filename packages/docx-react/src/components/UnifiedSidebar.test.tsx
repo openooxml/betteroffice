@@ -72,3 +72,66 @@ test('position updates move sidebar wrappers without rendering unchanged card co
   expect(renderCard.mock.calls.length).toBe(renders + 1);
   expect(firstWrapper().textContent).toBe('true');
 });
+
+test('missing anchor positions preserve every known card and the visible sidebar', () => {
+  const items: ReactSidebarItem[] = ['a', 'b', 'c'].map(id => ({
+    id, anchorPos: 0, anchorKey: id, render: ({ measureRef }) => <div data-testid={id} ref={measureRef} />,
+  }));
+  const props = { items, renderedDomContext: null, pageWidth: 800, zoom: 1, editorContainerRef: { current: null } };
+  const positions = new Map([['a', 100], ['b', 200], ['c', 300]]);
+  const view = render(<UnifiedSidebar {...props} anchorPositions={positions} />);
+  const wrappers = items.map(item => view.getByTestId(item.id).parentElement!);
+  const before = wrappers.map(card => ({ top: card.style.top, opacity: card.style.opacity }));
+  view.rerender(<UnifiedSidebar {...props} anchorPositions={new Map()} />);
+  expect(view.getByRole('complementary').style.opacity).toBe('1');
+  expect(wrappers.map(card => ({ top: card.style.top, opacity: card.style.opacity }))).toEqual(before);
+  expect(wrappers.every(card => card.style.visibility !== 'hidden')).toBe(true);
+  view.rerender(<UnifiedSidebar {...props} anchorPositions={positions} />);
+  expect(wrappers.map(card => ({ top: card.style.top, opacity: card.style.opacity }))).toEqual(before);
+});
+
+test('edit-driven anchor moves skip transitions while expansion and collapse still animate collisions', async () => {
+  const heights = new Map([['a', 40], ['b', 40]]);
+  const items: ReactSidebarItem[] = ['a', 'b'].map(id => ({
+    id, anchorPos: 0, anchorKey: id,
+    render: ({ measureRef, isExpanded }) => <div data-testid={id} ref={measureRef}>{String(isExpanded)}</div>,
+  }));
+  const props = { items, renderedDomContext: null, pageWidth: 800, zoom: 1, editorContainerRef: { current: null } };
+  const positions = (offset: number) => new Map([['a', 100 + offset], ['b', 120 + offset]]);
+  const anchors = positions(0);
+  const view = render(<UnifiedSidebar {...props} anchorPositions={anchors} />);
+  for (const item of items) Object.defineProperty(view.getByTestId(item.id), 'offsetHeight', {
+    configurable: true, get: () => heights.get(item.id),
+  });
+  const wrapper = (id: string) => view.getByTestId(id).parentElement!;
+  await waitFor(() => expect(wrapper('b').style.transition).toContain('top 0.15s ease'));
+  const moved = positions(200);
+  view.rerender(<UnifiedSidebar {...props} anchorPositions={moved} />);
+  expect(wrapper('a').style.top).toBe('300px');
+  for (const item of items) {
+    expect(wrapper(item.id).style.transition).toBe('none');
+    expect(wrapper(item.id).style.opacity).toBe('1');
+  }
+  const collapsedTop = Number.parseFloat(wrapper('b').style.top);
+  heights.set('a', 200);
+  view.rerender(<UnifiedSidebar {...props} anchorPositions={moved} activeItemId="a" />);
+  await waitFor(() => expect(Number.parseFloat(wrapper('b').style.top)).toBeGreaterThanOrEqual(500));
+  expect(wrapper('b').style.transition).toContain('top 0.15s ease');
+  heights.set('a', 40);
+  view.rerender(<UnifiedSidebar {...props} anchorPositions={moved} activeItemId={null} />);
+  await waitFor(() => expect(Number.parseFloat(wrapper('b').style.top)).toBe(collapsedTop));
+  expect(wrapper('b').style.transition).toContain('top 0.15s ease');
+});
+
+test('first appearances and newly added cards retain their opacity transition', () => {
+  const item = (id: string, fixedY: number): ReactSidebarItem => ({
+    id, anchorPos: 0, fixedY, render: ({ measureRef }) => <div data-testid={id} ref={measureRef} />,
+  });
+  const first = item('a', 100);
+  const props = { anchorPositions: new Map<string, number>(), renderedDomContext: null, pageWidth: 800, zoom: 1, editorContainerRef: { current: null } };
+  const view = render(<UnifiedSidebar {...props} items={[first]} />);
+  expect(view.getByRole('complementary').style.transition).toBe('opacity 0.15s ease');
+  expect(view.getByTestId('a').parentElement!.style.transition).toBe('opacity 0.2s ease');
+  view.rerender(<UnifiedSidebar {...props} items={[first, item('b', 300)]} />);
+  expect(view.getByTestId('b').parentElement!.style.transition).toBe('opacity 0.2s ease');
+});

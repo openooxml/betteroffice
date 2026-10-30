@@ -3014,7 +3014,31 @@ fn run_to_units(
     let direct = field(Some(run), "formatting").map(|formatting| Arc::new(formatting.clone()));
     array(field(Some(run), "content"))
         .iter()
-        .flat_map(|content| run_content_to_units(content, &marks, source))
+        .flat_map(|content| {
+            let mut units = run_content_to_units(content, &marks, source);
+            let replayed = match string(field(Some(content), "type")) {
+                Some("shape") => field(field(Some(content), "shape"), "drawingRunXml")
+                    .and_then(Value::as_str)
+                    .is_some(),
+                Some("opaqueDrawing") => string(field(Some(content), "kind")) == Some("drawingRun"),
+                _ => false,
+            };
+            if replayed {
+                for unit in &mut units {
+                    if let UnitContent::Embed { payload, .. } = &mut unit.content {
+                        payload.insert(
+                            "sourceRun".to_owned(),
+                            json!({
+                                "formatting": field(Some(run), "formatting").cloned().unwrap_or_else(|| json!({})),
+                                "attributes": unit.attrs,
+                                "propertyChanges": field(Some(run), "propertyChanges"),
+                            }),
+                        );
+                    }
+                }
+            }
+            units
+        })
         .map(|mut unit| {
             unit.direct_formatting = direct.clone();
             unit
@@ -8558,6 +8582,31 @@ mod tests {
             inheritance.run_attrs(None, None)["fontSize"]["size"],
             json!(22)
         );
+    }
+
+    #[test]
+    fn replayed_drawings_capture_source_properties_and_seed_attributes() {
+        let formatting = json!({"hidden": true, "position": 20});
+        let run = json!({"type": "run", "formatting": formatting, "content": [
+            {"type": "shape", "shape": {"shapeType": "rect", "drawingRunXml": "<w:r><w:drawing/></w:r>"}},
+            {"type": "opaqueDrawing", "kind": "drawingRun", "xml": "<w:r><w:drawing/></w:r>"},
+            {"type": "drawing", "image": {"wrap": {"type": "inline"}}},
+        ]});
+        let styles = StyleResolver::new(None);
+        let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
+        assert_eq!(units.len(), 3);
+        for (at, unit) in units.iter().enumerate() {
+            let UnitContent::Embed { payload, .. } = &unit.content else {
+                panic!("expected drawing embed");
+            };
+            if at < 2 {
+                assert_eq!(payload["sourceRun"]["formatting"], formatting);
+                assert_eq!(payload["sourceRun"]["attributes"], json!({"hidden": true}));
+                assert!(payload["sourceRun"]["propertyChanges"].is_null());
+            } else {
+                assert!(!payload.contains_key("sourceRun"));
+            }
+        }
     }
 
     #[test]
