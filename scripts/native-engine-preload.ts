@@ -1,7 +1,7 @@
 import { plugin } from 'bun';
+import { fileURLToPath } from 'node:url';
 import { NATIVE_ENGINE_FILTER, nativeEngineSource } from './native-engine';
 
-// Links the -native engine modules in place of the wasm ones, as the -native package builds do.
 plugin({
   name: 'betteroffice-native-engine',
   setup(build) {
@@ -13,3 +13,13 @@ plugin({
 });
 
 (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testEngine')] = 'native';
+
+const preload = fileURLToPath(import.meta.url);
+const BaseWorker = globalThis.Worker;
+globalThis.Worker = class extends BaseWorker {
+  constructor(url: string | URL, options: WorkerOptions & { preload?: string | string[] } = {}) {
+    const preloads = options.preload === undefined ? [] : [options.preload].flat();
+    super(url, { ...options, preload: [...preloads, preload] } as WorkerOptions);
+  }
+} as typeof Worker;
+process.env.BUN_OPTIONS = [process.env.BUN_OPTIONS, `--preload ${preload}`].filter(Boolean).join(' ');

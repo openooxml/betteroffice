@@ -37,9 +37,7 @@ test.skipIf(engineKind !== 'native')('native initialization ignores wasm inputs 
       finally { reopened.dispose(); }
     } finally { handle.dispose(); }
   `;
-  const child = Bun.spawn([
-    process.execPath, '--preload', resolve(import.meta.dir, '../../../../scripts/native-engine-preload.ts'), '--eval', script,
-  ], {
+  const child = Bun.spawn([process.execPath, '--eval', script], {
     cwd: resolve(import.meta.dir, '../../../..'), stdout: 'ignore', stderr: 'pipe',
   });
   const error = await new Response(child.stderr).text();
