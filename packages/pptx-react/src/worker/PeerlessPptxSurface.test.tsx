@@ -636,6 +636,32 @@ function heldImage() {
   } };
 }
 
+function stripClock() {
+  const set = window.setTimeout;
+  const clear = window.clearTimeout;
+  let now = 0;
+  let nextId = 0;
+  const active = new Map<number, { tick(): void; due: number }>();
+  const timeout = spyOn(window, 'setTimeout').mockImplementation(((tick: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    if (delay !== 400) return set.call(window, tick, delay, ...args);
+    const id = --nextId;
+    active.set(id, { tick: () => tick(...args), due: now + delay });
+    return id;
+  }) as typeof window.setTimeout);
+  const cancel = spyOn(window, 'clearTimeout').mockImplementation(((id?: number) => {
+    if (id !== undefined && id < 0) active.delete(id);
+    else clear.call(window, id);
+  }) as typeof window.clearTimeout);
+  restorers.push(() => { timeout.mockRestore(); cancel.mockRestore(); });
+  return { active, advance(milliseconds: number) {
+    now += milliseconds;
+    for (const [id, timer] of [...active]) {
+      if (timer.due > now || !active.delete(id)) continue;
+      timer.tick();
+    }
+  } };
+}
+
 test.each(['painted', 'disposed', 'failed', 'stale', 'failed-layer'] as const)('p2_parallel_tiles_release_shared_images_after_all_draws (%s)', async (outcome) => {
   const client = new FakeCommandClient();
   const list = JSON.parse(new TextDecoder().decode(client.state.frame.displayList)) as SlideDisplayList;
@@ -937,6 +963,7 @@ test('p2_read_only_false_true_false_enqueues_both_transitions', async () => {
 });
 
 async function thumbnailMediaTyping() {
+  const clock = stripClock();
   const value = session();
   value.client.hold = true;
   value.client.state.slides.push({ id: 'other', index: 1, name: null, layoutPartPath: null });
@@ -954,6 +981,7 @@ async function thumbnailMediaTyping() {
   if (!input) throw new Error('Expected peer-less text input');
   await act(async () => { fireEvent.keyDown(input, { key: 'ArrowRight' }); });
   await act(async () => { value.client.ack(1, coveringFrame(value.client, 'abc', 1)); });
+  await act(async () => { clock.advance(400); });
   const index = paints.length - 1;
   expect(suppliedMedia.flat()).toContainEqual({ assetId: 'shared-image', bytes: new Uint8Array([1, 2]).buffer });
   expect(paints[index].frame.slideId).toBe('slide');
@@ -2788,31 +2816,6 @@ describe('peerless stage fit', () => {
       .map((entry) => entry.args[0]).filter((source): source is HTMLCanvasElement => source instanceof HTMLCanvasElement);
   }
 
-  function stripClock() {
-    const set = window.setTimeout;
-    const clear = window.clearTimeout;
-    let now = 0;
-    let nextId = 0;
-    const active = new Map<number, { tick(): void; due: number }>();
-    override(window, 'setTimeout', { value: ((tick: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
-      if (delay !== 400) return set.call(window, tick, delay, ...args);
-      const id = --nextId;
-      active.set(id, { tick: () => tick(...args), due: now + delay });
-      return id;
-    }) as typeof window.setTimeout });
-    override(window, 'clearTimeout', { value: ((id?: number) => {
-      if (id !== undefined && id < 0) active.delete(id);
-      else clear.call(window, id);
-    }) as typeof window.clearTimeout });
-    return { active, advance(milliseconds: number) {
-      now += milliseconds;
-      for (const [id, timer] of [...active]) {
-        if (timer.due > now || !active.delete(id)) continue;
-        timer.tick();
-      }
-    } };
-  }
-
   function stripRun() {
     const client = new FakeCommandClient();
     client.state.slides.push({ id: 'other', index: 1, name: null, layoutPartPath: null });
@@ -3265,6 +3268,7 @@ describe('peerless stage fit', () => {
   });
 
   test('superseded_thumbnail_caches_media_and_repaints_referencing_frames', async () => {
+    const clock = stripClock();
     const images = heldBitmaps();
     const value = session(true);
     const first = deferred<PresentationCommandThumbnailResult>();
@@ -3293,6 +3297,7 @@ describe('peerless stage fit', () => {
           frame: { ...picture, slideId: 'other', slideIndex: 2 } });
       });
       expect(images.decode).toHaveBeenCalledTimes(1);
+      await flushStage(() => { clock.advance(400); });
       await flushStage(images.releaseAll);
       await flushStage(images.releaseAll);
       expect(value.client.thumbnail).toHaveBeenCalledTimes(3);
