@@ -7,9 +7,57 @@ use crate::properties::{Props, Styles, Theme, num_pr, number};
 use crate::xml::Node;
 
 pub(crate) const MAX_FACES: usize = 512;
-pub(crate) const MAX_DERIVED_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_DERIVED_BYTES: u32 = 4 * 1024 * 1024;
+// Fixed costs cover native and wasm32 item layouts and vector growth.
+pub(crate) const RUN_ITEM_BYTES: u32 = 128;
+const PROPERTIES_ITEM_BYTES: u32 = 160;
 
 type Run<'a> = (Rc<Props>, Option<Cow<'a, str>>);
+
+#[derive(Clone, Copy)]
+struct TemporaryBudget {
+    remaining: u32,
+}
+
+impl Default for TemporaryBudget {
+    fn default() -> Self {
+        Self {
+            remaining: MAX_DERIVED_BYTES,
+        }
+    }
+}
+
+impl TemporaryBudget {
+    fn charge(&mut self, bytes: u32) -> bool {
+        if let Some(remaining) = self.remaining.checked_sub(bytes) {
+            self.remaining = remaining;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn refund(&mut self, bytes: u32) {
+        self.remaining = self.remaining.saturating_add(bytes).min(MAX_DERIVED_BYTES);
+    }
+
+    fn run_cost(new_properties: bool, text: Option<&Cow<'_, str>>) -> Option<u32> {
+        let owned = match text {
+            Some(Cow::Owned(text)) => u32::try_from(text.len())
+                .ok()?
+                .checked_mul(2)?
+                .checked_add(8)?,
+            _ => 0,
+        };
+        let items = RUN_ITEM_BYTES
+            + if new_properties {
+                PROPERTIES_ITEM_BYTES
+            } else {
+                0
+            };
+        items.checked_add(owned)
+    }
+}
 
 #[derive(Default)]
 struct FaceState {
@@ -18,20 +66,11 @@ struct FaceState {
     reached: bool,
 }
 
+#[derive(Default)]
 pub(crate) struct Collector {
     faces: BTreeMap<(String, bool, bool), FaceState>,
-    remaining: usize,
+    temporary: TemporaryBudget,
     pub(crate) limited: bool,
-}
-
-impl Default for Collector {
-    fn default() -> Self {
-        Self {
-            faces: BTreeMap::new(),
-            remaining: MAX_DERIVED_BYTES,
-            limited: false,
-        }
-    }
 }
 
 fn fold(ch: char) -> char {
@@ -51,9 +90,8 @@ fn merge_scripts(face: &mut PreflightFace, scripts: &[String]) {
 }
 
 impl Collector {
-    fn charge(&mut self, bytes: usize) -> bool {
-        if let Some(remaining) = self.remaining.checked_sub(bytes) {
-            self.remaining = remaining;
+    fn charge(&mut self, bytes: u32) -> bool {
+        if self.temporary.charge(bytes) {
             true
         } else {
             self.limited = true;
@@ -311,6 +349,15 @@ impl Scan<'_> {
 
     #[inline(never)]
     fn paragraph(&mut self, node: &Node, table: &Props) {
+        let checkpoint = self.collector.temporary;
+        let nested = self.paragraph_fonts(node, table);
+        self.collector.temporary = checkpoint;
+        if nested {
+            self.nested(node, table);
+        }
+    }
+
+    fn paragraph_fonts(&mut self, node: &Node, table: &Props) -> bool {
         let ppr = node.child("w:pPr");
         let style_id = ppr.and_then(|node| node.val("w:pStyle"));
         let style = if self.shape {
@@ -358,7 +405,7 @@ impl Scan<'_> {
         let mut runs = Vec::new();
         self.runs(node, &base, &mark, &mut runs);
         if runs.is_empty() && mark.hidden == Some(true) {
-            return;
+            return false;
         }
         let mut generated_label = self.note_label;
         if generated_label {
@@ -377,7 +424,7 @@ impl Scan<'_> {
             });
             if self
                 .collector
-                .charge(props.allocation_cost() + std::mem::size_of::<Run<'_>>() + 3)
+                .charge(PROPERTIES_ITEM_BYTES + RUN_ITEM_BYTES)
             {
                 runs.insert(0, (props, Some("1  ".into())));
             } else {
@@ -443,7 +490,7 @@ impl Scan<'_> {
                 *self.complete = false;
             }
         }
-        self.nested(node, table);
+        true
     }
 
     fn nested(&mut self, node: &Node, table: &Props) {
@@ -468,10 +515,12 @@ impl Scan<'_> {
         runs: &mut Vec<Run<'n>>,
         props: Rc<Props>,
         text: Option<Cow<'n, str>>,
+        new_properties: bool,
     ) {
-        let cost = props.allocation_cost()
-            + std::mem::size_of::<Run<'_>>()
-            + text.as_ref().map_or(0, |text| text.len());
+        let Some(cost) = TemporaryBudget::run_cost(new_properties, text.as_ref()) else {
+            self.collector.limited = true;
+            return;
+        };
         if self.collector.charge(cost) {
             runs.push((props, text));
         }
@@ -495,7 +544,7 @@ impl Scan<'_> {
                         ..Props::default()
                     };
                     props.apply_defaults(mark);
-                    self.push_run(runs, Rc::new(props), Some(Cow::Owned(text)));
+                    self.push_run(runs, Rc::new(props), Some(Cow::Owned(text)), true);
                 }
                 "w:r" => {
                     let direct = Props::parse(child.child("w:rPr"), self.theme);
@@ -514,6 +563,9 @@ impl Scan<'_> {
                         continue;
                     }
                     props.apply_defaults(mark);
+                    if !self.collector.charge(PROPERTIES_ITEM_BYTES) {
+                        break;
+                    }
                     let props = Rc::new(props);
                     for content in &child.children {
                         if self.collector.limited {
@@ -526,16 +578,23 @@ impl Scan<'_> {
                                         runs,
                                         props.clone(),
                                         Some(Cow::Borrowed(&content.text)),
+                                        false,
                                     );
                                 }
                             }
-                            "w:tab" => self.push_run(runs, props.clone(), None),
-                            "w:noBreakHyphen" => {
-                                self.push_run(runs, props.clone(), Some(Cow::Borrowed("\u{2011}")))
-                            }
-                            "w:softHyphen" => {
-                                self.push_run(runs, props.clone(), Some(Cow::Borrowed("\u{00ad}")))
-                            }
+                            "w:tab" => self.push_run(runs, props.clone(), None, false),
+                            "w:noBreakHyphen" => self.push_run(
+                                runs,
+                                props.clone(),
+                                Some(Cow::Borrowed("\u{2011}")),
+                                false,
+                            ),
+                            "w:softHyphen" => self.push_run(
+                                runs,
+                                props.clone(),
+                                Some(Cow::Borrowed("\u{00ad}")),
+                                false,
+                            ),
                             "w:sym" if !self.shape => {
                                 if let Some(ch) = content
                                     .attr("char")
@@ -554,17 +613,21 @@ impl Scan<'_> {
                                         runs,
                                         Rc::new(symbol),
                                         Some(Cow::Owned(ch.to_string())),
+                                        true,
                                     );
                                 }
                             }
                             "w:footnoteReference" | "w:endnoteReference" => {
-                                self.push_run(runs, props.clone(), Some(Cow::Borrowed("1")))
+                                self.push_run(runs, props.clone(), Some(Cow::Borrowed("1")), false)
                             }
                             "w:fldChar" | "w:instrText" | "w:drawing" | "w:pict" => {
                                 *self.complete = false;
                             }
                             _ => {}
                         }
+                    }
+                    if Rc::strong_count(&props) == 1 {
+                        self.collector.temporary.refund(PROPERTIES_ITEM_BYTES);
                     }
                 }
                 "w:pPr" | "w:tbl" | "w:p" | "w:rPr" => {}
@@ -776,4 +839,35 @@ fn wrapped_children<'a>(node: &'a Node, name: &str) -> Vec<&'a Node> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_allocation_accounting_is_platform_independent() {
+        let source = "word ".repeat(1000);
+        let borrowed = Cow::Borrowed(source.as_str());
+        let owned = Cow::Owned("x".repeat(1024));
+        assert_eq!(TemporaryBudget::run_cost(false, Some(&borrowed)), Some(128));
+        assert_eq!(TemporaryBudget::run_cost(true, Some(&borrowed)), Some(288));
+        assert_eq!(TemporaryBudget::run_cost(false, Some(&owned)), Some(2184));
+        assert_eq!(TemporaryBudget::run_cost(true, Some(&owned)), Some(2344));
+
+        let mut budget = TemporaryBudget::default();
+        let checkpoint = budget;
+        assert!(budget.charge(PROPERTIES_ITEM_BYTES));
+        for _ in 0..2 {
+            assert!(budget.charge(TemporaryBudget::run_cost(false, Some(&borrowed)).unwrap()));
+        }
+        assert_eq!(budget.remaining, 4_193_888);
+        budget.refund(PROPERTIES_ITEM_BYTES);
+        assert_eq!(budget.remaining, 4_194_048);
+        budget = checkpoint;
+        assert_eq!(budget.remaining, 4_194_304);
+        assert!(budget.charge(4_194_303));
+        assert!(!budget.charge(2));
+        assert_eq!(budget.remaining, 1);
+    }
 }

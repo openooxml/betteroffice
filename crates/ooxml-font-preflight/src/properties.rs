@@ -33,17 +33,6 @@ pub(crate) fn on_off(value: &str) -> Option<bool> {
 }
 
 impl Props {
-    pub(crate) fn allocation_cost(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self
-                .fonts
-                .iter()
-                .chain([&self.family_override, &self.hint, &self.style])
-                .flatten()
-                .map(|value| value.len())
-                .sum::<usize>()
-    }
-
     pub(crate) fn apply_defaults(&mut self, mark: &Self) {
         if self.fonts.iter().all(Option::is_none) {
             self.fonts.clone_from(&mark.fonts);

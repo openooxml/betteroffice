@@ -551,7 +551,7 @@ fn oversized_font_names_are_ignored_before_run_property_expansion() {
 fn bounded_font_names_work_across_many_runs() {
     let font = "X".repeat(xml::MAX_VALUE_BYTES);
     let styles = format!(
-        r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{font}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:eastAsia="{font}" w:cs="{font}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
     );
     let body = document(&format!(
         "<w:p>{}</w:p>",
@@ -571,7 +571,7 @@ fn bounded_font_names_work_across_many_runs() {
 
 #[test]
 fn derived_run_budget_returns_partial_faces() {
-    let count = collect::MAX_DERIVED_BYTES / std::mem::size_of::<Props>() + 1;
+    let count = (collect::MAX_DERIVED_BYTES / collect::RUN_ITEM_BYTES + 1) as usize;
     let body = format!("<w:p><w:r>{}</w:r></w:p>", "<w:t>x</w:t>".repeat(count));
     let result = scan("", &body);
     assert!(!result.complete);
@@ -744,4 +744,32 @@ fn excessive_relationships_return_partial_faces() {
     let result = docx_font_preflight(&bytes).unwrap();
     assert!(!result.complete);
     assert_eq!(keys(&result), [("Base", false, false)]);
+}
+
+#[test]
+fn long_documents_keep_late_body_and_header_fonts() {
+    let paragraph = format!("<w:p>{}</w:p>", "<w:r><w:t>word </w:t></w:r>".repeat(100));
+    let mut body = paragraph.repeat(600);
+    body.push_str(r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Late Body" w:hAnsi="Late Body"/></w:rPr><w:t>Appendix</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#);
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
+    let header = r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:rPr><w:rFonts w:ascii="Late Header" w:hAnsi="Late Header"/></w:rPr><w:t>Header</w:t></w:r></w:p></w:hdr>"#;
+    let bytes = fixture(
+        "",
+        &body,
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/header1.xml", header),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert_eq!(
+        keys(&result),
+        [
+            ("Base", false, false),
+            ("Late Body", false, false),
+            ("Late Header", false, false)
+        ]
+    );
 }
