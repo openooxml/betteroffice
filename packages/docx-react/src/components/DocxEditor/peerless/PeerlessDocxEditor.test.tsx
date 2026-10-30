@@ -655,6 +655,72 @@ test('unmanaged plugin sidebar items are placed from worker geometry without plu
 const noteComment = (id: number, text: string, extra: object = {}) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
   content: [{ type: 'paragraph' as const, formatting: {}, content: [{ type: 'run' as const, formatting: {}, content: [{ type: 'text' as const, text }] }] }], ...extra });
 
+test('comment cards retain fixed positions through an edit until current review geometry arrives', async () => {
+  const h = proposalHost({ automatic: false });
+  const pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  h.binding.viewStore.getSnapshot().geometry!.pages = pages;
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
+  let review: yrs.DocxReviewSnapshot = { ...base.value, uiComments: [noteComment(3, 'Anchored note')], commentIds: { native: 3 },
+    commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
+  let refreshed: Promise<void> = Promise.resolve();
+  let reads = 0;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) => {
+    if (request.kind === 'reviewSnapshot') { reads++; await refreshed; }
+    return { status: 'ok', version, value: request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null };
+  }) as never);
+  const column = spyOn(sidebarView, 'UnifiedSidebar');
+  restorers.push(() => readAt.mockRestore(), () => column.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  const cardItem = () => column.mock.calls.at(-1)![0].items.find(item => item.id === 'comment-3');
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(88));
+  const wrapper = () => view.container.querySelector<HTMLElement>('.docx-comment-card')!.parentElement!;
+  const before = { top: wrapper().style.top, opacity: wrapper().style.opacity };
+  const initialCalls = column.mock.calls.length;
+  const initialReads = reads;
+  let refresh!: () => void;
+  refreshed = new Promise(resolve => { refresh = resolve; });
+  await act(async () => { await h.submit('insertText', { text: 'x' }, {}).ack; });
+  await waitFor(() => expect(reads).toBeGreaterThan(initialReads));
+  expect(column.mock.calls.length).toBeGreaterThan(initialCalls);
+  for (const [props] of column.mock.calls.slice(initialCalls)) {
+    expect(props.items.find(item => item.id === 'comment-3')).toMatchObject({ fixedY: 88 });
+    expect(props.items.find(item => item.id === 'comment-3')?.hidden).not.toBe(true);
+    expect(props.anchorPositions.get('comment-3')).toBe(88);
+  }
+  expect(view.getByRole('complementary').style.opacity).toBe('1');
+  expect({ top: wrapper().style.top, opacity: wrapper().style.opacity }).toEqual(before);
+  await act(async () => {
+    h.present();
+    const frame = h.binding.viewStore.getSnapshot().geometry!;
+    frame.pages = pages;
+    review = { ...review, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision,
+      commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 70, width: 50, height: 12 }] } };
+    refresh();
+  });
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(118));
+  expect(cardItem()?.hidden).not.toBe(true);
+  expect(wrapper().style.transition).toBe('none');
+  refreshed = new Promise(resolve => { refresh = resolve; });
+  await act(async () => { await h.submit('insertText', { text: 'y' }, {}).ack; });
+  expect(cardItem()?.fixedY).toBe(118);
+  await act(async () => {
+    h.present();
+    const frame = h.binding.viewStore.getSnapshot().geometry!;
+    frame.pages = pages;
+    review = { ...review, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision, commentGeometry: { native: [] } };
+    refresh();
+  });
+  await waitFor(() => expect(cardItem()?.hidden).toBe(true));
+  expect(wrapper().style.visibility).toBe('hidden');
+  expect(column.mock.calls.at(-1)![0].anchorPositions.has('comment-3')).toBe(false);
+  view.unmount();
+  h.controller.dispose();
+});
+
 test('controlled comments replace the worker comment projection in the sidebar and follow prop updates', async () => {
   const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
