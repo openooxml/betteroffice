@@ -1,6 +1,5 @@
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
-import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
@@ -179,7 +178,7 @@ export class CommandOutcomeUnknown extends Error {
   }
 }
 
-export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure;
+export type PresentationCommandFailure = Error;
 
 export interface PresentationCommandOutcome {
   seq: number;

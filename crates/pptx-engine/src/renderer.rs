@@ -77,7 +77,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -95,7 +95,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_fallback_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -518,6 +518,15 @@ impl Renderer {
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn font_error(error: pptx_render::RenderError) -> EngineError {
+    match error {
+        pptx_render::RenderError::ResourceLimit(_) => {
+            EngineError::resource_limit(error.to_string())
+        }
+        error => engine_error(error),
     }
 }
 

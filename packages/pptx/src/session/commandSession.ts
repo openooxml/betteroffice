@@ -80,7 +80,8 @@ export function createPptxWorkerSession(
 
   function fail(cause: unknown): void {
     if (disposed || failure) return;
-    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ? cause
+    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ||
+      !client && cause instanceof Error ? cause
       : new SessionFailure(cause instanceof Error && cause.name === 'RuntimeError' ? 'trap' : 'crash',
         cause instanceof Error ? cause.message : String(cause));
     if (client) failedState = { ...client.state, editState: { ...client.state.editState, readOnly: true,
@@ -141,7 +142,7 @@ export function createPptxWorkerSession(
       return () => { connectionErrors.delete(listener); off(); };
     },
     close() {
-      if (!disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
+      if (client && !disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
       transport.close();
     },
   };

@@ -599,15 +599,18 @@ function openPresentationInternal(
   try {
     renderer = construct(() => new PptxRenderer());
   } catch (error) {
-    if (peer) {
-      try { doc.free(); } catch {}
-      throw peerError(error);
-    }
-    throw error;
+    try { doc.free(); } catch {}
+    throw peer ? peerError(error) : error;
   }
   if (!peer) {
-    for (const face of options.fonts ?? []) registerFont(renderer, face);
-    for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+    try {
+      for (const face of options.fonts ?? []) registerFont(renderer, face);
+      for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+    } catch (error) {
+      try { renderer.free(); } catch {}
+      try { doc.free(); } catch {}
+      throw error;
+    }
   }
   const listeners = new Map<
     number,
