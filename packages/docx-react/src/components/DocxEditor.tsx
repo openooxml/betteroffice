@@ -2892,6 +2892,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
             onApplyImageProperties={handleApplyImageProperties}
             pmImageContext={imageTarget}
             showPageSetup={showPageSetup}
+            pageSetupUnit={rulerUnit}
             onPageSetupClose={() => setShowPageSetup(false)}
             onPageSetupApply={(properties) => {
               void commands.complete('pageSetup', () => {
