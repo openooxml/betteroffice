@@ -8,6 +8,7 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { createWorkerEditSession } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 import type { PptxFontFace } from '../types';
+import type { DefaultFontInstallation, DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationSharedAdapter,
   type PresentationSharedAck, type PresentationSharedMethods, type PresentationSharedOpenResult } from './commandSharedAdapter';
 import { presentationSharedInputs, type PresentationSharedInput } from './commandSharedInput';
@@ -57,6 +58,7 @@ async function createCommandClient(
   transport: SessionTransport,
   shared: boolean
 ): Promise<PresentationCommandClient> {
+  const { pptxDefaultFontInstaller: installDefaultFonts, ...wireOptions } = options as CommandOpenInput & DefaultFontInstallation;
   const pipe = createPresentationCollaborationPipe();
   type PendingPipeOutput = { batches: PipeOutputBatch<PptxPresencePeer>[]; ready: boolean };
   const pendingPipeOutputs: PendingPipeOutput[] = [];
@@ -90,8 +92,16 @@ async function createCommandClient(
 
   const transportErrors = new Set<(error: unknown) => void>();
   const outstandingCalls = new Set<number>();
+  const suppliedFamilies = new Set(options.fonts?.map((face) => face.family.trim().toLowerCase()));
   const guarded: SessionTransport = {
     post(message, transfer) {
+      if (installDefaultFonts && isClientMessage(message) && message.kind === 'call' &&
+        (message.method === 'command' || message.method === 'edit')) {
+        const command = message.args[0] as PresentationCommandEnvelope | undefined;
+        if (command?.kind === 'registerFont' && typeof command.payload?.font?.family === 'string') {
+          suppliedFamilies.add(command.payload.font.family.trim().toLowerCase());
+        }
+      }
       const call = isClientMessage(message) && message.kind === 'call' ? message.id : undefined;
       if (call !== undefined) outstandingCalls.add(call);
       try { transport.post(message, transfer); } catch (error) {
@@ -102,15 +112,39 @@ async function createCommandClient(
         throw failure;
       }
     },
-    listen(listener) { return transport.listen((message) => {
-      if (isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')) {
-        const output = (message as typeof message & { collabPipe?: PipeOutputBatch<PptxPresencePeer>[] }).collabPipe;
-        const awaited = message.kind === 'event' || outstandingCalls.delete(message.id);
-        if (output) receivePipe(output, !awaited ? undefined
-          : message.kind === 'event' ? message.payload : message.ok ? message.value : undefined);
-      }
-      listener(message);
-    }); },
+    listen(listener) {
+      const deliver = (message: unknown) => {
+        if (isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')) {
+          const output = (message as typeof message & { collabPipe?: PipeOutputBatch<PptxPresencePeer>[] }).collabPipe;
+          const awaited = message.kind === 'event' || outstandingCalls.delete(message.id);
+          if (output) receivePipe(output, !awaited ? undefined
+            : message.kind === 'event' ? message.payload : message.ok ? message.value : undefined);
+        }
+        listener(message);
+      };
+      return transport.listen((message) => {
+        if (!isHostMessage(message) || message.kind !== 'event' || message.name !== 'defaultFontInstall') {
+          deliver(message); return;
+        }
+        const request = message.payload as DefaultFontInstallRequest;
+        const allowed = (family: string) => !suppliedFamilies.has(family.trim().toLowerCase());
+        const faces = request.faces.filter((face) => allowed(face.family));
+        let finished = false;
+        const finish = (installed: ReadonlyArray<(typeof faces)[number]>) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          const indices = request.faces.flatMap((face, index) => allowed(face.family) && installed.includes(face) ? [index] : []);
+          try { transport.post({ protocol: 1, kind: 'pptx-default-fonts-installed', id: request.id, installed: indices }); }
+          catch {}
+        };
+        const timer = setTimeout(() => finish([]), 5000);
+        try {
+          if (!installDefaultFonts) finish(faces);
+          else void installDefaultFonts(faces, allowed).then((installed) => finish(installed ?? faces), () => finish([]));
+        } catch { finish([]); }
+      });
+    },
     onError(listener) {
       transportErrors.add(listener);
       const unsubscribe = transport.onError(listener);
@@ -118,7 +152,9 @@ async function createCommandClient(
     },
     close() { transport.close(); },
   };
-  const rpc = createSessionClient<PresentationCommandMethods & PresentationSharedMethods, PresentationCommandEvents>(guarded, {
+  const rpc = createSessionClient<PresentationCommandMethods & PresentationSharedMethods, PresentationCommandEvents & {
+    defaultFonts: PresentationCommandAck & DefaultFontPayload;
+  }>(guarded, {
     methods: { ...PRESENTATION_COMMAND_METHODS, edit: true, checkpoint: true },
   });
   let state: PresentationCommandOpenResult;
@@ -128,7 +164,7 @@ async function createCommandClient(
   try {
     const document = copyBytes(bytes);
     const transfer: Transferable[] = [document];
-    const input: PresentationCommandOpenOptions = { ...options,
+    const input: PresentationCommandOpenOptions = { ...wireOptions,
       fonts: options.fonts?.map((face) => {
         const bytes = copyBytes(face.bytes);
         transfer.push(bytes);
@@ -191,13 +227,13 @@ async function createCommandClient(
     }
   }
 
-  function install(ack: PresentationCommandAck): PresentationCommandAck {
-    const installed = installAck(ack);
+  function install(ack: PresentationCommandAck, fontsChanged = false): PresentationCommandAck {
+    const installed = installAck(ack, fontsChanged);
     releasePipe(ack);
     return installed;
   }
 
-  function installAck(ack: PresentationCommandAck): PresentationCommandAck {
+  function installAck(ack: PresentationCommandAck, fontsChanged: boolean): PresentationCommandAck {
     if (disposed || failure || ack.session !== state.session || ack.incarnation !== state.incarnation ||
       ack.epoch !== state.epoch) return ack;
     publishMedia(ack.frame);
@@ -212,7 +248,7 @@ async function createCommandClient(
     state = { ...state, ...ack, frame: installsFrame ? frame : ack.frame === null ? null : state.frame,
       activeSlideId: installsFrame ? frame.slideId : ack.activeSlideId === null ? null : state.activeSlideId };
     if (installsFrame) notify(frameListeners, frame);
-    if (advances && !failure) notify(listeners, ack);
+    if ((advances || fontsChanged) && !failure) notify(listeners, ack);
     if (ack.throughSeq > updateThroughSeq) {
       updateThroughSeq = ack.throughSeq;
       for (const update of ack.updates ?? []) {
@@ -256,6 +292,9 @@ async function createCommandClient(
 
   const identity = { session: state.session, incarnation: state.incarnation };
   const unack = rpc.on('ack', install);
+  const unfonts = rpc.on('defaultFonts', (ack) => {
+    if (ack.defaultFonts?.length) install(ack, true);
+  });
   const unpipe = rpc.on('collaborationPipe', receivePipe);
   const unfailure = rpc.onFailure(fail);
   const fence = (seq = sentThroughSeq) => ({ ...identity, seq });
@@ -290,6 +329,8 @@ async function createCommandClient(
             return reply.then((ack) => {
               if (ack.throughSeq >= latestSharedAck!.throughSeq) latestSharedAck = ack;
               const projected = adapter!.ack(ack);
+              const faces = (ack as DefaultFontPayload).defaultFonts;
+              if (faces?.length) Object.assign(projected, { defaultFonts: faces });
               const output = pipeAcks.get(ack);
               if (output) {
                 pipeAcks.set(projected, output);
@@ -456,6 +497,7 @@ async function createCommandClient(
       presentationCollaborationPipes.delete(client);
       unpipe();
       unack();
+      unfonts();
       unfailure();
       listeners.clear();
       frameListeners.clear();
