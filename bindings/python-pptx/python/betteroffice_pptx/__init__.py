@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import json
-from typing import Any, Iterator, Literal, Mapping, Sequence, Union, overload
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Union, overload
 from .edits import (
     PptxEditFailure,
     PptxEditFailureCode,
@@ -78,6 +78,7 @@ from ._betteroffice_pptx import (
     TextEdit,
     TextRun,
     TransformEdit,
+    UpdateSubscription,
     export_pptx_markdown_json as _export_pptx_markdown_json,
     export_pptx_structured_json as _export_pptx_structured_json,
     render_pptx_markdown_json as _render_pptx_markdown_json,
@@ -161,6 +162,7 @@ __all__ = [
     "TextEdit",
     "TextRun",
     "TransformEdit",
+    "UpdateSubscription",
     "__version__",
     "export_pptx_markdown",
     "export_pptx_structured",
@@ -225,14 +227,41 @@ class Presentation:
             )
         )
 
+    @classmethod
+    def open_from_update(
+        cls,
+        update: "bytes | bytearray | memoryview",
+        *,
+        client_id: int,
+        source: "bytes | bytearray | memoryview | None" = None,
+    ) -> "Presentation":
+        """Join an update; matching source bytes also enable saving."""
+        return cls(
+            _Presentation.open_from_update(
+                _as_bytes(update, max_length=MAX_COLLABORATION_BYTES),
+                client_id=client_id,
+                source=None if source is None else _as_bytes(source),
+            )
+        )
+
     @property
     def client_id(self) -> int:
         return self._inner.client_id
 
     @property
     def is_collaborative(self) -> bool:
-        """True only for ``open_collaborative`` decks, which alone may sync."""
+        """Whether opened for sync or explicitly marked shared."""
         return self._inner.is_collaborative
+
+    def set_collaborative(self) -> None:
+        """Refuse structural table edits; use a collaborative constructor for state exchange."""
+        self._inner.set_collaborative()
+
+    def on_update(
+        self, callback: Callable[[bytes, Literal["local", "remote"]], None],
+    ) -> UpdateSubscription:
+        """Deliver updates on this thread; re-raise the first callback error after flushing."""
+        return self._inner.on_update(callback)
 
     @property
     def is_edited(self) -> bool:
@@ -867,6 +896,13 @@ class Presentation:
     def add_undo_barrier(self) -> None:
         """Close the current undo step so the next edit starts a new one."""
         self._inner.add_undo_barrier()
+
+    @property
+    def undo_capture_mode(self) -> Literal["auto", "manual"]:
+        return self._inner.undo_capture_mode
+
+    def set_undo_capture_mode(self, mode: Literal["auto", "manual"]) -> None:
+        self._inner.set_undo_capture_mode(mode)
 
     def __getitem__(self, slide: SlideKey) -> Slide:
         return self._inner.slide(slide)

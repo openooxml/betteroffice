@@ -268,6 +268,15 @@ impl DeckSession {
         self.attach_source_package(package)
     }
 
+    /// Attaches matching source bytes; a different fingerprint leaves the session unchanged.
+    pub fn attach_source_if_matching(self, source: &[u8]) -> EditResult<Self> {
+        if self.seeded_from(source)? {
+            self.attach_source(source)
+        } else {
+            Ok(self)
+        }
+    }
+
     #[cfg(feature = "engine")]
     pub(crate) fn attach_source_owned(self, source: Vec<u8>) -> EditResult<Self> {
         let package = parse_source_package(self.package(), &source)?;
