@@ -610,6 +610,9 @@ impl Workbook {
     }
 
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        xlsx_model::open_timing! {
+            let timing_parse = xlsx_model::open_timing::span("package_parse");
+        }
         let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
         let mut names = HashSet::with_capacity(parts.len());
         for (name, _) in &parts {
@@ -618,6 +621,7 @@ impl Workbook {
             }
         }
         let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        xlsx_model::open_timing! { drop(timing_parse); }
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -633,6 +637,9 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("recalculate");
+        }
         workbook.recalculate(options);
         Ok(workbook)
     }

@@ -2386,7 +2386,7 @@ impl BaseBuilder {
                     full_precision: date.1,
                     defined_names: Vec::new(),
                     fingerprint,
-                    fingerprints: BTreeMap::new(),
+                    fingerprints: BTreeMap::new().into(),
                     freeze_panes: Vec::new(),
                     formats: Vec::new(),
                     col_styles: Vec::new(),
@@ -2477,7 +2477,7 @@ impl BaseBuilder {
                 full_precision,
                 defined_names: Vec::new(),
                 fingerprint,
-                fingerprints: BTreeMap::new(),
+                fingerprints: BTreeMap::new().into(),
                 freeze_panes: Vec::new(),
                 formats: Vec::new(),
                 col_styles: Vec::new(),
@@ -3787,7 +3787,8 @@ mod tests {
             ),
             (3, Vec::new()),
             (i64::MAX, vec![String::new()]),
-        ]);
+        ])
+        .into();
         base.defined_names = vec![
             DefinedName {
                 name: "Second".into(),
