@@ -1519,7 +1519,8 @@ export function registerPresentationCommandHandlers(
       if (handle || opening) throw new Error('Presentation command session is already open');
       if (!input || typeof input.session !== 'string' || !input.session ||
         typeof input.incarnation !== 'string' || !input.incarnation ||
-        (input.readOnly !== undefined && typeof input.readOnly !== 'boolean')) {
+        (input.readOnly !== undefined && typeof input.readOnly !== 'boolean') ||
+        (input.defaultFonts !== undefined && typeof input.defaultFonts !== 'boolean')) {
         throw new TypeError('Invalid presentation command open options');
       }
       opening = true;
@@ -1530,7 +1531,10 @@ export function registerPresentationCommandHandlers(
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           fallbackFonts: input.fallbackFonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           initialUpdate: input.initialUpdate, retainSource: false });
-        if (!input.fonts?.length) requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId);
+        if (input.defaultFonts !== false) {
+          for (const face of input.fonts ?? []) suppliedFonts.push({ family: face.family });
+          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId);
+        }
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
         });

@@ -35,14 +35,13 @@
 //!
 //! - **Each session owns its measurement fonts.** Every entry point that
 //!   reaches font registration, measurement, layout, display state or glyph
-//!   outlines starts with `let _fonts = self.fonts.enter();`
+//!   outlines starts with `let _fonts = self.core.fonts.enter();`
 //!   ([`docx_layout::MeasureFonts`]), so font ids are the session's own. One
 //!   that forgets panics on its first font lookup.
 //!
 //! Story lengths, selection indices and every other unit count in this module
 //! are UTF-16 units in which each embed, pilcrows included, counts as one.
 
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use js_sys::{Function, Uint8Array};
@@ -53,12 +52,8 @@ use yrs::Subscription;
 
 use crate::batch::outcome_json;
 use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
-use crate::session::args::{
-    AdjacentStoryUnit, DeleteDirection, IndexedLoc, adjacent_story_unit, embed_at, index_loc,
-};
 use crate::session::{EditSessionCore, EngineError, EngineErrorKind, Host};
 use crate::structured::ExportOptions;
-use crate::{EditCtx, MergeDirection, StoryRange};
 
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
@@ -96,37 +91,6 @@ pub fn decode_font_face(
     Ok(object.into())
 }
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = performance, js_name = now)]
-    fn performance_now() -> f64;
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ApplyInputProfile {
-    selection_ms: f64,
-    edit_ms: f64,
-    lower_ms: f64,
-    measure_ms: f64,
-    paginate_ms: f64,
-    display_input_ms: f64,
-    display_build_ms: f64,
-    display_finalize_ms: f64,
-    display_ms: f64,
-    encode_ms: f64,
-}
-
-fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
-    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-    if !(epoch.is_finite() && epoch >= 0.0 && epoch.fract() == 0.0 && epoch <= MAX_SAFE_INTEGER) {
-        return Err(js_err(
-            "expected_frame_epoch must be a non-negative safe integer",
-        ));
-    }
-    Ok(epoch as u64)
-}
-
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -150,6 +114,12 @@ impl From<EngineError> for JsValue {
 }
 
 fn wasm_host() -> Host {
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = performance, js_name = now)]
+        fn performance_now() -> f64;
+    }
+
     Host::new(
         Arc::new(|| js_sys::Date::now() as u64),
         Arc::new(js_entropy),
@@ -262,177 +232,6 @@ pub struct EditSession {
     update_observer: Option<Subscription>,
 }
 
-// Temporary bridge: removed in slice 4.
-impl Deref for EditSession {
-    type Target = EditSessionCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for EditSession {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
-
-impl EditSession {
-    fn collapsed_resident_input_selection(&self) -> Result<(String, String, u32), JsValue> {
-        let selection = self.selection.borrow();
-        let selection = selection
-            .as_ref()
-            .ok_or_else(|| js_err("resident input requires a selection"))?;
-        let story = selection.story.clone();
-        let (anchor, head) = self
-            .engine
-            .doc()
-            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
-            .map_err(js_err)?;
-        if anchor != head {
-            return Err(js_err(
-                "resident input currently requires a collapsed selection",
-            ));
-        }
-        let loc = index_loc(self.engine.doc(), &story, head)?;
-        if !self.engine.can_apply_input(&story, &loc.para_id) {
-            return Err(js_err(
-                "resident input state is not ready for this paragraph",
-            ));
-        }
-        Ok((story, loc.para_id, head))
-    }
-
-    fn delete_resident_units(&self, direction: &str, count: u32) -> Result<String, JsValue> {
-        self.resident_deleted_units.set(0);
-        if count == 0 {
-            return Err(js_err("resident delete count must be positive"));
-        }
-        // Resident layout absorbs one paragraph merge per pass.
-        let mut story = None;
-        let mut merged = false;
-        let mut deleted = 0;
-        while deleted < count {
-            let step = self
-                .collapsed_resident_input_selection()
-                .and_then(|selection| {
-                    let merges = self.resident_unit_is_pilcrow(direction, &selection)?;
-                    if merges && merged {
-                        return Ok(None);
-                    }
-                    Ok(Some((
-                        self.delete_resident_input(direction, selection, count == 1)?,
-                        merges,
-                    )))
-                });
-            match step {
-                Ok(Some((from, merges))) => {
-                    story = Some(from);
-                    merged |= merges;
-                    deleted += 1;
-                }
-                Err(error) if deleted == 0 => return Err(error),
-                Ok(None) | Err(_) => break,
-            }
-        }
-        self.resident_deleted_units.set(deleted);
-        Ok(story.expect("the first resident deletion succeeded"))
-    }
-
-    fn resident_unit_is_pilcrow(
-        &self,
-        direction: &str,
-        selection: &(String, String, u32),
-    ) -> Result<bool, JsValue> {
-        let direction = match direction {
-            "backward" => DeleteDirection::Backward,
-            "forward" => DeleteDirection::Forward,
-            _ => return Err(js_err("delete direction must be backward or forward")),
-        };
-        Ok(matches!(
-            adjacent_story_unit(self.engine.doc(), &selection.0, selection.2, direction)?,
-            Some(AdjacentStoryUnit::Pilcrow)
-        ))
-    }
-
-    fn delete_resident_input(
-        &self,
-        direction: &str,
-        selection: (String, String, u32),
-        local_lowering: bool,
-    ) -> Result<String, JsValue> {
-        let (story, para_id, head) = selection;
-        let direction = match direction {
-            "backward" => DeleteDirection::Backward,
-            "forward" => DeleteDirection::Forward,
-            _ => return Err(js_err("delete direction must be backward or forward")),
-        };
-        let adjacent = adjacent_story_unit(self.engine.doc(), &story, head, direction)?;
-        let ctx = EditCtx::local("", "");
-
-        match (direction, adjacent) {
-            (_, Some(AdjacentStoryUnit::Table)) => {
-                return Err(js_err(
-                    "resident input state is not ready for this paragraph",
-                ));
-            }
-            (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
-                self.engine
-                    .edit_resident_text(
-                        StoryRange::new(&story, head - width, head),
-                        None,
-                        local_lowering,
-                    )
-                    .map_err(js_err)?;
-            }
-            (DeleteDirection::Forward, Some(AdjacentStoryUnit::Content(width))) => {
-                self.engine
-                    .edit_resident_text(
-                        StoryRange::new(&story, head, head + width),
-                        None,
-                        local_lowering,
-                    )
-                    .map_err(js_err)?;
-            }
-            (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
-                // Merging forward over a table or other embed would pull it
-                // into the paragraph; the host path owns that case.
-                if matches!(direction, DeleteDirection::Forward)
-                    && embed_at(self.engine.doc(), &story, head + 1)?
-                {
-                    return Err(js_err(
-                        "resident input state is not ready for this paragraph",
-                    ));
-                }
-                let paragraphs = self.engine.doc().paragraphs(&story).map_err(js_err)?;
-                let paragraph_index = paragraphs
-                    .iter()
-                    .position(|paragraph| paragraph.para_id == para_id)
-                    .ok_or_else(|| js_err("resident input paragraph no longer resolves"))?;
-                let merge = match direction {
-                    DeleteDirection::Backward if paragraph_index > 0 => {
-                        Some(MergeDirection::Backward)
-                    }
-                    DeleteDirection::Forward if paragraph_index + 1 < paragraphs.len() => {
-                        Some(MergeDirection::Forward)
-                    }
-                    _ => None,
-                };
-                let Some(merge) = merge else {
-                    return Err(js_err("resident input has no character in that direction"));
-                };
-                self.engine
-                    .doc()
-                    .merge_paragraphs(&ctx, &para_id, merge)
-                    .map_err(js_err)?;
-            }
-            (_, None) => {
-                return Err(js_err("resident input has no character in that direction"));
-            }
-        }
-        Ok(story)
-    }
-}
-
 #[wasm_bindgen]
 impl EditSession {
     /// Creates a replica. The host allocates `client_id` (a random 32-bit id
@@ -463,12 +262,13 @@ impl EditSession {
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
     pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
-        let _fonts = self.fonts.enter();
-        docx_layout::register_measure_font_bytes(bytes).map_err(js_err)
+        self.core
+            .register_measure_font(bytes)
+            .map_err(JsValue::from)
     }
 
     pub fn decode_font(&self, bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
-        crate::decode_resident_font(bytes).map_err(js_err)
+        self.core.decode_font(bytes).map_err(JsValue::from)
     }
 
     /// Registers a measurement view of `base` carrying the vertical metrics
@@ -480,17 +280,16 @@ impl EditSession {
         base: u32,
         requested_family: &str,
     ) -> Result<u32, JsValue> {
-        let _fonts = self.fonts.enter();
-        docx_layout::register_substitute_measure_font_id(base, requested_family).map_err(js_err)
+        self.core
+            .register_substitute_measure_font(base, requested_family)
+            .map_err(JsValue::from)
     }
 
     /// Drops every registered measurement font (ids restart at zero) and
     /// invalidates the retained paragraph measurement templates, so the next
     /// edit must pass back through the full layout path.
     pub fn clear_measure_fonts(&self) {
-        let _fonts = self.fonts.enter();
-        docx_layout::clear_measure_fonts();
-        self.engine.clear_measurement_templates();
+        self.core.clear_measure_fonts()
     }
 
     /// Measurement input JSON in, `ParagraphExtent` JSON out. Also records the
@@ -498,37 +297,33 @@ impl EditSession {
     /// a later resident edit re-measures only the changed block. Errors with
     /// the engine's message for input it cannot measure.
     pub fn measure_paragraph_json(&self, input: &str) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine.measure_paragraph_json(input).map_err(js_err)
+        self.core
+            .measure_paragraph_json(input)
+            .map_err(JsValue::from)
     }
 
     /// `{ measured, options }` JSON in, `Layout` JSON out. Both the measured
     /// input and the resulting layout are retained for the resident edit path.
     /// Errors on unparseable input or on layout failure.
     pub fn layout_document_json(&self, input: &str) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
-            .layout_document_json(input)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core.layout_document_json(input).map_err(JsValue::from)
     }
 
     /// Region-layout input JSON in, the font families and sizes that input
     /// needs as JSON out, so the host can register fonts before laying out.
     pub fn layout_font_requirements_json(&self, input: &str) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
+        self.core
             .layout_font_requirements_json(input)
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     /// Region-layout input JSON in, a paginated envelope with section and page
     /// regions already composed as JSON out — ready for the display builder
     /// with no host-side layout mutation. Retains the pass for resident edits.
     pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
+        self.core
             .layout_document_with_regions_json(input)
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     /// Same full region pass as [`Self::layout_document_with_regions_json`],
@@ -539,58 +334,47 @@ impl EditSession {
         &self,
         input: &str,
     ) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
+        self.core
             .layout_document_with_regions_retained_json(input)
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     pub fn layout_document_with_regions_retained_meta(
         &self,
         input: &str,
     ) -> Result<RetainedLayoutMeta, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
+        self.core
             .layout_document_with_regions_retained_meta(input)
             .map(|inner| RetainedLayoutMeta { inner })
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     pub fn retained_layout_json(&self) -> Result<String, JsValue> {
-        self.engine
-            .retained_layout_json()
-            .map_err(|error| JsValue::from_str(&error))
+        self.core.retained_layout_json().map_err(JsValue::from)
     }
 
     /// [`Self::layout_document_with_regions_retained_json`] without the reply,
     /// for a caller that reads only the retained state.
     pub fn layout_document_with_regions_retained(&self, input: &str) -> Result<(), JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
+        self.core
             .layout_document_with_regions_retained(input)
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     /// [`Self::layout_document_with_regions_retained`] after one edit: the
     /// resident path when that edit was the [`Self::edit_text_resident`] taken
     /// last; see `EngineSession::layout_document_with_regions_after_edit`.
     pub fn layout_document_with_regions_after_edit(&self, input: &str) -> Result<(), JsValue> {
-        let _fonts = self.fonts.enter();
-        let edit = self
-            .resident_text_edit
-            .take()
-            .filter(|(_, epoch)| *epoch == self.engine.doc_epoch());
-        let story = edit.as_ref().map(|(story, _)| story.as_str());
-        self.engine
-            .layout_document_with_regions_after_edit(input, story)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .layout_document_with_regions_after_edit(input)
+            .map_err(JsValue::from)
     }
 
     /// The retained region layout's `headersFooters` JSON, when it has any.
     pub fn retained_headers_footers_json(&self) -> Result<Option<String>, JsValue> {
-        self.engine
+        self.core
             .retained_headers_footers_json()
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     /// The retained region layout of the first `pages` pages only; see
@@ -600,10 +384,9 @@ impl EditSession {
         input: &str,
         pages: u32,
     ) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
-            .layout_document_with_regions_prefix_retained_json(input, pages as usize)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .layout_document_with_regions_prefix_retained_json(input, pages)
+            .map_err(JsValue::from)
     }
 
     /// The retained region layout of exactly the first `pages` pages when no
@@ -615,60 +398,46 @@ impl EditSession {
         input: &str,
         pages: u32,
     ) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        let layout = self
-            .engine
-            .layout_document_with_regions_exact_prefix_retained(input, pages as usize)
-            .map_err(|error| JsValue::from_str(&error))?;
-        serde_json::to_string(&layout).map_err(|error| JsValue::from_str(&error.to_string()))
+        self.core
+            .layout_document_with_regions_exact_prefix_retained(input, pages)
+            .map_err(JsValue::from)
     }
 
     /// Begins `layout_document_with_regions_retained_json` as a pass measured a
     /// step at a time; see `EngineSession::begin_region_layout`. Returns the
     /// progress JSON, with `layoutJson` once the pass is complete.
     pub fn begin_region_layout(&self, input: &str) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        let progress = self
-            .engine
-            .begin_region_layout(input)
-            .map_err(|error| JsValue::from_str(&error))?;
-        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
+        self.core.begin_region_layout(input).map_err(JsValue::from)
     }
 
     /// Measures up to `blocks` more body blocks of the begun pass; see
     /// `EngineSession::resume_region_layout`.
     pub fn resume_region_layout(&self, blocks: u32) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        let progress = self
-            .engine
-            .resume_region_layout(blocks as usize)
-            .map_err(|error| JsValue::from_str(&error))?;
-        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
+        self.core
+            .resume_region_layout(blocks)
+            .map_err(JsValue::from)
     }
 
     /// Retained `{ measured, options }` for the main-thread display-list
     /// fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
+        self.core
             .retained_kernel_inputs_json()
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     /// Makes the next display frame a full one whatever epoch its caller
     /// passes, for a host that switches to this engine from another.
     pub fn reset_frame_base(&self) {
-        let _fonts = self.fonts.enter();
-        self.engine.reset_frame_base();
+        self.core.reset_frame_base()
     }
 
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
+        self.core
             .build_display_list_json(input)
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(JsValue::from)
     }
 
     /// Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
@@ -682,47 +451,41 @@ impl EditSession {
         input: &str,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        let _fonts = self.fonts.enter();
-        let epoch = validate_frame_epoch(expected_frame_epoch)?;
-        self.engine
-            .build_display_list_frame(input, epoch)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .build_display_list_frame(input, expected_frame_epoch)
+            .map_err(JsValue::from)
     }
 
     /// Limit full display builds to pages `start..end` plus the pages already
     /// built; the others stay unbuilt placeholders carrying their geometry
     /// until [`Self::build_display_pages_frame`] builds them.
     pub fn set_display_window(&self, start: u32, end: u32) {
-        let _fonts = self.fonts.enter();
-        self.engine
-            .set_display_window(Some(start as usize..(end.max(start)) as usize));
+        self.core.set_display_window(start, end)
     }
 
     /// Keep every previously built page while windowed builds are on.
     pub fn set_display_retain_built_pages(&self, retain: bool) {
-        let _fonts = self.fonts.enter();
-        self.engine.set_display_retain_built_pages(retain);
+        self.core.set_display_retain_built_pages(retain)
     }
 
     /// Let an eligible resident text edit re-lower only its paragraph. Off by default.
     pub fn set_local_lowering(&self, enabled: bool) {
-        self.engine.set_local_lowering(enabled);
+        self.core.set_local_lowering(enabled)
     }
 
     /// Apply admitted paragraph-local text batches directly. Off by default.
     pub fn set_direct_batches(&self, enabled: bool) {
-        self.engine.doc().set_direct_batches(enabled);
+        self.core.set_direct_batches(enabled)
     }
 
     /// The number of text batches applied directly to the live document.
     pub fn direct_batches_applied(&self) -> f64 {
-        self.engine.doc().direct_batches_applied() as f64
+        self.core.direct_batches_applied()
     }
 
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
     pub fn set_windowed_incremental_builds(&self, enabled: bool) {
-        let _fonts = self.fonts.enter();
-        self.engine.set_windowed_incremental_builds(enabled);
+        self.core.set_windowed_incremental_builds(enabled)
     }
 
     /// Build the listed pages that are still unbuilt and return a FrameDelta
@@ -733,12 +496,9 @@ impl EditSession {
         pages: Vec<u32>,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        let _fonts = self.fonts.enter();
-        let epoch = validate_frame_epoch(expected_frame_epoch)?;
-        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
-        self.engine
-            .build_display_pages_frame(&pages, epoch)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .build_display_pages_frame(pages, expected_frame_epoch)
+            .map_err(JsValue::from)
     }
 
     /// Release display pages; an empty result means the request was superseded.
@@ -747,12 +507,9 @@ impl EditSession {
         pages: Vec<u32>,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        let _fonts = self.fonts.enter();
-        let epoch = validate_frame_epoch(expected_frame_epoch)?;
-        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
-        self.engine
-            .release_display_pages_frame(&pages, epoch)
-            .map_err(js_err)
+        self.core
+            .release_display_pages_frame(pages, expected_frame_epoch)
+            .map_err(JsValue::from)
     }
 
     /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
@@ -760,48 +517,9 @@ impl EditSession {
     /// selection is not a collapsed body caret, or the retained layout has no
     /// geometry for it. `frameEpoch` identifies the frame the rect belongs to.
     pub fn resident_caret_snapshot_json(&self) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        let paragraph = {
-            let selection = self.selection.borrow();
-            let Some(selection) = selection.as_ref() else {
-                return serde_json::to_string(
-                    &self.engine.resident_caret_snapshot(None).map_err(js_err)?,
-                )
-                .map_err(js_err);
-            };
-            if selection.story != "body" {
-                None
-            } else {
-                let doc = self.engine.doc();
-                let anchor = doc
-                    .cached_sticky_offset(&selection.story, &selection.anchor)
-                    .ok()
-                    .flatten();
-                let head = if selection.anchor == selection.head {
-                    anchor
-                } else {
-                    doc.cached_sticky_offset(&selection.story, &selection.head)
-                        .ok()
-                        .flatten()
-                };
-                match (anchor, head) {
-                    (Some(anchor), Some(head)) if anchor == head => {
-                        let loc = index_loc(self.engine.doc(), &selection.story, head)?;
-                        Some((loc.para_id, loc.node_offset))
-                    }
-                    _ => None,
-                }
-            }
-        };
-        let snapshot = self
-            .engine
-            .resident_caret_snapshot(
-                paragraph
-                    .as_ref()
-                    .map(|(id, offset)| (id.as_str(), *offset)),
-            )
-            .map_err(js_err)?;
-        serde_json::to_string(&snapshot).map_err(js_err)
+        self.core
+            .resident_caret_snapshot_json()
+            .map_err(JsValue::from)
     }
 
     /// Applies one ordinary insertion at this session's collapsed selection
@@ -816,53 +534,9 @@ impl EditSession {
     /// not collapsed, or when the resident layout state cannot absorb an edit
     /// in that paragraph. The caller must then run the full layout path.
     pub fn apply_input(&self, text: &str, expected_frame_epoch: f64) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-        let _fonts = self.fonts.enter();
-        if text.is_empty() || text.contains(['\r', '\n']) {
-            return Err(js_err(
-                "apply_input requires non-empty paragraph-break-free text",
-            ));
-        }
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
-
-        let selection = self.selection.borrow().clone();
-        let selection = selection
-            .as_ref()
-            .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
-        let story = selection.story.clone();
-        let (anchor, head) = self
-            .engine
-            .doc()
-            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
-            .map_err(js_err)?;
-        if anchor != head {
-            return Err(js_err(
-                "apply_input currently requires a collapsed selection",
-            ));
-        }
-        let loc = index_loc(self.engine.doc(), &story, head)?;
-        if !self.engine.can_apply_input(&story, &loc.para_id) {
-            return Err(js_err(
-                "resident input state is not ready for this paragraph",
-            ));
-        }
-
-        let receipt = self
-            .engine
-            .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
-            .map_err(js_err)?;
-        self.settle_snapped_input(&story, &loc, &receipt)?;
-        self.engine
-            .apply_and_layout(&story, expected_frame_epoch as u64)
-            .map_err(js_err)
+        self.core
+            .apply_input(text, expected_frame_epoch)
+            .map_err(JsValue::from)
     }
 
     /// Instrumented twin of [`EditSession::apply_input`]: identical arguments,
@@ -874,73 +548,9 @@ impl EditSession {
         text: &str,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-        let _fonts = self.fonts.enter();
-        if text.is_empty() || text.contains(['\r', '\n']) {
-            return Err(js_err(
-                "apply_input requires non-empty paragraph-break-free text",
-            ));
-        }
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
-
-        let started = performance_now();
-        let selection = self.selection.borrow().clone();
-        let selection = selection
-            .as_ref()
-            .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
-        let story = selection.story.clone();
-        let (anchor, head) = self
-            .engine
-            .doc()
-            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
-            .map_err(js_err)?;
-        if anchor != head {
-            return Err(js_err(
-                "apply_input currently requires a collapsed selection",
-            ));
-        }
-        let loc = index_loc(self.engine.doc(), &story, head)?;
-        if !self.engine.can_apply_input(&story, &loc.para_id) {
-            return Err(js_err(
-                "resident input state is not ready for this paragraph",
-            ));
-        }
-        let selection_ms = performance_now() - started;
-
-        let started = performance_now();
-        let receipt = self
-            .engine
-            .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
-            .map_err(js_err)?;
-        self.settle_snapped_input(&story, &loc, &receipt)?;
-        let edit_ms = performance_now() - started;
-        let (frame, engine_profile) = self
-            .engine
-            .apply_and_layout_profiled(&story, expected_frame_epoch as u64, &mut performance_now)
-            .map_err(js_err)?;
-        let profile = ApplyInputProfile {
-            selection_ms,
-            edit_ms,
-            lower_ms: engine_profile.lower_ms,
-            measure_ms: engine_profile.measure_ms,
-            paginate_ms: engine_profile.paginate_ms,
-            display_input_ms: engine_profile.display_input_ms,
-            display_build_ms: engine_profile.display_build_ms,
-            display_finalize_ms: engine_profile.display_finalize_ms,
-            display_ms: engine_profile.display_ms,
-            encode_ms: engine_profile.encode_ms,
-        };
-        *self.last_apply_profile_json.borrow_mut() =
-            serde_json::to_string(&profile).map_err(js_err)?;
-        Ok(frame)
+        self.core
+            .apply_input_profiled(text, expected_frame_epoch)
+            .map_err(JsValue::from)
     }
 
     /// Deletes up to `count` characters at this session's collapsed selection,
@@ -962,26 +572,14 @@ impl EditSession {
         expected_frame_epoch: f64,
         count: u32,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-        let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
-        let story = self.delete_resident_units(direction, count)?;
-        self.engine
-            .apply_and_layout(&story, expected_frame_epoch as u64)
-            .map_err(js_err)
+        self.core
+            .apply_delete(direction, expected_frame_epoch, count)
+            .map_err(JsValue::from)
     }
 
     /// Characters the last [`EditSession::apply_delete`] removed.
     pub fn resident_deleted_units(&self) -> u32 {
-        self.resident_deleted_units.get()
+        self.core.resident_deleted_units()
     }
 
     /// Instrumented twin of [`EditSession::apply_delete`]: identical arguments,
@@ -993,44 +591,9 @@ impl EditSession {
         expected_frame_epoch: f64,
         count: u32,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-        let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
-
-        let started = performance_now();
-        self.collapsed_resident_input_selection()?;
-        let selection_ms = performance_now() - started;
-
-        let started = performance_now();
-        let story = self.delete_resident_units(direction, count)?;
-        let edit_ms = performance_now() - started;
-        let (frame, engine_profile) = self
-            .engine
-            .apply_and_layout_profiled(&story, expected_frame_epoch as u64, &mut performance_now)
-            .map_err(js_err)?;
-        let profile = ApplyInputProfile {
-            selection_ms,
-            edit_ms,
-            lower_ms: engine_profile.lower_ms,
-            measure_ms: engine_profile.measure_ms,
-            paginate_ms: engine_profile.paginate_ms,
-            display_input_ms: engine_profile.display_input_ms,
-            display_build_ms: engine_profile.display_build_ms,
-            display_finalize_ms: engine_profile.display_finalize_ms,
-            display_ms: engine_profile.display_ms,
-            encode_ms: engine_profile.encode_ms,
-        };
-        *self.last_apply_profile_json.borrow_mut() =
-            serde_json::to_string(&profile).map_err(js_err)?;
-        Ok(frame)
+        self.core
+            .apply_delete_profiled(direction, expected_frame_epoch, count)
+            .map_err(JsValue::from)
     }
 
     /// Stage timings of the last profiled apply, in milliseconds:
@@ -1038,7 +601,7 @@ impl EditSession {
     /// "displayInputMs","displayBuildMs","displayFinalizeMs","displayMs",
     /// "encodeMs"}`. `{}` before the first profiled call.
     pub fn apply_input_profile_json(&self) -> String {
-        self.last_apply_profile_json.borrow().clone()
+        self.core.apply_input_profile_json()
     }
 
     /// Region-aware hit test against the resident display list, so no
@@ -1056,10 +619,9 @@ impl EditSession {
         x: f64,
         y: f64,
     ) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
-            .display_hit_test_regions_json(page_index as usize, x, y)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .display_hit_test_regions_json(page_index, x, y)
+            .map_err(JsValue::from)
     }
 
     /// Nearest caret position on the adjacent visual line. `direction` is
@@ -1074,10 +636,9 @@ impl EditSession {
         direction: &str,
         goal_x: f64,
     ) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
-            .display_vertical_move_json(position as i64, direction, goal_x)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .display_vertical_move_json(position, direction, goal_x)
+            .map_err(JsValue::from)
     }
 
     /// Highlight rectangles for a body document range against the resident
@@ -1085,10 +646,9 @@ impl EditSession {
     /// page-local px, one entry per page the range touches. Body positions
     /// only. Errors when no display list is resident.
     pub fn display_range_rects_json(&self, from: f64, to: f64) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
-            .display_range_rects_json(from as i64, to as i64)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .display_range_rects_json(from, to)
+            .map_err(JsValue::from)
     }
 
     /// @internal
@@ -1099,14 +659,9 @@ impl EditSession {
         first_page: f64,
         last_page: f64,
     ) -> Result<String, JsValue> {
-        let Some((first_page, last_page)) = docx_layout::hit::page_window(first_page, last_page)
-        else {
-            return Ok("[]".to_string());
-        };
-        let _fonts = self.fonts.enter();
-        self.engine
-            .display_range_rects_on_pages_json(from as i64, to as i64, first_page, last_page)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .display_range_rects_on_pages_json(from, to, first_page, last_page)
+            .map_err(JsValue::from)
     }
 
     /// Same rectangles as [`EditSession::display_range_rects_json`], scoped to
@@ -1124,10 +679,9 @@ impl EditSession {
         from: f64,
         to: f64,
     ) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        self.engine
-            .display_range_rects_region_json(region, part_id, from as i64, to as i64)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .display_range_rects_region_json(region, part_id, from, to)
+            .map_err(JsValue::from)
     }
 
     /// [`EditSession::display_range_rects_region_json`] for many ranges, given as flat
@@ -1139,30 +693,9 @@ impl EditSession {
         part_id: &str,
         ranges: Vec<f64>,
     ) -> Result<Vec<f64>, JsValue> {
-        let ranges: Vec<(i64, i64)> = ranges
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&[from, to]| (from as i64, to as i64))
-            .collect();
-        let batches = self
-            .engine
-            .display_range_rects_batch(region, part_id, &ranges)
-            .map_err(|error| JsValue::from_str(&error))?;
-        let mut flat = Vec::new();
-        for rects in batches {
-            flat.push(rects.len() as f64);
-            for rect in rects {
-                flat.extend([
-                    rect.page_index as f64,
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height,
-                ]);
-            }
-        }
-        Ok(flat)
+        self.core
+            .display_range_rects_batch(region, part_id, ranges)
+            .map_err(JsValue::from)
     }
 
     /// One glyph outline from this session's resident font store:
@@ -1171,8 +704,9 @@ impl EditSession {
     /// [`EditSession::register_measure_font`] and `glyph_id` from shaping.
     /// Errors when the glyph cannot be extracted.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        docx_layout::outline_glyph_json_resident(font_id, glyph_id).map_err(js_err)
+        self.core
+            .outline_glyph_json(font_id, glyph_id)
+            .map_err(JsValue::from)
     }
 
     /// Typing echo model of one font at one shaping size from this session's
@@ -1186,9 +720,9 @@ impl EditSession {
         kern: bool,
         alphabet: &str,
     ) -> Result<String, JsValue> {
-        let _fonts = self.fonts.enter();
-        docx_layout::echo_glyph_set_json(font_id, size, kern, alphabet)
-            .map_err(|error| JsValue::from_str(&error))
+        self.core
+            .echo_glyph_set_json(font_id, size, kern, alphabet)
+            .map_err(JsValue::from)
     }
 
     /// Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
@@ -1490,6 +1024,7 @@ impl EditSession {
     pub fn set_update_observer(&mut self, callback: &Function) -> Result<(), JsValue> {
         let callback = callback.clone();
         let subscription = self
+            .core
             .engine
             .doc()
             .observe_update_v1(move |update, remote| {
@@ -1614,20 +1149,6 @@ impl EditSession {
     ) -> Result<(), JsValue> {
         self.core
             .set_selection(story, anchor_para, anchor_offset, head_para, head_offset)
-            .map_err(JsValue::from)
-    }
-
-    /// Typing with the caret inside a surrogate pair lands before the pair,
-    /// while the sticky head stays inside it: collapse the selection after the
-    /// inserted text instead.
-    fn settle_snapped_input(
-        &self,
-        story: &str,
-        requested: &IndexedLoc,
-        receipt: &crate::Receipt,
-    ) -> Result<(), JsValue> {
-        self.core
-            .settle_snapped_input(story, requested, receipt)
             .map_err(JsValue::from)
     }
 
@@ -3332,10 +2853,10 @@ pub fn render_docx_markdown_with_pages_json(
 mod tests {
     use super::*;
     use crate::presence::encode_sticky;
-    use crate::session::args::loc_index;
+    use crate::session::args::{index_loc, loc_index};
     use crate::{
         EditCtx, EditRequest, EditingDoc, FormatPolicy, ParagraphRef, Position, RawOp,
-        SegmentContent, TriState, UndoSession, story_ref,
+        SegmentContent, StoryRange, TriState, UndoSession, story_ref,
     };
     use serde_json::Value;
     use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, Transact};
@@ -3345,7 +2866,7 @@ mod tests {
         use crate::sticky_positions::{STICKY_INDEX_WALKS, STICKY_OFFSET_WALKS};
 
         let session = EditSession::new(77.0).unwrap();
-        let doc = session.engine.doc();
+        let doc = session.core.engine.doc();
         doc.create_story_with_paragraph_id("body", "p1", "abcdef", "Normal", "left")
             .unwrap();
         let txn = doc.yrs_doc().transact();
@@ -3366,7 +2887,7 @@ mod tests {
                 json!({"story": "body", "paraId": "p1", "offset": 3})
             );
         }
-        let selection = session.selection.borrow();
+        let selection = session.core.selection.borrow();
         let selection = selection.as_ref().unwrap();
         assert_eq!(selection.anchor, expected);
         assert_eq!(selection.head, expected);
@@ -3385,7 +2906,7 @@ mod tests {
         for repeats in [1, 32, 256] {
             for reads in [1, 8] {
                 let session = EditSession::new(77.0).unwrap();
-                let doc = session.engine.doc();
+                let doc = session.core.engine.doc();
                 let initial = "abcdef".repeat(repeats);
                 let offset = initial.len() as u32 / 2;
                 doc.create_story_with_paragraph_id("body", "p1", &initial, "Normal", "left")
@@ -3424,7 +2945,7 @@ mod tests {
                         0.0,
                     )
                     .unwrap();
-                session.engine.set_display_window(Some(0..1));
+                session.core.engine.set_display_window(Some(0..1));
                 session.set_windowed_incremental_builds(true);
                 STICKY_INDEX_WALKS.with(|walks| walks.set(0));
                 STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
@@ -3470,8 +2991,9 @@ mod tests {
     #[test]
     fn line_break_inserts_one_inline_unit_and_is_undoable() {
         let mut session = EditSession::new(76.0).unwrap();
-        session.undo = UndoSession::with_clock(Arc::new(|| 0));
+        session.core.undo = UndoSession::with_clock(Arc::new(|| 0));
         session
+            .core
             .engine
             .doc()
             .create_story_with_paragraph_id("body", "p1", "ab", "Normal", "left")
@@ -3490,11 +3012,14 @@ mod tests {
         assert_eq!(parsed[0]["text"], "a");
         assert_eq!(parsed[1]["embedKind"], "break");
         assert_eq!(parsed[2]["text"], "b");
-        assert_eq!(session.engine.doc().paragraphs("body").unwrap().len(), 1);
+        assert_eq!(
+            session.core.engine.doc().paragraphs("body").unwrap().len(),
+            1
+        );
         session.add_undo_boundary();
         assert!(session.undo());
         assert_eq!(
-            session.engine.doc().paragraphs("body").unwrap()[0].text,
+            session.core.engine.doc().paragraphs("body").unwrap()[0].text,
             "ab"
         );
         assert!(session.redo());
@@ -3504,7 +3029,7 @@ mod tests {
     #[test]
     fn paragraph_segments_build_only_requested_units() {
         let session = EditSession::new(75.0).unwrap();
-        let doc = session.engine.doc();
+        let doc = session.core.engine.doc();
         doc.create_story("body", "A😀B", "Normal", "left").unwrap();
         for _ in 0..80 {
             doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 0), None)
@@ -3600,7 +3125,7 @@ mod tests {
     #[test]
     fn selection_context_reads_only_selected_units_after_text_edits() {
         let session = EditSession::new(77.0).unwrap();
-        let doc = session.engine.doc();
+        let doc = session.core.engine.doc();
         doc.create_story("body", "Seed", "Normal", "left").unwrap();
         for _ in 0..80 {
             doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 0), None)
@@ -3678,9 +3203,12 @@ mod tests {
     #[test]
     fn header_footer_alias_exports_seed_and_follow_legacy_updates() {
         let session = EditSession::new(41.0).unwrap();
-        let before = session.engine.doc().encode_state_as_update_v1();
+        let before = session.core.engine.doc().encode_state_as_update_v1();
         session.set_header_footer_aliases("[]").unwrap();
-        assert_eq!(session.engine.doc().encode_state_as_update_v1(), before);
+        assert_eq!(
+            session.core.engine.doc().encode_state_as_update_v1(),
+            before
+        );
         assert_eq!(session.header_footer_aliases_json(), "{}");
         let groups = json!([{
             "isHeader": true, "partPath": "word/header1.xml", "relationshipIds": ["rId7", "rId9"]
@@ -3689,17 +3217,19 @@ mod tests {
             .set_header_footer_aliases(&groups.to_string())
             .unwrap();
         session
+            .core
             .engine
             .doc()
             .create_story("hf:rId7", "Header", "Normal", "left")
             .unwrap();
         assert_eq!(session.header_footer_aliases_json(), r#"{"rId9":"rId7"}"#);
         let peer = EditingDoc::new(42);
-        peer.apply_update_v1(&session.engine.doc().encode_state_as_update_v1())
+        peer.apply_update_v1(&session.core.engine.doc().encode_state_as_update_v1())
             .unwrap();
         peer.create_story("hf:rId9:t0:r0c0", "Legacy", "Normal", "left")
             .unwrap();
         session
+            .core
             .engine
             .doc()
             .apply_update_v1(&peer.encode_state_as_update_v1())
@@ -3717,12 +3247,13 @@ mod tests {
             let session = EditSession::new(41.0).unwrap();
             let result: Value = serde_json::from_str(
                 &session
+                    .core
                     .open_docx(&bytes, seed, Some("aliases".to_owned()), None)
                     .unwrap(),
             )
             .unwrap();
             assert_eq!(session.header_footer_aliases_json(), "{}");
-            let txn = session.engine.doc().yrs_doc().transact();
+            let txn = session.core.engine.doc().yrs_doc().transact();
             assert!(
                 !txn.get_map(crate::identity::SESSION)
                     .unwrap()
@@ -3735,8 +3266,8 @@ mod tests {
                     .is_none()
             );
             if seed {
-                assert!(session.engine.doc().paragraphs("hf:rId7").is_ok());
-                assert!(session.engine.doc().paragraphs("hf:rId9").is_ok());
+                assert!(session.core.engine.doc().paragraphs("hf:rId7").is_ok());
+                assert!(session.core.engine.doc().paragraphs("hf:rId9").is_ok());
             }
         }
     }
@@ -3747,6 +3278,7 @@ mod tests {
             let bytes = unidentified_docx("雪 &amp; café & 🦀");
             let borrowed = EditSession::new(74.0).unwrap();
             let expected = borrowed
+                .core
                 .open_docx(&bytes, seed_stories, Some("fixed".to_owned()), None)
                 .unwrap();
             let owned = EditSession::new(74.0).unwrap();
@@ -3763,17 +3295,25 @@ mod tests {
             );
             assert_eq!(owned.media_sources_json(), borrowed.media_sources_json());
             assert_eq!(
-                owned.docx_source.borrow().as_ref().unwrap().as_ptr(),
+                owned.core.docx_source.borrow().as_ref().unwrap().as_ptr(),
                 pointer
             );
             assert_eq!(
-                owned.engine.doc().source_index().unwrap().bytes().as_ptr(),
+                owned
+                    .core
+                    .engine
+                    .doc()
+                    .source_index()
+                    .unwrap()
+                    .bytes()
+                    .as_ptr(),
                 pointer
             );
         }
         let bytes = batch_docx();
         let borrowed = EditSession::new(74.0).unwrap();
         let expected = borrowed
+            .core
             .seed_from_docx(&bytes, Some("fixed".to_owned()))
             .unwrap();
         let owned = EditSession::new(74.0).unwrap();
@@ -3785,7 +3325,7 @@ mod tests {
         assert_eq!(owned.encode_state(), borrowed.encode_state());
         assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
         assert_eq!(
-            owned.docx_source.borrow().as_ref().unwrap().as_ptr(),
+            owned.core.docx_source.borrow().as_ref().unwrap().as_ptr(),
             pointer
         );
     }
@@ -3795,7 +3335,7 @@ mod tests {
         for blocks in [1, 2, 3] {
             let bytes = batch_docx();
             let borrowed = EditSession::new(74.0).unwrap();
-            let expected = borrowed.open_docx_preview(&bytes, blocks).unwrap();
+            let expected = borrowed.core.open_docx_preview(&bytes, blocks).unwrap();
             let owned = EditSession::new(74.0).unwrap();
             let actual = owned.open_docx_preview_owned(bytes, blocks).unwrap();
             assert_eq!(actual, expected);
@@ -3812,7 +3352,7 @@ mod tests {
         );
         let borrowed = EditSession::new(74.0).unwrap();
         let owned = EditSession::new(74.0).unwrap();
-        let expected = borrowed.open_docx_preview(&bytes, 1).unwrap();
+        let expected = borrowed.core.open_docx_preview(&bytes, 1).unwrap();
         assert!(expected.is_none());
         assert_eq!(owned.open_docx_preview_owned(bytes, 1).unwrap(), expected);
         assert_eq!(owned.encode_state(), borrowed.encode_state());
@@ -3827,6 +3367,7 @@ mod tests {
         for paragraph_budget in [None, Some(256), Some(400)] {
             let borrowed = EditSession::new(74.0).unwrap();
             let expected = borrowed
+                .core
                 .open_docx_preview_with_budget(&bytes, 200, paragraph_budget)
                 .unwrap();
             let owned = EditSession::new(74.0).unwrap();
@@ -3850,19 +3391,23 @@ mod tests {
                 let borrowed = EditSession::new(74.0).unwrap();
                 let owned = EditSession::new(74.0).unwrap();
                 assert_eq!(
-                    owned.open_docx_retaining_source(
+                    owned.core.open_docx_retaining_source(
                         bytes.clone().into(),
                         true,
                         Some("fixed"),
                         digest
                     ),
-                    borrowed.open_docx_retaining(&bytes, true, Some("fixed"), digest)
+                    borrowed
+                        .core
+                        .open_docx_retaining(&bytes, true, Some("fixed"), digest)
                 );
                 assert_eq!(owned.encode_state(), borrowed.encode_state());
                 assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
                 assert_eq!(
-                    owned.open_preview_source(b"not a zip".to_vec(), 1, None),
-                    borrowed.open_preview(b"not a zip", 1)
+                    owned
+                        .core
+                        .open_preview_source(b"not a zip".to_vec(), 1, None),
+                    borrowed.core.open_preview(b"not a zip", 1)
                 );
             }
         }
@@ -3883,17 +3428,19 @@ mod tests {
         assert!(!expected.document.package.media_entries.is_empty());
         let session = EditSession::new(7.0).unwrap();
         let host: Value =
-            serde_json::from_str(&session.open_docx(&source, true, None, None).unwrap()).unwrap();
+            serde_json::from_str(&session.core.open_docx(&source, true, None, None).unwrap())
+                .unwrap();
         assert_eq!(
             host["envelope"]["document"]["package"]["mediaEntries"],
             json!([])
         );
         assert_eq!(
-            session.docx_source.borrow().as_deref(),
+            session.core.docx_source.borrow().as_deref(),
             Some(source.as_slice())
         );
-        let blocks =
-            |env: &crate::bridge::RenderEnv| session.engine.lower_story_json("body", env).unwrap();
+        let blocks = |env: &crate::bridge::RenderEnv| {
+            session.core.engine.lower_story_json("body", env).unwrap()
+        };
         let tokens_env = crate::bridge::RenderEnv {
             media_tokens: true,
             ..Default::default()
@@ -3920,13 +3467,18 @@ mod tests {
                 .windows(data_url.len())
                 .any(|window| window == data_url)
         };
-        assert!(holds(&session.engine.doc().encode_state_as_update_v1()));
+        assert!(holds(
+            &session.core.engine.doc().encode_state_as_update_v1()
+        ));
         let tokens = EditSession::new(8.0).unwrap();
         tokens.set_media_tokens(true);
-        tokens.open_docx(&source, true, None, None).unwrap();
-        assert!(!holds(&tokens.engine.doc().encode_state_as_update_v1()));
+        tokens.core.open_docx(&source, true, None, None).unwrap();
+        assert!(!holds(
+            &tokens.core.engine.doc().encode_state_as_update_v1()
+        ));
         assert!(
             tokens
+                .core
                 .engine
                 .lower_story_json("body", &crate::bridge::RenderEnv::default())
                 .unwrap()
@@ -3950,7 +3502,7 @@ mod tests {
         .unwrap();
         let saved = docx_parse::serializer::write_docx_s13(
             request,
-            session.docx_source.borrow().as_deref().unwrap(),
+            session.core.docx_source.borrow().as_deref().unwrap(),
         )
         .unwrap();
         let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
@@ -3986,6 +3538,7 @@ mod tests {
 
     fn identities_cache_buffer(session: &EditSession) -> *const u8 {
         session
+            .core
             .paragraph_identities_cache
             .borrow()
             .as_ref()
@@ -3996,13 +3549,13 @@ mod tests {
 
     fn checked_paragraph_identities(session: &EditSession) -> String {
         let json = session.paragraph_identities().unwrap();
-        assert_eq!(json, session.paragraph_identities_uncached().unwrap());
+        assert_eq!(json, session.core.paragraph_identities_uncached().unwrap());
         let buffer = identities_cache_buffer(session);
         assert_eq!(json, session.paragraph_identities().unwrap());
         assert_eq!(buffer, identities_cache_buffer(session));
-        let cache = session.paragraph_identities_cache.borrow();
+        let cache = session.core.paragraph_identities_cache.borrow();
         let cached = cache.as_ref().unwrap();
-        assert_eq!(cached.version, session.engine.doc().version());
+        assert_eq!(cached.version, session.core.engine.doc().version());
         assert_eq!(cached.json, json);
         json
     }
@@ -4018,10 +3571,11 @@ mod tests {
     #[test]
     fn paragraph_identities_cache_matches_fresh_json_after_mutations() {
         let mut session = EditSession::new(71.0).unwrap();
-        session.undo = UndoSession::with_clock(Arc::new(|| 0));
+        session.core.undo = UndoSession::with_clock(Arc::new(|| 0));
         checked_paragraph_identities(&session);
         changed_paragraph_identities(&session, || {
             session
+                .core
                 .engine
                 .doc()
                 .create_story_with_paragraph_id("body", "p1", "abcd", "Normal", "left")
@@ -4065,6 +3619,7 @@ mod tests {
             assert!(!receipt["assignments"].as_array().unwrap().is_empty());
         });
         let saved: Vec<_> = session
+            .core
             .engine
             .doc()
             .paragraph_identities()
@@ -4088,7 +3643,7 @@ mod tests {
         let before = checked_paragraph_identities(&session);
         assert_eq!(
             changed_paragraph_identities(&session, || {
-                session.engine.doc().rotate_version(js_entropy());
+                session.core.engine.doc().rotate_version(js_entropy());
             }),
             before
         );
@@ -4105,12 +3660,12 @@ mod tests {
         let source = batch_docx();
         checked_paragraph_identities(&session);
         let opened = changed_paragraph_identities(&session, || {
-            session.open_docx(&source, true, None, None).unwrap();
+            session.core.open_docx(&source, true, None, None).unwrap();
         });
         let version = session.version();
         assert_eq!(
             changed_paragraph_identities(&session, || {
-                session.engine.doc().retain_source_docx(source.clone());
+                session.core.engine.doc().retain_source_docx(source.clone());
             }),
             opened
         );
@@ -4127,12 +3682,17 @@ mod tests {
             .into_bytes();
         let replacement = ooxml_opc::rezip_parts(&parts).unwrap();
         let replaced = changed_paragraph_identities(&session, || {
-            session.engine.doc().retain_source_docx(replacement.clone());
+            session
+                .core
+                .engine
+                .doc()
+                .retain_source_docx(replacement.clone());
         });
         assert_ne!(opened, replaced);
         assert_eq!(session.version(), version);
         changed_paragraph_identities(&session, || {
             session
+                .core
                 .engine
                 .doc()
                 .retain_source_docx(&b"invalid docx"[..]);
@@ -4146,7 +3706,10 @@ mod tests {
     #[test]
     fn paragraph_identities_cache_survives_reads_and_layout_slices() {
         let session = EditSession::new(74.0).unwrap();
-        session.open_docx(&batch_docx(), true, None, None).unwrap();
+        session
+            .core
+            .open_docx(&batch_docx(), true, None, None)
+            .unwrap();
         session
             .insert_text(
                 "body",
@@ -4192,9 +3755,9 @@ mod tests {
                 .is_empty()
         );
         check();
-        session.engine.doc().forget_seen();
-        let txn = session.engine.doc().yrs_doc().transact();
-        session.engine.doc().with_seen(&txn, |_| ());
+        session.core.engine.doc().forget_seen();
+        let txn = session.core.engine.doc().yrs_doc().transact();
+        session.core.engine.doc().with_seen(&txn, |_| ());
         drop(txn);
         check();
 
@@ -4265,7 +3828,10 @@ mod tests {
     #[test]
     fn batch_envelopes_default_and_refuse_as_data() {
         let session = EditSession::new(71.0).unwrap();
-        session.open_docx(&batch_docx(), true, None, None).unwrap();
+        session
+            .core
+            .open_docx(&batch_docx(), true, None, None)
+            .unwrap();
         let version = session.version();
         let read = envelope(
             &session
@@ -4308,7 +3874,7 @@ mod tests {
         assert_eq!(stale["failure"]["code"], "stale-version");
         assert_eq!(stale["version"], session.version().as_str());
         assert_eq!(
-            session.engine.doc().paragraphs("body").unwrap()[0].text,
+            session.core.engine.doc().paragraphs("body").unwrap()[0].text,
             "AlphaBETA"
         );
     }
@@ -4316,7 +3882,10 @@ mod tests {
     #[test]
     fn export_envelopes_carry_versions_and_refusals_as_data() {
         let session = EditSession::new(73.0).unwrap();
-        session.open_docx(&batch_docx(), true, None, None).unwrap();
+        session
+            .core
+            .open_docx(&batch_docx(), true, None, None)
+            .unwrap();
         let version = session.version();
         let read = envelope(
             &session
@@ -4373,7 +3942,10 @@ mod tests {
     fn paged_export_envelopes_carry_versions_maps_and_refusals() {
         let font: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
         let session = EditSession::new(75.0).unwrap();
-        session.open_docx(&batch_docx(), true, None, None).unwrap();
+        session
+            .core
+            .open_docx(&batch_docx(), true, None, None)
+            .unwrap();
         let options = r#"{"revisionView":"markup"}"#;
         let unavailable = envelope(
             &session
@@ -4438,7 +4010,10 @@ mod tests {
         );
         assert_eq!(read["content"]["structured"]["anchorScope"], "session");
         let private = EditSession::new(76.0).unwrap();
-        private.open_docx(&batch_docx(), true, None, None).unwrap();
+        private
+            .core
+            .open_docx(&batch_docx(), true, None, None)
+            .unwrap();
         let snapshot = envelope(
             &private
                 .export_snapshot_with_private_fonts_json(
@@ -4498,7 +4073,10 @@ mod tests {
         let parse = |json: String| serde_json::from_str::<Value>(&json).unwrap();
         let open = |client_id: f64| {
             let session = EditSession::new(client_id).unwrap();
-            session.open_docx(&batch_docx(), true, None, None).unwrap();
+            session
+                .core
+                .open_docx(&batch_docx(), true, None, None)
+                .unwrap();
             session
         };
         let request = |session: &EditSession| {
@@ -4689,7 +4267,10 @@ mod tests {
     #[test]
     fn untracked_batches_keep_history_and_source_is_echoed() {
         let session = EditSession::new(72.0).unwrap();
-        session.open_docx(&batch_docx(), true, None, None).unwrap();
+        session
+            .core
+            .open_docx(&batch_docx(), true, None, None)
+            .unwrap();
         let request = replace_request(
             &session.version(),
             json!({"source": "agent", "history": "none"}),
@@ -4730,22 +4311,24 @@ mod tests {
             let label = path.display().to_string();
             let session = EditSession::new(81.0).unwrap();
             if session
+                .core
                 .open_docx_retaining(&bytes, true, None, None)
                 .is_err()
             {
                 continue;
             }
-            let doc = session.engine.doc();
+            let doc = session.core.engine.doc();
             assert!(doc.unchanged_since_seeded(), "{label}");
             let reused = doc.paragraph_save_plan();
             crate::identity::assert_seed_states_match_a_reseed(doc, &label);
             let reseeding = EditSession::new(82.0).unwrap();
             reseeding
+                .core
                 .open_docx_retaining(&bytes, true, None, None)
                 .unwrap();
-            reseeding.engine.doc().forget_seeding();
+            reseeding.core.engine.doc().forget_seeding();
             assert_eq!(
-                reseeding.engine.doc().paragraph_save_plan(),
+                reseeding.core.engine.doc().paragraph_save_plan(),
                 reused,
                 "{label}"
             );
@@ -4767,16 +4350,17 @@ mod tests {
                 .create_story("fn:99", "Existing note", "Normal", "left")
                 .unwrap();
             session
+                .core
                 .open_docx_retaining(&bytes, true, None, None)
                 .unwrap();
             session
         };
         let session = opened(86.0);
-        assert!(!session.engine.doc().unchanged_since_seeded());
-        let plan = session.engine.doc().paragraph_save_plan();
+        assert!(!session.core.engine.doc().unchanged_since_seeded());
+        let plan = session.core.engine.doc().paragraph_save_plan();
         let reseeding = opened(87.0);
-        reseeding.engine.doc().forget_seeding();
-        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+        reseeding.core.engine.doc().forget_seeding();
+        assert_eq!(reseeding.core.engine.doc().paragraph_save_plan(), plan);
     }
 
     #[test]
@@ -4789,6 +4373,7 @@ mod tests {
         let opened = |client: f64| {
             let session = EditSession::new(client).unwrap();
             session
+                .core
                 .open_docx_retaining(&bytes, true, None, None)
                 .unwrap();
             let comments: Vec<Value> =
@@ -4812,12 +4397,12 @@ mod tests {
             session
         };
         let session = opened(88.0);
-        assert!(session.engine.doc().unchanged_since_seeded());
-        let plan = session.engine.doc().paragraph_save_plan();
-        crate::identity::assert_seed_states_match_a_reseed(session.engine.doc(), "principal");
+        assert!(session.core.engine.doc().unchanged_since_seeded());
+        let plan = session.core.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(session.core.engine.doc(), "principal");
         let reseeding = opened(89.0);
-        reseeding.engine.doc().forget_seeding();
-        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+        reseeding.core.engine.doc().forget_seeding();
+        assert_eq!(reseeding.core.engine.doc().paragraph_save_plan(), plan);
     }
 
     #[test]
@@ -4827,39 +4412,42 @@ mod tests {
         let opened = |client: f64| {
             let session = EditSession::new(client).unwrap();
             session
+                .core
                 .open_docx_retaining(&bytes, true, Some("fixed"), Some(&digest))
                 .unwrap();
             session
         };
         let session = opened(91.0);
-        let plan = session.engine.doc().paragraph_save_plan();
+        let plan = session.core.engine.doc().paragraph_save_plan();
         let reseeding = opened(92.0);
-        reseeding.engine.doc().forget_seeding();
-        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+        reseeding.core.engine.doc().forget_seeding();
+        assert_eq!(reseeding.core.engine.doc().paragraph_save_plan(), plan);
     }
 
     #[test]
     fn a_session_edited_since_seeding_plans_from_a_reseed() {
         let session = EditSession::new(83.0).unwrap();
         session
+            .core
             .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
             .unwrap();
-        assert!(session.engine.doc().unchanged_since_seeded());
-        let para_id = session.engine.doc().paragraphs("body").unwrap()[0]
+        assert!(session.core.engine.doc().unchanged_since_seeded());
+        let para_id = session.core.engine.doc().paragraphs("body").unwrap()[0]
             .para_id
             .clone();
         session
             .insert_text("body", &para_id, 1, "!", None, None)
             .unwrap();
-        assert!(!session.engine.doc().unchanged_since_seeded());
-        session.engine.doc().paragraph_save_plan();
-        crate::identity::assert_seed_states_match_a_reseed(session.engine.doc(), "edited");
+        assert!(!session.core.engine.doc().unchanged_since_seeded());
+        session.core.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(session.core.engine.doc(), "edited");
 
         let restored = EditSession::new(84.0).unwrap();
         restored
+            .core
             .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
             .unwrap();
-        let para_id = restored.engine.doc().paragraphs("body").unwrap()[0]
+        let para_id = restored.core.engine.doc().paragraphs("body").unwrap()[0]
             .para_id
             .clone();
         restored
@@ -4869,19 +4457,20 @@ mod tests {
             .delete_range("body", &para_id, 1, &para_id, 2, None, None)
             .unwrap();
         assert_eq!(
-            restored.engine.doc().paragraphs("body").unwrap()[0].text,
+            restored.core.engine.doc().paragraphs("body").unwrap()[0].text,
             "Alpha"
         );
-        assert!(!restored.engine.doc().unchanged_since_seeded());
+        assert!(!restored.core.engine.doc().unchanged_since_seeded());
 
         let remote = EditSession::new(85.0).unwrap();
         remote
+            .core
             .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
             .unwrap();
         remote.apply_update(&session.encode_state()).unwrap();
-        assert!(!remote.engine.doc().unchanged_since_seeded());
-        remote.engine.doc().paragraph_save_plan();
-        crate::identity::assert_seed_states_match_a_reseed(remote.engine.doc(), "remote");
+        assert!(!remote.core.engine.doc().unchanged_since_seeded());
+        remote.core.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(remote.core.engine.doc(), "remote");
     }
 
     fn unidentified_docx(text: &str) -> Vec<u8> {
@@ -4919,9 +4508,13 @@ mod tests {
     fn unused_script_fonts(body: &str, defaults: &str, seed_stories: bool) -> Value {
         let session = EditSession::new(78.0).unwrap();
         let bytes = script_fonts_docx(body, defaults);
-        let host: Value =
-            serde_json::from_str(&session.open_docx(&bytes, seed_stories, None, None).unwrap())
-                .unwrap();
+        let host: Value = serde_json::from_str(
+            &session
+                .core
+                .open_docx(&bytes, seed_stories, None, None)
+                .unwrap(),
+        )
+        .unwrap();
         host["unusedScriptFonts"].clone()
     }
 
@@ -4970,6 +4563,7 @@ mod tests {
         let unused = |body: String| -> Value {
             let session = EditSession::new(79.0).unwrap();
             let host = session
+                .core
                 .open_preview(&script_fonts_docx(&body, ""), 1)
                 .unwrap()
                 .unwrap();
@@ -4987,16 +4581,17 @@ mod tests {
     fn a_failed_reopen_keeps_the_open_package_and_its_digest() {
         let opened = unidentified_docx("Alpha");
         let session = EditSession::new(75.0).unwrap();
-        session.open_docx(&opened, true, None, None).unwrap();
+        session.core.open_docx(&opened, true, None, None).unwrap();
         let materialized = session.materialize_docx().unwrap();
         assert!(
             session
+                .core
                 .open_docx_retaining(&unidentified_docx("Beta"), true, None, None)
                 .is_err()
         );
         assert_eq!(session.materialize_docx().unwrap(), materialized);
         let fresh = EditSession::new(76.0).unwrap();
-        fresh.open_docx(&opened, true, None, None).unwrap();
+        fresh.core.open_docx(&opened, true, None, None).unwrap();
         assert_eq!(fresh.materialize_docx().unwrap(), materialized);
     }
 
@@ -5006,10 +4601,12 @@ mod tests {
         let generation = Some("fixed".to_owned());
         let hashed = EditSession::new(77.0).unwrap();
         hashed
+            .core
             .open_docx(&bytes, true, generation.clone(), None)
             .unwrap();
         let given = EditSession::new(77.0).unwrap();
         given
+            .core
             .open_docx(
                 &bytes,
                 true,
@@ -5019,8 +4616,8 @@ mod tests {
             .unwrap();
         assert!(hashed.encode_state() == given.encode_state());
         assert_eq!(
-            hashed.docx_digest.borrow().clone(),
-            given.docx_digest.borrow().clone()
+            hashed.core.docx_digest.borrow().clone(),
+            given.core.docx_digest.borrow().clone()
         );
         assert_eq!(
             hashed.materialize_docx().unwrap(),
@@ -5028,6 +4625,7 @@ mod tests {
         );
         let other = EditSession::new(77.0).unwrap();
         other
+            .core
             .open_docx(&bytes, true, Some("fixed".to_owned()), Some("0".repeat(64)))
             .unwrap();
         assert_ne!(
@@ -5040,6 +4638,7 @@ mod tests {
         for malformed in ["", "ABC", &"A".repeat(64), &"g".repeat(64)] {
             assert!(
                 refused
+                    .core
                     .open_docx_retaining(&bytes, true, None, Some(malformed))
                     .is_err()
             );
@@ -5084,16 +4683,22 @@ mod tests {
         })
         .to_string();
         let numpages = |session: &EditSession| {
-            let _fonts = session.fonts.enter();
+            let _fonts = session.core.fonts.enter();
             let layout: Value = serde_json::from_str(
                 &session
+                    .core
                     .engine
                     .layout_document_with_regions_retained_json(&request)
                     .unwrap(),
             )
             .unwrap();
-            session.engine.build_display_list_frame("{}", 0).unwrap();
+            session
+                .core
+                .engine
+                .build_display_list_frame("{}", 0)
+                .unwrap();
             let text = session
+                .core
                 .engine
                 .with_display_list(|list| {
                     let page = serde_json::to_value(&list.pages[0]).unwrap();
@@ -5110,21 +4715,22 @@ mod tests {
         };
         let full = EditSession::new(80.0).unwrap();
         full.register_measure_font(LIBERATION).unwrap();
-        full.open_docx(&bytes, true, None, None).unwrap();
+        full.core.open_docx(&bytes, true, None, None).unwrap();
         let (text, pages) = numpages(&full);
         assert!(pages > 1);
         assert_eq!(text, pages.to_string());
         // The preview's blocks fit its pages whole; its page count is still not the document's.
         let preview = EditSession::new(81.0).unwrap();
         preview.register_measure_font(LIBERATION).unwrap();
-        preview.open_preview(&bytes, 20).unwrap().unwrap();
+        preview.core.open_preview(&bytes, 20).unwrap().unwrap();
         let (text, preview_pages) = numpages(&preview);
         assert!(preview_pages < pages);
         assert_eq!(text, "");
 
         // An edit's resident pass lays out part of the package too.
-        let fonts = preview.fonts.enter();
+        let fonts = preview.core.fonts.enter();
         preview
+            .core
             .engine
             .doc()
             .insert_text(
@@ -5134,14 +4740,16 @@ mod tests {
                 FormatPolicy::Inherit,
             )
             .unwrap();
-        let epoch = preview.engine.stats().frame_epoch;
-        preview.engine.apply_and_layout("body", epoch).unwrap();
-        assert!(preview.engine.stats().incremental_pagination_calls > 0);
+        let epoch = preview.core.engine.stats().frame_epoch;
+        preview.core.engine.apply_and_layout("body", epoch).unwrap();
+        assert!(preview.core.engine.stats().incremental_pagination_calls > 0);
         preview
+            .core
             .engine
             .build_display_list_frame("{\"changed\":1}", 0)
             .unwrap();
         let text = preview
+            .core
             .engine
             .with_display_list(|list| {
                 serde_json::to_value(&list.pages[0]).unwrap()["primitives"]
@@ -5158,7 +4766,7 @@ mod tests {
 
         // A complete open over the preview counts the whole document again.
         preview.delete_story("body").unwrap();
-        preview.open_docx(&bytes, true, None, None).unwrap();
+        preview.core.open_docx(&bytes, true, None, None).unwrap();
         assert_eq!(numpages(&preview), (pages.to_string(), pages));
     }
 
@@ -5179,13 +4787,13 @@ mod tests {
         for (blocks, whole) in [(10, false), (30, false), (31, true), (200, true)] {
             let preview = EditSession::new(83.0).unwrap();
             let host: Value =
-                serde_json::from_str(&preview.open_preview(&bytes, blocks).unwrap().unwrap())
+                serde_json::from_str(&preview.core.open_preview(&bytes, blocks).unwrap().unwrap())
                     .unwrap();
             assert_eq!(host.get("wholeBody").is_some(), whole, "{blocks} blocks");
         }
         let full = EditSession::new(84.0).unwrap();
         let host: Value =
-            serde_json::from_str(&full.open_docx(&bytes, true, None, None).unwrap()).unwrap();
+            serde_json::from_str(&full.core.open_docx(&bytes, true, None, None).unwrap()).unwrap();
         assert!(host.get("wholeBody").is_none());
     }
 
@@ -5205,6 +4813,7 @@ mod tests {
             let preview = EditSession::new(83.0).unwrap();
             let host: Value = serde_json::from_str(
                 &preview
+                    .core
                     .open_preview_source(&bytes[..], 200, paragraph_budget)
                     .unwrap()
                     .unwrap(),
@@ -5240,9 +4849,9 @@ mod tests {
             ])
             .unwrap();
             let preview = EditSession::new(82.0).unwrap();
-            assert!(preview.open_preview(&bytes, 60).unwrap().is_none());
+            assert!(preview.core.open_preview(&bytes, 60).unwrap().is_none());
             assert!(preview.story_ids().is_empty());
-            preview.open_docx(&bytes, true, None, None).unwrap();
+            preview.core.open_docx(&bytes, true, None, None).unwrap();
         }
     }
 
@@ -5250,13 +4859,13 @@ mod tests {
     fn a_preview_opens_only_into_an_empty_session() {
         let bytes = batch_docx();
         let opened = EditSession::new(77.0).unwrap();
-        opened.open_docx(&bytes, false, None, None).unwrap();
-        assert!(opened.open_preview(&bytes, 1).is_err());
+        opened.core.open_docx(&bytes, false, None, None).unwrap();
+        assert!(opened.core.open_preview(&bytes, 1).is_err());
         let seeded = EditSession::new(78.0).unwrap();
-        seeded.open_docx(&bytes, true, None, None).unwrap();
-        assert!(seeded.open_preview(&bytes, 1).is_err());
+        seeded.core.open_docx(&bytes, true, None, None).unwrap();
+        assert!(seeded.core.open_preview(&bytes, 1).is_err());
         let preview = EditSession::new(79.0).unwrap();
-        preview.open_preview(&bytes, 1).unwrap().unwrap();
+        preview.core.open_preview(&bytes, 1).unwrap().unwrap();
         assert!(preview.materialize_docx().unwrap().is_none());
     }
 
@@ -5264,10 +4873,10 @@ mod tests {
     fn a_replica_indexes_its_package_as_it_opens() {
         let bytes = batch_docx();
         let origin = EditSession::new(83.0).unwrap();
-        origin.open_docx(&bytes, true, None, None).unwrap();
+        origin.core.open_docx(&bytes, true, None, None).unwrap();
         let replica = EditSession::new(84.0).unwrap();
-        replica.open_docx(&bytes, false, None, None).unwrap();
-        assert!(replica.engine.doc().source_indexed());
+        replica.core.open_docx(&bytes, false, None, None).unwrap();
+        assert!(replica.core.engine.doc().source_indexed());
         replica.load(&origin.encode_state()).unwrap();
         let paragraphs = |session: &EditSession| {
             envelope(
@@ -5285,16 +4894,16 @@ mod tests {
     fn reopening_and_hydrating_invalidate_versions() {
         let bytes = batch_docx();
         let origin = EditSession::new(73.0).unwrap();
-        origin.open_docx(&bytes, true, None, None).unwrap();
+        origin.core.open_docx(&bytes, true, None, None).unwrap();
         let joined = EditSession::new(74.0).unwrap();
         let before_open = joined.version();
-        joined.open_docx(&bytes, false, None, None).unwrap();
+        joined.core.open_docx(&bytes, false, None, None).unwrap();
         assert_ne!(joined.version(), before_open);
         let before_load = joined.version();
         joined.load(&origin.encode_state()).unwrap();
         assert_ne!(joined.version(), before_load);
         let before_reopen = joined.version();
-        joined.open_docx(&bytes, false, None, None).unwrap();
+        joined.core.open_docx(&bytes, false, None, None).unwrap();
         assert_ne!(joined.version(), before_reopen);
         let structural = json!({
             "expectVersion": joined.version(),
@@ -5314,7 +4923,10 @@ mod tests {
     #[test]
     fn compatibility_helpers_resolve_targets_after_atoms() {
         let session = EditSession::new(75.0).unwrap();
-        session.open_docx(&batch_docx(), true, None, None).unwrap();
+        session
+            .core
+            .open_docx(&batch_docx(), true, None, None)
+            .unwrap();
         let target = r#"{"kind":"search","text":"beta","within":{"kind":"paragraph","story":"body","paraId":"00000001"},"view":"accepted"}"#;
         let formatted = envelope(
             &session
@@ -5323,6 +4935,7 @@ mod tests {
         );
         assert_eq!(formatted["ok"], true);
         let bold: String = session
+            .core
             .engine
             .doc()
             .story_segments("body")
@@ -5347,7 +4960,13 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(commented["ok"], true);
-        let anchor = session.engine.doc().resolve_comment("7").unwrap().remove(0);
+        let anchor = session
+            .core
+            .engine
+            .doc()
+            .resolve_comment("7")
+            .unwrap()
+            .remove(0);
         assert_eq!((anchor.start, anchor.end), (6, 10));
         let missing = envelope(
             &session
@@ -5372,6 +4991,7 @@ mod tests {
     fn image_geometry_at_a_position_reaches_one_of_several_images_sharing_an_id() {
         let session = EditSession::new(22.0).unwrap();
         session
+            .core
             .engine
             .doc()
             .create_story_with_paragraph_id("body", "p0", "AB", "Normal", "left")
@@ -5389,6 +5009,7 @@ mod tests {
             .unwrap();
 
         let images: Vec<_> = session
+            .core
             .engine
             .doc()
             .story_segments("body")
@@ -5498,20 +5119,21 @@ mod tests {
     #[test]
     fn resident_backspace_after_a_leading_embed_deletes_the_previous_character() {
         let session = EditSession::new(20.0).unwrap();
-        seed_paragraph_after_embeds(session.engine.doc(), &["table"], "ABCDE");
-        let head = loc_index(session.engine.doc(), "body", "p1", 6).unwrap();
+        seed_paragraph_after_embeds(session.core.engine.doc(), &["table"], "ABCDE");
+        let head = loc_index(session.core.engine.doc(), "body", "p1", 6).unwrap();
 
         session
+            .core
             .delete_resident_input("backward", ("body".into(), "p1".into(), head), true)
             .unwrap();
 
-        let paragraphs = session.engine.doc().paragraphs("body").unwrap();
+        let paragraphs = session.core.engine.doc().paragraphs("body").unwrap();
         assert_eq!(paragraphs[1].text, "ABCD");
     }
 
     fn resident_surrogate_session(client_id: f64) -> EditSession {
         let session = EditSession::new(client_id).unwrap();
-        let doc = session.engine.doc();
+        let doc = session.core.engine.doc();
         doc.create_story_with_paragraph_id("body", "p0", "a😀b", "Normal", "left")
             .unwrap();
         doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 3), None)
@@ -5552,7 +5174,7 @@ mod tests {
             .unwrap();
         session.set_selection("body", "p0", 2, "p0", 2).unwrap();
         assert_eq!(
-            session.collapsed_resident_input_selection().unwrap(),
+            session.core.collapsed_resident_input_selection().unwrap(),
             ("body".into(), "p0".into(), 2)
         );
         session
@@ -5567,7 +5189,7 @@ mod tests {
                 .map(|paragraph| paragraph.text)
                 .collect::<Vec<_>>()
         };
-        let doc = session.engine.doc();
+        let doc = session.core.engine.doc();
         assert_eq!(texts(doc), expected);
         let peer = EditingDoc::new(99);
         peer.apply_update_v1(&doc.encode_state_as_update_v1())
@@ -5578,14 +5200,14 @@ mod tests {
     #[test]
     fn resident_backspace_inside_a_surrogate_pair_deletes_the_whole_emoji() {
         let session = resident_surrogate_session(23.0);
-        session.delete_resident_units("backward", 1).unwrap();
+        session.core.delete_resident_units("backward", 1).unwrap();
         assert_resident_surrogate_texts(&session, &["a", "b"]);
     }
 
     #[test]
     fn resident_forward_delete_inside_a_surrogate_pair_deletes_the_whole_emoji() {
         let session = resident_surrogate_session(24.0);
-        session.delete_resident_units("forward", 1).unwrap();
+        session.core.delete_resident_units("forward", 1).unwrap();
         assert_resident_surrogate_texts(&session, &["a", "b"]);
     }
 
@@ -5595,17 +5217,17 @@ mod tests {
         session.apply_input("x", 1.0).unwrap();
         assert_resident_surrogate_texts(&session, &["ax😀", "b"]);
         assert_eq!(
-            session.collapsed_resident_input_selection().unwrap(),
+            session.core.collapsed_resident_input_selection().unwrap(),
             ("body".into(), "p0".into(), 2)
         );
-        session.delete_resident_units("backward", 1).unwrap();
+        session.core.delete_resident_units("backward", 1).unwrap();
         assert_resident_surrogate_texts(&session, &["a😀", "b"]);
     }
 
     #[test]
     fn resident_caret_snapshot_returns_null_for_a_removed_story() {
         let session = EditSession::new(21.0).unwrap();
-        let doc = session.engine.doc();
+        let doc = session.core.engine.doc();
         doc.create_story_with_paragraph_id("body", "p1", "ABCDE", "Normal", "left")
             .unwrap();
         session.layout_document_json(&caret_layout_input()).unwrap();
@@ -5620,7 +5242,7 @@ mod tests {
         peer.delete_story("body").unwrap();
         doc.apply_update_v1(&peer.encode_state_as_update_v1())
             .unwrap();
-        assert!(session.selection.borrow().is_some());
+        assert!(session.core.selection.borrow().is_some());
         let snapshot: Value =
             serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
         assert_eq!(snapshot["frameEpoch"], before["frameEpoch"]);
@@ -5631,7 +5253,7 @@ mod tests {
     fn resident_caret_snapshot_rebases_cumulative_block_embeds() {
         let session = EditSession::new(21.0).unwrap();
         seed_paragraph_after_embeds(
-            session.engine.doc(),
+            session.core.engine.doc(),
             &["table", "pageBreak", "columnBreak", "blockSdt"],
             "ABCDE",
         );
@@ -5671,7 +5293,7 @@ mod tests {
     fn content_control_envelopes_refuse_as_data() {
         let bytes = content_controls_docx();
         let session = EditSession::new(72.0).unwrap();
-        session.open_docx(&bytes, true, None, None).unwrap();
+        session.core.open_docx(&bytes, true, None, None).unwrap();
         let listed = envelope(&session.list_content_controls_json("{}").unwrap());
         assert_eq!(listed["ok"], true);
         assert_eq!(listed["version"], session.version().as_str());
@@ -5732,9 +5354,9 @@ mod tests {
     fn loading_shared_state_keeps_legacy_values_as_they_are() {
         let bytes = content_controls_docx();
         let author = EditSession::new(73.0).unwrap();
-        author.open_docx(&bytes, true, None, None).unwrap();
+        author.core.open_docx(&bytes, true, None, None).unwrap();
         {
-            let doc = author.engine.doc();
+            let doc = author.core.engine.doc();
             let stories = doc.yrs_doc().transact().get_map(crate::STORIES).unwrap();
             let mut txn = doc.yrs_doc().transact_mut();
             let Some(yrs::Out::YText(body)) = stories.get(&txn, "body") else {
@@ -5755,7 +5377,7 @@ mod tests {
             map.insert(&mut txn, "value", "REF-LEGACY");
         }
         let joiner = EditSession::new(74.0).unwrap();
-        joiner.open_docx(&bytes, false, None, None).unwrap();
+        joiner.core.open_docx(&bytes, false, None, None).unwrap();
         joiner.load(&author.encode_state()).unwrap();
         assert_eq!(
             control_text(&joiner, "account.reference")["text"],
@@ -5777,6 +5399,7 @@ mod tests {
     fn unpaired_surrogates_in_fill_text_are_invalid_text() {
         let session = EditSession::new(75.0).unwrap();
         session
+            .core
             .open_docx(&content_controls_docx(), true, None, None)
             .unwrap();
         let request = |text: &str| {
@@ -5883,7 +5506,7 @@ mod tests {
     /// laid out and shown, so resident input is ready for it.
     fn shown_text_session(client_id: f64) -> EditSession {
         let session = EditSession::new(client_id).unwrap();
-        let doc = session.engine.doc();
+        let doc = session.core.engine.doc();
         doc.create_story("body", "Alpha beta", "Normal", "left")
             .unwrap();
         doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 5), None)
@@ -5933,13 +5556,13 @@ mod tests {
     fn text_commands_take_the_generic_path_where_resident_input_is_not_ready() {
         let resident = shown_text_session(78.0);
         let generic = shown_text_session(78.0);
-        let paragraphs = resident.engine.doc().paragraphs("body").unwrap();
+        let paragraphs = resident.core.engine.doc().paragraphs("body").unwrap();
         let (first, second) = (&paragraphs[0].para_id, &paragraphs[1].para_id);
-        let header = &resident.engine.doc().paragraphs("hf:rId1").unwrap()[0].para_id;
+        let header = &resident.core.engine.doc().paragraphs("hf:rId1").unwrap()[0].para_id;
         resident
             .edit_text_resident("body", first, 1, first, 1, Some("x".to_owned()))
             .unwrap();
-        assert!(resident.resident_text_edit.borrow().is_some());
+        assert!(resident.core.resident_text_edit.borrow().is_some());
         generic
             .insert_text("body", first, 1, "x", None, None)
             .unwrap();
@@ -5951,7 +5574,7 @@ mod tests {
                 .delete_range("body", first, 2, second, 1, None, None)
                 .unwrap()
         );
-        assert!(resident.resident_text_edit.borrow().is_none());
+        assert!(resident.core.resident_text_edit.borrow().is_none());
         assert_eq!(
             resident
                 .edit_text_resident("hf:rId1", header, 1, header, 1, Some("y".to_owned()))
@@ -5960,11 +5583,11 @@ mod tests {
                 .insert_text("hf:rId1", header, 1, "y", None, None)
                 .unwrap()
         );
-        assert!(resident.resident_text_edit.borrow().is_none());
+        assert!(resident.core.resident_text_edit.borrow().is_none());
         for story in ["body", "hf:rId1"] {
             assert_eq!(
-                resident.engine.doc().story_segments(story).unwrap(),
-                generic.engine.doc().story_segments(story).unwrap(),
+                resident.core.engine.doc().story_segments(story).unwrap(),
+                generic.core.engine.doc().story_segments(story).unwrap(),
                 "{story}"
             );
         }
@@ -5973,14 +5596,17 @@ mod tests {
     #[test]
     fn an_empty_text_command_records_no_resident_edit() {
         let session = shown_text_session(79.0);
-        let paragraph = session.engine.doc().paragraphs("body").unwrap()[0]
+        let paragraph = session.core.engine.doc().paragraphs("body").unwrap()[0]
             .para_id
             .clone();
-        let before = session.engine.doc().story_segments("body").unwrap();
+        let before = session.core.engine.doc().story_segments("body").unwrap();
         session
             .edit_text_resident("body", &paragraph, 1, &paragraph, 1, Some(String::new()))
             .unwrap();
-        assert!(session.resident_text_edit.borrow().is_none());
-        assert_eq!(session.engine.doc().story_segments("body").unwrap(), before);
+        assert!(session.core.resident_text_edit.borrow().is_none());
+        assert_eq!(
+            session.core.engine.doc().story_segments("body").unwrap(),
+            before
+        );
     }
 }
