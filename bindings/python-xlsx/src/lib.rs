@@ -828,12 +828,16 @@ impl PyWorkbook {
     }
 
     fn list_defined_names_json(&self, request: &str) -> PyResult<String> {
-        self.inner.list_defined_names_json(request).map_err(map_error)
+        self.inner
+            .list_defined_names_json(request)
+            .map_err(map_error)
     }
 
     fn conditional_formats_json(&self, sheet: &Bound<'_, PyAny>) -> PyResult<String> {
         let sheet = self.resolve_sheet(sheet)?;
-        self.inner.conditional_formats_json(sheet).map_err(map_error)
+        self.inner
+            .conditional_formats_json(sheet)
+            .map_err(map_error)
     }
 
     #[pyo3(signature = (query, *, case_sensitive = false, limit = None))]
