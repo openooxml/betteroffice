@@ -9,6 +9,7 @@ import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
 import { CommandOutcomeUnknown } from './commandProtocol';
+import type { DefaultFontInstallation } from '../../../../shared/pptxDefaultFonts';
 import type {
   PresentationCommandClient, PresentationCommandFailure, PresentationCommandOpenResult,
 } from './commandProtocol';
@@ -143,6 +144,7 @@ export function createPptxWorkerSession(
       transport.close();
     },
   };
+  Object.assign(input, { pptxDefaultFontInstaller: (options as PptxWorkerSessionOptions & DefaultFontInstallation).pptxDefaultFontInstaller });
   const opening = createSharedPresentationCommandClient(bytes, input, monitored).then((opened) => {
     client = opened;
     offClientFailure = opened.subscribeFailure(fail);
