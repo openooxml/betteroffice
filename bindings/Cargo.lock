@@ -143,6 +143,7 @@ dependencies = [
  "betteroffice-docx",
  "betteroffice-docx-engine",
  "betteroffice-fonts",
+ "betteroffice-ooxml-font-preflight",
  "getrandom 0.3.4",
  "napi",
  "napi-build",
@@ -227,6 +228,14 @@ dependencies = [
 [[package]]
 name = "betteroffice-ooxml-diff"
 version = "0.5.1"
+
+[[package]]
+name = "betteroffice-ooxml-font-preflight"
+version = "0.5.1"
+dependencies = [
+ "miniz_oxide",
+ "quick-xml",
+]
 
 [[package]]
 name = "betteroffice-ooxml-text"

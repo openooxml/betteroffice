@@ -382,6 +382,8 @@ describe('native package release wiring', () => {
     expect(xlsx.run).toContain(
       'BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts'
     );
+    expect(xlsx.run).toContain('bun run build:docx-wasm');
+    expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
