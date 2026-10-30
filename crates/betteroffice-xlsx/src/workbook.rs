@@ -9,6 +9,7 @@ mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
 mod geometry;
+pub(crate) mod reads;
 mod recovery;
 mod rich_text;
 #[cfg(test)]

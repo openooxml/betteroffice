@@ -11,6 +11,7 @@ homepage = "https://betteroffice.dev"
 repository = "https://github.com/openooxml/betteroffice"
 
 [workspace.dependencies]
+betteroffice-fonts = { path = "crates/betteroffice-fonts", version = "0.5.1", default-features = false }
 libm = "=0.2.15"
 betteroffice-xlsx = { path = "crates/betteroffice-xlsx", version = "0.5.1", default-features = false }
 ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.5.1" }
@@ -28,6 +29,7 @@ docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", 
 docx-layout = { package = "betteroffice-docx-layout", path = "crates/docx-layout", version = "0.5.1" }
 docx-raster = { package = "betteroffice-docx-raster", path = "crates/docx-raster", version = "0.5.1" }
 docx-edit = { package = "betteroffice-docx-edit", path = "crates/docx-edit", version = "0.5.1" }
+docx-engine = { package = "betteroffice-docx-engine", path = "crates/docx-engine" }
 betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.5.1" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.5.1" }
 pptx-edit = { package = "betteroffice-pptx-edit", path = "crates/pptx-edit", version = "0.5.1" }

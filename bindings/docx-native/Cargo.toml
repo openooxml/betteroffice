@@ -12,6 +12,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 betteroffice-docx = { path = "../../crates/betteroffice-docx", features = ["raster"] }
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.5"

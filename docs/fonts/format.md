@@ -59,6 +59,13 @@ font bytes.
 
 ## Decoding and ownership
 
+The published `betteroffice-fonts` Rust crate owns decoding. Every engine links
+it and exposes `decodeFontFace(bytes, codec, dict?, maxOutput?)` in wasm and
+Node bindings. Python exposes `decode_font_face`; Rust facades re-export the
+crate as `fonts`. Engine calls return owned font bytes and the optional woff2t
+payload. The standalone wasm decoder links the same crate. Its vendored C
+decoder lives at `crates/betteroffice-fonts/vendor/zstd`.
+
 Decoders sniff only `28 B5 2F FD`. Other input, including TTF (`00 01 00 00`),
 OTF (`OTTO`), WOFF (`wOFF`) and WOFF2 (`wOF2`), passes through without decoding.
 Decoding is a single operation, with no recursive attempt on the result.
@@ -84,7 +91,8 @@ font face codec error before decoding or passthrough. Omitting the option for
 standalone byte decoding selects `zstd`.
 
 The frame must declare its content size before output allocation. The default
-TypeScript `maxOutput` is 64 MiB; Rust callers supply their own limit. Oversized
+TypeScript `maxOutput` and Rust `decode_font_face` limit are 64 MiB by default.
+Explicit limits must be integers from 0 to 2,147,483,647. Oversized
 frames fail before output allocation. Decoders reject missing checksums,
 corruption, truncation and output lengths that disagree with the header.
 For `woff2t+zstd`, `maxOutput` bounds both the zstd payload and the reconstructed
@@ -108,7 +116,8 @@ Passthrough does not apply the decoded-output limit.
 TypeScript always returns a fresh, independently owned `ArrayBuffer`, including
 for passthrough. A caller may transfer that buffer. The wasm instance is reused,
 but its output is copied and freed after each call. Rust passthrough returns a
-borrowed `Cow`; decoded output is owned.
+borrowed `Cow` through `decode_or_passthrough`; `decode_font_face` always returns
+owned bytes.
 If any wasm export throws, TypeScript discards that instance and reports
 `Font face could not be decoded`. It makes no further calls into that instance;
 the next decode loads a fresh module instance.

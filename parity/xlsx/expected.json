@@ -1757,5 +1757,459 @@
       "byteLength": 10864,
       "sha256": "86d6eef66d9c793992ffd8cc5d1ceaa57fda0c956ba5d46a80f55a5646d087c9"
     }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 499.05078,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "calculationStatus",
+    "result": {
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "cell",
+    "result": {
+      "a1": "C3",
+      "input": "=B3*2",
+      "isFormula": true
+    }
+  },
+  {
+    "op": "open",
+    "result": null
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": false,
+          "name": "Rows",
+          "refersTo": "Data!$A$1:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))",
+          "scope": null
+        },
+        {
+          "hidden": false,
+          "name": "Header",
+          "refersTo": "SUM(Data!$1:$1)",
+          "scope": null
+        }
+      ],
+      "nextOffset": 2,
+      "total": 5,
+      "version": "<version:5>"
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": false,
+          "name": "Spilled",
+          "refersTo": "SUM(Data!A1#)",
+          "scope": null
+        },
+        {
+          "hidden": false,
+          "name": "Picked",
+          "refersTo": "SUM(@Data!A1)",
+          "scope": null
+        },
+        {
+          "hidden": false,
+          "name": "Spaced",
+          "refersTo": "Data!A1: Data!B2",
+          "scope": null
+        }
+      ],
+      "nextOffset": null,
+      "total": 5,
+      "version": "<version:5>"
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": false,
+          "name": "Rows",
+          "refersTo": "Data!$A$1:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))",
+          "scope": null
+        },
+        {
+          "hidden": false,
+          "name": "Header",
+          "refersTo": "SUM(Data!$1:$1)",
+          "scope": null
+        },
+        {
+          "hidden": false,
+          "name": "Spilled",
+          "refersTo": "SUM(Data!A1#)",
+          "scope": null
+        },
+        {
+          "hidden": false,
+          "name": "Picked",
+          "refersTo": "SUM(@Data!A1)",
+          "scope": null
+        },
+        {
+          "hidden": false,
+          "name": "Spaced",
+          "refersTo": "Data!A1: Data!B2",
+          "scope": null
+        }
+      ],
+      "nextOffset": null,
+      "total": 5,
+      "version": "<version:5>"
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [],
+      "nextOffset": null,
+      "total": 0,
+      "version": "<version:5>"
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": []
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": [
+      {
+        "editable": true,
+        "format": {
+          "bold": false,
+          "fill": "#00FF00",
+          "fontColor": "#FF0000",
+          "italic": true
+        },
+        "formulas": [
+          "1"
+        ],
+        "id": "cf1",
+        "operator": "greaterThan",
+        "priority": 1,
+        "range": "A1:A3",
+        "type": "cellIs"
+      }
+    ]
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": "A1:A3",
+      "contentHeight": 80,
+      "contentWidth": 128.02344,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0"
+      ],
+      "sheetNames": [
+        "Data"
+      ]
+    }
+  },
+  {
+    "op": "version",
+    "result": "<version:6>"
+  },
+  {
+    "op": "applyEdits",
+    "result": {
+      "applied": true,
+      "baseVersion": "<version:6>",
+      "calculation": {
+        "changed": [],
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false
+      },
+      "changedSheets": [
+        "sheet:0"
+      ],
+      "ok": true,
+      "receipts": [
+        {
+          "changed": true,
+          "changedCells": [
+            {
+              "a1": "C1",
+              "col": 2,
+              "row": 0,
+              "sheetId": "sheet:0"
+            }
+          ],
+          "stepIndex": 0,
+          "target": {
+            "range": {
+              "a1": "C1",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:0"
+          }
+        }
+      ],
+      "source": "host",
+      "version": "<version:7>"
+    }
+  },
+  {
+    "op": "cell",
+    "result": {
+      "a1": "C1",
+      "input": "=SEQUENCE(2)",
+      "isFormula": true
+    }
+  },
+  {
+    "op": "cell",
+    "result": {
+      "a1": "C2",
+      "input": "",
+      "isFormula": false
+    }
+  },
+  {
+    "op": "cell",
+    "result": {
+      "a1": "C3",
+      "input": "",
+      "isFormula": false
+    }
+  },
+  {
+    "op": "calculationStatus",
+    "result": {
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "open",
+    "result": null
+  },
+  {
+    "op": "searchText",
+    "result": [
+      {
+        "a1": "B1",
+        "col": 1,
+        "row": 0,
+        "sheet": 0,
+        "sheetId": "sheet:0",
+        "sheetName": "Charts",
+        "text": "Revenue"
+      }
+    ]
+  },
+  {
+    "op": "searchText",
+    "result": []
+  },
+  {
+    "op": "searchText",
+    "result": [
+      {
+        "a1": "A1",
+        "col": 0,
+        "row": 0,
+        "sheet": 0,
+        "sheetId": "sheet:0",
+        "sheetName": "Charts",
+        "text": "Quarter"
+      },
+      {
+        "a1": "A2",
+        "col": 0,
+        "row": 1,
+        "sheet": 0,
+        "sheetId": "sheet:0",
+        "sheetName": "Charts",
+        "text": "Q1"
+      }
+    ]
+  },
+  {
+    "op": "rangeCells",
+    "result": [
+      [
+        {
+          "a1": "A1",
+          "input": "Quarter",
+          "isFormula": false
+        },
+        {
+          "a1": "B1",
+          "input": "Revenue",
+          "isFormula": false
+        }
+      ],
+      [
+        {
+          "a1": "A2",
+          "input": "Q1",
+          "isFormula": false
+        },
+        {
+          "a1": "B2",
+          "input": "12",
+          "isFormula": false
+        }
+      ]
+    ]
+  },
+  {
+    "op": "selectionFormatting",
+    "result": {
+      "bold": false,
+      "borderPreset": "none",
+      "fillColor": "#ffffff",
+      "fontFamily": "Calibri",
+      "fontSize": 11,
+      "horizontalAlignment": "left",
+      "italic": false,
+      "numberFormat": "automatic",
+      "strikethrough": false,
+      "textColor": "#000000",
+      "textWrapping": "overflow",
+      "verticalAlignment": "bottom"
+    }
+  },
+  {
+    "op": "charts",
+    "result": [
+      {
+        "anchorRange": "B6:F19",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#0",
+        "index": 0,
+        "part": "xl/charts/chart1.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          },
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 1,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Revenue and costs",
+        "type": "barChart"
+      },
+      {
+        "anchorRange": "G6",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#1",
+        "index": 1,
+        "part": "xl/charts/chart2.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue trend",
+        "type": "lineChart"
+      },
+      {
+        "anchorRange": null,
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#2",
+        "index": 2,
+        "part": "xl/charts/chart3.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue share",
+        "type": "pieChart"
+      },
+      {
+        "anchorRange": "G21:M35",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#3",
+        "index": 3,
+        "part": "xl/charts/chart4.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Cost share",
+        "type": "doughnutChart"
+      }
+    ]
   }
 ]
