@@ -399,6 +399,7 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   // Japanese (the Mincho serif families map to the sans face — Noto Serif JP
   // is not vendored)
   'ms pgothic': 'ms gothic',
+  'ms ui gothic': 'ms gothic',
   meiryo: 'ms gothic',
   'yu gothic': 'ms gothic',
   'ｍｓ ゴシック': 'ms gothic',

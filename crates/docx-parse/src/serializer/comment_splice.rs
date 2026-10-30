@@ -22,7 +22,7 @@ use super::parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info,
 };
-use super::xml_writer::js_number;
+use super::xml_writer::{escape_xml, js_number};
 
 pub(super) struct SplicedComments {
     pub(super) xml: String,
@@ -92,11 +92,15 @@ pub(super) fn splice_comments(
         .iter()
         .map(|(id, span)| (id.as_str(), &source[span.clone()]))
         .collect();
+    let mut text_patches: HashMap<String, Vec<(Range<usize>, String)>> = HashMap::new();
     for (comment, original) in kept.iter().zip(&original) {
         let id = js_number(comment.id);
         let fragment = fragments
             .get(id.as_str())
             .ok_or_else(|| error_xml("missing source comment"))?;
+        if let Some(patch) = comment_text_patch(original, comment, fragment)? {
+            text_patches.insert(id.clone(), patch);
+        }
         let same_para_id = match (&original.para_id, &comment.para_id) {
             (Some(source), Some(written)) => source.eq_ignore_ascii_case(written),
             (None, None) => true,
@@ -104,7 +108,13 @@ pub(super) fn splice_comments(
         };
         if (!thread_changed && original.para_id.is_none() && parent_ids.contains(&id))
             || !same_para_id
-            || !can_replay(original, comment, fragment, thread_changed)?
+            || !can_replay(
+                original,
+                comment,
+                fragment,
+                thread_changed,
+                text_patches.contains_key(&id),
+            )?
         {
             return Err(error_xml("comment changed"));
         }
@@ -133,8 +143,24 @@ pub(super) fn splice_comments(
     } else {
         source_infos != kept_infos
     };
-    if source_xml != kept_xml || infos_changed {
+    if infos_changed {
         return Err(error_xml("comment serialization changed"));
+    }
+    if source_xml != kept_xml {
+        let source_fragments: HashMap<_, _> = comment_spans(&source_xml)?.0.into_iter().collect();
+        let kept_fragments: HashMap<_, _> = comment_spans(&kept_xml)?.0.into_iter().collect();
+        for comment in kept.iter() {
+            let id = js_number(comment.id);
+            let differs = match (source_fragments.get(&id), kept_fragments.get(&id)) {
+                (Some(source_span), Some(kept_span)) => {
+                    source_xml[source_span.clone()] != kept_xml[kept_span.clone()]
+                }
+                _ => true,
+            };
+            if differs && !text_patches.contains_key(&id) {
+                return Err(error_xml("comment serialization changed"));
+            }
+        }
     }
     let original_para_ids: HashMap<_, _> = original
         .iter()
@@ -170,6 +196,14 @@ pub(super) fn splice_comments(
     }
     let mut patches = Vec::new();
     for (id, span) in &spans {
+        if let Some(text_patch) = text_patches.get(id) {
+            for (range, replacement) in text_patch {
+                patches.push((
+                    span.start + range.start..span.start + range.end,
+                    replacement.clone(),
+                ));
+            }
+        }
         if original_para_ids.get(id).is_some_and(|id| id.is_none()) && needed_ids.contains(id) {
             let fragment = &source[span.clone()];
             let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid parent"))?;
@@ -212,10 +246,12 @@ pub(super) fn splice_comments(
     if !crate::xml::reads_as_written(spliced.as_bytes()) {
         return Err(error_xml("added comments require whole-part writing"));
     }
-    let companions = if thread_changed {
+    let companions = if thread_changed || (!text_patches.is_empty() && !added.is_empty()) {
         Some(splice_companions(
             parts, &original, comments, infos, &added_ids,
         )?)
+    } else if !text_patches.is_empty() {
+        Some(Vec::new())
     } else {
         None
     };
@@ -510,6 +546,7 @@ fn can_replay(
     written: &Comment,
     fragment: &str,
     thread_changed: bool,
+    text_only: bool,
 ) -> Result<bool, ParseError> {
     if source
         .para_id
@@ -517,7 +554,7 @@ fn can_replay(
         .is_some_and(|id| parse_paragraph_id(id).is_none())
         || source.durable_id != written.durable_id
         || source.date_utc != written.date_utc
-        || !unchanged(source, written)?
+        || !(unchanged(source, written)? || text_only)
     {
         return Ok(false);
     }
@@ -671,6 +708,231 @@ fn unchanged(source: &Comment, written: &Comment) -> Result<bool, ParseError> {
         && projection(&source.content)? == projection(&written.content)?
         && (written.block_content.is_empty()
             || projection(&source.block_content)? == projection(&written.block_content)?))
+}
+
+fn blanked(value: &impl Serialize) -> Result<Value, ParseError> {
+    let mut value = projection(value)?;
+    blank_text(&mut value);
+    Ok(value)
+}
+
+fn blank_text(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("paragraph") {
+                for key in [
+                    "extraAttributes",
+                    "listRendering",
+                    "renderedPageBreakBefore",
+                ] {
+                    object.remove(key);
+                }
+                if object.get("formatting").is_some_and(|formatting| {
+                    formatting.is_null()
+                        || formatting
+                            .as_object()
+                            .is_some_and(|values| values.is_empty())
+                }) {
+                    object.remove("formatting");
+                }
+            }
+            if object.get("type").and_then(Value::as_str) == Some("text") {
+                object.insert("text".to_owned(), Value::String(String::new()));
+            }
+            for child in object.values_mut() {
+                blank_text(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array.iter_mut() {
+                blank_text(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn value_text_parts(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Array(array) => array.iter().for_each(|child| value_text_parts(child, out)),
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(text) = object.get("text").and_then(Value::as_str) {
+                    out.push(text.to_owned());
+                }
+                return;
+            }
+            let structured_result = object.contains_key("structuredResult");
+            for key in [
+                "structuredChildren",
+                "structuredResult",
+                "content",
+                "children",
+                "fieldResult",
+                "inline",
+            ] {
+                if key == "children" && object.contains_key("structuredChildren") {
+                    continue;
+                }
+                if key == "content" && structured_result {
+                    continue;
+                }
+                if key == "fieldResult" && structured_result {
+                    continue;
+                }
+                if let Some(child) = object.get(key) {
+                    value_text_parts(child, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn model_paragraph_text_parts(
+    paragraph: &crate::paragraph::Paragraph,
+) -> Result<Vec<String>, ParseError> {
+    let value = projection(paragraph)?;
+    let mut parts = Vec::new();
+    value_text_parts(&value, &mut parts);
+    Ok(parts)
+}
+
+fn direct_paragraph_spans(tags: &[Tag]) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut depth = 0usize;
+    let mut start: Option<usize> = None;
+    for tag in tags {
+        if tag.end {
+            depth = depth.saturating_sub(1);
+            if depth == 1 {
+                if let Some(start) = start.take() {
+                    spans.push(start..tag.range.end);
+                }
+            }
+        } else {
+            if depth == 1 && tag.name == "w:p" {
+                if tag.empty {
+                    spans.push(tag.range.clone());
+                } else {
+                    start = Some(tag.range.start);
+                }
+            }
+            depth += usize::from(!tag.empty);
+        }
+    }
+    spans
+}
+
+struct CommentTextNode {
+    range: Range<usize>,
+    tag: Range<usize>,
+    text: String,
+    empty: bool,
+    preserve: bool,
+}
+
+fn comment_text_nodes(
+    fragment: &str,
+    tags: &[Tag],
+    span: &Range<usize>,
+) -> Option<Vec<CommentTextNode>> {
+    let mut nodes = Vec::new();
+    let mut open: Option<&Tag> = None;
+    for tag in tags {
+        if tag.range.start < span.start || tag.range.start >= span.end || tag.name != "w:t" {
+            continue;
+        }
+        if tag.end {
+            let begin = open.take()?;
+            let range = begin.range.end..tag.range.start;
+            let preserve = attribute(begin, "xml:space")
+                .and_then(|value| unescaped(fragment, value))
+                .as_deref()
+                == Some("preserve");
+            nodes.push(CommentTextNode {
+                text: unescaped(fragment, range.clone())?,
+                range,
+                tag: begin.range.clone(),
+                empty: false,
+                preserve,
+            });
+        } else if tag.empty {
+            nodes.push(CommentTextNode {
+                range: tag.range.end..tag.range.end,
+                tag: tag.range.clone(),
+                text: String::new(),
+                empty: true,
+                preserve: false,
+            });
+        } else {
+            open = Some(tag);
+        }
+    }
+    if open.is_some() {
+        return None;
+    }
+    Some(nodes)
+}
+
+fn comment_text_patch(
+    source: &Comment,
+    written: &Comment,
+    fragment: &str,
+) -> Result<Option<Vec<(Range<usize>, String)>>, ParseError> {
+    if source.content.len() != written.content.len()
+        || blanked(&source.content)? != blanked(&written.content)?
+        || (!written.block_content.is_empty()
+            && blanked(&source.block_content)? != blanked(&written.block_content)?)
+    {
+        return Ok(None);
+    }
+    let Some(fragment_tags) = tags(fragment) else {
+        return Ok(None);
+    };
+    let spans = direct_paragraph_spans(&fragment_tags);
+    if spans.len() != source.content.len() {
+        return Ok(None);
+    }
+    let mut patches = Vec::new();
+    let mut changed = false;
+    for (index, paragraph) in source.content.iter().enumerate() {
+        let source_parts = model_paragraph_text_parts(paragraph)?;
+        let written_parts = model_paragraph_text_parts(&written.content[index])?;
+        if source_parts == written_parts {
+            continue;
+        }
+        changed = true;
+        let Some(nodes) = comment_text_nodes(fragment, &fragment_tags, &spans[index]) else {
+            return Ok(None);
+        };
+        if nodes.len() != source_parts.len()
+            || nodes.len() != written_parts.len()
+            || nodes
+                .iter()
+                .zip(&source_parts)
+                .any(|(node, part)| node.text != *part)
+        {
+            return Ok(None);
+        }
+        for (node, replacement) in nodes.iter().zip(&written_parts) {
+            if *replacement != node.text {
+                if node.empty {
+                    return Ok(None);
+                }
+                patches.push((node.range.clone(), escape_xml(replacement)));
+                let edge_whitespace = matches!(replacement.chars().next(), Some(' ' | '\t'))
+                    || matches!(replacement.chars().next_back(), Some(' ' | '\t'));
+                if edge_whitespace && !node.preserve {
+                    patches.push((
+                        node.tag.clone(),
+                        set_attribute(&fragment[node.tag.clone()], "xml:space", Some("preserve"))?,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(changed.then_some(patches))
 }
 
 fn projection(value: &impl Serialize) -> Result<Value, ParseError> {
@@ -841,4 +1103,439 @@ fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, Option<usize
 
 fn error_xml(message: impl Into<String>) -> ParseError {
     ParseError::Canonical(format!("comments splice: {}", message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::formatting::{ParagraphFormatting, TextFormatting};
+    use crate::inline::{
+        InlineNode, PropertyChangeInfo, Run, RunContent, RunPropertyChange, RunPropertyChangeType,
+        RunType,
+    };
+    use crate::paragraph::{Paragraph, ParagraphContent};
+
+    use super::*;
+
+    const FRAGMENT: &str = "<w:comment w:id=\"0\" w:author=\"Reviewer\" w:date=\"2026-01-05T09:00:00Z\" w:initials=\"R\"><w:p w14:paraId=\"1A2B3C4D\" w14:textId=\"77777777\" w:rsidR=\"00AB\" w:rsidRDefault=\"00CD\"><w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>First identity proofed here. </w:t></w:r><w:proofErr w:type=\"spellStart\"/><w:r><w:rPr><w:b/></w:rPr><w:t>Second identity </w:t></w:r><w:r><w:rPr><w:color w:val=\"0066AA\"/></w:rPr><w:t>proofed there.</w:t></w:r><w:proofErr w:type=\"spellEnd\"/></w:p></w:comment>";
+
+    #[test]
+    fn source_guard_requires_preserve_for_edge_spaces_in_any_comment() {
+        let guarded = "<w:comment w:id=\"1\"><w:p><w:fldSimple w:instr=\" PAGE \"><w:r><w:t>7</w:t></w:r></w:fldSimple><w:hyperlink w:anchor=\"target\"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p></w:comment>";
+        let source = format!(
+            "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">{FRAGMENT}{guarded}</w:comments>"
+        );
+        assert!(!crate::xml::reads_as_written(source.as_bytes()));
+        let preserved = source
+            .replace(
+                "<w:t>First identity proofed here. </w:t>",
+                "<w:t xml:space=\"preserve\">First identity proofed here. </w:t>",
+            )
+            .replace(
+                "<w:t>Second identity </w:t>",
+                "<w:t xml:space=\"preserve\">Second identity </w:t>",
+            );
+        assert!(crate::xml::reads_as_written(preserved.as_bytes()));
+    }
+
+    fn run(text: &str, formatting: Option<TextFormatting>) -> ParagraphContent {
+        ParagraphContent::Inline(InlineNode::Run(Run {
+            node_type: RunType::Run,
+            formatting,
+            property_changes: None,
+            content: vec![RunContent::Text {
+                text: text.to_owned(),
+                preserve_space: None,
+            }],
+        }))
+    }
+
+    fn comment(first: &str, second: &str, third: &str) -> Comment {
+        let reference = ParagraphContent::Inline(InlineNode::Run(Run {
+            node_type: RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![RunContent::CommentReference { id: None }],
+        }));
+        Comment {
+            id: 0.0,
+            author: "Reviewer".to_owned(),
+            initials: Some("R".to_owned()),
+            date: Some("2026-01-05T09:00:00Z".to_owned()),
+            content: vec![Paragraph {
+                node_type: "paragraph".to_owned(),
+                para_id: Some("1A2B3C4D".to_owned()),
+                repeated_para_id: None,
+                para_id_attribute: None,
+                source_ordinal: None,
+                text_id: Some("77777777".to_owned()),
+                extra_attributes: Vec::new(),
+                formatting: None,
+                property_changes: None,
+                p_pr_ins: None,
+                p_pr_del: None,
+                content: vec![
+                    reference,
+                    run(first, None),
+                    run(
+                        second,
+                        Some(TextFormatting {
+                            bold: Some(true),
+                            ..TextFormatting::default()
+                        }),
+                    ),
+                    run(third, None),
+                ],
+                list_rendering: None,
+                rendered_page_break_before: None,
+                section_properties: None,
+            }],
+            parent_id: None,
+            done: Some(false),
+            status: "active".to_owned(),
+            author_id: None,
+            durable_id: Some("2ECC71AA".to_owned()),
+            para_id: Some("1A2B3C4D".to_owned()),
+            date_utc: None,
+            palette_index: 0.0,
+            block_content: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn text_patch_changes_only_wt_text_and_keeps_ids_and_proofing() {
+        let source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        let written = comment(
+            "First identity-proofed here. ",
+            "Second identity-proofed",
+            " there.",
+        );
+        let patch = comment_text_patch(&source, &written, FRAGMENT)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = FRAGMENT
+            .replace(
+                "<w:t>First identity proofed here. </w:t>",
+                "<w:t xml:space=\"preserve\">First identity-proofed here. </w:t>",
+            )
+            .replace(
+                "<w:t>Second identity </w:t>",
+                "<w:t>Second identity-proofed</w:t>",
+            )
+            .replace(
+                "<w:t>proofed there.</w:t>",
+                "<w:t xml:space=\"preserve\"> there.</w:t>",
+            );
+        assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_adds_preserve_to_nodes_gaining_edge_whitespace() {
+        const FRAGMENT: &str = "<w:comment w:id=\"0\" w:author=\"Reviewer\" w:date=\"2026-01-05T09:00:00Z\" w:initials=\"R\"><w:p w14:paraId=\"1A2B3C4D\" w14:textId=\"77777777\" w:rsidR=\"00AB\"><w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>alpha be</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ta gamma</w:t></w:r><w:r><w:t> rest</w:t></w:r></w:p></w:comment>";
+        let source = comment("alpha be", "ta gamma", " rest");
+        let written = comment("alpha x ", " gamma", " rest");
+        let patch = comment_text_patch(&source, &written, FRAGMENT)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = FRAGMENT
+            .replace(
+                "<w:t>alpha be</w:t>",
+                "<w:t xml:space=\"preserve\">alpha x </w:t>",
+            )
+            .replace(
+                "<w:t>ta gamma</w:t>",
+                "<w:t xml:space=\"preserve\"> gamma</w:t>",
+            );
+        assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_replaces_default_space_with_preserve() {
+        let fragment = FRAGMENT.replace(
+            "<w:t>First identity proofed here. </w:t>",
+            "<w:t xml:space=\"default\">alpha</w:t>",
+        );
+        let source = comment("alpha", "Second identity ", "proofed there.");
+        let written = comment(" alpha ", "Second identity ", "proofed there.");
+        let patch = comment_text_patch(&source, &written, &fragment)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = fragment.replace(
+            "<w:t xml:space=\"default\">alpha</w:t>",
+            "<w:t xml:space=\"preserve\"> alpha </w:t>",
+        );
+        assert_eq!(apply_patches(&fragment, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_keeps_a_fully_covered_run_as_an_empty_wt() {
+        const FRAGMENT: &str = "<w:comment w:id=\"0\" w:author=\"Reviewer\" w:date=\"2026-01-05T09:00:00Z\" w:initials=\"R\"><w:p w14:paraId=\"1A2B3C4D\" w14:textId=\"77777777\" w:rsidR=\"00AB\"><w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>alpha b</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>et</w:t></w:r><w:r><w:t>a gamma</w:t></w:r></w:p></w:comment>";
+        let source = comment("alpha b", "et", "a gamma");
+        let written = comment("alpha x", "", "a gamma");
+        let patch = comment_text_patch(&source, &written, FRAGMENT)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = FRAGMENT
+            .replace("<w:t>alpha b</w:t>", "<w:t>alpha x</w:t>")
+            .replace("<w:t>et</w:t>", "<w:t></w:t>");
+        assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_rejects_a_paragraph_formatting_change_with_the_text() {
+        let mut source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        source.content[0].formatting = Some(ParagraphFormatting {
+            alignment: Some("left".to_owned()),
+            ..ParagraphFormatting::default()
+        });
+        let mut written = comment(
+            "First identity-proofed here. ",
+            "Second identity-proofed",
+            " there.",
+        );
+        written.content[0].formatting = Some(ParagraphFormatting {
+            alignment: Some("center".to_owned()),
+            ..ParagraphFormatting::default()
+        });
+        assert_eq!(
+            comment_text_patch(&source, &written, FRAGMENT).unwrap(),
+            None
+        );
+        written.content[0].formatting = source.content[0].formatting.clone();
+        assert!(
+            comment_text_patch(&source, &written, FRAGMENT)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn text_patch_rejects_removing_an_explicit_false_paragraph_override() {
+        let mut source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        source.content[0].formatting = Some(ParagraphFormatting {
+            style_id: Some("KeepWithNext".to_owned()),
+            keep_next: Some(false),
+            ..ParagraphFormatting::default()
+        });
+        let mut written = comment(
+            "First identity-proofed here. ",
+            "Second identity-proofed",
+            " there.",
+        );
+        written.content[0].formatting = source.content[0].formatting.clone();
+        let fragment = FRAGMENT.replace(
+            "<w:pStyle w:val=\"CommentText\"/>",
+            "<w:pStyle w:val=\"KeepWithNext\"/><w:keepNext w:val=\"0\"/>",
+        );
+        assert!(
+            comment_text_patch(&source, &written, &fragment)
+                .unwrap()
+                .is_some()
+        );
+        written.content[0].formatting.as_mut().unwrap().keep_next = None;
+        assert_eq!(
+            comment_text_patch(&source, &written, &fragment).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn text_patch_rejects_run_property_changes_and_reordering() {
+        let source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        let mut written = comment(
+            "First identity-proofed here. ",
+            "Second identity-proofed",
+            " there.",
+        );
+        let mut revised = written.clone();
+        if let ParagraphContent::Inline(InlineNode::Run(run)) = &mut revised.content[0].content[2] {
+            run.property_changes = Some(vec![RunPropertyChange {
+                node_type: RunPropertyChangeType::RunPropertyChange,
+                info: PropertyChangeInfo {
+                    id: 1.0,
+                    author: "Editor".to_owned(),
+                    date: None,
+                    rsid: None,
+                },
+                previous_formatting: None,
+                current_formatting: run.formatting.clone(),
+            }]);
+        }
+        assert_eq!(
+            comment_text_patch(&source, &revised, FRAGMENT).unwrap(),
+            None
+        );
+        written.content[0].content.swap(1, 2);
+        assert_eq!(
+            comment_text_patch(&source, &written, FRAGMENT).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn top_level_additions_without_text_patches_keep_default_companion_writing() {
+        let source_comment = "<w:comment w:id=\"0\" w:author=\"Reviewer\"><w:p w14:paraId=\"1A2B3C4D\"><w:r><w:t>old</w:t></w:r></w:p></w:comment>";
+        let source = format!(
+            "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">{source_comment}</w:comments>"
+        );
+        for entry in [
+            None,
+            Some("<w15:commentEx w15:done='0' w15:paraId='1A2B3C4D'/>"),
+            Some("<w15:commentEx w15:paraId=\"1A2B3C4D\" w15:done=\"0\" extra=\"keep\"/>"),
+        ] {
+            let mut parts = vec![("word/comments.xml".to_owned(), source.as_bytes().to_vec())];
+            if let Some(entry) = entry {
+                parts.push((
+                    "word/commentsExtended.xml".to_owned(),
+                    format!(
+                        "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\">{entry}</w15:commentsEx>"
+                    )
+                    .into_bytes(),
+                ));
+            }
+            let seed = "0".repeat(64);
+            let original = source_comments(&parts, &seed).unwrap();
+            let mut comments = original.clone();
+            let mut added = original[0].clone();
+            added.id = 1.0;
+            added.para_id = Some("1A2B3C4E".to_owned());
+            added.content[0].para_id = added.para_id.clone();
+            added.content[0].content = vec![run("added", None)];
+            added.block_content.clear();
+            added.done = Some(true);
+            comments.push(added);
+            let context = SerializerContext::new(&super::super::s10::SerializerDeterminism {
+                seed: seed.clone(),
+                now: "2026-01-05T09:00:00.000Z".to_owned(),
+            })
+            .unwrap();
+            let (serialized, mut infos) =
+                serialize_comments_with_info(&comments, &mut context.clone());
+            let spliced = splice_comments(
+                source.as_bytes(),
+                &parts,
+                &seed,
+                &comments,
+                &serialized,
+                &mut infos,
+                context,
+            )
+            .unwrap();
+            assert!(spliced.xml.contains(source_comment));
+            assert!(spliced.companions.is_none());
+            assert_eq!(infos.len(), 2);
+            assert_eq!(infos[1].done, Some(true));
+        }
+    }
+
+    #[test]
+    fn text_patch_with_an_added_resolved_comment_keeps_its_companion_entry() {
+        let source = "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:comment w:id=\"0\" w:author=\"Reviewer\"><w:p w14:paraId=\"1A2B3C4D\"><w:r><w:t>old</w:t></w:r></w:p></w:comment></w:comments>";
+        let source_entry = "<w15:commentEx w15:paraId=\"1A2B3C4D\" w15:done=\"1\"/>";
+        let mut parts = vec![
+            ("word/comments.xml".to_owned(), source.as_bytes().to_vec()),
+            (
+                "word/commentsExtended.xml".to_owned(),
+                format!(
+                    "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\">{source_entry}</w15:commentsEx>"
+                )
+                .into_bytes(),
+            ),
+        ];
+        let seed = "0".repeat(64);
+        let original = source_comments(&parts, &seed).unwrap();
+        assert_eq!(original[0].done, Some(true));
+        let mut comments = original.clone();
+        comments[0].content[0].content = vec![run("new", None)];
+        comments[0].block_content.clear();
+        let mut added = original[0].clone();
+        added.id = 1.0;
+        added.para_id = Some("1A2B3C4E".to_owned());
+        added.content[0].para_id = added.para_id.clone();
+        added.content[0].content = vec![run("added", None)];
+        added.block_content.clear();
+        added.done = Some(true);
+        comments.push(added);
+        let context = SerializerContext::new(&super::super::s10::SerializerDeterminism {
+            seed: seed.clone(),
+            now: "2026-01-05T09:00:00.000Z".to_owned(),
+        })
+        .unwrap();
+        let (serialized, mut infos) = serialize_comments_with_info(&comments, &mut context.clone());
+        let spliced = splice_comments(
+            source.as_bytes(),
+            &parts,
+            &seed,
+            &comments,
+            &serialized,
+            &mut infos,
+            context,
+        )
+        .unwrap();
+        parts[0].1 = spliced.xml.into_bytes();
+        for (path, xml) in spliced.companions.unwrap() {
+            if let Some((_, bytes)) = parts.iter_mut().find(|(name, _)| name == &path) {
+                *bytes = xml.into_bytes();
+            } else {
+                parts.push((path, xml.into_bytes()));
+            }
+        }
+        let (_, extended) = find_part(&parts, "word/commentsExtended.xml").unwrap();
+        assert!(
+            std::str::from_utf8(extended)
+                .unwrap()
+                .contains(source_entry)
+        );
+        let reopened = source_comments(&parts, &seed).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(
+            model_paragraph_text_parts(&reopened[0].content[0]).unwrap(),
+            ["new"]
+        );
+        assert_eq!(reopened[0].done, Some(true));
+        assert_eq!(reopened[1].done, Some(true));
+    }
+
+    #[test]
+    fn text_patch_ignores_unchanged_and_rejects_formatting_changes() {
+        let source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        assert_eq!(
+            comment_text_patch(&source, &source.clone(), FRAGMENT).unwrap(),
+            None
+        );
+        let mut written = source.clone();
+        if let ParagraphContent::Inline(InlineNode::Run(run)) = &mut written.content[0].content[2] {
+            run.formatting = Some(TextFormatting {
+                italic: Some(true),
+                ..TextFormatting::default()
+            });
+            run.content = vec![RunContent::Text {
+                text: "Second identity-proofed".to_owned(),
+                preserve_space: None,
+            }];
+        }
+        assert_eq!(
+            comment_text_patch(&source, &written, FRAGMENT).unwrap(),
+            None
+        );
+    }
 }

@@ -45,7 +45,7 @@ export const listedFormats = formats.filter((format) => format.id !== "vsdx");
 
 // on the launcher without a demo link, under the website's status for it
 export const previewFormats = formats.filter((format) => !listedFormats.includes(format));
-export const PREVIEW_STATUS = "source preview";
+export const PREVIEW_STATUS = "from source";
 
 export const listedLiveFormats = listedFormats.filter(
   (format) => format.status === "live",

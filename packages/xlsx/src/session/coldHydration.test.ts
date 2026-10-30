@@ -1,10 +1,11 @@
 import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { isHostMessage } from '../../../../shared/office-session';
+import { engineBackend } from '../wasm/engine';
 import type { WorkbookHandle } from '../wasm/loader';
 import { hydratePeer, openWorkbookSession } from './client';
 
-test('cold hydration instantiates exactly the worker module without main-thread wasm compilation', async () => {
+test.skipIf(engineBackend() === 'native')('cold hydration instantiates exactly the worker module without main-thread wasm compilation', async () => {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
