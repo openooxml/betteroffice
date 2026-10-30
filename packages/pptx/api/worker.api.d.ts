@@ -951,6 +951,7 @@ export interface PresentationCommandOpenOptions extends PresentationSessionOpenO
     activeSlideIndex?: number;
     collaboration?: boolean;
     observeChanges?: boolean;
+    defaultFonts?: boolean;
 }
 export interface PresentationCommandOpenResult extends PresentationCommandAck {
     recoveryBaseline?: 'source' | 'update';
@@ -1052,6 +1053,8 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
     readOnly?: boolean;
     observeChanges?: boolean;
     activeSlideIndex?: number;
+    /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
+    defaultFonts?: boolean;
     collaboration?: {
         clientId: number;
         initialUpdate?: Uint8Array;
@@ -3686,6 +3689,10 @@ export class PptxRenderer {
     requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
     setActiveSlide(document: PptxDocument, id: string, key: string): boolean;
+    /**
+     * Enables browser metrics for uncovered characters. Off by default.
+     */
+    setBrowserCoverageFallback(enabled: boolean): void;
     slideLayoutKey(document: PptxDocument, slide_index: number): string;
     snapshotWithLayoutKeysJson(document: PptxDocument): string;
 }
@@ -3842,6 +3849,7 @@ export interface InitOutput {
     readonly pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly pptxrenderer_setBrowserCoverageFallback: (a: number, b: number) => void;
     readonly pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_snapshotWithLayoutKeysJson: (a: number, b: number) => [number, number, number, number];
     readonly renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -3880,6 +3888,15 @@ import type { CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, Hist
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface InspectPresentationOptions {
     includeMedia?: boolean;
+}
+/**
+ * Faces a save lays out text with, in a renderer of its own, so the saved
+ * bytes do not depend on the faces earlier renders registered with the handle.
+ */
+export interface SavePresentationOptions {
+    fonts: ReadonlyArray<PptxFontFace>;
+    /** Faces drawn only for characters the run's own face has no glyph for. */
+    fallbackFonts?: ReadonlyArray<PptxFontFace>;
 }
 export interface OpenPresentationOptions {
     clientId?: number;
@@ -3988,8 +4005,12 @@ export interface PresentationHandle extends CollaborationReplica {
     layoutSlideProfiled(slideIndex: number): ProfiledLayout;
     hitTest(x: number, y: number): HitTestResult | null;
     mediaBytes(partPath: string): Uint8Array;
-    /** serialize the presentation back to .pptx bytes, edits included. */
-    save(): Uint8Array;
+    /**
+     * serialize the presentation back to .pptx bytes, edits included. Normal
+     * autofit text the edits changed is fitted with the registered faces, or
+     * with `options.fonts` alone when given.
+     */
+    save(options?: SavePresentationOptions): Uint8Array;
     insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
     /** `insertText` with the boundary's stage timings attached. */
     insertTextProfiled(storyId: string, index: number, text: string, style?: TextStyle): Profiled<TextReceipt>;
