@@ -73,9 +73,10 @@ describe("chart SVGs", () => {
     for (const [name, svg] of SVGS()) {
       const width = Number(svg.match(/viewBox="0 0 (\d+) /)[1]);
       const height = Number(svg.match(/viewBox="0 0 \d+ (\d+)"/)[1]);
-      const texts = [...svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)" font-size="([\d.]+)"([^>]*)>([^<]*)<\/text>/g)];
+      const texts = [...svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)" font-size="([\d.]+)"([^>]*)>(.*?)<\/text>/g)].map(([, x, y, size, attrs, inner]) => [x, y, size, attrs, inner.replace(/<[^>]+>/g, "")]);
+      expect(texts.length).toBe((svg.match(/<text /g) ?? []).length);
       expect(texts.length).toBeGreaterThan(8);
-      for (const [, x, y, size, attrs, content] of texts) {
+      for (const [x, y, size, attrs, content] of texts) {
         const wide = content.replace(/&\w+;/g, "x").length * Number(size) * 0.62;
         const anchor = attrs.match(/text-anchor="(\w+)"/)?.[1] ?? "start";
         const from = anchor === "middle" ? Number(x) - wide / 2 : anchor === "end" ? Number(x) - wide : Number(x);
