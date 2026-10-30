@@ -416,18 +416,20 @@ impl<'a> DataUrls<'a> {
         const KEY: &str = "\"src\":\"";
         let mut sources = Vec::new();
         let mut len = json.len();
+        let mut expanded = json.len();
         let mut rest = json;
         while let Some(at) = rest.find(KEY) {
             let value = &rest[at + KEY.len()..];
             let end = value.find('"').unwrap_or(value.len());
             let url = media_token_index(&value[..end]).and_then(|index| self.url(index));
             if let Some(url) = &url {
-                len = len - end + url.len();
+                len = len.wrapping_sub(end).wrapping_add(url.len());
+                expanded = expanded.saturating_add(url.len());
             }
             sources.push((&rest[..at + KEY.len()], &value[..end], url));
             rest = &value[end..];
         }
-        if !spend(&mut self.budget, &mut self.spent, len) {
+        if !spend(&mut self.budget, &mut self.spent, expanded) {
             return String::new();
         }
         let mut out = String::with_capacity(len);
@@ -683,7 +685,7 @@ mod tests {
         let json = format!(r#"{{"src":"media:{a}"}}"#);
         let rewritten = format!(r#"{{"src":"{url}"}}"#);
         let mut writer = DataUrls::new(&table);
-        writer.budget = Some(rewritten.len());
+        writer.budget = Some(json.len() + url.len());
         assert_eq!(writer.json(&json), rewritten);
         assert!(!writer.spent);
         assert_eq!(writer.json(&json), "");

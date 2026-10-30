@@ -903,12 +903,13 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, S
     story_states_within(doc, txn, None).unwrap_or_default()
 }
 
-/// [`story_states_in`] writing at most `media_budget` bytes of media URLs,
-/// counted at every use, when given one; `None` once it runs out.
+/// [`story_states_in`] within `budget` bytes, when given one, of media URLs
+/// written and of segment text held, each counted at every use; `None` once
+/// it runs out.
 fn story_states_within(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
-    mut media_budget: Option<usize>,
+    mut budget: Option<usize>,
 ) -> Option<HashMap<String, StoryState>> {
     let (scan, mut comments) = {
         let scan = doc.committed_scan(txn);
@@ -925,8 +926,8 @@ fn story_states_within(
     let mut states = HashMap::new();
     for story in &scan.stories {
         let comments = comments.remove(story).unwrap_or_default();
-        let fingerprint = story_fingerprint_within(doc, txn, story, &comments, &mut media_budget);
-        if media_budget == Some(0) {
+        let fingerprint = story_fingerprint_within(doc, txn, story, &comments, &mut budget);
+        if budget == Some(0) {
             return None;
         }
         let Some((fingerprint, units)) = fingerprint else {
@@ -980,6 +981,37 @@ fn segment_value(segment: &crate::StorySegment) -> serde_json::Value {
 /// Writes into `entry` the JSON of [`segment_value`], and into `section` the JSON of that value
 /// with its pilcrow's section properties left out, or with a null pilcrow when it has none,
 /// byte for byte as `serde_json` writes them, without building either value.
+/// The bytes of text and strings `segment` holds, each counted at every use:
+/// about what [`segment_canonical`] copies of it.
+fn segment_text_len(segment: &crate::StorySegment) -> usize {
+    let content = match &segment.content {
+        crate::SegmentContent::Text(text) => text.len(),
+        crate::SegmentContent::Pilcrow(properties) => entries_text_len(&properties.values),
+        crate::SegmentContent::OtherEmbed { payload, .. } => entries_text_len(payload),
+    };
+    content.saturating_add(entries_text_len(&segment.attributes))
+}
+
+fn entries_text_len<'a>(entries: impl IntoIterator<Item = (&'a String, &'a Any)>) -> usize {
+    entries.into_iter().fold(0, |total, (key, value)| {
+        total
+            .saturating_add(key.len())
+            .saturating_add(any_text_len(value))
+    })
+}
+
+fn any_text_len(value: &Any) -> usize {
+    match value {
+        Any::String(text) => text.len(),
+        Any::Buffer(bytes) => bytes.len(),
+        Any::Array(items) => items
+            .iter()
+            .fold(0, |total, item| total.saturating_add(any_text_len(item))),
+        Any::Map(map) => entries_text_len(map.iter()),
+        _ => 8,
+    }
+}
+
 fn segment_canonical(segment: &crate::StorySegment, entry: &mut Vec<u8>, section: &mut Vec<u8>) {
     entry.clear();
     section.clear();
@@ -1177,7 +1209,7 @@ fn story_fingerprint(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     let txn = doc.yrs_doc().transact();
-    story_fingerprint_in(doc, &txn, story, comments)
+    story_fingerprint_within(doc, &txn, story, comments, &mut None)
 }
 
 #[cfg(test)]
@@ -1270,23 +1302,16 @@ pub(crate) fn run_size_fingerprint<'a>(
     Some(digest.finish())
 }
 
-fn story_fingerprint_in(
-    doc: &EditingDoc,
-    txn: &Transaction<'_>,
-    story: &str,
-    comments: &BTreeMap<String, Vec<(u32, u32)>>,
-) -> Option<([u8; 32], Vec<UnitState>)> {
-    story_fingerprint_within(doc, txn, story, comments, &mut None)
-}
-
-/// [`story_fingerprint_in`] taking the media URLs it writes off
-/// `media_budget` when given one, which it leaves at `Some(0)` once spent.
+/// Each paragraph's [`UnitState`] and the SHA-256 of their digests in order,
+/// hashing the story's save segments with media tokens expanded; takes the
+/// media URLs it writes and the segment text it hashes off `budget` when
+/// given one, which it leaves at `Some(0)` once spent.
 fn story_fingerprint_within(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
     story: &str,
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
-    media_budget: &mut Option<usize>,
+    budget: &mut Option<usize>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
     #[cfg(test)]
@@ -1294,7 +1319,7 @@ fn story_fingerprint_within(
     let mut segments = doc.story_segments_in(txn, story).ok()?;
     strip_display_only_keys(&mut segments);
     if let Some(media) = doc.media_table() {
-        match media_budget {
+        match budget.as_mut() {
             None => crate::media::write_segment_data_urls(&mut segments, &media).ok()?,
             Some(budget) => {
                 let written =
@@ -1331,6 +1356,13 @@ fn story_fingerprint_within(
     let mut bytes = Vec::new();
     let mut section_bytes = Vec::new();
     for segment in segments {
+        if let Some(budget) = budget.as_mut() {
+            let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
+                *budget = 0;
+                return None;
+            };
+            *budget = rest;
+        }
         segment_canonical(&segment, &mut bytes, &mut section_bytes);
         unit.segment(&bytes);
         section_content.update(&section_bytes);
@@ -3107,8 +3139,9 @@ impl EditingDoc {
     /// Caches save seed states without reseeding, declining a document of
     /// more than `max_paragraphs` paragraphs or a package of more than
     /// `max_inflated_bytes` bytes, packed or as its parts declare them
-    /// inflated, and stopping once the media URLs its stories reference would
-    /// take more than that; returns whether they are known.
+    /// inflated, and stopping once the media URLs and text its stories hold,
+    /// counted at every use, would take more than that; returns whether they
+    /// are known.
     pub fn prime_save_seed_states(&self, max_paragraphs: u32, max_inflated_bytes: u32) -> bool {
         let bytes = match self.source.lock().unwrap().as_ref() {
             Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => return true,
@@ -3142,8 +3175,8 @@ impl EditingDoc {
         if !source.opened_under_own_digest() {
             return false;
         }
-        let media_budget = (max_inflated_bytes as usize).max(1);
-        let Some(stories) = story_states_within(self, &txn, Some(media_budget)) else {
+        let budget = (max_inflated_bytes as usize).max(1);
+        let Some(stories) = story_states_within(self, &txn, Some(budget)) else {
             return false;
         };
         source.seed_states_or(|| self.live_save_seed_states(stories));
@@ -4204,6 +4237,22 @@ mod tests {
                 Some(unit.digest),
             );
         }
+    }
+
+    #[test]
+    fn segment_text_len_counts_a_shared_string_at_every_use() {
+        let url: Arc<str> = Arc::from("data:image/png;base64,AQID");
+        let source = HashMap::from([("src".to_owned(), Any::String(Arc::clone(&url)))]);
+        let item = Any::Map(Arc::new(source));
+        let payload = BTreeMap::from([("content".to_owned(), Any::Array(vec![item; 3].into()))]);
+        let segment = crate::StorySegment {
+            content: crate::SegmentContent::OtherEmbed {
+                kind: "sdt".to_owned(),
+                payload,
+            },
+            attributes: BTreeMap::new(),
+        };
+        assert!(segment_text_len(&segment) >= 3 * url.len());
     }
 
     #[test]
