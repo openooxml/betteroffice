@@ -472,7 +472,7 @@ jobs:
           bun run build:docx-wasm
           bun run build:fonts
           bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx scripts/parity/parity.test.ts scripts/native-engine.test.ts
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/cli-env.test.ts packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
 
       - name: Check engine surface
         run: |
