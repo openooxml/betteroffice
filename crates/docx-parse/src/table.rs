@@ -515,13 +515,17 @@ pub fn parse_table_grid(element: Option<&XmlElement>) -> Option<Vec<f64>> {
 }
 
 pub fn infer_implicit_single_cell_row_spans(table: &mut Table) {
-    let max_columns = table.rows.iter().map(row_grid_span).fold(
-        table
-            .column_widths
-            .as_ref()
-            .map_or(0.0, |grid| grid.len() as f64),
-        f64::max,
-    );
+    let max_columns = table
+        .rows
+        .iter()
+        .map(|row| row_grid_span(row) + row_skipped_columns(row))
+        .fold(
+            table
+                .column_widths
+                .as_ref()
+                .map_or(0.0, |grid| grid.len() as f64),
+            f64::max,
+        );
     if max_columns <= 1.0 {
         return;
     }
@@ -529,6 +533,7 @@ pub fn infer_implicit_single_cell_row_spans(table: &mut Table) {
         if row.cells.len() != 1 {
             continue;
         }
+        let max_columns = max_columns - row_skipped_columns(row);
         let cell = &mut row.cells[0];
         let formatting = cell
             .formatting
@@ -652,6 +657,12 @@ pub fn is_floating_table(table: &Table) -> bool {
         .as_ref()
         .and_then(|formatting| formatting.floating.as_ref())
         .is_some()
+}
+
+fn row_skipped_columns(row: &TableRow) -> f64 {
+    row.formatting.as_ref().map_or(0.0, |formatting| {
+        formatting.grid_before.unwrap_or(0.0) + formatting.grid_after.unwrap_or(0.0)
+    })
 }
 
 fn row_grid_span(row: &TableRow) -> f64 {

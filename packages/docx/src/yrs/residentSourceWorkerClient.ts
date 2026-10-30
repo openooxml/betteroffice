@@ -6,6 +6,7 @@ import type { DocxFontEnvironmentEvent } from './residentFontEnvironment';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
+import { retainEmbeddedFontFaces } from '../utils/embeddedFonts';
 import type { DocxSvgMedia } from './residentCommandProtocol';
 
 export interface DocxEngineWorkerSourceOpened {
@@ -107,6 +108,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
         return null;
       }
       if (!response.sourceDocument) throw new ResidentWorkerFailureError('Document worker omitted the opened source');
+      if (response.embeddedFontFaces) retainEmbeddedFontFaces(response.sourceDocument, response.embeddedFontFaces);
       return response.sourceDocument;
     } catch (error) {
       this.releaseCut(reservation);
@@ -142,6 +144,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
       if (!response.sourceDocument || !response.stateVector) {
         throw new ResidentWorkerFailureError('Document worker omitted the opened source');
       }
+      if (response.embeddedFontFaces) retainEmbeddedFontFaces(response.sourceDocument, response.embeddedFontFaces);
       if (this.cutReservation === cut) this.cutReservation = null;
       if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
       return {

@@ -32,6 +32,12 @@ describe('workspace build order', () => {
     expect(position.get('@betteroffice/fonts-cjk')!).toBeLessThan(
       position.get('@betteroffice/fonts')!
     );
+    expect(targets.find((target) => target.name === '@betteroffice/fonts')?.deps).toContain(
+      '@betteroffice/fonts-intl'
+    );
+    expect(position.get('@betteroffice/fonts-intl')!).toBeLessThan(
+      position.get('@betteroffice/fonts')!
+    );
   });
 
   test('every package that builds is ordered exactly once', () => {

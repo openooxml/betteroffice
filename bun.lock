@@ -20,6 +20,7 @@
         "@betteroffice/docx-react": "workspace:*",
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
+        "@betteroffice/fonts-intl": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
         "@betteroffice/vsdx": "workspace:*",
@@ -57,6 +58,7 @@
         "@betteroffice/docx-react": "workspace:*",
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
+        "@betteroffice/fonts-intl": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-i18n": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
@@ -344,6 +346,7 @@
       "version": "0.4.2",
       "devDependencies": {
         "@betteroffice/fonts-cjk": "workspace:*",
+        "@betteroffice/fonts-intl": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
         "tsup": "^8.0.1",
@@ -351,9 +354,11 @@
       },
       "peerDependencies": {
         "@betteroffice/fonts-cjk": "workspace:^0",
+        "@betteroffice/fonts-intl": "workspace:^0",
       },
       "optionalPeers": [
         "@betteroffice/fonts-cjk",
+        "@betteroffice/fonts-intl",
       ],
     },
     "packages/fonts-cjk": {
@@ -364,9 +369,20 @@
         "typescript": "^6.0.3",
       },
     },
+    "packages/fonts-intl": {
+      "name": "@betteroffice/fonts-intl",
+      "version": "0.4.2",
+      "devDependencies": {
+        "tsup": "^8.0.1",
+        "typescript": "^6.0.3",
+      },
+    },
     "packages/pptx": {
       "name": "@betteroffice/pptx",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
+      },
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "@types/node": "^26.0.0",
@@ -714,6 +730,8 @@
     "@betteroffice/fonts": ["@betteroffice/fonts@workspace:packages/fonts"],
 
     "@betteroffice/fonts-cjk": ["@betteroffice/fonts-cjk@workspace:packages/fonts-cjk"],
+
+    "@betteroffice/fonts-intl": ["@betteroffice/fonts-intl@workspace:packages/fonts-intl"],
 
     "@betteroffice/pptx": ["@betteroffice/pptx@workspace:packages/pptx"],
 

@@ -495,6 +495,22 @@ impl FontStore {
         self.byte_entry(id).map(|e| &*e.data)
     }
 
+    /// Every family name the font's own name table declares, legacy and
+    /// typographic, in every language, so a clone registered under another
+    /// name reads as itself.
+    pub fn declared_families(&self, id: FontId) -> Result<Vec<String>, FontError> {
+        let font =
+            FontRef::new(self.font_bytes(id)?).map_err(|e| FontError::Parse(e.to_string()))?;
+        Ok([
+            skrifa::string::StringId::FAMILY_NAME,
+            skrifa::string::StringId::TYPOGRAPHIC_FAMILY_NAME,
+        ]
+        .into_iter()
+        .flat_map(|name| font.localized_strings(name))
+        .map(|name| name.to_string())
+        .collect())
+    }
+
     /// The registered face owning this id's unscaled font bytes.
     pub fn byte_owner(&self, id: FontId) -> Result<FontId, FontError> {
         let entry = self.entry(id)?;

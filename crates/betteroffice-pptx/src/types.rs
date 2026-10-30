@@ -27,7 +27,8 @@ pub use pptx_edit::{
     SlideHeaderFooter, SlideHeaderFooterText, SlideLayoutSnapshot, SlideReceipt, SlideSnapshot,
     StorySnapshot, TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt,
     TextParagraphDraft, TextReceipt, TextRunDraft, TextRunSnapshot, TextSearchMatch, TextStyle,
-    TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin, UpdateSubscription,
+    TextStylePatch, TransformReceipt, UndoCaptureMode, UpdateEvent, UpdateOrigin,
+    UpdateSubscription,
 };
 pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,
