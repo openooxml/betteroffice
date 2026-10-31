@@ -397,9 +397,19 @@ pub fn try_serialize_comments_with_info(
     }
 
     let mut para_infos = Vec::with_capacity(comments.len());
+    let mut durable_ids: std::collections::HashSet<_> = comments
+        .iter()
+        .filter_map(|comment| comment.durable_id.as_ref())
+        .map(|id| id.to_ascii_uppercase())
+        .collect();
     let mut content = String::new();
     for comment in top_level.into_iter().chain(replies) {
-        content.push_str(&serialize_comment(comment, &mut para_infos, context)?);
+        content.push_str(&serialize_comment(
+            comment,
+            &mut para_infos,
+            &mut durable_ids,
+            context,
+        )?);
     }
 
     Ok((
@@ -493,6 +503,7 @@ pub fn serialize_comments_extensible_part(
 fn serialize_comment(
     comment: &Comment,
     para_infos: &mut Vec<CommentParaInfo>,
+    durable_ids: &mut std::collections::HashSet<String>,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     if comment.block_content.iter().any(|block| {
@@ -574,10 +585,14 @@ fn serialize_comment(
     para_infos.push(CommentParaInfo {
         comment_id: comment.id,
         last_para_id: comment_para_id,
-        durable_id: comment
-            .durable_id
-            .clone()
-            .unwrap_or_else(|| context.allocate_hex_id()),
+        durable_id: comment.durable_id.clone().unwrap_or_else(|| {
+            loop {
+                let id = context.allocate_hex_id();
+                if durable_ids.insert(id.to_ascii_uppercase()) {
+                    break id;
+                }
+            }
+        }),
         parent_id: comment.parent_id,
         done: comment.done,
     });
@@ -1060,6 +1075,19 @@ mod tests {
             note.verbatim_xml = Some(hostile.to_owned());
             assert!(serialize_endnotes_part(&[note], &mut context()).is_err());
         }
+    }
+
+    #[test]
+    fn new_comments_do_not_reuse_saved_durable_ids() {
+        let mut first = comment(1.0, None, "first");
+        let (_, infos) = serialize_comments_with_info(&[first.clone()], &mut context());
+        first.durable_id = Some(infos[0].durable_id.clone());
+        first.para_id = Some(infos[0].last_para_id.clone());
+        let (_, saved) =
+            serialize_comments_with_info(&[first, comment(2.0, None, "second")], &mut context());
+        assert_eq!(saved[0].durable_id, infos[0].durable_id);
+        assert_eq!(saved[0].last_para_id, infos[0].last_para_id);
+        assert_ne!(saved[0].durable_id, saved[1].durable_id);
     }
 
     #[test]

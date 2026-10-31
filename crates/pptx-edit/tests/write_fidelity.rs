@@ -1971,7 +1971,7 @@ fn an_edit_inside_a_tracked_run_keeps_its_letter_spacing() {
     let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
     assert!(slide.contains(r#"<a:rPr spc="300"/><a:t>Wi</a:t>"#));
     assert!(slide.contains(r#"<a:rPr spc="300"/><a:t>de</a:t>"#));
-    assert!(slide.contains(r#"<a:rPr b="1" spc="300"/><a:t>Caps</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr spc="300" b="1"/><a:t>Caps</a:t>"#));
     assert!(slide.contains(r#"<a:rPr/><a:t>X</a:t>"#));
 
     let reopened = DeckSession::open(&saved, 12).unwrap();
@@ -2104,7 +2104,7 @@ fn an_edit_inside_a_raised_run_keeps_its_baseline() {
 
     let saved = session.save().unwrap();
     let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
-    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr sz="1200" baseline="30000"/><a:t>s</a:t>"#));
     assert!(slide.contains(r#"<a:rPr/><a:t>X</a:t>"#));
 
     let reopened = DeckSession::open(&saved, 12).unwrap();
@@ -2130,7 +2130,7 @@ fn an_edit_spanning_two_runs_keeps_both_baselines() {
 
     let saved = session.save().unwrap();
     let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
-    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr sz="1200" baseline="30000"/><a:t>s</a:t>"#));
     assert!(slide.contains(r#"baseline="-25000""#));
 
     let reopened = DeckSession::open(&saved, 12).unwrap();
@@ -2416,8 +2416,8 @@ fn unevaluated_adjustment_guides_survive_a_shape_adjust() {
 
     let saved = parts(&session.save().unwrap());
     let slide = part_text(&saved, "ppt/slides/slide1.xml");
-    assert!(slide.contains(r#"fmla="val 25000" name="adj""#));
-    assert!(slide.contains(r#"fmla="*/ missing 2 3" name="adj2""#));
+    assert!(slide.contains(r#"name="adj" fmla="val 25000""#));
+    assert!(slide.contains(r#"name="adj2" fmla="*/ missing 2 3""#));
 }
 
 #[test]

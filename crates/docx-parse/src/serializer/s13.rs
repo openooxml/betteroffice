@@ -184,6 +184,27 @@ fn write_docx_s13_parts_with_warnings(
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
+    let mut removed_comments = match (
+        package.original_bytes(COMMENTS_PART),
+        request.document.comments.as_deref(),
+    ) {
+        (Some(source), Some(comments)) => {
+            super::comment_splice::removed_comment_ids(source, comments)?
+        }
+        _ => HashSet::new(),
+    };
+    if let Some(plan) = &request.paragraph_ids {
+        for id in &plan.removed_comment_ids {
+            if request.document.comments.as_ref().is_some_and(|comments| {
+                comments
+                    .iter()
+                    .any(|comment| super::xml_writer::js_number(comment.id) == *id)
+            }) {
+                return Err(save_error("removed comment is still present"));
+            }
+            removed_comments.insert(id.clone());
+        }
+    }
     if let Some(ids) = &mut request.paragraph_ids {
         let patched_parts = &ids.patched_parts;
         ids.spliced_parts.retain(|part| {
@@ -591,6 +612,38 @@ fn write_docx_s13_parts_with_warnings(
                 PatchErrorCode::InvalidPlan,
                 "paragraph patch part was not written",
             ));
+        }
+    }
+    if !removed_comments.is_empty() {
+        let mut parts = HashSet::from([package.document_path.clone()]);
+        for relationship in relationships.values() {
+            if matches!(
+                relationship.relationship_type.as_str(),
+                relationship_types::HEADER
+                    | relationship_types::FOOTER
+                    | relationship_types::FOOTNOTES
+                    | relationship_types::ENDNOTES
+            ) {
+                parts.insert(resolve_relative_path(
+                    &package.document_path,
+                    &relationship.target,
+                )?);
+            }
+        }
+        let updated = package
+            .refs()
+            .into_iter()
+            .filter(|(path, _)| parts.contains(path))
+            .map(|(path, bytes)| {
+                let xml =
+                    std::str::from_utf8(bytes).map_err(|error| save_error(error.to_string()))?;
+                let cleaned = super::splice::remove_comment_markers(xml, &removed_comments)
+                    .ok_or_else(|| save_error("deleted comment markers could not be removed"))?;
+                Ok((path, cleaned))
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?;
+        for (path, xml) in updated {
+            package.set_text(path, xml);
         }
     }
     update_core_part(&request.options, &mut package, context.now());
@@ -1505,13 +1558,12 @@ fn serialize_comment_parts(
     seed: &str,
     allow_source_splice: bool,
 ) -> Result<(), ParseError> {
-    let Some(comments) = document
-        .comments
-        .as_ref()
-        .filter(|comments| !comments.is_empty())
-    else {
+    let Some(comments) = document.comments.as_ref() else {
         return Ok(());
     };
+    if comments.is_empty() && !package.contains(COMMENTS_PART) {
+        return Ok(());
+    }
     let mut restored;
     let comments = if comments
         .iter()

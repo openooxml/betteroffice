@@ -290,7 +290,10 @@
   },
   "type": "commonjs",
   "dependencies": {
-    "@betteroffice/fonts": "workspace:^0"
+    "@betteroffice/fonts": "workspace:^0",
+    "@betteroffice/fonts-cjk": "workspace:^0",
+    "@betteroffice/fonts-intl": "workspace:^0",
+    "@betteroffice/fonts-latin": "workspace:^0"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",

@@ -135,6 +135,7 @@
       "unsupportedCommand": "尚不支持。",
       "invalidArguments": "此值无效。",
       "inputFailed": "之前的单元格输入无法保存。",
+      "sheetProtected": "此单元格位于受保护的工作表上。",
       "documentReplaced": "已打开另一个工作簿。",
       "targetChanged": "选择已更改。",
       "gestureActive": "请先完成图表移动。",

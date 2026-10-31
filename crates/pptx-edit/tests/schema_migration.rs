@@ -1255,7 +1255,7 @@ fn edits_made_after_migrating_a_released_update_survive_the_source_import() {
         r#"</a:solidFill></a:rPr><a:t>QZ</a:t>"#
     )));
     assert!(caps.contains(concat!(
-        r#"<a:rPr cap="all" lang="en-US" sz="3200"><a:solidFill><a:schemeClr val="tx1"/>"#,
+        r#"<a:rPr lang="en-US" sz="3200" cap="all"><a:solidFill><a:schemeClr val="tx1"/>"#,
         r#"</a:solidFill><a:latin typeface="Arial"/></a:rPr><a:t>Mixed Case Title</a:t>"#
     )));
     assert!(!shape_xml("Default trapezoid").contains("<a:gd "));

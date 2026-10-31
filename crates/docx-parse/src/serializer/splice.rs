@@ -1,7 +1,7 @@
 //! Story parts written as their source XML with only the paragraphs a save changed re-serialized.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 use crate::paragraph_identity::{
@@ -678,34 +678,6 @@ fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize
             .map(|(index, tag)| Some((index, unescaped(xml, attribute(tag, "w:id")?)?)))
             .collect()
     }
-    /// The span of the marker at `index`: its empty range tag, or the run it is alone in.
-    fn markup(tags: &[Tag<'_>], index: usize) -> Option<Range<usize>> {
-        let tag = &tags[index];
-        if tag.name != "w:commentReference" {
-            return tag.empty.then(|| tag.range.clone());
-        }
-        let close = tags
-            .get(index + 1)
-            .filter(|tag| tag.end && tag.name == "w:r")?;
-        let mut at = index.checked_sub(1)?;
-        if tags[at].end && tags[at].name == "w:rPr" {
-            let mut depth = 0usize;
-            loop {
-                if tags[at].end {
-                    depth += 1;
-                } else if !tags[at].empty {
-                    depth = depth.checked_sub(1)?;
-                }
-                if depth == 0 {
-                    break;
-                }
-                at = at.checked_sub(1)?;
-            }
-            at = at.checked_sub(1)?;
-        }
-        let open = &tags[at];
-        (open.name == "w:r" && !open.end && !open.empty).then(|| open.range.start..close.range.end)
-    }
     let source_tags = tags(source)?;
     let written_tags = tags(written)?;
     let source_markers = markers(source, &source_tags)?;
@@ -717,12 +689,182 @@ fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize
         if let Some((kept, _)) =
             held.next_if(|(kept, kept_id)| source_tags[*kept].name == name && *kept_id == id)
         {
-            after = markup(&source_tags, *kept).map(|span| span.end);
+            after = comment_marker_markup(&source_tags, *kept).map(|span| span.end);
             continue;
         }
-        added.push((after?, &written[markup(&written_tags, index)?]));
+        added.push((
+            after?,
+            &written[comment_marker_markup(&written_tags, index)?],
+        ));
     }
     (held.next().is_none() && !added.is_empty()).then_some(added)
+}
+
+fn comment_marker_markup(tags: &[Tag<'_>], index: usize) -> Option<Range<usize>> {
+    let tag = &tags[index];
+    if tag.name != "w:commentReference" {
+        return tag.empty.then(|| tag.range.clone());
+    }
+    let close = tags
+        .get(index + 1)
+        .filter(|tag| tag.end && tag.name == "w:r")?;
+    let mut at = index.checked_sub(1)?;
+    if tags[at].empty && tags[at].name == "w:rPr" {
+        at = at.checked_sub(1)?;
+    }
+    if tags[at].end && tags[at].name == "w:rPr" {
+        let mut depth = 0usize;
+        loop {
+            if tags[at].end {
+                depth += 1;
+            } else if !tags[at].empty {
+                depth = depth.checked_sub(1)?;
+            }
+            if depth == 0 {
+                break;
+            }
+            at = at.checked_sub(1)?;
+        }
+        at = at.checked_sub(1)?;
+    }
+    let open = &tags[at];
+    (open.name == "w:r" && !open.end && !open.empty).then(|| open.range.start..close.range.end)
+}
+
+fn comment_removal_spans(
+    xml: &str,
+    remove: impl Fn(&str, &str) -> bool,
+) -> Option<Vec<Range<usize>>> {
+    let parsed = tags(xml)?;
+    let mut parents = vec![None; parsed.len()];
+    let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut ends = HashMap::new();
+    let mut stack: Vec<usize> = Vec::new();
+    for (index, tag) in parsed.iter().enumerate() {
+        if tag.end {
+            let open = stack.pop()?;
+            if parsed[open].name != tag.name {
+                return None;
+            }
+            ends.insert(open, index);
+        } else {
+            parents[index] = stack.last().copied();
+            if let Some(parent) = parents[index] {
+                children.entry(parent).or_default().push(index);
+            }
+            if !tag.empty {
+                stack.push(index);
+            }
+        }
+    }
+    let span = |index: usize| -> Option<Range<usize>> {
+        let tag = &parsed[index];
+        Some(
+            tag.range.start..if tag.empty {
+                tag.range.end
+            } else {
+                parsed[*ends.get(&index)?].range.end
+            },
+        )
+    };
+    let mut removed = HashSet::new();
+    for (index, tag) in parsed.iter().enumerate() {
+        if tag.end
+            || !matches!(
+                tag.name,
+                "w:commentRangeStart" | "w:commentRangeEnd" | "w:commentReference"
+            )
+        {
+            continue;
+        }
+        if let Some(id) = attribute(tag, "w:id").and_then(|range| unescaped(xml, range))
+            && remove(tag.name, &id)
+        {
+            removed.insert(index);
+        }
+    }
+    let runs: HashSet<_> = removed
+        .iter()
+        .filter_map(|index| {
+            (parsed[*index].name == "w:commentReference")
+                .then_some(parents[*index])
+                .flatten()
+        })
+        .filter(|parent| parsed[*parent].name == "w:r")
+        .collect();
+    let mut spans = removed
+        .iter()
+        .map(|index| span(*index))
+        .collect::<Option<Vec<_>>>()?;
+    for run in runs {
+        let mut cursor = parsed[run].range.end;
+        let mut pure = true;
+        for child in children.get(&run)? {
+            let child_span = span(*child)?;
+            pure &= xml[cursor..child_span.start].trim().is_empty()
+                && (parsed[*child].name == "w:rPr" || removed.contains(child));
+            cursor = child_span.end;
+        }
+        let close = parsed[*ends.get(&run)?].range.start;
+        if pure && xml[cursor..close].trim().is_empty() {
+            spans.push(span(run)?);
+        }
+    }
+    spans.sort_by_key(|range| (range.start, std::cmp::Reverse(range.end)));
+    let mut outer = Vec::new();
+    let mut end = 0;
+    for range in spans {
+        if range.start < end {
+            continue;
+        }
+        end = range.end;
+        outer.push(range);
+    }
+    Some(outer)
+}
+
+pub(super) fn remove_comment_markers(xml: &str, ids: &HashSet<String>) -> Option<String> {
+    let mut result = xml.to_owned();
+    for span in comment_removal_spans(xml, |_, id| ids.contains(id))?
+        .into_iter()
+        .rev()
+    {
+        result.replace_range(span, "");
+    }
+    Some(result)
+}
+
+fn changed_comment_ranges(source: &str, written: &str) -> Option<String> {
+    let keys = |xml: &str| -> Option<HashSet<(String, String)>> {
+        tags(xml)?
+            .iter()
+            .filter(|tag| {
+                !tag.end
+                    && matches!(
+                        tag.name,
+                        "w:commentRangeStart" | "w:commentRangeEnd" | "w:commentReference"
+                    )
+            })
+            .map(|tag| {
+                Some((
+                    tag.name.to_owned(),
+                    unescaped(xml, attribute(tag, "w:id")?)?,
+                ))
+            })
+            .collect()
+    };
+    let held = keys(written)?;
+    let spans = comment_removal_spans(source, |name, id| {
+        !held.contains(&(name.to_owned(), id.to_owned()))
+    })?;
+    let mut result = source.to_owned();
+    for span in spans.iter().rev() {
+        result.replace_range(span.clone(), "");
+    }
+    if let Some(added) = added_comment_ranges(&result, written) {
+        return Some(with_insertions(&result, &added));
+    }
+    (!spans.is_empty() && keys(&result)? == held).then_some(result)
 }
 
 /// `source` with each tag in `added` inserted at its offset.
@@ -1240,9 +1382,8 @@ fn splice_story_part_inner(
         if marks(paragraph)?.admit(&wanted) {
             continue;
         }
-        let rangeable = added_comment_ranges(paragraph, xml).is_some_and(|added| {
-            marks(&with_insertions(paragraph, &added)).is_some_and(|patched| patched.admit(&wanted))
-        });
+        let rangeable = changed_comment_ranges(paragraph, xml)
+            .is_some_and(|patched| marks(&patched).is_some_and(|marks| marks.admit(&wanted)));
         if rangeable {
             ranged.insert(ordinal);
         } else {
@@ -1302,6 +1443,10 @@ fn splice_story_part_inner(
             return None;
         }
     }
+    let changed_ranges = ranged
+        .iter()
+        .map(|ordinal| changed_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal]))
+        .collect::<Option<Vec<_>>>()?;
     let mut prefixes = BTreeSet::new();
     for ordinal in &replaced {
         let mut required = required_prefixes(&written[ordinal])?;
@@ -1317,10 +1462,8 @@ fn splice_story_part_inner(
     for (_, _, xml) in &rows.edits {
         prefixes.extend(required_prefixes(xml)?);
     }
-    for ordinal in &ranged {
-        for (_, tag) in added_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal])? {
-            prefixes.extend(required_prefixes(tag)?);
-        }
+    for xml in &changed_ranges {
+        prefixes.extend(required_prefixes(xml)?);
     }
     let root = root_tag(source)?;
     let bound = bindings(source, &root);
@@ -1386,7 +1529,7 @@ fn splice_story_part_inner(
                 let xml = if replaced.contains(&ordinal) {
                     xml.clone()
                 } else if ranged.contains(&ordinal) {
-                    with_insertions(original, &added_comment_ranges(original, xml)?)
+                    changed_comment_ranges(original, xml)?
                 } else {
                     original.to_owned()
                 };
@@ -1428,9 +1571,8 @@ fn splice_story_part_inner(
             continue;
         }
         let range = span(ordinal)?;
-        for (at, tag) in added_comment_ranges(&source[range.clone()], &written[&ordinal])? {
-            edits.push((range.start + at..range.start + at, 0, tag.to_owned()));
-        }
+        let patched = changed_comment_ranges(&source[range.clone()], &written[&ordinal])?;
+        edits.push((range, 0, patched));
     }
     let structural = rows.inserted.union(&tables.inserted).copied().collect();
     let offsets = insertion_offsets(
@@ -2081,6 +2223,39 @@ mod tests {
 
     fn splice(source: &str, paragraphs: &[(u32, &str)], changed: &[u32]) -> Option<String> {
         splice_around(source, paragraphs, changed, &[], ("", ""))
+    }
+
+    #[test]
+    fn removing_comment_markers_keeps_other_run_content() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t><w:commentReference w:id="1"/></w:r><w:commentRangeEnd w:id="1"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="1"/></w:r><w:r><w:commentReference w:id="2"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1".to_owned()])).unwrap(),
+            r#"<w:p><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="2"/></w:r></w:p>"#,
+        );
+    }
+
+    #[test]
+    fn removing_comment_references_drops_runs_that_hold_only_deleted_references() {
+        let xml = r#"<w:p><w:r><w:rPr/><w:commentReference w:id="1"/><w:commentReference w:id="2"/></w:r><w:r><w:rPr/><w:commentReference w:id="1"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1".to_owned(), "2".to_owned()])).unwrap(),
+            "<w:p></w:p>",
+        );
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1".to_owned()])).unwrap(),
+            r#"<w:p><w:r><w:rPr/><w:commentReference w:id="2"/></w:r></w:p>"#,
+        );
+    }
+
+    #[test]
+    fn changed_comment_markers_keep_source_bytes() {
+        let source = r#"<w:p keep='yes'><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>"#;
+        let written =
+            r#"<w:p><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p>"#;
+        assert_eq!(
+            changed_comment_ranges(source, written).unwrap(),
+            r#"<w:p keep='yes'><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p>"#,
+        );
     }
 
     #[test]

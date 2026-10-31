@@ -145,6 +145,14 @@ jobs:
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --test fonts
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown --no-default-features --features raster
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown --no-default-features --features raster
           cargo check -p pptx-wasm --target wasm32-unknown-unknown
           cargo check -p vsdx-wasm --target wasm32-unknown-unknown --no-default-features
 
@@ -242,9 +250,8 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.rust || 'kyora-8x16' }}
     timeout-minutes: 90
-    # Full debuginfo in every test binary fills a kyora VM's disk; backtraces keep file:line.
     env:
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--compress-debug-sections=zlib
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -304,6 +311,10 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: cargo test
 
+      - name: Remove the workspace test binaries
+        if: steps.ws.outputs.present == 'true'
+        run: find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+
       # Optional features are only unified into `cargo test` while some other
       # workspace member enables them.
       - name: Test optional features
@@ -337,6 +348,12 @@ jobs:
       - name: License and advisory gate for the fuzz package
         if: steps.ws.outputs.present == 'true'
         run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
+
+      - name: Disk usage
+        if: always() && steps.ws.outputs.present == 'true'
+        run: |
+          df -h .
+          du -sh target
 
   native-viewer:
     name: Native viewer lint

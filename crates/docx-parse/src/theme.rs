@@ -9,6 +9,21 @@ pub use ooxml_drawingml::{
     get_major_font, get_minor_font, get_theme_color, get_theme_fonts, resolve_theme_font_ref,
 };
 
+/// Resolves an rFonts theme reference only when its theme slot names a font.
+pub fn resolve_rfonts_theme_font<'a>(theme: Option<&'a Theme>, reference: &str) -> Option<&'a str> {
+    let scheme = &theme?.font_scheme;
+    let font = match reference.to_ascii_lowercase().as_str() {
+        "majorascii" | "majorhansi" => &scheme.major_font.latin,
+        "minorascii" | "minorhansi" => &scheme.minor_font.latin,
+        "majoreastasia" => &scheme.major_font.ea,
+        "minoreastasia" => &scheme.minor_font.ea,
+        "majorbidi" => &scheme.major_font.cs,
+        "minorbidi" => &scheme.minor_font.cs,
+        _ => return None,
+    };
+    (!font.is_empty()).then_some(font.as_str())
+}
+
 pub fn parse_theme(
     xml: Option<&[u8]>,
     part: &str,

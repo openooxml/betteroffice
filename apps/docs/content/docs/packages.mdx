@@ -57,6 +57,10 @@ Install `@betteroffice/fonts-intl` for additional international script coverage.
 `@betteroffice/fonts-latin` is installed automatically with `@betteroffice/fonts`.
 All font packages are optional and must be installed explicitly.
 
+For headless PPTX (`openPresentation`), pass the faces in `fonts` and
+`fallbackFonts`; `loadBundledFontBytes` from `@betteroffice/fonts` returns a
+bundled face's bytes.
+
 Missing font bytes can cause fallback measurements and different pagination.
 See the language guides for font setup in other formats and runtimes.
 
