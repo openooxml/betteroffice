@@ -73,21 +73,23 @@ Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/mi
 Layout needs the fonts a document names. BetterOffice ships open substitutes with the same
 advance widths as the Microsoft core fonts (Carlito for Calibri, Caladea for Cambria, Liberation
 Sans, Serif and Mono for Arial, Times New Roman and Courier New) plus script coverage, so line
-breaks and pagination match Office without the original fonts installed. A face resolves in this
-order: fonts embedded in the document, fonts your app registers, the bundled packs, then a last
-resort fallback.
+breaks and pagination match Office without the original fonts installed. DOCX layout resolves a
+face in this order: fonts embedded in the document, fonts your app configures, the bundled packs,
+then a last resort fallback.
 
 | Pack | Covers | Size |
 |---|---|---|
 | [`@betteroffice/fonts-latin`](https://www.npmjs.com/package/@betteroffice/fonts-latin) | Office core families, common presentation families, Hebrew and Arabic | 4.6 MB |
-| [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl) | 24 more scripts, among them Thai, Devanagari and other Indic scripts, Armenian, Georgian and Ethiopic | 2.2 MB |
+| [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl) | 23 more scripts, among them Thai, Devanagari and other Indic scripts, Armenian, Georgian and Ethiopic | 2.2 MB |
 | [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) | Simplified and Traditional Chinese, Japanese, Korean | 26.7 MB |
 
 **Node.js, Bun and Deno.** `@betteroffice/docx` and `@betteroffice/pptx` depend on the font
 manager [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), which installs
-`fonts-latin`. Add `fonts-intl` or `fonts-cjk` to cover those scripts. Each face is read from the
-installed package files the first time a document needs it; nothing is downloaded. Reading package
-files needs Node.js 20.16 or 22.3 and later, Bun or Deno.
+`fonts-latin`. Add `fonts-intl` or `fonts-cjk` to cover those scripts. DOCX reads each face from the
+installed package files the first time a document needs it; nothing is downloaded. For headless PPTX
+(`openPresentation`), pass the faces in `fonts` and `fallbackFonts`; `loadBundledFontBytes` from
+`@betteroffice/fonts` returns a bundled face's bytes. Reading package files needs Node.js 20.16 or
+22.3 and later, Bun or Deno.
 
 **Native bindings, Rust and Python.** For DOCX and PPTX, register the faces a document needs with
 `registerFont` (native) or `register_font` (Rust, Python) before rendering. The XLSX renderer draws
