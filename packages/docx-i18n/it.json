@@ -417,6 +417,8 @@
         "strikethroughDescription": "Attiva/disattiva il barrato",
         "subscript": "Pedice",
         "subscriptDescription": "Attiva/disattiva il pedice",
+        "clearFormatting": "Cancella formattazione",
+        "clearFormattingDescription": "Cancella la formattazione del testo",
         "superscript": "Apice",
         "superscriptDescription": "Attiva/disattiva l'apice",
         "alignLeft": "Allinea a sinistra",

@@ -417,6 +417,8 @@
         "strikethroughDescription": "Üstü çiziliyi aç/kapa",
         "subscript": "Alt simge",
         "subscriptDescription": "Alt simgeyi aç/kapa",
+        "clearFormatting": "Biçimlendirmeyi temizle",
+        "clearFormattingDescription": "Metin biçimlendirmesini temizle",
         "superscript": "Üst simge",
         "superscriptDescription": "Üst simgeyi aç/kapa",
         "alignLeft": "Sola hizala",

@@ -417,6 +417,8 @@
         "strikethroughDescription": "Activer/désactiver le texte barré",
         "subscript": "Indice",
         "subscriptDescription": "Activer/désactiver l'indice",
+        "clearFormatting": "Effacer la mise en forme",
+        "clearFormattingDescription": "Effacer la mise en forme du texte",
         "superscript": "Exposant",
         "superscriptDescription": "Activer/désactiver l'exposant",
         "alignLeft": "Aligner à gauche",

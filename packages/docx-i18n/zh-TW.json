@@ -417,6 +417,8 @@
         "strikethroughDescription": "切換刪除線",
         "subscript": "下標",
         "subscriptDescription": "切換下標",
+        "clearFormatting": "清除格式",
+        "clearFormattingDescription": "清除文字格式",
         "superscript": "上標",
         "superscriptDescription": "切換上標",
         "alignLeft": "靠左對齊",

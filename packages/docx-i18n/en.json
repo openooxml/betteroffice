@@ -417,6 +417,8 @@
         "strikethroughDescription": "Toggle strikethrough",
         "subscript": "Subscript",
         "subscriptDescription": "Toggle subscript",
+        "clearFormatting": "Clear Formatting",
+        "clearFormattingDescription": "Clear text formatting",
         "superscript": "Superscript",
         "superscriptDescription": "Toggle superscript",
         "alignLeft": "Align Left",

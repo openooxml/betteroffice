@@ -417,6 +417,8 @@
         "strikethroughDescription": "Activar o desactivar el tachado",
         "subscript": "Subíndice",
         "subscriptDescription": "Activar o desactivar el subíndice",
+        "clearFormatting": "Borrar formato",
+        "clearFormattingDescription": "Borrar el formato del texto",
         "superscript": "Superíndice",
         "superscriptDescription": "Activar o desactivar el superíndice",
         "alignLeft": "Alinear a la izquierda",
