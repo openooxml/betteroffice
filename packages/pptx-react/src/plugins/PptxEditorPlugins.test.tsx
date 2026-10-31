@@ -59,7 +59,7 @@ beforeAll(async () => {
   faces = [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }];
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(cleanup);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));

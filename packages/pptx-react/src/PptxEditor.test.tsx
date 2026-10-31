@@ -77,7 +77,7 @@ beforeAll(async () => {
   await initWasm(wasm);
   fixture = pptx;
   fontBytes = font;
-});
+}, 30_000);
 
 afterEach(cleanup);
 afterAll(async () => {

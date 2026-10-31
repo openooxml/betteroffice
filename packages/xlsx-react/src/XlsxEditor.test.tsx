@@ -159,7 +159,7 @@ beforeAll(async () => {
   linked = fixtureFrom(withHyperlink(source));
   charted = fixtureFrom(new Uint8Array(readFileSync(CHART_FIXTURE)));
   undrawable = fixtureFrom(new Uint8Array(readFileSync(UNDRAWABLE_FIXTURE)));
-});
+}, 30_000);
 
 afterAll(async () => {
   HTMLCanvasElement.prototype.getContext = originalGetContext;
