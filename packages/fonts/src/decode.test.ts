@@ -199,6 +199,31 @@ describe('internal font decoder', () => {
       expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
     });
 
+    test.skipIf(!hasWasm)('concurrent decodes recover when one traps the shared instance', async () => {
+      const trapUrl = new URL('https://font-decoder.invalid/concurrent-trap.wasm');
+      const trapModule = trappingDecoder();
+      const originalFetch = globalThis.fetch;
+      let loads = 0;
+      const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url !== trapUrl.href) return originalFetch(input, init);
+        loads++;
+        const bytes = loads === 1 ? trapModule : new Uint8Array(readFileSync(wasmUrl));
+        return Promise.resolve(new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } }));
+      }) as typeof fetch);
+      try {
+        const [first, second] = await Promise.allSettled([
+          decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl }),
+          decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl }),
+        ]);
+        expect(first.status).toBe('rejected');
+        expect(second.status === 'fulfilled' ? new Uint8Array(second.value) : second.reason).toEqual(hello);
+        expect(loads).toBe(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     test.skipIf(!hasBundledWasm)('a decoder missing at the configured URL falls back to the decoder shipped with the package', async () => {
       const missing = new URL('https://fonts-only.example/assets/decoder/fontpack.wasm');
       const originalFetch = globalThis.fetch;

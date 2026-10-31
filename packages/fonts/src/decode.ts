@@ -371,6 +371,7 @@ export async function decodeFontFace(
       throw new Error(`Font face is corrupt or uses a wrong dictionary: ${detail}`);
     }
   }
-  const instance = await loadDecoder(options?.wasmUrl);
+  let instance = await loadDecoder(options?.wasmUrl);
+  while (instance.failed) instance = await loadDecoder(options?.wasmUrl);
   return decodeWasm(instance, input, dictionary, maxOutput, expectedSize, codec);
 }
