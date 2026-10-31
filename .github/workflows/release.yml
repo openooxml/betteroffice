@@ -34,7 +34,7 @@ jobs:
           bun-version: "1.4.3"
 
       # Node 24 ships npm >= 11.5.1, required for provenance and OIDC publishing.
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
