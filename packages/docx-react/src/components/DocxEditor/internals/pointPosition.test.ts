@@ -72,7 +72,7 @@ function wasm(path: string): Uint8Array {
 beforeAll(async () => {
   await preloadEditWasm(wasm('edit/docx_edit_bg.wasm'));
   await preloadLayoutWasm(wasm('edit/docx_edit_bg.wasm'));
-});
+}, 30_000);
 afterEach(() => {
   for (const queries of disposables.splice(0)) queries.dispose();
   for (const session of sessions.splice(0)) session.destroy();

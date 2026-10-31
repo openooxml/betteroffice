@@ -22,7 +22,7 @@ export interface Target {
 }
 
 export interface Format {
-  engineBackend(): string;
+  engineKind: string;
   open(bytes: Uint8Array, script: Script): Promise<Target>;
   versionPattern?: RegExp;
 }

@@ -3724,7 +3724,7 @@ export class PptxRenderer {
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
-     * requested font faces before layout, for one slide or the whole deck.
+     * Requested faces with optional script coverage buckets, before layout.
      */
     requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
@@ -4229,9 +4229,6 @@ export declare function presentationDisplayListJson(handle: PresentationHandle, 
 export declare function isProposalsAvailable(): boolean;
 export declare function initWasm(input?: WasmInitInput): Promise<void>;
 export declare function isWasmAvailable(): boolean;
-export type EngineBackend = 'wasm' | 'native';
-/** Which engine runs this presentation code ('native' when @betteroffice/pptx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export declare function engineBackend(): EngineBackend;
 export declare function wasmVersion(): string;
 export declare function inspectPresentation(bytes: Uint8Array, options?: InspectPresentationOptions): unknown;
 /**

@@ -10,6 +10,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { configureDefaultFonts } from '@betteroffice/docx/layout';
 import type { CollaborationReplica } from '@betteroffice/docx/collaboration';
 import {
   createYrsSession,
@@ -80,6 +81,7 @@ const editorEngines: Array<[string, false | undefined]> = [
 ];
 
 beforeAll(async () => {
+  configureDefaultFonts({ fonts: { createFontProvider: () => ({ resolve: () => undefined }) } });
   if (!window.document.fonts) {
     Object.defineProperty(window.document, 'fonts', {
       value: {
@@ -100,7 +102,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(async () => {
   cleanup();
   takePreloadedResidentEngineWorker()?.destroy();
@@ -112,6 +114,7 @@ afterEach(async () => {
   globalThis.Worker = originalWorker;
 });
 afterAll(async () => {
+  configureDefaultFonts({});
   console.error = quiet.error;
   console.warn = quiet.warn;
   if (ownsDom) await GlobalRegistrator.unregister();

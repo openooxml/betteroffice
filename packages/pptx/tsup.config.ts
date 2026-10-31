@@ -12,7 +12,6 @@ export default defineConfig((options) => ({
     pptxSessionWorker: 'src/session/worker.ts',
   },
   format: ['esm'],
-  external: ['@betteroffice/pptx-native'],
   dts: true,
   splitting: true,
   sourcemap: false,

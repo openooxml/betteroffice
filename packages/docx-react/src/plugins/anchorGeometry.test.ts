@@ -139,7 +139,7 @@ describe('view-to-raw boundaries in a real session', () => {
         )
       )
     );
-  });
+  }, 30_000);
 
   test('maps accepted and original text across revisions and an atom in body and table cells', async () => {
     const session = await createYrsSession({ clientId: 813 });

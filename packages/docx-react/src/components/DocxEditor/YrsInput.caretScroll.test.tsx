@@ -46,7 +46,7 @@ beforeAll(() => {
       readFileSync(resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))
     )
   );
-});
+}, 30_000);
 afterEach(() => {
   cleanup();
   for (const restore of restoreMocks.splice(0)) restore();

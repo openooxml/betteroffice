@@ -31,7 +31,7 @@
     "build:debug": "napi build --platform",
     "prepublishOnly": "napi pre-publish --tag-style npm --no-gh-release",
     "test": "bun test",
-    "typecheck": "tsc --noEmit --types node --target es2022 --module nodenext index.d.ts"
+    "typecheck": "tsc --noEmit --types node --target es2022 --module nodenext index.d.ts && tsc -p js"
   },
   "keywords": [
     "pptx",

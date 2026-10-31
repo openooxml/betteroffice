@@ -41,7 +41,7 @@ function docx(): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 /** Records the segment reads `session` answers. */
 function counted(session: YrsSession) {

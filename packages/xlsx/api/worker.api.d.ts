@@ -3727,9 +3727,6 @@ export declare function getDisplayListCellLimit(): number;
  * Whether this environment exposes the WebAssembly runtime required by the core.
  */
 export declare function isWasmAvailable(): boolean;
-export type EngineBackend = 'wasm' | 'native';
-/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export declare function engineBackend(): EngineBackend;
 /**
  * Whether the embedded wasm core was built with png export (the `raster` cargo
  * feature). The wasm-bindgen method only exists on the class when compiled in,

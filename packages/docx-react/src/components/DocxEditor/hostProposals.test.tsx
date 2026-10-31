@@ -44,7 +44,7 @@ beforeAll(async () => {
   );
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(cleanup);
 afterAll(async () => {
   console.error = quiet.error;

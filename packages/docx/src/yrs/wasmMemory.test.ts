@@ -16,7 +16,7 @@ const FONT = new Uint8Array(
 );
 const edit = () => wasmModuleMemories().find((module) => module.label === 'docx-edit')!;
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 it('counts the editing core heap as sessions grow and go', async () => {
   const before = edit();

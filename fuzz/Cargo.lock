@@ -186,6 +186,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
  "unicode-segmentation",
 ]
 

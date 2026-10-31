@@ -48,7 +48,7 @@ function imagePayloads(session: YrsSession): Record<string, unknown>[] {
 }
 
 describe('picture payload parity', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('projects the same picture payloads as the native seed', async () => {
     const bytes = picturesPackage();

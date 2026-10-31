@@ -101,7 +101,7 @@ import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
 import { initialZoomScale } from './commands/evaluate';
 import { WorkbookFailure } from './components/WorkbookFailure';
 
-import type { XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
+import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
 
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
@@ -212,6 +212,16 @@ interface PaintMark {
   mutation: number;
   /** Sheet and zoom. */
   view: string;
+}
+
+type PendingReady = { handle: WorkbookHandle; fire: () => void };
+
+/** Fires the pending onReady once `handle` has painted. */
+function releaseReady(pending: { current: PendingReady | null }, handle: WorkbookHandle): void {
+  const ready = pending.current;
+  if (ready?.handle !== handle) return;
+  pending.current = null;
+  ready.fire();
 }
 
 /** Whether a paint shows everything `wanted` asks for. */
@@ -472,6 +482,8 @@ export function XlsxEditorContent({
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  // the opened workbook's onReady, released by its first painted frame.
+  const pendingReadyRef = useRef<PendingReady | null>(null);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   const onChangeRef = useRef(onChange);
@@ -897,6 +909,19 @@ export function XlsxEditorContent({
         cleanup();
       } catch {}
     };
+    const failOpen = (e: unknown) => {
+      if (pendingReadyRef.current?.handle === handle) pendingReadyRef.current = null;
+      runReadyCleanup();
+      unsubscribeUpdates();
+      unsubscribeUpdates = () => {};
+      handle?.dispose();
+      handle = null;
+      handleRef.current = null;
+      setSheetInfo(null);
+      setSelection(null);
+      setError(e instanceof Error ? e.message : String(e));
+      try { onErrorRef.current?.(e instanceof Error ? e : new Error(String(e))); } catch {}
+    };
     void initWasm().then(
       () => {
         if (disposed) return;
@@ -932,7 +957,7 @@ export function XlsxEditorContent({
           setError(null);
           refreshProposals();
           const opened = handle;
-          const cleanup = onReadyRef.current?.({
+          const api: XlsxEditorApi = {
             clearSelection,
             commands: commandController.store,
             handle,
@@ -972,20 +997,23 @@ export function XlsxEditorContent({
               }
               return afterInput(opened, () => applyBatch(opened, request));
             },
-          });
-          if (typeof cleanup === 'function') cleanupReady = cleanup;
-          setOpenedHandle(opened);
+          };
+          pendingReadyRef.current = {
+            handle: opened,
+            fire: () => {
+              if (disposed || handleRef.current !== opened) return;
+              try {
+                const cleanup = onReadyRef.current?.(api);
+                if (typeof cleanup === 'function') cleanupReady = cleanup;
+              } catch (e) {
+                failOpen(e);
+                return;
+              }
+              setOpenedHandle(opened);
+            },
+          };
         } catch (e) {
-          runReadyCleanup();
-          unsubscribeUpdates();
-          unsubscribeUpdates = () => {};
-          handle?.dispose();
-          handle = null;
-          handleRef.current = null;
-          setSheetInfo(null);
-          setSelection(null);
-          setError(e instanceof Error ? e.message : String(e));
-          try { onErrorRef.current?.(e instanceof Error ? e : new Error(String(e))); } catch {}
+          failOpen(e);
         }
       },
       (e: unknown) => {
@@ -1001,6 +1029,7 @@ export function XlsxEditorContent({
       disposed = true;
       compositionRef.current?.settle(false);
       compositionRef.current = null;
+      if (pendingReadyRef.current?.handle === handle) pendingReadyRef.current = null;
       runReadyCleanup();
       unsubscribeUpdates();
       handle?.dispose();
@@ -1070,7 +1099,10 @@ export function XlsxEditorContent({
     const canvas = canvasRef.current;
     if (!scroll || !canvas) return;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      if (handleRef.current) releaseReady(pendingReadyRef, handleRef.current);
+      return;
+    }
     const dpr = window.devicePixelRatio || 1;
     const w = scroll.clientWidth;
     const h = scroll.clientHeight;
@@ -1088,16 +1120,20 @@ export function XlsxEditorContent({
       height: logicalHeight,
     };
     const handle = handleRef.current;
+    const failPaint = (paintError: unknown) => {
+      frameRef.current = null;
+      paintedRef.current = null;
+      presentGrid(null);
+      setFrame(null);
+      setRenderError(paintError instanceof Error ? paintError.message : String(paintError));
+      if (handle) releaseReady(pendingReadyRef, handle);
+    };
     let dl: DisplayList;
     if (handle) {
       try {
         dl = handle.displayList(viewport);
       } catch (paintError) {
-        frameRef.current = null;
-        paintedRef.current = null;
-        presentGrid(null);
-        setFrame(null);
-        setRenderError(paintError instanceof Error ? paintError.message : String(paintError));
+        failPaint(paintError);
         return;
       }
     } else {
@@ -1115,8 +1151,13 @@ export function XlsxEditorContent({
           .slice(0, MAX_OVERLAY_MERGED_RANGES);
       } catch {}
     }
-    canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom))
-      ? 'settled' : 'pending';
+    try {
+      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom))
+        ? 'settled' : 'pending';
+    } catch (paintError) {
+      failPaint(paintError);
+      return;
+    }
     frameRef.current = dl;
     paintedRef.current = { frame: dl, zoom, sheet: activeSheet, handle };
     let version: string | null = null;
@@ -1143,6 +1184,7 @@ export function XlsxEditorContent({
     const waiters = paintWaitersRef.current;
     paintWaitersRef.current = waiters.filter((waiter) => !covers(painted, waiter.mark));
     for (const waiter of waiters) if (covers(painted, waiter.mark)) waiter.resolve(true);
+    releaseReady(pendingReadyRef, handle);
   }, [activeSheet, paintWithDefaultFonts, presentGrid, t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open

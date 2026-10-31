@@ -65,14 +65,6 @@
     "tsup": "^8.5.1",
     "typescript": "^6.0.3"
   },
-  "peerDependencies": {
-    "@betteroffice/xlsx-native": "workspace:^"
-  },
-  "peerDependenciesMeta": {
-    "@betteroffice/xlsx-native": {
-      "optional": true
-    }
-  },
   "license": "Apache-2.0",
   "homepage": "https://betteroffice.dev/",
   "repository": {
