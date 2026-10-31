@@ -17,7 +17,7 @@ jobs:
   # Free GitHub-hosted runners first, then a fresh kyora VM per job; the router and the variables work as in ci.yml.
   route:
     name: Route runners
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       actions: read

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const GITHUB_HOSTED = /^(ubuntu|macos|windows)-[\w.-]+$/;
 export const LABEL = 'ubuntu-latest';
+export const ROUTER = 'Route runners';
 export const BATCH_RUNS = 10;
 
 /** `packages python package_tests:2 rust`: job groups in the order they claim GitHub-hosted slots. */
@@ -38,6 +39,7 @@ export function hostedJobs(jobs) {
   return jobs.filter(
     (job) =>
       (job.status === 'queued' || job.status === 'in_progress') &&
+      job.name !== ROUTER &&
       job.labels?.length === 1 &&
       GITHUB_HOSTED.test(job.labels[0])
   ).length;

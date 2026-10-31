@@ -16,13 +16,13 @@ concurrency:
 
 jobs:
   # The router fills the account's free GitHub-hosted runners first; a job that does not fit, or every job when
-  # the router cannot count, runs on a fresh kyora VM of the leanest class that fits. The router itself runs on
-  # kyora, so it never queues behind the GitHub-hosted limit it measures. The two shortest (Security audit, Native
-  # gate) stay GitHub-hosted. Fork pull requests stay GitHub-hosted, BO_CI_RUNNER pins every job to one label,
+  # the router cannot count, runs on a fresh kyora VM of the leanest class that fits. The router itself runs
+  # GitHub-hosted, so it never queues behind the kyora job cap, and does not count itself as busy. The two shortest
+  # (Security audit, Native gate) stay GitHub-hosted. Fork pull requests stay GitHub-hosted, BO_CI_RUNNER pins every job to one label,
   # BO_CI_SPILL=off keeps them on kyora, and BO_CI_GH_LIMIT/BO_CI_GH_RESERVE size the GitHub share.
   route:
     name: Route runners
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       actions: read
