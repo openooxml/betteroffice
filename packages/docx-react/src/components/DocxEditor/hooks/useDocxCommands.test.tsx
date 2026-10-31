@@ -17,7 +17,7 @@ import { createYrsPositionProjection } from '../internals/yrsPositionProjection'
 import type { YrsInputRef } from '../YrsInput';
 import * as workerOpenReplica from '../internals/workerOpenReplica';
 import { awaitWorkerOpenReplica, deferWorkerOpenReplica, holdWorkerOpenDocument, workerOpenReplicaPending, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
-import { currentYrsToolbarSelection } from '../yrsToolbar';
+import { applyYrsToolbarFormatting, currentYrsToolbarSelection } from '../yrsToolbar';
 import {
   useDocxCommandBinding,
   type DocxCommandInputs,
@@ -160,6 +160,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
     tableAction: () => false,
     openImageProperties: noop,
     openPageSetup: noop,
+    openParagraphSpacing: () => opened.push('paragraphSpacingDialog'),
     openWatermark: noop,
     refreshTrackedChanges: noop,
     ...overrides,
@@ -211,6 +212,33 @@ function heldReplica(
 }
 
 describe('editor command binding', () => {
+  test('paragraphSpacing executes through the toolbar adapter and exposes the changed spacing', async () => {
+    const { session } = await newSession();
+    const editor = mount(session);
+    const format = spyOn(editor.bridge, 'format').mockImplementation((action) => {
+      const map = createYrsInputPositionMap('body', session.paragraphs('body').map((paragraph) => ({
+        paraId: paragraph.paraId, length: paragraph.text.length,
+      })));
+      return applyYrsToolbarFormatting(session, map, action);
+    });
+    expect(await editor.store.execute('paragraphSpacing', { before: 240 })).toEqual({ ok: true, status: 'executed' });
+    expect(format).toHaveBeenCalledWith({ type: 'paragraphSpacing', before: 240 });
+    expect(editor.store.getState('paragraphSpacing').value).toEqual({ before: 240, after: 0 });
+  });
+
+  test('paragraph spacing dialog refuses completion after the target changes', async () => {
+    const { session } = await newSession();
+    const editor = mount(session);
+    await act(async () => { expect(await editor.store.execute('paragraphSpacingDialog', null)).toEqual({ ok: true, status: 'opened' }); });
+    expect(editor.opened).toContain('paragraphSpacingDialog');
+    const location = session.selection()!.head;
+    session.setSelection({ ...location, offset: 1 }, { ...location, offset: 1 });
+    const write = mock(() => ({ ok: true as const, status: 'executed' as const }));
+    const result = await editor.hook.result.current.commands.complete('paragraphSpacingDialog', write);
+    expect(code(result)).toBe('target-changed');
+    expect(write).not.toHaveBeenCalled();
+  });
+
   for (const readOnly of [true, false]) {
     test(`worker viewer mutations refuse ${readOnly ? 'read-only' : 'viewing-mode'} without input admission`, async () => {
       const { session } = await newSession();

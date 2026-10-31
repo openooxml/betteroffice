@@ -104,7 +104,12 @@
     "single": "Одинарний",
     "double": "Подвійний",
     "lineSpacingTitle": "Міжрядковий інтервал: {label}",
-    "paragraphSpacing": "Інтервал між абзацами"
+    "paragraphSpacing": "Інтервал між абзацами",
+    "addBefore": "Додати інтервал перед абзацом",
+    "removeBefore": "Видалити інтервал перед абзацом",
+    "addAfter": "Додати інтервал після абзацу",
+    "removeAfter": "Видалити інтервал після абзацу",
+    "options": "Параметри міжрядкового інтервалу..."
   },
   "styles": {
     "selectAriaLabel": "Вибрати стиль абзацу",
@@ -478,6 +483,11 @@
       "top": "Зверху (px)",
       "width": "Ширина (px)",
       "height": "Висота (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Інтервал перед",
+      "after": "Інтервал після",
+      "multiple": "Множник"
     }
   },
   "comments": {

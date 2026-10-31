@@ -104,7 +104,12 @@
     "single": "Tunggal",
     "double": "Ganda",
     "lineSpacingTitle": "Spasi baris: {label}",
-    "paragraphSpacing": "Jarak antar paragraf"
+    "paragraphSpacing": "Jarak antar paragraf",
+    "addBefore": "Tambahkan Spasi Sebelum Paragraf",
+    "removeBefore": "Hapus Spasi Sebelum Paragraf",
+    "addAfter": "Tambahkan Spasi Setelah Paragraf",
+    "removeAfter": "Hapus Spasi Setelah Paragraf",
+    "options": "Opsi Spasi Baris..."
   },
   "styles": {
     "selectAriaLabel": "Pilih gaya paragraf",
@@ -478,6 +483,11 @@
       "top": "Atas (px)",
       "width": "Lebar (px)",
       "height": "Tinggi (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Spasi Sebelum",
+      "after": "Spasi Setelah",
+      "multiple": "Kelipatan"
     }
   },
   "comments": {

@@ -250,6 +250,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, recoverableProps);
   useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id) => {
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
+    if (id === 'paragraphSpacingDialog') return propertyDialogs.openParagraphSpacing();
     if (id === 'watermark') return propertyDialogs.openWatermark();
     if (id === 'insertLink') return propertyDialogs.openLink();
     if (id === 'imageProperties') return propertyDialogs.openImage();

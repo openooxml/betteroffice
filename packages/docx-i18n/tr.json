@@ -104,7 +104,12 @@
     "single": "Tek",
     "double": "Çift",
     "lineSpacingTitle": "Satır aralığı: {label}",
-    "paragraphSpacing": "Paragraf aralığı"
+    "paragraphSpacing": "Paragraf aralığı",
+    "addBefore": "Paragraftan Önce Boşluk Ekle",
+    "removeBefore": "Paragraftan Önceki Boşluğu Kaldır",
+    "addAfter": "Paragraftan Sonra Boşluk Ekle",
+    "removeAfter": "Paragraftan Sonraki Boşluğu Kaldır",
+    "options": "Satır Aralığı Seçenekleri..."
   },
   "styles": {
     "selectAriaLabel": "Paragraf stili seç",
@@ -478,6 +483,11 @@
       "top": "Üst (px)",
       "width": "Genişlik (px)",
       "height": "Yükseklik (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Önceki Boşluk",
+      "after": "Sonraki Boşluk",
+      "multiple": "Çoklu"
     }
   },
   "comments": {

@@ -45,6 +45,8 @@ export const DOCX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
     { chord: 'Mod+J', args: { value: 'both' } },
   ]),
   lineSpacing: descriptor('lineSpacing', 'lineSpacing.label', true),
+  paragraphSpacing: descriptor('paragraphSpacing', 'lineSpacing.paragraphSpacing', true),
+  paragraphSpacingDialog: descriptor('paragraphSpacingDialog', 'lineSpacing.options', true),
   bulletList: descriptor('bulletList', 'lists.bulletList', true),
   numberedList: descriptor('numberedList', 'lists.numberedList', true),
   indent: descriptor('indent', 'lists.increaseIndent', true),

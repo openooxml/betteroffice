@@ -104,7 +104,12 @@
     "single": "Single",
     "double": "Double",
     "lineSpacingTitle": "Line spacing: {label}",
-    "paragraphSpacing": "Paragraph spacing"
+    "paragraphSpacing": "Paragraph spacing",
+    "addBefore": "Add Space Before Paragraph",
+    "removeBefore": "Remove Space Before Paragraph",
+    "addAfter": "Add Space After Paragraph",
+    "removeAfter": "Remove Space After Paragraph",
+    "options": "Line Spacing Options..."
   },
   "styles": {
     "selectAriaLabel": "Select paragraph style",
@@ -478,6 +483,11 @@
       "top": "Top (px)",
       "width": "Width (px)",
       "height": "Height (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Spacing Before",
+      "after": "Spacing After",
+      "multiple": "Multiple"
     }
   },
   "comments": {

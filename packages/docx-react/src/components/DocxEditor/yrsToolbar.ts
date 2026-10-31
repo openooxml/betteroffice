@@ -1,3 +1,4 @@
+import { paragraphSpacingAttrs } from '../../commands/paragraphSpacing';
 import type { ColorValue, ParagraphAlignment } from '@betteroffice/docx/types/document';
 import type {
   YrsInputPositionMap,
@@ -34,6 +35,7 @@ export type FormattingAction =
   | { type: 'highlightColor'; value: string }
   | { type: 'alignment'; value: ParagraphAlignment }
   | { type: 'lineSpacing'; value: number }
+  | { type: 'paragraphSpacing'; before?: number; after?: number; lineSpacing?: number }
   | { type: 'applyStyle'; value: string };
 
 export interface YrsToolbarSelection {
@@ -366,6 +368,9 @@ export function applyYrsToolbarFormatting(
         { lineSpacing: action.value, lineSpacingRule: 'auto' },
         suggesting
       );
+      return true;
+    case 'paragraphSpacing':
+      session.setParagraphAttrs(range, paragraphSpacingAttrs(action), suggesting);
       return true;
     case 'applyStyle':
       session.applyParagraphStyle(range, action.value, suggesting);

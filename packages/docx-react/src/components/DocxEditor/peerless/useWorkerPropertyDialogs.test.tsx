@@ -1,6 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { evaluateDocxCommand } from '../../../commands/evaluate';
+import { toolbarFixture } from './toolbarCommands.testing';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
 import {
   buildImageTransformPatch,
@@ -547,3 +548,29 @@ test('image context-menu wrap action refuses in header, footer, note stories and
   pageEl.remove();
 });
 
+
+test('paragraph dialog reads spacing and submits line and paragraph attributes together', async () => {
+  const { controller, context, submit } = toolbarFixture();
+  context({ paragraphProperties: { spaceBefore: 240, spaceAfter: 160, lineSpacing: 360 } });
+  const hook = renderHook(() => useWorkerPropertyDialogs(controller, {}));
+  await act(async () => { expect(hook.result.current.openParagraphSpacing()).toEqual({ ok: true, status: 'opened' }); });
+  const dialog = hook.result.current.element.props.children.at(-1);
+  expect(dialog.props.currentProps).toEqual({ before: 240, after: 160, lineSpacing: 360 });
+  await act(async () => { await dialog.props.onApply({ before: 120, after: 240, lineSpacing: 480 }); });
+  expect(submit).toHaveBeenCalledWith({ kind: 'setParagraphAttrs', payload: { attrs: {
+    spaceBefore: 120, spaceAfter: 240, lineSpacing: 480, lineSpacingRule: 'auto',
+  } } }, { fence: true });
+});
+
+test('paragraph dialog refuses a changed worker selection', async () => {
+  const { controller, context, submit, selection } = toolbarFixture();
+  const onError = mock(() => {});
+  const hook = renderHook(() => useWorkerPropertyDialogs(controller, { onError }));
+  await act(async () => { hook.result.current.openParagraphSpacing(); });
+  const dialog = hook.result.current.element.props.children.at(-1);
+  selection.focus.offset = 1;
+  context({});
+  await act(async () => { await dialog.props.onApply({ before: 120, after: 240 }); });
+  expect(submit).not.toHaveBeenCalled();
+  expect(onError).toHaveBeenCalledTimes(1);
+});

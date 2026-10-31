@@ -91,6 +91,7 @@ function commandInputs(
     tableAction: () => false,
     openImageProperties: noop,
     openPageSetup: noop,
+    openParagraphSpacing: noop,
     openWatermark: noop,
     refreshTrackedChanges: noop,
   };

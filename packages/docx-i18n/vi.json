@@ -104,7 +104,12 @@
     "single": "Đơn",
     "double": "Đôi",
     "lineSpacingTitle": "Giãn cách dòng: {label}",
-    "paragraphSpacing": "Giãn cách đoạn văn"
+    "paragraphSpacing": "Giãn cách đoạn văn",
+    "addBefore": "Thêm khoảng cách trước đoạn văn",
+    "removeBefore": "Xóa khoảng cách trước đoạn văn",
+    "addAfter": "Thêm khoảng cách sau đoạn văn",
+    "removeAfter": "Xóa khoảng cách sau đoạn văn",
+    "options": "Tùy chọn giãn dòng..."
   },
   "styles": {
     "selectAriaLabel": "Chọn kiểu đoạn văn",
@@ -478,6 +483,11 @@
       "top": "Trên (px)",
       "width": "Chiều rộng (px)",
       "height": "Chiều cao (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Khoảng cách trước",
+      "after": "Khoảng cách sau",
+      "multiple": "Bội số"
     }
   },
   "comments": {

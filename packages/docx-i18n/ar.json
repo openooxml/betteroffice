@@ -104,7 +104,12 @@
     "single": "مفرد",
     "double": "مزدوج",
     "lineSpacingTitle": "تباعد الأسطر: {label}",
-    "paragraphSpacing": "تباعد الفقرات"
+    "paragraphSpacing": "تباعد الفقرات",
+    "addBefore": "إضافة مسافة قبل الفقرة",
+    "removeBefore": "إزالة المسافة قبل الفقرة",
+    "addAfter": "إضافة مسافة بعد الفقرة",
+    "removeAfter": "إزالة المسافة بعد الفقرة",
+    "options": "خيارات تباعد الأسطر..."
   },
   "styles": {
     "selectAriaLabel": "تحديد نمط الفقرة",
@@ -478,6 +483,11 @@
       "top": "أعلى (px)",
       "width": "العرض (px)",
       "height": "الارتفاع (px)"
+    },
+    "paragraphSpacing": {
+      "before": "التباعد قبل الفقرة",
+      "after": "التباعد بعد الفقرة",
+      "multiple": "متعدد"
     }
   },
   "comments": {

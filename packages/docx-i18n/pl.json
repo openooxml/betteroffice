@@ -104,7 +104,12 @@
     "single": "Pojedyncza",
     "double": "Podwójna",
     "lineSpacingTitle": "Interlinia: {label}",
-    "paragraphSpacing": "Odstępy między akapitami"
+    "paragraphSpacing": "Odstępy między akapitami",
+    "addBefore": "Dodaj odstęp przed akapitem",
+    "removeBefore": "Usuń odstęp przed akapitem",
+    "addAfter": "Dodaj odstęp po akapicie",
+    "removeAfter": "Usuń odstęp po akapicie",
+    "options": "Opcje interlinii..."
   },
   "styles": {
     "selectAriaLabel": "Wybierz styl akapitu",
@@ -478,6 +483,11 @@
       "top": "Od góry (px)",
       "width": "Szerokość (px)",
       "height": "Wysokość (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Odstęp przed",
+      "after": "Odstęp po",
+      "multiple": "Wielokrotna"
     }
   },
   "comments": {
