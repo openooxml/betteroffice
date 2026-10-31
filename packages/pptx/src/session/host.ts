@@ -3,7 +3,7 @@ import { createCommandFontInstallation } from './commandFontInstallation';
 import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { MethodHandlers } from '../../../../shared/office-session/types';
-import { compileWasm } from '../../../../shared/office-session/wasm';
+import { compileSessionWasm } from '#session-worker';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import { wasmAssetUrl } from '../wasm/asset';
@@ -47,7 +47,7 @@ export async function initializePresentationEditorWasm(source?: ArrayBuffer | We
     return undefined;
   }
   const module = source instanceof WebAssembly.Module ? source : source === undefined
-    ? await compileWasm(wasmAssetUrl()) : await WebAssembly.compile(source);
+    ? await compileSessionWasm(wasmAssetUrl()) : await WebAssembly.compile(source);
   await initWasm(module);
   return module;
 }

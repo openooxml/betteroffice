@@ -34,14 +34,8 @@ test('worker sessions without a Web Worker use worker_threads when available', a
     return { Worker: class { constructor() { created += 1; throw reached; } } };
   } });
   await expect(openPresentationSession(new Uint8Array())).rejects.toBe(reached);
-  const editor = createPptxWorkerEditorSession(new Uint8Array());
-  try { await expect(editor.whenHydrated()).rejects.toThrow(reached.message); }
-  finally { await editor.dispose(); }
-  const fonts = preparePresentationFontDecoder(new Uint8Array());
-  try { await expect(fonts.decoder(new Uint8Array(), { codec: 'woff' })).rejects.toThrow(reached.message); }
-  finally { fonts.release(); }
-  const session = createPptxWorkerSession(new Uint8Array());
-  try { await expect(session.ready).rejects.toThrow(reached.message); }
-  finally { await session.dispose(); }
+  expect(() => createPptxWorkerEditorSession(new Uint8Array())).toThrow(reached.message);
+  expect(() => preparePresentationFontDecoder(new Uint8Array())).toThrow(reached.message);
+  expect(() => createPptxWorkerSession(new Uint8Array())).toThrow(reached.message);
   expect(created).toBe(4);
 });

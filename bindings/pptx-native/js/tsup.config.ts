@@ -15,6 +15,8 @@ export default defineConfig({
     worker: `${source}/src/worker.ts`,
     collaboration: `${source}/src/collaboration/index.ts`,
     pptxSessionWorker: `${source}/src/session/worker.ts`,
+    'sessionWorker.browser': `${source}/src/session/sessionWorker.browser.ts`,
+    'sessionWorker.node': `${source}/src/session/sessionWorker.node.ts`,
   },
   outDir: dist,
   format: ['esm'],
@@ -25,7 +27,7 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   minify: true,
-  external: ['@betteroffice/fonts'],
+  external: ['@betteroffice/fonts', '#session-worker'],
   esbuildPlugins: [
     packageBoundary(fileURLToPath(new URL(`${source}/`, import.meta.url))),
     nativeEnginePlugin('pptx'),
@@ -35,7 +37,12 @@ export default defineConfig({
   },
   onSuccess: async () => {
     await rename(join(dist, 'pptxSessionWorker.js'), join(dist, 'pptxSessionWorker.mjs'));
-    await writeFile(join(dist, 'package.json'), '{\n  "type": "module"\n}\n');
+    await writeFile(join(dist, 'package.json'), JSON.stringify({
+      type: 'module',
+      imports: { '#session-worker': {
+        node: './sessionWorker.node.js', default: './sessionWorker.browser.js',
+      } },
+    }, null, 2) + '\n');
     await writeFile(join(dist, 'browser.js'), browser);
   },
 });

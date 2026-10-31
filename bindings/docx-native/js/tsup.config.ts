@@ -34,6 +34,8 @@ export default defineConfig([
       'yrs/index': '../../../packages/docx/src/yrs/index.ts',
       'collaboration/index': '../../../packages/docx/src/collaboration/index.ts',
       'yrs/docxWorker': '../../../packages/docx/src/yrs/residentEngineWorker.ts',
+      'sessionWorker.browser': '../../../packages/docx/src/yrs/sessionWorker.browser.ts',
+      'sessionWorker.node': '../../../packages/docx/src/yrs/sessionWorker.node.ts',
       'wasm-opc': '../../../packages/docx/src/wasm/opc.ts',
       'wasm-layout': '../../../packages/docx/src/wasm/layout.ts',
       'wasm-edit': '../../../packages/docx/src/wasm/edit.ts',
@@ -52,7 +54,7 @@ export default defineConfig([
     treeshake: true,
     minify: true,
     injectStyle: false,
-    external: ['@betteroffice/fonts'],
+    external: ['@betteroffice/fonts', '#session-worker'],
     esbuildPlugins: [nativeEnginePlugin('docx')],
     esbuildOptions(options) {
       options.chunkNames = 'chunk-[hash]';

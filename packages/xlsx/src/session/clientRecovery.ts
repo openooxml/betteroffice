@@ -1,6 +1,7 @@
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { createSessionWorker } from '#session-worker';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import type { OpenWorkbookSessionOptions, WorkbookSession } from './client';
 import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContext, WorkbookSharedCommand } from './commandProtocol';
@@ -47,11 +48,7 @@ export const workbookSessionRecovery = new WeakMap<WorkbookSession, WorkbookSess
 export const workbookRecoveryBackend = {
   async open(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession> {
     if (options.collaborative) return Promise.reject(new Error('Recovery is unavailable for collaborative workbooks'));
-    const transport = createWorkerTransport(options.worker ? options.worker() :
-      typeof Worker === 'function' ?
-        new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' }) :
-        (await import('../../../../shared/office-session/nodeWorker')).createSessionWorker(
-          new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' }, 'openWorkbook'));
+    const transport = createWorkerTransport(options.worker ? options.worker() : createSessionWorker());
     return createWorkbookRecoverySession(bytes, options, transport, checkpoint, version);
   },
 };

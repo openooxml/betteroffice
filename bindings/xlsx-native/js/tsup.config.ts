@@ -14,12 +14,15 @@ export default defineConfig({
     worker: `${source}/src/worker.ts`,
     collaboration: `${source}/src/collaboration/index.ts`,
     xlsxSessionWorker: `${source}/src/session/worker.ts`,
+    'sessionWorker.browser': `${source}/src/session/sessionWorker.browser.ts`,
+    'sessionWorker.node': `${source}/src/session/sessionWorker.node.ts`,
   },
   outDir: dist,
   format: ['esm'],
   dts: true,
   tsconfig: `${source}/tsconfig.json`,
   splitting: true,
+  external: ['#session-worker'],
   sourcemap: false,
   clean: true,
   treeshake: true,
@@ -30,7 +33,12 @@ export default defineConfig({
   },
   onSuccess: async () => {
     await rename(join(dist, 'xlsxSessionWorker.js'), join(dist, 'xlsxSessionWorker.mjs'));
-    await writeFile(join(dist, 'package.json'), '{\n  "type": "module"\n}\n');
+    await writeFile(join(dist, 'package.json'), JSON.stringify({
+      type: 'module',
+      imports: { '#session-worker': {
+        node: './sessionWorker.node.js', default: './sessionWorker.browser.js',
+      } },
+    }, null, 2) + '\n');
     await writeFile(join(dist, 'browser.js'), browser);
   },
 });

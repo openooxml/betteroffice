@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
-import { createSessionWorker, sessionWorkerScope } from './nodeWorker';
-import { deferSessionWorker } from './webWorker';
+import { createSessionWorker, sessionWorkerScope } from './nodeSessionWorker';
 
 const original = Object.getOwnPropertyDescriptor(process, 'getBuiltinModule');
 const threads: FakeThread[] = [];
@@ -113,55 +112,5 @@ test('uses parentPort as the worker scope', () => {
 test('reports the existing in-thread guidance without getBuiltinModule', () => {
   Object.defineProperty(process, 'getBuiltinModule', { configurable: true, value: undefined });
   expect(open).toThrow('use openDocument in-thread or pass the worker option');
-  expect(() => deferSessionWorker(async () => open(), 'openDocument')).toThrow('use openDocument in-thread');
   expect(sessionWorkerScope).toThrow('Worker sessions need a Web Worker');
-});
-
-test('buffers posts and subscriptions while the adapter loads', async () => {
-  let resolve!: (worker: Worker) => void;
-  const pending = new Promise<Worker>(done => { resolve = done; });
-  const worker = deferSessionWorker(() => pending, 'openDocument');
-  const message = mock();
-  const handler = mock();
-  const bytes = new ArrayBuffer(4);
-  worker.addEventListener('message', message);
-  worker.onmessage = handler;
-  worker.postMessage({ bytes }, [bytes]);
-  resolve(open());
-  await pending;
-  expect(threads[0].postMessage).toHaveBeenCalledWith({ bytes }, [bytes]);
-  threads[0].emit('message', 11);
-  expect(message).toHaveBeenCalledWith({ data: 11 });
-  expect(handler).toHaveBeenCalledWith({ data: 11 });
-  worker.removeEventListener('message', message);
-  threads[0].emit('message', 12);
-  expect(message).toHaveBeenCalledTimes(1);
-  worker.terminate();
-  expect(threads[0].terminate).toHaveBeenCalledTimes(1);
-});
-
-test('terminates a worker disposed before its import completes', async () => {
-  let resolve!: (worker: Worker) => void;
-  const pending = new Promise<Worker>(done => { resolve = done; });
-  const worker = deferSessionWorker(() => pending, 'openDocument');
-  worker.postMessage('discard');
-  worker.terminate();
-  resolve(open());
-  await pending;
-  expect(threads[0].postMessage).not.toHaveBeenCalled();
-  expect(threads[0].terminate).toHaveBeenCalledTimes(1);
-});
-
-test('reports asynchronous creation failures through listeners and setters', async () => {
-  const failure = new Error('Cannot load thread');
-  const worker = deferSessionWorker(() => Promise.reject(failure), 'openDocument');
-  const error = mock();
-  const handler = mock();
-  worker.addEventListener('error', error);
-  worker.onerror = handler;
-  await Promise.resolve();
-  await Promise.resolve();
-  expect(error).toHaveBeenCalledWith({ error: failure, message: failure.message });
-  expect(handler).toHaveBeenCalledWith({ error: failure, message: failure.message });
-  worker.terminate();
 });

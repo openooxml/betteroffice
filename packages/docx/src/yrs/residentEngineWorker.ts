@@ -131,6 +131,8 @@ import {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 
+import { sessionWorkerScope } from '#session-worker';
+
 let scope: DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
@@ -1442,12 +1444,7 @@ function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
   scope.onmessageerror = () => resolveHostEditModule(null);
 }
 
-if (typeof self === 'undefined') {
-  void import('../../../../shared/office-session/nodeWorker').then(({ sessionWorkerScope }) =>
-    startWorker(sessionWorkerScope() as unknown as DedicatedWorkerGlobalScope));
-} else {
-  startWorker(self as unknown as DedicatedWorkerGlobalScope);
-}
+startWorker(sessionWorkerScope() as unknown as DedicatedWorkerGlobalScope);
 
 function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   if (!shipsWasmAsset) return Promise.resolve(null);

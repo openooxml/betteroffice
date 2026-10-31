@@ -1,7 +1,7 @@
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { deferSessionWorker } from '../../../../shared/office-session/webWorker';
+import { createSessionWorker } from '#session-worker';
 import { shipsWasmAsset } from '../wasm/asset';
 import type { PresentationCommandMethods } from './commandProtocol';
 
@@ -32,10 +32,7 @@ export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer)
 }
 
 function createPreparedFontWorker() {
-  const worker = typeof Worker === 'function' ?
-    new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }) :
-    deferSessionWorker(async () => (await import('../../../../shared/office-session/nodeWorker')).createSessionWorker(
-      new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }, 'openPresentation'), 'openPresentation');
+  const worker = createSessionWorker();
   const transport = createWorkerTransport(worker);
   const subscriptions = new Set<() => void>();
   const subscribe = (stop: () => void) => {

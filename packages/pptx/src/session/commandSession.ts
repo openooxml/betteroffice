@@ -1,6 +1,6 @@
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { deferSessionWorker } from '../../../../shared/office-session/webWorker';
+import { createSessionWorker } from '#session-worker';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { requestWasmCompile } from '../../../../shared/office-session/client';
@@ -59,10 +59,7 @@ export function createPptxWorkerSession(
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
   const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
   const transport = createWorkerTransport(options.worker ? options.worker() :
-    preparedWorker ?? (typeof Worker === 'function' ?
-      new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }) :
-      deferSessionWorker(async () => (await import('../../../../shared/office-session/nodeWorker')).createSessionWorker(
-        new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }, 'openPresentation'), 'openPresentation')));
+    preparedWorker ?? createSessionWorker());
   if (cacheUrl && !wasm) requestWasmCompile(transport);
   const input = {
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),

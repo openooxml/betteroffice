@@ -1,5 +1,14 @@
 import type { SessionScope } from './transport';
 import { missingWebWorker } from './webWorker';
+import { compileWasm } from './wasm';
+import { readWasmSync } from './readWasmAsset';
+
+export { readWasmSync };
+
+export async function compileSessionWasm(url: URL): Promise<WebAssembly.Module> {
+  const bytes = readWasmSync(url);
+  return bytes ? WebAssembly.compile(bytes as BufferSource) : compileWasm(url);
+}
 
 type WorkerEvent = 'message' | 'error' | 'messageerror';
 type Listener = EventListenerOrEventListenerObject;

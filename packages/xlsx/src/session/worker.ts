@@ -1,6 +1,7 @@
 import { createScopeTransport, type SessionScope } from '../../../../shared/office-session/transport';
+import { sessionWorkerScope, compileSessionWasm } from '#session-worker';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
-import { compileWasm, createWorkerWasmInitializer } from '../../../../shared/office-session/wasm';
+import { createWorkerWasmInitializer } from '../../../../shared/office-session/wasm';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
 import { initWasm } from '../wasm/loader';
@@ -24,7 +25,7 @@ function startWorker(scope: SessionScope): void {
     },
   };
   const initialize = createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(), initWasm, async (url) => {
-    module = await compileWasm(url);
+    module = await compileSessionWasm(url);
     return module;
   });
   let initializeLean: ReturnType<typeof createWorkerWasmInitializer> | undefined;
@@ -32,7 +33,7 @@ function startWorker(scope: SessionScope): void {
     initWasm: engineKind === 'native' ? initWasm : (input, options) => {
       if (options?.png !== false) return initialize(input);
       initializeLean ??= createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(false), initWasm, async (url) => {
-        module = await compileWasm(url);
+        module = await compileSessionWasm(url);
         return module;
       });
       return initializeLean(input);
@@ -42,8 +43,4 @@ function startWorker(scope: SessionScope): void {
   Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });
 }
 
-if (typeof self === 'undefined') {
-  void import('../../../../shared/office-session/nodeWorker').then(({ sessionWorkerScope }) => startWorker(sessionWorkerScope()));
-} else {
-  startWorker(self as unknown as SessionScope);
-}
+startWorker(sessionWorkerScope());
