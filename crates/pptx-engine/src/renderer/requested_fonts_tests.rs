@@ -1078,3 +1078,79 @@ fn edited_japanese_paragraphs_keep_the_japanese_face() {
         ])
     );
 }
+
+#[test]
+fn coalesced_runs_keep_each_source_language() {
+    let mixed = shape(
+        2,
+        "",
+        "",
+        &format!(
+            "<a:p>{}{}</a:p>",
+            lang_run("かな", "ja-JP", "Same Face"),
+            lang_run("汉字", "zh-CN", "Same Face"),
+        ),
+    );
+    let year = shape(
+        3,
+        "",
+        "",
+        &format!(
+            "<a:p>{}{}</a:p>",
+            lang_run("2026 ", "en-US", "Year Face"),
+            lang_run("推計月間", "ja-JP", "Year Face"),
+        ),
+    );
+    let slide = format!("{mixed}{year}");
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([
+            {"family":"Same Face","bold":false,"italic":false,"scripts":["cjk-jp","cjk-sc"]},
+            {"family":"Year Face","bold":false,"italic":false,"scripts":["cjk-jp"]},
+        ])
+    );
+}
+
+#[test]
+fn edited_mixed_paragraphs_keep_every_source_language() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        r#"<a:p><a:r><a:rPr lang="ja-JP" b="1"><a:latin typeface="Edit Mix"/></a:rPr><a:t>日本</a:t></a:r><a:r><a:rPr lang="zh-CN"><a:latin typeface="Edit Mix"/></a:rPr><a:t>汉字</a:t></a:r></a:p>"#,
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    let context = EditCtx::local("fonts");
+    session.delete_text(&context, &story.id, 0, 2).unwrap();
+    session
+        .insert_text(
+            &context,
+            &story.id,
+            2,
+            "体",
+            &pptx_edit::TextStyle {
+                bold: Some(true),
+                font_family: Some("Edit Mix".to_owned()),
+                ..pptx_edit::TextStyle::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([
+            {"family":"Edit Mix","bold":false,"italic":false,"scripts":["cjk-jp","cjk-sc"]},
+            {"family":"Edit Mix","bold":true,"italic":false,"scripts":["cjk-jp","cjk-sc"]},
+        ])
+    );
+}

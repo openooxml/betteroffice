@@ -1369,21 +1369,20 @@ impl FontRequests {
                 .default_run
                 .as_ref()
                 .and_then(|properties| properties.language.as_deref());
-            let paragraph_scripts = paragraph_scripts_with_languages(
-                source.paragraph.runs.iter().map(|run| {
-                    (
-                        run.text.as_str(),
-                        han_language(run, end_language, style_language),
-                    )
-                }),
-                false,
-            );
+            let pieces: Vec<Vec<(&str, Option<&str>)>> = source
+                .paragraph
+                .runs
+                .iter()
+                .map(|run| run_language_pieces(run, end_language, style_language))
+                .collect();
+            let paragraph_scripts =
+                paragraph_scripts_with_languages(pieces.iter().flatten().copied(), false);
             self.record(first.clone(), &[]);
-            for run in &source.paragraph.runs {
-                let language = han_language(run, end_language, style_language);
+            for (run, run_pieces) in source.paragraph.runs.iter().zip(&pieces) {
+                let unresolved = run_pieces.iter().all(|(_, language)| language.is_none());
                 let mut scripts =
-                    paragraph_scripts_with_languages([(run.text.as_str(), language)], false);
-                if language.is_none() && scripts.iter().any(|script| script == "cjk-sc") {
+                    paragraph_scripts_with_languages(run_pieces.iter().copied(), false);
+                if unresolved && scripts.iter().any(|script| script == "cjk-sc") {
                     let contextual: Vec<_> = paragraph_scripts
                         .iter()
                         .filter(|script| matches!(script.as_str(), "cjk-jp" | "cjk-kr"))
@@ -1410,17 +1409,101 @@ impl FontRequests {
     }
 }
 
-/// The language deciding a run's Han glyphs: the first East Asian one of the run, the
-/// paragraph mark and the paragraph's style default.
-fn han_language<'a>(
+/// A run's text pieces, each with the language deciding its Han glyphs: the first East Asian
+/// one of the source text, the paragraph mark and the paragraph's style default.
+fn run_language_pieces<'a>(
     run: &'a ContentRun,
     end_language: Option<&'a str>,
     style_language: Option<&'a str>,
-) -> Option<&'a str> {
-    [run.language.as_deref(), end_language, style_language]
-        .into_iter()
-        .flatten()
-        .find(|tag| han_script_for_language(tag).is_some())
+) -> Vec<(&'a str, Option<&'a str>)> {
+    let decide = |language: Option<&'a str>| {
+        [language, end_language, style_language]
+            .into_iter()
+            .flatten()
+            .find(|tag| han_script_for_language(tag).is_some())
+    };
+    if run.languages.is_empty() {
+        return vec![(run.text.as_str(), decide(None))];
+    }
+    run.languages
+        .iter()
+        .map(|(range, language)| {
+            (
+                run.text.get(range.clone()).unwrap_or(""),
+                decide(language.as_deref()),
+            )
+        })
+        .collect()
+}
+
+/// Source languages for each live run of a story paragraph: where the live text still equals
+/// the source text, each run is cut at the source run boundaries; otherwise every run carries
+/// each language the source paragraph uses, so no needed face is dropped.
+fn live_run_languages(
+    source: Option<&pptx_parse::TextParagraph>,
+    live: &[&str],
+) -> Vec<Vec<(std::ops::Range<usize>, Option<String>)>> {
+    let Some(source) = source else {
+        return live
+            .iter()
+            .map(|text| vec![(0..text.len(), None)])
+            .collect();
+    };
+    let unchanged = live
+        .iter()
+        .flat_map(|text| text.bytes())
+        .eq(source.runs.iter().flat_map(|run| run.text.bytes()));
+    if !unchanged {
+        let languages: std::collections::BTreeSet<Option<&String>> = source
+            .runs
+            .iter()
+            .map(|run| run.properties.language.as_ref())
+            .collect();
+        return live
+            .iter()
+            .map(|text| {
+                if languages.is_empty() {
+                    return vec![(0..text.len(), None)];
+                }
+                languages
+                    .iter()
+                    .map(|language| (0..text.len(), language.cloned()))
+                    .collect()
+            })
+            .collect();
+    }
+    let mut source_runs = source
+        .runs
+        .iter()
+        .filter(|run| !run.text.is_empty())
+        .peekable();
+    let mut source_start = 0;
+    let mut start = 0;
+    let mut out = Vec::with_capacity(live.len());
+    for text in live {
+        let end = start + text.len();
+        let mut spans = Vec::new();
+        while let Some(run) = source_runs.peek() {
+            let source_end = source_start + run.text.len();
+            let from = source_start.max(start);
+            let to = source_end.min(end);
+            if from < to {
+                spans.push((from - start..to - start, run.properties.language.clone()));
+            }
+            if source_end <= end {
+                source_start = source_end;
+                source_runs.next();
+            } else {
+                break;
+            }
+        }
+        if spans.is_empty() {
+            spans.push((0..text.len(), None));
+        }
+        out.push(spans);
+        start = end;
+    }
+    out
 }
 
 struct FontRequestWalker<'a, 'b> {
@@ -3623,8 +3706,9 @@ struct ContentParagraph {
 struct ContentRun {
     text: String,
     style: TextStyle,
-    /// `a:rPr/@lang` of the source run.
-    language: Option<String>,
+    /// Byte ranges of `text` with the `a:rPr/@lang` of the source text they come from;
+    /// ranges overlap when an edited paragraph can no longer be mapped to its source runs.
+    languages: Vec<(std::ops::Range<usize>, Option<String>)>,
 }
 
 fn content_from_story(
@@ -3648,8 +3732,7 @@ fn content_from_story(
                 let insertions = source_para
                     .map(|source| slide_number_insertions(source, &live))
                     .unwrap_or_default();
-                let aligned =
-                    source_para.filter(|source| source.runs.len() == paragraph.runs.len());
+                let mut live_languages = live_run_languages(source_para, &live).into_iter();
                 let mut runs = Vec::with_capacity(paragraph.runs.len() + insertions.len());
                 let mut insertion_index = 0;
                 let mut offset = 0;
@@ -3658,31 +3741,40 @@ fn content_from_story(
                         && insertions[insertion_index].0 == offset
                     {
                         let source_run = insertions[insertion_index].1;
+                        let text = slide_number.to_string();
                         runs.push(ContentRun {
-                            text: slide_number.to_string(),
+                            languages: vec![(
+                                0..text.len(),
+                                source_run.properties.language.clone(),
+                            )],
+                            text,
                             style: style_from_run_properties(&source_run.properties, Some(theme)),
-                            language: source_run.properties.language.clone(),
                         });
                         insertion_index += 1;
                     }
                     offset += run.text.len();
+                    let languages = live_languages.next().unwrap_or_default();
+                    let replaced = replacements
+                        .as_ref()
+                        .and_then(|values| values.get(run_index))
+                        .and_then(|value| value.clone());
                     runs.push(ContentRun {
-                        text: replacements
-                            .as_ref()
-                            .and_then(|values| values.get(run_index))
-                            .and_then(|value| value.clone())
-                            .unwrap_or_else(|| run.text.clone()),
+                        languages: if replaced.is_some() {
+                            Vec::new()
+                        } else {
+                            languages
+                        },
+                        text: replaced.unwrap_or_else(|| run.text.clone()),
                         style: run.style.clone(),
-                        language: aligned
-                            .and_then(|source| source.runs[run_index].properties.language.clone()),
                     });
                 }
                 while insertion_index < insertions.len() {
                     let source_run = insertions[insertion_index].1;
+                    let text = slide_number.to_string();
                     runs.push(ContentRun {
-                        text: slide_number.to_string(),
+                        languages: vec![(0..text.len(), source_run.properties.language.clone())],
+                        text,
                         style: style_from_run_properties(&source_run.properties, Some(theme)),
-                        language: source_run.properties.language.clone(),
                     });
                     insertion_index += 1;
                 }
@@ -3730,10 +3822,13 @@ fn content_from_body(
                 runs: paragraph
                     .runs
                     .iter()
-                    .map(|run| ContentRun {
-                        text: field_text(run, slide_number),
-                        style: style_from_properties(&run.properties, theme),
-                        language: run.properties.language.clone(),
+                    .map(|run| {
+                        let text = field_text(run, slide_number);
+                        ContentRun {
+                            languages: vec![(0..text.len(), run.properties.language.clone())],
+                            text,
+                            style: style_from_properties(&run.properties, theme),
+                        }
                     })
                     .collect(),
                 end_language: paragraph
