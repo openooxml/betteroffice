@@ -1,4 +1,5 @@
 import { writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsup';
 import { nativeEnginePlugin } from '../../../scripts/native-engine';
 
@@ -47,7 +48,11 @@ export default defineConfig([
     tsconfig: '../../../packages/docx/tsconfig.json',
     format: ['esm'],
     shims: true,
-    dts: true,
+    dts: {
+      compilerOptions: {
+        paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/docx/src/yrs/sessionWorker.node.ts', import.meta.url))] },
+      },
+    },
     splitting: true,
     sourcemap: false,
     clean: true,

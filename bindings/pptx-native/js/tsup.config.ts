@@ -20,7 +20,11 @@ export default defineConfig({
   },
   outDir: dist,
   format: ['esm'],
-  dts: true,
+  dts: {
+    compilerOptions: {
+      paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/pptx/src/session/sessionWorker.node.ts', import.meta.url))] },
+    },
+  },
   tsconfig: `${source}/tsconfig.json`,
   splitting: true,
   sourcemap: false,

@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsup';
 import { rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,7 +20,11 @@ export default defineConfig({
   },
   outDir: dist,
   format: ['esm'],
-  dts: true,
+  dts: {
+    compilerOptions: {
+      paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/xlsx/src/session/sessionWorker.node.ts', import.meta.url))] },
+    },
+  },
   tsconfig: `${source}/tsconfig.json`,
   splitting: true,
   external: ['#session-worker'],
