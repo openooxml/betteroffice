@@ -474,8 +474,11 @@ jobs:
         run: |
           bun run --filter @betteroffice/xlsx build:wasm
           bun run --filter @betteroffice/pptx build:wasm
+          bun run --filter @betteroffice/docx build:wasm
 
       - name: Build and test
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: |
           bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build
           (cd packages/fonts && bunx tsup)
@@ -490,6 +493,8 @@ jobs:
           done
 
       - name: Check native declarations
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: |
           (cd packages/xlsx && bunx tsup)
           ls packages/xlsx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/wasm-declarations"
@@ -499,6 +504,22 @@ jobs:
           ls packages/pptx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/pptx-wasm-declarations"
           ls bindings/pptx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/pptx-wasm-declarations" -
           while read -r file; do cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"; done < "$RUNNER_TEMP/pptx-wasm-declarations"
+          (cd packages/docx && bunx tsup)
+          for asset in edit/docx_edit parse/docx_parse query/docx_query opc/ooxml_opc preflight/docx_preflight; do
+            asset_chunks=$(grep -rlF --include='*.mjs' "./generated/${asset}_bg.wasm" packages/docx/dist)
+            test -n "$asset_chunks"
+            while IFS= read -r chunk; do
+              test "$(dirname "$chunk")" = packages/docx/dist
+            done <<< "$asset_chunks"
+          done
+          for package in packages/docx bindings/docx-native; do
+            (cd "$package/dist" && find . -type f \( -name '*.d.ts' -o -name '*.d.mts' \) | LC_ALL=C sort) > "$RUNNER_TEMP/$(basename "$package")-declarations.txt"
+          done
+          test -s "$RUNNER_TEMP/docx-declarations.txt"
+          cmp "$RUNNER_TEMP/docx-declarations.txt" "$RUNNER_TEMP/docx-native-declarations.txt"
+          while IFS= read -r declaration; do
+            cmp "packages/docx/dist/$declaration" "bindings/docx-native/dist/$declaration"
+          done < "$RUNNER_TEMP/docx-declarations.txt"
 
       - name: Test the xlsx packages on the native engine
         run: |
@@ -512,6 +533,10 @@ jobs:
           bun scripts/check-engine-surface.ts xlsx
           bun scripts/check-engine-surface.ts pptx
           bun scripts/check-engine-surface.ts docx
+          bun scripts/check-engine-surface.ts docx-parse
+          bun scripts/check-engine-surface.ts docx-query
+          bun scripts/check-engine-surface.ts docx-opc
+          bun scripts/check-engine-surface.ts docx-preflight
 
       - name: Test the pptx packages on the native engine
         run: |

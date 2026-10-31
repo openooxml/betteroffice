@@ -39,6 +39,30 @@ export const FORMATS: Record<string, FormatConfig> = {
     classes: ["EditSession", "RetainedLayoutMeta", "RunInheritance"],
     pending: [],
   },
+  "docx-parse": {
+    wasm: "packages/docx/src/wasm/generated/parse/docx_parse.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  "docx-query": {
+    wasm: "packages/docx/src/wasm/generated/query/docx_query.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  "docx-opc": {
+    wasm: "packages/docx/src/wasm/generated/opc/ooxml_opc.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  "docx-preflight": {
+    wasm: "packages/docx/src/wasm/generated/preflight/docx_preflight.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
   pptx: {
     wasm: "packages/pptx/src/wasm/generated/pptx_wasm.d.ts",
     native: "bindings/pptx-native/index.d.ts",

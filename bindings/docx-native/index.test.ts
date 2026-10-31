@@ -1,265 +1,85 @@
-import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'bun:test';
-import JSZip from 'jszip';
+import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { describe, expect, spyOn, test } from 'bun:test';
+import { documentFixture, exercisePackage } from './package-script';
 
-import type {
-  DocxContentControlsSnapshot,
-  DocxMarkdownContent,
-  DocxStructuredContent,
-} from '../../packages/docx/src/core';
-import { expectSavedPartsEqual } from '../native-parity';
-import { decodeFontFace, fontPreflight, openDocument, renderDocxMarkdown } from './index.js';
-import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
+const manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+const wasmManifest = JSON.parse(readFileSync(new URL('../../packages/docx/package.json', import.meta.url), 'utf8'));
 
-const fixture = readFileSync(
-  new URL('../../apps/demo/public/betteroffice-demo.docx', import.meta.url)
-);
-const layoutInput = JSON.parse(
-  readFileSync(
-    new URL(
-      '../../crates/docx-layout/tests/fixtures/single-page-multi-paragraph.input.json',
-      import.meta.url
-    ),
-    'utf8'
-  )
-);
-const font = readFileSync(
-  new URL('../../crates/docx-raster/tests/assets/Carlito-Regular.ttf', import.meta.url)
-);
-const exportFixture = readFileSync(
-  new URL('../../crates/docx-edit/tests/fixtures/structured-export/principal.docx', import.meta.url)
-);
-const controlsFixture = readFileSync(
-  new URL('../../packages/docx/src/yrs/__fixtures__/content-controls/template.docx', import.meta.url)
-);
+function distFiles(directory = new URL('./dist/', import.meta.url)): URL[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = new URL(entry.name + (entry.isDirectory() ? '/' : ''), directory);
+    return entry.isDirectory() ? distFiles(path) : [path];
+  });
+}
 
 describe('@betteroffice/docx-native', () => {
-  test('font preflight returns the expected faces on synthetic bytes', async () => {
-    const zip = new JSZip();
-    zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/><w:rFonts w:ascii="Run" w:cs="Complex"/><w:iCs/></w:rPr><w:t>Text العربية</w:t></w:r></w:p></w:body></w:document>`);
-    zip.file('word/styles.xml', `<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Base" w:hAnsi="Base"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`);
-    const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-    const native = fontPreflight(bytes);
-    expect(JSON.parse(native)).toEqual({
-      complete: false,
-      faces: [
-        { family: 'Base', bold: false, italic: false, scripts: ['arabic'] },
-        { family: 'Base', bold: true, italic: false, scripts: ['arabic'] },
-        { family: 'Complex', bold: false, italic: false, scripts: ['arabic'] },
-        { family: 'Complex', bold: true, italic: false, scripts: ['arabic'] },
-        { family: 'Complex', bold: true, italic: true, scripts: ['arabic'] },
-        { family: 'Run', bold: false, italic: false, scripts: ['arabic'] },
-        { family: 'Run', bold: true, italic: false, scripts: ['arabic'] },
-      ],
-    });
-  });
-
-  test('linked font decoder returns known answers and shared errors', () => {
-    expect(typeof decodeFontFace).toBe('function');
-    for (const entry of fontCases()) {
-      const decoded = decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
-      expectFontFace(decoded, entry);
-      for (const bytes of [decoded.font, decoded.payload].filter((value) => value !== undefined)) {
-        expect(bytes).toBeInstanceOf(Uint8Array);
-        expect(Buffer.isBuffer(bytes)).toBe(false);
-        expect(Object.getPrototypeOf(bytes)).toBe(Uint8Array.prototype);
-      }
-    }
-    for (const entry of fontErrorCases()) {
-      expect(() => decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput))
-        .toThrow(new Error(entry.message));
-    }
-  });
-
-  test('opens, inspects, lays out, renders, and saves a document', async () => {
-    const document = await openDocument(fixture, { author: 'Node test' });
-
-    const structure = await document.structure;
-    const paragraphIds = await document.paragraphIds;
-    const text = await document.text;
-
-    expect(structure.bodyParagraphs).toBeGreaterThan(0);
-    expect(document.author).toBe('Node test');
-    expect(paragraphIds).toHaveLength(structure.bodyParagraphs);
-    expect(text.length).toBeGreaterThan(0);
-    const layout = await document.layout(layoutInput);
-    await document.registerFont({ family: 'Calibri', data: font });
-    const rendered = await document.renderPage(layout.displayList);
-
-    expect(rendered.data.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    expect((await document.save()).subarray(0, 2)).toEqual(Buffer.from('PK'));
-  });
-
-  test('rejects invalid edit origins', async () => {
-    expect(() => openDocument(fixture, { origin: 'unknown' })).toThrow('origin must be');
-  });
-
-  test('applies optional parse limits and preserves unspecified defaults', async () => {
-    const document = await openDocument(exportFixture, { limits: { maxParagraphs: 500_000 } });
-    expect((await document.structure).bodyParagraphs).toBeGreaterThan(1);
-    const defaults = await openDocument(exportFixture, { limits: {} });
-    expect(await document.text).toBe(await defaults.text);
-    await expect(openDocument(exportFixture, { limits: { maxParagraphs: 1 } })).rejects.toThrow();
-    await expect(openDocument(exportFixture, { limits: { maxXmlBytes: 1 } })).rejects.toThrow();
-    for (const maxBlocks of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => openDocument(exportFixture, { limits: { maxBlocks } })).toThrow(
-        'maxBlocks must be a nonnegative safe integer'
-      );
-    }
-  });
-
-  test('exports structured content and Markdown without a session envelope', async () => {
-    const document = await openDocument(exportFixture);
-    const content = (await document.exportStructured({
-      revisionView: 'markup',
-      stories: ['body', 'headers'],
-      includeFormatting: false,
-    })) as DocxStructuredContent;
-    expect(content.schemaVersion).toBe(1);
-    expect(content.anchorScope).toBe('snapshot');
-    expect(content.revisionView).toBe('markup');
-    expect(content.includeFormatting).toBe(false);
-    expect(content.includedStories).toEqual(['body', 'headers']);
-    expect(content.stories[0].blocks.length).toBeGreaterThan(1);
-    expect(content).not.toHaveProperty('ok');
-    expect(content).not.toHaveProperty('version');
-    const markdown = (await document.exportMarkdown({
-      revisionView: 'markup',
-      stories: ['body', 'headers'],
-      includeFormatting: false,
-    })) as DocxMarkdownContent;
-    expect(markdown.markdown).toContain('Structured export');
-    expect(markdown.anchors.length).toBeGreaterThan(0);
-    const rendering = renderDocxMarkdown(content);
-    expect(rendering).toBeInstanceOf(Promise);
-    expect(await rendering).toBe(markdown.markdown);
-    expect(await renderDocxMarkdown(content, { maxBytes: 8_388_608 })).toBe(markdown.markdown);
-    const truncated = (await document.exportStructured({
-      revisionView: 'accepted',
-      maxBlocks: 1,
-    })) as DocxStructuredContent;
-    expect(truncated.truncated).toBe(true);
-
-    await document.replaceParagraphText('00000001', 'Updated native export');
-    const updated = (await document.exportMarkdown({ revisionView: 'accepted' })) as DocxMarkdownContent;
-    expect(updated.markdown).toContain('Updated native export');
-  });
-
-  test('rejects export refusals with the failure message and data', async () => {
-    const document = await openDocument(exportFixture);
-    for (const operation of [
-      () => document.exportStructured({ revisionView: 'accepted', maxBlocks: 2_000_000 }),
-      () => document.exportMarkdown({ revisionView: 'accepted', maxBytes: 67_108_865 }),
-    ]) {
-      const refused = await operation().catch((error) => error);
-      expect(refused).toBeInstanceOf(Error);
-      expect(refused.name).toBe('DocxExportError');
-      expect(refused.failure).toEqual({
-        code: 'limit-exceeded',
-        target: null,
-        message: expect.any(String),
+  test('exposes exactly the wasm package subpaths with a browser guard', () => {
+    expect(Object.keys(manifest.exports)).toEqual(Object.keys(wasmManifest.exports));
+    expect(Object.keys(manifest.exports)).toHaveLength(28);
+    for (const [entry, target] of Object.entries(wasmManifest.exports) as [string, { types: string; import: string }][]) {
+      expect(manifest.exports[entry]).toEqual({
+        types: target.types,
+        browser: './dist/browser.js',
+        import: target.import,
       });
-      expect(refused.message).toBe(refused.failure.message);
+      expect(Object.keys(manifest.exports[entry])).toEqual(['types', 'browser', 'import']);
     }
-    const content = await document.exportStructured({ revisionView: 'accepted' });
-    const rendering = renderDocxMarkdown(content, { maxBytes: 16 });
-    expect(rendering).toBeInstanceOf(Promise);
-    const refused = await rendering.catch((error) => error);
-    expect(refused).toBeInstanceOf(Error);
-    expect(refused).toMatchObject({
-      name: 'DocxExportError',
-      failure: { code: 'invalid-options', target: null },
-    });
-    expect(refused.message).toBe(refused.failure.message);
+    expect(manifest.main).toBe(wasmManifest.main);
+    expect(manifest.module).toBe(wasmManifest.module);
+    expect(manifest.types).toBe(wasmManifest.types);
+    expect(manifest.files).toEqual(['dist', 'index.js', 'index.d.ts']);
+    expect(manifest.dependencies).toEqual(wasmManifest.dependencies);
+    expect(manifest.peerDependencies).toEqual(wasmManifest.peerDependencies);
+    expect(manifest.peerDependenciesMeta).toEqual(wasmManifest.peerDependenciesMeta);
+    expect(readFileSync(new URL('./dist/core.mjs', import.meta.url), 'utf8').length).toBeGreaterThan(0);
+    expect(readFileSync(new URL('./dist/core.d.mts', import.meta.url), 'utf8').length).toBeGreaterThan(0);
   });
 
-  test('rejects malformed Markdown content and options asynchronously', async () => {
-    const malformedContent = renderDocxMarkdown({ schemaVersion: 2 });
-    expect(malformedContent).toBeInstanceOf(Promise);
-    await expect(malformedContent).rejects.toThrow();
-    const document = await openDocument(exportFixture);
-    const content = await document.exportStructured({ revisionView: 'accepted' });
-    const malformedOptions = renderDocxMarkdown(content, { maxBytes: -1 });
-    expect(malformedOptions).toBeInstanceOf(Promise);
-    await expect(malformedOptions).rejects.toThrow();
-  });
-
-  test('lists and finds content controls with optional story filters', async () => {
-    const document = await openDocument(controlsFixture);
-    const snapshot = (await document.listContentControls()) as DocxContentControlsSnapshot;
-    expect(snapshot.schemaVersion).toBe(1);
-    expect(snapshot.anchorScope).toBe('snapshot');
-    expect(snapshot.complete).toBe(true);
-    expect(snapshot.controls.length).toBeGreaterThan(2);
-    expect(snapshot).not.toHaveProperty('version');
-    const duplicates = (await document.findContentControls({
-      kind: 'tag',
-      tag: 'account.reference',
-    })) as DocxContentControlsSnapshot;
-    expect(duplicates.controls).toHaveLength(2);
-    const address = (await document.findContentControls({
-      kind: 'alias',
-      alias: 'Address',
-    })) as DocxContentControlsSnapshot;
-    expect(address.controls).toHaveLength(1);
-    const byId = (await document.findContentControls({
-      kind: 'id',
-      controlId: address.controls[0].controlId,
-    })) as DocxContentControlsSnapshot;
-    expect(byId.controls).toEqual(address.controls);
-    const byOoxmlId = (await document.findContentControls({
-      kind: 'ooxmlId',
-      ooxmlId: '105',
-    })) as DocxContentControlsSnapshot;
-    expect(byOoxmlId.controls).toEqual(address.controls);
-    const missing = (await document.findContentControls({
-      kind: 'tag',
-      tag: 'ACCOUNT.reference',
-    })) as DocxContentControlsSnapshot;
-    expect(missing.controls).toEqual([]);
-    const options = { stories: ['headers'] as const };
-    const headers = (await document.listContentControls(options)) as DocxContentControlsSnapshot;
-    expect(headers.controls.map((control) => control.tag)).toEqual(['document.title']);
-    const title = (await document.findContentControls(
-      { kind: 'tag', tag: 'document.title' },
-      options
-    )) as DocxContentControlsSnapshot;
-    expect(title.controls).toEqual(headers.controls);
-  });
-
-  test('rejects content-control refusals with the failure message and data', async () => {
-    const document = await openDocument(controlsFixture);
-    for (const operation of [
-      () => document.listContentControls({ maxControls: 2 }),
-      () => document.findContentControls({ kind: 'tag', tag: 'account.reference' }, { maxControls: 1 }),
-    ]) {
-      const refused = await operation().catch((error) => error);
-      expect(refused).toBeInstanceOf(Error);
-      expect(refused.name).toBe('DocxContentControlsError');
-      expect(refused.failure.code).toBe('limit-exceeded');
-      expect(refused.message).toBe(refused.failure.message);
+  test('browser conditions reject every entry', () => {
+    for (const entry of Object.keys(manifest.exports)) {
+      const specifier = '@betteroffice/docx-native' + (entry === '.' ? '' : entry.slice(1));
+      const result = spawnSync(process.execPath, ['--conditions=browser', '--eval', `import(${JSON.stringify(specifier)}).catch(error => { console.error(error.message); process.exit(1); })`], {
+        cwd: import.meta.dir,
+        encoding: 'utf8',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('use @betteroffice/docx in browsers');
     }
-    const invalid = await document.listContentControls({ maxControls: 0 }).catch((error) => error);
-    expect(invalid.failure.code).toBe('invalid-options');
   });
 
-  test('accepts now as a save timestamp alias and rejects conflicting values', async () => {
-    const document = await openDocument(fixture, { timestamp: '2000-01-01T00:00:00.000Z' });
-    const now = '2026-05-06T07:08:09.000Z';
-    const options = { updateModifiedDate: true, modifiedBy: 'Native alias test' };
-    const timestamp = await document.save({ ...options, timestamp: now });
-    const aliased = await document.save({ ...options, now });
-    await expectSavedPartsEqual(timestamp, aliased);
-    await expectSavedPartsEqual(timestamp, await document.save({ ...options, timestamp: now, now }));
-    const zip = await JSZip.loadAsync(aliased);
-    const properties = await zip.file('docProps/core.xml')!.async('string');
-    expect(properties).toContain(now);
-    expect(properties).toContain('Native alias test');
-    const conflict = document.save({ timestamp: document.timestamp, now });
-    expect(conflict).toBeInstanceOf(Promise);
-    await expect(conflict).rejects.toBeInstanceOf(TypeError);
-    await expect(conflict).rejects.toThrow('now and timestamp must match when both are provided');
-    expect(document.timestamp).toBe('2000-01-01T00:00:00.000Z');
-    await expectSavedPartsEqual(timestamp, await document.save({ ...options, timestamp: now }));
+  test('ships no wasm assets or wasm-bindgen runtime', () => {
+    for (const file of distFiles()) {
+      expect(file.pathname).not.toEndWith('.wasm');
+      if (!/\.(?:m?js|json)$/.test(file.pathname)) continue;
+      const contents = readFileSync(file, 'utf8');
+      expect(contents).not.toContain('__wbindgen');
+      expect(contents).not.toContain('_bg.wasm');
+      expect(contents).not.toMatch(/\.wasm\b/);
+    }
+  });
+
+  test('opens, edits, saves and reopens in-thread without compiling or instantiating wasm', async () => {
+    const reject = () => { throw new Error('Unexpected WebAssembly call'); };
+    const spies = [
+      spyOn(WebAssembly, 'compile').mockImplementation(reject),
+      spyOn(WebAssembly, 'instantiate').mockImplementation(reject),
+      spyOn(WebAssembly, 'compileStreaming').mockImplementation(reject),
+      spyOn(WebAssembly, 'instantiateStreaming').mockImplementation(reject),
+    ];
+    try {
+      const core = await import('@betteroffice/docx-native');
+      const yrs = await import('@betteroffice/docx-native/yrs');
+      const fixture = await documentFixture();
+      const { results, bytes } = await exercisePackage(yrs, core, fixture);
+      expect(results.before).toBe('Package text');
+      expect(results.texts).toEqual(['Native Ω Package text']);
+      expect(results.reopenedTexts).toEqual(results.texts);
+      expect(results.blocks).toBeGreaterThan(0);
+      expect(bytes.subarray(0, 2)).toEqual(new Uint8Array([80, 75]));
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });

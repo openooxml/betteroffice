@@ -1,74 +1,47 @@
+import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { beforeAll, expect, test } from 'bun:test';
 import JSZip from 'jszip';
-import {
-  exportDocxMarkdown,
-  exportDocxStructured,
-  findDocxContentControls,
-  listDocxContentControls,
-  type DocxExportOptions,
-} from '../../packages/docx/src/core';
-import { preloadEditWasm } from '../../packages/docx/src/wasm/edit';
-import {
-  fontPreflight as wasmFontPreflight,
-  preloadPreflightWasm,
-} from '../../packages/docx/src/wasm/preflight';
-import { fontPreflight, openDocument } from './index.js';
+import * as wasmCore from '../../packages/docx/src/core';
+import * as wasmYrs from '../../packages/docx/src/yrs';
+import * as nativeCore from '@betteroffice/docx-native';
+import * as nativeYrs from '@betteroffice/docx-native/yrs';
+import { NATIVE_ENTRIES } from '../../scripts/native-engine';
+import { expectSavedPartsEqual } from '../native-parity';
+import { documentFixture, exercisePackage } from './package-script';
 
-const exportFixture = readFileSync(
-  new URL('../../crates/docx-edit/tests/fixtures/structured-export/principal.docx', import.meta.url)
-);
-const controlsFixture = readFileSync(
-  new URL('../../packages/docx/src/yrs/__fixtures__/content-controls/template.docx', import.meta.url)
-);
+for (const [entry, source] of Object.entries(NATIVE_ENTRIES.docx)) {
+  test(`matches the wasm source exports at ${entry}`, async () => {
+    const specifier = '@betteroffice/docx-native' + (entry === '.' ? '' : entry.slice(1));
+    const nativeKeys = Object.keys(await import(specifier));
+    const wasmKeys = Object.keys(await import(`../../packages/docx/${source}`));
+    expect(nativeKeys.sort()).toEqual(wasmKeys.sort());
+  });
+}
 
-beforeAll(() =>
-  preloadEditWasm(
-    new Uint8Array(
-      readFileSync(
-        new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)
-      )
-    )
-  ),
-  30_000
-);
-
-test('matches the WASM bytes-level exports and content controls', async () => {
-  for (const bytes of [exportFixture, controlsFixture]) {
-    const document = await openDocument(bytes);
-    for (const revisionView of ['accepted', 'original', 'markup'] as const) {
-      const options: DocxExportOptions = {
-        revisionView,
-        stories: ['body', 'headers', 'footers', 'footnotes', 'endnotes', 'comments'],
-        includeFormatting: false,
-        maxBlocks: 10_000,
-        maxBytes: 8_388_608,
-      };
-      expect(await document.exportStructured(options)).toEqual(
-        await exportDocxStructured(bytes, options)
-      );
-      expect(await document.exportMarkdown(options)).toEqual(await exportDocxMarkdown(bytes, options));
-    }
-    expect(await document.listContentControls()).toEqual(await listDocxContentControls(bytes));
-    const options = { stories: ['body', 'headers'] as const, maxControls: 10_000, maxBytes: 8_388_608 };
-    expect(await document.listContentControls(options)).toEqual(
-      await listDocxContentControls(bytes, options)
-    );
-    const query = { kind: 'tag', tag: 'account.reference' } as const;
-    expect(await document.findContentControls(query, options)).toEqual(
-      await findDocxContentControls(bytes, query, options)
-    );
-  }
+test('the same public package script returns equal results and saved parts', async () => {
+  const bytes = await documentFixture();
+  const actual = await exercisePackage(nativeYrs, nativeCore, bytes);
+  const expected = await exercisePackage(wasmYrs, wasmCore, bytes);
+  expect(actual.results).toEqual(expected.results);
+  await expectSavedPartsEqual(actual.bytes, expected.bytes);
+  const saved = await JSZip.loadAsync(actual.bytes);
+  expect(await saved.file('custom/untouched.bin')!.async('uint8array')).toEqual(new Uint8Array([0, 127, 255]));
 });
 
-test('native font preflight matches the standalone wasm on synthetic bytes', async () => {
-  const zip = new JSZip();
-  zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/><w:rFonts w:ascii="Run" w:cs="Complex"/><w:iCs/></w:rPr><w:t>Text العربية</w:t></w:r></w:p></w:body></w:document>');
-  zip.file('word/styles.xml', '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Base" w:hAnsi="Base"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>');
-  const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-  await preloadPreflightWasm(readFileSync(new URL(
-    '../../packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm',
-    import.meta.url
-  )));
-  expect(fontPreflight(bytes)).toBe(JSON.stringify(await wasmFontPreflight(bytes)));
+test('structured exports and content controls match through the package API', async () => {
+  for (const fixture of [
+    '../../crates/docx-edit/tests/fixtures/structured-export/principal.docx',
+    '../../packages/docx/src/yrs/__fixtures__/content-controls/template.docx',
+  ]) {
+    const bytes = new Uint8Array(readFileSync(new URL(fixture, import.meta.url)));
+    for (const revisionView of ['accepted', 'original', 'markup'] as const) {
+      const options = { revisionView, includeFormatting: false, maxBlocks: 10_000, maxBytes: 8_388_608 };
+      expect(await nativeCore.exportDocxStructured(bytes, options)).toEqual(await wasmCore.exportDocxStructured(bytes, options));
+      expect(await nativeCore.exportDocxMarkdown(bytes, options)).toEqual(await wasmCore.exportDocxMarkdown(bytes, options));
+    }
+    expect(await nativeCore.listDocxContentControls(bytes)).toEqual(await wasmCore.listDocxContentControls(bytes));
+    const query = { kind: 'tag', tag: 'account.reference' } as const;
+    expect(await nativeCore.findDocxContentControls(bytes, query)).toEqual(await wasmCore.findDocxContentControls(bytes, query));
+    expect(await nativeCore.fontPreflight(bytes)).toEqual(await wasmCore.fontPreflight(bytes));
+  }
 });
