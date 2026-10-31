@@ -378,6 +378,8 @@ export interface DocAttrs {
 export interface TextRunPrimitive extends DocAttrs {
   kind: 'text';
   text: string;
+  /** Canvas-only glyph stand-in text. */
+  paintText?: string;
   x: number; // pen origin
   baselineY: number;
   width: number; // measured advance of the whole run

@@ -393,7 +393,8 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
     (ctx as CanvasRenderingContext2D & { wordSpacing: string }).wordSpacing =
       `${(run.wordSpacing ?? 0) / substituteScale}px`;
   }
-  const text = run.allCaps ? run.text.toUpperCase() : run.text;
+  const paintText = run.paintText ?? run.text;
+  const text = run.allCaps ? paintText.toUpperCase() : paintText;
   if (run.leaderGlyphs?.glyph && (run.leaderGlyphs.count ?? 0) > 0) {
     drawLeaderText(ctx, run, substituteScale);
   } else if (run.canvasClusters?.length) {
