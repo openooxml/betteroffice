@@ -17,8 +17,8 @@ use super::comment_references::normalize_comment_references;
 use super::context::SerializerContext;
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
-    serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
-    serialize_endnotes_part, serialize_footnotes_part, serialize_header_footer_part,
+    serialize_comments_ids_part, serialize_document_part, serialize_endnotes_part,
+    serialize_footnotes_part, serialize_header_footer_part, try_serialize_comments_with_info,
 };
 use super::s10::{CanonicalXmlEvent, SerializerDeterminism, canonical_xml_events};
 
@@ -111,18 +111,18 @@ pub fn serialize_s12_wire(
         }
         S12SerializeRequest::Comments { comments, .. } => (
             "comments",
-            serialize_comments_with_info(&comments, &mut context).0,
+            try_serialize_comments_with_info(&comments, &mut context)?.0,
         ),
         S12SerializeRequest::CommentsExtended { comments, .. } => {
-            let (_, infos) = serialize_comments_with_info(&comments, &mut context);
+            let (_, infos) = try_serialize_comments_with_info(&comments, &mut context)?;
             ("commentsExtended", serialize_comments_extended_part(&infos))
         }
         S12SerializeRequest::CommentsIds { comments, .. } => {
-            let (_, infos) = serialize_comments_with_info(&comments, &mut context);
+            let (_, infos) = try_serialize_comments_with_info(&comments, &mut context)?;
             ("commentsIds", serialize_comments_ids_part(&infos))
         }
         S12SerializeRequest::CommentsExtensible { comments, .. } => {
-            let (_, infos) = serialize_comments_with_info(&comments, &mut context);
+            let (_, infos) = try_serialize_comments_with_info(&comments, &mut context)?;
             (
                 "commentsExtensible",
                 serialize_comments_extensible_part(&infos, &comments),

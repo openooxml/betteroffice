@@ -24,6 +24,7 @@ pub use section_patch::{SectionEdit, SectionEdits};
 pub(crate) mod splice;
 pub mod table;
 mod table_splice;
+mod text_box;
 pub mod watermark;
 pub mod xml_writer;
 
@@ -43,7 +44,8 @@ pub use parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_part, serialize_comments_with_info,
     serialize_document_body, serialize_document_part, serialize_endnotes_part,
-    serialize_footnotes_part, serialize_header_footer_part,
+    serialize_footnotes_part, serialize_header_footer_part, try_serialize_comments_part,
+    try_serialize_comments_with_info,
 };
 pub use run::{
     serialize_drawing_content, serialize_run, serialize_shape_content, serialize_text_formatting,

@@ -52,12 +52,23 @@ pub fn parse_notes(
         };
         let note_type = parse_note_type(element.attribute(Some("w"), "type"));
         let content = parser.parse_blocks(element, 0, false)?;
-        let custom_root_bindings = if has_foreign_content(element) {
+        let bookmarked = has_block_bookmark(element);
+        let mut custom_root_bindings = if has_foreign_content(element) {
             note_bindings(root, element)
         } else {
             Vec::new()
         };
-        let verbatim_xml = has_unmodeled_direct_block(element).then(|| {
+        if bookmarked {
+            for binding in bookmark_bindings(root, element) {
+                if !custom_root_bindings
+                    .iter()
+                    .any(|existing| existing.name == binding.name)
+                {
+                    custom_root_bindings.push(binding);
+                }
+            }
+        }
+        let verbatim_xml = needs_verbatim(element).then(|| {
             let mut bound = element.clone();
             for attribute in &custom_root_bindings {
                 bound
@@ -65,7 +76,11 @@ pub fn parse_notes(
                     .entry(attribute.name.clone())
                     .or_insert_with(|| attribute.value.clone());
             }
-            bound.to_raw_inline_xml()
+            if bookmarked {
+                bound.to_bookmarked_raw_inline_xml()
+            } else {
+                bound.to_raw_inline_xml()
+            }
         });
         let source_ordinal = verbatim_xml
             .as_ref()
@@ -84,7 +99,6 @@ pub fn parse_notes(
     Ok(notes)
 }
 
-/// The root's custom bindings plus those a previous save placed on the note.
 fn note_bindings(root: &XmlElement, note: &XmlElement) -> Vec<crate::paragraph::RawAttribute> {
     let mut bindings = crate::document::custom_root_bindings(root);
     for (name, value) in &note.attributes {
@@ -96,6 +110,79 @@ fn note_bindings(root: &XmlElement, note: &XmlElement) -> Vec<crate::paragraph::
         }
     }
     bindings
+}
+
+fn bookmark_bindings(root: &XmlElement, note: &XmlElement) -> Vec<crate::paragraph::RawAttribute> {
+    fn required<'a>(
+        element: &'a XmlElement,
+        scopes: &mut Vec<&'a str>,
+        prefixes: &mut std::collections::HashSet<&'a str>,
+        root: bool,
+    ) {
+        let mark = scopes.len();
+        if !root {
+            scopes.extend(
+                element
+                    .attributes
+                    .keys()
+                    .filter_map(|name| name.strip_prefix("xmlns:")),
+            );
+        }
+        for name in std::iter::once(element.name.as_str())
+            .chain(element.attributes.keys().map(String::as_str))
+        {
+            if let Some((prefix, _)) = name.split_once(':')
+                && !matches!(prefix, "xml" | "xmlns")
+                && !scopes.contains(&prefix)
+            {
+                prefixes.insert(prefix);
+            }
+        }
+        for (name, value) in &element.attributes {
+            if matches!(
+                crate::xml::local_name(name),
+                "Ignorable"
+                    | "MustUnderstand"
+                    | "Requires"
+                    | "ProcessContent"
+                    | "PreserveElements"
+                    | "PreserveAttributes"
+            ) {
+                for token in value.split_whitespace() {
+                    let prefix = token.split_once(':').map_or(token, |(prefix, _)| prefix);
+                    if prefix != "xml" && !scopes.contains(&prefix) {
+                        prefixes.insert(prefix);
+                    }
+                }
+            }
+        }
+        for child in element.child_elements() {
+            required(child, scopes, prefixes, false);
+        }
+        scopes.truncate(mark);
+    }
+    let mut prefixes = std::collections::HashSet::new();
+    required(note, &mut Vec::new(), &mut prefixes, true);
+    root.attributes
+        .iter()
+        .chain(&note.attributes)
+        .filter(|(name, _)| name.starts_with("xmlns:"))
+        .collect::<indexmap::IndexMap<_, _>>()
+        .into_iter()
+        .filter(|(name, value)| {
+            prefixes.contains(name.strip_prefix("xmlns:").unwrap())
+                && !crate::serializer::parts::note_root_declares(name, value)
+        })
+        .map(|(name, value)| crate::paragraph::RawAttribute {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+fn has_block_bookmark(element: &XmlElement) -> bool {
+    crate::block::has_direct_block_bookmark(element)
+        || element.child_elements().any(has_block_bookmark)
 }
 
 fn has_foreign_content(element: &XmlElement) -> bool {
@@ -112,7 +199,7 @@ pub fn parse_note_type(value: Option<&str>) -> &'static str {
     }
 }
 
-fn has_unmodeled_direct_block(note: &XmlElement) -> bool {
+fn needs_verbatim(note: &XmlElement) -> bool {
     note.child_elements().any(|child| {
         matches!(
             child.local_name(),
@@ -373,6 +460,139 @@ mod tests {
                 .contains("a&amp;b")
         );
         assert!(notes[1].verbatim_xml.is_none());
+    }
+
+    #[test]
+    fn note_attributes_do_not_trigger_verbatim_without_direct_blocks() {
+        for attributes in [r#"label="a&amp;b""#, r#"w:rsidR="00112233""#] {
+            let notes = parse_story(
+                &format!(
+                    r#"<w:endnotes xmlns:w="w"><w:endnote w:id="1" {attributes}><w:p/></w:endnote><w:endnote w:id="2" {attributes}><w:bookmarkStart w:id="7" w:name="Range"/><w:p/><w:bookmarkEnd w:id="7"/></w:endnote><w:endnote w:id="3"><w:bookmarkStart w:id="8" w:name="Range"/><w:p/><w:bookmarkEnd w:id="8"/></w:endnote><w:endnote w:id="4"><w:customXml><w:p/></w:customXml></w:endnote></w:endnotes>"#
+                ),
+                false,
+                &ParseLimits::default(),
+            );
+            assert!(notes[0].verbatim_xml.is_none());
+            assert!(
+                notes[1]
+                    .verbatim_xml
+                    .as_deref()
+                    .unwrap()
+                    .contains(attributes)
+            );
+            assert!(notes[2].verbatim_xml.is_some());
+            assert_eq!(
+                notes[2]
+                    .content
+                    .iter()
+                    .map(BlockContent::node_type)
+                    .collect::<Vec<_>>(),
+                ["rawXml", "paragraph", "rawXml"]
+            );
+            assert!(notes[3].verbatim_xml.is_some());
+        }
+    }
+
+    #[test]
+    fn verbatim_notes_do_not_accumulate_part_root_bindings() {
+        use crate::serializer::{
+            SerializerContext, SerializerDeterminism, serialize_endnotes_part,
+            serialize_footnotes_part,
+        };
+
+        for footnotes in [true, false] {
+            let name = if footnotes { "footnote" } else { "endnote" };
+            for content in ["<w:p/>", "<w:p><w:r><w:t>Text</w:t></w:r></w:p>"] {
+                let note = format!(
+                    r#"<w:{name} w:id="1"><w:bookmarkStart w:id="7" w:name="Note"/><w:customXml>{content}</w:customXml><w:bookmarkEnd w:id="7"/></w:{name}>"#
+                );
+                let xml = format!(
+                    r#"<w:{name}s xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex" xmlns:x="urn:unused" mc:Ignorable="cx x">{note}</w:{name}s>"#
+                );
+                let mut notes = parse_story(&xml, footnotes, &ParseLimits::default());
+                let mut context = SerializerContext::new(&SerializerDeterminism {
+                    seed: "0".repeat(64),
+                    now: "2000-01-01T00:00:00.000Z".to_owned(),
+                })
+                .unwrap();
+                let serialize = if footnotes {
+                    serialize_footnotes_part
+                } else {
+                    serialize_endnotes_part
+                };
+                let mut previous = None;
+                for _ in 0..3 {
+                    assert_eq!(notes[0].verbatim_xml.as_deref(), Some(note.as_str()));
+                    assert!(notes[0].custom_root_bindings.is_empty());
+                    let saved = serialize(&notes, &mut context).unwrap();
+                    if let Some(previous) = previous {
+                        assert_eq!(saved, previous);
+                    }
+                    notes = parse_story(&saved, footnotes, &ParseLimits::default());
+                    previous = Some(saved);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_notes_keep_their_root_bindings_and_ignorable_prefixes() {
+        use crate::serializer::{
+            SerializerContext, SerializerDeterminism, serialize_endnotes_part,
+            serialize_footnotes_part,
+        };
+
+        for footnotes in [true, false] {
+            let name = if footnotes { "footnote" } else { "endnote" };
+            for custom_xml in [false, true] {
+                let content = if custom_xml {
+                    "<w:customXml><x:opaque/><w:p/></w:customXml>"
+                } else {
+                    "<x:opaque/><w:p/>"
+                };
+                let xml = format!(
+                    r#"<w:{name}s xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension" mc:Ignorable="x"><w:{name} w:id="1">{content}</w:{name}></w:{name}s>"#
+                );
+                let notes = parse_story(&xml, footnotes, &ParseLimits::default());
+                assert_eq!(
+                    notes[0].custom_root_bindings,
+                    vec![
+                        crate::paragraph::RawAttribute {
+                            name: "xmlns:x".to_owned(),
+                            value: "urn:extension".to_owned(),
+                        },
+                        crate::paragraph::RawAttribute {
+                            name: "mc:Ignorable".to_owned(),
+                            value: "x".to_owned(),
+                        },
+                    ]
+                );
+                let mut context = SerializerContext::new(&SerializerDeterminism {
+                    seed: "0".repeat(64),
+                    now: "2000-01-01T00:00:00.000Z".to_owned(),
+                })
+                .unwrap();
+                let serialize = if footnotes {
+                    serialize_footnotes_part
+                } else {
+                    serialize_endnotes_part
+                };
+                let saved = serialize(&notes, &mut context).unwrap();
+                if custom_xml {
+                    let expected = format!(
+                        r#"<w:{name} w:id="1" xmlns:x="urn:extension" mc:Ignorable="x">{content}</w:{name}>"#
+                    );
+                    assert_eq!(notes[0].verbatim_xml.as_deref(), Some(expected.as_str()));
+                    assert!(saved.contains(&expected), "{saved}");
+                } else {
+                    assert!(notes[0].verbatim_xml.is_none());
+                    assert!(saved.contains(&format!(
+                        r#"<w:{name} w:id="1" xmlns:x="urn:extension" mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh wp14 x">"#
+                    )), "{saved}");
+                    assert!(saved.contains("<x:opaque/>"), "{saved}");
+                }
+            }
+        }
     }
 
     #[test]

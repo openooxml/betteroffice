@@ -20,7 +20,7 @@ use crate::xml::{
 use super::context::SerializerContext;
 use super::parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
-    serialize_comments_ids_part, serialize_comments_with_info,
+    serialize_comments_ids_part, try_serialize_comments_with_info,
 };
 use super::xml_writer::{escape_xml, js_number};
 
@@ -132,8 +132,8 @@ pub(super) fn splice_comments(
         }
     }
     let (source_xml, source_infos) =
-        serialize_comments_with_info(&original, &mut source_context.clone());
-    let (kept_xml, kept_infos) = serialize_comments_with_info(kept, &mut source_context);
+        try_serialize_comments_with_info(&original, &mut source_context.clone())?;
+    let (kept_xml, kept_infos) = try_serialize_comments_with_info(kept, &mut source_context)?;
     let infos_changed = if thread_changed {
         source_infos.iter().zip(&kept_infos).any(|(source, kept)| {
             source.comment_id != kept.comment_id
@@ -971,7 +971,10 @@ fn normalize(value: &mut Value) {
     }
 }
 
-fn source_comments(parts: &[(String, Vec<u8>)], seed: &str) -> Result<Vec<Comment>, ParseError> {
+pub(super) fn source_comments(
+    parts: &[(String, Vec<u8>)],
+    seed: &str,
+) -> Result<Vec<Comment>, ParseError> {
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
     let settings = crate::settings::parse_settings(
@@ -1425,7 +1428,7 @@ mod tests {
             })
             .unwrap();
             let (serialized, mut infos) =
-                serialize_comments_with_info(&comments, &mut context.clone());
+                try_serialize_comments_with_info(&comments, &mut context.clone()).unwrap();
             let spliced = splice_comments(
                 source.as_bytes(),
                 &parts,
@@ -1476,7 +1479,8 @@ mod tests {
             now: "2026-01-05T09:00:00.000Z".to_owned(),
         })
         .unwrap();
-        let (serialized, mut infos) = serialize_comments_with_info(&comments, &mut context.clone());
+        let (serialized, mut infos) =
+            try_serialize_comments_with_info(&comments, &mut context.clone()).unwrap();
         let spliced = splice_comments(
             source.as_bytes(),
             &parts,

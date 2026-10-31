@@ -23,7 +23,9 @@ import type {
   DocxPersistedParagraphAnchor,
   DocxSessionParagraphAnchor,
 } from './paragraphIdentity';
-import { projectedSessionKey, yrsToDocument } from './yrsToDocument';
+import {
+  assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
+} from './yrsToDocument';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
 export interface DocxSavedParagraph {
@@ -68,13 +70,16 @@ function storyBlocks(document: Document): BlockContent[][] {
 
 const COMMENTS_PART = 'word/comments.xml';
 
+function commentBlocks(body: unknown): BlockContent[] | undefined {
+  return Array.isArray(body) && body.every(entry =>
+    entry && ['paragraph', 'table', 'blockSdt', 'rawXml'].includes(entry.type)
+  ) ? body as BlockContent[] : undefined;
+}
+
 function commentContent(body: unknown): Paragraph[] {
-  if (
-    Array.isArray(body) &&
-    body.length > 0 &&
-    body.every((entry) => (entry as { type?: unknown } | null)?.type === 'paragraph')
-  ) {
-    return body as Paragraph[];
+  const blocks = commentBlocks(body);
+  if (blocks && blocks.length > 0) {
+    return blocks.filter((block): block is Paragraph => block.type === 'paragraph');
   }
   const text = typeof body === 'string' ? body : '';
   return [
@@ -123,10 +128,14 @@ function savedComments(
     if (!bodyChanged && author === comment.author && date === comment.date &&
       entry.done === (comment.done ?? false) && parentId === comment.parentId) return comment;
     changed = true;
+    if (bodyChanged) assertCommentBookmarkReplacement(comment.blockContent ?? comment.content);
+    const content = bodyChanged ? commentContent(entry.body) : undefined;
+    const blocks = commentBlocks(entry.body) ?? content ?? [];
+    const restored = content ? restoreBlockBookmarks(blocks, comment.blockContent ?? comment.content, `comment:${comment.id}`) : blocks;
     return {
       ...comment, author, date, done: entry.done, parentId,
       ...(comment.status === undefined ? {} : { status: entry.done ? 'resolved' as const : 'active' as const }),
-      ...(bodyChanged ? { content: commentContent(entry.body), blockContent: undefined } : {}),
+      ...(content ? { content, blockContent: restored === blocks ? undefined : restored } : {}),
     };
   });
   const sessionIds = new Map<number, string>();

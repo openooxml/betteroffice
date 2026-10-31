@@ -32,6 +32,7 @@ fn empty(name: String) -> XmlElement {
         paragraph_ordinal: None,
         para_id_attribute: None,
         bookmark_xml: None,
+        bookmark_replay_xml: None,
     }
 }
 
@@ -227,7 +228,7 @@ fn clear_decorative_extensions(element: &mut XmlElement) {
     }
 }
 
-fn update_frame(
+pub(super) fn update_frame(
     drawing: &mut XmlElement,
     shape: &Shape,
     baseline: &Value,
@@ -391,6 +392,13 @@ pub(super) fn replay(
     context: &mut SerializerContext,
     whole_run: bool,
 ) -> Result<Option<String>, ParseError> {
+    if shape
+        .drawing_model
+        .as_ref()
+        .is_some_and(|model| model.get("textBoxContentSha256").is_some())
+    {
+        return super::text_box::replay(shape, context, whole_run);
+    }
     let Some(source) = shape
         .drawing_run_xml
         .as_deref()
