@@ -30,3 +30,9 @@ test('saved comment ids keep source and free numeric ids and number the rest aft
   expect([...savedCommentIds([1], [{ id: '9201:0' }, { id: '5' }, { id: '1' }, { id: '01' }])])
     .toEqual([['1', 1], ['9201:0', 2], ['5', 5], ['01', 3]]);
 });
+
+test('saved comment ids preserve survivors and reserve identities of deleted comments', () => {
+  const previous = new Map([['9201:0', 1], ['9201:1', 2]]);
+  expect([...savedCommentIds([], [{ id: '9201:1' }, { id: '9201:2' }], previous)])
+    .toEqual([['9201:1', 2], ['9201:2', 3]]);
+});

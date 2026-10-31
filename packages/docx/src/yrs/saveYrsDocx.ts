@@ -1,5 +1,5 @@
 import { DocxSectionError, sectionPropertiesEqual } from './sections';
-import { preloadOpcWasm, unzipContainer } from '../docx/wasm';
+import { preloadOpcWasm, rezipContainer, unzipContainer } from '../docx/wasm';
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
 import { engineProgress } from '../utils/engineProgress';
@@ -10,9 +10,11 @@ import {
   markHeaderFooterAlias,
 } from '../docx/headerFooterAliasProjection';
 import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFacade';
+import { parseDocumentWithRust } from '../docx/rustParseFacade';
+import { preloadParseWasm } from '../docx/parseWasm';
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
-import type { YrsSession } from './index';
+import type { YrsCommentInfo, YrsSession } from './index';
 import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
@@ -49,6 +51,28 @@ export interface DocxSavedDocument {
   conflicts: DocxSavedParagraph[];
 }
 
+/** @internal */
+export interface DocxCommentSaveIdentity {
+  id: number;
+  paraId?: string;
+  durableId?: string;
+}
+
+/** @internal */
+export interface DocxCommentSaveBaseline {
+  bytes: Uint8Array;
+  comments: readonly YrsCommentInfo[];
+}
+
+export interface DocxSaveOptions extends RepackOptions {
+  /** @internal */
+  commentIdentities?: ReadonlyMap<string, DocxCommentSaveIdentity>;
+  /** @internal */
+  commentBaseline?: DocxCommentSaveBaseline;
+  /** @internal */
+  commentDeletion?: boolean;
+}
+
 function storyBlocks(document: Document): BlockContent[][] {
   const pkg = document.package;
   const headerFooterBlocks = [pkg.headers, pkg.footers].flatMap((entries) =>
@@ -67,6 +91,17 @@ function storyBlocks(document: Document): BlockContent[][] {
 }
 
 const COMMENTS_PART = 'word/comments.xml';
+const COMMENT_SOURCE_PARTS = [COMMENTS_PART, 'word/commentsExtended.xml', 'word/commentsIds.xml', 'word/commentsExtensible.xml', 'word/_rels/comments.xml.rels', '[Content_Types].xml', 'word/_rels/document.xml.rels', 'docProps/core.xml'];
+
+function commentSourceBuffer(original: ArrayBuffer, baseline: Uint8Array): ArrayBuffer {
+  const parts = unzipContainer(new Uint8Array(original));
+  const saved = unzipContainer(baseline);
+  for (const path of COMMENT_SOURCE_PARTS) {
+    if (saved[path]) parts[path] = saved[path];
+    else delete parts[path];
+  }
+  return Uint8Array.from(rezipContainer(parts)).buffer;
+}
 
 function commentContent(body: unknown): Paragraph[] {
   if (
@@ -95,13 +130,27 @@ function commentBodyKey(body: unknown): string | undefined {
 
 function savedComments(
   session: YrsSession,
-  base: Document
+  base: Document,
+  identities?: ReadonlyMap<string, DocxCommentSaveIdentity>,
+  baseline?: readonly YrsCommentInfo[]
 ): { comments: Comment[]; sessionIds: Map<number, string>; changed: boolean } {
   const source = base.package.document.comments ?? [];
   const listed = session.listComments();
   resolveCommentMedia(listed, (token) => session.mediaDataUrl(token));
-  const ids = savedCommentIds(source.map((comment) => comment.id), listed);
+  const ids = savedCommentIds(source.map((comment) => comment.id), listed,
+    identities && new Map([...identities].map(([id, identity]) => [id, identity.id])));
   const held = new Map(listed.map((comment) => [comment.id, comment]));
+  const prior = structuredClone([...(baseline ?? [])]);
+  resolveCommentMedia(prior, (token) => session.mediaDataUrl(token));
+  const previous = new Map(prior.map(comment => [comment.id, comment]));
+  const aliases = new Map<number, string>(identities && [...identities].map(([id, identity]) => [identity.id, id]));
+  const sessionId = (comment: Comment) => aliases.get(comment.id) ?? String(comment.id);
+  let retained: Set<string> | undefined;
+  if (source.some(comment => !held.has(sessionId(comment)))) {
+    const read = session.exportStructured({ revisionView: 'markup', stories: ['comments'], maxBlocks: 1_000_000, maxBytes: 67_108_864 });
+    if (!read.ok || read.content.truncated) throw new Error('The remaining source comments could not be read for saving');
+    retained = new Set(read.content.stories.flatMap(story => story.comment ? [story.comment.id] : []));
+  }
   let changed = false;
   const parentOf = (parentId: string | null) => {
     if (parentId === null) return undefined;
@@ -110,15 +159,21 @@ function savedComments(
     const numeric = Number(parentId);
     return Number.isFinite(numeric) && String(numeric) === parentId ? numeric : undefined;
   };
-  const comments = source.map((comment) => {
-    const entry = held.get(String(comment.id));
-    held.delete(String(comment.id));
+  const comments = source.filter(comment => {
+    if (!retained || retained.has(sessionId(comment))) return true;
+    changed = true;
+    return false;
+  }).map((comment) => {
+    const key = sessionId(comment);
+    const entry = held.get(key);
+    const before = previous.get(key);
+    held.delete(key);
     if (!entry || (!entry.author && !entry.date && entry.body == null &&
       !entry.done && entry.parentId === null)) return comment;
-    const bodyChanged = entry.body != null &&
-      commentBodyKey(entry.body) !== commentBodyKey(comment.blockContent ?? comment.content);
-    const author = entry.author;
-    const date = entry.date === (comment.date ?? '') ? comment.date : entry.date || undefined;
+    const priorBody = before ? before.body : comment.blockContent ?? comment.content;
+    const bodyChanged = entry.body != null && commentBodyKey(entry.body) !== commentBodyKey(priorBody);
+    const author = before && entry.author === before.author ? comment.author : entry.author;
+    const date = entry.date === (before?.date ?? comment.date ?? '') ? comment.date : entry.date || undefined;
     const parentId = parentOf(entry.parentId);
     if (!bodyChanged && author === comment.author && date === comment.date &&
       entry.done === (comment.done ?? false) && parentId === comment.parentId) return comment;
@@ -129,13 +184,16 @@ function savedComments(
       ...(bodyChanged ? { content: commentContent(entry.body), blockContent: undefined } : {}),
     };
   });
-  const sessionIds = new Map<number, string>();
+  const sessionIds = new Map([...ids].filter(([id, numeric]) => id !== String(numeric)).map(([id, numeric]) => [numeric, id]));
   for (const entry of held.values()) {
     changed = true;
     const id = ids.get(entry.id)!;
+    const identity = identities?.get(entry.id);
     if (String(id) !== entry.id) sessionIds.set(id, entry.id);
     comments.push({
       id,
+      ...(identity?.paraId ? { paraId: identity.paraId } : {}),
+      ...(identity?.durableId ? { durableId: identity.durableId } : {}),
       author: entry.author,
       done: entry.done,
       parentId: parentOf(entry.parentId),
@@ -459,7 +517,7 @@ export async function writeSessionSave(
   document: Document,
   capture: DocxSessionSave,
   originalBuffer: ArrayBuffer,
-  options: RepackOptions = {},
+  options: DocxSaveOptions = {},
   patches: (part: string) => boolean = () => true,
   skipMutations = false,
   splices: (part: string) => boolean = patches,
@@ -474,6 +532,7 @@ export async function writeSessionSave(
   const separators = noteSeparatorKeys(document);
   let sourceSeparators: ReturnType<typeof noteSeparatorKeys> | null | undefined;
   const rewritten = (part: string): boolean => {
+    if (options.commentDeletion) return false;
     const kind = (['footnotes', 'endnotes'] as const).find(
       (name) => part.replace(/^\//, '') === `word/${name}.xml`
     );
@@ -494,7 +553,7 @@ export async function writeSessionSave(
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
-  const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
+  const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(session, output, capture, sourceBuffer);
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
@@ -502,6 +561,12 @@ export async function writeSessionSave(
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
     const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));
     const plan: RustParagraphIds = {
+      ...(options.commentBaseline ? {
+        removedCommentIds: [...new Set([
+          ...(sessionMaterializedSource(session)?.package.document.comments ?? []).map(comment => String(comment.id)),
+          ...[...(options.commentIdentities?.values() ?? [])].map(identity => String(identity.id)),
+        ])].filter(id => !output.package.document.comments?.some(comment => String(comment.id) === id)),
+      } : {}),
       ...(sectionEdits ? { sectionEdits } : {}),
       assignments: capture.plan.assignments,
       patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (sectionPlan === undefined || part !== bodyPart)),
@@ -525,8 +590,11 @@ export async function writeSessionSave(
             }),
           }),
     };
+    const source = options.commentDeletion && options.commentBaseline ? Uint8Array.from(options.commentBaseline.bytes).buffer
+      : options.commentBaseline ? commentSourceBuffer(sectionEdits ? sourceBuffer : originalBuffer, options.commentBaseline.bytes)
+        : sectionEdits ? sourceBuffer : originalBuffer;
     const { buffer, warnings } = await writeDocumentWithRust(
-      withSourceOrdinals(output, spliced), sectionEdits ? sourceBuffer : originalBuffer, options, undefined, undefined, plan, skipMutations, yieldSave
+      withSourceOrdinals(output, spliced), source, options, undefined, undefined, plan, skipMutations, yieldSave
     );
     for (const warning of warnings) {
       if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
@@ -599,14 +667,39 @@ export async function writeSessionSave(
  */
 export async function saveYrsDocx(
   session: YrsSession,
-  options: RepackOptions = {}
+  options: DocxSaveOptions = {}
 ): Promise<DocxSavedDocument> {
-  const base = session.materializeDocx();
+  let base = session.materializeDocx();
   if (!base?.originalBuffer) {
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
   }
-  const capture = captureSessionSave(session);
-  const comments = savedComments(session, base);
+  if (options.commentDeletion && !options.commentBaseline) throw new Error('Comment deletion requires a saved comment baseline');
+  let capture = captureSessionSave(session);
+  if (options.commentBaseline) {
+    await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
+    const source = options.commentDeletion ? Uint8Array.from(options.commentBaseline.bytes).buffer
+      : commentSourceBuffer(base.originalBuffer!, options.commentBaseline.bytes);
+    const saved = parseDocumentWithRust(source, {
+      parseHeadersFooters: false, parseNotes: false, detectVariables: false, includeCanonical: false,
+    }).document.package.document.comments;
+    base = { ...base, package: { ...base.package, document: { ...base.package.document, comments: saved } } };
+    capture = { ...capture, plan: { ...capture.plan,
+      assignments: capture.plan.assignments.filter(entry => entry.part !== COMMENTS_PART),
+      patchedParts: capture.plan.patchedParts.filter(entry => entry.part !== COMMENTS_PART),
+      splicedParts: capture.plan.splicedParts?.filter(entry => entry.part !== COMMENTS_PART),
+    } };
+    if (options.commentDeletion) {
+      capture.plan = {
+        assignments: [],
+        patchedParts: Object.keys(unzipContainer(options.commentBaseline.bytes))
+          .filter(part => part.endsWith('.xml') && part !== COMMENTS_PART).map(part => ({ part, paraIds: [] })),
+      };
+    }
+  }
+  const comments = savedComments(session, base, options.commentIdentities, options.commentBaseline?.comments);
+  if (options.commentBaseline && !comments.changed && base.package.document.comments) {
+    capture.plan.patchedParts.push({ part: COMMENTS_PART, paraIds: [] });
+  }
   const document = yrsToDocument(
     session,
     comments.changed
@@ -624,7 +717,7 @@ export async function saveYrsDocx(
     session,
     document,
     capture,
-    base.originalBuffer,
+    base.originalBuffer!,
     options,
     (part) => !comments.changed || part !== COMMENTS_PART
   );
