@@ -1,5 +1,16 @@
 # @betteroffice/vsdx-react
 
+## 0.3.0
+
+### Patch Changes
+
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- Updated dependencies [ad45f86]
+- Updated dependencies [4fb3025]
+  - @betteroffice/vsdx@0.3.0
+  - @betteroffice/vsdx-i18n@0.3.0
+
 ## 0.2.0
 
 ### Minor Changes

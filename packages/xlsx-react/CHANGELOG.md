@@ -1,5 +1,58 @@
 # @betteroffice/xlsx-react
 
+## 0.6.0
+
+### Minor Changes
+
+- 1346f3c: The xlsx editor loads metric-compatible bundled fonts for workbook families from `@betteroffice/fonts` and repaints when they arrive. On by default; `defaultFonts={false}` opts out. Worker sessions expose `call.decodeFontFace`.
+- 9ff8a3f: Typing into a locked cell on a protected sheet now reports `sheet-protected` ("This cell is on a protected sheet.") instead of a failed save; unlocked cells there can be edited. `XlsxCommandFailureCode` and `XlsxCommandAdmissionCode` gain `sheet-protected`, so exhaustive switches need a case.
+
+### Patch Changes
+
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- ad45f86: Editors decode packed fonts with their engine by default instead of downloading a separate decoder. Standalone font providers can opt into a decoder with `runtime.decoder`.
+- 5797065: Loads collaboration support and presence UI only when collaboration is configured. Default editor opens download less JavaScript, while collaborative sessions retain synchronization and presence behavior.
+- 2922d83: The default spreadsheet editor downloads less code up front: the deprecated legacy editor and the in-thread fallback editor now load only when used.
+- 95f9416: The default editor no longer downloads the legacy worker session hook, editor API and input coordinator when it opens a workbook.
+- 421a628: Adds `headerFooter` facts to plugin `readCells` sheet entries: printable left, center and right sections and the active first, odd and even variants; null when a sheet has none. Workbook snapshots written by this version do not decode in 0.5.1.
+- 3d988e4: `XlsxEditor` and `PptxEditor` with `legacySyncApi` now call `onReady` once the first frame is painted. A hidden or zero-size editor calls it once it is shown.
+- 9ff8a3f: Protected cell entries now report `sheet-protected` with a localized message by default. Unlocked cells on protected sheets remain editable.
+- Updated dependencies [de8f092]
+- Updated dependencies [d17d538]
+- Updated dependencies [5999962]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [ad45f86]
+- Updated dependencies [39ae19a]
+- Updated dependencies [ec04baa]
+- Updated dependencies [4fb3025]
+- Updated dependencies [7b30d80]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [cc65f8e]
+- Updated dependencies [842d624]
+- Updated dependencies [e65df1c]
+- Updated dependencies [ad45f86]
+- Updated dependencies [bb3e6b7]
+- Updated dependencies [1346f3c]
+- Updated dependencies [711c41a]
+- Updated dependencies [5797065]
+- Updated dependencies [6d5edbc]
+- Updated dependencies [9d85035]
+- Updated dependencies [421a628]
+- Updated dependencies [057f74a]
+- Updated dependencies [abeaece]
+- Updated dependencies [9ff8a3f]
+- Updated dependencies [9ff8a3f]
+- Updated dependencies [b5f3ca2]
+- Updated dependencies [9d9de00]
+- Updated dependencies [df287ec]
+- Updated dependencies [8001b2f]
+  - @betteroffice/fonts@1.0.0
+  - @betteroffice/xlsx@0.6.0
+  - @betteroffice/xlsx-i18n@0.6.0
+
 ## 0.5.1
 
 ### Patch Changes

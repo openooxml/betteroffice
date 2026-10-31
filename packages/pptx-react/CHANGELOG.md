@@ -1,5 +1,64 @@
 # @betteroffice/pptx-react
 
+## 0.6.0
+
+### Minor Changes
+
+- e65df1c: Editors given `fonts` now load bundled faces for the other families a deck uses, including light members such as Calibri Light, so their text keeps its metrics. Supplied families keep the app's faces. Pass `defaultFonts={false}` to fetch no default fonts.
+- 0979b79: Adds `title`, `description` and `decorative` to pptx read shapes, from shape alternative text at every depth. Sessions seeded before this change read them as absent until reseeded.
+
+### Patch Changes
+
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- fe7a975: Unconfigured editors now load bundled fonts per family before the first paint. App fonts still take precedence, and uncovered characters retain browser font fallback.
+- 24179a4: Bold and italic runs in families whose bundled face has only a regular style, such as Chinese, Japanese and Korean fonts, are now drawn bold and slanted instead of upright regular. Lighter members such as Calibri Light keep their own weight.
+- e67e831: The default PowerPoint editor downloads about two thirds less code up front: the deprecated legacy editor and the in-thread fallback editor now load only when used.
+- 40f8868: Metafile pictures with labels, bitmaps or complex paint now draw through a lazy SVG replay in editors and native PNG exports, keeping the original media when saving. Adds `metafileSvg` and `metafileImageBytes` for hosts resolving display bytes.
+- 01a0e1f: Plugin reads include `headerFooter` with visible slide footer, slide number and date text, plus stored settings in `layout.headerFooter`. These facts are included by default and optional for older engines.
+- 9e8097c: The PowerPoint editor keeps its private crash-recovery copy of the opened file as a Blob instead of in page memory, lowering page memory by the file's size.
+- eb1ac5d: Crash recovery in the PowerPoint editor now works on picture-heavy decks: it reopens the original file and replays the edits instead of loading an open-time state export that could exceed the 64 MiB update limit, and opening no longer spends time exporting that state.
+- d4667b6: Lower PowerPoint editor memory on large decks: crash recovery keeps one copy of the opening state and the edits since then, instead of re-encoding and copying the whole presentation at every automatic checkpoint.
+- fea115a: Slide thumbnails in the PowerPoint editor no longer keep their full-resolution pictures decoded after painting, lowering memory on picture-heavy decks.
+- c485cb0: Typing no longer repaints the active slide's thumbnail on every keystroke; it updates once input pauses, and switching slides still shows each thumbnail's latest edits.
+- ec768e6: Slide thumbnails in the PowerPoint editor decode pictures at thumbnail size instead of full resolution, lowering memory on picture-heavy decks.
+- 61c7e5e: Typing in a PowerPoint text box no longer allocates and repaints a full slide canvas per keystroke: the editor reuses the slide raster and repaints only the lines that changed.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- ad45f86: Editors decode packed fonts with their engine by default instead of downloading a separate decoder. Standalone font providers can opt into a decoder with `runtime.decoder`.
+- 3d988e4: `XlsxEditor` and `PptxEditor` with `legacySyncApi` now call `onReady` once the first frame is painted. A hidden or zero-size editor calls it once it is shown.
+- Updated dependencies [d17d538]
+- Updated dependencies [5999962]
+- Updated dependencies [f44c229]
+- Updated dependencies [ad45f86]
+- Updated dependencies [4fb3025]
+- Updated dependencies [7b30d80]
+- Updated dependencies [cc65f8e]
+- Updated dependencies [842d624]
+- Updated dependencies [1398cff]
+- Updated dependencies [fe7a975]
+- Updated dependencies [24179a4]
+- Updated dependencies [e65df1c]
+- Updated dependencies [84578e1]
+- Updated dependencies [0530412]
+- Updated dependencies [e664196]
+- Updated dependencies [40f8868]
+- Updated dependencies [4cfcf6e]
+- Updated dependencies [01a0e1f]
+- Updated dependencies [c45b6ff]
+- Updated dependencies [eb1ac5d]
+- Updated dependencies [d4667b6]
+- Updated dependencies [8b61ea4]
+- Updated dependencies [6329841]
+- Updated dependencies [dfd1833]
+- Updated dependencies [906e337]
+- Updated dependencies [1398cff]
+- Updated dependencies [0979b79]
+- Updated dependencies [01a0e1f]
+- Updated dependencies [ec768e6]
+- Updated dependencies [76515fc]
+  - @betteroffice/pptx@0.6.0
+  - @betteroffice/pptx-i18n@0.6.0
+
 ## 0.5.1
 
 ### Patch Changes

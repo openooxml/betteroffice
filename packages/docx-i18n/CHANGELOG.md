@@ -1,5 +1,16 @@
 # @betteroffice/docx-i18n
 
+## 0.6.0
+
+### Minor Changes
+
+- 7b30d80: Adds `ar`, `es`, `it`, `ja`, `ko`, `nl`, `ru`, `uk`, `vi` and `zh-TW` (`zhTW`), and every shipped locale now translates every string with Office terminology and its language's plural forms.
+
+### Patch Changes
+
+- b7fa550: Adds Clear formatting shortcuts by default: Ctrl+Space on Windows and Linux, and ⌘\ on macOS, with translated shortcut help in every locale. Shortcut bindings can now be restricted to a platform through the optional `platform` field.
+- 4fb3025: The `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr` and `zh-CN` editor strings are now fully translated with Office terminology and correct plurals. Removes 185 unused locale keys.
+
 ## 0.5.1
 
 ## 0.5.0

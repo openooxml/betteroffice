@@ -1,5 +1,33 @@
 # @betteroffice/rust-crates
 
+## 0.6.0
+
+### Minor Changes
+
+- 191b4bf: Adds optional native font family resolution and local bundled font packs. Enable `manager` for resolution and `fonts-latin`, `fonts-intl`, or `fonts-cjk` for embedded bytes; all are off by default.
+- 2ea4cd7: The docx, pptx, xlsx and vsdx crates now resolve fonts by default: document-embedded faces, then faces you register, then the bundled Latin, international and CJK packs, read locally. Use `open_with_options` to pick a source, or turn off default features.
+- 90cdcb1: Adds `Workbook::list_defined_names`, `Workbook::conditional_formats`, their JSON wrappers and `Workbook::calculation_status` to the Rust facade. `Workbook::auto_filter` and `Workbook::is_array_formula` expose the existing engine read metadata.
+
+### Patch Changes
+
+- 3c1c056: Native DOCX page rendering is up to ten times faster on pages with clipped content. Pixel output is unchanged.
+- d1fff89: DOCX saves keep untouched paragraphs unchanged after more agent and editor edits: inserts next to tables, content controls, bookmarks and comment ranges, and cell merges in plain tables. Text edits keep a direct automatic text color and the original runs.
+- f8c262a: DOCX saves keep untouched paragraphs in more documents: Word 2007 files, documents with a default namespace on the root, table of contents page fields next to an edited label, text boxes beside edited text, and grouped text boxes.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- 91c80bf: Adds opt-in `Presentation.open_from_update`, `set_collaborative` and undo capture controls to Rust and Python. Python adds opt-in `on_update` subscriptions with synchronous callbacks after edits and remote updates.
+- 0530412: The same font bytes registered under several family names are now held once and no longer count against the 256-face limit. Opening a deck with more than 256 distinct faces now fails with `PptxResourceLimitError` instead of a closed worker connection.
+- 40f8868: Metafile pictures with labels, bitmaps or complex paint now draw through a lazy SVG replay in editors and native PNG exports, keeping the original media when saving. Adds `metafileSvg` and `metafileImageBytes` for hosts resolving display bytes.
+- ffe5b78: Rust and Python presentations gain the TypeScript names as aliases: `add_undo_boundary`, `list_proposals`, `encode_state_vector`, `encode_state_as_update`, `encode_diff`, and `apply_update` in Rust. Existing names stay.
+- d34e388: Rust and Python presentations gain `hit_test`, `register_fallback_font` and `layout_proposal_diff_slide`, matching the TypeScript API. Python adds `inspect_presentation`, which includes media bytes unless `include_media=False`, as in TypeScript.
+- 9a51fa7: The Rust `Presentation` API duplicates slides, adds pictures, changes shape z-order, edits table rows and columns, sets story paragraphs and comment positions, and returns undo/redo receipts and command reads, matching the TypeScript API.
+- dfd1833: Agent presentation exports no longer depend on a prior slide preview: edited autofit text is always shrunk to fit on save. `PresentationHandle.save` accepts `{ fonts, fallbackFonts }` to fit with those faces. Saving edited autofit text no longer scans a slide's shapes quadratically.
+- 906e337: Saving an edited slide keeps the original XML of every shape and element the edit did not change, including attribute order, namespace declarations, comments and processing instructions, instead of rewriting the whole slide.
+- 1398cff: Default fonts now load CJK script coverage for unmapped families and mixed text when the CJK packs are available; other scripts keep the browser font. `requestedFontFacesJson` adds optional `scripts` per face, and presentations with only coverage fonts render successfully.
+- 01a0e1f: Slide number fields on a slide render the slide's current number, counted from the presentation's first slide number, instead of the text cached in the file. Rendered and read slide numbers now agree after slides move.
+- b27572c: Adds Python workbook reads for cells, ranges, sheet metadata, calculation status, defined names, conditional formats, text search, selection formatting, merged ranges and charts. Results use plain dictionaries and lists with camelCase keys, matching TypeScript workbook reads.
+- ad45f86: Adds opt-in `decode_font_face` calls for zstd and woff2t font pack faces. Rust facades expose the shared `betteroffice-fonts` decoder as `fonts`; Python returns font bytes and an optional transformed payload.
+- 4990e8d: Native XLSX rendering draws charts much faster: a chart sheet that took about 400 ms now takes about 20 ms. Pixel output is unchanged.
+
 ## 0.5.1
 
 ### Patch Changes

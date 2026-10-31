@@ -1,5 +1,79 @@
 # @betteroffice/docx
 
+## 0.6.0
+
+### Minor Changes
+
+- cc2dc6c: Reads now include `drawing` (`wp:docPr` properties, placement and type) on drawing atoms by default, as do structured image and unsupported inlines. Plugins request a drawing's frame rects with the new `drawing` geometry target. Sessions seeded earlier read `drawing` as absent until reseeded.
+- 02bd5be: DOCX uses installed font packs by default for characters they cover. Uncovered scripts and unavailable CJK families retain browser and Google Fonts fallbacks unless disabled; configured fonts and document embeds still take precedence.
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+
+### Patch Changes
+
+- 21d4394: `docx_edit` can now replace every occurrence of literal text inside an existing Word comment with `replace_comment_text`, keeping its author, anchor, formatting and thread state.
+- 5421e9e: `docx_edit` adds `delete_comment`, which removes a comment or a root comment's whole thread, including its range markers, reference and companion entries.
+- 1f2c008: Applying a paragraph style to a numbered paragraph now keeps its direct list numbering and direct formatting, and a paragraph numbered only by its old style stops being numbered, instead of refusing the change.
+- b2ccc11: The docx editing engine downloads about 390 KB less (gzip): its heap accounting no longer inlines into every allocation.
+- f831537: Body margins now ignore header and footer distances when no reference applies to the page.
+- e1a414e: Documents whose XML parts start with a byte order mark and have bookmarks between paragraphs now save. Before, saving them failed with a malformed XML error.
+- 802a67c: A continuous section that changes its left or right margins now uses them from the page where it starts, as Word does, so its text, tables and floating objects no longer overflow or sit at the old position.
+- 0372f1d: Reads now include `drawings` on inline content-control atoms by default, including text boxes and revision views. Drawing geometry targets accept an optional `index` to address a drawing inside a control, including footer controls.
+- cc7f362: Opening a Word document no longer downloads the save engine up front. The editor prepares saving as soon as you edit or reach for Save, so the first save stays fast and read-only opens download less.
+- 0a4285c: Adds opt-in `fontPreflight`, returning DOCX font faces, script keys, and scan completeness without the editing engine. Its standalone module loads only when called or explicitly loaded with `preloadPreflightWasm`.
+- 80fbccd: Automatic paragraph spacing now uses 14 pt like Word instead of 14 px, is not added above the first paragraph of the document, and is dropped between items of the same list.
+- 51390c5: Inline charts and text boxes now sit side by side on a line like inline pictures, as in Word, instead of each taking a block of its own, so landscape pages with two charts no longer spill onto a second page.
+- e3b2ddb: Justified paragraphs in documents saved in Word 2010 or earlier compatibility modes no longer squeeze extra words onto a line, so line and page breaks match Word.
+- 773c633: Keeps bookmarks in table cells, content controls, headers, footers, notes, comments and text boxes on save, including after blocks are deleted, merged or moved.
+- f88d5cd: A multi-line paragraph kept with the next one now splits across pages like Word when it does not also keep its lines together, instead of moving whole and leaving a gap at the page bottom.
+- 45aceb4: A document with the same picture stored in more than one part now reports the same media part for it on every open, so collaborating replicas agree on its source.
+- 8c6a8a7: Odd and even page sections round explicit page numbering restarts up to the requested parity, avoiding extra blank pages when the authored restart has the opposite parity. Enabled by default.
+- 5999962: MS Mincho, MS Gothic, their proportional variants, and MS UI Gothic now use Office glyph widths by default, including Japanese names and decomposed voiced kana. CJK substitute outlines keep their original size during canvas painting.
+- f44c229: Non-breaking hyphens draw and measure with the font's hyphen glyph when the font has no dedicated one, instead of a missing-glyph box. They still never break a line.
+- b312d8c: Widens autofit table cells with `noWrap` when room permits and wraps text at the resolved cell width when constrained. Rows retain paragraph spacing, line height, and cell margins by default.
+- 3936cdb: The DOCX editor loads one engine wasm module instead of also fetching the layout module on the main thread and in its worker. Standalone font measurement now works beside an open editing session instead of throwing.
+- 4dc30ef: A page break that follows only a floating picture or shape now starts the next page with the text after it, as in Word, instead of leaving that text behind on an extra page.
+- 61f3ae2: In documents saved by Word 2013 or later, a paragraph that starts its own page (Page break before, or a page break at its start) no longer keeps its space before at the top of the new page, matching Word.
+- 5a6445d: A line that fits on the page in Word stays on the page instead of moving to the next one because of the spacing below it.
+- 0cc6839: Fixes painted text and list marker positions for paragraphs with negative inherited indents.
+- 4761a87: Shape geometry, rotations, image transforms and drawing arcs in documents are now computed bit for bit the same on WebAssembly and on native targets, ready for the native engine. WebAssembly results are unchanged.
+- c2f553d: The caret now moves with prepainted text while you type, at its real height, and settles when layout arrives. Moving or blinking the caret no longer causes a page layout.
+- 48c6d3c: Opening a Word document downloads about 4 MB less by using a smaller module for caret and selection queries.
+- 6b80d49: Reads no longer refuse documents with tracked paragraph splits and merges. They show pending paragraph-mark revisions as accepted in the accepted view or as rejected in the original view, keeping the following paragraph's id when paragraphs join.
+- 4b0842b: Restyling a paragraph now updates inherited field result formatting immediately while preserving explicit field result formatting.
+- f30d46e: `set_paragraph_style` keeps borders, spacing and other properties inherited from the new style when saving an unnumbered paragraph, so later style changes continue to apply.
+- bb1207f: Right aligned tab stops written as `right` in the document now keep the text after them on the same line, so table of contents page numbers no longer wrap onto a second line.
+- 875e0d6: A table row now stays with the next row only when its first cell is set to keep with next, as in Word, so tables fill the page instead of moving whole to the next one.
+- 5e26101: Text without its own font size now uses its style's size instead of the paragraph mark's, and table of contents entries no longer grow taller from their tab, page number or link style size, matching Word's line heights.
+- 9ab2b61: Fonts named "Sans Serif", such as Microsoft Sans Serif, now fall back to a sans face (Arial widths in Word documents) instead of Times New Roman, so text using them measures and wraps like Word.
+- 7599ffb: Speeds up repeated DOCX saves.
+- 60aeefa: Speeds up the first save after editing a large document.
+- fc50302: Speeds up DOCX saving without changing saved document bytes.
+- bb08976: Fixes section page sizes, margins and columns for section breaks inside block content controls.
+- 8c6a8a7: Odd page and even page section breaks into a section that restarts its page numbering now decide parity from the restarted number, as Word does, so no extra blank page is added when the restarted number already has the right parity.
+- 308f7b3: Preserves SmartArt during agent and editor saves, including resized diagrams and large source payloads. `Shape.drawingXml` or `Shape.drawingRunXml` stores the source once; `Shape.drawingModel` tracks frame edits. Enabled by default.
+- 514e876: Story checksums use constant memory, so long documents no longer exhaust the WebAssembly engine's memory and stop the editor. Checksum values are unchanged.
+- ceb5208: Table rows that start or end with skipped grid columns now place their cells in the right columns, as Word does, instead of shifting them to the left.
+- 7774f6c: Run fonts that name both a font and a theme font now use the theme font, as Word does, while saving keeps the authored font attributes.
+- 6091ab3: The editor now loads the fallback font for Chinese, Japanese, Korean, Arabic or Hebrew text typed or pasted into a document that had none, instead of drawing empty boxes until the document is reopened.
+- d1fff89: DOCX saves keep untouched paragraphs unchanged after more agent and editor edits: inserts next to tables, content controls, bookmarks and comment ranges, and cell merges in plain tables. Text edits keep a direct automatic text color and the original runs.
+- f8c262a: DOCX saves keep untouched paragraphs in more documents: Word 2007 files, documents with a default namespace on the root, table of contents page fields next to an edited label, text boxes beside edited text, and grouped text boxes.
+- dab515e: Collaboration update listeners now run after each engine call returns instead of inside the document transaction, so a listener can read or edit the session, and a listener that throws no longer stops the others from receiving the update.
+- 37199d9: Ships the same Latin and RTL faces in a smaller compressed install by default. Existing providers decode faces on demand, and DOCX reuses each face across fallback registrations.
+- 842d624: Office fonts we draw with a substitute, such as Aptos, Arial Narrow, Cambria and Verdana, now measure at the real font's glyph widths and line heights, so text breaks like Word and PowerPoint. Legacy names such as Tms Rmn and Helv also resolve.
+- 974d3ab: The first picture bullet in a document's numbering now takes up its space at the start of the first paragraph, as in Word, including when that paragraph is in a table.
+- 6478dec: The first save after editing is faster by warming the save path in the background when the editor is idle.
+- Updated dependencies [de8f092]
+- Updated dependencies [5999962]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [39ae19a]
+- Updated dependencies [ec04baa]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [842d624]
+- Updated dependencies [e65df1c]
+- Updated dependencies [ad45f86]
+  - @betteroffice/fonts@1.0.0
+
 ## 0.5.1
 
 ### Patch Changes

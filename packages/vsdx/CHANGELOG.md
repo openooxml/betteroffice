@@ -1,5 +1,11 @@
 # @betteroffice/vsdx
 
+## 0.3.0
+
+### Minor Changes
+
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+
 ## 0.2.0
 
 ## 0.1.0

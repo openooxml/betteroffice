@@ -1,5 +1,52 @@
 # @betteroffice/pptx
 
+## 0.6.0
+
+### Minor Changes
+
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+- e65df1c: Editors given `fonts` now load bundled faces for the other families a deck uses, including light members such as Calibri Light, so their text keeps its metrics. Supplied families keep the app's faces. Pass `defaultFonts={false}` to fetch no default fonts.
+- 0979b79: Adds `title`, `description` and `decorative` to pptx read shapes, from shape alternative text at every depth. Sessions seeded before this change read them as absent until reseeded.
+
+### Patch Changes
+
+- d17d538: A remote collaboration update or pipe frame is no longer refused as stale when local edits moved the document on while it was in flight, so peers stay in sync and no typed character is lost.
+- 5999962: MS Mincho, MS Gothic, their proportional variants, and MS UI Gothic now use Office glyph widths by default, including Japanese names and decomposed voiced kana. CJK substitute outlines keep their original size during canvas painting.
+- f44c229: Non-breaking hyphens draw and measure with the font's hyphen glyph when the font has no dedicated one, instead of a missing-glyph box. They still never break a line.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- 842d624: Office fonts we draw with a substitute, such as Aptos, Arial Narrow, Cambria and Verdana, now measure at the real font's glyph widths and line heights, so text breaks like Word and PowerPoint. Legacy names such as Tms Rmn and Helv also resolve.
+- 1398cff: With browser coverage fallback enabled, emoji with emoji presentation stay on the browser font instead of a registered coverage font, and a text presentation selector lets a coverage font draw the character.
+- fe7a975: Unconfigured editors now load bundled fonts per family before the first paint. App fonts still take precedence, and uncovered characters retain browser font fallback.
+- 24179a4: Bold and italic runs in families whose bundled face has only a regular style, such as Chinese, Japanese and Korean fonts, are now drawn bold and slanted instead of upright regular. Lighter members such as Calibri Light keep their own weight.
+- 84578e1: Disposing a PowerPoint worker editor while an edit, read or thumbnail call is still pending no longer reports an unhandled promise rejection; the call still rejects for any caller that awaits it.
+- 0530412: The same font bytes registered under several family names are now held once and no longer count against the 256-face limit. Opening a deck with more than 256 distinct faces now fails with `PptxResourceLimitError` instead of a closed worker connection.
+- e664196: The PowerPoint engine is about 3 KB smaller compressed: the slide layout cache compares slide floats with a direct walk instead of a generic serializer. Layout and cache behaviour are unchanged.
+- 40f8868: Metafile pictures with labels, bitmaps or complex paint now draw through a lazy SVG replay in editors and native PNG exports, keeping the original media when saving. Adds `metafileSvg` and `metafileImageBytes` for hosts resolving display bytes.
+- 4cfcf6e: Lower PowerPoint editor memory when opening large decks: temporary copies of the deck state made while opening are released before the next one is built, so the engine's memory peak stays lower for the whole session.
+- 01a0e1f: Plugin reads include `headerFooter` with visible slide footer, slide number and date text, plus stored settings in `layout.headerFooter`. These facts are included by default and optional for older engines.
+- c45b6ff: Slide shape geometry, rotations, shadows and EMF/WMF pictures are now computed bit for bit the same on WebAssembly and the native engine. WebAssembly results are unchanged.
+- eb1ac5d: Crash recovery in the PowerPoint editor now works on picture-heavy decks: it reopens the original file and replays the edits instead of loading an open-time state export that could exceed the 64 MiB update limit, and opening no longer spends time exporting that state.
+- d4667b6: Lower PowerPoint editor memory on large decks: crash recovery keeps one copy of the opening state and the edits since then, instead of re-encoding and copying the whole presentation at every automatic checkpoint.
+- 8b61ea4: The PowerPoint engine can list the font faces a slide or deck asks for before layout, so hosts can load exactly those fonts before the first paint. Rendering is unchanged.
+- 6329841: Arabic and Hebrew lines no longer break into scattered letters in the editor when a word's second letter starts with dots or a vowel point, as with Noto Naskh Arabic, Noto Sans Arabic and Noto Sans Hebrew.
+- dfd1833: Agent presentation exports no longer depend on a prior slide preview: edited autofit text is always shrunk to fit on save. `PresentationHandle.save` accepts `{ fonts, fallbackFonts }` to fit with those faces. Saving edited autofit text no longer scans a slide's shapes quadratically.
+- 906e337: Saving an edited slide keeps the original XML of every shape and element the edit did not change, including attribute order, namespace declarations, comments and processing instructions, instead of rewriting the whole slide.
+- 1398cff: Default fonts now load CJK script coverage for unmapped families and mixed text when the CJK packs are available; other scripts keep the browser font. `requestedFontFacesJson` adds optional `scripts` per face, and presentations with only coverage fonts render successfully.
+- 01a0e1f: Slide number fields on a slide render the slide's current number, counted from the presentation's first slide number, instead of the text cached in the file. Rendered and read slide numbers now agree after slides move.
+- ec768e6: Slide thumbnails in the PowerPoint editor decode pictures at thumbnail size instead of full resolution, lowering memory on picture-heavy decks.
+- 76515fc: Reduces PowerPoint editor memory use on picture-heavy decks.
+- Updated dependencies [de8f092]
+- Updated dependencies [5999962]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [39ae19a]
+- Updated dependencies [ec04baa]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [842d624]
+- Updated dependencies [e65df1c]
+- Updated dependencies [ad45f86]
+  - @betteroffice/fonts@1.0.0
+
 ## 0.5.1
 
 ### Patch Changes

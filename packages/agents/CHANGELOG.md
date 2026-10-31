@@ -1,5 +1,126 @@
 # @betteroffice/agents
 
+## 0.3.1
+
+### Patch Changes
+
+- 21d4394: `docx_edit` can now replace every occurrence of literal text inside an existing Word comment with `replace_comment_text`, keeping its author, anchor, formatting and thread state.
+- 8f3f1fa: Adding, replying to or resolving a Word comment after accepting a proposal that changed a header or another part no longer fails with "Saving comments would change the unrelated package part".
+- 5421e9e: `docx_edit` adds `delete_comment`, which removes a comment or a root comment's whole thread, including its range markers, reference and companion entries.
+- ab5bb3b: docx_edit insert_paragraphs can now insert before a paragraph, copying its style and paragraph formatting like pressing Enter at its start in Word, with optional anchor run formatting from that paragraph.
+- 1f2c008: Applying a paragraph style to a numbered paragraph now keeps its direct list numbering and direct formatting, and a paragraph numbered only by its old style stops being numbered, instead of refusing the change.
+- ea86df7: The MCP server now reports the package version in its initialize handshake instead of 0.0.0.
+- 2f5f765: Adds `--formats` and `--tools` filters (with `BETTEROFFICE_MCP_FORMATS` and `BETTEROFFICE_MCP_TOOLS` env equivalents) to `betteroffice-mcp` and `createOfficeMcpServer`, so `tools/list` only exposes the tools a job needs.
+- 4a26887: Agent tools now explain that `match` takes a grep match ID rather than literal text, default tracked acceptance to the current date, and let PPTX `find_replace` target soft line breaks with the vertical tab character.
+- 02bd5be: DOCX uses installed font packs by default for characters they cover. Uncovered scripts and unavailable CJK families retain browser and Google Fonts fallbacks unless disabled; configured fonts and document embeds still take precedence.
+- f30d46e: `set_paragraph_style` keeps borders, spacing and other properties inherited from the new style when saving an unnumbered paragraph, so later style changes continue to apply.
+- 308f7b3: Preserves SmartArt during agent and editor saves, including resized diagrams and large source payloads. `Shape.drawingXml` or `Shape.drawingRunXml` stores the source once; `Shape.drawingModel` tracks frame edits. Enabled by default.
+- d1fff89: DOCX saves keep untouched paragraphs unchanged after more agent and editor edits: inserts next to tables, content controls, bookmarks and comment ranges, and cell merges in plain tables. Text edits keep a direct automatic text color and the original runs.
+- dfd1833: Agent presentation exports no longer depend on a prior slide preview: edited autofit text is always shrunk to fit on save. `PresentationHandle.save` accepts `{ fonts, fallbackFonts }` to fit with those faces. Saving edited autofit text no longer scans a slide's shapes quadratically.
+- Updated dependencies [21d4394]
+- Updated dependencies [5421e9e]
+- Updated dependencies [1f2c008]
+- Updated dependencies [de8f092]
+- Updated dependencies [d17d538]
+- Updated dependencies [b2ccc11]
+- Updated dependencies [f831537]
+- Updated dependencies [e1a414e]
+- Updated dependencies [802a67c]
+- Updated dependencies [0372f1d]
+- Updated dependencies [cc2dc6c]
+- Updated dependencies [cc7f362]
+- Updated dependencies [0a4285c]
+- Updated dependencies [02bd5be]
+- Updated dependencies [80fbccd]
+- Updated dependencies [51390c5]
+- Updated dependencies [e3b2ddb]
+- Updated dependencies [773c633]
+- Updated dependencies [f88d5cd]
+- Updated dependencies [45aceb4]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [5999962]
+- Updated dependencies [f44c229]
+- Updated dependencies [b312d8c]
+- Updated dependencies [3936cdb]
+- Updated dependencies [4dc30ef]
+- Updated dependencies [61f3ae2]
+- Updated dependencies [5a6445d]
+- Updated dependencies [0cc6839]
+- Updated dependencies [4761a87]
+- Updated dependencies [c2f553d]
+- Updated dependencies [48c6d3c]
+- Updated dependencies [6b80d49]
+- Updated dependencies [4b0842b]
+- Updated dependencies [f30d46e]
+- Updated dependencies [bb1207f]
+- Updated dependencies [875e0d6]
+- Updated dependencies [5e26101]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [7599ffb]
+- Updated dependencies [60aeefa]
+- Updated dependencies [fc50302]
+- Updated dependencies [bb08976]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [308f7b3]
+- Updated dependencies [514e876]
+- Updated dependencies [ceb5208]
+- Updated dependencies [7774f6c]
+- Updated dependencies [6091ab3]
+- Updated dependencies [d1fff89]
+- Updated dependencies [f8c262a]
+- Updated dependencies [dab515e]
+- Updated dependencies [ad45f86]
+- Updated dependencies [39ae19a]
+- Updated dependencies [ec04baa]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [cc65f8e]
+- Updated dependencies [842d624]
+- Updated dependencies [1398cff]
+- Updated dependencies [fe7a975]
+- Updated dependencies [24179a4]
+- Updated dependencies [e65df1c]
+- Updated dependencies [84578e1]
+- Updated dependencies [0530412]
+- Updated dependencies [e664196]
+- Updated dependencies [40f8868]
+- Updated dependencies [4cfcf6e]
+- Updated dependencies [01a0e1f]
+- Updated dependencies [c45b6ff]
+- Updated dependencies [eb1ac5d]
+- Updated dependencies [d4667b6]
+- Updated dependencies [8b61ea4]
+- Updated dependencies [6329841]
+- Updated dependencies [dfd1833]
+- Updated dependencies [906e337]
+- Updated dependencies [1398cff]
+- Updated dependencies [0979b79]
+- Updated dependencies [01a0e1f]
+- Updated dependencies [ec768e6]
+- Updated dependencies [76515fc]
+- Updated dependencies [ad45f86]
+- Updated dependencies [974d3ab]
+- Updated dependencies [6478dec]
+- Updated dependencies [bb3e6b7]
+- Updated dependencies [1346f3c]
+- Updated dependencies [711c41a]
+- Updated dependencies [5797065]
+- Updated dependencies [6d5edbc]
+- Updated dependencies [9d85035]
+- Updated dependencies [421a628]
+- Updated dependencies [057f74a]
+- Updated dependencies [abeaece]
+- Updated dependencies [9ff8a3f]
+- Updated dependencies [9ff8a3f]
+- Updated dependencies [b5f3ca2]
+- Updated dependencies [9d9de00]
+- Updated dependencies [df287ec]
+- Updated dependencies [8001b2f]
+  - @betteroffice/docx@0.6.0
+  - @betteroffice/fonts@1.0.0
+  - @betteroffice/pptx@0.6.0
+  - @betteroffice/xlsx@0.6.0
+
 ## 0.3.0
 
 ### Minor Changes

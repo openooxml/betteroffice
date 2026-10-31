@@ -1,5 +1,17 @@
 # @betteroffice/xlsx-i18n
 
+## 0.6.0
+
+### Minor Changes
+
+- 7b30d80: Adds `ar`, `es`, `it`, `ja`, `ko`, `nl`, `ru`, `uk`, `vi` and `zh-TW` (`zhTW`), and every shipped locale now translates every string with Office terminology and its language's plural forms.
+
+### Patch Changes
+
+- 4fb3025: The `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr` and `zh-CN` editor strings are now fully translated with Office terminology and correct plurals. Removes 185 unused locale keys.
+- 9ff8a3f: Protected cell entries now report `sheet-protected` with a localized message by default. Unlocked cells on protected sheets remain editable.
+- 9ff8a3f: Typing into a locked cell on a protected sheet now reports `sheet-protected` ("This cell is on a protected sheet.") instead of a failed save; unlocked cells there can be edited. `XlsxCommandFailureCode` and `XlsxCommandAdmissionCode` gain `sheet-protected`, so exhaustive switches need a case.
+
 ## 0.5.1
 
 ## 0.5.0

@@ -1,5 +1,17 @@
 # @betteroffice/python-pptx
 
+## 0.2.3
+
+### Patch Changes
+
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- 91c80bf: Adds opt-in `Presentation.open_from_update`, `set_collaborative` and undo capture controls to Rust and Python. Python adds opt-in `on_update` subscriptions with synchronous callbacks after edits and remote updates.
+- ffe5b78: Rust and Python presentations gain the TypeScript names as aliases: `add_undo_boundary`, `list_proposals`, `encode_state_vector`, `encode_state_as_update`, `encode_diff`, and `apply_update` in Rust. Existing names stay.
+- 34bb0eb: The Python `Presentation` gains the operations the Rust and TypeScript APIs have: text search, caret anchors, notes, layouts, backgrounds, pictures, z-order, table row and column edits, history receipts, every text style field and an opt-in acceptance receipt.
+- d34e388: Rust and Python presentations gain `hit_test`, `register_fallback_font` and `layout_proposal_diff_slide`, matching the TypeScript API. Python adds `inspect_presentation`, which includes media bytes unless `include_media=False`, as in TypeScript.
+- 1398cff: Default fonts now load CJK script coverage for unmapped families and mixed text when the CJK packs are available; other scripts keep the browser font. `requestedFontFacesJson` adds optional `scripts` per face, and presentations with only coverage fonts render successfully.
+- ad45f86: Adds opt-in `decode_font_face` calls for zstd and woff2t font pack faces. Rust facades expose the shared `betteroffice-fonts` decoder as `fonts`; Python returns font bytes and an optional transformed payload.
+
 ## 0.2.2
 
 ### Patch Changes

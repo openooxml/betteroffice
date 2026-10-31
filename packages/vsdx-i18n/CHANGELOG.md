@@ -1,5 +1,11 @@
 # @betteroffice/vsdx-i18n
 
+## 0.3.0
+
+### Patch Changes
+
+- 4fb3025: The `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr` and `zh-CN` editor strings are now fully translated with Office terminology and correct plurals. Removes 185 unused locale keys.
+
 ## 0.2.0
 
 ## 0.1.0
