@@ -52,7 +52,7 @@ beforeAll(async () => {
     import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
   ))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 afterEach(() => {
   cleanup();
   resetEngineChoiceForTests();

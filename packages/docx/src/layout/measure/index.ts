@@ -20,6 +20,7 @@ export type {
 } from './fontRegistry';
 export {
   configureDefaultFonts,
+  hasConfiguredFontSource,
   resolveDefaultFontProvider,
   type BundledFontModule,
   type DefaultFontOptions,

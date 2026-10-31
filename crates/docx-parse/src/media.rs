@@ -220,6 +220,18 @@ impl MediaTable {
         }
     }
 
+    /// The length of [`MediaTable::data_url`] for the `index`th part, from its
+    /// transcode or declared size, without reading the part.
+    pub fn data_url_len(&self, index: usize) -> Option<usize> {
+        let part = self.parts.get(index)?;
+        let bytes = match &part.display {
+            Some(display) => display.len(),
+            None => usize::try_from(part.size).ok()?,
+        };
+        let encoded = base64::encoded_len(bytes, true)?;
+        Some("data:;base64,".len() + part.mime_type.len() + encoded)
+    }
+
     /// The `data:` URL [`build_media_map`] gives the `index`th part.
     pub fn data_url(&self, index: usize) -> Result<String, String> {
         let bytes = self.bytes(index)?;

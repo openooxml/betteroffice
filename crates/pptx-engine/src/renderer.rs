@@ -77,7 +77,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -95,7 +95,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_fallback_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -115,6 +115,16 @@ impl Renderer {
         Ok(self
             .layout_slide_timed(session, slide_index, &mut || 0.0)?
             .0)
+    }
+
+    /// Enables browser metrics for uncovered characters. Off by default.
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
+        if self.renderer.set_browser_coverage_fallback(enabled) {
+            self.font_epoch += 1;
+            self.layout_keys.clear();
+            self.rendered.clear();
+            self.last_slide = None;
+        }
     }
 
     /// returns a superset of layout's requested faces as JSON, including faces
@@ -141,29 +151,13 @@ impl Renderer {
             .collect::<Result<Vec<_>, _>>()?;
         let faces = self
             .renderer
-            .requested_font_faces(session.package(), &scopes)
+            .requested_font_faces_with_scripts(session.package(), &scopes)
             .map_err(engine_error)?;
         #[derive(Serialize)]
-        struct Face {
-            family: String,
-            bold: bool,
-            italic: bool,
-        }
-        #[derive(Serialize)]
         struct RequestedFaces {
-            faces: Vec<Face>,
+            faces: Vec<pptx_render::RequestedFontFace>,
         }
-        serde_json::to_string(&RequestedFaces {
-            faces: faces
-                .into_iter()
-                .map(|(family, bold, italic)| Face {
-                    family,
-                    bold,
-                    italic,
-                })
-                .collect(),
-        })
-        .map_err(engine_error)
+        serde_json::to_string(&RequestedFaces { faces }).map_err(engine_error)
     }
 
     /// `layoutSlideJson` with its stages timed, returned as
@@ -331,12 +325,12 @@ impl Renderer {
             .renderer
             .layout_scoped_slide(session.package(), &preview.scope)
             .map_err(engine_error)?;
-        serde_json::to_string(&serde_json::json!({
-            "proposal": preview.proposal,
-            "snapshot": preview.snapshot,
-            "textChanges": preview.text_changes,
-            "frame": rendered.display_list,
-        }))
+        serde_json::to_string(&pptx_render::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            frame: rendered.display_list,
+        })
         .map_err(engine_error)
     }
 }
@@ -508,6 +502,15 @@ impl Renderer {
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn font_error(error: pptx_render::RenderError) -> EngineError {
+    match error {
+        pptx_render::RenderError::ResourceLimit(_) => {
+            EngineError::resource_limit(error.to_string())
+        }
+        error => engine_error(error),
     }
 }
 
@@ -803,6 +806,43 @@ mod tests {
             .layout_scoped_slide(session.package(), &negative)
             .unwrap();
         assert_eq!(frame, serde_json::to_string(&fresh.display_list).unwrap());
+    }
+
+    #[test]
+    fn browser_coverage_changes_invalidate_layouts_once() {
+        let document = pptx_edit::DeckSession::open(DECK, 925).unwrap();
+        let slide_id = document.slide_ids().unwrap().remove(0);
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        for (enabled, changed) in [(false, false), (true, true), (false, true)] {
+            let frame = renderer.layout_slide_json(&document, 0).unwrap();
+            let old = renderer.slide_layout_key(&document, 0).unwrap();
+            assert!(renderer.set_active_slide(&document, &slide_id, &old));
+            let epoch = renderer.font_epoch;
+            let layouts = renderer.layout_count;
+            renderer.set_browser_coverage_fallback(enabled);
+            if changed {
+                assert_eq!(renderer.font_epoch, epoch + 1);
+                assert!(renderer.layout_keys.is_empty());
+                assert!(renderer.rendered.is_empty());
+                assert!(renderer.last_slide.is_none());
+                assert!(!renderer.set_active_slide(&document, &slide_id, &old));
+                assert_ne!(renderer.slide_layout_key(&document, 0).unwrap(), old);
+                renderer.layout_slide_json(&document, 0).unwrap();
+                assert_eq!(renderer.layout_count, layouts + 1);
+            } else {
+                assert_eq!(renderer.font_epoch, epoch);
+                assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), old);
+                assert_eq!(renderer.layout_slide_json(&document, 0).unwrap(), frame);
+                assert_eq!(renderer.layout_count, layouts);
+            }
+            let current = renderer.slide_layout_key(&document, 0).unwrap();
+            let layouts = renderer.layout_count;
+            renderer.set_browser_coverage_fallback(enabled);
+            assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), current);
+            renderer.layout_slide_json(&document, 0).unwrap();
+            assert_eq!(renderer.layout_count, layouts);
+        }
     }
 
     #[test]

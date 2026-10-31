@@ -59,7 +59,7 @@ beforeAll(async () => {
   faces = [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }];
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(cleanup);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));
@@ -1068,12 +1068,21 @@ describe('PptxEditor plugins', () => {
             <div data-testid="layout-marker" data-slide={geometry.layout.slide} />
           ),
         });
-        const { api, view } = await mount({ plugins: [plugin] });
-        await until(() => pending.length > 0 && contexts.length > 0);
+        const { api, view } = await mount({ plugins: [plugin], initialSlide: 2 });
+        await until(() => contexts.length > 0);
         const marker = () =>
           view.container.querySelector<HTMLElement>('[data-testid="layout-marker"]');
-        expect(marker()).toBeNull();
+        await until(() => marker()?.dataset.slide === '2');
         const content = await read(api());
+        await act(async () => {
+          await last(contexts).navigation.goToSlide(
+            { slideId: content.slides[0].id },
+            { expectVersion: content.version }
+          );
+        });
+        await until(() => pending.length > 0 && marker() === null);
+        expect(marker()).toBeNull();
+        expect(view.container.querySelector('aside button')?.getAttribute('aria-current')).toBe('page');
         await act(async () => {
           await last(contexts).navigation.goToSlide(
             { slideId: content.slides[1].id },

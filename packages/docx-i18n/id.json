@@ -417,6 +417,8 @@
         "strikethroughDescription": "Aktifkan/nonaktifkan teks coret",
         "subscript": "Subskrip",
         "subscriptDescription": "Aktifkan/nonaktifkan subskrip",
+        "clearFormatting": "Hapus Semua Pemformatan",
+        "clearFormattingDescription": "Hapus pemformatan teks",
         "superscript": "Superskrip",
         "superscriptDescription": "Aktifkan/nonaktifkan superskrip",
         "alignLeft": "Rata Kiri",

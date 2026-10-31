@@ -26976,6 +26976,80 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         .expect("zip the fixture")
     }
 
+    #[test]
+    fn raw_docx_font_preflight_covers_engine_requirements() {
+        fn check(bytes: &[u8]) {
+            let preflight = ooxml_font_preflight::docx_font_preflight(bytes).unwrap();
+            let engine = EngineSession::new(1701);
+            crate::seed::seed_from_docx(engine.doc(), bytes).unwrap();
+            let requirements: Vec<serde_json::Value> = serde_json::from_str(
+                &engine
+                    .layout_font_requirements_json(r#"{"bodyStory":"body","renderEnv":{}}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(!requirements.is_empty());
+            for requirement in requirements {
+                let family = requirement["family"].as_str().unwrap();
+                let bold = requirement["bold"].as_bool().unwrap();
+                let italic = requirement["italic"].as_bool().unwrap();
+                assert!(
+                    preflight
+                        .faces
+                        .iter()
+                        .any(|face| face.family.eq_ignore_ascii_case(family)
+                            && face.bold == bold
+                            && face.italic == italic),
+                    "missing {requirement}: {:?}",
+                    preflight.faces
+                );
+            }
+        }
+        for (styles, body) in [
+            ("", "<w:p><w:r><w:t>Defaults</w:t></w:r></w:p>"),
+            (
+                r#"<w:style w:type="paragraph" w:styleId="Normal"><w:rPr><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr></w:style>"#,
+                r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/></w:rPr><w:t>Theme</w:t></w:r></w:p>"#,
+            ),
+            (
+                "",
+                r#"<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x=1</m:t></m:r></m:oMath></w:p>"#,
+            ),
+            (
+                r#"<w:style w:type="paragraph" w:styleId="Parent"><w:rPr><w:rFonts w:ascii="Inherited" w:hAnsi="Inherited"/><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Parent"/><w:rPr><w:i/></w:rPr></w:style><w:style w:styleId="Unused"><w:rPr><w:rFonts w:ascii="Unused"/></w:rPr></w:style>"#,
+                r#"<w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:t>Styled</w:t></w:r></w:p>"#,
+            ),
+            (
+                r#"<w:style w:type="character" w:styleId="Run"><w:rPr><w:rFonts w:ascii="Run" w:hAnsi="Run"/><w:b/></w:rPr></w:style>"#,
+                r#"<w:p><w:r><w:rPr><w:rStyle w:val="Run"/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Run"/><w:b w:val="0"/><w:i/></w:rPr><w:t>Italic</w:t></w:r></w:p>"#,
+            ),
+            (
+                "",
+                r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="CJK" w:cs="Complex"/><w:b/><w:iCs/></w:rPr><w:t>漢かな한 العربية אב</w:t></w:r></w:p><w:p><w:r><w:rPr><w:rFonts w:eastAsia="Unused"/></w:rPr><w:t>Latin</w:t></w:r></w:p>"#,
+            ),
+            (
+                r#"<w:style w:type="table" w:styleId="Table"><w:rPr><w:rFonts w:ascii="Table" w:hAnsi="Table"/></w:rPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#,
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="Table"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            ),
+            (
+                "",
+                r#"<w:tbl><w:tr><w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent><w:tc><w:p><w:r><w:rPr><w:rFonts w:ascii="Glyph" w:hAnsi="Glyph"/><w:b/></w:rPr><w:t>Cell</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:tbl>"#,
+            ),
+            (
+                "",
+                r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:synthetic:vml" id="shape1" style="width:100pt;height:40pt"><v:textbox><w:txbxContent><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+            ),
+        ] {
+            check(&docx_bytes(styles, body));
+        }
+        let mut parts = ooxml_opc::unzip_parts(&docx_bytes(
+            r#"<w:style w:type="paragraph" w:styleId="BoldItalic"><w:rPr><w:b/><w:i/></w:rPr></w:style>"#,
+            r#"<w:p><w:pPr><w:pStyle w:val="BoldItalic"/><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>List</w:t></w:r></w:p>"#,
+        )).unwrap();
+        parts.push(("word/numbering.xml".to_owned(), br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="*"/><w:rPr><w:rFonts w:ascii="Bullet"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#.to_vec()));
+        check(&ooxml_opc::rezip_parts(&parts).unwrap());
+    }
+
     fn layout_with_note_separator(
         kind: &str,
         separator: Option<&str>,

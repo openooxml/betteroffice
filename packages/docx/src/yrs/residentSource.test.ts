@@ -11,6 +11,8 @@ import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './resident
 import { ResidentEngineWorkerClient as DefaultWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandPayloads, DocxCommandInitRequest } from './residentCommandProtocol';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
+import { extractEmbeddedFontFaces } from '../utils/embeddedFonts';
+import { deobfuscateFont } from '../utils/fontDeobfuscation';
 
 const TIMEOUT = 20_000;
 const PNG = 'data:image/png;base64,iVBORwECAwQ=';
@@ -25,7 +27,7 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 function source(paragraphs = 120, pageTotal = false): Uint8Array {
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -48,6 +50,38 @@ function init(): DocxCommandInitRequest {
     fontRegistrationSlots: true, layoutInput: LAYOUT, layoutWithRegions: true,
     layoutRevision: 1, extras: JSON.stringify({ fontChains: { 'liberation sans|0|0': [0] } }), displayWindow: [0, 1],
   };
+}
+
+for (const input of ['bytes', 'document', 'cut'] as const) {
+  test(`${input} opening supplies embedded faces before stripping the source buffer`, async () => {
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const key = '{00112233-4455-6677-8899-AABBCCDDEEFF}';
+    const face = Uint8Array.from({ length: 64 }, (_, index) => index);
+    const parts = new Map(Object.entries(unzipContainer(source(1))));
+    parts.set('word/fontTable.xml', toBytes(`<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}"><w:font w:name="Embedded Serif"><w:embedRegular r:id="face" w:fontKey="${key}" w:subsetted="1"/></w:font></w:fonts>`));
+    parts.set('word/_rels/fontTable.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="face" Type="${rel}/font" Target="fonts/face.odttf"/></Relationships>`));
+    parts.set('word/fonts/face.odttf', new Uint8Array(deobfuscateFont(face.buffer, key)));
+    const docRels = new TextDecoder().decode(parts.get('word/_rels/document.xml.rels'));
+    parts.set('word/_rels/document.xml.rels', toBytes(docRels.replace('</Relationships>', `<Relationship Id="fontTable" Type="${rel}/fontTable" Target="fontTable.xml"/></Relationships>`)));
+    const contentTypes = new TextDecoder().decode(parts.get('[Content_Types].xml'));
+    parts.set('[Content_Types].xml', toBytes(contentTypes.replace('</Types>', '<Default Extension="odttf" ContentType="application/vnd.openxmlformats-officedocument.obfuscatedFont"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>')));
+    const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    try {
+      const document = input === 'cut'
+        ? await client.openSourceCut({ bytes, cut: { blocks: 1 } })
+        : (await client.openSource(input === 'document' ? { document: await parsed(bytes) } : { bytes })).document;
+      expect(document).toBeTruthy();
+      expect(document!.originalBuffer).toBeUndefined();
+      const faces = await extractEmbeddedFontFaces(document!);
+      expect(faces).toHaveLength(1);
+      expect(faces[0]).toMatchObject({ family: 'Embedded Serif', weight: 'normal', style: 'normal', subsetted: true });
+      expect(new Uint8Array(faces[0]!.data)).toEqual(face);
+    } finally {
+      client.destroy();
+    }
+  }, TIMEOUT);
 }
 
 function firstPage(buffers: readonly (ArrayBuffer | Uint8Array)[]) {

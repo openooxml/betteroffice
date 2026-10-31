@@ -70,7 +70,7 @@ function score(samples, channel, revision) {
 function picture(url, alt) {
   return `<picture>
 <source media="(prefers-color-scheme: dark)" srcset="${url}?theme=dark">
-<img src="${url}" alt="${alt}" width="70%">
+<img src="${url}" alt="${alt}" width="100%">
 </picture>`;
 }
 

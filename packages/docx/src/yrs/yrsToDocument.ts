@@ -304,17 +304,44 @@ function dropNulls(value: unknown): unknown {
   return result;
 }
 
-function stableStringify(value: unknown): string {
+const SIMPLE_JSON_KEY = /^[A-Za-z0-9_$]+$/;
+const NON_FORMATTING_ATTRS = new Set(['hyperlink', 'ins', 'del']);
+
+/** @internal */
+export function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const object = asObject(value);
-  if (object) {
-    return `{${Object.keys(object)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`)
-      .join(',')}}`;
+  if (Array.isArray(value)) {
+    let result = '[';
+    const length = value.length;
+    for (let index = 0; index < length; index += 1) {
+      if (index > 0) result += ',';
+      if (index in value) {
+        const entry = stableStringify(value[index]);
+        if (entry !== undefined) result += entry;
+      }
+    }
+    return result + ']';
   }
+  const object = asObject(value);
+  if (object) return stableStringifyObject(object);
   return JSON.stringify(value);
+}
+
+function stableStringifyObject(value: Attrs, omitted?: ReadonlySet<string>): string {
+  let result = '{';
+  let separator = '';
+  for (const key of Object.keys(value).sort()) {
+    if (omitted?.has(key)) continue;
+    const quotedKey = SIMPLE_JSON_KEY.test(key) ? '"' + key + '"' : JSON.stringify(key);
+    result += separator + quotedKey + ':' + stableStringify(value[key]);
+    separator = ',';
+  }
+  return result + '}';
+}
+
+/** @internal */
+export function stableStringifyWithout(value: Attrs, omitted: ReadonlySet<string>): string {
+  return stableStringifyObject(value, omitted);
 }
 
 function formattingAttrs(attributes: Attrs): Attrs {
@@ -514,7 +541,17 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
   return result as TextFormatting;
 }
 
-function runContentForText(text: string, formatting: TextFormatting): RunContent[] {
+const SPECIAL_RUN_TEXT = /[\u00ad\u2011\uf000-\uf8ff]/;
+
+/** @internal */
+export function runContentForText(
+  text: string,
+  formatting: TextFormatting | (() => TextFormatting)
+): RunContent[] {
+  if (!SPECIAL_RUN_TEXT.test(text)) {
+    return text ? [{ type: 'text', text }] : [];
+  }
+  if (typeof formatting === 'function') formatting = formatting();
   const content: RunContent[] = [];
   let plainText = '';
   const flushText = (): void => {
@@ -561,7 +598,7 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
   return {
     type: 'run',
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
-    content: runContentForText(text, directFormatting(attributes)),
+    content: runContentForText(text, () => directFormatting(attributes)),
   };
 }
 
@@ -882,7 +919,7 @@ function imageRunFromPayload(payload: Attrs): Run {
 /** The seeded shape, carrying the text body and everything else no payload field describes. */
 function storedShape(value: unknown): Shape | undefined {
   const json = asString(value);
-  if (!json || json.length > 2_000_000) return undefined;
+  if (!json) return undefined;
   try {
     const parsed = JSON.parse(json) as Shape;
     if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
@@ -922,6 +959,25 @@ function chartRunFromPayload(payload: Attrs, recovery: ChartRecovery): Run | nul
   }
 }
 
+function replayedRunProperties(payload: Attrs, attributes: Attrs, format: RunFormatter): Pick<Run, 'formatting' | 'propertyChanges'> {
+  const source = asObject(payload.sourceRun);
+  const seeded = asObject(source?.attributes);
+  if (!source || !seeded) return {};
+  const before = directFormatting(seeded);
+  const current = directFormatting(attributes);
+  const projected: Attrs = { ...format(attributes) };
+  const formatting: Attrs = { ...asObject(source.formatting) };
+  for (const key of new Set([...Object.keys(before), ...Object.keys(current)])) {
+    if (sameJson(before[key as keyof TextFormatting], current[key as keyof TextFormatting])) continue;
+    if (projected[key] === undefined) delete formatting[key];
+    else formatting[key] = projected[key];
+  }
+  return {
+    formatting: formatting as TextFormatting,
+    ...(Array.isArray(source.propertyChanges) ? { propertyChanges: source.propertyChanges as Run['propertyChanges'] } : {}),
+  };
+}
+
 function opaqueDrawingRunFromPayload(
   payload: Attrs,
   attributes: Attrs,
@@ -935,7 +991,6 @@ function opaqueDrawingRunFromPayload(
     ? payload.previews.map(asObject).filter((image): image is Attrs => !!image).map(imageFromPayload)
     : [];
   const textBox = storedShape(payload.textBoxJson);
-  const formatting = format(attributes);
   return {
     type: 'run',
     content: [{
@@ -944,11 +999,11 @@ function opaqueDrawingRunFromPayload(
       ...(previews.length ? { previews } : {}),
       ...(textBox ? { textBox } : {}),
     }],
-    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    ...(kind === 'drawingRun' ? replayedRunProperties(payload, attributes, format) : { formatting: format(attributes) }),
   };
 }
 
-function shapeRunFromPayload(payload: Attrs): Run {
+function shapeRunFromPayload(payload: Attrs, attributes: Attrs, format: RunFormatter): Run {
   const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
     shapeType: 'rect',
@@ -1027,7 +1082,10 @@ function shapeRunFromPayload(payload: Attrs): Run {
     transform.flipV = true;
   if (transform.rotation || transform.flipH || transform.flipV) shape.transform = transform;
 
-  return { type: 'run', content: [{ type: 'shape', shape }] };
+  return {
+    type: 'run', content: [{ type: 'shape', shape }],
+    ...(shape.drawingRunXml ? replayedRunProperties(payload, attributes, format) : { formatting: format(attributes) }),
+  };
 }
 
 function inlineSdtFromPayload(
@@ -1149,7 +1207,7 @@ function ordinaryContentForItem(
     case 'horizontalRule':
       return horizontalRuleRun(item.payload, item.attributes, format);
     case 'shape':
-      return shapeRunFromPayload(item.payload);
+      return shapeRunFromPayload(item.payload, item.attributes, format);
     case 'chart':
       return chartRunFromPayload(item.payload, recovery);
     case 'opaqueDrawing':
@@ -1200,7 +1258,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
-    child = shapeRunFromPayload(item.payload);
+    child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
     child = chartRunFromPayload(item.payload, recovery) ?? { type: 'run', content: [] };
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
@@ -1246,7 +1304,7 @@ function addToHyperlink(
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
   } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
-  else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload);
+  else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
   else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? undefined;
   else if (item.embedKind === 'field') {
@@ -1437,7 +1495,7 @@ function buildParagraphContent(
 
     flushHyperlink();
     if (item.kind === 'text') {
-      const key = stableStringify(formattingAttrs(item.attributes));
+      const key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
       const nextRun = createTextRun(item.text, item.attributes, format);
       if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
       else {
@@ -1686,7 +1744,7 @@ function restoreOriginalRuns(
     while (remaining > 0) {
       const item = items[itemIndex];
       if (item?.kind !== 'text') return fallback();
-      if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
+      if (stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS) !== stableStringify(expected)) {
         return fallback();
       }
       const available = item.text.length - itemOffset;

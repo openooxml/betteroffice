@@ -1,15 +1,17 @@
 #!/usr/bin/env bun
-// usage: bun scripts/api-surface.ts --write xlsx | bun scripts/api-surface.ts --check xlsx
-// Regenerate the snapshot with: bun scripts/api-surface.ts --write xlsx
+// usage: bun scripts/api-surface.ts --write <xlsx|pptx> | bun scripts/api-surface.ts --check <xlsx|pptx>
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { nativeBuildSource } from "./native-engine";
 
 interface FormatConfig {
   packageDir: string;
   packageName: string;
   entries: Record<string, string>;
+  /** Declarations of the -native package built from these sources: checked against the wasm package's snapshots. */
+  native?: "xlsx" | "pptx";
 }
 
 interface DeclarationOptions {
@@ -29,7 +31,19 @@ export const FORMATS: Record<string, FormatConfig> = {
       "./collaboration": "src/collaboration/index.ts",
     },
   },
+  pptx: {
+    packageDir: "packages/pptx",
+    packageName: "@betteroffice/pptx",
+    entries: {
+      ".": "src/index.ts",
+      "./worker": "src/worker.ts",
+      "./collaboration": "src/collaboration/index.ts",
+    },
+  },
 };
+
+FORMATS["xlsx-native"] = { ...FORMATS.xlsx, native: "xlsx" };
+FORMATS["pptx-native"] = { ...FORMATS.pptx, native: "pptx" };
 
 export function entryFileName(entry: string): string {
   if (entry === ".") return "index.api.d.ts";
@@ -118,7 +132,7 @@ export function buildSnapshot(
   const reachable = reachableFiles(entryDeclaration, files, options);
   const lines: string[] = [
     `// ${packageName} "${entry}" public API surface`,
-    "// Regenerate: bun scripts/api-surface.ts --write xlsx",
+    `// Regenerate: bun scripts/api-surface.ts --write ${packageName.replace(/^@betteroffice\//, "")}`,
   ];
   for (const file of reachable) {
     const content = (files.get(file) as string)
@@ -183,7 +197,18 @@ function emitDeclarations(config: FormatConfig, root: string) {
     outDir: undefined,
     declarationDir: undefined,
   };
-  const program = ts.createProgram(entryFiles, options);
+  const host = ts.createCompilerHost(options);
+  if (config.native) {
+    const native = config.native;
+    const getSourceFile = host.getSourceFile;
+    host.getSourceFile = (fileName: string, languageVersion: unknown, ...rest: unknown[]) => {
+      const replaced = nativeBuildSource(native, fileName);
+      return replaced === undefined
+        ? getSourceFile.call(host, fileName, languageVersion, ...rest)
+        : ts.createSourceFile(fileName, replaced, languageVersion, true);
+    };
+  }
+  const program = ts.createProgram(entryFiles, options, host);
   const files = new Map<string, string>();
   const filePaths = new Map<string, string>();
   const addFile = (fileName: string, text: string) => {
@@ -251,6 +276,10 @@ function main(): void {
     process.exit(2);
   }
   const config = FORMATS[format];
+  if (config.native && mode === "--write") {
+    console.error(`${format} declarations are checked against the ${config.packageName} snapshots; write those instead`);
+    process.exit(2);
+  }
   const root = join(import.meta.dir, "..");
   const apiDir = join(root, config.packageDir, "api");
   const snapshots = generateSnapshots(format);

@@ -32,6 +32,7 @@ export interface ReferenceFile {
 
 export interface ReferenceHostQuirks {
   timestampConflict?: boolean;
+  relativeUrlToken?: boolean | string;
   tokenExpired?: boolean;
   slowBody?: boolean;
   noContentLength?: boolean;
@@ -49,6 +50,7 @@ export interface ReferenceHostOptions {
   verifyProof?: VerifyProofInput;
   now?: () => number;
   quirks?: ReferenceHostQuirks;
+  checkFileInfoExtras?: (file: ReferenceFile) => Record<string, unknown>;
 }
 
 export interface ReferenceHost {
@@ -170,7 +172,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     const sourceToken = url.searchParams.get("access_token");
     if (sourceToken !== null && !tokens.has(sourceToken)) tokens.set(sourceToken, user);
     user.fileIds?.add(fileId);
-    const token = randomUUID();
+    const token = typeof quirks.relativeUrlToken === "string" ? quirks.relativeUrlToken : randomUUID();
     tokens.set(token, user);
     url.pathname = url.pathname.replace(/[^/]+$/, encodeURIComponent(fileId));
     url.search = "";
@@ -349,6 +351,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         PostMessageOrigin: url.origin,
         CloseUrl: "",
         LastModifiedTime: file.lastModifiedTime,
+        ...options.checkFileInfoExtras?.(file),
       });
     }
 

@@ -10,7 +10,8 @@ beforeAll(() =>
     new Uint8Array(
       readFileSync(resolve(import.meta.dir, '../../wasm/generated/edit/docx_edit_bg.wasm'))
     )
-  )
+  ),
+  30_000
 );
 
 test('a session reuses its projection until the document changes', async () => {

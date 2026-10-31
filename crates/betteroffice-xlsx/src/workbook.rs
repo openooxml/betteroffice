@@ -9,6 +9,7 @@ mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
 mod geometry;
+pub(crate) mod reads;
 mod recovery;
 mod rich_text;
 #[cfg(test)]
@@ -388,6 +389,10 @@ fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
 }
 
 pub struct Workbook {
+    #[cfg(feature = "fonts")]
+    pub(crate) font_manager: betteroffice_fonts::FontManager,
+    #[cfg(all(feature = "fonts", feature = "raster"))]
+    pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     authority: WorkbookAuthority,
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
@@ -594,6 +599,19 @@ impl Workbook {
         Self::open_internal(bytes, true, None)
     }
 
+    #[cfg(feature = "fonts")]
+    pub fn open_with_options(bytes: &[u8], options: &crate::OpenOptions) -> Result<Self> {
+        let font_manager =
+            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)?;
+        let mut workbook = Self::open(bytes)?;
+        workbook.font_manager = font_manager;
+        #[cfg(feature = "raster")]
+        for font in &options.fonts {
+            workbook.register_font(&font.family, font.bold, font.italic, &font.data)?;
+        }
+        Ok(workbook)
+    }
+
     pub fn open_for_read(bytes: &[u8]) -> Result<Self> {
         Self::open_internal(bytes, false, None)
     }
@@ -610,6 +628,9 @@ impl Workbook {
     }
 
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        xlsx_model::open_timing! {
+            let timing_parse = xlsx_model::open_timing::span("package_parse");
+        }
         let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
         let mut names = HashSet::with_capacity(parts.len());
         for (name, _) in &parts {
@@ -618,6 +639,7 @@ impl Workbook {
             }
         }
         let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        xlsx_model::open_timing! { drop(timing_parse); }
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -633,6 +655,9 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("recalculate");
+        }
         workbook.recalculate(options);
         Ok(workbook)
     }
@@ -738,12 +763,13 @@ impl Workbook {
         }
         let model = projected;
         validate_model(&model)?;
-        let opened_anchors = model
-            .sheets
-            .iter()
-            .flat_map(|sheet| &sheet.charts)
-            .map(|chart| (chart.frame_id(), chart.anchor))
-            .collect();
+        let opened_anchors = model.sheets.iter().flat_map(|sheet| &sheet.charts).fold(
+            BTreeMap::new(),
+            |mut anchors, chart| {
+                anchors.insert(chart.frame_id(), chart.anchor);
+                anchors
+            },
+        );
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
@@ -803,6 +829,13 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
         })
     }
 
@@ -2667,6 +2700,13 @@ impl Workbook {
         let geometry = self.sheet_geometry(sheet)?;
         validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
         let display_list = self.display_list_for(sheet, viewport)?;
+        #[cfg(feature = "fonts")]
+        let bytes = {
+            let fonts = self.raster_fonts(&display_list)?;
+            xlsx_raster::render_png_with_fonts(&display_list, fonts.fonts())
+                .map_err(Error::Raster)?
+        };
+        #[cfg(not(feature = "fonts"))]
         let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
             bytes,
@@ -2717,6 +2757,13 @@ impl Workbook {
         } else {
             scaled(display_list, options.scale)
         };
+        #[cfg(feature = "fonts")]
+        let bytes = {
+            let fonts = self.raster_fonts(&display_list)?;
+            xlsx_raster::render_png_with_fonts(&display_list, fonts.fonts())
+                .map_err(Error::Raster)?
+        };
+        #[cfg(not(feature = "fonts"))]
         let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
             bytes,
@@ -5504,6 +5551,13 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
         })
     }
 }

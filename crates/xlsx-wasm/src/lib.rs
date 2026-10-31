@@ -4,6 +4,47 @@
 use wasm_bindgen::prelude::*;
 use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
 
+#[wasm_bindgen(typescript_custom_section)]
+const DECODED_FONT_FACE: &str =
+    r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
+
+/// Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+/// Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+/// The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+#[wasm_bindgen(js_name = decodeFontFace, unchecked_return_type = "DecodedFontFace")]
+pub fn decode_font_face(
+    bytes: &[u8],
+    codec: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "Uint8Array | null")] dict: Option<Vec<u8>>,
+    #[wasm_bindgen(js_name = maxOutput, unchecked_optional_param_type = "number | null")]
+    max_output: Option<f64>,
+) -> Result<JsValue, JsError> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(bytes, codec, dict.as_deref(), max_output)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &"font".into(),
+        &js_sys::Uint8Array::from(decoded.font.as_slice()),
+    )
+    .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    if let Some(payload) = decoded.payload {
+        js_sys::Reflect::set(
+            &object,
+            &"payload".into(),
+            &js_sys::Uint8Array::from(payload.as_slice()),
+        )
+        .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    }
+    Ok(object.into())
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "raster")))]
+#[used]
+#[unsafe(link_section = "betteroffice.xlsx.no-png")]
+static PNG_EXPORT_UNAVAILABLE: [u8; 1] = [1];
+
 /// days from the 1900 epoch to 1970-01-01, phantom-1900 leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
@@ -358,19 +399,33 @@ impl XlsxDocument {
     }
 
     /// render the current sheet viewport to png bytes (raster feature only).
-    #[cfg(feature = "raster")]
     #[wasm_bindgen(js_name = renderPng)]
     pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, JsValue> {
-        self.inner
-            .render_png(viewport_json)
-            .map_err(map_engine_error)
+        #[cfg(feature = "raster")]
+        {
+            self.inner
+                .render_png(viewport_json)
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "raster"))]
+        {
+            let _ = viewport_json;
+            Err(JsValue::from_str("png export not in this build"))
+        }
     }
 
     /// render an a1 range (default: used range) at an optional scale to png.
-    #[cfg(feature = "raster")]
     #[wasm_bindgen(js_name = renderRangePng)]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, JsValue> {
-        self.inner.render_range_png(args).map_err(map_engine_error)
+        #[cfg(feature = "raster")]
+        {
+            self.inner.render_range_png(args).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "raster"))]
+        {
+            let _ = args;
+            Err(JsValue::from_str("png export not in this build"))
+        }
     }
 
     /// serialized `SheetInfo`: stable IDs, names, active index, content extent.

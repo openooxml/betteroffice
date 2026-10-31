@@ -56,7 +56,7 @@ function lowered(session: Pick<YrsSession, 'yrsBlocksForStory'>, env: YrsRenderE
 }
 
 describe('computeLayout retained kernel inputs', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   test('the measured arena is fetched lazily, once, and only on demand', () => {
     const layout = { pages: [] };
