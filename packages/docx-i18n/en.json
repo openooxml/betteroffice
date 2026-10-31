@@ -32,6 +32,7 @@
     "ariaLabel": "Formatting toolbar",
     "file": "File",
     "format": "Format",
+    "layout": "Layout",
     "insert": "Insert",
     "open": "Open",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Current"
     }
+  },
+  "layout": {
+    "margins": "Margins",
+    "normal": "Normal",
+    "narrow": "Narrow",
+    "moderate": "Moderate",
+    "wide": "Wide",
+    "customMargins": "Custom margins...",
+    "morePaperSizes": "More paper sizes...",
+    "indent": "Indent"
   },
   "formattingBar": {
     "groups": {

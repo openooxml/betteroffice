@@ -32,6 +32,7 @@
     "ariaLabel": "סרגל כלים לעיצוב",
     "file": "קובץ",
     "format": "עיצוב",
+    "layout": "פריסה",
     "insert": "הוספה",
     "open": "פתיחה",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "נוכחי"
     }
+  },
+  "layout": {
+    "margins": "שוליים",
+    "normal": "רגיל",
+    "narrow": "צר",
+    "moderate": "בינוני",
+    "wide": "רחב",
+    "customMargins": "שוליים מותאמים אישית...",
+    "morePaperSizes": "גדלי נייר נוספים...",
+    "indent": "כניסה"
   },
   "formattingBar": {
     "groups": {

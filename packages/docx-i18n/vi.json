@@ -32,6 +32,7 @@
     "ariaLabel": "Thanh công cụ định dạng",
     "file": "Tệp",
     "format": "Định dạng",
+    "layout": "Bố cục",
     "insert": "Chèn",
     "open": "Mở",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Hiện tại"
     }
+  },
+  "layout": {
+    "margins": "Căn lề",
+    "normal": "Bình thường",
+    "narrow": "Hẹp",
+    "moderate": "Vừa phải",
+    "wide": "Rộng",
+    "customMargins": "Lề tùy chỉnh...",
+    "morePaperSizes": "Khổ giấy khác...",
+    "indent": "Thụt lề"
   },
   "formattingBar": {
     "groups": {

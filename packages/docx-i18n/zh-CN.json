@@ -32,6 +32,7 @@
     "ariaLabel": "格式工具栏",
     "file": "文件",
     "format": "格式",
+    "layout": "版式",
     "insert": "插入",
     "open": "打开",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "当前"
     }
+  },
+  "layout": {
+    "margins": "页边距",
+    "normal": "普通",
+    "narrow": "窄",
+    "moderate": "适中",
+    "wide": "宽",
+    "customMargins": "自定义页边距...",
+    "morePaperSizes": "其他纸张大小...",
+    "indent": "缩进"
   },
   "formattingBar": {
     "groups": {

@@ -11,7 +11,7 @@
 
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import type { Document, Theme } from '@betteroffice/docx/types/document';
+import type { Document, SectionProperties, Theme } from '@betteroffice/docx/types/document';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -1940,6 +1940,12 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   });
   const dialogApply = useRef({ pageSetup: handlePageSetupApply, watermark: handleWatermarkApply });
   dialogApply.current = { pageSetup: handlePageSetupApply, watermark: handleWatermarkApply };
+  const applyPageSetup = useCallback((properties: Partial<SectionProperties>) => {
+    void commands.complete('pageSetup', () => {
+      dialogApply.current.pageSetup(properties);
+      return commandOutcome(true);
+    });
+  }, [commands]);
 
   const { scrollPageInfo, setScrollPageInfo, readCurrentPage } = useScrollPageInfo({
     scrollContainerRef,
@@ -2543,8 +2549,19 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   };
 
   const chromeContext = useMemo<EditorChrome>(
-    () => ({ showZoomControl, toolbarExtra }),
-    [showZoomControl, toolbarExtra]
+    () => ({
+      showZoomControl,
+      toolbarExtra,
+      pageLayout: {
+        currentProps: history.state?.package.document?.finalSectionProperties,
+        unit: rulerUnit,
+        onApply: (properties) => {
+          commands.open('pageSetup');
+          applyPageSetup(properties);
+        },
+      },
+    }),
+    [showZoomControl, toolbarExtra, history.state, rulerUnit, commands, applyPageSetup]
   );
   const chrome = !showToolbar ? null : toolbar !== undefined ? (
     toolbar !== null && (
@@ -2900,12 +2917,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
             pmImageContext={imageTarget}
             showPageSetup={showPageSetup}
             onPageSetupClose={() => setShowPageSetup(false)}
-            onPageSetupApply={(properties) => {
-              void commands.complete('pageSetup', () => {
-                dialogApply.current.pageSetup(properties);
-                return commandOutcome(true);
-              });
-            }}
+            onPageSetupApply={applyPageSetup}
             showWatermark={showWatermark}
             onWatermarkClose={() => setShowWatermark(false)}
             onWatermarkApply={(watermark) => {
