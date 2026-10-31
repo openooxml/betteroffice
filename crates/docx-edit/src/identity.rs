@@ -4269,7 +4269,12 @@ mod tests {
             let cache = doc.save_story_states.lock().unwrap();
             let body = &cache.entries["body"].state;
             assert!(body.units[0].segments.is_some());
-            assert!(body.units.iter().skip(1).any(|unit| unit.segments.is_none()));
+            assert!(
+                body.units
+                    .iter()
+                    .skip(1)
+                    .any(|unit| unit.segments.is_none())
+            );
         }
         doc.delete_range(&ctx(), StoryRange::new("body", 0, 4))
             .unwrap();
@@ -4540,7 +4545,10 @@ mod tests {
             let pilcrow = pilcrows(&header, &txn).remove(0).1;
             pilcrow.insert(&mut txn, PARA_ID, key);
         }
-        assert_eq!(doc.story_revisions.lock().unwrap().stamped["body"], revision);
+        assert_eq!(
+            doc.story_revisions.lock().unwrap().stamped["body"],
+            revision
+        );
         doc.paragraph_save_plan();
         assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
     }
