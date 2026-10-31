@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 90
     outputs:
       publishing: ${{ steps.pending.outputs.publishing }}
+      published: ${{ steps.changesets.outputs.published }}
     permissions:
       contents: write
       pull-requests: write
@@ -276,3 +277,18 @@ jobs:
             fi
           done
           exit $status
+
+  # Runs only when this run published and WOPI_IMAGE_PUBLISH opts in; without
+  # that variable the WOPI image is never pushed.
+  wopi-image:
+    name: Publish WOPI image
+    needs: release
+    if: needs.release.result == 'success' && needs.release.outputs.published == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true'
+    uses: ./.github/workflows/wopi-image.yml
+    with:
+      publish: true
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
