@@ -1034,7 +1034,9 @@ impl UnitState {
             Some(segments)
         };
         let projection = match seed {
-            Some(seed) if projection.same_projection(&seed.projection) => Arc::clone(&seed.projection),
+            Some(seed) if projection.same_projection(&seed.projection) => {
+                Arc::clone(&seed.projection)
+            }
             _ => {
                 #[cfg(test)]
                 UNIT_PROJECTIONS.with(|count| count.set(count.get() + 1));
@@ -1674,7 +1676,9 @@ fn story_fingerprint_for_save(
     let mut position = 0u32;
     let mut bytes = Vec::new();
     let mut section_bytes = Vec::new();
-    let seeded_units = seeded.map(|seeded| seeded.units).filter(|units| units.unique);
+    let seeded_units = seeded
+        .map(|seeded| seeded.units)
+        .filter(|units| units.unique);
     for segment in segments {
         if let Some(budget) = budget.as_mut() {
             let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
@@ -1771,9 +1775,8 @@ fn story_fingerprint_for_save(
     for (index, unit) in units.iter().enumerate() {
         hasher.update(unit.digest);
         same_seed = same_seed
-            && seed.is_some_and(|seed| {
-                Arc::ptr_eq(&unit.projection, &seed.units[index].projection)
-            });
+            && seed
+                .is_some_and(|seed| Arc::ptr_eq(&unit.projection, &seed.units[index].projection));
     }
     Some((hasher.finalize().into(), units, same_seed))
 }
@@ -4360,7 +4363,8 @@ mod tests {
         doc.save_story_states.lock().unwrap().clear();
         doc.save_story_cache_disabled.store(true, Ordering::Relaxed);
         let fresh_plan = doc.paragraph_save_plan();
-        doc.save_story_cache_disabled.store(false, Ordering::Relaxed);
+        doc.save_story_cache_disabled
+            .store(false, Ordering::Relaxed);
         assert_eq!(plan, fresh_plan);
         assert_eq!(plan, doc.paragraph_save_plan());
         let txn = doc.yrs_doc().transact();
@@ -4645,7 +4649,8 @@ mod tests {
             assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
         }
         STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 2 * stories));
-        doc.save_story_cache_disabled.store(false, Ordering::Relaxed);
+        doc.save_story_cache_disabled
+            .store(false, Ordering::Relaxed);
         save_plans_agree(&doc);
     }
 
@@ -4666,7 +4671,8 @@ mod tests {
             let position = doc.paragraph_mark_position(&paragraph.para_id).unwrap();
             doc.insert_text(&ctx(), position, "x", FormatPolicy::Plain)
                 .unwrap();
-            doc.save_story_cache_disabled.store(bypass, Ordering::Relaxed);
+            doc.save_story_cache_disabled
+                .store(bypass, Ordering::Relaxed);
             doc
         }
 
