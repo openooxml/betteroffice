@@ -289,16 +289,10 @@
     "provenance": true
   },
   "type": "commonjs",
-  "peerDependencies": {
+  "dependencies": {
     "@betteroffice/fonts": "workspace:^0"
   },
-  "peerDependenciesMeta": {
-    "@betteroffice/fonts": {
-      "optional": true
-    }
-  },
   "devDependencies": {
-    "@betteroffice/fonts": "workspace:*",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3"

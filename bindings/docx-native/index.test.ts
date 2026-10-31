@@ -29,6 +29,7 @@ describe('@betteroffice/docx-native', () => {
     expect(manifest.module).toBe(wasmManifest.module);
     expect(manifest.types).toBe(wasmManifest.types);
     expect(manifest.files).toEqual(['dist', 'index.js', 'index.d.ts']);
+    expect(manifest.dependencies).toEqual(wasmManifest.dependencies);
     expect(manifest.peerDependencies).toEqual(wasmManifest.peerDependencies);
     expect(manifest.peerDependenciesMeta).toEqual(wasmManifest.peerDependenciesMeta);
     expect(readFileSync(new URL('./dist/core.mjs', import.meta.url), 'utf8').length).toBeGreaterThan(0);
