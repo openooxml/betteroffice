@@ -753,7 +753,11 @@
     "leftIndent": "Thụt lề trái",
     "rightIndent": "Thụt lề phải",
     "topMargin": "Lề trên",
-    "bottomMargin": "Lề dưới"
+    "bottomMargin": "Lề dưới",
+    "leftMargin": "Lề trái",
+    "rightMargin": "Lề phải",
+    "hangingIndent": "Thụt lề treo",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "In",

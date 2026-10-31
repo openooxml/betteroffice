@@ -753,7 +753,11 @@
     "leftIndent": "Inden Kiri",
     "rightIndent": "Inden Kanan",
     "topMargin": "Margin Atas",
-    "bottomMargin": "Margin Bawah"
+    "bottomMargin": "Margin Bawah",
+    "leftMargin": "Margin kiri",
+    "rightMargin": "Margin kanan",
+    "hangingIndent": "Inden gantung",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Cetak",

@@ -753,7 +753,11 @@
     "leftIndent": "Wcięcie z lewej",
     "rightIndent": "Wcięcie z prawej",
     "topMargin": "Margines górny",
-    "bottomMargin": "Margines dolny"
+    "bottomMargin": "Margines dolny",
+    "leftMargin": "Lewy margines",
+    "rightMargin": "Prawy margines",
+    "hangingIndent": "Wcięcie wysunięte",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Drukuj",

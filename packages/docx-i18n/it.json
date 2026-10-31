@@ -753,7 +753,11 @@
     "leftIndent": "Rientro sinistro",
     "rightIndent": "Rientro destro",
     "topMargin": "Margine superiore",
-    "bottomMargin": "Margine inferiore"
+    "bottomMargin": "Margine inferiore",
+    "leftMargin": "Margine sinistro",
+    "rightMargin": "Margine destro",
+    "hangingIndent": "Rientro sporgente",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Stampa",

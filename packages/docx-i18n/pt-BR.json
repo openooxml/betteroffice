@@ -753,7 +753,11 @@
     "leftIndent": "Recuo esquerdo",
     "rightIndent": "Recuo direito",
     "topMargin": "Margem superior",
-    "bottomMargin": "Margem inferior"
+    "bottomMargin": "Margem inferior",
+    "leftMargin": "Margem esquerda",
+    "rightMargin": "Margem direita",
+    "hangingIndent": "Recuo deslocado",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Imprimir",

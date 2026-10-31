@@ -753,7 +753,11 @@
     "leftIndent": "बायां इंडेंट",
     "rightIndent": "दायां इंडेंट",
     "topMargin": "शीर्ष मार्जिन",
-    "bottomMargin": "तल मार्जिन"
+    "bottomMargin": "तल मार्जिन",
+    "leftMargin": "बायाँ मार्जिन",
+    "rightMargin": "दायाँ मार्जिन",
+    "hangingIndent": "हैंगिंग इंडेंट",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "प्रिंट करें",

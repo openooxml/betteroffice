@@ -57,3 +57,56 @@ test('clear and list tab stops are named by their own type', () => {
   expect(getByTitle('Clear tab at 0.50"')).toBeTruthy();
   expect(getByTitle('List tab at 1.00"')).toBeTruthy();
 });
+
+test('indent and margin markers name their value in the ruler unit on hover, focus and drag', () => {
+  const left = mock((_twips: number) => {});
+  const { container, getByRole, queryByRole, rerender } = render(<HorizontalRuler editable unit="cm"
+    sectionProps={{ marginLeft: 1418, marginRight: 1134 }} indentLeft={567} onIndentLeftChange={() => {}}
+    onLeftMarginChange={left} />);
+  const indent = getByRole('slider', { name: 'Left indent' });
+  expect(indent.getAttribute('aria-valuetext')).toBe('Left indent: 1.0 cm');
+  fireEvent.mouseEnter(indent);
+  expect(getByRole('tooltip').textContent).toBe('Left indent: 1.0 cm');
+  fireEvent.mouseLeave(indent);
+  expect(queryByRole('tooltip')).toBeNull();
+  fireEvent.focus(indent);
+  expect(getByRole('tooltip').textContent).toBe('Left indent: 1.0 cm');
+  fireEvent.blur(indent);
+  const ruler = container.firstElementChild as HTMLElement;
+  ruler.getBoundingClientRect = () => ({ left: 0, top: 0 } as DOMRect);
+  const marginZone = ruler.children[0] as HTMLElement;
+  fireEvent.mouseEnter(marginZone);
+  expect(getByRole('tooltip').textContent).toBe('Left margin: 2.5 cm');
+  fireEvent.mouseDown(marginZone, { clientX: 40 });
+  fireEvent.mouseMove(document, { clientX: 96 });
+  expect(left).toHaveBeenLastCalledWith(1440);
+  expect(getByRole('tooltip').textContent).toBe('Left margin: 2.5 cm');
+  fireEvent.mouseMove(document, { clientX: 192 });
+  expect(getByRole('tooltip').textContent).toBe('Left margin: 5.1 cm');
+  fireEvent.mouseUp(document);
+  fireEvent.mouseLeave(marginZone);
+  expect(queryByRole('tooltip')).toBeNull();
+  rerender(<HorizontalRuler editable showFirstLineIndent hangingIndent firstLineIndent={360} indentLeft={720}
+    onIndentLeftChange={() => {}} />);
+  fireEvent.mouseEnter(getByRole('slider', { name: 'First line indent' }));
+  expect(getByRole('tooltip').textContent).toBe('Hanging indent: 0.25"');
+});
+
+test('vertical margin markers name their value on hover and drag, and tab stops use the ruler unit', () => {
+  const top = mock((_twips: number) => {});
+  const { container, getByRole, getByTitle } = render(<>
+    <VerticalRuler editable unit="cm" sectionProps={{ marginTop: 1134, marginBottom: 1440 }} onTopMarginChange={top} />
+    <HorizontalRuler unit="cm" tabStops={[{ position: 1134, alignment: 'left' }]} />
+  </>);
+  const marker = getByRole('slider', { name: 'Top margin' });
+  expect(marker.getAttribute('aria-valuetext')).toBe('Top margin: 2.0 cm');
+  fireEvent.mouseEnter(marker);
+  expect(getByRole('tooltip').textContent).toBe('Top margin: 2.0 cm');
+  (container.querySelector('.docx-vertical-ruler') as HTMLElement).getBoundingClientRect = () => ({ left: 0, top: 0 } as DOMRect);
+  fireEvent.mouseDown(marker);
+  fireEvent.mouseMove(document, { clientY: 192 });
+  expect(top).toHaveBeenLastCalledWith(2880);
+  expect(getByRole('tooltip').textContent).toBe('Top margin: 5.1 cm');
+  fireEvent.mouseUp(document);
+  expect(getByTitle('Left tab at 2.0 cm')).toBeTruthy();
+});

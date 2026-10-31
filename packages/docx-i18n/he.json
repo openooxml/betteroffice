@@ -753,7 +753,11 @@
     "leftIndent": "כניסה שמאלית",
     "rightIndent": "כניסה ימנית",
     "topMargin": "שוליים עליונים",
-    "bottomMargin": "שוליים תחתונים"
+    "bottomMargin": "שוליים תחתונים",
+    "leftMargin": "שוליים שמאליים",
+    "rightMargin": "שוליים ימניים",
+    "hangingIndent": "כניסה תלויה",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "הדפסה",

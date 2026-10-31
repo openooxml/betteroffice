@@ -753,7 +753,11 @@
     "leftIndent": "Inspringing links",
     "rightIndent": "Inspringing rechts",
     "topMargin": "Bovenmarge",
-    "bottomMargin": "Ondermarge"
+    "bottomMargin": "Ondermarge",
+    "leftMargin": "Linkermarge",
+    "rightMargin": "Rechtermarge",
+    "hangingIndent": "Verkeerd-om inspringen",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Afdrukken",
