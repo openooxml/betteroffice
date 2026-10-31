@@ -27,24 +27,34 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     const element = scroller.current;
     if (!element) return;
     let fade: ReturnType<typeof setTimeout> | undefined;
-    const update = (visible = false) => {
+    const update = (visible: boolean | null = false) => {
       const count = controller.getSnapshot().view?.geometry?.pages.length ?? 0;
       const currentPage = readCurrentPage();
       setPageInfo((previous) => previous.currentPage === currentPage && previous.totalPages === count &&
-        previous.visible === visible && previous.scrollLeft === element.scrollLeft ? previous :
-        { currentPage, totalPages: count, visible, scrollLeft: element.scrollLeft });
+        previous.visible === (visible ?? previous.visible) && previous.scrollLeft === element.scrollLeft ? previous :
+        { currentPage, totalPages: count, visible: visible ?? previous.visible, scrollLeft: element.scrollLeft });
     };
     let frame: number | null = null;
+    let reveal = false;
+    let width = element.clientWidth, height = element.clientHeight;
+    const refresh = (visible = false) => {
+      reveal ||= visible;
+      if (frame === null) frame = requestAnimationFrame(() => { frame = null; update(reveal ? true : null); reveal = false; });
+    };
+    const resize = () => refresh();
     const scroll = () => {
-      if (frame === null) frame = requestAnimationFrame(() => { frame = null; update(true); });
+      const resized = width !== element.clientWidth || height !== element.clientHeight;
+      width = element.clientWidth; height = element.clientHeight;
+      refresh(!resized);
+      if (resized) return;
       clearTimeout(fade);
       fade = setTimeout(() => update(false), 600);
     };
     update();
     const unsubscribe = controller.subscribe(() => update());
     element.addEventListener('scroll', scroll, { passive: true });
-    window.addEventListener('resize', scroll);
-    return () => { unsubscribe(); clearTimeout(fade); if (frame !== null) cancelAnimationFrame(frame); element.removeEventListener('scroll', scroll); window.removeEventListener('resize', scroll); };
+    window.addEventListener('resize', resize);
+    return () => { unsubscribe(); clearTimeout(fade); if (frame !== null) cancelAnimationFrame(frame); element.removeEventListener('scroll', scroll); window.removeEventListener('resize', resize); };
   }, [controller, readCurrentPage, scroller, zoom]);
   const state = controller.getSnapshot();
   useEffect(() => {

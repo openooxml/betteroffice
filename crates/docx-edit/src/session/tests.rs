@@ -260,3 +260,128 @@ fn unknown_selection_story_matches_shim_error() {
     assert_eq!(error.kind, EngineErrorKind::Message);
     assert_eq!(error.message, "story \"missing\" was not found");
 }
+
+#[test]
+fn fonts_layout_frames_and_resident_input_run_without_wasm() {
+    let session = core(1);
+    let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
+    let para_id = seeded["body"][0].as_str().unwrap();
+    let ordinary = core(2);
+    ordinary.load(&session.encode_state()).unwrap();
+    let font = session
+        .register_measure_font(include_bytes!(
+            "../../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+    let request = serde_json::json!({
+        "bodyStory": "body",
+        "regions": {"sections": [{
+            "sectionId": "main",
+            "properties": {
+                "pageWidth": 4320,
+                "pageHeight": 2880,
+                "marginTop": 300,
+                "marginRight": 300,
+                "marginBottom": 300,
+                "marginLeft": 300
+            }
+        }]},
+        "measurement": {
+            "fontChains": {"calibri|0|0": [font]},
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+            "authoritativeShaping": true
+        },
+        "renderEnv": {}
+    });
+    let layout: Value = serde_json::from_str(
+        &session
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!layout["layout"]["pages"].as_array().unwrap().is_empty());
+    let frame = session
+        .build_display_list_frame(
+            &serde_json::json!({"fontChains": {"calibri|0|0": [font]}}).to_string(),
+            0.0,
+        )
+        .unwrap();
+    assert!(!frame.is_empty());
+    session
+        .set_selection("body", para_id, 2, para_id, 2)
+        .unwrap();
+    let caret: Value =
+        serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+    let rect = &caret["caretRect"];
+    let hit: Value = serde_json::from_str(
+        &session
+            .display_hit_test_regions_json(
+                rect["pageIndex"].as_u64().unwrap() as u32,
+                rect["x"].as_f64().unwrap(),
+                rect["y"].as_f64().unwrap() + rect["height"].as_f64().unwrap() / 2.0,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(hit["region"], "body");
+    assert_eq!(hit["target"], "text");
+    let hit_pos = hit["pos"].as_i64().unwrap();
+    let hit_caret = session
+        .engine
+        .with_display_list(|list| docx_layout::hit::caret_rect(list, hit_pos))
+        .unwrap()
+        .unwrap();
+    let hit_caret = serde_json::to_value(hit_caret).unwrap();
+    for key in ["pageIndex", "x", "y", "height"] {
+        assert_eq!(hit_caret[key], rect[key], "{key}");
+    }
+
+    let receipt: Value = serde_json::from_str(
+        &ordinary
+            .insert_text("body", para_id, 2, "!", None, None)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        receipt,
+        serde_json::json!({
+            "revisionId": null,
+            "range": {
+                "story": "body",
+                "start": {"paraId": para_id, "offset": 2},
+                "end": {"paraId": para_id, "offset": 3}
+            }
+        })
+    );
+    let frame = session
+        .apply_input("!", caret["frameEpoch"].as_f64().unwrap())
+        .unwrap();
+    assert!(!frame.is_empty());
+    assert_eq!(paragraph_texts(&session), ["Fi!rst", "Second"]);
+    assert_eq!(paragraph_texts(&session), paragraph_texts(&ordinary));
+    let selection: Value = serde_json::from_str(&session.selection().unwrap()).unwrap();
+    assert_eq!(selection["head"]["story"], receipt["range"]["story"]);
+    assert_eq!(
+        selection["head"]["paraId"],
+        receipt["range"]["end"]["paraId"]
+    );
+    assert_eq!(
+        selection["head"]["offset"],
+        receipt["range"]["end"]["offset"]
+    );
+    assert_eq!(selection["anchor"], selection["head"]);
+}
+
+#[test]
+fn invalid_resident_frame_epoch_matches_shim_error_before_mutation() {
+    let session = core(1);
+    session.load_json(BODY).unwrap();
+    let before = session.encode_state();
+    let error = session.apply_input("!", -1.0).unwrap_err();
+    assert_eq!(error.kind, EngineErrorKind::Message);
+    assert_eq!(
+        error.message,
+        "expected_frame_epoch must be a non-negative safe integer"
+    );
+    assert_eq!(session.encode_state(), before);
+}

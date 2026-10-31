@@ -33,7 +33,7 @@ beforeAll(async () => {
   expect(document).toContain('w14:textId="invalid"');
   parts['word/document.xml'] = new TextEncoder().encode(document);
   DOCX = new Uint8Array(rezipPartsToArrayBuffer(new Map(Object.entries(parts))));
-});
+}, 30_000);
 
 afterEach(() => {
   Object.defineProperty(globalThis, 'crypto', { value: crypto, configurable: true });

@@ -23,6 +23,7 @@ interface FormatConfig {
   wasm: string;
   native: string;
   classes: string[];
+  pending: string[];
 }
 
 export const FORMATS: Record<string, FormatConfig> = {
@@ -30,6 +31,43 @@ export const FORMATS: Record<string, FormatConfig> = {
     wasm: "packages/xlsx/src/wasm/generated/xlsx_wasm.d.ts",
     native: "bindings/xlsx-native/index.d.ts",
     classes: ["XlsxDocument", "XlsxSnapshotBuilder"],
+    pending: [],
+  },
+  docx: {
+    wasm: "packages/docx/src/wasm/generated/edit/docx_edit.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: ["EditSession", "RetainedLayoutMeta", "RunInheritance"],
+    pending: [],
+  },
+  "docx-parse": {
+    wasm: "packages/docx/src/wasm/generated/parse/docx_parse.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  "docx-query": {
+    wasm: "packages/docx/src/wasm/generated/query/docx_query.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  "docx-opc": {
+    wasm: "packages/docx/src/wasm/generated/opc/ooxml_opc.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  "docx-preflight": {
+    wasm: "packages/docx/src/wasm/generated/preflight/docx_preflight.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  pptx: {
+    wasm: "packages/pptx/src/wasm/generated/pptx_wasm.d.ts",
+    native: "bindings/pptx-native/index.d.ts",
+    classes: ["PptxDocument", "PptxRenderer"],
+    pending: [],
   },
 };
 
@@ -211,9 +249,34 @@ function describe(member: MemberInfo): string {
   return `${prefix}${member.name}(${params}): ${member.returnType}`;
 }
 
-export function compareSurfaces(wasm: Surface, native: Surface, classNames: string[]): string[] {
+export function compareSurfaces(
+  wasm: Surface,
+  native: Surface,
+  classNames: string[],
+  pending: readonly string[] = [],
+): string[] {
+  const skipped = new Set(pending);
   const problems: string[] = [];
+  for (const item of skipped) {
+    const [owner, member] = item.startsWith("function ")
+      ? [undefined, item.slice("function ".length)]
+      : item.split(".", 2);
+    const inWasm = owner === undefined
+      ? wasm.functions.has(member)
+      : member === undefined ? wasm.classes.has(owner) : wasm.classes.get(owner)?.has(member);
+    const inNative = owner === undefined
+      ? native.functions.has(member)
+      : member === undefined
+        ? native.classes.has(owner)
+        : native.classes.get(owner)?.has(member);
+    if (!inWasm && !(owner === undefined && IGNORED_FUNCTIONS.has(member))) {
+      problems.push(`${item}: pending but not in the wasm surface`);
+    } else if (inNative) {
+      problems.push(`${item}: pending but available natively; remove it from pending`);
+    }
+  }
   for (const className of classNames) {
+    if (skipped.has(className)) continue;
     const wasmClass = wasm.classes.get(className);
     const nativeClass = native.classes.get(className);
     if (!wasmClass) {
@@ -224,10 +287,14 @@ export function compareSurfaces(wasm: Surface, native: Surface, classNames: stri
       problems.push(`native class ${className} is missing`);
       continue;
     }
-    if (!wasmClass.has("constructor") && nativeClass.has("constructor")) {
+    if (
+      !skipped.has(`${className}.constructor`)
+      && !wasmClass.has("constructor") && nativeClass.has("constructor")
+    ) {
       problems.push(`${className}.constructor: public constructor is only available natively`);
     }
     for (const [name, expected] of wasmClass) {
+      if (skipped.has(`${className}.${name}`)) continue;
       const actual = nativeClass.get(name);
       if (!actual) {
         problems.push(`${className}.${name}: missing natively (wasm: ${describe(expected)})`);
@@ -268,7 +335,7 @@ export function compareSurfaces(wasm: Surface, native: Surface, classNames: stri
     }
   }
   for (const [name, expected] of wasm.functions) {
-    if (IGNORED_FUNCTIONS.has(name)) continue;
+    if (IGNORED_FUNCTIONS.has(name) || skipped.has(`function ${name}`)) continue;
     const actual = native.functions.get(name);
     if (!actual) {
       problems.push(`function ${name}: missing natively (wasm: ${describe(expected)})`);
@@ -314,7 +381,13 @@ function main(): void {
   const root = join(import.meta.dir, "..");
   const wasmText = readFileSync(join(root, config.wasm), "utf8");
   const nativeText = readFileSync(join(root, config.native), "utf8");
-  const problems = compareSurfaces(parseSurface(wasmText), parseSurface(nativeText), config.classes);
+  const problems = compareSurfaces(
+    parseSurface(wasmText), parseSurface(nativeText), config.classes, config.pending,
+  );
+  if (config.pending.length > 0) {
+    console.log(`engine surface pending for ${format} (${config.pending.length}):`);
+    for (const item of config.pending) console.log(`  - ${item}`);
+  }
   if (problems.length > 0) {
     console.error(`engine surface mismatch for ${format}:`);
     for (const problem of problems) console.error(`  - ${problem}`);

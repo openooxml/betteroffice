@@ -417,6 +417,8 @@
         "strikethroughDescription": "Durchstreichung umschalten",
         "subscript": "Tiefgestellt",
         "subscriptDescription": "Tiefstellung umschalten",
+        "clearFormatting": "Formatierung löschen",
+        "clearFormattingDescription": "Textformatierung löschen",
         "superscript": "Hochgestellt",
         "superscriptDescription": "Hochstellung umschalten",
         "alignLeft": "Linksbündig",

@@ -113,7 +113,11 @@ jobs:
           bun run --filter '@betteroffice/collaboration-relay' typecheck
 
       - name: Check API surface
-        run: bun scripts/api-surface.ts --check xlsx
+        run: |
+          bun scripts/api-surface.ts --check xlsx
+          bun scripts/api-surface.ts --check pptx
+          bun scripts/api-surface.ts --check xlsx-native
+          bun scripts/api-surface.ts --check pptx-native
 
       # What `bun run test` builds; the tests themselves run in the package-tests shards.
       - name: Build the Wasm modules
@@ -123,6 +127,11 @@ jobs:
 
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
+
+      - name: Check Wasm memory limits
+        env:
+          BETTEROFFICE_REQUIRE_WASM: "1"
+        run: bun test scripts/wasm-memory.test.ts
 
       - name: Check demo assets
         run: |
@@ -199,7 +208,6 @@ jobs:
 
       - name: Test
         env:
-          BETTEROFFICE_ENGINE: wasm
           BETTEROFFICE_PACKAGE_DECLARATIONS: skip
         run: bun run test --shard=${{ matrix.shard }}/2
 
@@ -275,7 +283,9 @@ jobs:
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
-          cargo clippy -p fontpack --all-targets --features build -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features build -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features manager -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features manager,fonts-latin,fonts-intl,fonts-cjk -- -D warnings
 
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
@@ -306,7 +316,9 @@ jobs:
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
-          cargo test -p fontpack --features build
+          cargo test -p betteroffice-fonts --features build
+          cargo test -p betteroffice-fonts --features manager
+          cargo test -p betteroffice-fonts --features manager,fonts-latin,fonts-intl,fonts-cjk
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
@@ -454,38 +466,85 @@ jobs:
         run: |
           bun run --filter @betteroffice/xlsx build:wasm
           bun run --filter @betteroffice/pptx build:wasm
+          bun run --filter @betteroffice/docx build:wasm
 
       - name: Build and test
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: |
+          bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build
+          (cd packages/fonts && bunx tsup)
           for package in $(node scripts/native-bindings.mjs --paths); do
-            if [ "$package" = "bindings/xlsx-native" ]; then
+            if [ "$package" = "bindings/xlsx-native" ] || [ "$package" = "bindings/pptx-native" ]; then
               bunx napi build --cwd "$package" --platform --release -- --locked
             else
               bunx napi build --cwd "$package" --platform -- --locked
             fi
+            bun run --cwd "$package" --if-present build:js
             bun test "$package/index.test.ts"
           done
+
+      - name: Check native declarations
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          (cd packages/xlsx && bunx tsup)
+          ls packages/xlsx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/wasm-declarations"
+          ls bindings/xlsx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/wasm-declarations" -
+          while read -r file; do cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"; done < "$RUNNER_TEMP/wasm-declarations"
+          (cd packages/pptx && bunx tsup)
+          ls packages/pptx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/pptx-wasm-declarations"
+          ls bindings/pptx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/pptx-wasm-declarations" -
+          while read -r file; do cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"; done < "$RUNNER_TEMP/pptx-wasm-declarations"
+          (cd packages/docx && bunx tsup)
+          for asset in edit/docx_edit parse/docx_parse query/docx_query opc/ooxml_opc preflight/docx_preflight; do
+            asset_chunks=$(grep -rlF --include='*.mjs' "./generated/${asset}_bg.wasm" packages/docx/dist)
+            test -n "$asset_chunks"
+            while IFS= read -r chunk; do
+              test "$(dirname "$chunk")" = packages/docx/dist
+            done <<< "$asset_chunks"
+          done
+          for package in packages/docx bindings/docx-native; do
+            (cd "$package/dist" && find . -type f \( -name '*.d.ts' -o -name '*.d.mts' \) | LC_ALL=C sort) > "$RUNNER_TEMP/$(basename "$package")-declarations.txt"
+          done
+          test -s "$RUNNER_TEMP/docx-declarations.txt"
+          cmp "$RUNNER_TEMP/docx-declarations.txt" "$RUNNER_TEMP/docx-native-declarations.txt"
+          while IFS= read -r declaration; do
+            cmp "packages/docx/dist/$declaration" "bindings/docx-native/dist/$declaration"
+          done < "$RUNNER_TEMP/docx-declarations.txt"
 
       - name: Test the xlsx packages on the native engine
         run: |
           bun run build:docx-wasm
           bun run build:fonts
-          BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts
-          BETTEROFFICE_ENGINE=native bun test --isolate packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx scripts/parity/parity.test.ts scripts/native-engine.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/cli-env.test.ts packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
 
       - name: Check engine surface
-        run: bun scripts/check-engine-surface.ts xlsx
+        run: |
+          bun scripts/check-engine-surface.ts xlsx
+          bun scripts/check-engine-surface.ts pptx
+          bun scripts/check-engine-surface.ts docx
+          bun scripts/check-engine-surface.ts docx-parse
+          bun scripts/check-engine-surface.ts docx-query
+          bun scripts/check-engine-surface.ts docx-opc
+          bun scripts/check-engine-surface.ts docx-preflight
+
+      - name: Test the pptx packages on the native engine
+        run: |
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
 
       - name: Check native and wasm parity
-        env:
-          BETTEROFFICE_ENGINE: wasm
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
 
       - name: Check runtimes
         run: |
+          export BETTEROFFICE_EXPORT_KEYS="$RUNNER_TEMP/native-export-keys.json"
+          bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"
           node scripts/native-bindings-smoke.mjs
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
@@ -495,6 +554,7 @@ jobs:
             package_dir="$smoke_dir/node_modules/@betteroffice/$format"
             mkdir -p "$package_dir"
             cp "$package/package.json" "$package/index.js" "$package/index.d.ts" "$package/"*.node "$package_dir/"
+            if [ -d "$package/dist" ]; then cp -R "$package/dist" "$package_dir/"; fi
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"

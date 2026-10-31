@@ -1269,6 +1269,9 @@ pub(crate) fn parse_xml_strict(
     budget: &mut ParseBudget<'_>,
 ) -> Result<XmlDocument, ParseError> {
     budget.charge_xml_bytes(xml.len(), part)?;
+    // The reader skips a UTF-8 byte order mark without counting it, so its offsets index the
+    // bytes after it; slice retained source XML from those same bytes.
+    let xml = xml.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(xml);
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     reader.config_mut().check_end_names = true;
@@ -1433,7 +1436,13 @@ fn retain_replayed_namespace_aliases(
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
     let row = element.name == "w:tr" && !element.attributes.is_empty();
-    if !row && !matches!(element.local_name(), "pict" | "object") {
+    let smart_art =
+        element.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(element);
+    let smart_art_run = element.local_name() == "r"
+        && element.child_elements().any(|child| {
+            child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
+        });
+    if !row && !smart_art && !smart_art_run && !matches!(element.local_name(), "pict" | "object") {
         return Ok(());
     }
     let mut bindings = IndexMap::new();
@@ -1492,7 +1501,10 @@ fn retain_replayed_namespace_aliases(
             }
         }
         if !row {
-            pending.extend(node.child_elements());
+            pending.extend(
+                node.child_elements()
+                    .filter(|child| !smart_art_run || child.local_name() != "drawing"),
+            );
         }
     }
     let mut attribute_bytes: usize = element
@@ -1952,6 +1964,27 @@ mod tests {
             parse_twips_measure(&format!("{}in", "9".repeat(310)), true),
             None
         );
+    }
+
+    #[test]
+    fn retained_bookmark_xml_after_a_byte_order_mark_is_the_source_element() {
+        let start = "<w:bookmarkStart w:id=\"0\" w:name=\"_Toc1\"/>";
+        let end = "<w:bookmarkEnd w:id=\"0\"/>";
+        let part = format!(
+            "<w:document xmlns:w=\"urn:w\"><w:body>{start}<w:p/>{end}</w:body></w:document>"
+        );
+        for input in [part.clone(), format!("\u{feff}{part}")] {
+            let document = parse(&input).unwrap();
+            let retained: Vec<_> = document
+                .root()
+                .unwrap()
+                .child_by_local_name("body")
+                .unwrap()
+                .child_elements()
+                .filter_map(|element| element.bookmark_xml.as_deref())
+                .collect();
+            assert_eq!(retained, [start, end], "{input:?}");
+        }
     }
 
     fn parse(input: &str) -> Result<XmlDocument, ParseError> {

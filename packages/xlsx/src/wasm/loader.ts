@@ -12,14 +12,22 @@ import initWasmModule, {
   XlsxDocument,
   XlsxSnapshotBuilder,
   allocationFailure,
-  backend,
+  decodeFontFace as decodePackedFontFace,
   displayListCellLimit,
+  engineKind,
   exportXlsxMarkdownJson,
   exportXlsxStructuredJson,
   renderXlsxMarkdownJson,
 } from './engine';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import { wasmAssetUrl } from './asset';
 import { pngDisplayListReaders } from './pngDisplayList';
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
@@ -697,7 +705,7 @@ export function initWasm(
   if (initialization) return initialization;
   const png = options.png !== false;
   let module: WebAssembly.Module | undefined;
-  const source = backend === 'native' || (input === undefined && png)
+  const source = engineKind === 'native' || (input === undefined && png)
     ? input ?? wasmAssetUrl()
     : compileWasmInput(input ?? wasmAssetUrl(png)).then((compiled) => {
       module = compiled;
@@ -706,7 +714,7 @@ export function initWasm(
   initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
-      pngExportAvailable = backend === 'native' || module === undefined ||
+      pngExportAvailable = engineKind === 'native' || module === undefined ||
         WebAssembly.Module.customSections(module, 'betteroffice.xlsx.no-png').length === 0;
       initialized = true;
     },
@@ -750,13 +758,6 @@ export function getDisplayListCellLimit(): number {
  */
 export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
-}
-
-export type EngineBackend = 'wasm' | 'native';
-
-/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export function engineBackend(): EngineBackend {
-  return backend;
 }
 
 /**

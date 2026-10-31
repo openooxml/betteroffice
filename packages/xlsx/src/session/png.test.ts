@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
-import { engineBackend } from '../wasm/engine';
+import { engineKind } from '../wasm/engine';
 import { openWorkbookSession, type WorkbookSession } from './client';
 
 const fixture = new Uint8Array(readFileSync(new URL('../../test-fixtures/sample.xlsx', import.meta.url)));
@@ -45,7 +45,7 @@ async function matchingPng(lean: WorkbookSession, full: WorkbookSession, sheet: 
   }
 }
 
-describe.skipIf(engineBackend() === 'native')('lazy worker PNG export', () => {
+describe.skipIf(engineKind === 'native')('lazy worker PNG export', () => {
   test('loads raster only on the first export and matches full-core bytes after edits', async () => {
     const lean = await opened(false);
     const full = await opened(true);

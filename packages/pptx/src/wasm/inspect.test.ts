@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { initWasm, inspectPresentation } from '../index';
-import { parsePptxJson, parsePptxJsonWithoutMedia } from './generated/pptx_wasm.js';
+import { parsePptxJson, parsePptxJsonWithoutMedia } from './engine';
 
 const media = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1"/></svg>');
 let deck: Uint8Array;

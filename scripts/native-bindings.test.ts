@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,6 +65,30 @@ describe('native package registry', () => {
         expect(platform.private).not.toBe(true);
         expect(platform.publishConfig.access).toBe('public');
       }
+    }
+  });
+
+  test('pins workspace dependencies in native package manifests before packing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'native-workspace-deps-'));
+    const nativeManifest = join(root, 'bindings/pptx-native/package.json');
+    const fontsManifest = join(root, 'packages/fonts/package.json');
+    try {
+      mkdirSync(join(root, 'bindings/pptx-native'), { recursive: true });
+      mkdirSync(join(root, 'packages/fonts'), { recursive: true });
+      writeFileSync(fontsManifest, JSON.stringify({ name: '@betteroffice/fonts', version: '0.4.2' }));
+      writeFileSync(nativeManifest, JSON.stringify({
+        name: '@betteroffice/pptx-native', version: '0.5.1', private: true,
+        dependencies: { '@betteroffice/fonts': 'workspace:^' },
+      }));
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('./rewrite-workspace-deps.ts', import.meta.url))], {
+        cwd: root, encoding: 'utf8',
+      });
+      expect(result.status).toBe(0);
+      const manifest = JSON.parse(readFileSync(nativeManifest, 'utf8'));
+      expect(manifest.dependencies).toEqual({ '@betteroffice/fonts': '^0.4.2' });
+      expect(manifest.private).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -277,9 +301,19 @@ describe('native package release wiring', () => {
     expect(makePublic.run).toBe('npm pkg delete private');
     expect(makePublic['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
     expect(makePublic.if).toBeUndefined();
+    const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
+    expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
+    const pin = steps.find((step: any) => step.name === 'Pin workspace dependencies');
+    expect(pin.run).toBe('bun scripts/rewrite-workspace-deps.ts');
+    expect(pin.if).toBeUndefined();
+    expect(steps.indexOf(entries)).toBeLessThan(steps.indexOf(pin));
+    expect(steps.indexOf(pin)).toBe(steps.indexOf(makePublic) - 1);
     const contents = steps.find((step: any) => step.name === 'Check root contents');
     expect(contents.run).toBe(
-      `npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'`
+      `npm pack --dry-run --json | jq -e --slurpfile manifest package.json '(["index.js", "index.d.ts"] + [$manifest[0].exports // {} | .. | strings | ltrimstr("./")]) - [.[0].files[].path] == []'`
     );
     expect(contents['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
     expect(contents.if).toBeUndefined();
@@ -327,7 +361,7 @@ describe('native package release wiring', () => {
     expect(loader.if).toBe("matrix.platform.target == 'x86_64-unknown-linux-gnu'");
     expect(loader.with).toEqual({
       name: '${{ inputs.binding }}-native-loader',
-      path: 'bindings/${{ inputs.binding }}-native/index.js',
+      path: 'bindings/${{ inputs.binding }}-native/index.js\nbindings/${{ inputs.binding }}-native/dist\n',
       'if-no-files-found': 'error'
     });
     const binary = steps.find(
@@ -337,11 +371,24 @@ describe('native package release wiring', () => {
     );
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.run).toBe('bun test bindings/${{ inputs.binding }}-native/index.test.ts');
+    const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
+    expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
+    expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
+    const fonts = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fonts.run).toContain("bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build");
+    expect(fonts.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(fonts.shell).toBe('bash');
+    expect(steps.indexOf(fonts)).toBeLessThan(steps.indexOf(testing));
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
     expect(steps.indexOf(loader)).toBeGreaterThan(steps.indexOf(testing));
   });
 
   test('CI builds every path and checks declarations and all three runtimes', () => {
+    const api = ci.jobs.packages.steps.find((step: any) => step.name === 'Check API surface');
+    expect(api.run).toContain('bun scripts/api-surface.ts --check pptx-native');
     const job = ci.jobs.native;
     expect(job.name).toBe('Native gate');
     expect(job['runs-on']).toBe('ubuntu-latest');
@@ -365,14 +412,27 @@ describe('native package release wiring', () => {
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('for package in'));
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
-    expect(build.run).toContain('bun test "$package/index.test.ts"');
+    expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
+    expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeGreaterThan(-1);
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
+    const nativeDeclarations = job.steps.find((step: any) => step.name === 'Check native declarations');
+    expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
+    expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');
+    expect(nativeDeclarations.run).toContain('(cd packages/pptx && bunx tsup)');
+    expect(nativeDeclarations.run).toContain('ls packages/pptx/dist/*.d.ts');
+    expect(nativeDeclarations.run).toContain('ls bindings/pptx-native/dist/*.d.ts');
+    expect(nativeDeclarations.run).toContain('cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"');
+    expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(nativeDeclarations));
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
     expect(wasm.run).toContain('bun run --filter @betteroffice/xlsx build:wasm');
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
+    expect(wasm.run).toContain('bun run --filter @betteroffice/docx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
-      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts'
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts'
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
@@ -380,15 +440,26 @@ describe('native package release wiring', () => {
       (step: any) => step.name === 'Test the xlsx packages on the native engine'
     );
     expect(xlsx.run).toContain(
-      'BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx scripts/parity/parity.test.ts scripts/native-engine.test.ts'
     );
+    expect(xlsx.run).toContain('bun run build:docx-wasm');
+    expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
     expect(root.scripts.test).toContain('scripts');
+    expect(nativeDeclarations.run).toContain('(cd packages/docx && bunx tsup)');
+    expect(nativeDeclarations.run).toContain('for asset in edit/docx_edit parse/docx_parse query/docx_query opc/ooxml_opc preflight/docx_preflight; do');
+    expect(nativeDeclarations.run).toContain('test "$(dirname "$chunk")" = packages/docx/dist');
+    expect(nativeDeclarations.run).toContain("find . -type f");
+    expect(nativeDeclarations.run).toContain("-name '*.d.ts' -o -name '*.d.mts'");
+    expect(nativeDeclarations.run).toContain('cmp "$RUNNER_TEMP/docx-declarations.txt" "$RUNNER_TEMP/docx-native-declarations.txt"');
+    expect(nativeDeclarations.run).toContain('cmp "packages/docx/dist/$declaration" "bindings/docx-native/dist/$declaration"');
     const declarations = job.steps.find((step: any) => step.name === 'Check generated declarations');
     expect(declarations.run).toBe("git diff --exit-code -- 'bindings/*-native/index.d.ts'");
     const smoke = job.steps.find((step: any) => step.name === 'Check runtimes');
+    expect(smoke.run).toContain('bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"');
+    expect(smoke.run).toContain('if [ -d "$package/dist" ]; then cp -R "$package/dist" "$package_dir/"; fi');
     expect(smoke.run).toContain('node scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('bun scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
@@ -402,13 +473,22 @@ describe('native package release wiring', () => {
     );
   });
 
-  test('package assembly is path-filtered and builds every format', () => {
+  test('package assembly runs after merges to main, path-filtered, and builds every format', () => {
     expect(packages.name).toBe('Native packages');
-    expect(Object.keys(packages.on).sort()).toEqual(['pull_request', 'workflow_dispatch']);
-    expect(packages.on.pull_request.paths).toEqual([
+    expect(Object.keys(packages.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect(packages.on.push.branches).toEqual(['main']);
+    expect(packages.on.push.paths).toEqual([
       'bindings/*-native/**',
       'scripts/native-bindings.mjs',
       'scripts/native-bindings-smoke.mjs',
+      'scripts/native-engine.ts',
+      'packages/xlsx/src/**',
+      'packages/xlsx/package.json',
+      'packages/pptx/src/**',
+      'packages/pptx/package.json',
+      'packages/docx/src/**',
+      'packages/docx/package.json',
+      'shared/**',
       'scripts/version-packages.mjs',
       '.github/workflows/native-packages.yml',
       '.github/workflows/native-dist.yml',
@@ -473,16 +553,27 @@ describe('native package release wiring', () => {
     expect(job.steps.indexOf(loader)).toBeLessThan(job.steps.indexOf(artifacts));
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(makePublic));
     expect(job.steps.indexOf(makePublic)).toBeLessThan(job.steps.indexOf(validate));
+    const entries = job.steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = job.steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(job.steps.indexOf(fontPackages)).toBe(job.steps.indexOf(entries) - 1);
+    expect(entries.run).toBe('bun run --cwd bindings/${{ matrix.binding }}-native --if-present build:js');
+    expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(entries));
+    const pin = job.steps.find((step: any) => step.name === 'Pin workspace dependencies');
+    expect(pin.run).toBe('bun scripts/rewrite-workspace-deps.ts');
+    expect(job.steps.indexOf(entries)).toBeLessThan(job.steps.indexOf(pin));
+    expect(job.steps.indexOf(pin)).toBe(job.steps.indexOf(makePublic) - 1);
     const pack = job.steps.find((step: any) => step.name === 'Check package contents');
     expect(pack['working-directory']).toBe('bindings/${{ matrix.binding }}-native');
     expect(pack.run).toStartWith(
-      `npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'\n` +
+      `npm pack --dry-run --json | jq -e --slurpfile manifest package.json '(["index.js", "index.d.ts"] + [$manifest[0].exports // {} | .. | strings | ltrimstr("./")]) - [.[0].files[].path] == []'\n` +
         'npm pack --dry-run\n'
     );
     expect(pack.run).toContain('for package in npm/*; do');
     expect(pack.run).toContain('(cd "$package" && npm pack --dry-run)');
     expect(job.steps.indexOf(loader)).toBeLessThan(job.steps.indexOf(pack));
     expect(job.steps.indexOf(validate)).toBeLessThan(job.steps.indexOf(pack));
+    expect(job.steps.indexOf(entries)).toBeLessThan(job.steps.indexOf(pack));
   });
 });
 
@@ -513,7 +604,10 @@ describe('native package public names', () => {
         const triple = platform.name.replace(`@betteroffice/${format}-native-`, '');
         expect(identity).toBe(triple);
         expect(platform.main).toBe(`${manifest.napi.binaryName}.${triple}.node`);
-        expect(platform.files).toEqual([platform.main]);
+        expect(platform.files).toEqual([platform.main, 'BSD-3-Clause-Zstandard.txt', 'MIT-wuff.txt']);
+        expect(read(`${path}/npm/${identity}/BSD-3-Clause-Zstandard.txt`))
+          .toBe(read('crates/betteroffice-fonts/vendor/zstd/LICENSE'));
+        expect(read(`${path}/npm/${identity}/MIT-wuff.txt`)).toBe(read('packages/fonts/LICENSES/MIT-wuff.txt'));
         expect(platform.description).toBe(manifest.description);
         expect(platform.keywords).toEqual(manifest.keywords);
       }

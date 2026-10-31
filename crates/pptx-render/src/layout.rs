@@ -17,7 +17,8 @@ use ooxml_text::family_metrics::{
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
-    presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
+    paragraph_scripts_with_han_fallback, presentation_break_opportunities, shape, single_line_box,
+    uppercase_for_language,
 };
 use pptx_edit::paragraph::{
     ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_insertions,
@@ -36,6 +37,7 @@ use pptx_parse::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_properties::{EmojiStatus, UnicodeEmoji};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
@@ -64,6 +66,7 @@ const BACKGROUND_FILL_BASE: u32 = 1_001;
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+const MAX_FONT_REGISTRATIONS: usize = 4_096;
 const BROWSER_FONT_ID: u32 = u32::MAX;
 pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -127,6 +130,34 @@ fn needs_visible_glyph(character: char) -> bool {
                 | 0x1D173..=0x1D17A
                 | 0xE0000..=0xE0FFF
         )
+}
+
+fn emoji_presentation_cluster(cluster: &str) -> bool {
+    let text_presentation = cluster.contains('\u{FE0E}');
+    cluster.chars().any(|character| {
+        matches!(
+            character as u32,
+            0xFE0F | 0x20E3 | 0x1F1E6..=0x1F1FF | 0x1F3FB..=0x1F3FF
+        ) || (!text_presentation && default_emoji_presentation(character))
+    }) || cluster.split('\u{200D}').skip(1).any(|part| {
+        let Some(character) = part.chars().next() else {
+            return false;
+        };
+        // GB11 identifies pictographs; the ordinary prefix excludes extending marks.
+        let pictographic = format!("😀\u{200D}{character}");
+        let ordinary = format!("a\u{200D}{character}");
+        pictographic.graphemes(true).count() == 1 && ordinary.graphemes(true).count() == 2
+    })
+}
+
+fn default_emoji_presentation(character: char) -> bool {
+    matches!(
+        character.emoji_status(),
+        EmojiStatus::EmojiPresentation
+            | EmojiStatus::EmojiPresentationAndModifierBase
+            | EmojiStatus::EmojiPresentationAndEmojiComponent
+            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+    )
 }
 
 /// A font family the deck asked for that is not registered, the family drawn
@@ -232,18 +263,14 @@ impl SlideRenderer {
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        if self.font_count >= MAX_FONTS {
-            return Err(RenderError::ResourceLimit(format!(
-                "more than {MAX_FONTS} font faces"
-            )));
-        }
+        self.check_font_budget(bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register(bytes.to_vec())
+            .register_slice(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         let requested = normalize_family(family);
         let metrics = family_metrics(&requested, bold, italic);
@@ -266,6 +293,22 @@ impl SlideRenderer {
         Ok(id.to_u32())
     }
 
+    /// Only distinct font bytes count against [`MAX_FONTS`]; the same bytes
+    /// under another family or style share the face already held.
+    fn check_font_budget(&self, bytes: &[u8]) -> Result<(), RenderError> {
+        if self.font_count >= MAX_FONT_REGISTRATIONS {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONT_REGISTRATIONS} font registrations"
+            )));
+        }
+        if self.fonts.face_count() >= MAX_FONTS && self.fonts.find_face(bytes).is_none() {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONTS} font faces"
+            )));
+        }
+        Ok(())
+    }
+
     /// Registers a face drawn only where a run's own face has no glyph, the way
     /// PowerPoint reaches for a script's font when the named one cannot draw a
     /// character. The first registered face that covers a character draws it.
@@ -281,18 +324,14 @@ impl SlideRenderer {
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        if self.font_count >= MAX_FONTS {
-            return Err(RenderError::ResourceLimit(format!(
-                "more than {MAX_FONTS} font faces"
-            )));
-        }
+        self.check_font_budget(bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register(bytes.to_vec())
+            .register_slice(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         self.coverage_faces.push((
             bold,
@@ -386,19 +425,29 @@ impl SlideRenderer {
         bold: bool,
         italic: bool,
     ) -> Option<FontFace> {
-        let covering = || {
-            self.coverage_faces.iter().filter(|(_, _, candidate)| {
-                cluster
-                    .chars()
-                    .filter(|character| needs_visible_glyph(*character))
-                    .all(|character| self.fonts.covers(candidate.id, character).unwrap_or(false))
-            })
+        let covers = |candidate: &FontFace| {
+            cluster
+                .chars()
+                .filter(|character| needs_visible_glyph(*character))
+                .all(|character| self.fonts.covers(candidate.id, character).unwrap_or(false))
         };
-        covering()
-            .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
-            .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
-            .or_else(|| covering().next())
-            .map(|(_, _, candidate)| FontFace {
+        let covering = || {
+            self.coverage_faces
+                .iter()
+                .filter(|(_, _, candidate)| covers(candidate))
+        };
+        let registered = || {
+            covering()
+                .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
+                .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
+                .or_else(|| covering().next())
+                .map(|(_, _, candidate)| candidate)
+        };
+        (!emoji_presentation_cluster(cluster))
+            .then(registered)
+            .flatten()
+            .map(|candidate| FontFace {
+                widths: None,
                 line: face.line,
                 line_id: face.line_id,
                 ..candidate.clone()
@@ -418,10 +467,15 @@ impl SlideRenderer {
         bold: bool,
         italic: bool,
     ) -> Vec<(usize, Option<FontFace>)> {
+        let promoted = self
+            .coverage_faces
+            .iter()
+            .any(|(_, _, coverage)| coverage.id == face.id);
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
         if text
             .chars()
             .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+            && !(promoted && text.graphemes(true).any(emoji_presentation_cluster))
         {
             return vec![(0, None)];
         }
@@ -430,7 +484,8 @@ impl SlideRenderer {
             let own = cluster
                 .chars()
                 .filter(|character| needs_visible_glyph(*character))
-                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true));
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+                && !(promoted && emoji_presentation_cluster(cluster));
             let neutral = cluster
                 .chars()
                 .all(|character| character.is_whitespace() || character.is_ascii_punctuation());
@@ -480,7 +535,10 @@ impl SlideRenderer {
 
     /// First registered face for placeholder labels.
     pub fn fallback_font(&self) -> Option<FontId> {
-        self.fallback.as_ref().map(|face| face.id)
+        self.fallback
+            .as_ref()
+            .or_else(|| self.coverage_faces.first().map(|(_, _, face)| face))
+            .map(|face| face.id)
     }
 
     pub fn layout_slide(
@@ -528,6 +586,19 @@ impl SlideRenderer {
         package: &PptxPackage,
         scopes: &[SlideScope],
     ) -> Result<Vec<(String, bool, bool)>, RenderError> {
+        Ok(self
+            .requested_font_faces_with_scripts(package, scopes)?
+            .into_iter()
+            .map(|face| (face.family, face.bold, face.italic))
+            .collect())
+    }
+
+    #[doc(hidden)]
+    pub fn requested_font_faces_with_scripts(
+        &self,
+        package: &PptxPackage,
+        scopes: &[SlideScope],
+    ) -> Result<Vec<RequestedFontFace>, RenderError> {
         let mut requests = FontRequests::default();
         for scope in scopes {
             let SlideParents {
@@ -867,6 +938,14 @@ impl SlideRenderer {
                 )
             })
             .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
+            .or_else(|| {
+                self.coverage_faces
+                    .iter()
+                    .min_by_key(|(face_bold, face_italic, _)| {
+                        2 * u8::from(*face_bold != bold) + u8::from(*face_italic != italic)
+                    })
+                    .map(|(_, _, face)| self.with_requested_metrics(face, &requested, bold, italic))
+            })
             .ok_or(RenderError::NoFont)?;
         if normalize_family(&face.family) != requested {
             substitutions.record(family, &requested, &face.family);
@@ -1213,19 +1292,28 @@ impl<'a> TableStyleScope<'a> {
 
 #[derive(Default)]
 struct FontRequests {
-    seen: HashSet<(String, bool, bool)>,
-    faces: Vec<(String, bool, bool)>,
+    seen: HashMap<(String, bool, bool), usize>,
+    faces: Vec<RequestedFontFace>,
 }
 
 impl FontRequests {
-    fn record(&mut self, request: RequestedFontFace) {
+    fn record(&mut self, mut request: RequestedFontFace, scripts: &[String]) {
         let normalized = normalize_family(&request.family);
-        if !normalized.is_empty() && self.seen.insert((normalized, request.bold, request.italic)) {
-            self.faces.push((
-                request.family.trim().to_owned(),
-                request.bold,
-                request.italic,
-            ));
+        if normalized.is_empty() {
+            return;
+        }
+        let index = *self
+            .seen
+            .entry((normalized, request.bold, request.italic))
+            .or_insert_with(|| {
+                request.family = request.family.trim().to_owned();
+                self.faces.push(request);
+                self.faces.len() - 1
+            });
+        for script in scripts {
+            if !self.faces[index].scripts.contains(script) {
+                self.faces[index].scripts.push(script.clone());
+            }
         }
     }
 
@@ -1248,14 +1336,34 @@ impl FontRequests {
                     resolve_font_request(theme, &end_style, fallback)
                 }
             };
-            self.record(first.clone());
-            for run in source.paragraph.runs.iter().skip(1) {
-                self.record(resolve_font_request(theme, &run.style, fallback));
+            let paragraph_scripts = paragraph_scripts_with_han_fallback(
+                source.paragraph.runs.iter().map(|run| run.text.as_str()),
+                false,
+            );
+            self.record(first.clone(), &[]);
+            for run in &source.paragraph.runs {
+                let mut scripts = paragraph_scripts_with_han_fallback([run.text.as_str()], false);
+                if scripts.iter().any(|script| script == "cjk-sc") {
+                    let contextual: Vec<_> = paragraph_scripts
+                        .iter()
+                        .filter(|script| matches!(script.as_str(), "cjk-jp" | "cjk-kr"))
+                        .cloned()
+                        .collect();
+                    if !contextual.is_empty() {
+                        scripts.retain(|script| script != "cjk-sc");
+                        for script in contextual {
+                            if !scripts.contains(&script) {
+                                scripts.push(script);
+                            }
+                        }
+                    }
+                }
+                self.record(resolve_font_request(theme, &run.style, fallback), &scripts);
             }
             if paragraph_marker(source.paragraph, &source.properties, &mut numbering).is_some()
                 && let Some(family) = bullet_font_request(theme, &source.properties)
             {
-                self.record(RequestedFontFace { family, ..first });
+                self.record(RequestedFontFace { family, ..first }, &paragraph_scripts);
             }
         }
         Ok(())
@@ -1464,12 +1572,16 @@ impl FontRequestWalker<'_, '_> {
                     crate::chart::visit_chart_fonts(
                         &part.chart,
                         &default_font,
-                        &mut |family, bold, italic| {
-                            self.requests.record(RequestedFontFace {
-                                family: resolve_font_family(scope.theme, family),
-                                bold,
-                                italic,
-                            });
+                        &mut |family, bold, italic, scripts| {
+                            self.requests.record(
+                                RequestedFontFace {
+                                    family: resolve_font_family(scope.theme, family),
+                                    bold,
+                                    italic,
+                                    scripts: Vec::new(),
+                                },
+                                scripts,
+                            );
                         },
                     );
                 }
@@ -3887,11 +3999,14 @@ fn case_segments(text: &str) -> Vec<(bool, &str)> {
     segments
 }
 
-#[derive(Clone)]
-struct RequestedFontFace {
-    family: String,
-    bold: bool,
-    italic: bool,
+#[derive(Clone, Serialize)]
+#[doc(hidden)]
+pub struct RequestedFontFace {
+    pub family: String,
+    pub bold: bool,
+    pub italic: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<String>,
 }
 
 fn resolve_font_request(
@@ -3922,6 +4037,7 @@ fn resolve_font_request(
         family,
         bold,
         italic,
+        scripts: Vec::new(),
     }
 }
 
@@ -3945,6 +4061,7 @@ fn chart_font_request(theme: &Theme, font: &PlotFont) -> RequestedFontFace {
         family: resolve_font_family(theme, &font.family),
         bold: font.weight >= 600,
         italic: font.italic,
+        scripts: Vec::new(),
     }
 }
 
@@ -3997,6 +4114,7 @@ fn resolve_style(
         family,
         bold,
         italic,
+        ..
     } = resolve_font_request(theme, direct, fallback);
     let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let color = direct
@@ -4146,6 +4264,7 @@ fn chart_text_primitive(
         family,
         bold,
         italic,
+        ..
     } = chart_font_request(theme, &text.font);
     let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
@@ -8796,6 +8915,78 @@ mod tests {
     }
 
     #[test]
+    fn one_face_under_many_families_holds_its_bytes_once() {
+        let mut renderer = SlideRenderer::new();
+        for index in 0..300 {
+            let family = format!("Alias {index}");
+            renderer
+                .register_font(&family, index % 2 == 1, false, FONT)
+                .unwrap();
+            renderer
+                .register_fallback_font(&family, false, index % 3 == 1, FONT)
+                .unwrap();
+        }
+        assert_eq!(renderer.fonts().face_count(), 1);
+        assert_eq!(renderer.font_count, 600);
+        let face = &renderer.faces[&(normalize_family("Alias 299"), true, false)];
+        assert_eq!(face.family, "Alias 299");
+        assert_eq!(renderer.fonts().byte_owner(face.id).unwrap().to_u32(), 0);
+        assert!(renderer.fonts().covers(face.id, 'A').unwrap());
+    }
+
+    #[test]
+    fn distinct_faces_past_the_budget_are_refused_but_aliases_are_not() {
+        let mut renderer = SlideRenderer::new();
+        let face = |index: usize| {
+            let mut bytes =
+                include_bytes!("../../docx-edit/tests/fonts/LiberationSans-Regular.ttf").to_vec();
+            bytes.extend_from_slice(&(index as u32).to_le_bytes());
+            bytes
+        };
+        for index in 0..MAX_FONTS {
+            renderer
+                .register_font(&format!("Face {index}"), false, false, &face(index))
+                .unwrap();
+        }
+        let error = renderer
+            .register_font("Overflow", false, false, &face(MAX_FONTS))
+            .unwrap_err();
+        assert!(
+            matches!(&error, RenderError::ResourceLimit(message) if message == "more than 256 font faces"),
+            "{error}"
+        );
+        assert!(
+            !renderer
+                .faces
+                .contains_key(&(normalize_family("Overflow"), false, false))
+        );
+        renderer
+            .register_fallback_font("Overflow", false, false, &face(7))
+            .unwrap();
+        renderer
+            .register_font("Face 3", true, false, &face(3))
+            .unwrap();
+        assert_eq!(renderer.fonts().face_count(), MAX_FONTS);
+    }
+
+    #[test]
+    fn registrations_past_their_own_budget_are_refused() {
+        let mut renderer = SlideRenderer::new();
+        for index in 0..MAX_FONT_REGISTRATIONS {
+            renderer
+                .register_font(&format!("Alias {index}"), false, false, FONT)
+                .unwrap();
+        }
+        let error = renderer
+            .register_font("One more", false, false, FONT)
+            .unwrap_err();
+        assert!(
+            matches!(&error, RenderError::ResourceLimit(message) if message.contains("font registrations")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn no_registered_fonts_preserve_shapes_and_text() {
         let session = DeckSession::open(FIXTURE, 8_002).unwrap();
         let rendered = SlideRenderer::new()
@@ -10326,13 +10517,32 @@ mod tests {
             .unwrap()
     }
 
+    /// CPU time this thread has used.
+    #[cfg(unix)]
+    fn thread_cpu_time() -> std::time::Duration {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `now` is a valid timespec for the call to write into.
+        let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+        assert_eq!(status, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID) failed");
+        std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+    }
+
+    #[cfg(not(unix))]
+    fn thread_cpu_time() -> std::time::Duration {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed()
+    }
+
     fn best_of_three<T>(mut workload: impl FnMut() -> T) -> (std::time::Duration, T) {
         let mut best: Option<std::time::Duration> = None;
         let mut output = None;
         for _ in 0..3 {
-            let start = std::time::Instant::now();
+            let start = thread_cpu_time();
             let result = workload();
-            let elapsed = start.elapsed();
+            let elapsed = thread_cpu_time() - start;
             if best.is_none_or(|best_elapsed| elapsed < best_elapsed) {
                 best = Some(elapsed);
             }
@@ -11357,13 +11567,19 @@ mod tests {
             (current, baseline)
         };
         let (small_current, small_baseline) = make_shapes(7_500);
-        let (small_elapsed, _) = best_of_three(|| {
-            autofit_edited_shapes(&small_current, &small_baseline, &SlideParents::default())
-        });
         let (large_current, large_baseline) = make_shapes(30_000);
-        let (large_elapsed, edited) = best_of_three(|| {
-            autofit_edited_shapes(&large_current, &large_baseline, &SlideParents::default())
-        });
+        let mut small_elapsed = std::time::Duration::MAX;
+        let mut large_elapsed = std::time::Duration::MAX;
+        let mut edited = HashSet::new();
+        for _ in 0..5 {
+            let start = thread_cpu_time();
+            autofit_edited_shapes(&small_current, &small_baseline, &SlideParents::default());
+            small_elapsed = small_elapsed.min(thread_cpu_time() - start);
+            let start = thread_cpu_time();
+            edited =
+                autofit_edited_shapes(&large_current, &large_baseline, &SlideParents::default());
+            large_elapsed = large_elapsed.min(thread_cpu_time() - start);
+        }
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
             ratio < 8.0,
@@ -13178,13 +13394,15 @@ mod tests {
 
     #[test]
     fn named_japanese_clusters_use_composed_kana_advances() {
-        const NOTO_SANS_JP: &[u8] =
-            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
+        let font = betteroffice_fonts::decode(
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf.zst"),
+            None,
+            64 << 20,
+        )
+        .unwrap();
         for family in ["MS PGothic", "MS PMincho", "MS UI Gothic"] {
             let mut renderer = SlideRenderer::new();
-            renderer
-                .register_font(family, false, false, NOTO_SANS_JP)
-                .unwrap();
+            renderer.register_font(family, false, false, &font).unwrap();
             let face = renderer
                 .resolve_face(family, false, false, &mut SubstitutionLog::default())
                 .unwrap();

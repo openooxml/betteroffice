@@ -442,6 +442,7 @@ const UNSIGNED_FIELDS = new Set([
   'geometryPath',
   'leaderGlyphs',
   'modernEffects',
+  'paintText',
   'strokePaint',
   'substituteScale',
   'canvasClusters',

@@ -32,7 +32,10 @@ export const DOCX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
     plain('Mod+Shift+='),
   ]),
   subscript: descriptor('subscript', 'formattingBar.subscript', true, [plain('Mod+=')]),
-  clearFormatting: descriptor('clearFormatting', 'formattingBar.clearFormatting', true),
+  clearFormatting: descriptor('clearFormatting', 'formattingBar.clearFormatting', true, [
+    { chord: 'Mod+Space', args: null, platform: 'other' },
+    { chord: 'Mod+\\', args: null, platform: 'mac' },
+  ]),
   paragraphStyle: descriptor('paragraphStyle', 'commands.paragraphStyle', true),
   fontFamily: descriptor('fontFamily', 'commands.fontFamily', true),
   fontSize: descriptor('fontSize', 'fontSize.label', true),
@@ -126,6 +129,14 @@ export function isMacPlatform(): boolean {
   return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 }
 
+/** Whether a binding exists on the current platform. */
+export function shortcutMatchesPlatform(
+  shortcut: Pick<DocxCommandShortcut, 'chord' | 'platform'>,
+  mac = isMacPlatform()
+): boolean {
+  return shortcut.platform === undefined || shortcut.platform === (mac ? 'mac' : 'other');
+}
+
 const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
 
 /**
@@ -162,6 +173,8 @@ export const BUILT_IN_CHORDS: ReadonlySet<string> = new Set(
 
 function keyMatches(key: string, event: KeyboardEvent): boolean {
   if (key === '=') return event.code === 'Equal' || event.key === '=' || event.key === '+';
+  if (key === 'space') return event.key === ' ' || event.code === 'Space';
+  if (key === '\\') return event.key === '\\' || event.code === 'Backslash';
   return event.key.toLowerCase() === key;
 }
 
@@ -182,7 +195,8 @@ export function matchesChord(chord: string, event: KeyboardEvent, mac = isMacPla
 /** A chord as people read it on the current platform (`Ctrl+B`, `⌘B`). */
 export function formatChord(chord: string, mac = isMacPlatform()): string {
   const parsed = parseChord(chord);
-  const key = parsed.key.length === 1 ? parsed.key.toUpperCase() : parsed.key;
+  const key =
+    parsed.key === 'space' ? 'Space' : parsed.key.length === 1 ? parsed.key.toUpperCase() : parsed.key;
   if (mac) {
     return `${parsed.mod ? '⌘' : ''}${parsed.alt ? '⌥' : ''}${parsed.shift ? '⇧' : ''}${key}`;
   }
@@ -194,10 +208,13 @@ export function formatChord(chord: string, mac = isMacPlatform()): string {
 /** The display chord for a command invoked with `args`, if it has one. */
 export function commandShortcut<K extends DocxCommandId>(
   id: K,
-  args?: DocxCommandArgs[K]
+  args?: DocxCommandArgs[K],
+  mac = isMacPlatform()
 ): string | null {
   const shortcuts = DOCX_COMMAND_DESCRIPTORS[id].shortcuts as readonly DocxCommandShortcut<K>[];
   const key = JSON.stringify(args ?? null);
-  const match = shortcuts.find((shortcut) => JSON.stringify(shortcut.args) === key);
-  return match ? formatChord(match.chord) : null;
+  const match = shortcuts.find(
+    (shortcut) => shortcutMatchesPlatform(shortcut, mac) && JSON.stringify(shortcut.args) === key
+  );
+  return match ? formatChord(match.chord, mac) : null;
 }

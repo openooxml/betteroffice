@@ -11,6 +11,18 @@ homepage = "https://betteroffice.dev"
 repository = "https://github.com/openooxml/betteroffice"
 
 [workspace.dependencies]
+betteroffice-fonts-latin = { path = "crates/betteroffice-fonts-latin", version = "0.5.1" }
+betteroffice-fonts-intl = { path = "crates/betteroffice-fonts-intl", version = "0.5.1" }
+betteroffice-fonts-cjk-sc = { path = "crates/betteroffice-fonts-cjk-sc", version = "0.5.1" }
+betteroffice-fonts-cjk-tc = { path = "crates/betteroffice-fonts-cjk-tc", version = "0.5.1" }
+betteroffice-fonts-cjk-jp = { path = "crates/betteroffice-fonts-cjk-jp", version = "0.5.1" }
+betteroffice-fonts-cjk-kr = { path = "crates/betteroffice-fonts-cjk-kr", version = "0.5.1" }
+betteroffice-fonts-cjk-serif-sc = { path = "crates/betteroffice-fonts-cjk-serif-sc", version = "0.5.1" }
+betteroffice-fonts-cjk = { path = "crates/betteroffice-fonts-cjk", version = "0.5.1" }
+
+betteroffice-fonts = { path = "crates/betteroffice-fonts", version = "0.5.1", default-features = false }
+quick-xml = "0.41"
+wasm-bindgen = "0.2"
 libm = "=0.2.15"
 betteroffice-xlsx = { path = "crates/betteroffice-xlsx", version = "0.5.1", default-features = false }
 ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.5.1" }
@@ -28,6 +40,7 @@ docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", 
 docx-layout = { package = "betteroffice-docx-layout", path = "crates/docx-layout", version = "0.5.1" }
 docx-raster = { package = "betteroffice-docx-raster", path = "crates/docx-raster", version = "0.5.1" }
 docx-edit = { package = "betteroffice-docx-edit", path = "crates/docx-edit", version = "0.5.1" }
+docx-engine = { package = "betteroffice-docx-engine", path = "crates/docx-engine" }
 betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.5.1" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.5.1" }
 pptx-edit = { package = "betteroffice-pptx-edit", path = "crates/pptx-edit", version = "0.5.1" }
@@ -61,6 +74,9 @@ opt-level = 3
 
 [profile.release.package.betteroffice-docx-parse]
 opt-level = 3
+
+[profile.release.package.betteroffice-ooxml-font-preflight]
+opt-level = "z"
 
 # The per-keystroke hot path lives in docx-edit (engine session, frame
 # encoding), ooxml-text (shaping/measurement), and yrs (text CRDT ops); the

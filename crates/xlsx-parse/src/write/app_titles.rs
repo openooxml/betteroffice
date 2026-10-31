@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use xlsx_model::Workbook;
+use xlsx_model::sort::sort_by_shared;
 
 use crate::chart::quoted_sheet;
 use crate::package::Relationship;
@@ -139,7 +140,9 @@ pub(super) fn patch(
     if edits.is_empty() {
         None
     } else {
-        edits.sort_by_key(|(range, _)| range.start);
+        sort_by_shared(&mut edits, |(left, _), (right, _)| {
+            left.start.cmp(&right.start)
+        });
         part.splice(&edits).ok()
     }
 }

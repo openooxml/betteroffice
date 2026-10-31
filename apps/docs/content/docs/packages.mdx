@@ -17,7 +17,7 @@ Python. Choose a runtime below, then select the packages for your file format.
 | Format | npm | crates.io | PyPI |
 | --- | --- | --- | --- |
 | DOCX | `@betteroffice/docx`, `@betteroffice/docx-react` | `betteroffice-docx` | `betteroffice-docx` |
-| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react`, `@betteroffice/xlsx-native` (optional native engine for the core) | `betteroffice-xlsx` | `betteroffice-xlsx` |
+| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` | `betteroffice-xlsx` |
 | PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` | `betteroffice-pptx` |
 
 All three registries carry DOCX, XLSX, and PPTX. On npm, the core, React, and
@@ -38,6 +38,7 @@ Microsoft fonts, plus Hebrew, Arabic, CJK, and international script coverage.
 | `@betteroffice/fonts` | Carlito, Caladea, Liberation Sans/Serif/Mono, Gelasio, Comic Relief, Inter, Roboto, Source Sans 3, DM Sans, DM Serif Display, Open Sans, Montserrat, Poppins, Oswald, Heebo, Noto Hebrew/Arabic |
 | `@betteroffice/fonts-cjk` | Noto Sans SC/TC/JP/KR, Noto Serif SC |
 | `@betteroffice/fonts-intl` | Noto coverage for South and Southeast Asian, Armenian, Georgian, Ethiopic, Tibetan, Mongolian, Syriac, Thaana, Cherokee, and Tifinagh scripts |
+| `@betteroffice/fonts-latin` | Latin and Noto RTL font pack, installed with the manager |
 
 For the DOCX editor, install `@betteroffice/fonts` and configure it before
 mounting the editor:
@@ -53,6 +54,7 @@ To host the font files on your own CDN, pass `baseUrl` alongside `fonts`. The
 module provides the font manifest and is required with either asset location.
 Install `@betteroffice/fonts-cjk` when you need Chinese, Japanese, or Korean text.
 Install `@betteroffice/fonts-intl` for additional international script coverage.
+`@betteroffice/fonts-latin` is installed automatically with `@betteroffice/fonts`.
 All font packages are optional and must be installed explicitly.
 
 Missing font bytes can cause fallback measurements and different pagination.

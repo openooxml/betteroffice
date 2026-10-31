@@ -1,0 +1,27 @@
+[package]
+name = "betteroffice-ooxml-font-preflight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "Read-only DOCX font preflight without the editing engine."
+
+[lib]
+name = "ooxml_font_preflight"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+wasm = ["dep:wasm-bindgen"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
+
+[dependencies]
+quick-xml.workspace = true
+miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-alloc"] }
+wasm-bindgen = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = "1"
