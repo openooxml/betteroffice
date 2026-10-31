@@ -302,6 +302,9 @@ describe('native package release wiring', () => {
     expect(makePublic['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
     expect(makePublic.if).toBeUndefined();
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
     const pin = steps.find((step: any) => step.name === 'Pin workspace dependencies');
     expect(pin.run).toBe('bun scripts/rewrite-workspace-deps.ts');
@@ -358,7 +361,7 @@ describe('native package release wiring', () => {
     expect(loader.if).toBe("matrix.platform.target == 'x86_64-unknown-linux-gnu'");
     expect(loader.with).toEqual({
       name: '${{ inputs.binding }}-native-loader',
-      path: 'bindings/${{ inputs.binding }}-native/index.js',
+      path: 'bindings/${{ inputs.binding }}-native/index.js\nbindings/${{ inputs.binding }}-native/dist\n',
       'if-no-files-found': 'error'
     });
     const binary = steps.find(
@@ -369,6 +372,9 @@ describe('native package release wiring', () => {
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.run).toBe('bun test bindings/${{ inputs.binding }}-native/index.test.ts');
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
     expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
     const fonts = steps.find((step: any) => step.name === 'Build the font packages');
@@ -406,6 +412,7 @@ describe('native package release wiring', () => {
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('for package in'));
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
     expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
@@ -422,6 +429,7 @@ describe('native package release wiring', () => {
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
     expect(wasm.run).toContain('bun run --filter @betteroffice/xlsx build:wasm');
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
+    expect(wasm.run).toContain('bun run --filter @betteroffice/docx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
       'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts'
@@ -440,6 +448,13 @@ describe('native package release wiring', () => {
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
     expect(root.scripts.test).toContain('scripts');
+    expect(nativeDeclarations.run).toContain('(cd packages/docx && bunx tsup)');
+    expect(nativeDeclarations.run).toContain('for asset in edit/docx_edit parse/docx_parse query/docx_query opc/ooxml_opc preflight/docx_preflight; do');
+    expect(nativeDeclarations.run).toContain('test "$(dirname "$chunk")" = packages/docx/dist');
+    expect(nativeDeclarations.run).toContain("find . -type f");
+    expect(nativeDeclarations.run).toContain("-name '*.d.ts' -o -name '*.d.mts'");
+    expect(nativeDeclarations.run).toContain('cmp "$RUNNER_TEMP/docx-declarations.txt" "$RUNNER_TEMP/docx-native-declarations.txt"');
+    expect(nativeDeclarations.run).toContain('cmp "packages/docx/dist/$declaration" "bindings/docx-native/dist/$declaration"');
     const declarations = job.steps.find((step: any) => step.name === 'Check generated declarations');
     expect(declarations.run).toBe("git diff --exit-code -- 'bindings/*-native/index.d.ts'");
     const smoke = job.steps.find((step: any) => step.name === 'Check runtimes');
@@ -471,6 +486,8 @@ describe('native package release wiring', () => {
       'packages/xlsx/package.json',
       'packages/pptx/src/**',
       'packages/pptx/package.json',
+      'packages/docx/src/**',
+      'packages/docx/package.json',
       'shared/**',
       'scripts/version-packages.mjs',
       '.github/workflows/native-packages.yml',
@@ -537,6 +554,9 @@ describe('native package release wiring', () => {
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(makePublic));
     expect(job.steps.indexOf(makePublic)).toBeLessThan(job.steps.indexOf(validate));
     const entries = job.steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = job.steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(job.steps.indexOf(fontPackages)).toBe(job.steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ matrix.binding }}-native --if-present build:js');
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(entries));
     const pin = job.steps.find((step: any) => step.name === 'Pin workspace dependencies');

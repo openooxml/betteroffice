@@ -1,4 +1,5 @@
 import { plugin } from 'bun';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { NATIVE_ENGINE_FILTER, nativeEngineSource } from './native-engine';
 
@@ -6,8 +7,7 @@ plugin({
   name: 'betteroffice-native-engine',
   setup(build) {
     build.onLoad({ filter: NATIVE_ENGINE_FILTER }, ({ path }) => {
-      const contents = nativeEngineSource(path);
-      return contents === undefined ? undefined : { contents, loader: 'ts' };
+      return { contents: nativeEngineSource(path) ?? readFileSync(path, 'utf8'), loader: 'ts' };
     });
   },
 });

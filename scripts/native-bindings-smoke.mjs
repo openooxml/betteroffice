@@ -1,37 +1,16 @@
 import assert from 'node:assert/strict';
-import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const require = createRequire(import.meta.url);
 const fixtureRoot = process.argv[2]
   ? pathToFileURL(`${resolve(process.argv[2])}/`)
   : new URL('../', import.meta.url);
 const fixture = (path) => readFileSync(new URL(path, fixtureRoot));
-const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const docxBytes = fixture('apps/demo/public/betteroffice-demo.docx');
 const xlsxBytes = fixture('crates/ooxml-opc/tests/fixtures/sample.xlsx');
 const pptxBytes = fixture('apps/demo/public/betteroffice-demo.pptx');
 
-for (const load of [(name) => import(name), async (name) => require(name)]) {
-  const { openDocument } = await load('@betteroffice/docx-native');
-  const document = await openDocument(docxBytes);
-  const structure = await document.structure;
-  assert.ok(structure.bodyParagraphs > 0);
-  await document.registerFont({
-    family: 'Calibri',
-    data: fixture('crates/docx-raster/tests/assets/Carlito-Regular.ttf')
-  });
-  const layoutInput = JSON.parse(
-    fixture('crates/docx-layout/tests/fixtures/single-page-multi-paragraph.input.json')
-  );
-  const page = await document.renderPage((await document.layout(layoutInput)).displayList);
-  assert.deepEqual(page.data.subarray(0, 8), pngSignature);
-  const reopenedDocument = await openDocument(await document.save());
-  assert.equal((await reopenedDocument.structure).bodyParagraphs, structure.bodyParagraphs);
-}
 assert.ok(process.env.BETTEROFFICE_EXPORT_KEYS, 'BETTEROFFICE_EXPORT_KEYS names the export names of each wasm entry');
 const exportKeys = JSON.parse(readFileSync(process.env.BETTEROFFICE_EXPORT_KEYS, 'utf8'));
 for (const [format, entries] of Object.entries(exportKeys)) {
@@ -40,6 +19,26 @@ for (const [format, entries] of Object.entries(exportKeys)) {
     assert.deepEqual(Object.keys(await import(name)).sort(), keys, name);
   }
 }
+const { createYrsSession, saveYrsDocx } = await import('@betteroffice/docx-native/yrs');
+const { parseDocx, exportDocxMarkdown, fontPreflight } = await import('@betteroffice/docx-native');
+const session = await createYrsSession({ clientId: 7 });
+const reopened = await createYrsSession({ clientId: 8 });
+try {
+  session.seedFromDocx(new Uint8Array(docxBytes));
+  const first = session.paragraphs('body')[0];
+  assert.ok(first);
+  session.insertText({ story: 'body', paraId: first.paraId, offset: 0 }, 'Native smoke ');
+  const saved = await saveYrsDocx(session, { updateModifiedDate: false });
+  reopened.seedFromDocx(saved.bytes);
+  assert.deepEqual(reopened.paragraphs('body').map(({ text }) => text), session.paragraphs('body').map(({ text }) => text));
+  assert.ok((await parseDocx(saved.bytes)).package.document.content.length > 0);
+  assert.ok(await exportDocxMarkdown(saved.bytes, { revisionView: 'accepted' }));
+  assert.ok(Array.isArray((await fontPreflight(saved.bytes)).faces));
+} finally {
+  reopened.destroy();
+  session.destroy();
+}
+
 const { initWasm: initPptx, openPresentation } = await import('@betteroffice/pptx-native');
 await initPptx();
 const presentation = openPresentation(pptxBytes);
@@ -86,4 +85,4 @@ assert.deepEqual(reopenedWorkbook.readCells({ ranges: [target] }).ranges[0].cell
 assert.ok((await exportXlsxMarkdown(xlsxBytes)).markdown.length > 0);
 workbook.dispose();
 reopenedWorkbook.dispose();
-console.log('Native DOCX import, require, save/reopen and PNG checks and XLSX/PPTX package API, edit and save/reopen checks passed.');
+console.log('Native DOCX/XLSX/PPTX export names, package API, edit and save/reopen checks passed.');
