@@ -36,14 +36,14 @@ use crate::auto_space::AutoSpace;
 use crate::caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
-use crate::font_store::{FontId, FontStore};
+use crate::font_store::{FontId, FontStore, covered_character};
 use crate::line_break::break_opportunities;
 use crate::shape::{ShapeDirection, ShapeFeature, shape_with_direction, shape_with_properties};
 use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
-use super::input::{MeasureRequest, RunIn, validate_pt_size};
-use super::{MAX_RUN_TEXT_BYTES, MeasureError, pt_to_px};
+use super::input::{FontChains, MeasureRequest, RunIn, validate_pt_size};
+use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px};
 
 /// Longest fallback chain a run keeps resolved per slot. Chains past it are
 /// rebuilt per character instead, so keeping them can never cost more memory
@@ -539,6 +539,7 @@ fn prepare_field_run(
         fallback,
         pt_to_px(font_size_pt),
         base_direction(run.rtl, input),
+        input.font_chains,
     )?;
     Ok(PreparedField {
         width,
@@ -562,12 +563,25 @@ fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
     }
 }
 
-/// First font in `chain` covering `ch`, or the chain's terminal font when
-/// nothing covers it. A truly uncovered character therefore shapes as that
-/// face's `.notdef` — a real advance width — instead of refusing the block.
-/// `None` only for an empty chain, which `validate_chain` rejects upstream.
+type FontResolver = fn(&FontStore, &[FontId], char) -> Option<FontId>;
+
+fn font_resolver(coverage_only: bool) -> FontResolver {
+    if coverage_only {
+        resolve_covered
+    } else {
+        resolve_with_fallback
+    }
+}
+
 fn resolve_with_fallback(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
     store.resolve(chain, ch).or_else(|| chain.last().copied())
+}
+
+fn resolve_covered(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
+    if !needs_glyph(ch) {
+        return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
+    }
+    store.resolve(chain, ch)
 }
 
 /// Width of `text` shaped plainly through `chain` — no caps, letter spacing
@@ -579,6 +593,7 @@ pub(super) fn measure_plain_text(
     text: &str,
     size_px: f32,
     base: crate::bidi::BaseDirection,
+    font_chains: FontChains<'_>,
 ) -> Result<f32, MeasureError> {
     if text.len() > MAX_RUN_TEXT_BYTES {
         return Err(MeasureError::Unsupported(format!(
@@ -595,11 +610,19 @@ pub(super) fn measure_plain_text(
 
     let levels = char_levels(text, base);
     let mut plan: Vec<(char, FontId, u8)> = Vec::new();
+    let resolve = font_resolver(font_chains.coverage_only(chain));
     for (i, ch) in text.chars().enumerate() {
-        let Some(font) = resolve_with_fallback(store, chain, ch) else {
-            return Err(MeasureError::Unsupported("empty font chain".to_string()));
+        let Some(font) = resolve(store, chain, ch) else {
+            return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
-        plan.push((ch, font, levels[i]));
+        let shaped = if ch == '\u{2011}' {
+            covered_character(store, font, ch)
+                .map_err(|e| MeasureError::Invalid(format!("glyph coverage failed: {e}")))?
+                .unwrap_or(ch)
+        } else {
+            ch
+        };
+        plan.push((shaped, font, levels[i]));
     }
 
     // shape maximal same-font single-level subranges and sum advances
@@ -763,6 +786,7 @@ fn prepare_text_run(
     // that trade is rebuilt per character into `oversized` instead, one at a
     // time — never more resident than resolving it per character already was.
     let mut slot_chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
+    let mut slot_resolvers: [Option<FontResolver>; 4] = [None, None, None, None];
     let mut oversized: Vec<FontId> = Vec::new();
     for (char_index, ch) in text.chars().enumerate() {
         let slot = char_slot(ch, run.complex_script, east_asia_hint, previous_slot);
@@ -818,6 +842,8 @@ fn prepare_text_run(
                 resolved => resolved?,
             };
             validate_chain(store, &resolved)?;
+            slot_resolvers[index]
+                .get_or_insert_with(|| font_resolver(input.font_chains.coverage_only(&resolved)));
             if resolved.len() <= MAX_KEPT_CHAIN_IDS {
                 slot_chains[index] = Some(resolved);
             } else {
@@ -825,9 +851,10 @@ fn prepare_text_run(
             }
         }
         let chain = slot_chains[index].as_deref().unwrap_or(&oversized);
+        let resolve = slot_resolvers[index].expect("slot resolver");
         let first = shaped[0];
-        let Some(mut font) = resolve_with_fallback(store, chain, first) else {
-            return Err(MeasureError::Unsupported("empty font chain".to_string()));
+        let Some(mut font) = resolve(store, chain, first) else {
+            return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         let mut features = kern_features(run.kerning_min_pt.is_some_and(|threshold| {
             kern_enabled(
@@ -839,7 +866,7 @@ fn prepare_text_run(
             && run.small_caps
             && !run.all_caps
             && ch.is_lowercase()
-            && let Some(original_font) = resolve_with_fallback(store, chain, ch)
+            && let Some(original_font) = resolve(store, chain, ch)
             && supports_smcp(
                 store,
                 original_font,
@@ -858,6 +885,11 @@ fn prepare_text_run(
                 tag: *b"smcp",
                 value: 1,
             });
+        }
+        for ch in shaped.iter_mut().filter(|ch| **ch == '\u{2011}') {
+            *ch = covered_character(store, font, *ch)
+                .map_err(|e| MeasureError::Invalid(format!("glyph coverage failed: {e}")))?
+                .unwrap_or(*ch);
         }
         let first = shaped[0];
         // Chars a resolved font doesn't cover (e.g. a rare char in a multi-char
@@ -1057,6 +1089,70 @@ mod tests {
             "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn implicit_non_visible_characters_do_not_require_cmap_entries() {
+        let mut bytes = FIXTURE.to_vec();
+        let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        let entry = bytes[12..]
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .take(count)
+            .find(|entry| &entry[..4] == b"cmap")
+            .unwrap();
+        let cmap = u32::from_be_bytes(entry[8..12].try_into().unwrap()) as usize;
+        bytes[cmap + 2..cmap + 4].copy_from_slice(&0u16.to_be_bytes());
+
+        let mut store = FontStore::new();
+        let font = store.register(bytes).unwrap();
+        let fallback = store.register(FIXTURE.to_vec()).unwrap();
+        let chain = [font, fallback];
+        let configured = std::collections::HashMap::new();
+        let implicit = std::collections::HashMap::from([(
+            "@betteroffice/fonts/coverage".to_owned(),
+            vec![fallback.to_u32()],
+        )]);
+        let unrelated = std::collections::HashMap::from([(
+            "@betteroffice/fonts/coverage".to_owned(),
+            vec![font.to_u32()],
+        )]);
+        for ch in [
+            '\t', '\u{0013}', '\u{0014}', '\u{0015}', '\u{00a0}', '\u{00ad}', '\u{200b}',
+            '\u{200d}', '\u{202f}', '\u{2060}', '\u{fe0f}', '\u{feff}',
+        ] {
+            assert!(!needs_glyph(ch), "U+{:04X}", ch as u32);
+            assert_eq!(store.glyph_id(font, ch).unwrap(), None);
+            assert!(!store.covers(font, ch).unwrap(), "U+{:04X}", ch as u32);
+            assert_eq!(store.resolve(&[font], ch), None);
+            assert_eq!(store.resolve(&chain, ch), store.resolve(&[fallback], ch));
+            for chains in [&configured, &unrelated] {
+                assert_eq!(
+                    font_resolver(FontChains::Hash(chains).coverage_only(&chain))(
+                        &store, &chain, ch
+                    ),
+                    Some(fallback)
+                );
+            }
+            assert_eq!(
+                font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
+                    &store, &chain, ch
+                ),
+                Some(font)
+            );
+        }
+        assert!(needs_glyph('€'));
+        assert!(store.covers(fallback, '€').unwrap());
+        assert!(needs_glyph('\u{0939}'));
+        assert_eq!(
+            font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
+                &store, &chain, '\u{0939}'
+            ),
+            None
+        );
+        let unknown = FontId::from_u32(u32::MAX);
+        assert!(store.covers(unknown, '\t').is_err());
     }
 
     /// Offsets are UTF-16 code units, not UTF-8 bytes: 'é' is 2 bytes but

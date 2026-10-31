@@ -13,6 +13,6 @@ name = "_betteroffice_xlsx"
 crate-type = ["cdylib"]
 
 [dependencies]
-betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx" }
+betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx", default-features = false, features = ["raster"] }
 pyo3 = { version = "0.29", features = ["abi3-py39", "extension-module"] }
 python-common = { package = "betteroffice-python-common", path = "../python-common" }

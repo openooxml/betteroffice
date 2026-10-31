@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import '../fontTraits';
 import { installDefaultFonts, installFonts } from './peerlessFonts';
 
 test('app ownership suppresses defaults both before and after browser loading', async () => {
@@ -19,6 +20,7 @@ test('app ownership suppresses defaults both before and after browser loading', 
     const allowed = (family: string) => !owned.has(family.trim().toLowerCase());
     const font = { family: 'Cambria', bold: false, italic: false, bytes: Uint8Array.of(1).buffer };
     const loading = installDefaultFonts([font], installed, () => true, () => {}, allowed);
+    for (let tick = 0; tick < 20 && !created.length; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
     expect(created).toHaveLength(1);
     owned.add('cambria');
     await installFonts([{ family: 'Cambria', bytes: Uint8Array.of(2) }], installed, () => true, () => {});

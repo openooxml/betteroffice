@@ -125,6 +125,65 @@
         "markdownOptions": { "maxRows": 4, "maxColumns": 4, "maxCells": 100, "maxBytes": 65536 }
       }
     },
-    { "op": "save", "args": {} }
+    { "op": "save", "args": {} },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "calculationStatus", "args": {} },
+    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 } },
+    {
+      "op": "open",
+      "args": { "fixture": "packages/xlsx/test-fixtures/defined-names.xlsx" }
+    },
+    { "op": "listDefinedNames", "args": { "limit": 2 } },
+    { "op": "listDefinedNames", "args": { "offset": 2 } },
+    { "op": "listDefinedNames", "args": { "scope": null } },
+    { "op": "listDefinedNames", "args": { "scope": 0 } },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "addConditionalFormat",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } },
+            "kind": "cellIs",
+            "operator": "greaterThan",
+            "formulas": ["1"],
+            "format": { "fontColor": "#FF0000", "bold": false, "italic": true, "fill": "#00FF00" }
+          },
+          { "type": "setAutoFilter", "sheet": 0, "range": "A1:A3" }
+        ]
+      },
+      "targets": ["ts", "rust"]
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 0 }, "targets": ["ts", "rust"] },
+    { "op": "sheetInfo", "args": {}, "targets": ["ts", "rust"] },
+    { "op": "version", "args": {}, "targets": ["ts", "rust"] },
+    {
+      "op": "applyEdits",
+      "args": {
+        "expectVersion": "<version:6>",
+        "calculation": { "nowSerial": 45000.75 },
+        "steps": [
+          {
+            "op": "setFormulas",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "C1" } },
+            "formulas": [["SEQUENCE(2)"]]
+          }
+        ]
+      },
+      "targets": ["ts", "rust"]
+    },
+    { "op": "cell", "args": { "sheet": 0, "row": 0, "col": 2 }, "targets": ["ts", "rust"] },
+    { "op": "cell", "args": { "sheet": 0, "row": 1, "col": 2 } },
+    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 } },
+    { "op": "calculationStatus", "args": {} },
+    { "op": "open", "args": { "fixture": "packages/xlsx/test-fixtures/charts.xlsx" } },
+    { "op": "searchText", "args": { "query": "REVENUE" } },
+    { "op": "searchText", "args": { "query": "revenue", "options": { "caseSensitive": true } } },
+    { "op": "searchText", "args": { "query": "Q", "options": { "limit": 2 } } },
+    { "op": "rangeCells", "args": { "sheet": 0, "range": "A1:B2" } },
+    { "op": "selectionFormatting", "args": { "sheet": 0, "range": "A1:B2" } },
+    { "op": "charts", "args": { "sheet": 0 } }
   ]
 }

@@ -20,6 +20,7 @@ mod error;
 mod exports;
 mod fonts;
 mod frames;
+pub mod free;
 mod history;
 mod host;
 mod identity;
@@ -42,6 +43,10 @@ pub struct ParagraphIdentitiesCache {
     pub(crate) version: crate::DocumentVersion,
     pub(crate) source: Option<Arc<crate::identity::SourceIndex>>,
     pub(crate) json: String,
+}
+
+pub struct UpdateSubscription {
+    _subscription: Subscription,
 }
 
 pub struct UpdateEventObserver {

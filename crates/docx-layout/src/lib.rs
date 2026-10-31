@@ -206,10 +206,18 @@ pub fn layout_to_canonical_json(input: &str) -> Result<String, LayoutError> {
     Ok(canonical::serialize_layout(&layout))
 }
 
+pub fn layout_document_json_str(input: &str) -> Result<String, String> {
+    with_module_fonts(|| layout_to_json(input))
+}
+
+fn js_error(error: String) -> JsValue {
+    JsValue::from_str(&error)
+}
+
 /// wasm wrapper over [`layout_to_json`].
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn layout_document_json(input: &str) -> Result<String, JsValue> {
-    with_module_fonts(|| layout_to_json(input)).map_err(|e| JsValue::from_str(&e))
+    layout_document_json_str(input).map_err(js_error)
 }
 
 /// Builds a display list from a `{ measured, options, layout }` JSON envelope,
@@ -553,16 +561,19 @@ pub fn update_resident_display_list_incremental_partial_cached_shifts_observed(
     })
 }
 
-/// wasm compatibility wrapper. Resident engine users call
-/// [`build_display_list_value`] and keep the typed result.
-#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
-pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
+pub fn build_display_list_json_str(input: &str) -> Result<String, String> {
     with_module_fonts(|| {
         build_display_list_value(input).and_then(|display_list| {
             serde_json::to_string(&display_list).map_err(|e| format!("serialize: {e}"))
         })
     })
-    .map_err(|e| JsValue::from_str(&e))
+}
+
+/// wasm compatibility wrapper. Resident engine users call
+/// [`build_display_list_value`] and keep the typed result.
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
+pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
+    build_display_list_json_str(input).map_err(js_error)
 }
 
 /// wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
@@ -595,6 +606,19 @@ pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String
     hit::range_rects_json(display_list, from as i64, to as i64).map_err(|e| JsValue::from_str(&e))
 }
 
+pub fn range_rects_on_pages_json_str(
+    display_list: &str,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String, String> {
+    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
+        return Ok("[]".to_string());
+    };
+    hit::range_rects_on_pages_json(display_list, from as i64, to as i64, first_page, last_page)
+}
+
 /// @internal
 #[wasm_bindgen]
 pub fn range_rects_on_pages_json(
@@ -604,11 +628,7 @@ pub fn range_rects_on_pages_json(
     first_page: f64,
     last_page: f64,
 ) -> Result<String, JsValue> {
-    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
-        return Ok("[]".to_string());
-    };
-    hit::range_rects_on_pages_json(display_list, from as i64, to as i64, first_page, last_page)
-        .map_err(|e| JsValue::from_str(&e))
+    range_rects_on_pages_json_str(display_list, from, to, first_page, last_page).map_err(js_error)
 }
 
 /// wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
@@ -713,6 +733,19 @@ pub fn range_rects_by_handle(handle: u32, from: f64, to: f64) -> Result<String, 
         .map_err(|e| JsValue::from_str(&e))
 }
 
+pub fn range_rects_on_pages_by_handle_str(
+    handle: u32,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String, String> {
+    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
+        return Ok("[]".to_string());
+    };
+    session::range_rects_on_pages_by_handle(handle, from as i64, to as i64, first_page, last_page)
+}
+
 /// @internal
 #[wasm_bindgen]
 pub fn range_rects_on_pages_by_handle(
@@ -722,11 +755,7 @@ pub fn range_rects_on_pages_by_handle(
     first_page: f64,
     last_page: f64,
 ) -> Result<String, JsValue> {
-    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
-        return Ok("[]".to_string());
-    };
-    session::range_rects_on_pages_by_handle(handle, from as i64, to as i64, first_page, last_page)
-        .map_err(|e| JsValue::from_str(&e))
+    range_rects_on_pages_by_handle_str(handle, from, to, first_page, last_page).map_err(js_error)
 }
 
 /// wasm wrapper over [`session::range_rects_region_by_handle`]: region-aware
@@ -831,13 +860,24 @@ impl Drop for MeasureFontsScope {
     }
 }
 
+pub fn register_measure_font_module(bytes: &[u8]) -> Result<u32, String> {
+    with_module_fonts(|| register_measure_font_bytes(bytes))
+}
+
 /// Register a font for measurement from raw sfnt bytes; returns the font id
 /// that `measure_paragraph_json` inputs reference in their `fontChains`.
 /// Malformed bytes (attacker-controlled embedded fonts) are rejected as an
 /// error at this boundary, mirroring `FontStore::register`.
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
-    with_module_fonts(|| register_measure_font_bytes(bytes)).map_err(|e| JsValue::from_str(&e))
+    register_measure_font_module(bytes).map_err(js_error)
+}
+
+pub fn register_substitute_measure_font_module(
+    base: u32,
+    requested_family: &str,
+) -> Result<u32, String> {
+    with_module_fonts(|| register_substitute_measure_font_id(base, requested_family))
 }
 
 /// Register a measurement view of `base` carrying the vertical metrics and
@@ -848,8 +888,7 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
 /// this one store, so a widened view measures and paints at one pitch.
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
-    with_module_fonts(|| register_substitute_measure_font_id(base, requested_family))
-        .map_err(|e| JsValue::from_str(&e))
+    register_substitute_measure_font_module(base, requested_family).map_err(js_error)
 }
 
 /// Registers a substitute view in the current measurement font store.
@@ -875,6 +914,11 @@ pub fn clear_measure_fonts() {
     measure_blocks::clear_extent_cache();
 }
 
+pub fn clear_measure_fonts_module() -> Result<(), String> {
+    with_module_fonts(clear_measure_fonts);
+    Ok(())
+}
+
 /// Drop every registered measurement font (ids restart at 0). Callers must
 /// re-register before the next `measure_paragraph_json`.
 #[cfg_attr(
@@ -882,8 +926,7 @@ pub fn clear_measure_fonts() {
     wasm_bindgen(js_name = clear_measure_fonts)
 )]
 pub fn clear_measure_fonts_wasm() -> Result<(), JsValue> {
-    with_module_fonts(clear_measure_fonts);
-    Ok(())
+    clear_measure_fonts_module().map_err(js_error)
 }
 
 /// Unique id of the current measurement font store, for caches keyed by store
@@ -935,7 +978,7 @@ pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
     with_measure_fonts(|store| {
         store
             .borrow_mut()
-            .register(bytes.to_vec())
+            .register_slice(bytes)
             .map(|id| id.to_u32())
             .map_err(|error| error.to_string())
     })
@@ -956,12 +999,16 @@ pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Opt
     })
 }
 
+pub fn measure_paragraph_json_str(input: &str) -> Result<String, String> {
+    with_module_fonts(|| measure_paragraph_json_resident(input))
+}
+
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
 /// out. An `Err` whose message starts with `"UNSUPPORTED"` means the caller
 /// must fall back to browser measurement for that block.
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
-    with_module_fonts(|| measure_paragraph_json_resident(input)).map_err(|e| JsValue::from_str(&e))
+    measure_paragraph_json_str(input).map_err(js_error)
 }
 
 /// Native/resident-engine form of [`measure_paragraph_json`]. Keeping the
@@ -1045,6 +1092,10 @@ pub(crate) fn min_content_width_typed_resident(
     with_measure_fonts(|store| ooxml_text::min_content_width_typed(&store.borrow(), request))
 }
 
+pub fn outline_glyph_json_str(font_id: u32, glyph_id: u32) -> Result<String, String> {
+    with_module_fonts(|| outline_glyph_json_resident(font_id, glyph_id))
+}
+
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline
 /// of a registered font's glyph, in font design units, as JSON:
 /// `{"upem":2048,"cmds":[{"t":"M","x":..,"y":..},{"t":"L","x":..,"y":..},
@@ -1054,8 +1105,7 @@ pub(crate) fn min_content_width_typed_resident(
 /// flipping y at draw time. `cmds` is empty for a blank glyph (space).
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
-    with_module_fonts(|| outline_glyph_json_resident(font_id, glyph_id))
-        .map_err(|e| JsValue::from_str(&e))
+    outline_glyph_json_str(font_id, glyph_id).map_err(js_error)
 }
 
 /// Reads a glyph outline from the current measurement font store.
@@ -1503,3 +1553,8 @@ mod tests {
         assert_eq!(v["pages"][0]["number"], 1);
     }
 }
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+mod native;
+#[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+pub use native::with_measure_font_store;

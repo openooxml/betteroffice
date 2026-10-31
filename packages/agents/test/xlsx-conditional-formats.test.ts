@@ -7,11 +7,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { xlsxFixture } from './format-fixtures';
 import { openXlsx } from '../src/xlsx';
+import { cliEnv } from './cli-env';
 
 test('xlsx conditional formats add list delete export reopen via MCP', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-cf-'));
   const client = new Client({ name: 'xlsx-cf-test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   try {
     await writeFile(join(root, 'book.xlsx'), await xlsxFixture());
     await client.connect(transport);
@@ -156,7 +157,7 @@ test('conditional format pages bound text and expose complete formula windows', 
 test('xlsx conditional formats preserve italic true and false through MCP export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-cf-italic-'));
   const client = new Client({ name: 'xlsx-cf-italic-test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   try {
     await writeFile(join(root, 'book.xlsx'), await xlsxFixture());
     await client.connect(transport);

@@ -1696,3 +1696,4 @@ export async function createYrsSession(options?: CreateYrsSessionOptions): Promi
   return wrapSession(wasm.createEditSession(clientId), clientId);
 }
 export type { DocxEngineWorkerSourceOpened } from './residentSourceWorkerClient';
+export { decodeFontFace } from '../wasm/fontDecoder';

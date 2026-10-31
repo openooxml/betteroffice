@@ -113,7 +113,7 @@ beforeAll(async () => {
   )));
   startWorker = await residentWorkerFactory();
   source = fixture();
-});
+}, 30_000);
 
 afterAll(() => setSystemTime());
 

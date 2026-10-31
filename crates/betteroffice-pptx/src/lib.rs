@@ -1,5 +1,12 @@
 //! Typed native facade for opening, editing, rendering, and saving PPTX files.
 
+/// The font pack decoder shared by every engine.
+pub use betteroffice_fonts as fonts;
+#[cfg(feature = "fonts")]
+pub use fonts::OpenOptions;
+#[cfg(not(feature = "fonts"))]
+pub use open_options::OpenOptions;
+
 mod error;
 mod presentation;
 #[cfg(feature = "raster")]
@@ -7,6 +14,7 @@ mod render;
 mod types;
 
 pub use error::Error;
+pub use pptx_edit::engine::{parse_pptx_json, parse_pptx_json_without_media};
 pub use presentation::{
     Presentation, export_pptx_markdown, export_pptx_structured, render_pptx_markdown,
 };
@@ -23,3 +31,6 @@ pub const MAX_COLLABORATION_BYTES: usize = pptx_edit::MAX_UPDATE_BYTES;
 pub const MAX_COLLABORATION_CLIENT_ID: u64 = pptx_edit::MAX_SAFE_CLIENT_ID;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(not(feature = "fonts"))]
+mod open_options;

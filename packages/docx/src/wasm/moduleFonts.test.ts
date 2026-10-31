@@ -25,7 +25,7 @@ const input = (id: number) => JSON.stringify({
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, 'generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 test('module font exports coexist with an edit session in the same wasm instance', () => {
   clear_measure_fonts();

@@ -60,7 +60,7 @@ beforeAll(async () => {
     new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')))
   );
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 afterAll(() => {
   setSystemTime();

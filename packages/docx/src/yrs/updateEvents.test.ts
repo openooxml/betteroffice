@@ -10,7 +10,7 @@ import * as editWasm from './wasm/index';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 let nextClientId = 6200;
 const clientId = (): number => ++nextClientId;

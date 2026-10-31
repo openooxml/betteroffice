@@ -344,19 +344,39 @@ function validateDeterminism(value: RustSaveDeterminism): void {
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
-function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
-  if (value === null || typeof value !== 'object') return;
-  if (active.has(value)) throw new TypeError(`${path} contains a cycle`);
-  active.add(value);
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => assertSafeSaveTree(entry, `${path}[${index}]`, active));
-  } else {
-    for (const key of Object.keys(value)) {
-      if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${path} contains forbidden key ${key}`);
-      assertSafeSaveTree((value as Record<string, unknown>)[key], `${path}.${key}`, active);
+/** @internal */
+export function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
+  const segments: Array<string | number> = [];
+  const currentPath = (): string => {
+    let result = path;
+    for (const segment of segments) {
+      result += typeof segment === 'number' ? `[${segment}]` : `.${segment}`;
     }
-  }
-  active.delete(value);
+    return result;
+  };
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== 'object') return;
+    if (active.has(value)) throw new TypeError(`${currentPath()} contains a cycle`);
+    active.add(value);
+    if (Array.isArray(value)) {
+      const length = value.length;
+      for (let index = 0; index < length; index += 1) {
+        if (!(index in value)) continue;
+        segments.push(index);
+        visit(value[index]);
+        segments.pop();
+      }
+    } else {
+      for (const key of Object.keys(value)) {
+        if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
+        segments.push(key);
+        visit((value as Record<string, unknown>)[key]);
+        segments.pop();
+      }
+    }
+    active.delete(value);
+  };
+  visit(value);
 }
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {

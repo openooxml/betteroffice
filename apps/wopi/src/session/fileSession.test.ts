@@ -260,6 +260,37 @@ describe("leader handoff and explicit save", () => {
 });
 
 describe("last leave, disconnect and hold", () => {
+  test("stale connection generations cannot disconnect or heartbeat the current connection", async () => {
+    const h = makeHarness({ reconnectGraceMs: 0 });
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const b = await joinEditor(h, "tok-b");
+    const session = a.session;
+    try {
+      const stale = session.connect(a.user.id);
+      const current = session.connect(a.user.id);
+      expect(current).toBeGreaterThan(stale);
+      await session.disconnect(a.user.id, stale);
+      expect(a.user.connected).toBe(true);
+      const lastSeen = a.user.lastSeen;
+      await h.clock.advance(1000);
+      session.heartbeat(a.user.id, stale);
+      expect(a.user.lastSeen).toBe(lastSeen);
+      await session.disconnect(a.user.id, current);
+      expect(a.user.connected).toBe(false);
+      session.heartbeat(a.user.id, stale);
+      expect(a.user.connected).toBe(false);
+      session.heartbeat(a.user.id, current);
+      expect(a.user.connected).toBe(true);
+      expect(a.user.lastSeen).toBe(h.clock.t);
+      expect(b.user.connected).toBe(true);
+      expect(session.lockHeld).toBe(true);
+    } finally {
+      session.abandon();
+    }
+  });
+
   test("last leave flushes edits after the last autosave before unlock", async () => {
     const h = makeHarness();
     addToken(h, "tok-a", "user-a");
@@ -288,7 +319,7 @@ describe("last leave, disconnect and hold", () => {
 
   for (const save of ["autosave", "explicit save"] as const) {
     test(`${save} after a failed exit save unlocks and closes the held session`, async () => {
-      const h = makeHarness();
+      const h = makeHarness({ reconnectGraceMs: 0 });
       addToken(h, "tok-a", "user-a");
       const fetch = h.host.fetch.bind(h.host);
       let failed = false;
@@ -337,7 +368,7 @@ describe("last leave, disconnect and hold", () => {
   }
 
   test("expired leaver token falls back to another valid token", async () => {
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     const a = await joinEditor(h, "tok-a");
@@ -555,21 +586,24 @@ describe("locks, conflicts and permissions", () => {
   });
 
   test("timestamp conflict saves a conflict copy and leaves the original untouched", async () => {
-    const h = makeHarness({ quirks: { timestampConflict: true } });
+    const h = makeHarness({ quirks: { timestampConflict: true, relativeUrlToken: true } });
     addToken(h, "tok-a", "user-a");
     const a = await joinEditor(h, "tok-a");
     const session = [...h.registry.list()][0]!;
     const client = await clientFor(session, a.joinPayload);
-    const conflicts: Array<{ name?: string; url?: string }> = [];
-    session.on("conflict", (e) => conflicts.push(e as { name?: string }));
+    const conflicts: Array<{ name: string; copyName: string }> = [];
+    session.on("conflict", (e) => conflicts.push(e));
     const originalBytes = h.host.files.get("file1")!.bytes.slice();
     try {
       edit(session, a.user.id, client, "conflict-edit ", 0);
       h.host.files.get("file1")!.lastModifiedTime = "1999-01-01T00:00:00.000Z";
-      await session.requestSave(a.user.id);
+      const saved = await session.requestSave(a.user.id);
       expect(conflicts.length).toBe(1);
       expect(conflicts[0]?.name).toMatch(/\(conflict \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\)\.xlsx$/);
-      expect(conflicts[0]?.url).toBeUndefined();
+      expect(saved.conflictName).toBe(conflicts[0]?.name);
+      expect(saved).not.toHaveProperty("conflictUrl");
+      expect(conflicts[0]).not.toHaveProperty("url");
+      expect(conflicts[0]).not.toHaveProperty("copyUrl");
       expect(JSON.stringify(conflicts)).not.toContain("access_token");
       expect(h.host.files.get("file1")!.bytes).toEqual(originalBytes);
       const copies = [...h.host.files.values()].filter((f) => f.name.includes("(conflict"));
@@ -751,18 +785,19 @@ describe("locks, conflicts and permissions", () => {
   });
 
   test("a distinctive token never appears in logs or events", async () => {
-    const h = makeHarness();
+    const h = makeHarness({ quirks: { timestampConflict: true, relativeUrlToken: true } });
     const secret = "distinctive-secret-token-xyz";
     addToken(h, secret, "user-a");
     const a = await joinEditor(h, secret);
     const session = [...h.registry.list()][0]!;
     const events: string[] = [];
-    for (const name of ["leaderChanged", "saved", "saveFailed", "conflict", "viewOnly", "closed", "lostFlush", "tokenExpiring"] as const) {
+    for (const name of ["leaderChanged", "saved", "saveFailed", "conflict", "viewOnly", "closed", "lostFlush", "tokenExpiring", "userInvalidated"] as const) {
       session.on(name, (e) => events.push(JSON.stringify(e)));
     }
     const client = await clientFor(session, a.joinPayload);
     try {
       edit(session, a.user.id, client, "redact-edit ", 0);
+      h.host.files.get("file1")!.lastModifiedTime = "1999-01-01T00:00:00.000Z";
       await session.requestSave(a.user.id);
       await session.leave(a.user.id);
       const combined = [...h.logs, ...events, JSON.stringify(a.user), JSON.stringify(session.users)].join("\n");
@@ -860,6 +895,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
     });
     let gated = true;
     const h = makeHarness({
+      reconnectGraceMs: 0,
       beforePut: async () => {
         if (!gated) return;
         gated = false;
@@ -966,7 +1002,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
   });
 
   test("disconnected users do not consume editor slots", async () => {
-    const h = makeHarness({ maxEditorsPerFile: 2 });
+    const h = makeHarness({ reconnectGraceMs: 0, maxEditorsPerFile: 2 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     addToken(h, "tok-c", "user-c");
@@ -1057,6 +1093,7 @@ describe("review round 2: serialized transitions", () => {
     });
     let gated = true;
     const h = makeHarness({
+      reconnectGraceMs: 0,
       beforeUnlock: async () => {
         if (!gated) return;
         gated = false;
@@ -1237,7 +1274,7 @@ describe("session safety regressions", () => {
       const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
       let enteredUnlock: () => void = () => {};
       const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-      const h = makeHarness();
+      const h = makeHarness({ reconnectGraceMs: 0 });
       addToken(h, "tok-a", "user-a");
       addToken(h, "tok-external", "external-app");
       const a = await joinEditor(h, "tok-a");
@@ -1312,7 +1349,7 @@ describe("session safety regressions", () => {
       h.host.tokens.set("tok-a", { userId: "user-a", canWrite: true, expiresAt: h.clock.t });
       expect((await session.requestSave(a.user.id)).saved).toBe(false);
       await h.clock.flush();
-      expect(a.user.connected).toBe(true);
+      expect(a.user.connected).toBe(false);
       expect(a.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(session.awaitingFlushToken).toBe(true);
       expect(session.dirty).toBe(true);
@@ -1385,7 +1422,7 @@ describe("session safety regressions", () => {
       await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
       expect(relaunchChecks).toBe(2);
       expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
-      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(viewer.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
     } finally {
       await session.close();
@@ -1409,7 +1446,7 @@ describe("session safety regressions", () => {
       await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
       expect(h.calls.some((call) => call.override === "GET_LOCK")).toBe(true);
       expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
-      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(viewer.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(session.viewOnlyReason).not.toBe("lockedElsewhere");
     } finally {
       await session.close();
@@ -1421,7 +1458,7 @@ describe("session safety regressions", () => {
     const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
     let enteredUnlock: () => void = () => {};
     const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-    const h = makeHarness({ refreshStatus: () => 500 });
+    const h = makeHarness({ refreshStatus: () => 500, reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     const a = await joinEditor(h, "tok-a");
     const session = a.session;
@@ -1466,7 +1503,7 @@ describe("session safety regressions", () => {
     const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
     let releaseCheck: () => void = () => {};
     const checkGate = new Promise<void>((resolve) => { releaseCheck = resolve; });
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-external", "external-app");
     const a = await joinEditor(h, "tok-a");
@@ -1536,7 +1573,7 @@ describe("session safety regressions", () => {
       const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
       let enteredUnlock: () => void = () => {};
       const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-      const h = makeHarness({ beforeUnlock: async () => { enteredUnlock(); await unlockGate; } });
+      const h = makeHarness({ reconnectGraceMs: 0, beforeUnlock: async () => { enteredUnlock(); await unlockGate; } });
       addToken(h, "tok-a", "user-a");
       const a = await joinEditor(h, "tok-a");
       const session = a.session;
@@ -1741,8 +1778,11 @@ describe("session safety regressions", () => {
       addToken(h, "tok-a", "writer");
       const viewer = await joinEditor(h, "tok-v", "view");
       const session = viewer.session;
+      const baselineGeneration = session.baselineGeneration;
+      expect(baselineGeneration).toBe(1);
       const events: unknown[] = [];
-      session.on("rejoinRequired", (event) => events.push(event));
+      const generations: number[] = [];
+      session.on("rejoinRequired", (event) => { events.push(event); generations.push(session.baselineGeneration); });
       const external = await openFreshClient("xlsx", sourceBytes("xlsx"), nextId());
       let client: TestClient | null = null;
       try {
@@ -1760,13 +1800,16 @@ describe("session safety regressions", () => {
         };
         const writer = await joinEditor(h, "tok-a");
         expect(changedUnderLock).toBe(true);
+        expect(session.baselineGeneration).toBe(baselineGeneration + 1);
         expect(events).toEqual([{ reason: "sourceChanged" }]);
+        expect(generations).toEqual([baselineGeneration + 1]);
         client = await clientFor(session, writer.joinPayload, bytes);
         expect(client.contains("external-before-lock")).toBe(true);
         edit(session, writer.user.id, client, "writer-after-lock ", 1);
         await session.requestSave(writer.user.id);
         expect(await savedContains(h, "external-before-lock")).toBe(true);
         expect(await savedContains(h, "writer-after-lock")).toBe(true);
+        expect(session.baselineGeneration).toBe(baselineGeneration + 1);
         expect(h.calls.filter((call) => call.pathname.endsWith("/contents") && call.override === null)).toHaveLength(2);
       } finally {
         external.destroy();

@@ -1,0 +1,56 @@
+[package]
+name = "betteroffice-fonts"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0 AND BSD-3-Clause"
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Font pack decoding with optional native font providers and family resolution"
+readme = "README.md"
+keywords = ["fonts", "zstd", "woff2", "ooxml"]
+categories = ["compression", "parser-implementations"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "fontpack"
+path = "src/bin/fontpack.rs"
+required-features = ["build"]
+
+[features]
+default = []
+wasm = ["dep:lol_alloc"]
+build = ["dep:zstd", "dep:serde", "dep:serde_json", "dep:sha2", "dep:semver", "wuff/brotli"]
+manager = ["dep:serde", "dep:serde_json", "dep:quick-xml"]
+fonts-latin = ["manager", "dep:betteroffice-fonts-latin"]
+fonts-intl = ["manager", "dep:betteroffice-fonts-intl"]
+fonts-cjk = ["manager", "dep:betteroffice-fonts-cjk"]
+
+[dependencies]
+betteroffice-fonts-latin = { workspace = true, optional = true }
+betteroffice-fonts-intl = { workspace = true, optional = true }
+betteroffice-fonts-cjk = { workspace = true, optional = true }
+wuff = { version = "=0.2.9", default-features = false }
+zstd = { version = "0.14.3", default-features = false, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+quick-xml = { version = "0.41", optional = true }
+sha2 = { version = "0.10", optional = true }
+semver = { version = "1", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+lol_alloc = { version = "=0.4.1", optional = true }
+ruzstd = { version = "=0.9.1", default-features = false, features = ["hash"] }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+betteroffice-fonts-latin.workspace = true
+ruzstd = { version = "=0.9.1", default-features = false, features = ["hash"] }
+zstd = { version = "0.14.3", default-features = false }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"

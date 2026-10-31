@@ -91,12 +91,12 @@ export { buildA11yGrid } from './a11y/index';
 export { paintDisplayList } from './render/canvas2d';
 export {
   initWasm,
+  decodeFontFace,
   isWasmAvailable,
   isPngExportAvailable,
   isProposalsAvailable,
   openWorkbook,
   wasmVersion,
-  engineBackend,
   StaleProposalError,
   DisplayTooLargeError,
   getDisplayListCellLimit,
@@ -107,7 +107,6 @@ export {
 export type {
   WasmInitInput,
   WasmInitOptions,
-  EngineBackend,
   OpenWorkbookOptions,
   WorkbookCalculationContext,
   Viewport,

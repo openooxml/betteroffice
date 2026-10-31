@@ -22,6 +22,7 @@ export interface SessionRegistryDeps {
   instanceId?: string;
   journalDir?: string;
   maxEditorsPerFile?: number;
+  autosave?: boolean;
   logger?: SessionLogger;
   now?: () => number;
   scheduler?: SessionScheduler;
@@ -90,7 +91,9 @@ export class SessionRegistry {
       scheduler: this.#deps.scheduler,
       journal: journalDir ? new FileJournal(journalDir, key) : null,
       maxEditorsPerFile: this.#deps.maxEditorsPerFile ?? this.#config.maxEditorsPerFile ?? 50,
+      reconnectGraceMs: this.#config.reconnectGraceMs,
       openReplica: this.#deps.openReplica,
+      autosave: this.#deps.autosave,
       isLiveLock: (lock) => this.list().some((live) => live.lockId === lock),
       onClosed: (closed) => {
         if (this.#sessions.get(closed.fileKey) === closed) this.#sessions.delete(closed.fileKey);

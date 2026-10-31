@@ -1,13 +1,15 @@
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { requireWebWorker } from '../../../../shared/office-session/webWorker';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { requestWasmCompile } from '../../../../shared/office-session/client';
-import { wasmAssetUrl } from '../wasm/asset';
+import { shipsWasmAsset, wasmAssetUrl } from '../wasm/asset';
+import { takePresentationFontWorker } from './fontWorker';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
-import { CommandOutcomeUnknown } from './commandProtocol';
+import { CommandOutcomeUnknown, PptxResourceLimitError } from './commandProtocol';
 import type { DefaultFontInstallation } from '../../../../shared/pptxDefaultFonts';
 import type {
   PresentationCommandClient, PresentationCommandFailure, PresentationCommandOpenResult,
@@ -53,10 +55,12 @@ export function createPptxWorkerSession(
   bytes: Uint8Array | ArrayBuffer, options: PptxWorkerSessionOptions = {},
 ): PptxWorkerSession {
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
-  const cacheUrl = !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
+  const cacheUrl = shipsWasmAsset && !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
+  if (!options.worker) requireWebWorker('openPresentation');
+  const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
   const transport = createWorkerTransport(options.worker ? options.worker() :
-    new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
+    preparedWorker ?? new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
   if (cacheUrl && !wasm) requestWasmCompile(transport);
   const input = {
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
@@ -80,7 +84,9 @@ export function createPptxWorkerSession(
 
   function fail(cause: unknown): void {
     if (disposed || failure) return;
-    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ? cause
+    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ||
+      cause instanceof PptxResourceLimitError ? cause
+      : cause instanceof Error && cause.name === 'PptxResourceLimitError' ? new PptxResourceLimitError(cause.message)
       : new SessionFailure(cause instanceof Error && cause.name === 'RuntimeError' ? 'trap' : 'crash',
         cause instanceof Error ? cause.message : String(cause));
     if (client) failedState = { ...client.state, editState: { ...client.state.editState, readOnly: true,
@@ -141,7 +147,7 @@ export function createPptxWorkerSession(
       return () => { connectionErrors.delete(listener); off(); };
     },
     close() {
-      if (!disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
+      if (client && !disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
       transport.close();
     },
   };

@@ -27,10 +27,11 @@
   "scripts": {
     "prebuild": "bun run --filter '@betteroffice/fonts-cjk' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-latin' build",
     "build": "tsup && bun ../../scripts/build-fonts-decoder.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "export:catalog": "bun scripts/export-catalog.ts"
   },
   "peerDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:^0",
+    "@betteroffice/fonts-cjk": "workspace:*",
     "@betteroffice/fonts-intl": "workspace:^0"
   },
   "peerDependenciesMeta": {
