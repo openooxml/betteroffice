@@ -244,7 +244,7 @@ dependencies = [
 name = "betteroffice-ooxml-font-preflight"
 version = "0.5.1"
 dependencies = [
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "quick-xml",
  "serde_json",
  "wasm-bindgen",
