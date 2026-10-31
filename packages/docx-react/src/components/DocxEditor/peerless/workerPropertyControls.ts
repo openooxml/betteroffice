@@ -8,15 +8,15 @@ import { applyWorkerProperty, readWorkerSection, type WorkerPropertyQuery, type 
 
 export function useWorkerPageSetupControls(controller: WorkerShellController, onError?: (error: Error) => void) {
   const [query, setQuery] = useState<WorkerPropertyQuery | null>(null);
-  const [layoutProps, setLayoutProps] = useState<SectionProperties>();
+  const [layoutQuery, setLayoutQuery] = useState<WorkerPropertyQuery | null>(null);
   const layoutRequest = useRef(0);
   const readCurrent = useCallback(async () => {
     const request = ++layoutRequest.current;
-    setLayoutProps(undefined);
+    setLayoutQuery(null);
     try {
       const result = await readWorkerSection(controller);
       if (result.value?.kind !== 'section') throw new Error('Section properties are unavailable');
-      if (request === layoutRequest.current) setLayoutProps(result.value.properties);
+      if (request === layoutRequest.current) setLayoutQuery(result);
     } catch (error) { onError?.(error instanceof Error ? error : new Error(String(error))); }
   }, [controller, onError]);
   const handleOpenPageSetup = useCallback(async () => {
@@ -30,18 +30,19 @@ export function useWorkerPageSetupControls(controller: WorkerShellController, on
   }, [controller, onError]);
   const handlePageSetupApply = useCallback(async (patch: Partial<SectionProperties>) => {
     try {
+      const source = query ?? layoutQuery;
+      if (source?.value?.kind !== 'section') return;
       if (!query) await controller.ref.flushPendingInput();
-      const source = query ?? await readWorkerSection(controller);
-      if (source.value?.kind !== 'section') return;
       if (await applyWorkerProperty(controller, source, { kind: 'setSectionProperties',
         payload: { section: source.value.section, patch, expectVersion: source.version } }, onError)) {
         setQuery(null);
         if (!query) await readCurrent();
       }
     } catch (error) { onError?.(error instanceof Error ? error : new Error(String(error))); }
-  }, [controller, query, onError, readCurrent]);
+  }, [controller, query, layoutQuery, onError, readCurrent]);
+  const current = query ?? layoutQuery;
   return { showPageSetup: query !== null, close: () => setQuery(null),
-    currentProps: query?.value?.kind === 'section' ? query.value.properties : layoutProps,
+    currentProps: current?.value?.kind === 'section' ? current.value.properties : undefined,
     readCurrent, handleOpenPageSetup, handlePageSetupApply };
 }
 
