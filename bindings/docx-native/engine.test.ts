@@ -843,7 +843,7 @@ describe('docx native engine parity', () => {
   test('decodeFontFace and font_preflight failures have the wasm error shape', () => {
     const nativePreflight = (native as unknown as { font_preflight: typeof wasmFontPreflight }).font_preflight;
     const invalid = new Uint8Array([1, 2, 3, 4]);
-    for (const [codec, dict, maxOutput] of [['woff2', undefined, undefined], ['zstd', undefined, 16], ['unknown', undefined, undefined]] as const) {
+    for (const [codec, dict, maxOutput] of [['woff2', undefined, undefined], ['unknown', undefined, undefined], ['', undefined, undefined]] as const) {
       const actual = expectThrownParity(
         () => wasm.decodeFontFace(invalid, codec, dict, maxOutput),
         () => native.decodeFontFace(invalid, codec, dict, maxOutput),
