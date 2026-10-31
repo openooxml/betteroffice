@@ -6,6 +6,7 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { requireWebWorker } from '../../../../shared/office-session/webWorker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
@@ -45,6 +46,7 @@ import { createWorkbookEditSession, type WorkbookEditSession } from './editSessi
 import { attachCollaborationPipe, createAsyncCollaborationReplica, type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
+import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -100,6 +102,7 @@ export interface WorkbookSession {
   readonly call: Promisified<Omit<WorkbookSessionMethods,
     'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' |
     'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    decodeFontFace: FontDecoder;
     renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
     renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
     printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
@@ -253,6 +256,7 @@ export async function openWorkbookSession(
   bytes: Uint8Array | ArrayBuffer,
   options: OpenWorkbookSessionOptions = {}
 ): Promise<WorkbookSession> {
+  if (!options.worker) requireWebWorker('openWorkbook');
   const transport = createWorkerTransport(
     options.worker ? options.worker() :
       new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
@@ -552,6 +556,7 @@ export async function createWorkbookSession(
       }
     },
     call: {
+      decodeFontFace: (bytes, options) => calls.decodeFontFace(bytes as ArrayBuffer, options),
       version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
       captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
       collaborationStateVector, collaborationStateAsUpdate,

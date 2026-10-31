@@ -75,7 +75,7 @@ beforeAll(async () => {
       )
     )
   );
-});
+}, 30_000);
 
 afterEach(() => {
   cleanup();

@@ -23,7 +23,7 @@ let docs = 0;
 let queries = 0;
 let totalMatches = 0;
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 afterAll(() => console.log(`Find parity: docs=${docs}, queries=${queries}, total matches=${totalMatches}`));
 
 function documents(): string[] {

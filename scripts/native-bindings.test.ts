@@ -424,7 +424,7 @@ describe('native package release wiring', () => {
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
-      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts'
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts'
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
@@ -467,6 +467,11 @@ describe('native package release wiring', () => {
       'scripts/native-bindings.mjs',
       'scripts/native-bindings-smoke.mjs',
       'scripts/native-engine.ts',
+      'packages/xlsx/src/**',
+      'packages/xlsx/package.json',
+      'packages/pptx/src/**',
+      'packages/pptx/package.json',
+      'shared/**',
       'scripts/version-packages.mjs',
       '.github/workflows/native-packages.yml',
       '.github/workflows/native-dist.yml',

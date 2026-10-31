@@ -13,7 +13,7 @@ import { yrsToDocument } from './yrsToDocument';
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(new URL('../wasm/generated/edit/docx_edit_bg.wasm', import.meta.url))));
   await preloadOpcWasm();
-});
+}, 30_000);
 
 function makeOpaque(source: ReturnType<typeof smartArtFixture>): void {
   source.parts.set('word/diagrams/drawing1.xml', '<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"/>');

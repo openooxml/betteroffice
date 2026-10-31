@@ -68,6 +68,33 @@ What to install for which language, with a first example each:
 
 Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5).
 
+## Fonts
+
+Layout needs the fonts a document names. BetterOffice ships open substitutes with the same
+advance widths as the Microsoft core fonts (Carlito for Calibri, Caladea for Cambria, Liberation
+Sans, Serif and Mono for Arial, Times New Roman and Courier New) plus script coverage, so line
+breaks and pagination match Office without the original fonts installed. DOCX layout resolves a
+face in this order: fonts embedded in the document, fonts your app configures, the bundled packs,
+then a last resort fallback.
+
+| Pack | Covers | Size |
+|---|---|---|
+| [`@betteroffice/fonts-latin`](https://www.npmjs.com/package/@betteroffice/fonts-latin) | Office core families, common presentation families, Hebrew and Arabic | 4.6 MB |
+| [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl) | 23 more scripts, among them Thai, Devanagari and other Indic scripts, Armenian, Georgian and Ethiopic | 2.2 MB |
+| [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) | Simplified and Traditional Chinese, Japanese, Korean | 26.7 MB |
+
+**Node.js, Bun and Deno.** `@betteroffice/docx` and `@betteroffice/pptx` depend on the font
+manager [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), which installs
+`fonts-latin`. Add `fonts-intl` or `fonts-cjk` to cover those scripts. DOCX reads each face from the
+installed package files the first time a document needs it; nothing is downloaded. For headless PPTX
+(`openPresentation`), pass the faces in `fonts` and `fallbackFonts`; `loadBundledFontBytes` from
+`@betteroffice/fonts` returns a bundled face's bytes. Reading package files needs Node.js 20.16 or
+22.3 and later, Bun or Deno.
+
+**Native bindings, Rust and Python.** For DOCX and PPTX, register the faces a document needs with
+`registerFont` (native) or `register_font` (Rust, Python) before rendering. The XLSX renderer draws
+text with one embedded face.
+
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
 
@@ -75,7 +102,7 @@ Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/mi
 
 <picture>
 <source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/benchmarks.svg?theme=dark">
-<img src="https://betteroffice.dev/api/charts/benchmarks.svg" alt="Scored against Microsoft Office, BetterOffice vs LibreOffice: DOCX SSIM 0.8519 vs 0.7694, DOCX Exact page counts 63/63 vs 44/63, PPTX SSIM 0.9170 vs 0.9030, XLSX SSIM 0.7661 vs 0.6892, XLSX Recalc accuracy 99.60% vs 85.87%; average time per file, lower is better: DOCX Render time (avg) 430 ms vs 773 ms, PPTX Render time (avg) 159 ms vs 1351 ms, XLSX Recalc time (avg) 64 ms vs 405 ms." width="85%">
+<img src="https://betteroffice.dev/api/charts/benchmarks.svg" alt="Scored against Microsoft Office, BetterOffice vs LibreOffice: DOCX SSIM 0.8519 vs 0.7694, DOCX Exact page counts 63/63 vs 44/63, PPTX SSIM 0.9170 vs 0.9030, XLSX SSIM 0.7661 vs 0.6892, XLSX Recalc accuracy 99.60% vs 85.87%; average time per file, lower is better: DOCX Render time (avg) 430 ms vs 773 ms, PPTX Render time (avg) 159 ms vs 1351 ms, XLSX Recalc time (avg) 64 ms vs 405 ms." width="100%">
 </picture>
 
 <details>

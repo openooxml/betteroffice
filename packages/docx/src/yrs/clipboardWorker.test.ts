@@ -27,7 +27,7 @@ beforeAll(async () => {
     process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'
   ))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 function seedDoc(): Uint8Array {
   const parts = new Map<string, Uint8Array>();

@@ -279,6 +279,8 @@ jobs:
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-fonts --all-targets --features build -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features manager -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features manager,fonts-latin,fonts-intl,fonts-cjk -- -D warnings
 
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
@@ -310,6 +312,8 @@ jobs:
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
           cargo test -p betteroffice-fonts --features build
+          cargo test -p betteroffice-fonts --features manager
+          cargo test -p betteroffice-fonts --features manager,fonts-latin,fonts-intl,fonts-cjk
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
@@ -494,6 +498,7 @@ jobs:
         run: |
           bun scripts/check-engine-surface.ts xlsx
           bun scripts/check-engine-surface.ts pptx
+          bun scripts/check-engine-surface.ts docx
 
       - name: Test the pptx packages on the native engine
         run: |
@@ -501,7 +506,7 @@ jobs:
           bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
 
       - name: Check native and wasm parity
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'

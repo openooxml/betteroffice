@@ -146,12 +146,13 @@ impl MediaSources {
 
     /// The key and digests, for a replica that did not seed.
     pub fn to_json(&self) -> String {
-        let parts: Vec<(String, u32)> = self
+        let mut parts: Vec<(String, u32)> = self
             .0
             .parts
             .iter()
             .map(|(digest, index)| (format!("{digest:016x}"), *index))
             .collect();
+        parts.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
         serde_json::json!({
             "key": [format!("{:016x}", self.0.key.0), format!("{:016x}", self.0.key.1)],
             "parts": parts,
@@ -237,8 +238,12 @@ pub(crate) fn write_data_urls<'a>(
     let mut seen = HashMap::new();
     for (index, url) in writer.urls {
         if let Some(url) = url {
-            parts.insert(digest(key, &url), index as u32);
-            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index as u32));
+            let index = index as u32;
+            parts
+                .entry(digest(key, &url))
+                .and_modify(|kept: &mut u32| *kept = (*kept).min(index))
+                .or_insert(index);
+            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index));
         }
     }
     Ok(MediaSources(Arc::new(Sources {
@@ -631,6 +636,51 @@ mod tests {
             &MediaSources::default().tokenized_json(&source),
             &source
         ));
+    }
+
+    #[test]
+    fn identical_parts_map_to_the_lowest_index_in_index_order() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3]),
+            ("word/media/b.png".to_owned(), vec![9]),
+            ("word/media/c.png".to_owned(), vec![1, 2, 3]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let index = |path| {
+            (0..table.len())
+                .find(|&i| table.path(i) == Some(path))
+                .unwrap() as u32
+        };
+        let (a, b, c) = (
+            index("word/media/a.png"),
+            index("word/media/b.png"),
+            index("word/media/c.png"),
+        );
+        let mut expected = vec![a.min(c), b];
+        expected.sort_unstable();
+        for _ in 0..32 {
+            let mut ops: Vec<RawOp> = [c, b, a]
+                .iter()
+                .enumerate()
+                .map(|(at, part)| RawOp::InsertEmbed {
+                    index: at as u32,
+                    kind: "image".to_owned(),
+                    payload: vec![("src".to_owned(), Any::from(format!("media:{part}")))],
+                    attrs: crate::Attrs::new(),
+                })
+                .collect();
+            let sources = write_data_urls(&mut ops, &table, true).unwrap();
+            let json: Value = serde_json::from_str(&sources.to_json()).unwrap();
+            let indices: Vec<u32> = json["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part[1].as_u64().unwrap() as u32)
+                .collect();
+            assert_eq!(indices, expected);
+        }
     }
 
     #[test]

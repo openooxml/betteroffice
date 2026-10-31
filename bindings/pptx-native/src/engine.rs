@@ -947,6 +947,7 @@ impl PptxRenderer {
         Ok(())
     }
 
+    /// Requested faces with optional script coverage buckets, before layout.
     #[napi(js_name = "requestedFontFacesJson")]
     pub fn requested_font_faces_json(
         &self,

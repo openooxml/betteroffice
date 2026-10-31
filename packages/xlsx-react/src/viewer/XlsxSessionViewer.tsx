@@ -25,6 +25,7 @@ import { cellInViewport, deriveLimits, expandRangeToMergedCells, laidOutCellRect
 import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
 import { WorkbookFailure } from '../components/WorkbookFailure';
+import { useDefaultFonts } from '../useDefaultFonts';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -71,6 +72,9 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
   const clickStart = useRef<CellAddr | null>(null);
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const { run, loading, error, reportError } = useSessionWorkbook(props, commands.store, focus);
+  const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
+    () => { if (run?.current) run.schedule(); },
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   const latest = useRef({ run, props, zoom, selectedChart, loading, t, reportError });
   latest.current = { run, props, zoom, selectedChart, loading, t, reportError };
   const pendingSave = useRef<{ run: ViewerSession; promise: Promise<XlsxCommandResult> } | null>(null);
@@ -110,7 +114,8 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       canvas.height = Math.round(request.height * request.dpr);
       canvas.style.width = `${request.width}px`;
       canvas.style.height = `${request.height}px`;
-      paintDisplayList(context, frame.displayList, request.dpr * request.zoom);
+      canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
+        () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
     },
   }), []);
 
