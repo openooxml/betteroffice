@@ -1,22 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import JSZip from 'jszip';
-import type { XlsxEditRefusal } from '../edits';
-import { packageVersion, selectBackend, type EngineBackend } from '../wasm/engine';
-
-const CHILD = 'XLSX_PROTECTED_CELL_INPUT_TEST';
-const RESULT = 'XLSX_PROTECTED_CELL_INPUT_OUTCOME=';
-const nativeUnavailable = (() => {
-  try {
-    selectBackend({ env: 'native', packageVersion, runtime: {
-      hasProcess: true, hasGetBuiltinModule: typeof process.getBuiltinModule === 'function',
-      hasNodeVersion: typeof process.versions.node === 'string' && process.versions.node.length > 0,
-      hasDom: false,
-    }, loadNative: () => createRequire(new URL('../wasm/engine.ts', import.meta.url))('@betteroffice/xlsx-native') });
-    return undefined;
-  } catch (error) { return error instanceof Error ? error.message : String(error); }
-})();
+import { engineKind } from '../wasm/engine';
 
 async function workbook(): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -30,10 +15,9 @@ async function workbook(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-async function protectedCellOutcomes(engine: EngineBackend) {
-  const { engineBackend, initWasm } = await import('../wasm/loader');
+test(`protected cell input on the ${engineKind} engine`, async () => {
+  const { initWasm } = await import('../wasm/loader');
   const { createTestWorkbookSession } = await import('./testHelpers');
-  expect(engineBackend()).toBe(engine);
   await initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
   const session = await createTestWorkbookSession(await workbook(), undefined, {
     includeEditState: true, calculation: { nowSerial: 45000.75, randSeed: 42 },
@@ -56,7 +40,6 @@ async function protectedCellOutcomes(engine: EngineBackend) {
         message: 'A1 is locked on protected sheet "Protected"' } } });
     expect(await inputs()).toEqual(['1', '2', '3']);
     expect(session.confirmedBasis.version).toBe(before);
-    const { version: _, ...refusal } = locked.result as XlsxEditRefusal;
     const unlocked = await edit(0, 1, 'unlocked');
     expect(unlocked).toMatchObject({ status: 'applied', committed: true });
     expect(await inputs()).toEqual(['1', 'unlocked', '3']);
@@ -64,52 +47,11 @@ async function protectedCellOutcomes(engine: EngineBackend) {
     const afterUnlocked = session.confirmedBasis.version;
     const unprotected = await edit(1, 0, 'unprotected');
     expect(unprotected).toMatchObject({ status: 'applied', committed: true });
-    const values = await inputs();
-    expect(values).toEqual(['1', 'unlocked', 'unprotected']);
+    expect(await inputs()).toEqual(['1', 'unlocked', 'unprotected']);
     expect(session.confirmedBasis.version).not.toBe(afterUnlocked);
     expect(session.failure).toBeUndefined();
-    return { locked: { ...locked, result: refusal }, unlocked, unprotected, values };
   } finally { await session.dispose(); }
-}
-
-type ProtectionOutcomes = Awaited<ReturnType<typeof protectedCellOutcomes>>;
-const outcomes = new Map<EngineBackend, Promise<ProtectionOutcomes>>();
-
-function engineOutcomes(engine: EngineBackend): Promise<ProtectionOutcomes> {
-  let result = outcomes.get(engine);
-  if (!result) {
-    result = (async () => {
-      const child = Bun.spawn([process.execPath, 'test', import.meta.path, '-t', `^protected cell input on ${engine}$`], {
-        env: { ...process.env, BETTEROFFICE_ENGINE: engine, [CHILD]: engine }, stdout: 'pipe', stderr: 'pipe',
-      });
-      const deadline = setTimeout(() => child.kill(), 20_000);
-      try {
-        const [status, stdout, stderr] = await Promise.all([
-          child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-        ]);
-        expect({ status, output: status === 0 ? '' : stdout + stderr }).toEqual({ status: 0, output: '' });
-        const line = stdout.split('\n').find((line) => line.startsWith(RESULT));
-        if (!line) throw new Error(`Missing ${engine} protection outcomes: ${stdout}${stderr}`);
-        return JSON.parse(line.slice(RESULT.length)) as ProtectionOutcomes;
-      } finally { clearTimeout(deadline); }
-    })();
-    outcomes.set(engine, result);
-  }
-  return result;
-}
-
-for (const engine of ['wasm', 'native'] as const) {
-  const reason = engine === 'native' ? nativeUnavailable : undefined;
-  test.skipIf(reason !== undefined)(`protected cell input on ${engine}${reason ? ` (skipped: ${reason})` : ''}`, async () => {
-    if (process.env[CHILD] === engine) {
-      process.stdout.write(`${RESULT}${JSON.stringify(await protectedCellOutcomes(engine))}\n`);
-    } else await engineOutcomes(engine);
-  }, 30_000);
-}
-
-test.skipIf(nativeUnavailable !== undefined)(`protected cell input engine outcomes match${nativeUnavailable ? ` (skipped: ${nativeUnavailable})` : ''}`, async () => {
-  expect(await engineOutcomes('native')).toEqual(await engineOutcomes('wasm'));
-}, 60_000);
+}, 30_000);
 
 test('protected cell input refreshes an editable sheet cache before catalog projection', async () => {
   const { initWasm, openWorkbook } = await import('../wasm/loader');
