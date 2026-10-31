@@ -13,7 +13,7 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   minify: true,
-  external: ['react', 'react-dom', '@betteroffice/xlsx'],
+  external: ['react', 'react-dom', '@betteroffice/xlsx', '@betteroffice/fonts'],
   esbuildPlugins: [packageBoundary(fileURLToPath(new URL('.', import.meta.url)))],
   esbuildOptions(options) {
     options.chunkNames = 'chunk-[hash]';

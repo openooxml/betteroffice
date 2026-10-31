@@ -16,6 +16,7 @@ import type {
   WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
 import type { WorkbookReplayOp } from '@betteroffice/xlsx/worker';
+import { useDefaultFonts } from '../useDefaultFonts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
@@ -197,6 +198,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     canNavigateSync: () => apiBridgeRef.current?.canNavigateSync?.() ?? false,
   }));
   const { run, error, loading } = useLegacySessionWorkbook(props, commands.store, apiBridge);
+  const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
+    () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); });
   runRef.current = run;
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
@@ -395,7 +398,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`;
         canvas.style.height = `${request.height}px`;
-        paintDisplayList(context, frame.displayList, request.dpr * request.zoom);
+        paintWithDefaultFonts(frame.displayList, () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom));
         canvas.dataset.previewReady = 'true';
       }
     }
@@ -720,7 +723,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`;
         canvas.style.height = `${request.height}px`;
-        paintDisplayList(context, painted.displayList, request.dpr * request.zoom);
+        paintWithDefaultFonts(painted.displayList, () => paintDisplayList(context, painted.displayList, request.dpr * request.zoom));
         canvas.dataset.workerSequence = String(painted.sequence);
         canvas.dataset.paintSource = painted.source;
         canvas.dataset.workerZoom = String(request.zoom);

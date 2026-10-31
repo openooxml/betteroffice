@@ -1306,6 +1306,7 @@ import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPain
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
 import { type WorkbookEditSession } from './editSession';
 import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
 /**
  * Options for opening a workbook in a dedicated worker.
  * @experimental
@@ -1344,6 +1345,7 @@ export interface WorkbookSession {
     markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
     whenPresented(seq: number): Promise<void>;
     readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+        decodeFontFace: FontDecoder;
         renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
         renderRangePng(options?: {
             range?: string;

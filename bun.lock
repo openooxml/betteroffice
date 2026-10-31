@@ -511,6 +511,7 @@
       "name": "@betteroffice/xlsx-react",
       "version": "0.5.1",
       "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
         "@betteroffice/xlsx": "workspace:*",
         "@betteroffice/xlsx-i18n": "workspace:*",
       },

@@ -11,6 +11,7 @@ import type {
   CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary,
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
+import { useDefaultFonts } from '../useDefaultFonts';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
@@ -220,6 +221,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   });
   const ownerRef = useRef(run);
   ownerRef.current = run;
+  const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
+    () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); });
   const sheetSelections = useMemo(() => new Map<string, Selection>(), [run]);
   const sheetScrolls = useMemo(() => new Map<string, { x: number; y: number }>(), [run]);
   const sheetId = (sheet: number) => (ownerRef.current?.session.editState.sheets ??
@@ -946,7 +949,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         canvas.width = Math.round(request.width * request.dpr);
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`; canvas.style.height = `${request.height}px`;
-        paintDisplayList(context, frame.displayList, request.dpr * request.zoom);
+        paintWithDefaultFonts(frame.displayList, () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom));
         canvas.dataset.workerSequence = String(frame.sequence);
         canvas.dataset.commandCoverage = String(frame.coversThroughSeq ?? 0);
         canvas.dataset.paintSource = frame.source; canvas.dataset.workerZoom = String(request.zoom);
