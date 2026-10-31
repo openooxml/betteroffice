@@ -1,8 +1,14 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, mock, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
 import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE } from './defaultFontProvider';
 import { createRustMeasureSource } from './rustMeasureSource';
 import * as wasm from '../wasm';
+
+mock.module('@betteroffice/fonts-intl', () => ({
+  then(_resolve: unknown, reject: (error: unknown) => void) {
+    Promise.resolve().then(() => reject(new Error("Cannot find package '@betteroffice/fonts-intl'")));
+  },
+}));
 
 afterEach(() => configureDefaultFonts({}));
 
@@ -70,7 +76,7 @@ function paint(fontChains: Record<string, number[]>, family: string, text: strin
     primitive.kind === 'text' || primitive.kind === 'glyphRun');
 }
 
-test('implicit fonts leave uncovered Devanagari to the no-provider path while Latin uses Carlito', async () => {
+test('without the intl pack, implicit fonts leave Devanagari to the no-provider path while Latin uses Carlito', async () => {
   const { config, registered } = await prepare();
   for (const family of ['Noto Sans Devanagari', 'Calibri']) {
     for (const text of ['\u0939', 'Latin \u0939']) {

@@ -13,6 +13,12 @@ mock.module('@betteroffice/fonts-cjk', () => ({
   },
 }));
 
+mock.module('@betteroffice/fonts-intl', () => ({
+  then(_resolve: unknown, reject: (error: unknown) => void) {
+    Promise.resolve().then(() => reject(new Error("Cannot find package '@betteroffice/fonts-intl'")));
+  },
+}));
+
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const fontManager = await import('@betteroffice/fonts');
@@ -114,7 +120,7 @@ test('a missing CJK module leaves SimSun to Google without registering or cachin
   expect(google).toHaveLength(1);
 });
 
-test('an uncovered script family uses Google without a managed substitute', async () => {
+test('a script family whose pack is not installed uses Google without a managed substitute', async () => {
   expect(await loadFontWithMapping('Noto Sans Devanagari')).toBe(false);
   expect(google.map((url) => new URL(url).searchParams.get('family'))).toEqual([
     'Noto Sans Devanagari:ital,wght@0,400;0,700;1,400;1,700',
