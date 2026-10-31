@@ -8,7 +8,7 @@ mod coverage_regressions {
                 "Arial",
                 false,
                 false,
-                include_bytes!("../../fontpack/tests/fixtures/Synthetic-Regular.ttf"),
+                include_bytes!("../../betteroffice-fonts/tests/fixtures/Synthetic-Regular.ttf"),
             )
             .unwrap();
         renderer
