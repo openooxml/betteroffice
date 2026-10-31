@@ -190,6 +190,7 @@ function declarationEnd(text: string, from: number): number {
 /**
  * A metafile's display bytes: `resolve`'s replay of it, unless the browser
  * path already draws it (a plain bitmap wrapper). Other images are unchanged.
+ * @internal
  */
 export function metafileImageBytes(bytes: Uint8Array, resolve?: () => Uint8Array | undefined): Uint8Array {
   if (!resolve || (!emfData(bytes) && wmfStart(bytes) < 0) || wmfBitmap(bytes, true) || emfBitmap(bytes, true)) return bytes;

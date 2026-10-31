@@ -1,5 +1,5 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
-export { decodePresentationImage, metafileImageBytes, needsElementDecode, presentationImageBlob } from './render/image';
+export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
 export { StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
@@ -189,6 +189,8 @@ export type {
   TableReceipt,
   UpdateEvent,
 } from './types';
+/** @internal */
+export { metafileImageBytes } from './render/image';
 // Static editor paths import these four here so bundlers keep the command core out of the default editor's static chunk.
 /** @internal */
 export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/peerHydrationError';

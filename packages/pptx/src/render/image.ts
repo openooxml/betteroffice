@@ -3,7 +3,9 @@ import { decodeTiffImage } from '../wasm/loader';
 import { browserPresentationImageBlob, decodeBrowserImageBlob } from './browserImage';
 import type { PresentationImageDecodeOptions } from './browserImage';
 
-export { imageDecodeScale, metafileImageBytes, needsElementDecode, setImageDecodeScale } from './browserImage';
+export { imageDecodeScale, needsElementDecode, setImageDecodeScale } from './browserImage';
+/** @internal */
+export { metafileImageBytes } from './browserImage';
 export type { PresentationImageDecodeOptions } from './browserImage';
 
 export function presentationImageBlob(bytes: Uint8Array): Blob {
