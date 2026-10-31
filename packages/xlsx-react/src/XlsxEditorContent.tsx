@@ -51,6 +51,7 @@ import type {
 import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { CellClipboard, clipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
 import { useTranslation } from './i18n';
+import { useDefaultFonts } from './useDefaultFonts';
 import {
   createXlsxCommandController,
   XlsxCommandAdmissionError,
@@ -411,6 +412,7 @@ export function XlsxEditorContent({
   onReady,
   className,
   readOnly = false,
+  defaultFonts,
   toolbar,
   showToolbar = true,
   i18n,
@@ -828,6 +830,9 @@ export function XlsxEditorContent({
     };
   });
   const [openedHandle, setOpenedHandle] = useState<WorkbookHandle | null>(null);
+  const paintWithDefaultFonts = useDefaultFonts(openedHandle, null, defaultFonts,
+    () => setRevision((revision) => revision + 1),
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   const pluginSelection = useMemo<XlsxPluginSelection>(() => {
     const sheetId = sheetInfo?.sheetIds[activeSheet];
     if (sheetId === undefined) return null;
@@ -1147,7 +1152,8 @@ export function XlsxEditorContent({
       } catch {}
     }
     try {
-      paintDisplayList(ctx, dl, dpr * zoom);
+      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom))
+        ? 'settled' : 'pending';
     } catch (paintError) {
       failPaint(paintError);
       return;
@@ -1179,7 +1185,7 @@ export function XlsxEditorContent({
     paintWaitersRef.current = waiters.filter((waiter) => !covers(painted, waiter.mark));
     for (const waiter of waiters) if (covers(painted, waiter.mark)) waiter.resolve(true);
     releaseReady(pendingReadyRef, handle);
-  }, [activeSheet, presentGrid, t, zoom]);
+  }, [activeSheet, paintWithDefaultFonts, presentGrid, t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
   // workbook, active sheet, or a mutation (revision) changes the pixels.

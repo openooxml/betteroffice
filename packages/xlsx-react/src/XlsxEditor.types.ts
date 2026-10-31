@@ -124,6 +124,8 @@ interface XlsxHostProps {
 
 /** Props for XlsxEditor. */
 export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHostProps {
+  /** Load bundled workbook fonts. Defaults to true. */
+  defaultFonts?: boolean;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: false;
   onError?: (error: Error) => void;

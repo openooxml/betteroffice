@@ -495,6 +495,47 @@ describe('Canvas text-run slot clipping', () => {
 });
 
 describe('Canvas substitute widths', () => {
+  it('paints the glyph run stand-in when glyph outlines are unavailable', async () => {
+    const { ctx } = recordingContext(new Map([['co-op', { width: 40, ascent: 12, descent: 4 }]]));
+    const fillText = spyOn(ctx, 'fillText');
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 1,
+      size: 16,
+      color: '#000000',
+      text: 'co\u2011op',
+      paintText: 'co-op',
+      fallbackFont: '16px Calibri',
+      glyphs: [{ id: 1, x: 10, y: 20, cluster: 0 }],
+    };
+
+    await drawPrimitive(ctx, run);
+
+    expect(fillText).toHaveBeenCalledWith('co-op', 10, 20);
+    expect(run.text).toBe('co\u2011op');
+  });
+
+  it('paints the supplied hyphen stand-in while preserving source text', async () => {
+    for (const allCaps of [false, true]) {
+      const painted = allCaps ? 'CO-OP' : 'co-op';
+      const { ctx } = recordingContext(
+        new Map([[painted, { width: 40, ascent: 12, descent: 4 }]])
+      );
+      const fillText = spyOn(ctx, 'fillText');
+      const run = {
+        ...textRun('co\u2011op', 40, 40, 'Calibri'),
+        paintText: 'co-op',
+        allCaps,
+      };
+
+      await drawPrimitive(ctx, run);
+
+      expect(fillText).toHaveBeenCalledWith(painted, run.x, run.baselineY);
+      expect(run.text).toBe('co\u2011op');
+      expect(run.paintText.length).toBe(run.text.length);
+    }
+  });
+
   it('paints corrected Japanese cluster positions without scaling CJK outlines', async () => {
     const text = '1111111111中あア';
     for (const effects of [{ allCaps: true }, { textShadow: 'shadow' as const }]) {
