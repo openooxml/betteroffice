@@ -33,6 +33,14 @@ async function openLayoutSubmenu(page: Page, index: number, name: string) {
   await expect(page.getByRole('menu', { name: label })).toBeVisible();
 }
 
+async function rulerMargin(page: Page) {
+  return page.locator('.docx-horizontal-ruler > div').first().evaluate((zone) => zone.getBoundingClientRect().width);
+}
+
+async function rulerWidth(page: Page) {
+  return page.locator('.docx-horizontal-ruler').evaluate((ruler) => ruler.getBoundingClientRect().width);
+}
+
 async function savedSection(page: Page, info: TestInfo, name: string) {
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save', exact: true }).first().click();
@@ -68,8 +76,10 @@ for (const arm of ['&peerless=0', '']) {
     await expect(normal).toBeChecked();
     await page.keyboard.press('ArrowDown');
     await expect(narrow).toBeFocused();
+    const margin = await rulerMargin(page);
     await page.keyboard.press('Enter');
     await expect(page.getByRole('menu', { name: 'Layout', exact: true })).toBeHidden();
+    await expect.poll(() => rulerMargin(page)).toBeLessThan(margin);
     await openLayoutSubmenu(page, 0, 'Margins');
     await expect(narrow).toBeChecked();
     await page.keyboard.press('Escape');
@@ -80,8 +90,10 @@ for (const arm of ['&peerless=0', '']) {
     await expect(page.getByRole('menuitemradio', { name: 'Portrait', exact: true })).toBeFocused();
     await page.keyboard.press('ArrowDown');
     await expect(page.getByRole('menuitemradio', { name: 'Landscape', exact: true })).toBeFocused();
+    const width = await rulerWidth(page);
     await page.keyboard.press('Enter');
     await expect(page.getByRole('menu', { name: 'Layout', exact: true })).toBeHidden();
+    await expect.poll(() => rulerWidth(page)).toBeGreaterThan(width);
     await openLayoutSubmenu(page, 1, 'Orientation');
     await expect(page.getByRole('menuitemradio', { name: 'Landscape', exact: true })).toBeChecked();
     await page.keyboard.press('Escape');

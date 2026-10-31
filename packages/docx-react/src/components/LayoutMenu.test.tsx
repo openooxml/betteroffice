@@ -67,10 +67,11 @@ describe('Layout menubar menu', () => {
     fireEvent.keyDown(trigger, { key: 'Enter' });
     expect(reads).toBe(1);
     const margins = view.getByRole('menuitem', { name: /^margins$/i });
-    expect(margins.getAttribute('aria-disabled')).toBe('true');
-    await act(async () => { finish!(); });
     expect(margins.getAttribute('aria-disabled')).toBeNull();
     fireEvent.keyDown(margins, { key: 'ArrowRight' });
+    expect(view.getByRole('menuitemradio', { name: 'Normal' }).getAttribute('aria-disabled')).toBe('true');
+    await act(async () => { finish!(); });
+    expect(view.getByRole('menuitemradio', { name: 'Normal' }).getAttribute('aria-disabled')).toBeNull();
     expect(view.getByRole('menuitemradio', { name: 'Normal' }).getAttribute('aria-checked')).toBe('true');
     fireEvent.keyDown(view.getByRole('menuitemradio', { name: 'Normal' }), { key: 'Escape' });
     fireEvent.keyDown(margins, { key: 'Escape' });

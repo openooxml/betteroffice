@@ -56,6 +56,7 @@
     }
   },
   "layout": {
+    "margins": "여백",
     "normal": "기본",
     "narrow": "좁게",
     "moderate": "보통",

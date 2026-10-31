@@ -56,6 +56,7 @@
     }
   },
   "layout": {
+    "margins": "Marges",
     "normal": "Normal",
     "narrow": "Étroit",
     "moderate": "Modéré",

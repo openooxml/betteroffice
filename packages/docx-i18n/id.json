@@ -56,6 +56,7 @@
     }
   },
   "layout": {
+    "margins": "Margin",
     "normal": "Normal",
     "narrow": "Sempit",
     "moderate": "Sedang",

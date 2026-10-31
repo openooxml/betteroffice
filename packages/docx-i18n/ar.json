@@ -56,6 +56,7 @@
     }
   },
   "layout": {
+    "margins": "هوامش",
     "normal": "عادي",
     "narrow": "ضيق",
     "moderate": "متوسط",

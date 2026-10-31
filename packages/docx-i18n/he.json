@@ -56,6 +56,7 @@
     }
   },
   "layout": {
+    "margins": "שוליים",
     "normal": "רגיל",
     "narrow": "צר",
     "moderate": "בינוני",

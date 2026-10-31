@@ -56,6 +56,7 @@
     }
   },
   "layout": {
+    "margins": "邊界",
     "normal": "標準",
     "narrow": "窄",
     "moderate": "適中",

@@ -56,6 +56,7 @@
     }
   },
   "layout": {
+    "margins": "Căn lề",
     "normal": "Bình thường",
     "narrow": "Hẹp",
     "moderate": "Vừa phải",

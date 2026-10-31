@@ -117,13 +117,14 @@ export function LayoutMenu({ tabIndex, onFocus }: { tabIndex: number; onFocus():
     if (pageSetup.state.enabled) void layout?.onApply(patch);
   };
   const submenu = (label: string, choices: LayoutChoice[], pageItem = true): MenuEntry => {
-    const disabled = pageItem && (!pageSetup.state.enabled || !layout || loading || (!!layout.readCurrent && !properties));
+    const disabled = pageItem && (!pageSetup.state.enabled || !layout);
+    const pending = pageItem && (loading || (!!layout?.readCurrent && !properties));
     return {
       label,
       disabled,
       description: !pageItem || pageSetup.state.enabled ? undefined : pageSetup.state.disabledReason.message,
       submenuContent: (closeMenu) => (
-        <LayoutChoices choices={choices} disabled={disabled} closeMenu={closeMenu} />
+        <LayoutChoices choices={choices} disabled={disabled || pending} closeMenu={closeMenu} />
       ),
     };
   };
@@ -153,7 +154,7 @@ export function LayoutMenu({ tabIndex, onFocus }: { tabIndex: number; onFocus():
       onFocus={onFocus}
       onOpen={readCurrent}
       items={[
-        submenu(t('dialogs.pageSetup.margins'), [
+        submenu(t('layout.margins'), [
           ...margins,
           { label: t('layout.customMargins'), onClick: openDialog },
         ]),
