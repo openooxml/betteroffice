@@ -6,14 +6,14 @@ services:
     ports:
       - "3000:3000"
     environment:
-      WOPI_PUBLIC_URL: "http://office.nextcloud.test:3000"
+      WOPI_PUBLIC_URL: "http://office.nextcloud.localhost:3000"
       WOPI_ALLOW_HTTP: "1"
-      WOPI_HOSTS: '[{"id":"nextcloud","wopiSrcOrigins":["http://cloud.nextcloud.test:8080"],"frameOrigins":["http://cloud.nextcloud.test:8080"]}]'
+      WOPI_HOSTS: '[{"id":"nextcloud","wopiSrcOrigins":["http://cloud.nextcloud.localhost:8080"],"frameOrigins":["http://cloud.nextcloud.localhost:8080"]}]'
     volumes:
       - wopi-data:/data
     extra_hosts:
-      - "cloud.nextcloud.test:host-gateway"
-      - "office.nextcloud.test:host-gateway"
+      - "cloud.nextcloud.localhost:host-gateway"
+      - "office.nextcloud.localhost:host-gateway"
     restart: unless-stopped
 
   nextcloud:
@@ -24,14 +24,14 @@ services:
       SQLITE_DATABASE: "${NC_SQLITE_DATABASE:-nextcloud}"
       NEXTCLOUD_ADMIN_USER: "${NC_ADMIN_USER:-admin}"
       NEXTCLOUD_ADMIN_PASSWORD: "${NC_ADMIN_PASSWORD:?set NC_ADMIN_PASSWORD to a throwaway password}"
-      NEXTCLOUD_TRUSTED_DOMAINS: "cloud.nextcloud.test"
-      OVERWRITECLIURL: "http://cloud.nextcloud.test:8080"
+      NEXTCLOUD_TRUSTED_DOMAINS: "cloud.nextcloud.localhost"
+      OVERWRITECLIURL: "http://cloud.nextcloud.localhost:8080"
       OVERWRITEPROTOCOL: "http"
     volumes:
       - nextcloud:/var/www/html
     extra_hosts:
-      - "cloud.nextcloud.test:host-gateway"
-      - "office.nextcloud.test:host-gateway"
+      - "cloud.nextcloud.localhost:host-gateway"
+      - "office.nextcloud.localhost:host-gateway"
     restart: unless-stopped
 
 volumes:

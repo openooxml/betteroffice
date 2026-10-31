@@ -40,7 +40,7 @@ All editors of one file share one file session in one app process:
 - No SharePoint or Microsoft 365 hosting. Hosting there requires Microsoft
   partner onboarding for the host side, which is out of scope.
 - No cross-instance synchronisation. Two app instances never share a file
-  session (see sticky routing below).
+  session (see routing below).
 - No disk cache of documents. File bytes live in memory for the session,
   except for the opt-in journal.
 
@@ -83,17 +83,17 @@ Notes:
 - Persist `/data`. The proof key lives there by default (see Security). If
   `/data` is lost, the app generates a new proof key and hosts must pick up
   the new discovery values.
-- More than one instance: file sessions live in one process, and there is
-  no cross-instance sync in this version. Hashing the WOPISrc file id at
-  the proxy is not enough on its own: only the entry requests
-  (`/wopi/edit` and `/wopi/view`) carry the WOPISrc, while the session API
-  (`/api/session/*`) and the `/collab` WebSocket carry only the session
-  handle, with no file id to hash. A multi-instance setup therefore needs
-  affinity for those requests too, for example an affinity cookie: the
-  proxy sets a sticky cookie on the `/wopi/edit` and `/wopi/view`
-  responses and routes `/api/session/*` and `/collab` by that cookie, so
-  every request for one file reaches the instance that holds its session.
-  If your proxy cannot do that, run a single instance.
+- Run one instance per deployment. File sessions and session handles live
+  in one process, with no cross-instance sync. A shared affinity cookie
+  cannot keep two tabs for different files sticky to different instances.
+  Multiple instances require the proxy to route `/wopi/edit` and
+  `/wopi/view` by WOPISrc so all opens of one file reach the same instance,
+  then map each returned page's `sessionHandle` to that instance. Route
+  `/api/session/*`, including the SSE stream at `/api/session/events`, by
+  the handle in `Authorization: Bearer`; route `/collab` by the same
+  handle in the second `Sec-WebSocket-Protocol` value. Hashing the handle
+  alone does not identify the instance that created it. The app provides
+  no proxy mapping; without it, multiple instances are not supported.
 
 ## Configuration reference
 
@@ -103,7 +103,7 @@ invalid.
 
 | Variable | Default | Rules |
 | --- | --- | --- |
-| `WOPI_PUBLIC_URL` | required | Public origin of the app, for example `https://office.example.com`. Must use `https` unless `WOPI_ALLOW_HTTP` is `1`. No query, fragment, username or password. A path prefix is allowed. Trailing slashes are stripped. |
+| `WOPI_PUBLIC_URL` | required | Public origin of the app, for example `https://office.example.com`. Must use `https` unless `WOPI_ALLOW_HTTP` is `1`. No query, fragment, username or password. Serve the app at the root of its origin, using a dedicated host name. Path prefixes are not supported. Trailing slashes are stripped. |
 | `WOPI_HOSTS` | required | JSON array with at least one entry. Each entry has a non-empty unique `id`, a non-empty `wopiSrcOrigins` array, and a `frameOrigins` array (may be empty). Origins are bare origins only: scheme, host and optional port, no path, query or wildcard. `https` is required unless `WOPI_ALLOW_HTTP` is `1`. One WOPISrc origin may not appear under two host ids. |
 | `WOPI_ALLOW_HTTP` | unset | Only the exact value `1` allows `http` for `WOPI_PUBLIC_URL` and for host origins. Any other value, including `true`, keeps `https` required. |
 | `WOPI_PROOF_KEY_FILE` | `data/proof-key.pem` (the image sets `/data/proof-key.pem`) | Path of the RSA proof key file. Created on first start if missing. Keep it on the persisted volume. |
@@ -177,15 +177,21 @@ Journal: `WOPI_JOURNAL_DIR` is off by default because it keeps document
 data at rest on the app server. When set, the journal for a file stores
 the original source the session opened, every accepted and local update,
 and the item versions the app itself wrote as saves land. On reopen
-after a restart, the app takes its lock, and rebuilds the session from
-the journal only if the host version is still the original version or
-one the app wrote: it replays the journaled updates and then saves. If the host
-version has moved to something the journal does not know (someone else
-changed the file), the app discards the journal and opens the host's
-current version instead, so a stale journal never overwrites a newer
-file. Only enable it if you accept document data on that volume, protect
-the volume like the documents themselves, and delete journal data with
-the same retention rules as the files.
+after a restart, recovery runs after the app acquires its lock. If the
+host version matches the original version or one the app wrote, it
+rebuilds the session from the journal and resumes normal saving. If the
+host version is unknown or missing, it rebuilds the journal separately
+and uploads the recovered bytes through `PutRelativeFile`, suggesting
+`<name> (conflict YYYY-MM-DD HH.mm).<ext>` with the current UTC time.
+The host may choose a different name. Only after the upload succeeds
+does the app delete the journal and make the session view only with
+reason `externalChange`, displaying the host's current file. The original
+file is not overwritten. If recovery or the upload fails, opening fails
+and the journal stays on disk for a later retry. A normally recovered
+journal is deleted on clean session close once no unsaved edits remain;
+a broken journal is kept. Only enable it if you accept document data on
+that volume, protect the volume like the documents themselves, and delete
+journal data with the same retention rules as the files.
 
 ## OpenCloud
 
@@ -280,6 +286,10 @@ The compose file in `apps/wopi/deploy/nextcloud.compose.yml` wires a
 throwaway Nextcloud plus this app for a smoke test. It does not automate
 the richdocuments settings above; apply them in the admin UI after first
 start.
+
+The editor needs a secure browser context: serve it over HTTPS. The smoke
+stacks use plain HTTP on `*.localhost` host names, which browsers treat as
+secure; other plain HTTP host names fail to open documents.
 
 ## Seafile
 
