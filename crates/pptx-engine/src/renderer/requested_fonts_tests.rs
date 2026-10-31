@@ -946,3 +946,135 @@ fn coverage_only_deck_shapes_and_measures_without_a_primary_font() {
         assert!(lines[0]["width"].as_f64().unwrap() > 0.0);
     }
 }
+
+fn lang_run(text: &str, lang: &str, family: &str) -> String {
+    format!(
+        r#"<a:r><a:rPr lang="{lang}"><a:latin typeface="{family}"/></a:rPr><a:t>{text}</a:t></a:r>"#
+    )
+}
+
+#[test]
+fn han_requests_follow_run_paragraph_mark_and_style_languages() {
+    let run_language = shape(
+        2,
+        "",
+        "",
+        &format!("<a:p>{}</a:p>", lang_run("推計月間", "ja-JP", "Ja Run")),
+    );
+    let mark_language = shape(
+        3,
+        "",
+        "",
+        &format!(
+            r#"<a:p>{}<a:endParaRPr lang="ja-JP"/></a:p>"#,
+            lang_run("本町", "en-US", "Mark Face")
+        ),
+    );
+    let style_language = shape(
+        4,
+        "",
+        r#"<a:lvl1pPr><a:defRPr lang="zh-TW"/></a:lvl1pPr>"#,
+        &format!("<a:p>{}</a:p>", font_run("繁體字", "Style Face")),
+    );
+    let hong_kong = shape(
+        5,
+        "",
+        "",
+        &format!("<a:p>{}</a:p>", lang_run("香港", "zh-HK", "Hk Face")),
+    );
+    let mixed = shape(
+        6,
+        "",
+        "",
+        &format!(
+            "<a:p>{}{}</a:p>",
+            lang_run("かな", "ja-JP", "Kana Run"),
+            lang_run("汉字", "zh-CN", "Hans Run"),
+        ),
+    );
+    let unknown = shape(
+        7,
+        "",
+        "",
+        &format!("<a:p>{}</a:p>", font_run("漢字", "Plain Face")),
+    );
+    let slide = format!("{run_language}{mark_language}{style_language}{hong_kong}{mixed}{unknown}");
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([
+            {"family":"Ja Run","bold":false,"italic":false,"scripts":["cjk-jp"]},
+            {"family":"Mark Face","bold":false,"italic":false,"scripts":["cjk-jp"]},
+            {"family":"Style Face","bold":false,"italic":false,"scripts":["cjk-tc"]},
+            {"family":"Hk Face","bold":false,"italic":false,"scripts":["cjk-tc"]},
+            {"family":"Kana Run","bold":false,"italic":false,"scripts":["cjk-jp"]},
+            {"family":"Hans Run","bold":false,"italic":false,"scripts":["cjk-sc"]},
+            {"family":"Plain Face","bold":false,"italic":false,"scripts":["cjk-sc"]},
+        ])
+    );
+}
+
+#[test]
+fn han_requests_use_the_presentation_default_language() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!("<a:p>{}</a:p>", font_run("漢字", "Doc Face")),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        defaults: r#"<a:lvl1pPr><a:defRPr lang="ko-KR"/></a:lvl1pPr>"#,
+        ..Fixture::default()
+    }
+    .session();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([{"family":"Doc Face","bold":false,"italic":false,"scripts":["cjk-kr"]}])
+    );
+}
+
+#[test]
+fn edited_japanese_paragraphs_keep_the_japanese_face() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            r#"<a:p>{}<a:endParaRPr lang="ja-JP"/></a:p>"#,
+            lang_run("推計", "ja-JP", "Ja Edit")
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    for (index, text, family) in [(0, "月間", "Ja Edit"), (0, "平均", "Inserted Face")] {
+        session
+            .insert_text(
+                &EditCtx::local("fonts"),
+                &story.id,
+                index,
+                text,
+                &pptx_edit::TextStyle {
+                    font_family: Some(family.to_owned()),
+                    ..pptx_edit::TextStyle::default()
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([
+            {"family":"Inserted Face","bold":false,"italic":false,"scripts":["cjk-jp"]},
+            {"family":"Ja Edit","bold":false,"italic":false,"scripts":["cjk-jp"]},
+        ])
+    );
+}

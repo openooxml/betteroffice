@@ -17,8 +17,8 @@ use ooxml_text::family_metrics::{
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
-    paragraph_scripts_with_han_fallback, presentation_break_opportunities, shape, single_line_box,
-    uppercase_for_language,
+    han_script_for_language, paragraph_scripts_with_languages, presentation_break_opportunities,
+    shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{
     ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_insertions,
@@ -1359,14 +1359,31 @@ impl FontRequests {
                     resolve_font_request(theme, &end_style, fallback)
                 }
             };
-            let paragraph_scripts = paragraph_scripts_with_han_fallback(
-                source.paragraph.runs.iter().map(|run| run.text.as_str()),
+            let end_language = source.paragraph.end_language.as_deref().or_else(|| {
+                source
+                    .end_properties
+                    .and_then(|properties| properties.language.as_deref())
+            });
+            let style_language = source
+                .properties
+                .default_run
+                .as_ref()
+                .and_then(|properties| properties.language.as_deref());
+            let paragraph_scripts = paragraph_scripts_with_languages(
+                source.paragraph.runs.iter().map(|run| {
+                    (
+                        run.text.as_str(),
+                        han_language(run, end_language, style_language),
+                    )
+                }),
                 false,
             );
             self.record(first.clone(), &[]);
             for run in &source.paragraph.runs {
-                let mut scripts = paragraph_scripts_with_han_fallback([run.text.as_str()], false);
-                if scripts.iter().any(|script| script == "cjk-sc") {
+                let language = han_language(run, end_language, style_language);
+                let mut scripts =
+                    paragraph_scripts_with_languages([(run.text.as_str(), language)], false);
+                if language.is_none() && scripts.iter().any(|script| script == "cjk-sc") {
                     let contextual: Vec<_> = paragraph_scripts
                         .iter()
                         .filter(|script| matches!(script.as_str(), "cjk-jp" | "cjk-kr"))
@@ -1391,6 +1408,19 @@ impl FontRequests {
         }
         Ok(())
     }
+}
+
+/// The language deciding a run's Han glyphs: the first East Asian one of the run, the
+/// paragraph mark and the paragraph's style default.
+fn han_language<'a>(
+    run: &'a ContentRun,
+    end_language: Option<&'a str>,
+    style_language: Option<&'a str>,
+) -> Option<&'a str> {
+    [run.language.as_deref(), end_language, style_language]
+        .into_iter()
+        .flatten()
+        .find(|tag| han_script_for_language(tag).is_some())
 }
 
 struct FontRequestWalker<'a, 'b> {
@@ -3585,12 +3615,16 @@ struct ContentParagraph {
     level: u32,
     bullet: Option<Bullet>,
     runs: Vec<ContentRun>,
+    /// `a:endParaRPr/@lang` of the source paragraph.
+    end_language: Option<String>,
 }
 
 #[derive(Clone)]
 struct ContentRun {
     text: String,
     style: TextStyle,
+    /// `a:rPr/@lang` of the source run.
+    language: Option<String>,
 }
 
 fn content_from_story(
@@ -3614,6 +3648,8 @@ fn content_from_story(
                 let insertions = source_para
                     .map(|source| slide_number_insertions(source, &live))
                     .unwrap_or_default();
+                let aligned =
+                    source_para.filter(|source| source.runs.len() == paragraph.runs.len());
                 let mut runs = Vec::with_capacity(paragraph.runs.len() + insertions.len());
                 let mut insertion_index = 0;
                 let mut offset = 0;
@@ -3625,6 +3661,7 @@ fn content_from_story(
                         runs.push(ContentRun {
                             text: slide_number.to_string(),
                             style: style_from_run_properties(&source_run.properties, Some(theme)),
+                            language: source_run.properties.language.clone(),
                         });
                         insertion_index += 1;
                     }
@@ -3636,6 +3673,8 @@ fn content_from_story(
                             .and_then(|value| value.clone())
                             .unwrap_or_else(|| run.text.clone()),
                         style: run.style.clone(),
+                        language: aligned
+                            .and_then(|source| source.runs[run_index].properties.language.clone()),
                     });
                 }
                 while insertion_index < insertions.len() {
@@ -3643,6 +3682,7 @@ fn content_from_story(
                     runs.push(ContentRun {
                         text: slide_number.to_string(),
                         style: style_from_run_properties(&source_run.properties, Some(theme)),
+                        language: source_run.properties.language.clone(),
                     });
                     insertion_index += 1;
                 }
@@ -3654,6 +3694,9 @@ fn content_from_story(
                         .as_deref()
                         .and_then(|json| serde_json::from_str(json).ok()),
                     runs,
+                    end_language: source_para
+                        .and_then(|source| source.end_properties.as_ref())
+                        .and_then(|properties| properties.language.clone()),
                 }
             })
             .collect(),
@@ -3690,8 +3733,13 @@ fn content_from_body(
                     .map(|run| ContentRun {
                         text: field_text(run, slide_number),
                         style: style_from_properties(&run.properties, theme),
+                        language: run.properties.language.clone(),
                     })
                     .collect(),
+                end_language: paragraph
+                    .end_properties
+                    .as_ref()
+                    .and_then(|properties| properties.language.clone()),
             })
             .collect(),
     }
