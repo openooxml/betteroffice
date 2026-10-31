@@ -2852,7 +2852,7 @@ export class PptxRenderer {
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
-     * requested font faces before layout, for one slide or the whole deck.
+     * Requested faces with optional script coverage buckets, before layout.
      */
     requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
