@@ -780,9 +780,10 @@ pub enum StructuralRevisionKind {
 #[serde(rename_all = "camelCase")]
 pub struct TextRunPrimitive {
     pub text: String,
-    /// Canvas-only glyph stand-in text.
+    /// Canvas-only glyph stand-in text, boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paint_text: Option<String>,
+    pub paint_text: Option<Box<String>>,
     /// pen origin
     pub x: Number,
     pub baseline_y: Number,
@@ -850,9 +851,11 @@ pub struct GlyphRunPrimitive {
     /// SOURCE TEXT — the a11y mirror renders this as real characters and the
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
-    /// Canvas-only glyph stand-in text for the fillText fallback.
+    /// Canvas-only glyph stand-in text for the fillText fallback, boxed to
+    /// keep primitives compact.
+    #[allow(clippy::box_collection)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paint_text: Option<String>,
+    pub paint_text: Option<Box<String>>,
     pub glyphs: Vec<PlacedGlyph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<EchoRunFacts>,
@@ -6886,7 +6889,7 @@ fn emit_line(
         marker_attrs.list_marker_revision = marker_revision;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: marker.to_owned(),
-            paint_text: text_paint_override(ctx.shape, marker, &marker_format),
+            paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
             x: px(marker_x),
             baseline_y: px(baseline),
             width: px(slot_width),
@@ -7527,7 +7530,7 @@ fn emit_tab_leader(
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
         }));
         prims.push(Primitive::Text(TextRunPrimitive {
-            paint_text: text_paint_override(shape, &text, &fmt),
+            paint_text: text_paint_override(shape, &text, &fmt).map(Box::new),
             text,
             x: px(x),
             baseline_y: px(baseline),
@@ -7842,7 +7845,7 @@ fn emit_text_segment(
         .map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
-            paint_text: text_paint_override(shape, text, fmt),
+            paint_text: text_paint_override(shape, text, fmt).map(Box::new),
             x: px(x),
             baseline_y: px(paint_baseline),
             width: px(width),
@@ -8186,7 +8189,7 @@ fn try_emit_glyph_runs(
             font_id: font.to_u32(),
             size: round3(size_px),
             color: color.to_string(),
-            paint_text: glyph_paint_text(shape_fonts.store, font, &sub_text),
+            paint_text: glyph_paint_text(shape_fonts.store, font, &sub_text).map(Box::new),
             text: sub_text,
             glyphs: placed,
             echo: Some(EchoRunFacts {

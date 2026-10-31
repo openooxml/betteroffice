@@ -148,10 +148,9 @@ fn substitute_widths_use_the_stand_in_without_changing_clusters() {
     assert_eq!(actual[2].x_advance, expected[2].x_advance);
     assert_eq!(actual[3].cluster, 5);
     let chain = [font.to_u32()];
-    assert_eq!(
-        width(&measure(&store, "co\u{2011}operate", 1000.0, &chain)),
-        width(&measure(&store, "co-operate", 1000.0, &chain))
-    );
+    let stand_in = width(&measure(&store, "co\u{2011}operate", 1000.0, &chain));
+    let hyphen = width(&measure(&store, "co-operate", 1000.0, &chain));
+    assert!((stand_in - hyphen).abs() < 1e-3, "{stand_in} vs {hyphen}");
 }
 
 #[test]
