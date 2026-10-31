@@ -47,6 +47,51 @@ export type DocxDocument = Document
 
 export declare class EditSession {
   free(): void
+  register_measure_font(bytes: Uint8Array): number
+  decode_font(bytes: Uint8Array): Uint8Array
+  register_substitute_measure_font(base: number, requestedFamily: string): number
+  clear_measure_fonts(): void
+  measure_paragraph_json(input: string): string
+  layout_document_json(input: string): string
+  layout_font_requirements_json(input: string): string
+  layout_document_with_regions_json(input: string): string
+  layout_document_with_regions_retained_json(input: string): string
+  layout_document_with_regions_retained_meta(input: string): RetainedLayoutMeta
+  retained_layout_json(): string
+  layout_document_with_regions_retained(input: string): void
+  layout_document_with_regions_after_edit(input: string): void
+  retained_headers_footers_json(): string | undefined
+  layout_document_with_regions_prefix_retained_json(input: string, pages: number): string
+  layout_document_with_regions_exact_prefix_retained(input: string, pages: number): string
+  begin_region_layout(input: string): string
+  resume_region_layout(blocks: number): string
+  retained_kernel_inputs_json(): string
+  reset_frame_base(): void
+  build_display_list_json(input: string): string
+  build_display_list_frame(input: string, expectedFrameEpoch: number): Uint8Array
+  set_display_window(start: number, end: number): void
+  set_display_retain_built_pages(retain: boolean): void
+  set_local_lowering(enabled: boolean): void
+  set_direct_batches(enabled: boolean): void
+  direct_batches_applied(): number
+  set_windowed_incremental_builds(enabled: boolean): void
+  build_display_pages_frame(pages: Uint32Array, expectedFrameEpoch: number): Uint8Array
+  release_display_pages_frame(pages: Uint32Array, expectedFrameEpoch: number): Uint8Array
+  resident_caret_snapshot_json(): string
+  apply_input(text: string, expectedFrameEpoch: number): Uint8Array
+  apply_input_profiled(text: string, expectedFrameEpoch: number): Uint8Array
+  apply_delete(direction: string, expectedFrameEpoch: number, count: number): Uint8Array
+  resident_deleted_units(): number
+  apply_delete_profiled(direction: string, expectedFrameEpoch: number, count: number): Uint8Array
+  apply_input_profile_json(): string
+  display_hit_test_regions_json(pageIndex: number, x: number, y: number): string
+  display_vertical_move_json(position: number, direction: string, goalX: number): string
+  display_range_rects_json(from: number, to: number): string
+  display_range_rects_on_pages_json(from: number, to: number, firstPage: number, lastPage: number): string
+  display_range_rects_region_json(region: string, partId: string, from: number, to: number): string
+  display_range_rects_batch(region: string, partId: string, ranges: Float64Array): Float64Array
+  outline_glyph_json(fontId: number, glyphId: number): string
+  echo_glyph_set_json(fontId: number, size: number, kern: boolean, alphabet: string): string
   accept_change(targetJson: string): string
   add_comment(rangesJson: string, author: string, date: string, bodyJson: string): string
   add_undo_boundary(): void
@@ -204,6 +249,12 @@ export declare class EditSession {
   settle_revisions_json(request: string): string
   split_cell(atJson: string, rows?: number | undefined | null, columns?: number | undefined | null): string
   split_paragraph(story: string, paraId: string, offset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  /**
+   * Runs callbacks before each call returns, after its transactions commit, allowing session reads and edits.
+   * For calls with multiple commits, every callback sees the state after the call.
+   */
+  set_update_observer(callback: Function): void
+  clear_update_observer(): void
   start_update_event_observation(): void
   stories_changed_since(since: number): string
   story_checksum(story: string): string
@@ -226,12 +277,28 @@ export declare class EditSession {
   yrs_blocks_for_story(story: string, envJson: string): string
 }
 
+export declare class RetainedLayoutMeta {
+  free(): void
+  get page_count(): number
+  get partial(): boolean
+  get provisional(): boolean
+  get notes_converged(): boolean
+  page_sizes(): Float64Array
+  layout_shell_json(): string
+}
+
 export declare class RunInheritance {
   free(): void
   attributes(paragraphStyle?: string | undefined | null, runStyle?: string | undefined | null, tableRunJson?: string | undefined | null): string
   paragraph_formatting(paragraph_style: string | null | undefined, table_formatting_json: string): string
   table_attributes(tableJson: string): string
 }
+
+export declare function build_display_list_json(input: string): string
+
+export declare function clear_measure_fonts(): void
+
+export declare function close_display_list(handle: number): void
 
 export interface DecodedFontFace {
   font: Uint8Array
@@ -240,6 +307,8 @@ export interface DecodedFontFace {
 
 /** Decodes one font pack face using this engine's linked decoder. */
 export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace
+
+export declare function decodeTiffPng(data: Uint8Array): Uint8Array
 
 export interface DocumentStructure {
   bodyParagraphs: number
@@ -284,6 +353,12 @@ export interface EditReceipt {
   revisionIds: Array<string>
 }
 
+export declare function export_docx_markdown_json(bytes: Uint8Array, options: string): string
+
+export declare function export_docx_structured_json(bytes: Uint8Array, options: string): string
+
+export declare function find_docx_content_controls_json(bytes: Uint8Array, query: string, options: string): string
+
 export interface FontFace {
   family: string
   data: Buffer
@@ -293,6 +368,12 @@ export interface FontFace {
 
 export declare function fontPreflight(bytes: Buffer): string
 
+export declare function hit_test_json(displayList: string, pageIndex: number, x: number, y: number): string
+
+export declare function hit_test_regions_by_handle(handle: number, pageIndex: number, x: number, y: number): string
+
+export declare function hit_test_regions_json(displayList: string, pageIndex: number, x: number, y: number): string
+
 export interface ImageResource {
   relationshipId: string
   data: Buffer
@@ -300,10 +381,20 @@ export interface ImageResource {
   part?: string
 }
 
+export declare function install_panic_hook(): void
+
+export declare function layout_document_json(input: string): string
+
 export interface LayoutResult {
   layout: any
   displayList: any
 }
+
+export declare function list_docx_content_controls_json(bytes: Uint8Array, options: string): string
+
+export declare function measure_paragraph_json(input: string): string
+
+export declare function open_display_list(displayList: string): number
 
 export declare function openDocument(data: Buffer, options?: OpenDocumentOptions | undefined | null): Promise<Document>
 
@@ -333,6 +424,50 @@ export interface OpenDocumentOptions {
   limits?: OpenDocumentLimits
 }
 
+export declare function outline_glyph_json(fontId: number, glyphId: number): string
+
+export declare function paragraphPatchWriterVersion(): number
+
+export declare function parse_docx_relationships(data: Uint8Array): string
+
+export declare function parse_docx_s2(data: Uint8Array): string
+
+export declare function parse_docx_s3(data: Uint8Array): string
+
+export declare function parse_docx_s4(data: Uint8Array): string
+
+export declare function parse_docx_s5(data: Uint8Array): string
+
+export declare function parse_docx_s6(data: Uint8Array): string
+
+export declare function parse_docx_s7(data: Uint8Array): string
+
+export declare function parse_docx_s8(data: Uint8Array): string
+
+export declare function parse_docx_s9(data: Uint8Array, optionsJson: string): string
+
+export declare function parse_relationships_xml(xml: Uint8Array, partPath: string): string
+
+export declare function range_rects_by_handle(handle: number, from: number, to: number): string
+
+export declare function range_rects_json(displayList: string, from: number, to: number): string
+
+export declare function range_rects_on_pages_by_handle(handle: number, from: number, to: number, firstPage: number, lastPage: number): string
+
+export declare function range_rects_on_pages_json(displayList: string, from: number, to: number, firstPage: number, lastPage: number): string
+
+export declare function range_rects_region_by_handle(handle: number, region: string, partId: string, from: number, to: number): string
+
+export declare function range_rects_region_json(displayList: string, region: string, partId: string, from: number, to: number): string
+
+export declare function register_measure_font(bytes: Uint8Array): number
+
+export declare function register_substitute_measure_font(base: number, requestedFamily: string): number
+
+export declare function render_docx_markdown_json(content: string, options: string): string
+
+export declare function render_docx_markdown_with_pages_json(content: string, options: string): string
+
 /** Input has the same shape as DocxStructuredContent from @betteroffice/docx. */
 export declare function renderDocxMarkdown(content: unknown, options?: DocxMarkdownOptions | undefined | null): Promise<string>
 
@@ -341,9 +476,49 @@ export interface RenderedPage {
   skippedImages: number
 }
 
+/** Native no-op; native allocations are not counted. */
+export declare function reset_wasm_peak_bytes(): void
+
+export declare function rezip_docx(entries: any): Uint8Array
+
+export declare function sanitizeOoxml(data: Uint8Array, expectedFormat: string): Uint8Array
+
 export interface SaveDocumentOptions {
   timestamp?: string
   now?: string
   updateModifiedDate?: boolean
   modifiedBy?: string
 }
+
+export declare function serialize_docx_s10(requestJson: string): string
+
+export declare function serialize_docx_s11(requestJson: string): string
+
+export declare function serialize_docx_s12(requestJson: string): string
+
+/** Native no-op; native allocations are not limited. */
+export declare function set_wasm_heap_limit(bytes: number): void
+
+export declare function unzip_docx(data: Uint8Array): any
+
+export declare function update_display_list(handle: number, update: string): void
+
+export declare function vertical_move_by_handle(handle: number, position: number, direction: string, goalX: number): string
+
+export declare function vertical_move_json(displayList: string, position: number, direction: string, goalX: number): string
+
+/** Native no-op; native allocations are not counted. */
+export declare function wasm_failed_allocation_bytes(): number
+
+/** Native no-op; native allocations are not counted. */
+export declare function wasm_heap_counted(): boolean
+
+/** Native no-op; native allocations are not counted. */
+export declare function wasm_live_bytes(): number
+
+/** Native no-op; native allocations are not counted. */
+export declare function wasm_peak_bytes(): number
+
+export declare function write_docx_s13_wasm(requestJson: string, originalDocx: Uint8Array): Uint8Array
+
+export declare function write_docx_s13_wasm_with_warnings(requestJson: string, originalDocx: Uint8Array): Uint8Array
