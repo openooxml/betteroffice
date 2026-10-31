@@ -1,5 +1,16 @@
 # @betteroffice/python-docx
 
+## 0.3.0
+
+### Minor Changes
+
+- e1fed99: Adds `Document.replace_paragraph_text(para_id, text)` as an alias of `replace_text`, returning the same `Edit` receipt. Opt-in; `replace_text` is unchanged.
+
+### Patch Changes
+
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- ad45f86: Adds opt-in `decode_font_face` calls for zstd and woff2t font pack faces. Rust facades expose the shared `betteroffice-fonts` decoder as `fonts`; Python returns font bytes and an optional transformed payload.
+
 ## 0.2.2
 
 ### Patch Changes

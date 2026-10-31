@@ -77,7 +77,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "betteroffice-drawingml"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-metafile"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -112,11 +112,11 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-diff"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "betteroffice-ooxml-text"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "betteroffice-drawingml",
  "rustybuzz",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "js-sys",
  "quick-xml",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-edit"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-parse"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-raster"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-render"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-calc"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "betteroffice-xlsx-model",
  "libm",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-model"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "libm",
  "serde",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-ops"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",

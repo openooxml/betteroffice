@@ -11,9 +11,9 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://betteroffice.dev/api/badge?label=license&amp;message=Apache-2.0&amp;color=4ade80" alt="license"></a>
-  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads: 484,591/month (snapshot 2026-10-27)"></a>
-  <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads: 203,294/month (snapshot 2026-10-27)"></a>
-  <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads: 2,063/month (snapshot 2026-10-27)"></a>
+  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads: 1,023,431/month (snapshot 2026-10-31)"></a>
+  <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads: 174,757/month (snapshot 2026-10-31)"></a>
+  <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads: 2,063/month (snapshot 2026-10-31)"></a>
   <a href="https://betteroffice.dev"><img src="https://betteroffice.dev/api/badge?label=&amp;message=betteroffice.dev&amp;color=0a0a0a" alt="betteroffice.dev"></a>
   <a href="https://betteroffice.dev/blog"><img src="https://betteroffice.dev/api/badge?label=&amp;message=blog&amp;color=0a0a0a" alt="BetterOffice blog"></a>
 </p>

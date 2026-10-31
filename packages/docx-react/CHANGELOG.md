@@ -1,5 +1,93 @@
 # @betteroffice/docx-react
 
+## 0.6.0
+
+### Minor Changes
+
+- cc2dc6c: Reads now include `drawing` (`wp:docPr` properties, placement and type) on drawing atoms by default, as do structured image and unsupported inlines. Plugins request a drawing's frame rects with the new `drawing` geometry target. Sessions seeded earlier read `drawing` as absent until reseeded.
+- 02bd5be: DOCX uses installed font packs by default for characters they cover. Uncovered scripts and unavailable CJK families retain browser and Google Fonts fallbacks unless disabled; configured fonts and document embeds still take precedence.
+
+### Patch Changes
+
+- b7fa550: Adds Clear formatting shortcuts by default: Ctrl+Space on Windows and Linux, and ⌘\ on macOS, with translated shortcut help in every locale. Shortcut bindings can now be restricted to a platform through the optional `platform` field.
+- 14495c1: Keeps comment cards visible and steady while typing as their anchor positions update.
+- 0372f1d: Reads now include `drawings` on inline content-control atoms by default, including text boxes and revision views. Drawing geometry targets accept an optional `index` to address a drawing inside a control, including footer controls.
+- cc7f362: Opening a Word document no longer downloads the save engine up front. The editor prepares saving as soon as you edit or reach for Save, so the first save stays fast and read-only opens download less.
+- 25ed84c: Word documents stay more responsive during typing and scrolling. Hit-test preparation waits for scrolling to pause and, while the editor is focused, for two seconds without document changes; larger pages wait for more idle time.
+- 8e6d70f: Navigating to a paragraph (from a plugin or the API) after an edit now stays at the paragraph, instead of jumping back to the caret when the editor paints the next frames.
+- 4b9ca33: Fixes the page indicator flashing when resizing the editor or rotating a phone.
+- 2bfee58: Escape pressed right after clicking a picture now leaves the picture, instead of being lost while the selection was still landing.
+- c2f553d: The caret now moves with prepainted text while you type, at its real height, and settles when layout arrives. Moving or blinking the caret no longer causes a page layout.
+- 48c6d3c: Opening a Word document downloads about 4 MB less by using a smaller module for caret and selection queries.
+- c48265f: A plugin asking for a reservation it no longer has now gets `missing-target` right away, instead of `layout-unavailable` until the editor relays out.
+- 4182d03: Keeps a plugin's reserved boxes available while another plugin's reservations change or that plugin is removed, instead of every plugin's anchors disappearing until the editor relays out.
+- 7a9c8de: A tracked-change balloon in dots review now appears where it belongs, instead of first showing one frame offset by the previous balloon's width.
+- 6091ab3: The editor now loads the fallback font for Chinese, Japanese, Korean, Arabic or Hebrew text typed or pasted into a document that had none, instead of drawing empty boxes until the document is reopened.
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- ad45f86: Editors decode packed fonts with their engine by default instead of downloading a separate decoder. Standalone font providers can opt into a decoder with `runtime.decoder`.
+- Updated dependencies [21d4394]
+- Updated dependencies [5421e9e]
+- Updated dependencies [1f2c008]
+- Updated dependencies [b2ccc11]
+- Updated dependencies [f831537]
+- Updated dependencies [e1a414e]
+- Updated dependencies [b7fa550]
+- Updated dependencies [802a67c]
+- Updated dependencies [0372f1d]
+- Updated dependencies [cc2dc6c]
+- Updated dependencies [cc7f362]
+- Updated dependencies [0a4285c]
+- Updated dependencies [02bd5be]
+- Updated dependencies [80fbccd]
+- Updated dependencies [51390c5]
+- Updated dependencies [e3b2ddb]
+- Updated dependencies [773c633]
+- Updated dependencies [f88d5cd]
+- Updated dependencies [45aceb4]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [5999962]
+- Updated dependencies [f44c229]
+- Updated dependencies [b312d8c]
+- Updated dependencies [3936cdb]
+- Updated dependencies [4dc30ef]
+- Updated dependencies [61f3ae2]
+- Updated dependencies [5a6445d]
+- Updated dependencies [0cc6839]
+- Updated dependencies [4761a87]
+- Updated dependencies [c2f553d]
+- Updated dependencies [48c6d3c]
+- Updated dependencies [6b80d49]
+- Updated dependencies [4b0842b]
+- Updated dependencies [f30d46e]
+- Updated dependencies [bb1207f]
+- Updated dependencies [875e0d6]
+- Updated dependencies [5e26101]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [7599ffb]
+- Updated dependencies [60aeefa]
+- Updated dependencies [fc50302]
+- Updated dependencies [bb08976]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [308f7b3]
+- Updated dependencies [514e876]
+- Updated dependencies [ceb5208]
+- Updated dependencies [7774f6c]
+- Updated dependencies [6091ab3]
+- Updated dependencies [d1fff89]
+- Updated dependencies [f8c262a]
+- Updated dependencies [dab515e]
+- Updated dependencies [ad45f86]
+- Updated dependencies [4fb3025]
+- Updated dependencies [7b30d80]
+- Updated dependencies [37199d9]
+- Updated dependencies [842d624]
+- Updated dependencies [974d3ab]
+- Updated dependencies [6478dec]
+  - @betteroffice/docx@0.6.0
+  - @betteroffice/docx-i18n@0.6.0
+
 ## 0.5.1
 
 ### Patch Changes

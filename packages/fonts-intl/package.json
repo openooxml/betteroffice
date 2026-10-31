@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/fonts-intl",
-  "version": "0.4.2",
+  "version": "1.0.0",
   "description": "Optional international Noto coverage faces for @betteroffice/fonts, compressed as font pack format 1.",
   "sideEffects": false,
   "type": "module",

@@ -1,5 +1,31 @@
 # @betteroffice/xlsx
 
+## 0.6.0
+
+### Minor Changes
+
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+- 1346f3c: The xlsx editor loads metric-compatible bundled fonts for workbook families from `@betteroffice/fonts` and repaints when they arrive. On by default; `defaultFonts={false}` opts out. Worker sessions expose `call.decodeFontFace`.
+- 9ff8a3f: Typing into a locked cell on a protected sheet now reports `sheet-protected` ("This cell is on a protected sheet.") instead of a failed save; unlocked cells there can be edited. `XlsxCommandFailureCode` and `XlsxCommandAdmissionCode` gain `sheet-protected`, so exhaustive switches need a case.
+
+### Patch Changes
+
+- d17d538: A remote collaboration update or pipe frame is no longer refused as stale when local edits moved the document on while it was in flight, so peers stay in sync and no typed character is lost.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- bb3e6b7: Lookup tables that list the nth match of a key with `SMALL(IF(...))` array formulas over large data sheets now calculate every row instead of stopping with #NUM! partway through.
+- 711c41a: Opens workbooks faster while preserving compatibility with existing collaboration states and snapshots.
+- 5797065: Loads collaboration support and presence UI only when collaboration is configured. Default editor opens download less JavaScript, while collaborative sessions retain synchronization and presence behavior.
+- 6d5edbc: Adds opt-in `initWasm(input, { png: false })` and worker session `png: false` to load a smaller WASM binary without PNG export. PNG export remains enabled by default and on the native backend.
+- 9d85035: Smaller WebAssembly core and faster `applyOps`. Operations whose `type` key is not first take a slower fallback, so put `type` first. Malformed operation JSON may report different errors. Apps sending their own operation JSON across package versions should send operations as this package serializes them.
+- 421a628: Adds `headerFooter` facts to plugin `readCells` sheet entries: printable left, center and right sections and the active first, odd and even variants; null when a sheet has none. Workbook snapshots written by this version do not decode in 0.5.1.
+- 057f74a: Formula results and chart and rotated text geometry are now computed bit for bit the same on WebAssembly and the native engine. WebAssembly results are unchanged.
+- abeaece: Workbooks saved with Excel's "Set precision as displayed" now round formula results to their displayed precision, as Excel does. Sessions of such workbooks saved by this version cannot be opened by older versions.
+- 9ff8a3f: Protected cell entries now report `sheet-protected` with a localized message by default. Unlocked cells on protected sheets remain editable.
+- b5f3ca2: Smaller WebAssembly core: sorts that run once on open, save or metadata writes share one implementation.
+- 9d9de00: Sorting a range and copying formats now keep each cell's own style, so default cells no longer pick up a look-alike style with extra settings and sorts no longer add new styles to the workbook.
+- df287ec: `SUBTOTAL` and `AGGREGATE` now skip other subtotals inside their ranges, so grand totals over grouped data no longer count the group subtotals twice.
+- 8001b2f: `TEXT` now formats text that reads as a number or date, as Excel does, so `TEXT` over a cell holding "November 2025" with a date format gives the formatted date.
+
 ## 0.5.1
 
 ### Patch Changes
