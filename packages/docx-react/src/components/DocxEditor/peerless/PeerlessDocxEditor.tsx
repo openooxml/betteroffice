@@ -472,6 +472,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     });
     const fonts: YrsResidentFontRegistration[] = [];
     const fontIds: number[] = [];
+    const fontStyles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>();
     let nextFontId = 0;
     let measurement: ReturnType<typeof createRustMeasureSource> | undefined;
     let initialFrame: DocxCommandFrame | undefined;
@@ -482,6 +483,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       disposed = true;
       fonts.length = 0;
       fontIds.length = 0;
+      fontStyles.clear();
       measurement?.setEmbeddedFaces([]);
       measurement?.clear();
     };
@@ -515,8 +517,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         measurement ??= createRustMeasureSource({
           runtime: client.fontRuntime,
           engine: {
-            registerFont: (data) => {
+            registerFont: (data, face) => {
               const slot = appendFont(data);
+              if (face) fontStyles.set(slot, face);
               fontIds[slot] = nextFontId++;
               return slot;
             },
@@ -660,7 +663,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const families = [...new Set([...requirements.map(item => item.family),
         ...(metadata.package.fontTable?.fonts ?? []).map(font => font.name)])];
       fontSource.current = { document: metadata, layoutInput: JSON.stringify(layout), families, requirements,
-        initial: fontEnvironmentForRegistrations(fonts, config.fontChains, requirements, families),
+        initial: fontEnvironmentForRegistrations(fonts, config.fontChains, requirements, families, fontStyles),
         signature: settings.current.fonts === undefined && !settings.current.reportFonts ? '[]' : null,
         provider: settings.current.measurementFontProvider };
       controller.fontChoices(families);

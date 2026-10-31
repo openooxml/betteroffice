@@ -3756,6 +3756,64 @@ fn css_font(fmt: &RunFormattingIn) -> String {
     }
 }
 
+fn resolved_css_font(shape: Option<&ShapeFonts<'_>>, text: &str, fmt: &RunFormattingIn) -> String {
+    let Some(shape) = shape else {
+        return css_font(fmt);
+    };
+    let bold = fmt.bold == Some(true);
+    let italic = fmt.italic == Some(true);
+    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let Some(chain) = shape.chain_for(family, bold, italic) else {
+        return css_font(fmt);
+    };
+    #[cfg(not(feature = "base-latin"))]
+    if !chain
+        .ids
+        .iter()
+        .any(|&id| shape.store.backstop_style(id).is_some())
+    {
+        return css_font(fmt);
+    }
+    if chain.ids.iter().any(|&id| shape.store.metrics(id).is_err()) {
+        return css_font(fmt);
+    }
+    let Some(fonts): Option<Vec<_>> = text
+        .chars()
+        .map(|ch| chain.resolve_with_style(shape.store, ch, bold, italic, family))
+        .collect()
+    else {
+        return css_font(fmt);
+    };
+    if let Some(&font) = fonts.first()
+        && fonts.iter().all(|&id| id == font)
+        && !text.chars().any(ooxml_text::font_store::base_latin_alias)
+        && let Some((bold, italic)) = shape.store.backstop_style(font)
+    {
+        let mut backstop = fmt.clone();
+        backstop.font_family = Some(ooxml_text::BASE_LATIN_FAMILY.to_owned());
+        backstop.bold = Some(bold);
+        backstop.italic = Some(italic);
+        return css_font(&backstop);
+    }
+    let css = css_font(fmt);
+    if fonts
+        .iter()
+        .any(|&id| shape.store.backstop_style(id).is_some())
+    {
+        if !ooxml_text::font_store::symbol_family(family)
+            && text.chars().any(ooxml_text::font_store::base_latin_alias)
+        {
+            return css;
+        }
+        css.replace(
+            ", sans-serif",
+            &format!(", {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY),
+        )
+    } else {
+        css
+    }
+}
+
 /// Resolves deletion, hyperlink, and explicit run colors.
 fn run_color(fmt: &RunFormattingIn) -> String {
     if fmt.is_deletion == Some(true) {
@@ -4592,6 +4650,53 @@ impl ShapeFontChain {
             return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
         }
         store.resolve(chain, ch)
+    }
+
+    fn resolve_with_style(
+        &self,
+        store: &ooxml_text::FontStore,
+        ch: char,
+        bold: bool,
+        italic: bool,
+        family: &str,
+    ) -> Option<ooxml_text::FontId> {
+        if ooxml_text::font_store::base_latin_alias(ch) {
+            return store
+                .resolve_with_family(&self.ids, ch, bold, italic, family)
+                .filter(|&id| {
+                    !self.coverage_only
+                        || ooxml_text::covered_character(store, id, ch)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                });
+        }
+        #[cfg(not(feature = "base-latin"))]
+        {
+            (self.resolve)(store, &self.ids, ch)
+        }
+        #[cfg(feature = "base-latin")]
+        {
+            let resolved = (self.resolve)(store, &self.ids, ch);
+            if resolved.is_some_and(|id| {
+                ooxml_text::covered_character(store, id, ch)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    || (self.coverage_only && !ooxml_text::measure::needs_glyph(ch))
+            }) {
+                return resolved;
+            }
+            store
+                .resolve_with_style(&self.ids, ch, bold, italic)
+                .filter(|&id| {
+                    !self.coverage_only
+                        || ooxml_text::covered_character(store, id, ch)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                })
+        }
     }
 }
 
@@ -6512,7 +6617,7 @@ pub(crate) fn emit_paragraph_fragment(
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
             paint_clip: None,
-            font: css_font(&RunFormattingIn::default()),
+            font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
             word_spacing: None,
@@ -6987,7 +7092,7 @@ fn emit_line(
             baseline_y: px(baseline),
             width: px(slot_width),
             paint_clip: None,
-            font: css_font(&marker_format),
+            font: resolved_css_font(ctx.shape, marker, &marker_format),
             color: color.to_owned(),
             letter_spacing: None,
             word_spacing: None,
@@ -7602,6 +7707,12 @@ fn emit_tab_leader(
             base_bidi_level(fmt.rtl == Some(true)),
             false,
         );
+        let font = resolved_css_font(shape, &text, &fmt);
+        let leader_font = if font == css_font(&fmt) {
+            measured.font.clone()
+        } else {
+            Some(font.clone())
+        };
         let mut attrs = block_ref.attrs();
         attrs.doc_start = tab.pm_start;
         attrs.doc_end = tab.pm_end;
@@ -7616,7 +7727,7 @@ fn emit_tab_leader(
             baseline_y: Some(px(baseline)),
             advance: Some(px(advance)),
             width: Some(px(width)),
-            font: measured.font.clone(),
+            font: leader_font,
             font_id: None,
             size: measured.font_size.map(|size| px(size * 96.0 / 72.0)),
             color: Some(run_color(&fmt)),
@@ -7629,7 +7740,7 @@ fn emit_tab_leader(
             baseline_y: px(baseline),
             width: px(width),
             paint_clip: None,
-            font: css_font(&fmt),
+            font,
             color: run_color(&fmt),
             letter_spacing: None,
             word_spacing: None,
@@ -7943,7 +8054,7 @@ fn emit_text_segment(
             baseline_y: px(paint_baseline),
             width: px(width),
             paint_clip,
-            font: css_font(fmt),
+            font: resolved_css_font(shape, text, fmt),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
             word_spacing,
@@ -8066,11 +8177,15 @@ fn try_emit_glyph_runs(
     let Some(chain) = shape_fonts.chain_for(family, bold, italic) else {
         return false;
     };
-    if chain.ids.is_empty() {
+    if chain.ids.is_empty()
+        || chain
+            .ids
+            .iter()
+            .any(|&id| shape_fonts.store.metrics(id).is_err())
+    {
         return false;
     }
-    let resolve = chain.resolve;
-    let chain = chain.ids.as_slice();
+    let resolve = |ch| chain.resolve_with_style(shape_fonts.store, ch, bold, italic, family);
     let echo_font_route = fmt.complex_script != Some(true)
         && fmt.font_slots.as_ref().is_none_or(|slots| {
             slots.ascii == slots.h_ansi
@@ -8098,7 +8213,7 @@ fn try_emit_glyph_runs(
     let mut first_font: Option<ooxml_text::FontId> = None;
     let mut uniform = true;
     for ch in text.chars() {
-        match resolve(shape_fonts.store, chain, ch) {
+        match resolve(ch) {
             Some(font) => match first_font {
                 None => first_font = Some(font),
                 Some(first) if font != first => uniform = false,
@@ -8133,7 +8248,7 @@ fn try_emit_glyph_runs(
         let chars: Vec<char> = text.chars().collect();
         let mut fonts: Vec<ooxml_text::FontId> = Vec::with_capacity(chars.len());
         for &ch in &chars {
-            match resolve(shape_fonts.store, chain, ch) {
+            match resolve(ch) {
                 Some(font) => fonts.push(font),
                 None => return false,
             }
@@ -8277,7 +8392,16 @@ fn try_emit_glyph_runs(
         // the resolved CSS face for the canvas fillText safety net (glyph
         // outlines unavailable) — same shorthand the TextRunPrimitive would
         // carry, so the fallback keeps family/weight/style
-        sub_attrs.fallback_font = Some(css_font(fmt));
+        sub_attrs.fallback_font = Some(match shape_fonts.store.backstop_style(font) {
+            Some((bold, italic)) => {
+                let mut backstop = fmt.clone();
+                backstop.font_family = Some(ooxml_text::BASE_LATIN_FAMILY.to_owned());
+                backstop.bold = Some(bold);
+                backstop.italic = Some(italic);
+                css_font(&backstop)
+            }
+            None => css_font(fmt),
+        });
         sub_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
 
         local.push(Primitive::GlyphRun(GlyphRunPrimitive {
@@ -8292,7 +8416,7 @@ fn try_emit_glyph_runs(
                 right: 0.0,
                 kern: features.is_empty(),
                 kerning: fmt.kerning_min_pt.unwrap_or(0.0),
-                primary_font: echo_font_route && chain.first() == Some(&font),
+                primary_font: echo_font_route && chain.ids.first() == Some(&font),
                 letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
                 position: fmt.position_px.unwrap_or(0.0),
                 scale: fmt.horizontal_scale.unwrap_or(100.0),
@@ -14156,6 +14280,32 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "base-latin")]
+    fn browser_text_uses_the_resolved_backstop_family_and_style() {
+        let store = ooxml_text::FontStore::new();
+        let shape = ShapeFonts {
+            store: &store,
+            chains: HashMap::from([(
+                "calibri|1|0".to_owned(),
+                ShapeFontChain::new(vec![ooxml_text::FontId::base_latin(true, false)], false),
+            )]),
+            coverage_only: false,
+        };
+        let fmt = RunFormattingIn {
+            bold: Some(true),
+            emphasis_mark: Some("dot".to_owned()),
+            ..Default::default()
+        };
+        assert!(text_primitive_requires_browser_path(&fmt));
+        let latin = resolved_css_font(Some(&shape), "Latin", &fmt);
+        assert!(latin.contains(ooxml_text::BASE_LATIN_FAMILY));
+        assert!(latin.starts_with("700 "));
+        let greek = resolved_css_font(Some(&shape), "Ω", &fmt);
+        assert!(greek.contains(ooxml_text::BASE_LATIN_FAMILY));
+        assert!(greek.starts_with("400 "));
     }
 
     /// Every retained primitive carries its attributes inline, so rarely set

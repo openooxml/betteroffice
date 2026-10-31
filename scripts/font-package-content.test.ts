@@ -28,6 +28,11 @@ test('@betteroffice/fonts publishes no raw TTFs and retains its licenses', () =>
   const files = packedFiles('fonts');
   expect(readdirSync(join(packages, 'fonts/assets')).filter((file) => file.endsWith('.ttf'))).toHaveLength(70);
   expect(files.filter((file) => /\.ttf$/i.test(file))).toEqual([]);
+  const manifest = JSON.parse(readFileSync(join(packages, 'fonts/assets/base-latin.json'), 'utf8'));
+  const frames = manifest.faces.map((face: { file: string }) => `assets/${face.file}`).sort();
+  expect(frames).toHaveLength(4);
+  expect(files.filter(file => file.startsWith('assets/') && !file.endsWith('/')))
+    .toEqual([...frames, 'assets/base-latin.json'].sort());
   expect(files).toContain('LICENSE');
   for (const file of readdirSync(join(packages, 'fonts/LICENSES'))) {
     expect(files).toContain(`LICENSES/${file}`);

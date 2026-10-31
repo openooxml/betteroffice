@@ -103,6 +103,20 @@ jobs:
       - name: Check changeset length
         run: bun scripts/check-changeset-length.ts
 
+      - name: Check embedded fonts
+        run: |
+          bun scripts/check-embedded-fonts.mjs
+          bun test scripts/check-embedded-fonts.test.ts
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Check reproducible base fonts
+        run: |
+          python3 -m pip install -r scripts/base-latin/requirements.txt
+          bash scripts/base-latin/check.sh
+
       - name: Check UI strings and locale parity
         run: bun test scripts/hardcoded-ui-strings.test.ts packages/docx-i18n packages/xlsx-i18n packages/pptx-i18n shared/i18n-glossary
 
@@ -358,6 +372,9 @@ jobs:
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
+          cargo test -p betteroffice-docx-layout --no-default-features --test without_base_latin
+          cargo test -p betteroffice-docx-layout --features base-latin --test base_latin
+          cargo test -p betteroffice-docx-edit --features base-latin --test base_latin
           cargo test -p betteroffice-fonts --features build
           cargo test -p betteroffice-fonts --features manager
           cargo test -p betteroffice-fonts --features manager,fonts-latin,fonts-intl,fonts-cjk

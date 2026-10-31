@@ -19,6 +19,8 @@
     }
   },
   "files": [
+    "assets/BetterOfficeBaseLatin-*.ttf.zst",
+    "assets/base-latin.json",
     "dist",
     "LICENSE",
     "LICENSES",

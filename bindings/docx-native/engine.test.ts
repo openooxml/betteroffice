@@ -221,6 +221,7 @@ describe('docx native engine parity', () => {
       expectPlainBytes(decoded);
       expect(decoded).toEqual(expected.decode_font(fontBytes));
       expect(decoded).toEqual(fontBytes);
+      expect(actual.take_base_latin_miss()).toBe(expected.take_base_latin_miss());
       const echo = actual.echo_glyph_set_json(font, 11, true, 'Ab!');
       expect(echo).toBe(expected.echo_glyph_set_json(font, 11, true, 'Ab!'));
       const glyph = JSON.parse(echo).glyphIds[0] as number;

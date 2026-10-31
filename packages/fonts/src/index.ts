@@ -5,7 +5,8 @@ export type { BundledFontLoader, BundledFontSource } from './provider';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { loadPackedFontBytes, isLatinFont } from './packed';
+import { loadPackedFontBytes, isBaseLatinFont, isLatinFont } from './packed';
+import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
 
 export interface FontAssetOptions {
   /**
@@ -175,6 +176,8 @@ async function assetUrl(
   baseUrl: URL | undefined,
 ): Promise<URL> {
   if (baseUrl !== undefined) return new URL(file, baseUrl);
+  const baseLatin = BASE_LATIN_FONT_ASSET_URLS[file];
+  if (baseLatin) return baseLatin();
   if (isLatinFont(file)) {
     const latin = await loadLatinAssetUrls();
     const resolveLatin = latin?.[file];
@@ -216,7 +219,7 @@ export function loadBundledFontBytes(
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
-  const bytes = isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
+  const bytes = isBaseLatinFont(face.file) || isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
     ? loadPackedFontBytes(
       face,
       (dependency) => assetUrl(dependency, baseUrl),

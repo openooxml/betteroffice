@@ -1,11 +1,13 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import { charactersFromBits } from './fontCoverage';
 import {
   excludeHostedFontFamilies,
   hostedFontFamilies,
   IMPLICIT_FONT_COVERAGE,
   isImplicitFontProvider,
   resolveDefaultFontProvider,
+  resolveBaseLatinProvider,
 } from './defaultFontProvider';
 import {
   TextMeasureFontRegistry,
@@ -15,7 +17,7 @@ import {
 } from './fontRegistry';
 
 export interface RustTextEngine {
-  registerFont(bytes: Uint8Array): number;
+  registerFont(bytes: Uint8Array, face?: { family: string; bold: boolean; italic: boolean }): number;
   /**
    * Measurement view of `id` carrying the vertical metrics and advance pitch
    * Word measures `family` with; `id` when the engine knows none. Optional so
@@ -32,6 +34,27 @@ export interface ResidentFontRequirement {
   bold: boolean;
   italic: boolean;
   scripts?: FontScript[];
+  characters?: string[];
+  characterBits?: string;
+}
+
+/** @internal */
+export function fontRequirementCharacters(requirement: ResidentFontRequirement): string[] {
+  return [...new Set([...(requirement.characters ?? []), ...charactersFromBits(requirement.characterBits)])];
+}
+
+function mergeRequirements(requirements: ResidentFontRequirement[]): ResidentFontRequirement[] {
+  const merged = new Map<string, ResidentFontRequirement>();
+  for (const requirement of requirements) {
+    const characters = fontRequirementCharacters(requirement);
+    const known = merged.get(requirement.key);
+    merged.set(requirement.key, known ? {
+      ...known,
+      scripts: [...new Set([...(known.scripts ?? []), ...(requirement.scripts ?? [])])],
+      characters: [...new Set([...(known.characters ?? []), ...characters])],
+    } : { ...requirement, characters });
+  }
+  return [...merged.values()];
 }
 
 export interface ResidentMeasurementConfig {
@@ -46,7 +69,7 @@ export interface ResidentMeasurementConfig {
 }
 
 export interface RustMeasureSource {
-  setEmbeddedFaces(faces: EmbeddedFaceInput[]): void;
+  setEmbeddedFaces(faces: EmbeddedFaceInput[], appFaces?: EmbeddedFaceInput[]): void;
   setCompat(flags: CompatibilityFlags | undefined): void;
   prepareFontRequirements(
     requirements: ResidentFontRequirement[],
@@ -81,15 +104,18 @@ export function createRustMeasureSource(options: {
   const hosted = hostedFontFamilies(options.bundled);
   let implicit = false;
   let generation = 0;
+  let appFamilies = new Set<string>();
+  const hostedCoverageUnknown = (family: string) => implicit &&
+    hosted?.has(family.trim().toLowerCase()) === true && !appFamilies.has(family.trim().toLowerCase());
   const registry = new TextMeasureFontRegistry(
     {
-      registerFont: (bytes) => engine.registerFont(bytes),
+      registerFont: (bytes, face) => face ? engine.registerFont(bytes, face) : engine.registerFont(bytes),
       ...(engine.registerSubstituteFont && {
         registerSubstituteFont: (id, family) =>
           engine.registerSubstituteFont!(id, family),
       }),
     },
-    { bundled: (hosted ? undefined : options.bundled) ?? (async () => {
+    { baseLatin: () => resolveBaseLatinProvider(options.runtime), bundled: (hosted ? undefined : options.bundled) ?? (async () => {
       const current = generation;
       const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
@@ -99,8 +125,9 @@ export function createRustMeasureSource(options: {
   let compat: CompatibilityFlags | undefined;
 
   return {
-    setEmbeddedFaces(faces): void {
-      registry.setEmbeddedFaces(faces);
+    setEmbeddedFaces(faces, appFaces): void {
+      appFamilies = new Set((appFaces ?? []).map(face => face.family.trim().toLowerCase()));
+      registry.setEmbeddedFaces(faces, appFaces);
     },
 
     setCompat(flags): void {
@@ -108,6 +135,7 @@ export function createRustMeasureSource(options: {
     },
 
     async prepareFontRequirements(requirements): Promise<boolean> {
+      requirements = mergeRequirements(requirements);
       const settled = await Promise.all(
         requirements.flatMap((requirement) => [
           (async () => {
@@ -148,12 +176,23 @@ export function createRustMeasureSource(options: {
           }),
         ]),
       );
-      return settled.some(Boolean);
+      const backstops = await Promise.all(requirements.map(async (requirement) => {
+        if (hostedCoverageUnknown(requirement.family)) return false;
+        const earlier = [
+          ...(registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false) ?? []),
+          ...(implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
+            registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false) ?? []),
+        ];
+        return registry.prepareBaseLatin(requirement.family, requirement.bold, requirement.italic,
+          requirement.characters ?? [], earlier, requirement.key);
+      }));
+      return settled.some(Boolean) || backstops.some(Boolean);
     },
 
     measurementConfigForRequirements(
       requirements,
     ): ResidentMeasurementConfig | undefined {
+      requirements = mergeRequirements(requirements);
       const settled = requirements.map((requirement) => ({
         requirement,
         familyIds: registry.getCachedFontIdChain(
@@ -169,8 +208,11 @@ export function createRustMeasureSource(options: {
       }));
       if (
         settled.some(
-          ({ familyIds, scriptIds }) =>
-            familyIds === undefined || scriptIds === undefined,
+          ({ requirement, familyIds, scriptIds }) =>
+            familyIds === undefined || scriptIds === undefined ||
+            (!hostedCoverageUnknown(requirement.family) &&
+              registry.getCachedBaseLatinIds(requirement.family, requirement.bold, requirement.italic,
+                requirement.characters, [...familyIds, ...scriptIds], requirement.key) === undefined),
         )
       )
         return undefined;
@@ -186,9 +228,16 @@ export function createRustMeasureSource(options: {
         );
         if (familyIds === undefined || scriptIds === undefined)
           return undefined;
-        if (implicit && familyIds.length === 0) continue;
+        const backstopIds = hostedCoverageUnknown(requirement.family) ? [] :
+          registry.getCachedBaseLatinIds(requirement.family, requirement.bold, requirement.italic,
+            requirement.characters, [...familyIds, ...scriptIds], requirement.key);
+        if (backstopIds === undefined) return undefined;
+        if (implicit && familyIds.length === 0 && backstopIds.length === 0) continue;
         const chain = Array.from(familyIds);
         for (const id of scriptIds) if (!chain.includes(id)) chain.push(id);
+        for (const id of backstopIds) {
+          if (!chain.includes(id)) chain.push(id);
+        }
         if (chain.length > 0) fontChains[requirement.key] = chain;
       }
       if (implicit) {

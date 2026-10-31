@@ -244,6 +244,7 @@ impl Document {
                             [run.text.as_str()],
                             false,
                         ),
+                        characters: Default::default(),
                     });
                 }
             }

@@ -1,4 +1,5 @@
 import {
+  BASE_LATIN_FONTS,
   resolveBundledFamilyFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
@@ -18,6 +19,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
 
 /** Structural provider contract keeps this package independent of the engine. */
 export interface BundledFontSource {
+  /** @internal */
+  resolveBaseLatin?(bold: boolean, italic: boolean): BundledFontLoader | undefined;
   resolve(
     family: string,
     bold: boolean,
@@ -72,6 +75,10 @@ export function fontProvider(
     return loader;
   };
   return {
+    resolveBaseLatin(bold, italic) {
+      const face = BASE_LATIN_FONTS.find((face) => face.weight === (bold ? 700 : 400) && face.style === (italic ? 'italic' : 'normal'));
+      return face ? load(face) : undefined;
+    },
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
       return face ? load(face, { measureAs: face.family === 'Selawik' ? face.metricCompatWith : undefined }) : undefined;

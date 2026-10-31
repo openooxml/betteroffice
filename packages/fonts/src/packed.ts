@@ -1,6 +1,7 @@
 import latinManifest from '../../fonts-latin/assets/manifest.json';
 import intlManifest from '../../fonts-intl/assets/manifest.json';
 import cjkManifest from '../../fonts-cjk/assets/manifest.json';
+import baseLatinManifest from '../assets/base-latin.json';
 import { readFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
 import type { BundledFontFace } from './manifest';
@@ -42,11 +43,17 @@ export function readPackManifest(value: unknown): PackManifest {
 const latin = readPackManifest(latinManifest);
 const intl = readPackManifest(intlManifest);
 const cjk = readPackManifest(cjkManifest);
+const baseLatin = readPackManifest(baseLatinManifest);
+const baseLatinFiles = new Set(baseLatin.faces.map((face) => face.file));
 const latinFiles = new Set(latin.faces.map((face) => face.file));
 const cjkFiles = new Set(cjk.faces.map((face) => face.file));
 
 export function isLatinFont(file: string): boolean {
   return latinFiles.has(file);
+}
+
+export function isBaseLatinFont(file: string): boolean {
+  return baseLatinFiles.has(file);
 }
 
 export function isCjkFont(file: string): boolean {
@@ -128,7 +135,7 @@ export async function loadPackedFontBytes(
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
   timeoutMs?: number,
   wasmUrl?: URL,
-  manifest: PackManifest = isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl,
+  manifest: PackManifest = isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl,
   runtime?: { decoder?: FontDecoder },
 ): Promise<ArrayBuffer> {
   return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font.slice(0);

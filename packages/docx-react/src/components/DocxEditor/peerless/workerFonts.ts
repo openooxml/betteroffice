@@ -1,4 +1,4 @@
-import { createRustMeasureSource, type ResidentFontRequirement } from '@betteroffice/docx/layout';
+import { createRustMeasureSource, fontRequirementCharacters, type ResidentFontRequirement } from '@betteroffice/docx/layout';
 import type { EmbeddedFontFace, FontDefinition } from '@betteroffice/docx/utils';
 import type { DocxFontEnvironment, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
 import type { DocxEditorProps } from '../../DocxEditor';
@@ -16,8 +16,9 @@ export async function customWorkerFontFaces(fonts: ReadonlyArray<FontDefinition>
 }
 
 export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>,
-  requirements: ResidentFontRequirement[], families: string[]): DocxFontEnvironment {
-  const styles = new Map<number, ResidentFontRequirement>();
+  requirements: ResidentFontRequirement[], families: string[],
+  registeredStyles?: ReadonlyMap<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>): DocxFontEnvironment {
+  const styles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>(registeredStyles);
   for (const [key, slots] of Object.entries(chains)) {
     const [family, bold, italic] = key.split('|');
     const requirement = requirements.find(item => item.key === key) ?? { key, family: family!, bold: bold === '1', italic: italic === '1' };
@@ -28,7 +29,7 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
     const style = styles.get(index);
     return { family: style?.family ?? 'Liberation Sans', data: font.slice(),
       weight: style?.bold ? 'bold' : 'normal', style: style?.italic ? 'italic' : 'normal' };
-  }), chains: structuredClone(chains), families: [...new Set(families)] };
+  }), chains: structuredClone(chains), families: [...new Set([...families, ...Array.from(registeredStyles?.values() ?? [], face => face.family)])] };
 }
 
 /**
@@ -41,8 +42,14 @@ export function uncoveredFontRequirements(prepared: readonly ResidentFontRequire
   let uncovered = false;
   for (const requirement of next) {
     const known = byKey.get(requirement.key);
-    if (known && (known.scripts ?? []).join() === (requirement.scripts ?? []).join()) continue;
-    byKey.set(requirement.key, requirement);
+    const characters = fontRequirementCharacters(requirement);
+    const knownCharacters = known ? fontRequirementCharacters(known) : [];
+    const covered = new Set(knownCharacters);
+    if (known && (known.scripts ?? []).join() === (requirement.scripts ?? []).join() &&
+      characters.every(character => covered.has(character))) continue;
+    byKey.set(requirement.key, known ? {
+      ...requirement, characters: [...new Set([...knownCharacters, ...characters])].sort(),
+    } : requirement);
     uncovered = true;
   }
   return uncovered ? [...byKey.values()] : null;
@@ -59,15 +66,21 @@ export async function prepareWorkerFontEnvironment(options: {
   signal: AbortSignal;
 }): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
+  const styles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>();
   const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime, engine: {
-    registerFont(bytes) { options.signal.throwIfAborted(); return fonts.push(bytes.slice()) - 1; },
+    registerFont(bytes, face) {
+      options.signal.throwIfAborted();
+      const id = fonts.push(bytes.slice()) - 1;
+      if (face) styles.set(id, face);
+      return id;
+    },
     registerSubstituteFont(substituteOf, family) { return fonts.push({ substituteOf, family }) - 1; },
     clearFonts() { fonts.length = 0; },
   } });
   try {
     measurement.setCompat(options.compat);
     const custom = await customWorkerFontFaces(options.fonts, options.signal);
-    measurement.setEmbeddedFaces([...custom, ...options.embedded]);
+    measurement.setEmbeddedFaces(options.embedded, custom);
     const requirements = [...options.requirements, ...custom.map(face => ({
       key: `${face.family.toLowerCase()}|${face.weight === 'bold' ? 1 : 0}|0`, family: face.family,
       bold: face.weight === 'bold', italic: false,
@@ -77,6 +90,6 @@ export async function prepareWorkerFontEnvironment(options: {
     const config = measurement.measurementConfigForRequirements(requirements);
     if (!config) throw new Error('DOCX worker fonts are not ready');
     return fontEnvironmentForRegistrations(fonts, config.fontChains, requirements,
-      [...options.families, ...custom.map(face => face.family)]);
+      [...options.families, ...custom.map(face => face.family)], styles);
   } finally { measurement.setEmbeddedFaces([]); measurement.clear(); }
 }

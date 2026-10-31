@@ -127,6 +127,7 @@ export interface DefaultFontOptions {
 let options: DefaultFontOptions = {};
 const engineRuntime = { decoder: decodeFontFace };
 let resolved = new WeakMap<object, Promise<BundledFontProvider | undefined>>();
+let baseLatinResolved = new WeakMap<object, Promise<BundledFontProvider>>();
 
 function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
   if (baseUrl === undefined) return undefined;
@@ -155,6 +156,7 @@ export function hasConfiguredFontSource(): boolean {
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };
   resolved = new WeakMap();
+  baseLatinResolved = new WeakMap();
 }
 
 async function load(runtime: { decoder?: FontDecoder }): Promise<BundledFontProvider | undefined> {
@@ -185,6 +187,22 @@ export function resolveDefaultFontProvider(
     });
     resolved.set(runtime, promise);
     pending = promise;
+  }
+  return pending;
+}
+
+export function resolveBaseLatinProvider(
+  runtime: { decoder?: FontDecoder } = engineRuntime,
+): Promise<BundledFontProvider> {
+  let pending = baseLatinResolved.get(runtime);
+  if (!pending) {
+    const baseUrl = options.baseUrl;
+    const cache = baseLatinResolved;
+    pending = import('@betteroffice/fonts').then(manager =>
+      manager.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, runtime));
+    const current = pending;
+    pending.catch(() => { if (cache.get(runtime) === current) cache.delete(runtime); });
+    cache.set(runtime, pending);
   }
   return pending;
 }

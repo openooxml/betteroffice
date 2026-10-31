@@ -120,6 +120,19 @@ impl FontSpecCache {
     }
 }
 
+/// The built-in faces the layout names when only they cover a run, for hosts
+/// that registered no chain under their family.
+fn backstop_chain(spec: &FontSpec, key: &str) -> Result<[FontId; 1], String> {
+    if spec
+        .family
+        .eq_ignore_ascii_case(ooxml_text::BASE_LATIN_FAMILY)
+    {
+        Ok([FontId::base_latin(spec.bold, spec.italic)])
+    } else {
+        Err(format!("missing font chain for `{key}`"))
+    }
+}
+
 fn chain_key(spec: &FontSpec) -> String {
     format!(
         "{}|{}|{}",
@@ -429,8 +442,15 @@ fn paint_leader(
         .transpose()?
         .unwrap_or(number_f32(&run.baseline_y)?);
     let mut spec = run_font.spec.clone();
-    if let Some(family) = leader.font.as_deref() {
-        spec.family = family.to_string();
+    if let Some(font) = leader.font.as_deref() {
+        match parse_font(font) {
+            Ok(parsed) => {
+                spec.family = parsed.family;
+                spec.bold = parsed.bold;
+                spec.italic = parsed.italic;
+            }
+            Err(_) => spec.family = font.to_string(),
+        }
     }
     if let Some(size) = &leader.size {
         spec.size = number_f32(size)?;
@@ -506,15 +526,25 @@ fn shape_stamp(
         excess = (glyphs.len() as u64).saturating_sub(glyph.chars().count() as u64);
         segments.push(ShapedSegment { font, glyphs });
     } else {
-        let chain = context
-            .resources
-            .font_chains
-            .get(key)
-            .ok_or_else(|| format!("missing font chain for `{key}`"))?;
+        let backstop;
+        let chain: &[FontId] = match context.resources.font_chains.get(key) {
+            Some(chain) => chain.as_slice(),
+            None => {
+                backstop = backstop_chain(spec, key)?;
+                &backstop
+            }
+        };
         if chain.is_empty() {
             return Err(format!("font chain `{key}` is empty"));
         }
-        for segment in font_segments(context.resources.fonts, chain, glyph)? {
+        for segment in font_segments(
+            context.resources.fonts,
+            chain,
+            glyph,
+            spec.bold,
+            spec.italic,
+            &spec.family,
+        )? {
             let text = &glyph[segment.start..segment.end];
             let glyphs = shape_segment(context, text, segment.font, spec.size, direction)?;
             excess = excess
@@ -601,15 +631,25 @@ fn paint_resolved_text(
     color: tiny_skia::Color,
     transform: Transform,
 ) -> Result<(), String> {
-    let chain = context
-        .resources
-        .font_chains
-        .get(key)
-        .ok_or_else(|| format!("missing font chain for `{key}`"))?;
+    let backstop;
+    let chain: &[FontId] = match context.resources.font_chains.get(key) {
+        Some(chain) => chain.as_slice(),
+        None => {
+            backstop = backstop_chain(spec, key)?;
+            &backstop
+        }
+    };
     if chain.is_empty() {
         return Err(format!("font chain `{key}` is empty"));
     }
-    let segments = font_segments(context.resources.fonts, chain, text)?;
+    let segments = font_segments(
+        context.resources.fonts,
+        chain,
+        text,
+        spec.bold,
+        spec.italic,
+        &spec.family,
+    )?;
     let mut paint = Paint::default();
     paint.set_color(color);
     paint.anti_alias = true;
@@ -782,13 +822,15 @@ fn font_segments(
     fonts: &FontStore,
     chain: &[FontId],
     text: &str,
+    bold: bool,
+    italic: bool,
+    family: &str,
 ) -> Result<Vec<FontSegment>, String> {
     let mut segments: Vec<FontSegment> = Vec::new();
     for (start, character) in text.char_indices() {
         let end = start + character.len_utf8();
         let font = fonts
-            .resolve(chain, character)
-            .or_else(|| chain.last().copied())
+            .resolve_with_family(chain, character, bold, italic, family)
             .ok_or_else(|| "font chain is empty".to_string())?;
         if let Some(last) = segments.last_mut()
             && last.font == font

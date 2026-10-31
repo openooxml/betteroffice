@@ -1334,6 +1334,7 @@ export class EditSession {
      * table. Errors on an unknown story.
      */
     table_payload(story: string, table_index: number): string | undefined;
+    take_base_latin_miss(): boolean;
     /**
      * Applies one run mark over `[start, end)`. `mark_json`:
      * `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
@@ -1975,6 +1976,7 @@ export interface InitOutput {
     readonly editsession_story_segment_units: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_take_base_latin_miss: (a: number) => number;
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;

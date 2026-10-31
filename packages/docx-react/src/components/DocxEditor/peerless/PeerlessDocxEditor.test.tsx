@@ -1302,7 +1302,7 @@ test('custom fonts fetch bytes for worker faces without global CSS and wait for 
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let embedded: { data: ArrayBuffer }[] = [];
     let slots: number[] = [];
-    return { setCompat() {}, setEmbeddedFaces(faces) { embedded = faces; },
+    return { setCompat() {}, setEmbeddedFaces(faces, appFaces = []) { embedded = [...faces, ...appFaces]; },
       async prepareFontRequirements() { slots = embedded.map(face => engine.registerFont(new Uint8Array(face.data))); return true; },
       measurementConfigForRequirements: () => ({ fontChains: { 'custom|0|0': slots }, defaults: { fontFamily: 'Custom', fontSize: 11 },
         compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }), clear() {} };

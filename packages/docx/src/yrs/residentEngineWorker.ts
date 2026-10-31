@@ -691,6 +691,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         }
       },
       async apply(command, context) {
+        engine.takeBaseLatinMiss?.();
         if (command.command.kind === 'setFontEnvironment') {
           const prepared = preparedFonts.get(command);
           if (!prepared) throw new Error('Worker font environment was not prepared');
@@ -727,6 +728,11 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             if (error instanceof WebAssembly.RuntimeError) throw error;
             throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
           }
+        }
+        const coverageMiss = engine.takeBaseLatinMiss?.();
+        if (result.status === 'applied' && coverageMiss && !fontRequirementsHinted) {
+          fontRequirementsHinted = true;
+          reply({ id: 0, ok: true, fontRequirementsHint: { session: init.session, incarnation: init.incarnation, epoch: init.epoch } });
         }
         return result;
       },
@@ -2127,6 +2133,12 @@ async function handle(request: ScheduledRequest): Promise<void> {
           (request.operation.kind === 'snapshot' && fontRequirements.version === snapshot.version))
           ? { ...fontRequirements, version: snapshot.version }
           : null;
+      if (unchangedFonts && fontRequirements) {
+        const requirements = JSON.parse(fontRequirements.requirementsJson) as { characterBits?: string; characters?: string[] }[];
+        if (requirements.some(requirement => requirement.characterBits || requirement.characters?.length)) {
+          fontRequirements = previewFontRequirements(session, fontRequirements.layoutInput, undefined, snapshot.version);
+        }
+      }
       // A decision changes only the preview: the host's next input is its last one previewing it.
       const preview = proposalRevisionPreview(snapshot);
       if (
