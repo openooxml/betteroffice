@@ -41,9 +41,11 @@ export function createDefaultFontPainter(
   const owner = Symbol();
   const interests = new Set<Set<symbol>>();
   const loaded = new Set<string>();
+  const settled = new Set<string>();
   const pending = new Map<string, Promise<boolean>>();
   let disposed = false;
   let changed = false;
+  let unsettledPaint = false;
   let provider: Promise<{
     fonts: Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>;
     source: ReturnType<Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>['createFontProvider']>;
@@ -106,23 +108,38 @@ export function createDefaultFontPainter(
     }
   }
 
-  async function load(displayList: DisplayList): Promise<void> {
-    if (disposed || options.defaultFonts === false || decoder === undefined || typeof document === 'undefined'
-      || typeof FontFace === 'undefined' || !document.fonts) return;
-    const batch: Promise<boolean>[] = [];
+  const inactive = () => disposed || options.defaultFonts === false || decoder === undefined
+    || typeof document === 'undefined' || typeof FontFace === 'undefined' || !document.fonts;
+
+  function* faceKeys(displayList: DisplayList) {
     for (const command of displayList.commands) {
       if (command.op !== 'text' || !command.fontFamily || command.chart) continue;
       const { fontFamily, bold = false, italic = false } = command;
-      const key = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic]);
+      yield { fontFamily, bold, italic, key: JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic]) };
+    }
+  }
+
+  function isSettled(displayList: DisplayList): boolean {
+    if (inactive()) return true;
+    for (const { key } of faceKeys(displayList)) if (!settled.has(key)) return false;
+    return true;
+  }
+
+  async function load(displayList: DisplayList): Promise<void> {
+    if (inactive()) return;
+    const batch: Promise<boolean>[] = [];
+    for (const { fontFamily, bold, italic, key } of faceKeys(displayList)) {
       if (loaded.has(key) || pending.has(key)) continue;
       const task = loadFace(fontFamily, bold, italic).then((success) => {
         pending.delete(key);
+        settled.add(key);
         if (success) {
           loaded.add(key);
           changed = true;
         }
-        if (!disposed && !pending.size && changed) {
+        if (!disposed && !pending.size && (changed || unsettledPaint)) {
           changed = false;
+          unsettledPaint = false;
           repaint();
         }
         return success;
@@ -135,9 +152,22 @@ export function createDefaultFontPainter(
 
   return {
     load,
-    paint(displayList: DisplayList, paint: () => void): void {
+    /** Takes over a frame painted before this painter existed, repainting once its faces settle. */
+    adopt(displayList: DisplayList): void {
+      if (isSettled(displayList)) {
+        if (!disposed) repaint();
+        return;
+      }
+      unsettledPaint = true;
+      void load(displayList).catch(() => {});
+    },
+    /** Paints the frame and reports whether its faces had settled before it was painted. */
+    paint(displayList: DisplayList, paint: () => void): boolean {
+      const ready = isSettled(displayList);
+      if (!ready) unsettledPaint = true;
       paint();
       void load(displayList).catch(() => {});
+      return ready;
     },
     dispose(): void {
       disposed = true;

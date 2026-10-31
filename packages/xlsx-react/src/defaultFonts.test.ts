@@ -140,6 +140,47 @@ test('packed faces decode through the workbook worker RPC', async () => {
   } finally { fonts.dispose(); await session.dispose(); }
 });
 
+test('a frame reports settled faces only once its families have loaded', async () => {
+  const { added } = browser();
+  provider();
+  const repainted = deferred<void>();
+  const repaint = mock(() => repainted.resolve());
+  const fonts = createDefaultFontPainter(decoder(), repaint);
+  const list = display({ family: 'Calibri' });
+  const paint = mock(() => {});
+  expect(fonts.paint(list, paint)).toBe(false);
+  expect(paint).toHaveBeenCalledTimes(1);
+  await repainted.promise;
+  expect(added).toHaveLength(1);
+  expect(fonts.paint(list, paint)).toBe(true);
+  expect(repaint).toHaveBeenCalledTimes(1);
+  fonts.dispose();
+});
+
+test('a frame painted before a face fails still repaints once as settled', async () => {
+  const { added } = browser();
+  provider(async () => { throw new Error('Missing optional font pack'); });
+  const repainted = deferred<void>();
+  const repaint = mock(() => repainted.resolve());
+  const fonts = createDefaultFontPainter(decoder(), repaint);
+  const list = display({ family: 'Noto Sans Thai' }, { family: 'Unknown Face' });
+  expect(fonts.paint(list, () => {})).toBe(false);
+  await repainted.promise;
+  expect(added).toHaveLength(0);
+  expect(fonts.paint(list, () => {})).toBe(true);
+  await Promise.resolve();
+  expect(repaint).toHaveBeenCalledTimes(1);
+  fonts.dispose();
+});
+
+test('an opted-out painter reports every frame as settled', () => {
+  browser();
+  const { imported } = provider();
+  const fonts = createDefaultFontPainter(decoder(), () => {}, { defaultFonts: false });
+  expect(fonts.paint(display({ family: 'Calibri' }), () => {})).toBe(true);
+  expect(imported).not.toHaveBeenCalled();
+});
+
 test('unknown families register nothing', async () => {
   const { added } = browser();
   provider();

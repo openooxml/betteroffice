@@ -949,7 +949,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         canvas.width = Math.round(request.width * request.dpr);
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`; canvas.style.height = `${request.height}px`;
-        paintWithDefaultFonts(frame.displayList, () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom));
+        canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
+          () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
         canvas.dataset.workerSequence = String(frame.sequence);
         canvas.dataset.commandCoverage = String(frame.coversThroughSeq ?? 0);
         canvas.dataset.paintSource = frame.source; canvas.dataset.workerZoom = String(request.zoom);

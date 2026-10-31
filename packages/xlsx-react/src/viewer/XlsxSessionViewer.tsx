@@ -113,7 +113,8 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       canvas.height = Math.round(request.height * request.dpr);
       canvas.style.width = `${request.width}px`;
       canvas.style.height = `${request.height}px`;
-      paintWithDefaultFonts(frame.displayList, () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom));
+      canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
+        () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
     },
   }), []);
 

@@ -20,7 +20,8 @@ const frame = (fontFamily?: string): DisplayList => ({ width: 10, height: 10,
 function painterModule() {
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { release = resolve; });
-  const painter = { load: mock(async (_list: DisplayList) => {}), paint: mock((_: DisplayList, paint: () => void) => paint()), dispose: mock(() => {}) };
+  const painter = { adopt: mock((_list: DisplayList) => {}),
+    paint: mock((_: DisplayList, paint: () => void) => { paint(); return true; }), dispose: mock(() => {}) };
   const create = mock(() => painter);
   const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(async () => {
     await ready;
@@ -37,12 +38,12 @@ test('paints before the painter module loads, then hands it the latest frame', a
   const { result, unmount } = renderHook(() => useDefaultFonts('owner', decoder, undefined, () => {}));
   const paint = mock(() => {});
   const text = frame('Calibri');
-  result.current(frame(), paint);
-  result.current(text, paint);
+  expect(result.current(frame(), paint)).toBe(false);
+  expect(result.current(text, paint)).toBe(false);
   expect(paint).toHaveBeenCalledTimes(2);
   await act(async () => { module.release(); await Promise.resolve(); await Promise.resolve(); });
-  expect(module.painter.load.mock.calls.map(([list]) => list)).toEqual([text]);
-  result.current(text, paint);
+  expect(module.painter.adopt.mock.calls.map(([list]) => list)).toEqual([text]);
+  expect(result.current(text, paint)).toBe(true);
   expect(module.painter.paint).toHaveBeenCalledTimes(1);
   expect(paint).toHaveBeenCalledTimes(3);
   unmount();
@@ -53,7 +54,7 @@ test('opting out never loads the painter module', async () => {
   const module = painterModule();
   const { result } = renderHook(() => useDefaultFonts('owner', decoder, false, () => {}));
   const paint = mock(() => {});
-  result.current(frame('Calibri'), paint);
+  expect(result.current(frame('Calibri'), paint)).toBe(true);
   module.release();
   await Promise.resolve();
   expect(paint).toHaveBeenCalledTimes(1);

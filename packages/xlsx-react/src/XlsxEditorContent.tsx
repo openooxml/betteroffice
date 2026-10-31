@@ -1114,7 +1114,8 @@ export function XlsxEditorContent({
           .slice(0, MAX_OVERLAY_MERGED_RANGES);
       } catch {}
     }
-    paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom));
+    canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom))
+      ? 'settled' : 'pending';
     frameRef.current = dl;
     paintedRef.current = { frame: dl, zoom, sheet: activeSheet, handle };
     let version: string | null = null;

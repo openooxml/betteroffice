@@ -18,19 +18,19 @@ export function useDefaultFonts(
     void defaultFontPainterModule.load().then(({ createDefaultFontPainter }) => {
       if (state.current !== current) return;
       current.painter = createDefaultFontPainter(decoder, () => repaintRef.current());
-      if (current.last) void current.painter.load(current.last);
+      if (current.last) current.painter.adopt(current.last);
     }, () => {});
     return () => {
       current.painter?.dispose();
       if (state.current === current) state.current = undefined;
     };
   }, [owner, decoder, defaultFonts]);
-  return useCallback((displayList: DisplayList, paint: () => void) => {
+  return useCallback((displayList: DisplayList, paint: () => void): boolean => {
     const current = state.current;
-    if (current?.painter) current.painter.paint(displayList, paint);
-    else {
-      paint();
-      if (current) current.last = displayList;
-    }
+    if (current?.painter) return current.painter.paint(displayList, paint);
+    paint();
+    if (!current) return true;
+    current.last = displayList;
+    return false;
   }, []);
 }
