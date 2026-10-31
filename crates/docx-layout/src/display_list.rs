@@ -4659,7 +4659,7 @@ fn text_paint_override(
     let fonts = fonts?;
     let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
     let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
-    let font = fonts.resolve(chain, '\u{2011}')?;
+    let font = (chain.resolve)(fonts.store, &chain.ids, '\u{2011}')?;
     glyph_paint_text(fonts.store, font, text)
 }
 
