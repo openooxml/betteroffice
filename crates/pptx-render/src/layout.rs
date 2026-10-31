@@ -14015,3 +14015,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+#[path = "native.rs"]
+mod native;

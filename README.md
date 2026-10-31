@@ -91,9 +91,14 @@ installed package files the first time a document needs it; nothing is downloade
 `@betteroffice/fonts` returns a bundled face's bytes. Reading package files needs Node.js 20.16 or
 22.3 and later, Bun or Deno.
 
-**Native bindings, Rust and Python.** For DOCX and PPTX, register the faces a document needs with
-`registerFont` (native) or `register_font` (Rust, Python) before rendering. The XLSX renderer draws
-text with one embedded face.
+**Native bindings, Rust and Python.** The Rust crates `betteroffice-docx`, `betteroffice-pptx`,
+`betteroffice-xlsx` and `betteroffice-vsdx` embed the Latin (4.6 MB), international (2.2 MB) and CJK
+(26.7 MB) packs through the default features `fonts-latin`, `fonts-intl` and `fonts-cjk`, and resolve
+faces in the same order: embedded in the document, registered with `register_font`, then the packs.
+Turn a feature off to leave its pack out, or pass `OpenOptions` to `open_with_options` to read packs
+from a local directory or your own provider; nothing is fetched. `@betteroffice/pptx-native` installs
+all three npm packs and reads each face from disk on first use. For the DOCX native binding and
+Python, register the faces a document needs with `registerFont` or `register_font` before rendering.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks

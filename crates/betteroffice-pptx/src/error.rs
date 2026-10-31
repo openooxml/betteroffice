@@ -3,6 +3,8 @@ use std::fmt;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[cfg(feature = "fonts")]
+    FontSource(betteroffice_fonts::FontError),
     Parse(pptx_parse::PptxError),
     Edit(pptx_edit::EditError),
     Proposal(pptx_edit::ProposalError),
@@ -16,6 +18,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => error.fmt(formatter),
             Self::Parse(error) => error.fmt(formatter),
             Self::Edit(error) => error.fmt(formatter),
             Self::Proposal(error) => error.fmt(formatter),
@@ -29,6 +33,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => Some(error),
             Self::Parse(error) => Some(error),
             Self::Edit(error) => Some(error),
             Self::Proposal(error) => Some(error),
@@ -72,5 +78,12 @@ impl From<pptx_edit::structured::ExportError> for Error {
 impl From<pptx_edit::structured::ExportFailure> for Error {
     fn from(failure: pptx_edit::structured::ExportFailure) -> Self {
         Self::Export(pptx_edit::structured::ExportError::Refused(failure))
+    }
+}
+
+#[cfg(feature = "fonts")]
+impl From<betteroffice_fonts::FontError> for Error {
+    fn from(error: betteroffice_fonts::FontError) -> Self {
+        Self::FontSource(error)
     }
 }

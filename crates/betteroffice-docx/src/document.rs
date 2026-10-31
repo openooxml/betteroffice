@@ -1,5 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(any(feature = "fonts", feature = "raster"))]
+use std::sync::Mutex;
+#[cfg(feature = "fonts")]
+use std::sync::PoisonError;
+
+#[cfg(feature = "fonts")]
+use betteroffice_fonts::FontManager;
 
 use docx_edit::content_controls::{
     ContentControlQuery, ContentControlsOptions, ContentControlsSnapshot,
@@ -30,19 +37,23 @@ use docx_parse::xml::ParseLimits;
 use sha2::{Digest, Sha256};
 
 use crate::types::DEFAULT_SERIALIZATION_TIME;
-use crate::{DocumentModel, DocumentStructure, Error, LayoutResult, Result, SaveOptions};
+use crate::{
+    DocumentModel, DocumentStructure, Error, LayoutResult, OpenOptions, Result, SaveOptions,
+};
 
 pub struct Document {
     /// Inflated package parts retained from open for `save` to reuse.
-    original_parts: Vec<(String, Vec<u8>)>,
+    pub(crate) original_parts: Vec<(String, Vec<u8>)>,
     seed: String,
     model: DocumentModel,
     /// By body paragraph ordinal, the fresh ID handed to a paragraph that
     /// repeats an earlier paragraph's ID and the authored ID it saves with
     /// until it is edited or the model is changed.
     authored_ids: BTreeMap<usize, (String, String)>,
-    #[cfg(feature = "raster")]
-    pub(crate) fonts: crate::render::FontRegistry,
+    #[cfg(any(feature = "fonts", feature = "raster"))]
+    pub(crate) fonts: Mutex<crate::font::FontRegistry>,
+    #[cfg(feature = "fonts")]
+    pub(crate) font_manager: FontManager,
     #[cfg(feature = "raster")]
     pub(crate) images: crate::render::ImageRegistry,
 }
@@ -52,9 +63,26 @@ impl Document {
         Self::open_with_limits(bytes, &ParseLimits::default())
     }
 
+    #[cfg(feature = "fonts")]
+    pub fn open_with_options(bytes: &[u8], options: &OpenOptions) -> Result<Self> {
+        Self::open_with_limits_and_options(bytes, &ParseLimits::default(), options)
+    }
+
     /// [`Document::open`] under a caller-supplied parse budget. A document that
     /// exceeds any limit is rejected rather than truncated.
     pub fn open_with_limits(bytes: &[u8], limits: &ParseLimits) -> Result<Self> {
+        Self::open_with_limits_and_options(bytes, limits, &OpenOptions::default())
+    }
+
+    fn open_with_limits_and_options(
+        bytes: &[u8],
+        limits: &ParseLimits,
+        options: &OpenOptions,
+    ) -> Result<Self> {
+        #[cfg(not(feature = "fonts"))]
+        let _ = options;
+        #[cfg(feature = "fonts")]
+        let font_manager = FontManager::new(&options.font_source, options.font_loading)?;
         let (parsed, original_parts) = docx_parse::parse_docx_s9_wire_parts_with_limits(
             bytes,
             S9ParseOptions::default(),
@@ -68,16 +96,27 @@ impl Document {
             document.template_variables.unwrap_or_default(),
             document.warnings.unwrap_or_default(),
         );
-        Ok(Self {
+        let document = Self {
             original_parts,
             seed: format!("{:x}", Sha256::digest(bytes)),
             model,
             authored_ids,
-            #[cfg(feature = "raster")]
-            fonts: crate::render::FontRegistry::default(),
+            #[cfg(any(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
+            #[cfg(feature = "fonts")]
+            font_manager,
             #[cfg(feature = "raster")]
             images: crate::render::ImageRegistry::default(),
-        })
+        };
+        #[cfg(feature = "fonts")]
+        let mut document = document;
+        #[cfg(feature = "fonts")]
+        document.load_embedded_fonts()?;
+        #[cfg(feature = "fonts")]
+        for font in &options.fonts {
+            document.register_font(&font.family, font.bold, font.italic, &font.data)?;
+        }
+        Ok(document)
     }
 
     pub fn model(&self) -> &DocumentModel {
@@ -293,6 +332,72 @@ impl Document {
         }
     }
 
+    #[cfg(feature = "fonts")]
+    pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
+        let requirements = docx_layout::measure_blocks::collect_font_requirements(
+            input.measured.iter().map(|measured| &measured.block),
+            "Calibri",
+        );
+        let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
+        fonts.resolve(&self.font_manager, &requirements)?;
+        if fonts.chains.is_empty() {
+            let layout = docx_layout::compute_layout_input(&mut input)?;
+            let display_list =
+                docx_layout::build_display_list(&input, &layout).map_err(Error::DisplayList)?;
+            return Ok(LayoutResult {
+                layout,
+                display_list,
+            });
+        }
+        let chains: BTreeMap<String, Vec<u32>> = fonts
+            .chains
+            .iter()
+            .map(|(key, ids)| (key.clone(), ids.iter().map(|id| id.to_u32()).collect()))
+            .collect();
+        let config = docx_layout::measure_blocks::MeasurementConfig {
+            font_chains: chains.clone(),
+            defaults: serde_json::json!({ "fontFamily": "Calibri", "fontSize": 11 }),
+            authoritative_shaping: true,
+            ..Default::default()
+        };
+        let widths = crate::font::measurement_widths(&input)?;
+        docx_layout::with_measure_font_store(&mut fonts.store, || {
+            let has_floats = input
+                .measured
+                .iter()
+                .zip(&widths)
+                .any(|(measured, width)| has_floating_zones(&measured.block, *width, &config));
+            if has_floats {
+                return;
+            }
+            for (measured, width) in input.measured.iter_mut().zip(widths) {
+                let mut block = measured.block.clone();
+                if let Ok(measure) =
+                    docx_layout::measure_blocks::measure_block(&mut block, width, &config)
+                    && !docx_layout::measure_blocks::measured_synthetically([&measure])
+                {
+                    measured.block = block;
+                    measured.measure = measure;
+                }
+            }
+        });
+        let layout = docx_layout::compute_layout_input(&mut input)?;
+        let extras = serde_json::json!({ "fontChains": chains }).to_string();
+        let display_list =
+            docx_layout::display_list::build_display_list_value_from_resident_with_fonts(
+                &input,
+                &layout,
+                &extras,
+                &fonts.store,
+            )
+            .map_err(Error::DisplayList)?;
+        Ok(LayoutResult {
+            layout,
+            display_list,
+        })
+    }
+
+    #[cfg(not(feature = "fonts"))]
     pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
         let layout = docx_layout::compute_layout_input(&mut input)?;
         let display_list =
@@ -598,4 +703,35 @@ fn find_paragraph_mut<'a>(
 
 fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
+}
+
+#[cfg(feature = "fonts")]
+fn has_floating_zones(
+    block: &docx_layout::types::LayoutBlock,
+    width: f64,
+    config: &docx_layout::measure_blocks::MeasurementConfig,
+) -> bool {
+    use docx_layout::types::LayoutBlock;
+    if docx_layout::measure_blocks::has_floating_zones(
+        std::slice::from_ref(block),
+        width,
+        config,
+        None,
+    )
+    .unwrap_or(true)
+    {
+        return true;
+    }
+    match block {
+        LayoutBlock::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .flat_map(|cell| &cell.blocks)
+            .any(|block| has_floating_zones(block, width, config)),
+        LayoutBlock::TextBox(text_box) => text_box.content.iter().any(|paragraph| {
+            has_floating_zones(&LayoutBlock::Paragraph(paragraph.clone()), width, config)
+        }),
+        _ => false,
+    }
 }

@@ -5,6 +5,20 @@ use ooxml_opc::{rezip_parts, unzip_parts};
 use std::collections::BTreeMap;
 use vsdx_edit::{CellSnapshot, DiagramSession, EditCtx, ShapeDraft};
 
+#[cfg(not(any(feature = "fonts-latin", feature = "fonts-intl", feature = "fonts-cjk")))]
+#[test]
+fn opens_without_bundled_pack_features() {
+    let bytes = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
+    assert!(
+        !Diagram::open(bytes)
+            .unwrap()
+            .package()
+            .page_part_paths
+            .is_empty()
+    );
+    assert!(Diagram::open_with_options(bytes, &betteroffice_vsdx::OpenOptions::default()).is_ok());
+}
+
 fn diagram_with_page(xml: &str) -> (Vec<u8>, Diagram, u32) {
     let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
     let package = vsdx_parse::parse_vsdx(source).unwrap();
