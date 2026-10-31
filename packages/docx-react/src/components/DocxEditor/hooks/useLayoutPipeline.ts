@@ -648,7 +648,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           const queries = displayListQueriesRef.current;
           const currentViewportAnchor = currentViewportAnchorRef.current;
           const anchor =
-            !overtaken && scrollParent?.isConnected && interactionHost && queries
+            scrollParent?.isConnected && interactionHost && queries
               ? origin === 'remote'
                 ? currentViewportAnchor?.navigationEpoch === navigationEpochRef.current
                   ? {
@@ -656,15 +656,17 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                       anchor: currentViewportAnchor.anchor,
                     }
                   : null
-                : {
-                    kind: 'selection' as const,
-                    anchor: captureDisplayListScrollAnchor(
-                      queries,
-                      interactionHost,
-                      scrollParent,
-                      getSelectionHead?.() ?? 0
-                    ),
-                  }
+                : overtaken
+                  ? null
+                  : {
+                      kind: 'selection' as const,
+                      anchor: captureDisplayListScrollAnchor(
+                        queries,
+                        interactionHost,
+                        scrollParent,
+                        getSelectionHead?.() ?? 0
+                      ),
+                    }
               : null;
 
           viewportAnchorCaptureReadyRef.current = false;
