@@ -28,6 +28,7 @@ pub struct DecodedFontFace {
     ts_return_type = "DecodedFontFace"
 )]
 pub fn decode_font_face(
+    env: Env,
     bytes: Uint8Array,
     codec: String,
     dict: Option<Uint8Array>,
@@ -35,7 +36,7 @@ pub fn decode_font_face(
 ) -> Result<DecodedFontFace> {
     let decoded =
         betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+            .map_err(|error| throw_error(&env, &error.to_string()))?;
     Ok(DecodedFontFace {
         font: Uint8Array::new(decoded.font),
         payload: decoded.payload.map(Uint8Array::new),
@@ -43,10 +44,29 @@ pub fn decode_font_face(
 }
 
 #[napi(js_name = "font_preflight")]
-pub fn font_preflight(bytes: Uint8Array) -> napi::Result<String> {
+pub fn font_preflight(env: Env, bytes: Uint8Array) -> napi::Result<String> {
     ooxml_font_preflight::docx_font_preflight(&bytes)
         .map(|result| result.to_json())
-        .map_err(|error| Error::from_reason(error.to_string()))
+        .map_err(|error| throw_message(&env, error.to_string()))
+}
+
+fn throw_message(env: &Env, message: String) -> Error {
+    match env.throw(&message) {
+        Ok(()) => Error::new(Status::PendingException, message),
+        Err(error) => error,
+    }
+}
+
+fn throw_error(env: &Env, message: &str) -> Error {
+    let result = (|| -> Result<()> {
+        let mut exception = env.create_error(Error::from_reason(message))?;
+        exception.delete_named_property("code")?;
+        env.throw(exception)
+    })();
+    match result {
+        Ok(()) => Error::new(Status::PendingException, message.to_owned()),
+        Err(error) => error,
+    }
 }
 
 fn byte_result(env: Env, bytes: Vec<u8>) -> Result<Uint8Array> {

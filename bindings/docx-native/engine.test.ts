@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
+import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
@@ -18,6 +19,9 @@ let fontBytes: Uint8Array;
 beforeAll(async () => {
   await initWasm({
     module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)),
+  });
+  await initPreflight({
+    module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm', import.meta.url)),
   });
   fontBytes = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
   const encoder = new TextEncoder();
@@ -835,4 +839,17 @@ describe('docx native engine parity', () => {
       expected.free();
     }
   }, 120_000);
+
+  test('decodeFontFace and font_preflight failures have the wasm error shape', () => {
+    const nativePreflight = (native as unknown as { font_preflight: typeof wasmFontPreflight }).font_preflight;
+    const invalid = new Uint8Array([1, 2, 3, 4]);
+    for (const [codec, dict, maxOutput] of [['woff2', undefined, undefined], ['zstd', undefined, 16], ['unknown', undefined, undefined]] as const) {
+      const actual = expectThrownParity(
+        () => wasm.decodeFontFace(invalid, codec, dict, maxOutput),
+        () => native.decodeFontFace(invalid, codec, dict, maxOutput),
+      );
+      expect(actual instanceof Error && 'code' in actual).toBe(false);
+    }
+    expectThrownParity(() => wasmFontPreflight(invalid), () => nativePreflight(invalid));
+  });
 });
