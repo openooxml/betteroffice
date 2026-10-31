@@ -252,7 +252,11 @@ fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>, fit: RowFit) -> Op
         return None;
     }
     let fitted = fit.natural(normal.size_pt);
-    (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
+    (fitted.is_finite()
+        && fitted > 0.0
+        && fitted != declared
+        && (declared - fitted).abs() <= 1.0 + 1e-9)
+        .then_some(fitted / declared)
 }
 
 /// the height a cell's font contributes to row autofit, if any: a declared
@@ -1418,6 +1422,11 @@ mod tests {
         assert!((pinned.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
 
         sheet.format.custom_height = false;
+        sheet.format.default_row_height_pt = Some(19.0);
+        let authored = GridGeometry::new(&sheet, &styles);
+        assert!((authored.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
+
+        sheet.format.default_row_height_pt = Some(15.0);
         styles.fonts[0].name = Some("Arial".into());
         let unmeasured = GridGeometry::new(&sheet, &styles);
         assert!((unmeasured.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
@@ -1552,9 +1561,9 @@ mod tests {
             ..Font::default()
         });
         let mut sheet = sheet_with(&[], &[(0, 90.0)]);
-        sheet.format.default_row_height_pt = Some(20.0);
+        sheet.format.default_row_height_pt = Some(15.0);
         let grid = GridGeometry::new(&sheet, &styles);
-        assert!((grid.row_y(1) - row_pt_to_px(63.0)).abs() < 0.001);
+        assert!((grid.row_y(1) - row_pt_to_px(84.0)).abs() < 0.001);
     }
 
     #[test]
