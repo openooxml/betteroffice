@@ -6,7 +6,9 @@
   ],
   "main": "betteroffice-docx-native.linux-x64-gnu.node",
   "files": [
-    "betteroffice-docx-native.linux-x64-gnu.node"
+    "betteroffice-docx-native.linux-x64-gnu.node",
+    "BSD-3-Clause-Zstandard.txt",
+    "MIT-wuff.txt"
   ],
   "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js, Bun and Deno.",
   "keywords": [
@@ -23,7 +25,7 @@
   "homepage": "https://betteroffice.dev/",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18"
+    "node": "^20.16.0 || >=22.3.0"
   },
   "repository": {
     "type": "git",

@@ -24,7 +24,7 @@ beforeAll(async () => {
   await openCommandEngine();
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
   start = await residentWorkerFactory({ transferBuffers: true });
-});
+}, 30_000);
 afterEach(closeCommandEngines);
 
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';

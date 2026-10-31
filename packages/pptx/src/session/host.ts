@@ -7,6 +7,7 @@ import { compileWasm } from '../../../../shared/office-session/wasm';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import { wasmAssetUrl } from '../wasm/asset';
+import { engineKind } from '../wasm/engine';
 import {
   decodeTiffImage, initWasm, openPresentation, presentationDisplayListJson, presentationMetadata,
   openPresentationReplayBaseline, presentationPeerHydration, presentationPeerMetadata,
@@ -41,6 +42,10 @@ function fonts(faces?: readonly PresentationSessionFont[]): PptxFontFace[] | und
 }
 
 export async function initializePresentationEditorWasm(source?: ArrayBuffer | WebAssembly.Module) {
+  if (engineKind === 'native') {
+    await initWasm(source);
+    return undefined;
+  }
   const module = source instanceof WebAssembly.Module ? source : source === undefined
     ? await compileWasm(wasmAssetUrl()) : await WebAssembly.compile(source);
   await initWasm(module);
@@ -52,7 +57,7 @@ export function createPresentationSessionHost(
   transport: SessionTransport,
   options: {
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
-    initEditorWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<WebAssembly.Module>;
+    initEditorWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<WebAssembly.Module | undefined>;
   } = {}
 ): SessionHost<Events> {
   let handle: PresentationHandle | PresentationPeerHandle | undefined;

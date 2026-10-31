@@ -9,7 +9,7 @@ import type { XlsxEditRefusal } from '../edits';
 import type { XlsxExportOptions, XlsxExportResult, XlsxStructuredContent } from '../exports';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  engineAllocationFailure, initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
+  decodeFontFace, engineAllocationFailure, initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   workbookPeerSnapshot,
   openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion,
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
@@ -361,6 +361,13 @@ export function createWorkbookSessionHost(
   }
 
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
+    async decodeFontFace(_, bytes, input, wasm) {
+      if (disposed) throw new Error('Workbook session is disposed');
+      await (options.initWasm ?? initWasm)(wasm);
+      if (disposed) throw new Error('Workbook session is disposed');
+      const face = await decodeFontFace(bytes, input);
+      return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
+    },
     async openRecovery(_, checkpoint, input = {}) {
       if (disposed) throw new Error('Workbook session is disposed');
       if (handle) throw new Error('Workbook session is already open');

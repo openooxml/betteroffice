@@ -1,0 +1,58 @@
+{
+  "format": 1,
+  "schema": 1,
+  "pack": "cjk",
+  "version": "0.4.2",
+  "faces": [
+    {
+      "file": "NotoSansJP-Regular.otf.zst",
+      "source": "NotoSansJP-Regular.otf",
+      "family": "NotoSansJP",
+      "codec": "zstd",
+      "encodedLength": 3595531,
+      "byteLength": 4533028,
+      "sha256": "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073",
+      "dict": null
+    },
+    {
+      "file": "NotoSansKR-Regular.otf.zst",
+      "source": "NotoSansKR-Regular.otf",
+      "family": "NotoSansKR",
+      "codec": "zstd",
+      "encodedLength": 3420953,
+      "byteLength": 4644748,
+      "sha256": "69975a0ac8472717870aefeab0a4d52739308d90856b9955313b2ad5e0148d68",
+      "dict": null
+    },
+    {
+      "file": "NotoSansSC-Regular.otf.zst",
+      "source": "NotoSansSC-Regular.otf",
+      "family": "NotoSansSC",
+      "codec": "zstd",
+      "encodedLength": 6444964,
+      "byteLength": 8331336,
+      "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9",
+      "dict": null
+    },
+    {
+      "file": "NotoSansTC-Regular.otf.zst",
+      "source": "NotoSansTC-Regular.otf",
+      "family": "NotoSansTC",
+      "codec": "zstd",
+      "encodedLength": 4456580,
+      "byteLength": 5683368,
+      "sha256": "5bab0cb3c1cf89dde07c4a95a4054b195afbcfe784d69d75c340780712237537",
+      "dict": null
+    },
+    {
+      "file": "NotoSerifSC-Regular.otf.zst",
+      "source": "NotoSerifSC-Regular.otf",
+      "family": "NotoSerifSC",
+      "codec": "zstd",
+      "encodedLength": 8743526,
+      "byteLength": 11625800,
+      "sha256": "e8f396decc1f0963a016a989c3d8852e863d1350996f573860a80767c83a1cd3",
+      "dict": null
+    }
+  ]
+}

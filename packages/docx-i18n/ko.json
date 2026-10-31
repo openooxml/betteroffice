@@ -417,6 +417,8 @@
         "strikethroughDescription": "취소선 설정/해제",
         "subscript": "아래 첨자",
         "subscriptDescription": "아래 첨자 설정/해제",
+        "clearFormatting": "서식 지우기",
+        "clearFormattingDescription": "텍스트 서식 지우기",
         "superscript": "위 첨자",
         "superscriptDescription": "위 첨자 설정/해제",
         "alignLeft": "왼쪽 맞춤",

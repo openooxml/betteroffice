@@ -1,4 +1,6 @@
 export * from './manifest';
+export type { FontDecoder } from './decode';
+import type { FontDecoder } from './decode';
 export type { BundledFontLoader, BundledFontSource } from './provider';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
@@ -197,11 +199,9 @@ async function assetUrl(
     const cjk = await loadCjkAssetUrls();
     const resolveCjk = cjk?.[file];
     if (resolveCjk) return resolveCjk();
-    if (!cjk) {
-      throw new MissingCjkAddonError(
-        `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`,
-      );
-    }
+    throw new MissingCjkAddonError(cjk
+      ? `Bundled font ${file} needs a compressed @betteroffice/fonts-cjk release matching @betteroffice/fonts`
+      : `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
   }
   throw new Error(`Unknown bundled font asset: ${file}`);
 }
@@ -210,20 +210,22 @@ async function assetUrl(
 export function loadBundledFontBytes(
   face: BundledFontFace,
   options?: FontAssetOptions,
+  runtime?: { decoder?: FontDecoder },
 ): Promise<ArrayBuffer> {
   const baseUrl =
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
-  if (isLatinFont(face.file) || INTL_FILES.has(face.file)) {
-    return loadPackedFontBytes(
+  const bytes = isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
+    ? loadPackedFontBytes(
       face,
       (dependency) => assetUrl(dependency, baseUrl),
       undefined,
       baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
-    );
-  }
-  const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
+      undefined,
+      runtime,
+    )
+    : assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
   if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
   return bytes.catch((error) => {
     if (!(error instanceof MissingCjkAddonError)) throw error;
@@ -233,11 +235,14 @@ export function loadBundledFontBytes(
         face.weight === 700,
         face.style === 'italic',
       )!,
+      options,
+      runtime,
     );
   });
 }
 
 const registeredFaces = new Map<string, Promise<void>>();
+const engineRegistrations = new WeakMap<FontDecoder, Map<string, Promise<void>>>();
 
 /**
  * Register a face with the DOM via the `FontFace` API under an explicit CSS
@@ -250,6 +255,7 @@ export function registerBundledFontFace(
   face: BundledFontFace,
   cssFamily?: string,
   options?: FontAssetOptions,
+  runtime?: { decoder?: FontDecoder },
 ): Promise<void> {
   if (
     typeof document === 'undefined' ||
@@ -259,11 +265,16 @@ export function registerBundledFontFace(
     return Promise.resolve();
   }
   const family = cssFamily ?? face.family;
+  let registrations = registeredFaces;
+  if (runtime?.decoder !== undefined) {
+    registrations = engineRegistrations.get(runtime.decoder) ?? new Map();
+    engineRegistrations.set(runtime.decoder, registrations);
+  }
   const key = `${family}|${face.weight}|${face.style}`;
-  const existing = registeredFaces.get(key);
+  const existing = registrations.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const bytes = await loadBundledFontBytes(face, options);
+    const bytes = await loadBundledFontBytes(face, options, runtime);
     // The family name goes through the FontFace API as a value, never
     // interpolated into a CSS string, so there is no CSS-injection sink here.
     const fontFace = new FontFace(family, bytes, {
@@ -274,19 +285,20 @@ export function registerBundledFontFace(
     document.fonts.add(fontFace);
   })();
   promise.catch(() => {
-    if (registeredFaces.get(key) === promise) registeredFaces.delete(key);
+    if (registrations.get(key) === promise) registrations.delete(key);
   });
-  registeredFaces.set(key, promise);
+  registrations.set(key, promise);
   return promise;
 }
 
 /** Creates a lazy provider with optional custom asset URLs. */
 export function createFontProvider(
   options?: FontAssetOptions,
+  runtime?: { decoder?: FontDecoder },
 ): BundledFontSource {
   const resolvedOptions =
     options?.baseUrl === undefined
       ? undefined
       : { baseUrl: resolvedAssetBase(options.baseUrl) };
-  return fontProvider((face) => loadBundledFontBytes(face, resolvedOptions));
+  return fontProvider((face) => loadBundledFontBytes(face, resolvedOptions, runtime));
 }

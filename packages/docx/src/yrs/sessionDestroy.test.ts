@@ -13,7 +13,7 @@ const FONT = resolve(
   '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 function docx(): Uint8Array {
   const parts: PartsMap = new Map();

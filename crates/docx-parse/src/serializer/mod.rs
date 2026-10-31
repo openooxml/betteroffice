@@ -19,6 +19,7 @@ pub mod s13;
 pub mod sdt;
 pub mod section;
 mod section_patch;
+mod smart_art;
 pub use section_patch::{SectionEdit, SectionEdits};
 pub(crate) mod splice;
 pub mod table;

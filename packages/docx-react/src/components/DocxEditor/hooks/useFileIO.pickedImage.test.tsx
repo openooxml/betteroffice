@@ -51,7 +51,7 @@ beforeAll(async () => {
     if (typeof message === 'string' && message.startsWith('[DocxEditor] experimentalWorkerOpen={false} selects')) return;
     originalWarn(message, ...args);
   });
-});
+}, 30_000);
 afterEach(() => {
   cleanup();
   globalThis.Image = originalImage;

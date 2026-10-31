@@ -18,6 +18,14 @@ function env(overrides: Record<string, string | undefined> = {}): Record<string,
 }
 
 describe("loadConfig", () => {
+  test("reconnect grace defaults to thirty seconds and accepts a positive integer", () => {
+    expect(loadConfig(env()).reconnectGraceMs).toBe(30_000);
+    expect(loadConfig(env({ WOPI_RECONNECT_GRACE_MS: "1234" })).reconnectGraceMs).toBe(1234);
+    for (const value of ["0", "-1", "1.5", "", "NaN", "9007199254740992"]) {
+      expect(() => loadConfig(env({ WOPI_RECONNECT_GRACE_MS: value }))).toThrow(/WOPI_RECONNECT_GRACE_MS/);
+    }
+  });
+
   test("parses a valid env and applies defaults", () => {
     const config = loadConfig(env());
     expect(config.publicUrl).toBe("https://office.example.com");

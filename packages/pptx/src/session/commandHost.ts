@@ -3,7 +3,7 @@ import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
-import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import { PptxDocument } from '../wasm/engine';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -13,7 +13,7 @@ import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
-  decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
+  decodeTiffImage, decodeFontFace, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
@@ -21,7 +21,7 @@ import { buildCommandFrame } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
-import type { DefaultFontFace, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
+import type { DefaultFontFace, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
   type PresentationSharedAck, type PresentationSharedMethods } from './commandSharedAdapter';
 import { findLine, hitGeometry, indexHitGeometry, navigateGeometry, transformedRect,
@@ -127,7 +127,7 @@ export function registerPresentationCommandHandlers(
   let cancelDefaultFontImport: (() => void) | undefined;
   let gatingFonts = false;
   const gatedDefaultFonts: DefaultFontFace[] = [];
-  let requestedFonts: ((slideId?: string) => Omit<DefaultFontFace, 'bytes'>[]) | undefined;
+  let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
   const fontSlides = new Set<string>();
@@ -176,7 +176,7 @@ export function registerPresentationCommandHandlers(
     if (disposed || !requestedFonts) return false;
     if (defaultFonts) return defaultFonts.hasPending(slideId);
     try {
-      return requestedFonts(slideId).some((face) => !suppliedFonts.some((font) =>
+      return requestedFonts(slideId).some((face) => face.scripts?.length || !suppliedFonts.some((font) =>
         font.family.trim().toLowerCase() === face.family.trim().toLowerCase()));
     } catch { return false; }
   }
@@ -205,7 +205,11 @@ export function registerPresentationCommandHandlers(
       void commandDefaultFontModule.load().then(({ createCommandDefaultFonts }) => {
         if (finished || disposed || !requestedFonts) { finish(); return; }
         defaultFonts = createCommandDefaultFonts(suppliedFonts, requestedFonts,
-          (face) => presentation().registerFont({ ...face, bytes: new Uint8Array(face.bytes) }),
+          (face) => {
+            const font = { ...face, bytes: new Uint8Array(face.bytes) };
+            if (face.kind === 'coverage') presentation().registerFallbackFont(font);
+            else presentation().registerFont(font);
+          },
           (faces) => {
             if (!faces.length || disposed) return;
             layouts.clear();
@@ -1507,6 +1511,13 @@ export function registerPresentationCommandHandlers(
   }
 
   const handlers = {
+    async decodeFontFace(_, bytes, input, wasm) {
+      if (disposed) throw new Error('Presentation command session is disposed');
+      await (options.initWasm ?? initWasm)(wasm);
+      if (disposed) throw new Error('Presentation command session is disposed');
+      const face = await decodeFontFace(bytes, input);
+      return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
+    },
     async openCommandEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation command session is disposed');
       if (handle || opening) throw new Error('Presentation command session is already open');
@@ -1526,7 +1537,8 @@ export function registerPresentationCommandHandlers(
           initialUpdate: input.initialUpdate, retainSource: false });
         if (input.defaultFonts !== false) {
           for (const face of input.fonts ?? []) suppliedFonts.push({ family: face.family });
-          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId);
+          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId).map((face) => face.scripts
+            ? { ...face, scripts: face.scripts.filter((script) => script.startsWith('cjk-')) } : face);
         }
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
@@ -1710,6 +1722,7 @@ export function registerPresentationCommandHandlers(
   }
 
   return { handlers, policies: {
+    decodeFontFace: { lane: 'interactive' },
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),

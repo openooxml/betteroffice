@@ -351,6 +351,111 @@ fn shaped_width(store: &FontStore, font: FontId, text: &str) -> f64 {
 }
 
 #[test]
+fn browser_painted_nonbreaking_hyphen_uses_the_resolved_glyph_text() {
+    let mut store = FontStore::new();
+    let font = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let text = "co\u{2011}op";
+    for formatting in [
+        serde_json::json!({"allCaps": true}),
+        serde_json::json!({"textShadow": true}),
+    ] {
+        let run = browser_text_run(&store, "Calibri", font, text, formatting);
+        let primitive = serde_json::to_value(&run).unwrap();
+        assert_eq!(primitive["paintText"], "co-op");
+        assert_eq!(run.text, text);
+        assert_eq!(
+            primitive["paintText"]
+                .as_str()
+                .unwrap()
+                .encode_utf16()
+                .count(),
+            text.encode_utf16().count()
+        );
+        assert_eq!((run.attrs.doc_start, run.attrs.doc_end), (Some(1), Some(6)));
+    }
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input(text, 40.0, None, false, None)).unwrap();
+    input["measured"][0]["block"]["runs"][0]["allCaps"] = serde_json::json!(true);
+    let output = build_display_list_json_with_fonts(&input.to_string(), &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&output).unwrap();
+    let primitive = list.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(run) => Some(serde_json::to_value(run).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(primitive["text"], text);
+    assert!(primitive.get("paintText").is_none());
+
+    let font = store
+        .register(include_bytes!("../../../packages/fonts/assets/Inter-Regular.ttf").to_vec())
+        .unwrap();
+    let run = browser_text_run(
+        &store,
+        "Inter",
+        font,
+        text,
+        serde_json::json!({"allCaps": true}),
+    );
+    assert_eq!(run.text, text);
+    assert!(
+        serde_json::to_value(run)
+            .unwrap()
+            .get("paintText")
+            .is_none()
+    );
+}
+
+#[test]
+fn browser_canvas_clusters_paint_the_same_nonbreaking_hyphen_stand_in() {
+    let mut store = FontStore::new();
+    let base = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let font = store.register_named_substitute(base, "MS Gothic").unwrap();
+    let formatting = serde_json::json!({"allCaps": true});
+    let run = browser_text_run(
+        &store,
+        "MS Gothic",
+        font,
+        "co\u{2011}op",
+        formatting.clone(),
+    );
+    let control = browser_text_run(&store, "MS Gothic", font, "co-op", formatting);
+    assert_eq!(run.text, "co\u{2011}op");
+    let clusters = run.attrs.canvas_clusters.as_ref().unwrap();
+    assert_eq!(clusters[2].text, "-");
+    assert_eq!(run.attrs.canvas_clusters, control.attrs.canvas_clusters);
+}
+
+#[test]
+fn browser_painted_nonbreaking_hyphen_keeps_substitute_width_correction() {
+    let mut store = FontStore::new();
+    let base = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let text = "co\u{2011}operate";
+    let run = browser_text_run(
+        &store,
+        "Arial Narrow",
+        view,
+        text,
+        serde_json::json!({"textShadow": true}),
+    );
+    let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+    let expected = shaped_width(&store, view, text) / shaped_width(&store, base, text);
+    assert!((scale - expected).abs() < 1e-5);
+    assert_eq!(run.text, text);
+}
+
+#[test]
 fn browser_painted_all_caps_use_substitute_widths() {
     let mut store = store_with_liberation();
     let base = FontId::from_u32(0);
@@ -405,11 +510,13 @@ fn browser_painted_matching_arial_keeps_its_horizontal_scale() {
 #[test]
 fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
     let mut store = FontStore::new();
-    let base = store
-        .register(
-            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf").to_vec(),
-        )
-        .unwrap();
+    let font = betteroffice_fonts::decode(
+        include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf.zst"),
+        None,
+        64 << 20,
+    )
+    .unwrap();
+    let base = store.register(font).unwrap();
     for family in [
         "MS Mincho",
         "ＭＳ 明朝",
@@ -737,6 +844,56 @@ fn max_glyph_x(g: &GlyphRunPrimitive) -> f64 {
 
 fn min_glyph_x(g: &GlyphRunPrimitive) -> f64 {
     g.glyphs.iter().map(|gl| gl.x).fold(f64::MAX, f64::min)
+}
+
+#[test]
+fn nonbreaking_hyphen_paints_a_covered_glyph_with_original_clusters() {
+    let store = store_with_liberation();
+    let font = FontId::from_u32(0);
+    let text = "co\u{2011}operate";
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input(text, 0.0, None, false, Some(&[0]))).unwrap();
+    let measure = ooxml_text::measure_paragraph_json(
+        &store,
+        &serde_json::json!({
+            "block": input["measured"][0]["block"],
+            "maxWidth": FRAG_WIDTH,
+            "fontChains": input["fontChains"],
+            "defaults": {"fontSize": 12.0, "fontFamily": "Liberation Sans"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    input["measured"][0]["measure"] = serde_json::from_str(&measure).unwrap();
+    let json = build_display_list_json_with_fonts(&input.to_string(), &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    assert!(
+        list.pages[0]
+            .primitives
+            .iter()
+            .all(|primitive| !matches!(primitive, Primitive::Text(_)))
+    );
+    let runs = glyph_runs(&list);
+    assert_eq!(runs.len(), 1);
+    let run = runs[0];
+    assert_eq!(run.text, text);
+    assert_eq!(
+        run.paint_text.as_deref().map(String::as_str),
+        Some("co\u{2010}operate")
+    );
+    assert_eq!(
+        (run.attrs.doc_start, run.attrs.doc_end),
+        (Some(1), Some(11))
+    );
+    let hyphen = run.glyphs.iter().find(|glyph| glyph.cluster == 2).unwrap();
+    assert_eq!(
+        hyphen.id,
+        u32::from(store.glyph_id(font, '\u{2010}').unwrap().unwrap())
+    );
+    assert_eq!(run.glyphs[3].cluster, 5);
+    let rects = range_rects(&list, 3, 4);
+    assert_eq!(rects.len(), 1);
+    assert!((rects[0].width - hyphen.advance).abs() < 0.01);
 }
 
 #[test]

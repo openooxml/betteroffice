@@ -1,22 +1,41 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import * as fonts from '@betteroffice/fonts';
+import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts } from './commandDefaultFonts';
+import { decodeFontFace } from '../wasm/loader';
 
 const restorers: (() => void)[] = [];
+
+async function notoSansJP(): Promise<ArrayBuffer> {
+  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  return (await decodeFontFace(packed, { codec: 'zstd' })).font;
+}
 const regular = { family: 'Calibri', bold: false, italic: false };
 const bytes = new Uint8Array([1, 2, 3]).buffer;
 
-function provider(load: (family: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined) {
+function provider(
+  load: (family: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined,
+  script: (script: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
+) {
   const resolve = mock(load);
   const resolveFamily = mock(() => undefined);
-  const source = { resolve, resolveFamily, resolveScriptFallback: () => undefined,
+  const resolveScriptFallback = mock(script);
+  const source = { resolve, resolveFamily, resolveScriptFallback,
     resolveLastResort: () => { throw new Error('Unrelated substitution'); } };
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue(source);
   restorers.push(() => imported.mockRestore());
-  return { imported, resolve, resolveFamily };
+  return { imported, resolve, resolveFamily, resolveScriptFallback };
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
+
+test('the manager decodes packed faces with the worker engine', async () => {
+  const create = spyOn(fonts, 'createFontProvider');
+  restorers.push(() => create.mockRestore());
+  await commandFontProvider.load();
+  expect(create).toHaveBeenCalledWith(undefined, { decoder: decodeFontFace });
+});
 
 test('app families exclude all styles without importing the manager', async () => {
   const source = provider(() => async () => bytes);
@@ -72,12 +91,13 @@ test('resolves requested traits through manager mappings and skips unknown famil
     expect(source.resolveFamily).toHaveBeenCalledWith('Unknown Family', false, false);
     expect(faces).toHaveLength(1);
     expect(faces[0]).toMatchObject({ family: 'Calibri', bold: true, italic: true });
+    expect(faces[0].ownWeight).toBeUndefined();
     structuredClone(faces, { transfer: faces.map((face) => face.bytes) });
     expect(bytes.byteLength).toBe(3);
   } finally { fonts.dispose(); }
 });
 
-test('lighter members of bundled families load their regular face; other unknown names stay unregistered', async () => {
+test('lighter members of bundled families load their regular face at their own weight; other unknown names stay unregistered', async () => {
   const resolve = mock(() => undefined);
   const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
     family === 'Calibri Light' ? async () => bytes : undefined);
@@ -92,7 +112,7 @@ test('lighter members of bundled families load their regular face; other unknown
     const faces = await fonts.load();
     expect(resolveLightVariant.mock.calls).toEqual([['Calibri Light', true, false], ['BIZ UD明朝 Medium', false, false]]);
     expect(resolveLastResort).not.toHaveBeenCalled();
-    expect(faces.map((face) => [face.family, face.bold])).toEqual([['Calibri Light', true]]);
+    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true]]);
     expect(register).toHaveBeenCalledTimes(1);
   } finally { fonts.dispose(); }
 });
@@ -135,4 +155,130 @@ test('default font plumbing stays out of all package entries', async () => {
     const source = await readFile(new URL(entry, import.meta.url), 'utf8');
     expect(source).not.toMatch(/commandDefaultFonts|pptxDefaultFonts|presentationRequestedFontFaces|presentationEnableBrowserCoverageFallback|defaultFontInstaller|installDefaultFonts/);
   }
+});
+
+test('script requests keep traits, fall back to regular and deduplicate across families and concurrent loads', async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const source = provider(() => undefined, (script, bold, italic) =>
+    script === 'arabic' && !bold && !italic ? async () => arabic : undefined);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const requested = { ...regular, bold: true, italic: true, scripts: ['arabic', 'arabic'] };
+  const fonts = createCommandDefaultFonts([{ family: 'Calibri' }], () => [requested,
+    { ...requested, family: 'Unknown Family' }], register, settled, install);
+  try {
+    expect(fonts.hasPending()).toBe(true);
+    const results = await Promise.all([fonts.load(), fonts.load()]);
+    expect(source.resolve.mock.calls).toEqual([['Unknown Family', true, true]]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([['arabic', true, true], ['arabic', false, false]]);
+    expect(results.flat()).toMatchObject([{ family: 'Noto Sans Arabic', bold: false, italic: false, kind: 'coverage' }]);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(install.mock.calls[0][0][0].kind).toBe('coverage');
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(fonts.hasPending()).toBe(false);
+    expect(await fonts.load()).toEqual([]);
+  } finally { fonts.dispose(); }
+});
+
+test('script collection requests each style separately even when no script pack is available', async () => {
+  const source = provider(() => undefined);
+  const fonts = createCommandDefaultFonts([], () => [
+    { ...regular, family: 'BIZ UD明朝', bold: true, scripts: ['cjk-jp'] },
+    { ...regular, family: 'Unknown Indic', italic: true, scripts: ['devanagari'] },
+  ], () => {}, () => {});
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([
+      ['cjk-jp', true, false], ['cjk-jp', false, false],
+      ['devanagari', false, true], ['devanagari', false, false],
+    ]);
+    expect(await fonts.load()).toEqual([]);
+    expect(source.resolveScriptFallback).toHaveBeenCalledTimes(4);
+  } finally { fonts.dispose(); }
+});
+
+test('styled Japanese requests share installation by the resolved regular face', async () => {
+  const japanese = await notoSansJP();
+  const source = provider(() => undefined, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
+  const register = mock((_face: DefaultFontFace) => {});
+  const settled = mock(() => {});
+  let finish!: () => void;
+  let started!: () => void;
+  const installing = new Promise<void>((resolve) => { finish = resolve; });
+  const requested = new Promise<void>((resolve) => { started = resolve; });
+  const install = mock(async (faces: readonly DefaultFontFace[]) => { started(); await installing; return faces; });
+  const traits = [[false, false], [true, false], [false, true], [true, true]] as const;
+  const fonts = createCommandDefaultFonts([{ family: 'Calibri' }], () => traits.map(([bold, italic]) =>
+    ({ ...regular, bold, italic, scripts: ['cjk-jp'] })), register, settled, install);
+  try {
+    const first = fonts.load();
+    const second = fonts.load();
+    await requested;
+    finish();
+    expect((await Promise.all([first, second])).flat()).toMatchObject([
+      { family: 'Noto Sans JP', bold: false, italic: false, kind: 'coverage' },
+    ]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual(traits.map(([bold, italic]) => ['cjk-jp', bold, italic]));
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(fonts.isLoading()).toBe(false);
+    expect(fonts.hasPending()).toBe(false);
+    expect(await fonts.load()).toEqual([]);
+  } finally { fonts.dispose(); }
+});
+
+test('a family requested as primary and as script coverage installs its face once', async () => {
+  const japanese = await notoSansJP();
+  const source = provider((family) => family === 'Noto Sans JP' ? async () => japanese : undefined,
+    (script) => script === 'cjk-jp' ? async () => japanese : undefined);
+  const register = mock((_face: DefaultFontFace) => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const fonts = createCommandDefaultFonts([], () => [{ family: 'Noto Sans JP', bold: false, italic: false, scripts: ['cjk-jp'] }],
+    register, () => {}, install);
+  try {
+    expect(await fonts.load()).toMatchObject([
+      { family: 'Noto Sans JP', bold: false, italic: false },
+      { family: 'Noto Sans JP', bold: false, italic: false, kind: 'coverage' },
+    ]);
+    expect(source.resolve).toHaveBeenCalledTimes(1);
+    expect(source.resolveScriptFallback).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(2);
+  } finally { fonts.dispose(); }
+});
+
+test('missing CJK packs never install Latin substitute bytes as coverage', async () => {
+  const latin = new Uint8Array(await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url))).buffer;
+  const source = provider((family) => family === 'Calibri' ? async () => latin : undefined, () => async () => latin);
+  const register = mock((_face: DefaultFontFace) => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const fonts = createCommandDefaultFonts([], () => [
+    { ...regular, scripts: ['cjk-jp'] }, { ...regular, family: 'BIZ UD明朝', scripts: ['cjk-jp'] },
+  ], register, () => {}, install);
+  try {
+    expect(await fonts.load()).toMatchObject([{ family: 'Calibri' }]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(register.mock.calls[0][0]).not.toHaveProperty('kind', 'coverage');
+  } finally { fonts.dispose(); }
+});
+
+test('browser refusal prevents coverage registration and settlement', async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  provider(() => undefined, () => async () => arabic);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const beforeRegister = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [{ ...regular, scripts: ['arabic'] }],
+    register, settled, async () => [], beforeRegister);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(register).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+    expect(beforeRegister).not.toHaveBeenCalled();
+  } finally { fonts.dispose(); }
 });
