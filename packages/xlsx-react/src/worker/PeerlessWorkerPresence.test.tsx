@@ -80,6 +80,28 @@ test('a delayed presence chunk subscribes, renders peers and selections, and cle
   expect(room.setCursor).toHaveBeenLastCalledWith(null);
 });
 
+test('a rejected presence chunk stays hidden and retries when the provider changes', async () => {
+  const module = await originalLoad();
+  const load = spyOn(xlsxPeerlessPresenceLoader, 'load').mockRejectedValue(new Error('Presence import failed'));
+  const room = presence();
+  const view = render(<PeerlessWorkerPresence {...room.props} provider={room.provider} />);
+  await act(async () => {});
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(view.container.childNodes.length).toBe(0);
+  expect(room.onAwareness).not.toHaveBeenCalled();
+  expect(room.setCursor).not.toHaveBeenCalled();
+  load.mockResolvedValue(module);
+  view.rerender(<PeerlessWorkerPresence {...room.props} provider={room.provider} />);
+  await act(async () => {});
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(view.container.childNodes.length).toBe(0);
+  view.rerender(<PeerlessWorkerPresence {...room.props} provider={{ ...room.provider }} />);
+  await waitFor(() => expect(view.queryByTestId('xlsx-presence-chip-202')).not.toBeNull());
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(view.getByTestId('xlsx-remote-selection-202')).toBeTruthy();
+  expect(room.listeners.size).toBe(1);
+});
+
 for (const retire of ['unmount', 'remove provider'] as const) {
   test(`${retire} during the presence import never attaches late awareness listeners`, async () => {
     const module = await originalLoad();

@@ -2,7 +2,7 @@ import {
   anchorSelection, clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges,
   workbookSelectionMerges,
 } from './selectionData';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import {
   buildA11yGrid,
@@ -98,10 +98,10 @@ import { WorkbookFailure } from './components/WorkbookFailure';
 
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
+import { presenceViewLoader } from './presence/presenceViewLoader';
+import { useLazyModule } from './presence/useLazyModule';
 
 const presenceGeometry = { rangeRect, expandRangeToMergedCells };
-const PresenceStrip = lazy(() => import('./presence/PresenceView').then((module) => ({ default: module.PresenceStrip })));
-const RemoteSelections = lazy(() => import('./presence/PresenceView').then((module) => ({ default: module.RemoteSelections })));
 
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   return {
@@ -1065,6 +1065,8 @@ export function XlsxEditorContent({
     collaborationOnReplica(collaborationReplica);
     return () => collaborationOnReplica(null);
   }, [collaborationOnReplica, collaborationReplica]);
+
+  const presenceView = useLazyModule(collaborationProvider ? presenceViewLoader.load : null, collaborationProvider);
 
   useEffect(() => {
     setAwarenessPeers([]);
@@ -2311,15 +2313,15 @@ export function XlsxEditorContent({
       <div style={xlsxToolbarStyles.rail} role="group" aria-label={t('toolbar.formulaBarLabel')}>
         <EditorToolbar.FormulaBar />
         <div style={toolbarSeparatorStyle} aria-hidden="true" />
-        {collaborationProvider && <Suspense fallback={null}>
-          <PresenceStrip
+        {collaborationProvider && presenceView && (
+          <presenceView.PresenceStrip
             t={t}
             peers={awarenessPeers}
             sheetIds={sheetInfo?.sheetIds ?? []}
             sheetNames={sheetInfo?.sheetNames ?? []}
             activeSheet={activeSheet}
           />
-        </Suspense>}
+        )}
         {proposalsAvailable && (
           <div style={xlsxToolbarStyles.proposals}>
             <ProposalsButton />
@@ -2503,8 +2505,8 @@ export function XlsxEditorContent({
                     }}
                   />
                 )}
-                {collaborationProvider && <Suspense fallback={null}>
-                  <RemoteSelections
+                {collaborationProvider && presenceView && (
+                  <presenceView.RemoteSelections
                     geometry={presenceGeometry}
                     peers={awarenessPeers}
                     grid={grid}
@@ -2513,7 +2515,7 @@ export function XlsxEditorContent({
                     zoom={zoom}
                     mergedRanges={visibleMergedRanges}
                   />
-                </Suspense>}
+                )}
                 {!readOnly && editing && scaledEditRect && (
                   <input
                     ref={attachCellInput}

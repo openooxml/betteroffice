@@ -28,6 +28,7 @@ import { defineXlsxPlugin } from '../plugins/defineXlsxPlugin';
 import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
+import { xlsxPeerlessPresenceLoader } from './PeerlessWorkerSurface';
 import { XlsxWorkerEditor, xlsxPeerlessEditorLoader } from './XlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 
@@ -2385,6 +2386,53 @@ describe('XlsxEditor async API', () => {
     await expect(api.collaboration!.encodeStateVector()).rejects.toMatchObject({ code: 'document-replaced' });
     expect(host.hydrate).not.toHaveBeenCalled();
     expect(host.attach).not.toHaveBeenCalled();
+  });
+
+  it('keeps the collaborative editor mounted and saves committed input when the presence chunk rejects', async () => {
+    const host = collaborativePeerlessHarness();
+    const load = spyOn(xlsxPeerlessPresenceLoader, 'load').mockRejectedValue(new Error('Presence import failed'));
+    const save = spyOn(host.session, 'save').mockImplementation(async () => new TextEncoder().encode(host.cells.get('0:0:0')));
+    restorers.push(() => load.mockRestore(), () => save.mockRestore());
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const onError = mock((_error: Error) => {});
+    const onSave = mock((_bytes: Uint8Array) => {});
+    const peer: AwarenessPeer = { clientId: 202, clock: 1, lastSeen: Date.now(), cursorMovedAt: Date.now(),
+      user: { name: 'Peer', color: '#0B57D0' },
+      cursor: { sheet: 'sheet:0', anchor: { row: 0, col: 1 }, head: { row: 0, col: 1 } } };
+    const view = render(host.asyncEditor({ onReady: ready, onError, onSave,
+      collaboration: { clientId: 101, provider: { peers: [peer], setCursor: () => {},
+        onAwareness(listener) { listener([peer]); return () => {}; } } } }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(host.bindCollaboration).toHaveBeenCalled();
+    const scroll = view.getByTestId('xlsx-scroll');
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+    expect(view.queryByTestId('xlsx-presence-chip-202')).toBeNull();
+    expect(view.queryByTestId('xlsx-remote-selection-202')).toBeNull();
+    fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Keep my edits' } });
+    let saving!: Promise<Uint8Array>;
+    act(() => { saving = ready.mock.calls[0]![0].save(); });
+    await waitFor(() => expect(host.sent).toHaveLength(1));
+    expect(host.sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'Keep my edits'] } });
+    expect(save).not.toHaveBeenCalled();
+    let bytes!: Uint8Array;
+    await act(async () => { host.ack(host.sent[0], { paint: true }); bytes = await saving; });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('Keep my edits');
+    expect(new TextDecoder().decode(bytes)).toBe('Keep my edits');
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave).toHaveBeenCalledWith(bytes);
+    expect(view.getByTestId('xlsx-scroll')).toBe(scroll);
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+    expect(view.queryByTestId('xlsx-presence-chip-202')).toBeNull();
+    expect(view.queryByTestId('xlsx-remote-selection-202')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+    expect(ready).toHaveBeenCalledTimes(1);
+    expect(host.open).toHaveBeenCalledTimes(1);
+    expect(host.session.dispose).not.toHaveBeenCalled();
   });
 
   it('keeps the cell draft when clicking beneath a remote selection', async () => {

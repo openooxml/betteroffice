@@ -1,9 +1,10 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo } from 'react';
+import { memo, useCallback, useEffect, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { buildA11yGrid, cellRect, normalizeRange, rangeRect } from '@betteroffice/xlsx';
 import type { WorkbookSheetSummary } from '@betteroffice/xlsx';
 import type { CollaborationAwareness } from '@betteroffice/xlsx/collaboration';
 import { useTranslation } from '../i18n';
+import { useLazyModule } from '../presence/useLazyModule';
 import { expandRangeToMergedCells, scaledRect } from '../viewer/sessionGeometry';
 import { PeerlessWorkerCellInput, usePeerlessReadOnly } from './PeerlessWorkerInputs';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
@@ -115,11 +116,8 @@ export function PeerlessWorkerPresence({ store, run, provider, active, sheets }:
   const { t } = useTranslation();
   const painted = useWorkerPresentation(store, selectPainted);
   const selection = useWorkerPresentation(store, selectSelection);
-  const Presence = useMemo(() => lazy(() => xlsxPeerlessPresenceLoader.load()
-    .then((module) => ({ default: module.PeerlessPresence }))), [xlsxPeerlessPresenceLoader.load]);
-  if (!provider) return null;
-  return <Suspense fallback={null}>
-    <Presence painted={painted} selection={selection} run={run} provider={provider} active={active}
-      sheets={sheets} t={t} geometry={presenceGeometry} />
-  </Suspense>;
+  const presence = useLazyModule(provider ? xlsxPeerlessPresenceLoader.load : null, provider);
+  if (!provider || !presence) return null;
+  return <presence.PeerlessPresence painted={painted} selection={selection} run={run} provider={provider}
+    active={active} sheets={sheets} t={t} geometry={presenceGeometry} />;
 }
