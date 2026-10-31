@@ -116,6 +116,8 @@ mod section_margins;
 mod sections;
 pub use sections::SectionInfo;
 mod seed;
+#[doc(hidden)]
+pub use seed::RunInheritance;
 mod segment_json;
 mod segments;
 mod sticky_positions;

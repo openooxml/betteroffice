@@ -23,6 +23,7 @@ interface FormatConfig {
   wasm: string;
   native: string;
   classes: string[];
+  pending: string[];
 }
 
 export const FORMATS: Record<string, FormatConfig> = {
@@ -30,11 +31,121 @@ export const FORMATS: Record<string, FormatConfig> = {
     wasm: "packages/xlsx/src/wasm/generated/xlsx_wasm.d.ts",
     native: "bindings/xlsx-native/index.d.ts",
     classes: ["XlsxDocument", "XlsxSnapshotBuilder"],
+    pending: [],
+  },
+  docx: {
+    wasm: "packages/docx/src/wasm/generated/edit/docx_edit.d.ts",
+    native: "bindings/docx-native/index.d.ts",
+    classes: ["EditSession", "RetainedLayoutMeta", "RunInheritance"],
+    pending: [
+      "EditSession.register_measure_font",
+      "EditSession.decode_font",
+      "EditSession.register_substitute_measure_font",
+      "EditSession.clear_measure_fonts",
+      "EditSession.measure_paragraph_json",
+      "EditSession.layout_document_json",
+      "EditSession.layout_font_requirements_json",
+      "EditSession.layout_document_with_regions_json",
+      "EditSession.layout_document_with_regions_retained_json",
+      "EditSession.layout_document_with_regions_retained_meta",
+      "EditSession.retained_layout_json",
+      "EditSession.layout_document_with_regions_retained",
+      "EditSession.layout_document_with_regions_after_edit",
+      "EditSession.retained_headers_footers_json",
+      "EditSession.layout_document_with_regions_prefix_retained_json",
+      "EditSession.layout_document_with_regions_exact_prefix_retained",
+      "EditSession.begin_region_layout",
+      "EditSession.resume_region_layout",
+      "EditSession.retained_kernel_inputs_json",
+      "EditSession.reset_frame_base",
+      "EditSession.build_display_list_json",
+      "EditSession.build_display_list_frame",
+      "EditSession.set_display_window",
+      "EditSession.set_display_retain_built_pages",
+      "EditSession.set_local_lowering",
+      "EditSession.set_direct_batches",
+      "EditSession.direct_batches_applied",
+      "EditSession.set_windowed_incremental_builds",
+      "EditSession.build_display_pages_frame",
+      "EditSession.release_display_pages_frame",
+      "EditSession.resident_caret_snapshot_json",
+      "EditSession.apply_input",
+      "EditSession.apply_input_profiled",
+      "EditSession.apply_delete",
+      "EditSession.resident_deleted_units",
+      "EditSession.apply_delete_profiled",
+      "EditSession.apply_input_profile_json",
+      "EditSession.display_hit_test_regions_json",
+      "EditSession.display_vertical_move_json",
+      "EditSession.display_range_rects_json",
+      "EditSession.display_range_rects_on_pages_json",
+      "EditSession.display_range_rects_region_json",
+      "EditSession.display_range_rects_batch",
+      "EditSession.outline_glyph_json",
+      "EditSession.echo_glyph_set_json",
+      "EditSession.set_update_observer",
+      "EditSession.clear_update_observer",
+      "RetainedLayoutMeta",
+      "function build_display_list_json",
+      "function clear_measure_fonts",
+      "function close_display_list",
+      "function decodeTiffPng",
+      "function export_docx_markdown_json",
+      "function export_docx_structured_json",
+      "function find_docx_content_controls_json",
+      "function hit_test_json",
+      "function hit_test_regions_by_handle",
+      "function hit_test_regions_json",
+      "function layout_document_json",
+      "function list_docx_content_controls_json",
+      "function measure_paragraph_json",
+      "function open_display_list",
+      "function outline_glyph_json",
+      "function paragraphPatchWriterVersion",
+      "function parse_docx_relationships",
+      "function parse_docx_s2",
+      "function parse_docx_s3",
+      "function parse_docx_s4",
+      "function parse_docx_s5",
+      "function parse_docx_s6",
+      "function parse_docx_s7",
+      "function parse_docx_s8",
+      "function parse_docx_s9",
+      "function parse_relationships_xml",
+      "function range_rects_by_handle",
+      "function range_rects_json",
+      "function range_rects_on_pages_by_handle",
+      "function range_rects_on_pages_json",
+      "function range_rects_region_by_handle",
+      "function range_rects_region_json",
+      "function register_measure_font",
+      "function register_substitute_measure_font",
+      "function render_docx_markdown_json",
+      "function render_docx_markdown_with_pages_json",
+      "function reset_wasm_peak_bytes",
+      "function rezip_docx",
+      "function sanitizeOoxml",
+      "function serialize_docx_s10",
+      "function serialize_docx_s11",
+      "function serialize_docx_s12",
+      "function set_wasm_heap_limit",
+      "function unzip_docx",
+      "function update_display_list",
+      "function vertical_move_by_handle",
+      "function vertical_move_json",
+      "function wasm_failed_allocation_bytes",
+      "function wasm_heap_counted",
+      "function wasm_live_bytes",
+      "function wasm_peak_bytes",
+      "function write_docx_s13_wasm",
+      "function write_docx_s13_wasm_with_warnings",
+    ],
   },
   pptx: {
     wasm: "packages/pptx/src/wasm/generated/pptx_wasm.d.ts",
     native: "bindings/pptx-native/index.d.ts",
     classes: ["PptxDocument", "PptxRenderer"],
+    pending: [],
   },
 };
 
@@ -216,9 +327,34 @@ function describe(member: MemberInfo): string {
   return `${prefix}${member.name}(${params}): ${member.returnType}`;
 }
 
-export function compareSurfaces(wasm: Surface, native: Surface, classNames: string[]): string[] {
+export function compareSurfaces(
+  wasm: Surface,
+  native: Surface,
+  classNames: string[],
+  pending: readonly string[] = [],
+): string[] {
+  const skipped = new Set(pending);
   const problems: string[] = [];
+  for (const item of skipped) {
+    const [owner, member] = item.startsWith("function ")
+      ? [undefined, item.slice("function ".length)]
+      : item.split(".", 2);
+    const inWasm = owner === undefined
+      ? wasm.functions.has(member)
+      : member === undefined ? wasm.classes.has(owner) : wasm.classes.get(owner)?.has(member);
+    const inNative = owner === undefined
+      ? native.functions.has(member)
+      : member === undefined
+        ? native.classes.has(owner)
+        : native.classes.get(owner)?.has(member);
+    if (!inWasm && !(owner === undefined && IGNORED_FUNCTIONS.has(member))) {
+      problems.push(`${item}: pending but not in the wasm surface`);
+    } else if (inNative) {
+      problems.push(`${item}: pending but available natively; remove it from pending`);
+    }
+  }
   for (const className of classNames) {
+    if (skipped.has(className)) continue;
     const wasmClass = wasm.classes.get(className);
     const nativeClass = native.classes.get(className);
     if (!wasmClass) {
@@ -229,10 +365,14 @@ export function compareSurfaces(wasm: Surface, native: Surface, classNames: stri
       problems.push(`native class ${className} is missing`);
       continue;
     }
-    if (!wasmClass.has("constructor") && nativeClass.has("constructor")) {
+    if (
+      !skipped.has(`${className}.constructor`)
+      && !wasmClass.has("constructor") && nativeClass.has("constructor")
+    ) {
       problems.push(`${className}.constructor: public constructor is only available natively`);
     }
     for (const [name, expected] of wasmClass) {
+      if (skipped.has(`${className}.${name}`)) continue;
       const actual = nativeClass.get(name);
       if (!actual) {
         problems.push(`${className}.${name}: missing natively (wasm: ${describe(expected)})`);
@@ -273,7 +413,7 @@ export function compareSurfaces(wasm: Surface, native: Surface, classNames: stri
     }
   }
   for (const [name, expected] of wasm.functions) {
-    if (IGNORED_FUNCTIONS.has(name)) continue;
+    if (IGNORED_FUNCTIONS.has(name) || skipped.has(`function ${name}`)) continue;
     const actual = native.functions.get(name);
     if (!actual) {
       problems.push(`function ${name}: missing natively (wasm: ${describe(expected)})`);
@@ -319,7 +459,13 @@ function main(): void {
   const root = join(import.meta.dir, "..");
   const wasmText = readFileSync(join(root, config.wasm), "utf8");
   const nativeText = readFileSync(join(root, config.native), "utf8");
-  const problems = compareSurfaces(parseSurface(wasmText), parseSurface(nativeText), config.classes);
+  const problems = compareSurfaces(
+    parseSurface(wasmText), parseSurface(nativeText), config.classes, config.pending,
+  );
+  if (config.pending.length > 0) {
+    console.log(`engine surface pending for ${format} (${config.pending.length}):`);
+    for (const item of config.pending) console.log(`  - ${item}`);
+  }
   if (problems.length > 0) {
     console.error(`engine surface mismatch for ${format}:`);
     for (const problem of problems) console.error(`  - ${problem}`);

@@ -111,6 +111,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-docx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-docx-edit",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
+ "betteroffice-opc",
+]
+
+[[package]]
 name = "betteroffice-docx-layout"
 version = "0.5.1"
 dependencies = [
@@ -131,8 +141,10 @@ name = "betteroffice-docx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-docx",
+ "betteroffice-docx-engine",
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",
+ "getrandom 0.3.4",
  "napi",
  "napi-build",
  "napi-derive",
@@ -145,6 +157,7 @@ version = "0.5.1"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-opc",
  "indexmap",
  "libm",
@@ -207,6 +220,7 @@ dependencies = [
 name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
+ "base64",
  "betteroffice-drawingml",
  "libm",
 ]
