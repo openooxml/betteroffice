@@ -100,9 +100,14 @@ fn minimal_docx() -> Vec<u8> {
 }
 
 fn document() -> Document {
-    Document::open(&minimal_docx()).unwrap()
+    let options = betteroffice_docx::OpenOptions::default();
+    #[cfg(feature = "fonts")]
+    let options = betteroffice_docx::OpenOptions {
+        font_source: betteroffice_docx::fonts::FontSource::Backstop,
+        ..options
+    };
+    Document::open_with_options(&minimal_docx(), &options).unwrap()
 }
-
 fn page(primitives: Vec<Value>) -> DisplayList {
     sized_page(64, 32, primitives)
 }

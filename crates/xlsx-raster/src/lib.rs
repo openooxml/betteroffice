@@ -13,7 +13,7 @@ use tiny_skia::{
 };
 
 use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
-
+#[cfg(not(feature = "fonts"))]
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
     let w = (dl.width.ceil() as u32).max(1);
@@ -1595,3 +1595,8 @@ mod tests {
         assert_eq!(render(40.0, 40.0, rails).pixel(10, 4).unwrap().red(), 0);
     }
 }
+
+#[cfg(feature = "fonts")]
+mod native;
+#[cfg(feature = "fonts")]
+pub use native::{RasterFonts, render_png, render_png_with_fonts};

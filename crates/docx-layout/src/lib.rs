@@ -1553,3 +1553,8 @@ mod tests {
         assert_eq!(v["pages"][0]["number"], 1);
     }
 }
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+mod native;
+#[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+pub use native::with_measure_font_store;

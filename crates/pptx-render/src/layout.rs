@@ -209,6 +209,9 @@ pub struct SlideRenderer {
     /// Faces drawn only for characters a run's own face has no glyph for,
     /// with the weight and slant each was registered for.
     coverage_faces: Vec<(bool, bool, FontFace)>,
+    /// Coverage faces a requested family reaches before the shared ones.
+    #[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+    family_coverage_faces: HashMap<String, Vec<(bool, bool, FontFace)>>,
     fallback: Option<FontFace>,
     /// Normalized fallback family.
     fallback_family: Option<String>,
@@ -231,6 +234,8 @@ impl SlideRenderer {
             fonts: FontStore::new(),
             faces: HashMap::new(),
             coverage_faces: Vec::new(),
+            #[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+            family_coverage_faces: HashMap::new(),
             fallback: None,
             fallback_family: None,
             font_count: 0,
@@ -352,6 +357,26 @@ impl SlideRenderer {
         Ok(id.to_u32())
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+    fn coverage_candidates<'a>(
+        &'a self,
+        face: &FontFace,
+    ) -> impl Iterator<Item = &'a (bool, bool, FontFace)> + Clone {
+        self.family_coverage_faces
+            .get(&face.requested_family)
+            .into_iter()
+            .flatten()
+            .chain(&self.coverage_faces)
+    }
+
+    #[cfg(not(any(not(target_arch = "wasm32"), feature = "font-registration")))]
+    fn coverage_candidates<'a>(
+        &'a self,
+        _face: &FontFace,
+    ) -> impl Iterator<Item = &'a (bool, bool, FontFace)> + Clone {
+        self.coverage_faces.iter()
+    }
+
     /// The fallback face that draws `character` for a run in `face`: one of the
     /// same weight and slant where there is one, sized on the run's own line.
     fn coverage_face(
@@ -362,7 +387,7 @@ impl SlideRenderer {
         italic: bool,
     ) -> Option<FontFace> {
         let covering = || {
-            self.coverage_faces.iter().filter(|(_, _, candidate)| {
+            self.coverage_candidates(face).filter(|(_, _, candidate)| {
                 self.fonts.covers(candidate.id, character).unwrap_or(false)
             })
         };
@@ -388,7 +413,7 @@ impl SlideRenderer {
         italic: bool,
     ) -> Vec<(usize, Option<FontFace>)> {
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
-        if self.coverage_faces.is_empty()
+        if self.coverage_candidates(face).next().is_none()
             || text
                 .chars()
                 .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
@@ -432,8 +457,7 @@ impl SlideRenderer {
                 .all(|character| self.fonts.covers(candidate.id, character).unwrap_or(false))
         };
         let covering = || {
-            self.coverage_faces
-                .iter()
+            self.coverage_candidates(face)
                 .filter(|(_, _, candidate)| covers(candidate))
         };
         let registered = || {
@@ -468,8 +492,7 @@ impl SlideRenderer {
         italic: bool,
     ) -> Vec<(usize, Option<FontFace>)> {
         let promoted = self
-            .coverage_faces
-            .iter()
+            .coverage_candidates(face)
             .any(|(_, _, coverage)| coverage.id == face.id);
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
         if text
@@ -14015,3 +14038,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "font-registration"))]
+#[path = "native.rs"]
+mod native;
