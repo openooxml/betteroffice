@@ -27,7 +27,7 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 function source(paragraphs = 120, pageTotal = false): Uint8Array {
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';

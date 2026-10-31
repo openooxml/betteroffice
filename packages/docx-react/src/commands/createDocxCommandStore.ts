@@ -1,6 +1,12 @@
 import type { Translations } from '@betteroffice/docx-i18n';
 import type { Theme } from '@betteroffice/docx/types/document';
-import { DOCX_COMMAND_DESCRIPTORS, isDocxCommandId, isPluginCommandId } from './descriptors';
+import {
+  DOCX_COMMAND_DESCRIPTORS,
+  isDocxCommandId,
+  isMacPlatform,
+  isPluginCommandId,
+  shortcutMatchesPlatform,
+} from './descriptors';
 import {
   commandReason,
   contributedCommandGate,
@@ -10,9 +16,11 @@ import {
 import type {
   DocxCommandArgs,
   DocxCommandDisabledCode,
+  DocxCommandDescriptor,
   DocxCommandFailureCode,
   DocxCommandId,
   DocxCommandResult,
+  DocxCommandShortcut,
   DocxCommandState,
   DocxCommandStore,
   DocxPluginCommandDescriptor,
@@ -198,6 +206,26 @@ function mutatingBuiltIn(id: AnyCommandId): boolean {
 }
 
 /** Creates the command store of one editor mount. */
+const platformDescriptors = new Map<string, DocxCommandDescriptor>();
+
+/** The built-in descriptor with only the current platform's shortcuts. */
+function platformDescriptor(id: DocxCommandId): DocxCommandDescriptor {
+  const descriptor = DOCX_COMMAND_DESCRIPTORS[id] as DocxCommandDescriptor;
+  const shortcuts = descriptor.shortcuts as readonly DocxCommandShortcut[];
+  if (!shortcuts.some((shortcut) => shortcut.platform !== undefined)) return descriptor;
+  const mac = isMacPlatform();
+  const key = `${id}:${mac}`;
+  let filtered = platformDescriptors.get(key);
+  if (!filtered) {
+    filtered = Object.freeze({
+      ...descriptor,
+      shortcuts: Object.freeze(shortcuts.filter((shortcut) => shortcutMatchesPlatform(shortcut, mac))),
+    });
+    platformDescriptors.set(key, filtered);
+  }
+  return filtered;
+}
+
 export function createDocxCommandController(): DocxCommandController {
   let binding: DocxCommandBinding | null = null;
   let pluginCommands = new Map<DocxPluginCommandId, DocxPluginCommandBinding>();
@@ -383,9 +411,7 @@ export function createDocxCommandController(): DocxCommandController {
   };
 
   const getDescriptor = (id: AnyCommandId) =>
-    isPluginCommandId(id)
-      ? (pluginCommands.get(id)?.descriptor ?? null)
-      : DOCX_COMMAND_DESCRIPTORS[id];
+    isPluginCommandId(id) ? (pluginCommands.get(id)?.descriptor ?? null) : platformDescriptor(id);
 
   const store = Object.freeze({
     getDescriptor,

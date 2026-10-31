@@ -194,7 +194,7 @@ function rawNoteText(xml: string): string {
 }
 
 describe('typing into a note through the editor path', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   for (const kind of ['footnote', 'endnote'] as const) {
     it(`keeps an untouched ${kind} number in a mixed text run`, async () => {

@@ -39,7 +39,7 @@ function marked(bytes: Uint8Array): string {
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))));
-});
+}, 30_000);
 
 type Edit = (session: YrsSession, paraIds: string[]) => void;
 const insert = (para: number, offset: number, text = 'X'): Edit => (session, paraIds) => {

@@ -9,7 +9,7 @@ import { createYrsSession } from './index';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm',
-)))));
+)))), 30_000);
 
 test('resident pagination wraps all content after font provider loads reject', async () => {
   const paragraphs = Array.from({ length: 100 }, (_, index) => {

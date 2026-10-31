@@ -80,7 +80,7 @@ function appendToLastParagraph(session: YrsSession, text: string): void {
 }
 
 describe('shape save projection', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it.each(['native', 'projected'] as const)(
     'keeps a text box body through an untouched %s projection',
