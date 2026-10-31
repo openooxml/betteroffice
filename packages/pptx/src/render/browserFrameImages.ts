@@ -1,6 +1,6 @@
 import { isTiff } from '../../../../shared/media';
 import type { CanvasImageResolver } from './canvas';
-import { decodeBrowserPresentationImage } from './browserImage';
+import { decodeBrowserPresentationImage, type PresentationImageDecodeOptions } from './browserImage';
 
 interface CachedImage {
   promise: Promise<CanvasImageSource | null>;
@@ -10,7 +10,7 @@ interface CachedImage {
   closed: boolean;
 }
 
-export function browserFrameImages(): {
+export function browserFrameImages(options: PresentationImageDecodeOptions = {}): {
   resolve(frame: { media: ReadonlyMap<string, Uint8Array> }): CanvasImageResolver & { release(): void };
   dispose(): void;
 } {
@@ -35,7 +35,7 @@ export function browserFrameImages(): {
           const entry: CachedImage = {
             promise: Promise.resolve(null), source: null, references: 0, retained: true, closed: false,
           };
-          entry.promise = decodeBrowserPresentationImage(bytes, 'Unable to decode slide image').catch(() => null)
+          entry.promise = decodeBrowserPresentationImage(bytes, 'Unable to decode slide image', options).catch(() => null)
             .then((source) => { entry.source = source; close(entry); return source; });
           image = entry;
           cache.set(id, image);
