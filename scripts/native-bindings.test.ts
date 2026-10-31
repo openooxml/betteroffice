@@ -371,6 +371,11 @@ describe('native package release wiring', () => {
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
     expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
+    const fonts = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fonts.run).toContain("bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build");
+    expect(fonts.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(fonts.shell).toBe('bash');
+    expect(steps.indexOf(fonts)).toBeLessThan(steps.indexOf(testing));
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
     expect(steps.indexOf(loader)).toBeGreaterThan(steps.indexOf(testing));
   });
@@ -404,6 +409,8 @@ describe('native package release wiring', () => {
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
     expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeGreaterThan(-1);
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
     const nativeDeclarations = job.steps.find((step: any) => step.name === 'Check native declarations');
     expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
     expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');

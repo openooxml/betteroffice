@@ -464,6 +464,8 @@ jobs:
 
       - name: Build and test
         run: |
+          bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build
+          (cd packages/fonts && bunx tsup)
           for package in $(node scripts/native-bindings.mjs --paths); do
             if [ "$package" = "bindings/xlsx-native" ] || [ "$package" = "bindings/pptx-native" ]; then
               bunx napi build --cwd "$package" --platform --release -- --locked

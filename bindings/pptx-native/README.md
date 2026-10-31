@@ -30,5 +30,8 @@ export async function updatePresentation(bytes: Uint8Array): Promise<Uint8Array>
 }
 ```
 
+Default fonts need no setup: the Latin, international and CJK font packs install with this
+package and each face is read from disk the first time a slide needs it; nothing is fetched.
+
 Browsers need the WebAssembly engine: the `browser` export condition of this package throws, so
 use `@betteroffice/pptx` there.

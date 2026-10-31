@@ -25,7 +25,7 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   minify: true,
-  external: ['@betteroffice/fonts'],
+  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin'],
   esbuildPlugins: [
     packageBoundary(fileURLToPath(new URL(`${source}/`, import.meta.url))),
     nativeEnginePlugin('pptx'),

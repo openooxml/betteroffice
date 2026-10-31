@@ -1,5 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, spyOn, test } from 'bun:test';
+import { copyDecodedFace, fontBytes } from '../../shared/office-session/fontDecoder';
 
 const manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 const wasmManifest = JSON.parse(readFileSync(new URL('../../packages/pptx/package.json', import.meta.url), 'utf8'));
@@ -20,7 +22,12 @@ describe('@betteroffice/pptx-native', () => {
         import: conditions.import,
       });
     }
-    expect(manifest.dependencies).toEqual(wasmManifest.dependencies);
+    expect(manifest.dependencies).toEqual({
+      ...wasmManifest.dependencies,
+      '@betteroffice/fonts-cjk': 'workspace:^',
+      '@betteroffice/fonts-intl': 'workspace:^',
+      '@betteroffice/fonts-latin': 'workspace:^',
+    });
     expect(manifest.sideEffects).toEqual(wasmManifest.sideEffects);
     expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({ type: 'module' });
   });
@@ -75,6 +82,27 @@ describe('@betteroffice/pptx-native', () => {
     } finally {
       instantiate.mockRestore();
       compile.mockRestore();
+    }
+  });
+
+  test('loads every font pack from the installed packages without fetching', async () => {
+    const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
+    try {
+      const fonts = await import(Bun.resolveSync('@betteroffice/fonts', fileURLToPath(new URL('.', import.meta.url)))) as
+        typeof import('../../packages/fonts/src/index');
+      const { decodeFontFace } = await import('./js/engine');
+      const source = fonts.createFontProvider(undefined, {
+        decoder: async (bytes, { codec, dict, maxOutput }) =>
+          copyDecodedFace(decodeFontFace(fontBytes(bytes), codec, dict === undefined ? undefined : fontBytes(dict), maxOutput)),
+      });
+      for (const family of ['Carlito', 'Noto Sans Devanagari', 'Noto Sans JP']) {
+        const face = fonts.BUNDLED_FONTS.find((face) => face.family === family && face.weight === 400 && face.style === 'normal')!;
+        const bytes = await (source.resolve(family, false, false) ?? source.resolveFamily(family, false, false))!();
+        expect(bytes.byteLength).toBe(face.byteLength);
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
     }
   });
 
