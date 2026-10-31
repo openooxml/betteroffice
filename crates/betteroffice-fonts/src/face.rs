@@ -29,6 +29,7 @@ impl fmt::Display for FaceError {
     not(target_arch = "wasm32"),
     not(feature = "wasm"),
     feature = "build",
+    feature = "manager",
     test
 ))]
 impl std::error::Error for FaceError {

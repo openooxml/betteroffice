@@ -3,6 +3,7 @@
         target_arch = "wasm32",
         feature = "wasm",
         not(feature = "build"),
+        not(feature = "manager"),
         not(test)
     ),
     no_std
@@ -20,7 +21,13 @@ use core::ptr::{self, NonNull};
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod allocator;
+#[cfg(feature = "manager")]
+pub mod catalog;
 mod face;
+#[cfg(feature = "manager")]
+mod manager;
+#[cfg(feature = "manager")]
+mod resolution;
 #[cfg(any(target_arch = "wasm32", test))]
 mod rust_zstd;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
@@ -31,6 +38,13 @@ pub use face::{
     DEFAULT_MAX_OUTPUT, FaceError, MAX_OUTPUT_LIMIT, decode_font_face, decode_font_face_js,
     max_output_from_f64,
 };
+
+#[cfg(feature = "manager")]
+pub use catalog::BundledFontFace;
+#[cfg(feature = "manager")]
+pub use manager::*;
+#[cfg(feature = "manager")]
+pub use resolution::*;
 
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
@@ -111,6 +125,7 @@ impl fmt::Display for DecodeError {
     not(target_arch = "wasm32"),
     not(feature = "wasm"),
     feature = "build",
+    feature = "manager",
     test
 ))]
 impl std::error::Error for DecodeError {}
