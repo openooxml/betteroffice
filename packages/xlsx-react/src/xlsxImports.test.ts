@@ -132,12 +132,13 @@ for (const entry of ['packages/xlsx/src/session/client.ts', 'packages/xlsx/src/s
       'packages/xlsx/src/session/collaborationHost.ts', 'packages/xlsx/src/session/collaborationClient.ts',
       'packages/xlsx-react/src/presence/Presence.tsx', 'packages/xlsx-react/src/presence/PresenceView.tsx',
       'packages/xlsx-react/src/worker/PeerlessPresence.tsx',
-      'packages/xlsx-react/src/worker/usePeerlessPresence.ts']) expect(eager.has(path)).toBe(false);
+      'packages/xlsx-react/src/worker/usePeerlessPresence.ts', 'packages/xlsx-react/src/presence/awarenessView.ts'])
+      expect(eager.has(path)).toBe(false);
     expect(deferred.has(entry.endsWith('/worker.ts') ? 'packages/xlsx/src/session/collaborationHost.ts'
       : 'packages/xlsx/src/collaboration/asyncReplica.ts')).toBe(true);
     if (entry.includes('xlsx-react')) {
       expect(deferred.has('packages/xlsx-react/src/presence/PresenceView.tsx')).toBe(true);
-      expect(deferred.has('packages/xlsx/src/collaboration/awareness.ts')).toBe(true);
+      expect(deferred.has('packages/xlsx-react/src/presence/awarenessView.ts')).toBe(true);
       expect(deferred.has('packages/xlsx-react/src/worker/usePeerlessPresence.ts')).toBe(true);
     }
   });
@@ -155,4 +156,31 @@ test('the peerless editor has no static runtime imports of the legacy worker ses
   };
   visit(resolve(root, 'packages/xlsx-react/src/worker/XlsxPeerlessWorkerEditor.tsx'));
   expect(legacy.filter((path) => seen.has(path)).map((path) => relative(root, path))).toEqual([]);
+});
+
+function importsCollaborationAtRuntime(path: string): boolean {
+  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
+  return source.statements.some((node) => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text === '@betteroffice/xlsx/collaboration' && !node.importClause?.isTypeOnly) {
+      const bindings = node.importClause?.namedBindings;
+      return !!node.importClause?.name || !bindings || !ts.isNamedImports(bindings) ||
+        bindings.elements.some((entry) => !entry.isTypeOnly);
+    }
+    return ts.isExportDeclaration(node) && !node.isTypeOnly && !!node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === '@betteroffice/xlsx/collaboration';
+  });
+}
+
+test('lazy presence chunks import no collaboration runtime', () => {
+  const seen = new Set<string>();
+  const visit = (path: string): void => {
+    if (seen.has(path)) return;
+    seen.add(path);
+    for (const imported of runtimeImports(path, false)) visit(imported);
+  };
+  for (const path of ['presence/PresenceView.tsx', 'worker/PeerlessPresence.tsx']) {
+    visit(resolve(root, `packages/xlsx-react/src/${path}`));
+  }
+  expect([...seen].filter(importsCollaborationAtRuntime).map((path) => relative(root, path))).toEqual([]);
 });

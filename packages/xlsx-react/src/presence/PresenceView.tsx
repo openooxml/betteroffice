@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { GridMeta, MergedRange } from '@betteroffice/xlsx';
 import type { TFunction } from '@betteroffice/xlsx-i18n';
+import type { AwarenessPeer } from '@betteroffice/xlsx/collaboration';
 import {
   AWARENESS_LABEL_DURATION_MS,
   normalizeAwarenessColor,
   resolveAwarenessCursor,
-  type AwarenessPeer,
-} from '@betteroffice/xlsx/collaboration';
+} from './awarenessView';
 
 const MAX_PRESENCE_CHIPS = 8;
 const MAX_REMOTE_SELECTIONS = 32;
