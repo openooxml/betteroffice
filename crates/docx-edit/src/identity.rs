@@ -954,6 +954,9 @@ impl StoryStateCache {
                     && unit.digest == seed.digest
                     && unit.content_digest == seed.content_digest
                 {
+                    if unit.same_projection(seed) {
+                        unit.projection = Arc::clone(&seed.projection);
+                    }
                     unit.segments = None;
                 }
             }
@@ -982,6 +985,12 @@ impl StoryStateCache {
 /// One paragraph's segments in a story, or the segments after its last pilcrow.
 #[derive(Clone, Debug, PartialEq)]
 struct UnitState {
+    projection: Arc<UnitProjection>,
+    segments: Option<Vec<crate::StorySegment>>,
+}
+
+#[derive(Debug, PartialEq)]
+struct UnitProjection {
     /// The session key of the pilcrow closing the unit.
     key: Option<String>,
     /// Digest of all the unit's segments.
@@ -993,20 +1002,20 @@ struct UnitState {
     section_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
-    segments: Option<Vec<crate::StorySegment>>,
     markers: Vec<(u32, String, bool)>,
+}
+
+impl std::ops::Deref for UnitState {
+    type Target = UnitProjection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.projection
+    }
 }
 
 impl UnitState {
     fn same_projection(&self, other: &Self) -> bool {
-        self.key == other.key
-            && self.digest == other.digest
-            && self.blocks == other.blocks
-            && self.block_content == other.block_content
-            && self.content_digest == other.content_digest
-            && self.section_digest == other.section_digest
-            && self.inline == other.inline
-            && self.markers == other.markers
+        self.projection == other.projection
     }
 
     fn has_blocks(&self) -> bool {
@@ -1623,15 +1632,17 @@ fn story_fingerprint_within(
                 start = position;
                 block_positions.clear();
                 units.push(UnitState {
-                    key: Some(properties.para_id.clone()),
-                    digest: std::mem::take(&mut unit).finish(),
-                    blocks: std::mem::take(&mut blocks).finalize().into(),
-                    block_content: std::mem::take(&mut block_content),
-                    content_digest: std::mem::take(&mut inline_content).finalize().into(),
-                    section_digest: std::mem::take(&mut section_content).finalize().into(),
-                    inline: std::mem::take(&mut inline),
+                    projection: Arc::new(UnitProjection {
+                        key: Some(properties.para_id.clone()),
+                        digest: std::mem::take(&mut unit).finish(),
+                        blocks: std::mem::take(&mut blocks).finalize().into(),
+                        block_content: std::mem::take(&mut block_content),
+                        content_digest: std::mem::take(&mut inline_content).finalize().into(),
+                        section_digest: std::mem::take(&mut section_content).finalize().into(),
+                        inline: std::mem::take(&mut inline),
+                        markers: std::mem::take(&mut markers),
+                    }),
                     segments: Some(std::mem::take(&mut unit_segments)),
-                    markers: std::mem::take(&mut markers),
                 });
             }
             crate::SegmentContent::OtherEmbed { kind, .. }
@@ -1656,15 +1667,17 @@ fn story_fingerprint_within(
     let empty: [u8; 32] = Sha256::new().finalize().into();
     if trailing != empty {
         units.push(UnitState {
-            key: None,
-            digest: trailing,
-            blocks: blocks.finalize().into(),
-            block_content,
-            content_digest: inline_content.finalize().into(),
-            section_digest: section_content.finalize().into(),
-            inline,
+            projection: Arc::new(UnitProjection {
+                key: None,
+                digest: trailing,
+                blocks: blocks.finalize().into(),
+                block_content,
+                content_digest: inline_content.finalize().into(),
+                section_digest: section_content.finalize().into(),
+                inline,
+                markers,
+            }),
             segments: Some(unit_segments),
-            markers,
         });
     }
     let mut hasher = Sha256::new();
@@ -4436,6 +4449,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn edited_save_states_only_retain_changed_unit_segments_and_projections() {
+        let doc = save_plan_doc();
+        let source = doc.source_index().unwrap();
+        let seeded = source.seed_states();
+        let seeded_units = units_by_key(seeded);
+        assert!(seeded["body"].units.len() > 1);
+        assert!(
+            seeded["body"]
+                .units
+                .iter()
+                .any(|unit| !unit.block_content.is_empty())
+        );
+        let edited = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let mut previous = None;
+        for _ in 0..2 {
+            let plan = doc.paragraph_save_plan();
+            if let Some(previous) = &previous {
+                assert_eq!(previous, &plan);
+            }
+            previous = Some(plan);
+            let cache = doc.save_story_states.lock().unwrap();
+            let body = &cache.entries["body"];
+            assert!(!body.pending_trim);
+            let retained: Vec<_> = body
+                .state
+                .units
+                .iter()
+                .filter(|unit| {
+                    unit.segments
+                        .as_ref()
+                        .is_some_and(|segments| !segments.is_empty())
+                })
+                .map(|unit| unit.key.as_deref().unwrap())
+                .collect();
+            assert_eq!(retained, [edited.as_str()]);
+            for unit in &body.state.units {
+                let key = unit.key.as_deref().unwrap();
+                let (_, seed) = seeded_units[key];
+                if key == edited {
+                    assert!(!Arc::ptr_eq(&unit.projection, &seed.projection));
+                } else {
+                    assert!(unit.segments.is_none());
+                    assert!(Arc::ptr_eq(&unit.projection, &seed.projection));
+                }
+            }
+        }
+        save_plans_agree(&doc);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn progress_hooks_can_reenter_save_planning_without_publishing_cleared_states() {
@@ -5046,10 +5111,11 @@ mod tests {
         ]);
         let (_, units) = story_fingerprint(&doc, "body", &comments).unwrap();
         assert_eq!(units.len(), 2);
-        for unit in units {
+        for mut unit in units {
+            let segments = unit.segments.take().unwrap();
             assert_eq!(
                 run_size_fingerprint(
-                    unit.segments.unwrap().into_iter(),
+                    segments.into_iter(),
                     unit.markers
                         .iter()
                         .map(|(at, key, end)| (*at, key.as_str(), *end)),
