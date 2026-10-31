@@ -462,6 +462,8 @@ describe('native package release wiring', () => {
       'scripts/native-engine.ts',
       'packages/xlsx/src/**',
       'packages/xlsx/package.json',
+      'packages/pptx/src/**',
+      'packages/pptx/package.json',
       'shared/**',
       'scripts/version-packages.mjs',
       '.github/workflows/native-packages.yml',
