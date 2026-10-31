@@ -1,6 +1,6 @@
 import { isTiff } from '../../../../shared/media';
 import type { CanvasImageResolver } from './canvas';
-import { decodeBrowserPresentationImage, type PresentationImageDecodeOptions } from './browserImage';
+import { decodeBrowserPresentationImage } from './browserImage';
 
 interface CachedImage {
   promise: Promise<CanvasImageSource | null>;
@@ -10,7 +10,7 @@ interface CachedImage {
   closed: boolean;
 }
 
-export function browserFrameImages(options: PresentationImageDecodeOptions = {}): {
+export function browserFrameImages(options: { maxDimension?: number } = {}): {
   resolve(frame: { media: ReadonlyMap<string, Uint8Array> }): CanvasImageResolver & { release(): void };
   dispose(): void;
 } {
