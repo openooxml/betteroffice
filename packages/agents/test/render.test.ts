@@ -81,6 +81,32 @@ test('headless default preview keeps Latin native beside an uncovered emoji', as
   } finally { build.mockRestore(); doc.close(); }
 });
 
+test('headless default preview wraps an unbundled Aptos body beside a Calibri heading', async () => {
+  const zip = await JSZip.loadAsync(await fixture());
+  const body = 'Aptos body text needs a real fallback face so this paragraph wraps within the page. '.repeat(12);
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+    <w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:sz w:val="32"/></w:rPr><w:t>Calibri heading</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/></w:rPr><w:t xml:space="preserve">${body}</w:t></w:r></w:p>
+    <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+  </w:body></w:document>`);
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: renderDocxPage });
+  const build = spyOn(doc.session, 'buildDisplayListJson');
+  try {
+    await renderDocxPage(doc.session, 1);
+    const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
+    expect(input.fontChains['calibri|1|0']?.length).toBeGreaterThan(0);
+    expect(input.fontChains['aptos|0|0']?.length).toBeGreaterThan(0);
+    const display = JSON.parse(build.mock.results[0]!.value as string) as DisplayList;
+    const runs = display.pages[0]!.primitives.filter(
+      primitive => primitive.kind === 'glyphRun' && primitive.fallbackFont?.includes('Aptos'),
+    );
+    expect(runs.length).toBeGreaterThan(2);
+    const baselines = new Set(runs.flatMap(primitive => primitive.kind === 'glyphRun'
+      ? primitive.glyphs.map(glyph => glyph.y) : []));
+    expect(baselines.size).toBeGreaterThan(2);
+  } finally { build.mockRestore(); doc.close(); }
+});
+
 test('renders embedded image pixels in live and proposed previews', async () => {
   const image = createCanvas(32, 32);
   const context = image.getContext('2d');

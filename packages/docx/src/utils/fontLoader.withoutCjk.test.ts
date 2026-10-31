@@ -29,7 +29,7 @@ const fontFace = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
 const fontSet = Object.getOwnPropertyDescriptor(document, 'fonts');
 const getContext = HTMLCanvasElement.prototype.getContext;
 
-async function prepareCjk() {
+async function prepareCjk(family = 'Calibri', text = '中') {
   const { createRustMeasureSource } = await import('../layout/measure/rustMeasureSource');
   const wasm = await import('../layout/wasm');
   await wasm.preloadLayoutWasm();
@@ -39,15 +39,18 @@ async function prepareCjk() {
     clearFonts() {},
   } });
   const requirements: import('../layout/measure/rustMeasureSource').ResidentFontRequirement[] = [{
-    key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false, scripts: ['cjk-sc'],
+    key: `${family.toLowerCase()}|0|0`, family, bold: false, italic: false,
+    scripts: text.includes('中') ? ['cjk-sc'] : [],
   }];
   await source.prepareFontRequirements(requirements);
   const config = source.measurementConfigForRequirements(requirements)!;
   return {
+    config,
     registered,
-    measure: () => JSON.parse(wasm.measureParagraphJson(JSON.stringify({
+    measure: (fontChains = config.fontChains) => JSON.parse(wasm.measureParagraphJson(JSON.stringify({
       ...config,
-      block: { kind: 'paragraph', runs: [{ kind: 'text', text: '中', fontFamily: 'Calibri' }] },
+      fontChains,
+      block: { kind: 'paragraph', runs: [{ kind: 'text', text, fontFamily: family }] },
       maxWidth: 400,
     }))),
   };
@@ -135,6 +138,16 @@ test('a missing CJK module leaves measurement on the no-provider path', async ()
   expect(registered.length).toBeGreaterThan(0);
   expect(registered.every((bytes) => new DataView(bytes.buffer, bytes.byteOffset).getUint32(0) !== 0x4f54544f)).toBe(true);
 });
+
+for (const text of ['abc 123', '中 abc']) {
+  test(`missing CJK keeps SimSun ${JSON.stringify(text)} on the no-provider measurement path`, async () => {
+    const { config, measure, registered } = await prepareCjk('SimSun', text);
+    expect(() => measure({})).toThrow(/UNSUPPORTED/);
+    expect(() => measure()).toThrow(/UNSUPPORTED/);
+    expect(config.fontChains).toEqual({});
+    expect(registered).toEqual([]);
+  });
+}
 
 test('missing CJK remains absent when Google is disabled', async () => {
   setGoogleFontsEnabled(false);

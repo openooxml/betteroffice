@@ -1,7 +1,9 @@
 import { createCanvas, loadImage, Path2D } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
+import { createFontProvider } from '@betteroffice/fonts';
+import { decodeFontFace } from '@betteroffice/docx/yrs';
 import { buildResidentRegionLayoutRequest, computeLayout, getLayoutKernelInputs } from '@betteroffice/docx/editor';
-import { createRustMeasureSource, resolveDefaultFontProvider, type ResidentFontRequirement } from '@betteroffice/docx/layout';
+import { createRustMeasureSource, hasConfiguredFontSource, resolveDefaultFontProvider, type ResidentFontRequirement } from '@betteroffice/docx/layout';
 import { extractEmbeddedFontFaces } from '@betteroffice/docx/utils';
 import { buildRustDisplayList, drawDisplayPage, GlyphCache } from '@betteroffice/docx/layout/render';
 import { DocumentToolError, type DocumentRenderer } from './types';
@@ -9,7 +11,10 @@ import { DocumentToolError, type DocumentRenderer } from './types';
 export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   const document = session.materializeDocx();
   if (!document) throw new DocumentToolError('UNSUPPORTED', 'Rendering requires a session opened from DOCX bytes.');
-  const source = createRustMeasureSource({ engine: session, bundled: await resolveDefaultFontProvider() });
+  const bundled = hasConfiguredFontSource()
+    ? await resolveDefaultFontProvider()
+    : createFontProvider(undefined, { decoder: decodeFontFace });
+  const source = createRustMeasureSource({ engine: session, bundled });
   source.setEmbeddedFaces(await extractEmbeddedFontFaces(document));
   const request = buildResidentRegionLayoutRequest(document, 0, {});
   const requirements = JSON.parse(session.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];

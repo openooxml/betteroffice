@@ -59,6 +59,27 @@ function implicitFontProvider(
       return bytes;
     }, loader);
   };
+  const checkedFamilyFallback = (
+    loader: BundledFontLoader | undefined,
+    family: string,
+    bold: boolean,
+    italic: boolean
+  ): BundledFontLoader | undefined => {
+    const face = manager.resolveMetricCompatFace(family, bold, italic) ??
+      manager.resolveBundledFamilyFace(family, bold, italic) ??
+      manager.resolveBundledFamilyFace(family, false, false);
+    if (!loader || !face?.script) return loader;
+    const primary = checked(
+      provider.resolve(family, bold, italic) ?? provider.resolveFamily(family, bold, italic) ??
+        provider.resolveFamily(family, false, false),
+      face
+    );
+    return Object.assign(async () => {
+      if (!primary) throw new ImplicitFontAbsentError(face.family);
+      await primary();
+      return loader();
+    }, loader);
+  };
   const implicit: BundledFontProvider = {
     ...provider,
     resolve: (family, bold, italic) => checked(
@@ -71,13 +92,17 @@ function implicitFontProvider(
     resolveScriptFallback: (script, bold, italic) => checked(
       provider.resolveScriptFallback(script, bold, italic), manager.resolveScriptFallbackFace(script, bold, italic)
     ),
-    resolveGlyphFallback: (family, bold, italic, office) => providesFamily(family) ? checked(
-      provider.resolveGlyphFallback?.(family, bold, italic, office),
-      manager.resolveGlyphFallbackFace(family, bold, italic, office)
+    resolveGlyphFallback: (family, bold, italic, office) => providesFamily(family) ? checkedFamilyFallback(
+      checked(
+        provider.resolveGlyphFallback?.(family, bold, italic, office),
+        manager.resolveGlyphFallbackFace(family, bold, italic, office)
+      ), family, bold, italic
     ) : undefined,
-    resolveLastResort: (family, bold, italic, office) => providesFamily(family) ? checked(
-      provider.resolveLastResort(family, bold, italic, office),
-      manager.resolveLastResortFace(family, bold, italic, office)
+    resolveLastResort: (family, bold, italic, office) => providesFamily(family) ? checkedFamilyFallback(
+      checked(
+        provider.resolveLastResort(family, bold, italic, office),
+        manager.resolveLastResortFace(family, bold, italic, office)
+      ), family, bold, italic
     ) : undefined,
   };
   implicitProviders.add(implicit);
