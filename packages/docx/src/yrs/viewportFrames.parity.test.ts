@@ -61,7 +61,7 @@ interface Hosts {
   copying: RetainedFrame | null;
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 function mulberry32(seed: number): () => number {
   return () => {

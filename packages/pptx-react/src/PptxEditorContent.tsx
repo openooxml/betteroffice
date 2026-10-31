@@ -585,6 +585,20 @@ export function PptxEditorContent({
   }, [readOnly]);
 
   onReadyRef.current = onReady;
+  // the opened presentation's onReady, released by its first painted slide.
+  const pendingReadyRef = useRef<{ handle: PresentationHandle; fire: () => void } | null>(null);
+  const releaseReady = useCallback((painted: PresentationHandle | null) => {
+    const ready = pendingReadyRef.current;
+    if (!ready || ready.handle !== painted || painted !== handleRef.current) return;
+    pendingReadyRef.current = null;
+    ready.fire();
+  }, []);
+  const shownHandleRef = useRef<PresentationHandle | null>(null);
+  const releaseShown = useCallback(() => {
+    const host = canvasHostRef.current;
+    if (!host || host.getClientRects().length === 0) return;
+    releaseReady(shownHandleRef.current);
+  }, [releaseReady]);
   readOnlyRef.current = readOnly;
   initialSlideRef.current = initialSlide;
   onChangeRef.current = onChange;
@@ -1038,7 +1052,7 @@ export function PptxEditorContent({
             if (origin === 'remote') refreshAt(undefined, true, true);
           });
           const requestedSlide = initialSlideRef.current;
-          refreshAt(
+          const initial = refreshAt(
             worker ? worker.active : typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
               ? requestedSlide - 1
               : 0,
@@ -1047,7 +1061,7 @@ export function PptxEditorContent({
           );
           setLoading(false);
           if (!worker) setCollaborationReplica(handle);
-          setOpenedHandle(handle);
+          if (worker) setOpenedHandle(handle);
           const opened = handle;
           const api: PptxEditorApi = {
             clearSelection,
@@ -1088,7 +1102,22 @@ export function PptxEditorContent({
             () => readOnlyRef.current);
             owner.onFirstPaint = () => workerReadyRef.current?.(workerApi);
             setBackendRevision((value) => value + 1);
-          } else onReadyRef.current?.(api);
+          } else {
+            pendingReadyRef.current = {
+              handle: opened,
+              fire: () => {
+                if (disposed || handleRef.current !== opened) return;
+                try {
+                  onReadyRef.current?.(api);
+                } catch (value) {
+                  reportError(value);
+                  return;
+                }
+                setOpenedHandle(opened);
+              },
+            };
+            if (!initial) releaseReady(opened);
+          }
         } catch (value) {
           setLoading(false);
           reportError(value);
@@ -1102,6 +1131,7 @@ export function PptxEditorContent({
     );
     return () => {
       disposed = true;
+      if (pendingReadyRef.current?.handle === handle) pendingReadyRef.current = null;
       unsubscribeUpdates();
       if (worker) {
         const retired = worker;
@@ -1136,6 +1166,7 @@ export function PptxEditorContent({
     refresh,
     readOnlyRefusal,
     refreshAt,
+    releaseReady,
     reportError,
     selectText,
     setActiveTool,
@@ -1200,12 +1231,18 @@ export function PptxEditorContent({
     const canvas = canvasRef.current;
     const painted = model;
     const frame = backend ? workerFrame?.displayList : painted?.frame;
+    const owner = handleRef.current;
+    if (!backend && painted && !frame) releaseReady(owner);
     if (!canvas || !painted || !frame) return;
     if (backend && (!worker || !workerFrame || !worker.currentPaint(workerFrame, workerNavigation!))) return;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      if (!backend) releaseReady(owner);
+      return;
+    }
     const dpr = window.devicePixelRatio || 1;
     presentFrame(null);
+    shownHandleRef.current = null;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     let cancelled = false;
     const images = worker && workerFrame ? worker.images.resolve(workerFrame) : null;
@@ -1218,9 +1255,15 @@ export function PptxEditorContent({
         const { snapshot, slideIndex, version } = painted;
         presentFrame({ frame, snapshot, slideIndex, version, scale, canvas });
         if (worker && workerFrame) worker.didPaint(workerFrame, workerNavigation!);
+        if (!backend) {
+          shownHandleRef.current = owner;
+          releaseShown();
+        }
       },
       (value: unknown) => {
-        if (current()) reportError(value);
+        if (!current()) return;
+        reportError(value);
+        if (!backend) releaseReady(owner);
       }
     );
     activePaintRef.current = images ? painting.finally(() => images.release()) : painting;
@@ -1228,7 +1271,11 @@ export function PptxEditorContent({
       cancelled = true;
     };
   }, [backend, worker, workerFrame, workerNavigation, workerSequence, decodeImageError, model?.frame,
-    model?.snapshot, model?.slideIndex, model?.version, presentFrame, reportError, resolveSlideImage, scale]);
+    model?.snapshot, model?.slideIndex, model?.version, presentFrame, releaseReady, releaseShown, reportError, resolveSlideImage, scale]);
+
+  useEffect(() => {
+    if (!backend) releaseShown();
+  }, [backend, viewport, releaseShown]);
 
   useEffect(() => {
     if (backend) return;

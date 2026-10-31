@@ -304,17 +304,44 @@ function dropNulls(value: unknown): unknown {
   return result;
 }
 
-function stableStringify(value: unknown): string {
+const SIMPLE_JSON_KEY = /^[A-Za-z0-9_$]+$/;
+const NON_FORMATTING_ATTRS = new Set(['hyperlink', 'ins', 'del']);
+
+/** @internal */
+export function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const object = asObject(value);
-  if (object) {
-    return `{${Object.keys(object)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`)
-      .join(',')}}`;
+  if (Array.isArray(value)) {
+    let result = '[';
+    const length = value.length;
+    for (let index = 0; index < length; index += 1) {
+      if (index > 0) result += ',';
+      if (index in value) {
+        const entry = stableStringify(value[index]);
+        if (entry !== undefined) result += entry;
+      }
+    }
+    return result + ']';
   }
+  const object = asObject(value);
+  if (object) return stableStringifyObject(object);
   return JSON.stringify(value);
+}
+
+function stableStringifyObject(value: Attrs, omitted?: ReadonlySet<string>): string {
+  let result = '{';
+  let separator = '';
+  for (const key of Object.keys(value).sort()) {
+    if (omitted?.has(key)) continue;
+    const quotedKey = SIMPLE_JSON_KEY.test(key) ? '"' + key + '"' : JSON.stringify(key);
+    result += separator + quotedKey + ':' + stableStringify(value[key]);
+    separator = ',';
+  }
+  return result + '}';
+}
+
+/** @internal */
+export function stableStringifyWithout(value: Attrs, omitted: ReadonlySet<string>): string {
+  return stableStringifyObject(value, omitted);
 }
 
 function formattingAttrs(attributes: Attrs): Attrs {
@@ -514,7 +541,17 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
   return result as TextFormatting;
 }
 
-function runContentForText(text: string, formatting: TextFormatting): RunContent[] {
+const SPECIAL_RUN_TEXT = /[\u00ad\u2011\uf000-\uf8ff]/;
+
+/** @internal */
+export function runContentForText(
+  text: string,
+  formatting: TextFormatting | (() => TextFormatting)
+): RunContent[] {
+  if (!SPECIAL_RUN_TEXT.test(text)) {
+    return text ? [{ type: 'text', text }] : [];
+  }
+  if (typeof formatting === 'function') formatting = formatting();
   const content: RunContent[] = [];
   let plainText = '';
   const flushText = (): void => {
@@ -561,7 +598,7 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
   return {
     type: 'run',
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
-    content: runContentForText(text, directFormatting(attributes)),
+    content: runContentForText(text, () => directFormatting(attributes)),
   };
 }
 
@@ -1458,7 +1495,7 @@ function buildParagraphContent(
 
     flushHyperlink();
     if (item.kind === 'text') {
-      const key = stableStringify(formattingAttrs(item.attributes));
+      const key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
       const nextRun = createTextRun(item.text, item.attributes, format);
       if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
       else {
@@ -1707,7 +1744,7 @@ function restoreOriginalRuns(
     while (remaining > 0) {
       const item = items[itemIndex];
       if (item?.kind !== 'text') return fallback();
-      if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
+      if (stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS) !== stableStringify(expected)) {
         return fallback();
       }
       const available = item.text.length - itemOffset;

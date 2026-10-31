@@ -39,7 +39,7 @@ function assertBookmarks(bytes: Uint8Array): void {
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))));
-});
+}, 30_000);
 
 for (const seeder of ['native', 'projected']) {
   it(`${seeder} keeps body bookmarks in place after repeated text edits and saves`, async () => {

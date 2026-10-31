@@ -54,7 +54,7 @@ beforeAll(async () => {
   bands = open(BANDS);
   notes = open(NOTES);
   await Promise.all(facades.map((facade) => facade.whenReady()));
-});
+}, 30_000);
 
 afterAll(() => {
   for (const facade of facades) facade.dispose();

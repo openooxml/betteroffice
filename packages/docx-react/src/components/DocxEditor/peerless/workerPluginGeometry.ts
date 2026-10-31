@@ -181,9 +181,10 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const reserved = (owner: string, id: string, measured: ReturnType<typeof measure>): { result: DocxAnchorGeometryResult } | { hide: Read } => {
       if (!shown()) return { result: unavailable() };
       const sent = reservations();
+      const item = sent?.sets.find(set => set.owner === owner)?.items.find(entry => entry.id === id);
+      if (sent?.key !== undefined && !item) return { result: anchorFailure('missing-target', 'The reservation did not resolve') };
       if (sent ? sent.key === undefined || (frame.reservations?.key !== sent.key && !sameReservationOwner(laidReservations ? { payload: laidReservations } : null, { payload: sent }, owner))
         : frame.reservations !== undefined) return { result: unavailable() };
-      const item = sent?.sets.find(set => set.owner === owner)?.items.find(entry => entry.id === id);
       if (!item) return { result: anchorFailure('missing-target', 'The reservation did not resolve') };
       return item.kind === 'hide' ? { hide: item.anchor } : { result: placeReservation(repeatedOf(measured), owner, id) };
     };
