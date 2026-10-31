@@ -6531,6 +6531,58 @@ mod tests {
     }
 
     #[test]
+    fn edited_marker_font_wins_over_the_numbering_theme_font() {
+        let fonts = r#"<w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>"#;
+        let numbering = format!(
+            r#"<w:numbering {}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+            crate::seed::fixture::NS
+        );
+        let bytes = crate::seed::fixture::Package::new(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
+        )
+        .numbering(&numbering)
+        .part(
+            "theme/theme1.xml",
+            "theme",
+            "theme",
+            "theme",
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#,
+        )
+        .bytes();
+        for preview in [false, true] {
+            let doc = EditingDoc::new(75305);
+            if preview {
+                assert!(crate::seed::seed_docx_preview(&doc, &bytes, 1).unwrap());
+            } else {
+                crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+            }
+            let marker_font = |doc: &EditingDoc| {
+                let blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+                let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                    panic!("missing paragraph");
+                };
+                let BlockId::Str(id) = &paragraph.id else {
+                    panic!("paragraph without a string id");
+                };
+                (
+                    id.clone(),
+                    paragraph
+                        .attrs
+                        .as_ref()
+                        .unwrap()
+                        .list_marker_font_family
+                        .clone(),
+                )
+            };
+            let (para_id, inherited) = marker_font(&doc);
+            assert_eq!(inherited.as_deref(), Some("Calibri"));
+            doc.set_paragraph_attr(&para_id, "listMarkerFontFamily", Any::from("Courier New"))
+                .unwrap();
+            assert_eq!(marker_font(&doc).1.as_deref(), Some("Courier New"));
+        }
+    }
+
+    #[test]
     fn hard_break_spacing_suppression_clears_line_units_without_changing_authored_values() {
         let values = BTreeMap::from([
             ("spaceBeforeLines".to_owned(), Any::Number(200.0)),
