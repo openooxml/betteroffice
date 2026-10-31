@@ -80,7 +80,7 @@ describe('sortWasmExportDeclarations', () => {
     const files = ['docx', 'xlsx', 'pptx', 'vsdx'].flatMap((pkg) =>
       generatedDeclarations(resolve(ROOT, 'packages', pkg, 'src/wasm/generated'))
     );
-    expect(files.length).toBe(14);
+    expect(files.length).toBe(16);
     for (const file of files) {
       const text = readFileSync(file, 'utf8');
       expect({ file, text: sortWasmExportDeclarations(text) }).toEqual({ file, text });

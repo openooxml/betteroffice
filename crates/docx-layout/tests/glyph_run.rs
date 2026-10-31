@@ -405,11 +405,13 @@ fn browser_painted_matching_arial_keeps_its_horizontal_scale() {
 #[test]
 fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
     let mut store = FontStore::new();
-    let base = store
-        .register(
-            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf").to_vec(),
-        )
-        .unwrap();
+    let font = betteroffice_fonts::decode(
+        include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf.zst"),
+        None,
+        64 << 20,
+    )
+    .unwrap();
+    let base = store.register(font).unwrap();
     for family in [
         "MS Mincho",
         "ＭＳ 明朝",

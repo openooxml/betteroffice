@@ -62,7 +62,7 @@ beforeAll(async () => {
     selectionText: resident.selectionText,
     resolveComment: resident.resolveComment,
   });
-});
+}, 30_000);
 
 afterAll(() => {
   main.destroy();

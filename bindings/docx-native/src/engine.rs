@@ -1642,6 +1642,13 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(js_name = "prime_save_seed_states")]
+    pub fn prime_save_seed_states(&self, paragraphs: u32, inflated: u32) -> Result<bool> {
+        Ok(self
+            .document()?
+            .prime_save_seed_states(paragraphs, inflated))
+    }
+
     #[napi(js_name = "paragraph_save_plan")]
     pub fn paragraph_save_plan(&self, env: Env) -> Result<String> {
         self.document()?

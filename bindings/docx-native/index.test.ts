@@ -8,7 +8,7 @@ import type {
   DocxStructuredContent,
 } from '../../packages/docx/src/core';
 import { expectSavedPartsEqual } from '../native-parity';
-import { decodeFontFace, openDocument, renderDocxMarkdown } from './index.js';
+import { decodeFontFace, fontPreflight, openDocument, renderDocxMarkdown } from './index.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 
 const fixture = readFileSync(
@@ -34,6 +34,26 @@ const controlsFixture = readFileSync(
 );
 
 describe('@betteroffice/docx-native', () => {
+  test('font preflight returns the expected faces on synthetic bytes', async () => {
+    const zip = new JSZip();
+    zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/><w:rFonts w:ascii="Run" w:cs="Complex"/><w:iCs/></w:rPr><w:t>Text العربية</w:t></w:r></w:p></w:body></w:document>`);
+    zip.file('word/styles.xml', `<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Base" w:hAnsi="Base"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`);
+    const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const native = fontPreflight(bytes);
+    expect(JSON.parse(native)).toEqual({
+      complete: false,
+      faces: [
+        { family: 'Base', bold: false, italic: false, scripts: ['arabic'] },
+        { family: 'Base', bold: true, italic: false, scripts: ['arabic'] },
+        { family: 'Complex', bold: false, italic: false, scripts: ['arabic'] },
+        { family: 'Complex', bold: true, italic: false, scripts: ['arabic'] },
+        { family: 'Complex', bold: true, italic: true, scripts: ['arabic'] },
+        { family: 'Run', bold: false, italic: false, scripts: ['arabic'] },
+        { family: 'Run', bold: true, italic: false, scripts: ['arabic'] },
+      ],
+    });
+  });
+
   test('linked font decoder returns known answers and shared errors', () => {
     expect(typeof decodeFontFace).toBe('function');
     for (const entry of fontCases()) {

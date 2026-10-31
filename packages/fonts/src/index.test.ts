@@ -65,7 +65,7 @@ describe('resolution', () => {
 
   test('falls back to a family regular when the exact style is not vendored', () => {
     expect(resolveMetricCompatFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf.zst');
-    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
+    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf.zst');
   });
 
   test('MS Japanese spellings resolve to the bundled Japanese face in every style', () => {
@@ -76,7 +76,7 @@ describe('resolution', () => {
       expect(resolveMetricCompatFamily(` ${family.toUpperCase()} `)).toBe('Noto Sans JP');
       for (const bold of [false, true]) {
         for (const italic of [false, true]) {
-          expect(resolveMetricCompatFace(family, bold, italic)?.file).toBe('NotoSansJP-Regular.otf');
+          expect(resolveMetricCompatFace(family, bold, italic)?.file).toBe('NotoSansJP-Regular.otf.zst');
         }
       }
     }
@@ -335,7 +335,7 @@ describe('bundled family names', () => {
     );
     expect(resolveBundledFamilyFace('Comic Relief', true, false)?.file).toBe('ComicRelief-Bold.ttf.zst');
     expect(resolveBundledFamilyFace('Noto Serif SC', false, false)?.file).toBe(
-      'NotoSerifSC-Regular.otf'
+      'NotoSerifSC-Regular.otf.zst'
     );
   });
 
@@ -343,7 +343,7 @@ describe('bundled family names', () => {
     expect(resolveBundledFamilyFace('Oswald', false, true)).toBeUndefined();
     expect(resolveBundledFamilyFace('Noto Serif SC', true, false)).toBeUndefined();
     expect(resolveBundledFamilyFace('SimSun', true, false)).toBeUndefined();
-    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
+    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf.zst');
   });
 
   test('cover the serif Noto families the package does not vendor with the sans face', () => {
@@ -486,6 +486,31 @@ describe('loading', () => {
     }
   });
 
+  test.skipIf(!existsSync(new URL('./decoder/fontpack.wasm', import.meta.url)))(
+    'a baseUrl holding only font assets decodes packed faces with the decoder shipped in the package',
+    async () => {
+      const realFetch = globalThis.fetch;
+      const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
+      const original = host.getBuiltinModule;
+      const face = resolveMetricCompatFace('Calibri', false, false)!;
+      const decoderRequests: string[] = [];
+      host.getBuiltinModule = (id: string) => id === 'node:zlib' ? {} : original?.call(host, id);
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (!String(input).endsWith('.wasm')) return fontAssetResponse(input);
+        decoderRequests.push(String(input));
+        return new Response('missing', { status: 404 });
+      }) as unknown as typeof fetch;
+      try {
+        const bytes = await loadBundledFontBytes(face, { baseUrl: 'https://fonts-only.example/assets/' });
+        expect(bytes.byteLength).toBe(face.byteLength);
+        expect(decoderRequests).toEqual(['https://fonts-only.example/assets/decoder/fontpack.wasm']);
+      } finally {
+        globalThis.fetch = realFetch;
+        host.getBuiltinModule = original;
+      }
+    },
+  );
+
   test('explains that server-side provider bases must be absolute', () => {
     expect(() => createFontProvider({ baseUrl: 'fonts/' })).toThrow(
       'baseUrl must be absolute when no browser location exists'
@@ -530,12 +555,6 @@ describe('loading', () => {
       globalThis.fetch = realFetch;
     }
   });
-
-  test('loads every raw manifest face from the package without a base URL', async () => {
-    for (const face of BUNDLED_FONTS.filter((candidate) => !candidate.file.endsWith('.zst'))) {
-      expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
-    }
-  });
 });
 
 // Plain Node refuses to type-strip TypeScript under node_modules.
@@ -575,15 +594,6 @@ describe('published shape', () => {
     expect(intl.length).toBeGreaterThan(0);
     for (const face of intl) {
       expect(existsSync(new URL(`../assets/${face.file}`, import.meta.url))).toBe(false);
-    }
-  });
-
-  test('records the exact byte length of every raw vendored face', () => {
-    for (const face of BUNDLED_FONTS.filter((candidate) => !candidate.file.endsWith('.zst'))) {
-      const directory = face.script?.startsWith('cjk-') ? '../../fonts-cjk/assets/' : '../assets/';
-      expect(Bun.file(new URL(`${directory}${face.file}`, import.meta.url)).size).toBe(
-        face.byteLength
-      );
     }
   });
 });

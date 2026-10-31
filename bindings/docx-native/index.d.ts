@@ -188,6 +188,7 @@ export declare class EditSession {
   open_docx_preview_with_budget(bytes: Uint8Array, blocks: number, paragraphBudget?: number | undefined | null): string | undefined
   paragraph_id_count(story: string, paraId: string): number
   paragraph_identities(): string
+  prime_save_seed_states(paragraphs: number, inflated: number): boolean
   paragraph_save_plan(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number
@@ -364,6 +365,8 @@ export interface FontFace {
   bold?: boolean
   italic?: boolean
 }
+
+export declare function fontPreflight(bytes: Buffer): string
 
 export declare function hit_test_json(displayList: string, pageIndex: number, x: number, y: number): string
 

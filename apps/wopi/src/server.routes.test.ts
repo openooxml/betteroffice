@@ -7,10 +7,82 @@ import { openFreshClient, openTestClient, sourceBytes } from "../test/replica/cl
 import { addToken, makeHarness, SRC, type Harness } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
 import { SessionRegistry } from "./session/registry";
+import { CollabRelay, type RelaySocketData } from "./relay/relay";
+import { encodeSequencedFrame } from "./relay/sequence";
+import { encodeUpdateFrame } from "./relay/frames";
 import { BASELINE_GENERATION_HEADER, BASELINE_GENERATION_PROTOCOL } from "./baseline";
 
 const TOKEN = "SECRETTOKEN-routes-9f8e7d6c";
 const TOKEN_B = "SECRETTOKEN-routes-b-1a2b3c";
+
+test("baseline replacement between join and attachment rejects stale sockets and event streams", async () => {
+  const s = setup();
+  const viewer = pageConfig(await (await postPage(s, "view")).text());
+  const session = s.h.registry.list()[0]!;
+  const handler = createHandler({ config: s.h.config, currentKey: generateKeyPair(), registry: s.h.registry });
+  const source = await fetch(`${s.base}/api/session/source`, { headers: auth(viewer) });
+  const initial = await (await fetch(`${s.base}/api/session/join`, { headers: auth(viewer) })).json() as { baselineGeneration: number };
+  expect(source.headers.get("X-WOPI-Baseline-Generation")).toBe(String(initial.baselineGeneration));
+  expect(Number.isSafeInteger(initial.baselineGeneration)).toBe(true);
+  await source.arrayBuffer();
+  let socketData!: RelaySocketData;
+  await handler(new Request("https://office.example/collab", { headers: {
+    "Sec-WebSocket-Protocol": `bo-wopi.v1, ${viewer.sessionHandle}, bo-wopi.generation.${initial.baselineGeneration}`,
+  } }), { upgrade(_request, options) { socketData = options!.data as RelaySocketData; return true; } });
+  const external = await openFreshClient("xlsx", sourceBytes("xlsx"), 997001);
+  try {
+    external.edit("new-baseline ");
+    const file = s.h.host.files.get("file1")!;
+    file.bytes = await external.save();
+    file.itemVersion = "2";
+    await postPage(s, "edit", TOKEN_B);
+    expect(session.baselineGeneration).toBe(initial.baselineGeneration + 1);
+    const closed: number[] = [];
+    handler.relay.websocket.open({ data: socketData, send() {}, close(code) { closed.push(code!); } });
+    expect(closed).toEqual([4409]);
+    expect(handler.relay.hasSocket(session, viewer.sessionHandle)).toBe(false);
+    const stale = await handler(new Request("https://office.example/api/session/events", { headers: {
+      ...auth(viewer), "X-WOPI-Baseline-Generation": String(initial.baselineGeneration),
+    } }));
+    const reader = stale.body!.getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: rejoinRequired");
+      expect((await reader.read()).done).toBe(true);
+    } finally { await reader.cancel(); }
+    const latest = await (await fetch(`${s.base}/api/session/join`, { headers: auth(viewer) })).json() as { baselineGeneration: number };
+    handler.relay.websocket.open({ data: { handle: viewer.sessionHandle, baselineGeneration: latest.baselineGeneration }, send() {}, close(code) { closed.push(code!); } });
+    expect(closed).toEqual([4409]);
+    expect(handler.relay.hasSocket(session, viewer.sessionHandle)).toBe(true);
+    const matching = await handler(new Request("https://office.example/api/session/events", { headers: {
+      ...auth(viewer), "X-WOPI-Baseline-Generation": String(latest.baselineGeneration),
+    } }));
+    const events = matching.body!.getReader();
+    try { expect(new TextDecoder().decode((await events.read()).value)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n'); }
+    finally { await events.cancel(); }
+  } finally { external.destroy(); }
+});
+
+test("state vectors cannot authorize a disconnected deletion save", async () => {
+  const s = setup({ format: "docx", saveSyncTimeoutMs: 1 });
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const session = s.h.registry.list()[0]!;
+  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 997101);
+  try {
+    client.edit("delete-while-disconnected ", 0);
+    session.applyUpdate(config.sessionHandle, client.encodeStateAsUpdate());
+    await session.requestSave(config.sessionHandle);
+    const vector = client.encodeStateVector();
+    client.remove("delete-while-disconnected ");
+    expect(client.encodeStateVector()).toEqual(vector);
+    const before = s.h.putCount();
+    const response = await fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(vector).toString("base64") }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { kind: "invalidSaveBarrier" } });
+    expect(s.h.putCount()).toBe(before);
+  } finally { client.destroy(); }
+});
 
 beforeAll(async () => {
   await initEngines();
@@ -27,19 +99,21 @@ interface Setup {
   base: string;
   bodies: string[];
   headersSeen: string[];
+  relay: CollabRelay;
 }
 
-function setup(options: Parameters<typeof makeHarness>[0] = {}): Setup {
-  const h = makeHarness({ fileName: options.fileName, quirks: options.quirks });
-  if (options.fileName) h.host.setFile("file1", sourceBytes("xlsx"), { name: options.fileName });
+function setup(options: Parameters<typeof makeHarness>[0] & { saveSyncTimeoutMs?: number } = {}): Setup {
+  const h = makeHarness({ fileName: options.fileName, format: options.format, quirks: options.quirks });
+  if (options.fileName) h.host.setFile("file1", sourceBytes(options.format ?? "xlsx"), { name: options.fileName });
   addToken(h, TOKEN, "user-a", { name: "Alice A" });
   addToken(h, TOKEN_B, "user-b", { name: "Bob B", canWrite: true });
+  const relay = new CollabRelay(h.registry);
   const server = startServer(
-    { config: h.config, currentKey: generateKeyPair(), registry: h.registry },
+    { config: h.config, currentKey: generateKeyPair(), registry: h.registry, relay, saveSyncTimeoutMs: options.saveSyncTimeoutMs },
     0,
   );
   servers.push(server);
-  return { h, base: `http://127.0.0.1:${server.port}`, bodies: [], headersSeen: [] };
+  return { h, base: `http://127.0.0.1:${server.port}`, bodies: [], headersSeen: [], relay };
 }
 
 async function tracked(setup: Setup, response: Response): Promise<string> {
@@ -75,9 +149,23 @@ interface PageConfig {
   viewOnlyReason: string | null;
   postMessageOrigin: string;
   closeUrl: string;
+  closePostMessage: boolean;
   locale: string | null;
   userFriendlyName: string;
   tokenExpiresAt: number | null;
+}
+
+function auth(config: PageConfig): Record<string, string> {
+  return { Authorization: `Bearer ${config.sessionHandle}` };
+}
+
+function socketBarrier(s: Setup, config: PageConfig) {
+  const session = s.h.registry.list()[0]!;
+  const socket = { send() {}, close() {} };
+  const barrier = { connectionId: crypto.randomUUID(), seq: 0 };
+  s.relay.attach(socket, { session, user: session.getUser(config.sessionHandle)! }, session.baselineGeneration);
+  s.relay.handleMessage(socket, encodeSequencedFrame(barrier));
+  return barrier;
 }
 
 function pageConfig(html: string): PageConfig {
@@ -174,7 +262,7 @@ describe("wopi edit and view routes", () => {
     expectNoToken(s);
   });
 
-  test("postMessageOrigin and closeUrl are kept per user", async () => {
+  test("postMessageOrigin, closeUrl and ClosePostMessage are kept per user", async () => {
     const h = makeHarness();
     addToken(h, TOKEN, "user-a", { name: "Alice A" });
     addToken(h, TOKEN_B, "user-b", { name: "Bob B" });
@@ -183,7 +271,7 @@ describe("wopi edit and view routes", () => {
       checkFileInfo: async (input: { wopiSrc: string; accessToken: string }) => {
         const info = await h.hostClient.checkFileInfo(input);
         const who = input.accessToken === TOKEN ? "alice" : "bob";
-        return { ...info, CloseUrl: `https://host.example/${who}`, PostMessageOrigin: `https://${who}.example.com` };
+        return { ...info, ClosePostMessage: who === "alice", CloseUrl: `https://host.example/${who}`, PostMessageOrigin: `https://${who}.example.com` };
       },
     };
     const registry = new SessionRegistry({ config: h.config, hostClient: hostClient as never, logger: h.logger, now: h.clock.now, scheduler: h.scheduler });
@@ -201,11 +289,15 @@ describe("wopi edit and view routes", () => {
     };
     const a = await post(TOKEN);
     const b = await post(TOKEN_B);
+    expect(a.closePostMessage).toBe(true);
+    expect(b.closePostMessage).toBe(false);
     expect(a.closeUrl).toBe("https://host.example/alice");
     expect(a.postMessageOrigin).toBe("https://alice.example.com");
     expect(b.closeUrl).toBe("https://host.example/bob");
     expect(b.postMessageOrigin).toBe("https://bob.example.com");
     const session = registry.list()[0]!;
+    expect(session.getUser(a.sessionHandle)?.closePostMessage).toBe(true);
+    expect(session.getUser(b.sessionHandle)?.closePostMessage).toBe(false);
     expect(session.getUser(a.sessionHandle)?.closeUrl).toBe("https://host.example/alice");
     expect(session.getUser(a.sessionHandle)?.postMessageOrigin).toBe("https://alice.example.com");
     expect(session.getUser(b.sessionHandle)?.closeUrl).toBe("https://host.example/bob");
@@ -231,9 +323,123 @@ describe("session API", () => {
     return pageConfig(await tracked(s, response));
   }
 
-  function auth(config: PageConfig): Record<string, string> {
-    return { Authorization: `Bearer ${config.sessionHandle}` };
-  }
+  test("join and writable events expose effective per-user writability across lock recovery", async () => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "writer");
+    addToken(h, TOKEN_B, "viewer", { canWrite: false });
+    const writer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: 0, mode: "edit" });
+    const viewer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "view" });
+    const session = writer.session;
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    const request = (path: string, userId: string) => handler(new Request(`https://office.example/api/session/${path}`, {
+      headers: { Authorization: `Bearer ${userId}`, [BASELINE_GENERATION_HEADER]: String(session.baselineGeneration) },
+    }));
+    const readers = await Promise.all([writer, viewer].map(async ({ user }) => (await request("events", user.id)).body!.getReader()));
+    const nextEvent = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const chunk = await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("session event timed out")), 100); }),
+        ]);
+        return new TextDecoder().decode(chunk.value);
+      } finally { clearTimeout(timeout); }
+    };
+    try {
+      expect(await nextEvent(readers[0]!)).toBe('event: snapshot\ndata: {"canWrite":true,"viewOnlyReason":null}\n\n');
+      expect(await nextEvent(readers[1]!)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
+      expect(await (await request("join", viewer.user.id)).json()).toMatchObject({ canWrite: false });
+      const file = h.host.files.get("file1")!;
+      file.lock = "other-app-lock";
+      file.lockExpiresAt = h.clock.t + 30 * 60000;
+      for (let i = 0; i < 60 && !session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnlyReason).toBe("lockLost");
+      expect(writer.user.canWrite).toBe(true);
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: false });
+      for (const reader of readers) expect(await nextEvent(reader)).toBe('event: viewOnly\ndata: {"reason":"lockLost"}\n\n');
+      file.lock = null;
+      file.lockExpiresAt = null;
+      for (let i = 0; i < 4 && session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnly).toBe(false);
+      expect(await nextEvent(readers[0]!)).toBe('event: writable\ndata: {"canWrite":true}\n\n');
+      expect(await nextEvent(readers[1]!)).toBe('event: writable\ndata: {"canWrite":false}\n\n');
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
+    } finally {
+      await Promise.all(readers.map((reader) => reader.cancel()));
+      session.abandon();
+    }
+  });
+
+  test.each(["first attachment", "reconnection"])("event streams snapshot permission changes missed before %s", async (attachment) => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "writer");
+    addToken(h, TOKEN_B, "viewer", { canWrite: false });
+    const writer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: 0, mode: "edit" });
+    const viewer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "view" });
+    const session = writer.session;
+    const generation = session.baselineGeneration;
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    const request = (path: string, userId: string) => handler(new Request(`https://office.example/api/session/${path}`, {
+      headers: { Authorization: `Bearer ${userId}`, [BASELINE_GENERATION_HEADER]: String(generation) },
+    }));
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    const snapshot = async (userId: string) => {
+      const reader = (await request("events", userId)).body!.getReader();
+      readers.push(reader);
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      return new TextDecoder().decode(first.value);
+    };
+    try {
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
+      if (attachment === "reconnection") {
+        expect(await snapshot(writer.user.id)).toBe('event: snapshot\ndata: {"canWrite":true,"viewOnlyReason":null}\n\n');
+        await readers.pop()!.cancel();
+      }
+      const file = h.host.files.get("file1")!;
+      file.lock = "other-app-lock";
+      file.lockExpiresAt = h.clock.t + 30 * 60000;
+      for (let i = 0; i < 60 && !session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnlyReason).toBe("lockLost");
+      expect(await snapshot(writer.user.id)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":"lockLost"}\n\n');
+      expect(await snapshot(viewer.user.id)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":"lockLost"}\n\n');
+      for (const reader of readers.splice(0)) await reader.cancel();
+      file.lock = null;
+      file.lockExpiresAt = null;
+      for (let i = 0; i < 4 && session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnly).toBe(false);
+      expect(session.baselineGeneration).toBe(generation);
+      expect(await snapshot(writer.user.id)).toBe('event: snapshot\ndata: {"canWrite":true,"viewOnlyReason":null}\n\n');
+      expect(await snapshot(viewer.user.id)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
+      const client = await openTestClient(writer.joinPayload, session.sourceBytes!, 990451);
+      try {
+        client.edit("snapshot-live-event ", 0);
+        expect(session.applyUpdate(writer.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+        expect((await session.requestSave(writer.user.id)).saved).toBe(true);
+      } finally { client.destroy(); }
+      expect(new TextDecoder().decode((await readers.at(-2)!.read()).value)).toContain("event: saved\n");
+    } finally {
+      for (const reader of readers) await reader.cancel();
+      session.abandon();
+    }
+  });
 
   test("auth is required and the right handle gets source and join", async () => {
     const s = setup();
@@ -440,7 +646,7 @@ describe("session API", () => {
         client.encodeStateAsUpdate(replica.encodeStateVector()),
       );
       expect(result.accepted).toBe(true);
-      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config) });
+      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify(socketBarrier(s, config)) });
       expect(save.status).toBe(200);
       const saved = (await save.json()) as { itemVersion: string | null };
       s.bodies.push(JSON.stringify(saved));
@@ -488,7 +694,7 @@ describe("session API", () => {
         expect(response.headers.get("content-type")).toContain("text/event-stream");
         const reader = response.body!.getReader();
         readers.push(reader);
-        expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+        expect(new TextDecoder().decode((await reader.read()).value)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
       }
       external.edit("sse-replacement-baseline ", 0);
       const file = h.host.files.get("file1")!;
@@ -517,7 +723,9 @@ describe("session API", () => {
       const fresh = await requestEvents(viewers[0]!.user.id);
       const freshReader = fresh.body!.getReader();
       readers.push(freshReader);
-      expect(new TextDecoder().decode((await freshReader.read()).value)).toBe(": connected\n\n");
+      const connected = await freshReader.read();
+      expect(connected.done).toBe(false);
+      expect(new TextDecoder().decode(connected.value)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
       writerClient = await openTestClient(writer.joinPayload, session.sourceBytes!, 990351);
       expect(writerClient.contains("sse-replacement-baseline")).toBe(true);
       writerClient.edit("sse-replacement-live ", 1);
@@ -573,7 +781,7 @@ describe("session API", () => {
         config.sessionHandle,
         client.encodeStateAsUpdate(session.replica!.encodeStateVector()),
       );
-      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config) });
+      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify(socketBarrier(s, config)) });
       expect(save.status).toBe(200);
       await save.text();
       await readUntil("event: saved");
@@ -587,7 +795,7 @@ describe("session API", () => {
         config.sessionHandle,
         client.encodeStateAsUpdate(session.replica!.encodeStateVector()),
       );
-      const save2 = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config) });
+      const save2 = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify(socketBarrier(s, config)) });
       expect(save2.status).toBe(200);
       await save2.text();
       await readUntil("event: conflict");
@@ -607,4 +815,88 @@ describe("session API", () => {
     expect(text).not.toContain(TOKEN);
     expectNoToken(s, [text]);
   });
+});
+
+test("save rejects missing and legacy state vector barriers", async () => {
+  const s = setup();
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  for (const body of ["", "{}", '{"stateVector":"!bad"}', '{"stateVector":"/w=="}']) {
+    const response = await fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: { Authorization: `Bearer ${config.sessionHandle}` }, body,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { kind: "invalidSaveBarrier" } });
+  }
+  expect(s.h.putCount()).toBe(0);
+});
+
+test.each(["deletion", "insertion"] as const)("HTTP save waits for a delayed %s frame through the socket barrier", async (kind) => {
+  const s = setup({ format: "docx" });
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const session = s.h.registry.list()[0]!;
+  const user = session.getUser(config.sessionHandle)!;
+  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 995100);
+  const socket = { send() {}, close() {} };
+  const connectionId = crypto.randomUUID();
+  let seq = 0;
+  s.relay.attach(socket, { session, user }, session.baselineGeneration);
+  s.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }));
+  try {
+    const marker = "socket-save-marker ";
+    client.edit(marker, 0);
+    if (kind === "deletion") {
+      seq += 1;
+      s.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }, encodeUpdateFrame(client.encodeStateAsUpdate())));
+      await session.requestSave(user.id);
+      const vector = client.encodeStateVector();
+      client.remove(marker);
+      expect(client.encodeStateVector()).toEqual(vector);
+    }
+    const before = s.h.putCount();
+    seq += 1;
+    let completed = false;
+    const saving = fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: auth(config), body: JSON.stringify({ connectionId, seq }),
+    }).then((response) => { completed = true; return response; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(completed).toBe(false);
+    expect(s.h.putCount()).toBe(before);
+    s.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }, encodeUpdateFrame(client.encodeStateAsUpdate())));
+    const response = await saving;
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(s.h.putCount()).toBe(before + 1);
+    const saved = await openFreshClient("docx", s.h.host.files.get("file1")!.bytes, 995101);
+    try {
+      expect(saved.contains(marker.trim())).toBe(kind === "insertion");
+    } finally {
+      saved.destroy();
+    }
+  } finally {
+    client.destroy();
+  }
+});
+
+test("HTTP socket save times out without writing when its sequence never arrives", async () => {
+  const s = setup({ saveSyncTimeoutMs: 1 });
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const response = await fetch(`${s.base}/api/session/save`, {
+    method: "POST", headers: auth(config), body: JSON.stringify({ connectionId: crypto.randomUUID(), seq: 1 }),
+  });
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: { kind: "notSynced" } });
+  expect(s.h.putCount()).toBe(0);
+});
+
+test("HTTP save rejects malformed socket barriers", async () => {
+  const s = setup();
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  for (const barrier of [{ connectionId: "bad", seq: 1 }, { connectionId: crypto.randomUUID(), seq: -1 }, { seq: 1, stateVector: "AA==" }]) {
+    const response = await fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: auth(config), body: JSON.stringify(barrier),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { kind: "invalidSaveBarrier" } });
+  }
+  expect(s.h.putCount()).toBe(0);
 });
