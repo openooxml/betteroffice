@@ -58,6 +58,9 @@ vsdx-validate = { package = "betteroffice-vsdx-validate", path = "crates/vsdx-va
 vsdx-edit = { package = "betteroffice-vsdx-edit", path = "crates/vsdx-edit", version = "0.5.1" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.5.1" }
 
+[profile.test]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = "s"
 lto = true
