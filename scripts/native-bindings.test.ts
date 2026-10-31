@@ -302,6 +302,9 @@ describe('native package release wiring', () => {
     expect(makePublic['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
     expect(makePublic.if).toBeUndefined();
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
     const pin = steps.find((step: any) => step.name === 'Pin workspace dependencies');
     expect(pin.run).toBe('bun scripts/rewrite-workspace-deps.ts');
@@ -369,6 +372,9 @@ describe('native package release wiring', () => {
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.run).toBe('bun test bindings/${{ inputs.binding }}-native/index.test.ts');
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
     expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
@@ -401,6 +407,7 @@ describe('native package release wiring', () => {
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('for package in'));
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
     expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
@@ -540,6 +547,9 @@ describe('native package release wiring', () => {
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(makePublic));
     expect(job.steps.indexOf(makePublic)).toBeLessThan(job.steps.indexOf(validate));
     const entries = job.steps.find((step: any) => step.name === 'Build the JS entries');
+    const fontPackages = job.steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(job.steps.indexOf(fontPackages)).toBe(job.steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ matrix.binding }}-native --if-present build:js');
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(entries));
     const pin = job.steps.find((step: any) => step.name === 'Pin workspace dependencies');
