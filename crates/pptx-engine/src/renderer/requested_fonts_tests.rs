@@ -911,16 +911,17 @@ fn coverage_only_deck_shapes_and_measures_without_a_primary_font() {
         ..Fixture::default()
     }
     .session();
+    let japanese = betteroffice_fonts::decode(
+        include_bytes!("../../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf.zst"),
+        None,
+        64 << 20,
+    )
+    .unwrap();
     for browser_coverage in [false, true] {
         let mut renderer = Renderer::new();
         renderer.set_browser_coverage_fallback(browser_coverage);
         let id = renderer
-            .register_fallback_font(
-                "Noto Sans JP",
-                false,
-                false,
-                include_bytes!("../../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf"),
-            )
+            .register_fallback_font("Noto Sans JP", false, false, &japanese)
             .unwrap();
         let layout: Value =
             serde_json::from_str(&renderer.layout_slide_json(&session, 0).unwrap()).unwrap();
