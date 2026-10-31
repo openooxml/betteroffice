@@ -249,6 +249,32 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                         cell,
                         (*rotation_valign).unwrap_or(xlsx_render::TextValign::Bottom),
                     );
+                } else if let (Some(deg), Some(wrap)) = (rotation_deg, wrap) {
+                    let cell = rotation_box.as_ref().unwrap_or(clip);
+                    let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
+                        font::measure_text(line, *font_size)
+                    });
+                    for (index, line) in lines.iter().enumerate() {
+                        font::paint_rotated_text(
+                            &mut pixmap,
+                            &font::TextRun {
+                                text: line,
+                                align: Align::Center,
+                                ..run
+                            },
+                            *deg,
+                            &xlsx_render::wrap::rotated_line_box(
+                                cell,
+                                *deg,
+                                index,
+                                lines.len(),
+                                wrap,
+                                *align,
+                            ),
+                            (*rotation_valign).unwrap_or(xlsx_render::TextValign::Bottom),
+                            None,
+                        );
+                    }
                 } else if let Some(deg) = rotation_deg {
                     let cell = rotation_box.as_ref().unwrap_or(clip);
                     font::paint_rotated_text(

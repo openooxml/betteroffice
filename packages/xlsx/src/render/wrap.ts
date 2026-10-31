@@ -6,7 +6,7 @@
  * and a final line break opens no empty line (Excel centres "a\nb\n" as two lines).
  */
 
-import type { TextWrap } from '../display-list/types';
+import type { Rect, TextAlign, TextWrap } from '../display-list/types';
 
 type Segmenter = { segment(value: string): Iterable<{ segment: string; index: number }> };
 
@@ -121,4 +121,19 @@ export function wrappedLineY(y: number, index: number, count: number, wrap: Text
   const last = Math.max(count - 1, 0);
   const step = wrap.valign === 'top' ? index : wrap.valign === 'center' ? index - last / 2 : index - last;
   return y + wrap.lineHeight * step;
+}
+
+/** the strip of `cell` that line `index` of `count` wrapped lines of ±90° text paints in. */
+export function rotatedLineBox(
+  cell: Rect,
+  deg: number,
+  index: number,
+  count: number,
+  wrap: TextWrap,
+  align: TextAlign
+): Rect {
+  const block = wrap.lineHeight * count;
+  const left = align === 'center' ? cell.x + (cell.w - block) / 2 : align === 'right' ? cell.x + cell.w - block : cell.x;
+  const slot = deg < 0 ? Math.max(count - index - 1, 0) : index;
+  return { x: left + wrap.lineHeight * slot, y: cell.y, w: wrap.lineHeight, h: cell.h };
 }

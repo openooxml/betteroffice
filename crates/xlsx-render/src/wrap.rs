@@ -4,7 +4,7 @@
 use unicode_segmentation::UnicodeSegmentation;
 use xlsx_model::styles::Alignment;
 
-use crate::display_list::{TextValign, TextWrap};
+use crate::display_list::{Align, Rect, TextValign, TextWrap};
 
 /// whether an alignment wraps its text: wrapText without shrinkToFit, and
 /// neither rotated nor stacked.
@@ -133,6 +133,36 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
             TextValign::Center => index - last / 2.0,
             TextValign::Bottom => index - last,
         }
+}
+
+/// the strip of `cell` that line `index` of `count` wrapped lines of ±90°
+/// text paints in: lines stack across the cell from where the text's first
+/// line starts, the block placed by `align`.
+pub fn rotated_line_box(
+    cell: &Rect,
+    deg: f32,
+    index: usize,
+    count: usize,
+    wrap: &TextWrap,
+    align: Align,
+) -> Rect {
+    let block = wrap.line_height * count as f32;
+    let left = match align {
+        Align::Left => cell.x,
+        Align::Center => cell.x + (cell.w - block) / 2.0,
+        Align::Right => cell.x + cell.w - block,
+    };
+    let slot = if deg < 0.0 {
+        count.saturating_sub(index + 1)
+    } else {
+        index
+    };
+    Rect {
+        x: left + wrap.line_height * slot as f32,
+        y: cell.y,
+        w: wrap.line_height,
+        h: cell.h,
+    }
 }
 
 /// lines a wrapped cell takes in a text box `width` px wide, measured with

@@ -1080,8 +1080,10 @@ where
             }
         }
         let rotation_box = rotated.then_some(text_box);
+        let upright = rotation_deg.is_some_and(|deg| deg.abs() == 90.0);
         let wrap = (wraps
-            && !rotated
+            && !stacked
+            && (rotation_deg.is_none() || upright)
             && matches!(cell.value, CellValue::Text { .. })
             && number_format.as_ref().is_none_or(|layout| {
                 layout
@@ -1090,7 +1092,7 @@ where
                     .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
             }))
         .then(|| TextWrap {
-            width: text_width,
+            width: if upright { text_box.h } else { text_width },
             line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
                 f64::from(size),
                 print.map(|(m, _)| f64::from(m.dpi)),
@@ -2145,7 +2147,7 @@ impl<'a> FrameStyles<'a> {
                     a.v,
                     indent,
                     a.wrap_text || a.shrink_to_fit,
-                    wrap::wraps(a),
+                    a.wrap_text && !a.shrink_to_fit,
                     a.text_rotation,
                 )
             });
@@ -3734,6 +3736,62 @@ mod tests {
                 assert_eq!(bounds.h, clip.h - bottom_pad);
             }
         }
+    }
+
+    #[test]
+    fn wrapped_vertical_text_wraps_along_the_cell_height() {
+        for (rotation, wraps) in [
+            (Some(90), true),
+            (Some(180), true),
+            (Some(45), false),
+            (Some(255), false),
+        ] {
+            let dl = rotated_alignment_dl(
+                Alignment {
+                    text_rotation: rotation,
+                    v: Some(VAlign::Center),
+                    wrap_text: true,
+                    ..Alignment::default()
+                },
+                10.0,
+                30.0,
+            );
+            let DrawCmd::Text {
+                wrap, rotation_box, ..
+            } = only_text(&dl)
+            else {
+                panic!("text")
+            };
+            assert_eq!(
+                wrap.map(|wrap| wrap.width),
+                wraps.then(|| rotation_box.unwrap().h),
+                "{rotation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_lines_stack_from_where_the_text_starts() {
+        let cell = Rect {
+            x: 10.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        };
+        let wrap = TextWrap {
+            width: 50.0,
+            line_height: 20.0,
+            valign: TextValign::Bottom,
+        };
+        let xs = |deg: f32, align| {
+            (0..2)
+                .map(|i| wrap::rotated_line_box(&cell, deg, i, 2, &wrap, align).x)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(xs(90.0, Align::Center), [40.0, 60.0]);
+        assert_eq!(xs(-90.0, Align::Center), [60.0, 40.0]);
+        assert_eq!(xs(90.0, Align::Left), [10.0, 30.0]);
+        assert_eq!(xs(90.0, Align::Right), [70.0, 90.0]);
     }
 
     #[test]
