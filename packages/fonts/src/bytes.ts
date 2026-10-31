@@ -20,7 +20,7 @@ function builtinModule<T>(name: string): T | undefined {
 }
 
 const OLD_NODE =
-  'Reading bundled fonts from installed packages needs Node.js 20.16 or later (process.getBuiltinModule); upgrade Node.js or pass a font baseUrl.';
+  'Reading bundled fonts from installed packages needs Node.js 20.16+ or 22.3+ (process.getBuiltinModule); upgrade Node.js or pass a font baseUrl.';
 let warnedOldNode = false;
 
 /** Node fetch cannot read file: package assets, so server imports use built-in I/O. */

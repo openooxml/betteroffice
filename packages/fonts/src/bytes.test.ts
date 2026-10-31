@@ -9,8 +9,8 @@ test('package assets on a Node.js without getBuiltinModule fail loudly instead o
   host.getBuiltinModule = undefined;
   try {
     const url = new URL('../assets/manifest.json', import.meta.url);
-    await expect(readFontBytes('manifest.json', url)).rejects.toThrow('needs Node.js 20.16 or later');
-    await expect(readFontBytes('manifest.json', url)).rejects.toThrow('needs Node.js 20.16 or later');
+    await expect(readFontBytes('manifest.json', url)).rejects.toThrow('needs Node.js 20.16+ or 22.3+');
+    await expect(readFontBytes('manifest.json', url)).rejects.toThrow('needs Node.js 20.16+ or 22.3+');
     expect(fetch).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
   } finally {
