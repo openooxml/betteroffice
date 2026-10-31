@@ -298,4 +298,27 @@ describe('docx native engine parity', () => {
       expectedSession.free();
     }
   });
+
+  test('story_checksum of a million-character formatted run matches and stays within wasm memory', () => {
+    const encoder = new TextEncoder();
+    const text = 'lorem ipsum '.repeat(83_334).slice(0, 1_000_000);
+    const rPr = '<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Arial"/><w:b/><w:i/><w:color w:val="1F3864"/><w:sz w:val="22"/><w:u w:val="single"/><w:lang w:val="en-GB"/><w:highlight w:val="yellow"/></w:rPr>';
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>${rPr}<w:t xml:space="preserve">${text}</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+    });
+    const expected = new wasm.EditSession(7);
+    const actual = new native.EditSession(7);
+    try {
+      expected.open_docx(bytes, true);
+      actual.open_docx(bytes, true);
+      const checksum = expected.story_checksum('body');
+      expect(checksum).toMatch(/^\d+$/);
+      expect(actual.story_checksum('body')).toBe(checksum);
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  }, 120_000);
 });
