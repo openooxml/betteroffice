@@ -97,8 +97,9 @@ installed package files the first time a document needs it; nothing is downloade
 faces in the same order: embedded in the document, registered with `register_font`, then the packs.
 Turn a feature off to leave its pack out, or pass `OpenOptions` to `open_with_options` to read packs
 from a local directory or your own provider; nothing is fetched. `@betteroffice/pptx-native` installs
-all three npm packs and reads each face from disk on first use. For the DOCX native binding and
-Python, register the faces a document needs with `registerFont` or `register_font` before rendering.
+all three npm packs and reads each face from disk on first use; `@betteroffice/docx-native` uses the
+same font manager as `@betteroffice/docx` on Node.js. For Python, register the faces a document needs
+with `register_font` before rendering.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
