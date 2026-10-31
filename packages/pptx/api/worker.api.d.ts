@@ -404,7 +404,9 @@ export declare class StaleProposalError extends Error {
 
 // ---- render/browserFrameImages.d.ts ----
 import type { CanvasImageResolver } from './canvas';
-export declare function browserFrameImages(): {
+export declare function browserFrameImages(options?: {
+    maxDimension?: number;
+}): {
     resolve(frame: {
         media: ReadonlyMap<string, Uint8Array>;
     }): CanvasImageResolver & {

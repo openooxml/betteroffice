@@ -41,7 +41,9 @@ fn a_fill_edit_lands_on_the_shape_the_fallback_holds() {
     let fallback = xml.split("<mc:Fallback>").nth(1).unwrap();
     assert!(fallback.contains(r#"name="fallback""#));
     assert!(fallback.contains(r#"<a:srgbClr val="DC2626"/>"#));
-    assert!(xml.contains(r#"<mc:Choice Requires="bo""#));
+    assert!(
+        xml.contains(r#"<mc:Choice xmlns:bo="urn:betteroffice:fixture-extension" Requires="bo">"#)
+    );
     let caption = xml.split(r#"name="caption""#).nth(1).unwrap();
     assert!(caption.contains(r#"<a:srgbClr val="12B76A"/>"#));
 }

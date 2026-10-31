@@ -49,6 +49,7 @@ export interface RustSaveResult {
  * source bytes with only these IDs patched in.
  */
 export interface RustParagraphIds {
+  removedCommentIds?: string[];
   sectionEdits?: {
     onlySections: boolean;
     sha256: string;

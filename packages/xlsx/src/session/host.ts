@@ -1,7 +1,6 @@
-import { createCollaborationPipeHost } from '../../../../shared/collaboration-pipe/worker';
+import type { CollaborationPipeHost } from '../../../../shared/collaboration-pipe/worker';
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
-import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
-import { CollaborationError, type AwarenessCursor, type AwarenessPeer } from '../collaboration/types';
+import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { deferReply, isHostMessage, transferable } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
@@ -45,7 +44,7 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } &
   collaborationPipe: PipeOutputBatch<AwarenessPeer>[];
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
-type WorkerCollaborationProvider = CollaborationProvider & { onPeers: CollaborationProvider['onAwareness'] };
+export const workbookCollaborationHostLoader = { load: () => import('./collaborationHost') };
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
@@ -78,7 +77,7 @@ export function createWorkbookSessionHost(
   let commandHost: ReturnType<typeof createWorkbookCommandHost> | undefined;
   let collaborative = false;
   let offUpdates = () => {};
-  let pipe: ReturnType<typeof createCollaborationPipeHost<WorkerCollaborationProvider, AwarenessCursor, AwarenessPeer>> | undefined;
+  let pipe: CollaborationPipeHost<AwarenessCursor, AwarenessPeer> | undefined;
   let pipeOutputTimer: ReturnType<typeof setTimeout> | undefined;
   let previewSource: { bytes: Uint8Array; hydration: string } | undefined;
   let peerSnapshot: {
@@ -428,6 +427,9 @@ export function createWorkbookSessionHost(
       await (options.initWasm ?? initWasm)(wasm, { png: input.png });
       wasm ??= options.wasmModule?.();
       if (disposed) throw new Error('Workbook session is disposed');
+      const collaboration = input.collaborative && !retainPeerHydration
+        ? await workbookCollaborationHostLoader.load() : undefined;
+      if (disposed) throw new Error('Workbook session is disposed');
       const calculation = input.calculation ?? (retainPeerHydration && !input.collaborative ? {
         nowSerial: localNowSerial(Date.now()),
         randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
@@ -472,32 +474,7 @@ export function createWorkbookSessionHost(
           host.emit('collaborationUpdate', { update, origin });
         });
         if (collaborative && !retainPeerHydration) {
-          pipe = createCollaborationPipeHost<WorkerCollaborationProvider, AwarenessCursor, AwarenessPeer>({
-            clientId: opened.clientId,
-            read: { encodeStateVector: () => opened.encodeStateVector(),
-              encodeStateAsUpdate: (vector) => opened.encodeStateAsUpdate(vector) },
-            onUpdate: (listener) => opened.onUpdate(listener),
-            merge(updates) {
-              for (const update of updates) {
-                const before = opened.version();
-                try { opened.applyUpdate(update); }
-                catch (error) {
-                  if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || opened.version() !== before) throw error;
-                  return { failed: error };
-                }
-              }
-              return { applied: null };
-            },
-            createProvider: (replica, transport, providerOptions) => {
-              const provider = new CollaborationProvider(replica, transport, providerOptions);
-              return Object.assign(provider, { onPeers: (listener: Parameters<CollaborationProvider['onAwareness']>[0]) =>
-                provider.onAwareness(listener) });
-            },
-            arrive: providerArrival,
-            leave: providerLeave,
-            transportError: (error) => new CollaborationError(error.code, error.message),
-            onOutput: schedulePipeOutput,
-          });
+          pipe = collaboration!.createWorkbookCollaborationHost(opened, schedulePipeOutput);
         }
         commands = createWorkbookCommandState(commandIdentity, { epoch: 1, version: opened.version() },
           { sheetId: info.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } }, info.sheetIds, calculation ?? null);

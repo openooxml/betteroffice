@@ -135,6 +135,7 @@
       "unsupportedCommand": "עדיין לא נתמך.",
       "invalidArguments": "ערך זה אינו תקין.",
       "inputFailed": "לא ניתן לשמור את הזנת התא שלפני כן.",
+      "sheetProtected": "תא זה נמצא בגיליון מוגן.",
       "documentReplaced": "נפתחה חוברת עבודה אחרת.",
       "targetChanged": "הבחירה השתנתה.",
       "gestureActive": "סיים תחילה להזיז את התרשים.",
