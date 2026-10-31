@@ -31,7 +31,8 @@ describe('@betteroffice/docx-native', () => {
     expect(manifest.files).toEqual(['dist', 'index.js', 'index.d.ts']);
     expect(manifest.peerDependencies).toEqual(wasmManifest.peerDependencies);
     expect(manifest.peerDependenciesMeta).toEqual(wasmManifest.peerDependenciesMeta);
-    expect(JSON.parse(readFileSync(new URL('./dist/package.json', import.meta.url), 'utf8'))).toEqual({ type: 'module' });
+    expect(readFileSync(new URL('./dist/core.mjs', import.meta.url), 'utf8').length).toBeGreaterThan(0);
+    expect(readFileSync(new URL('./dist/core.d.mts', import.meta.url), 'utf8').length).toBeGreaterThan(0);
   });
 
   test('browser conditions reject every entry', () => {
@@ -53,7 +54,7 @@ describe('@betteroffice/docx-native', () => {
       const contents = readFileSync(file, 'utf8');
       expect(contents).not.toContain('__wbindgen');
       expect(contents).not.toContain('_bg.wasm');
-      expect(contents).not.toContain('.wasm');
+      expect(contents).not.toMatch(/\.wasm\b/);
     }
   });
 

@@ -44,7 +44,6 @@ export default defineConfig([
     outDir: '../dist',
     tsconfig: '../../../packages/docx/tsconfig.json',
     format: ['esm'],
-    outExtension: () => ({ js: '.mjs', dts: '.d.mts' }),
     shims: true,
     dts: true,
     splitting: true,
@@ -59,7 +58,6 @@ export default defineConfig([
       options.chunkNames = 'chunk-[hash]';
     },
     onSuccess: async () => {
-      await writeFile('../dist/package.json', JSON.stringify({ type: 'module' }) + '\n');
       await writeFile('../dist/browser.js', 'throw new Error("use @betteroffice/docx in browsers");\n');
       await writeFile('../dist/docxWorker.mjs', "import './yrs/docxWorker.mjs';\n");
     },
