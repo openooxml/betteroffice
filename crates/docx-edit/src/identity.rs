@@ -4135,7 +4135,12 @@ mod tests {
         save_plans_agree(&doc);
 
         let comment = doc
-            .add_comment(&[StoryRange::new("body", 0, 2)], "Ada", DATE, Any::from("hi"))
+            .add_comment(
+                &[StoryRange::new("body", 0, 2)],
+                "Ada",
+                DATE,
+                Any::from("hi"),
+            )
             .unwrap();
         save_plans_agree(&doc);
         doc.set_comment_ranges(&comment, &[StoryRange::new("hf:rIdHeader1", 1, 3)])
@@ -4204,13 +4209,8 @@ mod tests {
         STORY_FINGERPRINTS.with(|count| count.set(0));
         assert_eq!(plan, doc.paragraph_save_plan());
         STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 0));
-        doc.insert_text(
-            &ctx(),
-            Position::new("body", 0),
-            "x",
-            FormatPolicy::Plain,
-        )
-        .unwrap();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
         doc.paragraph_save_plan();
         STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
         save_plans_agree(&doc);
@@ -4261,7 +4261,12 @@ mod tests {
         let revision = doc.story_revisions.lock().unwrap().stamped["body"];
         let mut before = story_states(doc)["body"].fingerprint;
         let comment = doc
-            .add_comment(&[StoryRange::new("body", 0, 2)], "Ada", DATE, Any::from("hi"))
+            .add_comment(
+                &[StoryRange::new("body", 0, 2)],
+                "Ada",
+                DATE,
+                Any::from("hi"),
+            )
             .unwrap();
         for ranges in [Some((0, 2)), Some((1, 3)), None] {
             if ranges != Some((0, 2)) {
@@ -4295,7 +4300,10 @@ mod tests {
                     comments.remove(&mut txn, &comment);
                 }
             }
-            assert_eq!(doc.story_revisions.lock().unwrap().stamped["body"], revision);
+            assert_eq!(
+                doc.story_revisions.lock().unwrap().stamped["body"],
+                revision
+            );
             STORY_FINGERPRINTS.with(|count| count.set(0));
             doc.paragraph_save_plan();
             STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
@@ -4329,7 +4337,10 @@ mod tests {
         .unwrap();
         doc.apply_raw_ops("hf:rIdHeader1", vec![embed()], &ctx())
             .unwrap();
-        assert_eq!(doc.story_revisions.lock().unwrap().stamped["nested"], revision);
+        assert_eq!(
+            doc.story_revisions.lock().unwrap().stamped["nested"],
+            revision
+        );
         assert_eq!(story_states(&doc)["nested"].root, "hf:rIdHeader1");
         save_plans_agree(&doc);
 

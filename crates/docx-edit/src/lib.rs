@@ -759,12 +759,12 @@ impl EditingDoc {
             });
         let stamped = Arc::clone(&story_revisions);
         let cached = Arc::clone(&save_story_states);
-        let removed_story_sub = doc
-            .get_or_insert_map(REMOVED_STORIES)
-            .observe_deep(move |txn, events| {
-                stamped.lock().unwrap().stamp(txn, events);
-                identity::StoryStateCache::evict_root_changes(&cached, txn, events);
-            });
+        let removed_story_sub =
+            doc.get_or_insert_map(REMOVED_STORIES)
+                .observe_deep(move |txn, events| {
+                    stamped.lock().unwrap().stamp(txn, events);
+                    identity::StoryStateCache::evict_root_changes(&cached, txn, events);
+                });
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
