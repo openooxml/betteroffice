@@ -165,6 +165,7 @@ async function warmupEditor({ primitiveCounts = [0, 0, 0], timers = false } = {}
   }));
   const editor = await mount(false, false, false, candidate => ({
     identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision, layoutRevision: 1,
+    documentVersion: 'v1',
     pages: displayPages.map((displayPage, pageIndex) => ({ page: { pageId: String(pageIndex + 1), pageIndex },
       bounds: { x: 0, y: pageIndex * 64, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0], displayPage })),
     caret: null, selectionRects: [],
@@ -180,10 +181,12 @@ async function warmupEditor({ primitiveCounts = [0, 0, 0], timers = false } = {}
     restorers.push(() => clock.mockRestore(), () => timeout.mockRestore(), () => clear.mockRestore());
   }
   return { ...editor, scheduler, hitTestRegions, queries,
-    changeDocument() {
+    changeDocument(change: 'edit' | 'layout' = 'edit') {
       const before = editor.binding.viewStore.getSnapshot().geometry!;
       act(() => editor.binding.viewStore.installFrameGeometry({ ...before, frameEpoch: before.frameEpoch + 1,
-        layoutRevision: before.layoutRevision + 1,
+        ...(change === 'edit'
+          ? { documentVersion: `v${Number(before.documentVersion!.slice(1)) + 1}` }
+          : { layoutRevision: before.layoutRevision + 1 }),
         pages: before.pages.map(entry => ({ ...entry, displayPage: { ...entry.displayPage! } })),
       }));
     },
@@ -259,14 +262,14 @@ test('hit-test warm-up waits until 500 ms after the last keystroke', async () =>
   expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
 });
 
-for (const focusTarget of ['input', 'root']) {
-  test(`hit-test warm-up waits for 2 s after a document change with the ${focusTarget} focused`, async () => {
+for (const [focusTarget, change] of [['input', 'edit'], ['root', 'edit'], ['input', 'layout']] as const) {
+  test(`hit-test warm-up waits for 2 s after a document ${change} with the ${focusTarget} focused`, async () => {
     const editor = await warmupEditor({ timers: true });
     const { scheduler } = editor;
     const root = editor.container.querySelector<HTMLElement>('[data-docx-worker-editor]')!;
     root.tabIndex = 0;
     await act(async () => { (focusTarget === 'input' ? editor.textarea : root).focus(); });
-    editor.changeDocument();
+    editor.changeDocument(change);
     act(() => scheduler.flushIdle());
     expect(editor.hitTestRegions).not.toHaveBeenCalled();
     expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([2000]);
