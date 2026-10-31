@@ -2,6 +2,10 @@
 
 /// The font pack decoder shared by every engine.
 pub use betteroffice_fonts as fonts;
+#[cfg(feature = "fonts")]
+pub use fonts::OpenOptions;
+#[cfg(not(feature = "fonts"))]
+pub use open_options::OpenOptions;
 
 use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
@@ -23,10 +27,19 @@ pub use vsdx_validate::{
 
 #[derive(Debug)]
 pub enum Error {
+    #[cfg(feature = "fonts")]
+    FontSource(fonts::FontError),
     Parse(VsdxError),
     Resolve(ResolveError),
     Render(String),
     Policy(String),
+}
+
+#[cfg(feature = "fonts")]
+impl From<fonts::FontError> for Error {
+    fn from(error: fonts::FontError) -> Self {
+        Self::FontSource(error)
+    }
 }
 
 impl From<VsdxError> for Error {
@@ -44,50 +57,74 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Diagram {
     package: VsdxPackage,
+    #[cfg(feature = "fonts")]
+    fonts: Vec<fonts::FontDefinition>,
 }
 
 impl Diagram {
     pub fn open(bytes: &[u8]) -> Result<Self> {
+        #[cfg(feature = "fonts")]
+        {
+            Self::open_with_options(bytes, &OpenOptions::default())
+        }
+        #[cfg(not(feature = "fonts"))]
+        {
+            Self::open_with_limits(bytes, &ParseLimits::default())
+        }
+    }
+    #[cfg(feature = "fonts")]
+    pub fn open_with_options(bytes: &[u8], options: &OpenOptions) -> Result<Self> {
+        let _source = fonts::FontManager::new(&options.font_source, options.font_loading)?;
         Ok(Self {
             package: vsdx_parse::parse_vsdx(bytes)?,
+            fonts: options.fonts.clone(),
         })
     }
     pub fn open_with_limits(bytes: &[u8], limits: &ParseLimits) -> Result<Self> {
         Ok(Self {
             package: vsdx_parse::parse_vsdx_with_limits(bytes, limits)?,
+            #[cfg(feature = "fonts")]
+            fonts: Vec::new(),
         })
+    }
+    fn renderer(&self) -> Result<vsdx_render::Renderer> {
+        let renderer = vsdx_render::Renderer::default();
+        #[cfg(feature = "fonts")]
+        let mut renderer = renderer;
+        #[cfg(feature = "fonts")]
+        for font in &self.fonts {
+            renderer
+                .register_font(&font.family, font.bold, font.italic, font.data.clone())
+                .map_err(|error| Error::Render(error.to_string()))?;
+        }
+        Ok(renderer)
     }
     pub fn package(&self) -> &VsdxPackage {
         &self.package
     }
     /// Renders every diagram page to a vector PDF with selectable text.
     pub fn export_pdf(&self) -> Result<Vec<u8>> {
-        vsdx_render::Renderer::default()
+        self.renderer()?
             .export_pdf(&self.package)
             .map_err(|error| Error::Render(error.to_string()))
     }
     /// Renders every diagram page to one SVG string per page, sized from the PageSheet.
     pub fn export_svg(&self) -> Result<Vec<String>> {
-        vsdx_render::Renderer::default()
+        self.renderer()?
             .export_svg(&self.package)
             .map_err(|error| Error::Render(error.to_string()))
     }
     /// Renders one diagram page to an SVG string sized from the PageSheet.
     pub fn export_svg_page(&self, page_index: usize) -> Result<String> {
-        vsdx_render::Renderer::default()
+        self.renderer()?
             .export_svg_page(&self.package, page_index)
             .map_err(|error| Error::Render(error.to_string()))
     }
     /// Renders one diagram page to PNG at `scale` times the 96 dpi display list.
     #[cfg(feature = "raster")]
     pub fn export_png(&self, page_index: usize, scale: f32) -> Result<vsdx_raster::RenderedPage> {
-        vsdx_raster::render_page(
-            &vsdx_render::Renderer::default(),
-            &self.package,
-            page_index,
-            scale,
-        )
-        .map_err(Error::Render)
+        vsdx_raster::render_page(&self.renderer()?, &self.package, page_index, scale)
+            .map_err(Error::Render)
     }
     /// Applies formula edits sequentially, recomputing caches and enforcing current locks.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
@@ -396,6 +433,8 @@ impl MutationContext for PackageMutationContext<'_> {
                 expression,
             )
             .map_err(|error| match error {
+                #[cfg(feature = "fonts")]
+                Error::FontSource(error) => error.to_string(),
                 Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
                 Error::Parse(error) => error.to_string(),
                 Error::Resolve(error) => error.to_string(),
@@ -504,3 +543,6 @@ impl<'a> ShapeView<'a> {
 
 pub type PageRef<'a> = Page<'a>;
 pub type ShapeRef<'a> = ShapeView<'a>;
+
+#[cfg(not(feature = "fonts"))]
+mod open_options;

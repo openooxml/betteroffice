@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use betteroffice_fonts::{
-    BundledFontOptions, BundledFonts, FontError, FontFaceHandle, FontPack, FontProvider,
-    FontSource, LastResortOffice, resolve_metric_compat_face,
+    BundledFontOptions, BundledFonts, FontError, FontFaceHandle, FontLoading, FontManager,
+    FontPack, FontProvider, FontSource, LastResortOffice, resolve_metric_compat_face,
 };
 
 fn local_provider(root: PathBuf) -> BundledFonts {
@@ -70,10 +70,17 @@ fn decodes_embedded_carlito_and_its_dictionary_faces() {
 #[cfg(not(feature = "fonts-latin"))]
 #[test]
 fn absent_embedded_pack_names_the_cargo_feature() {
-    let handle = BundledFonts::default()
-        .resolve_family("Calibri", false, false)
-        .unwrap();
-    match handle.load().unwrap_err() {
+    assert!(
+        BundledFonts::default()
+            .resolve_family("Calibri", false, false)
+            .is_none()
+    );
+    match BundledFonts::new(BundledFontOptions {
+        packs: vec![FontPack::Latin],
+        base_url: None,
+    })
+    .unwrap_err()
+    {
         FontError::MissingFontPack { pack, action } => {
             assert_eq!(pack, FontPack::Latin);
             assert!(action.contains("fonts-latin"));
@@ -257,11 +264,18 @@ fn provider_source_is_used_verbatim() {
 }
 
 #[test]
-fn defaults_select_all_local_packs() {
+fn defaults_select_compiled_local_packs() {
     assert!(
         matches!(FontSource::default(), FontSource::Bundled(options) if options == BundledFontOptions::default())
     );
     assert!(FontSource::Backstop.provider().unwrap().is_none());
+    assert_eq!(
+        BundledFontOptions::default().packs,
+        [FontPack::Latin, FontPack::Intl, FontPack::Cjk]
+            .into_iter()
+            .filter(|pack| pack.is_compiled_in())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -331,6 +345,32 @@ fn preload_obeys_the_selected_packs() {
     let provider = local_provider(root.path().to_path_buf());
     assert!(matches!(
         provider.preload(),
+        Err(FontError::MissingFontPack {
+            pack: FontPack::Latin,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn on_demand_defers_local_reads_and_preload_reads_at_open() {
+    let root = tempfile::tempdir().unwrap();
+    let source = FontSource::Bundled(BundledFontOptions {
+        packs: vec![FontPack::Latin],
+        base_url: Some(root.path().to_owned()),
+    });
+    let manager = FontManager::new(&source, FontLoading::OnDemand).unwrap();
+    let faces = manager.resolve("Calibri", false, false, &[], LastResortOffice::Word);
+    assert_eq!(faces[0].family, "Carlito");
+    assert!(matches!(
+        faces[0].load(),
+        Err(FontError::MissingFontPack {
+            pack: FontPack::Latin,
+            ..
+        })
+    ));
+    assert!(matches!(
+        FontManager::new(&source, FontLoading::Preload),
         Err(FontError::MissingFontPack {
             pack: FontPack::Latin,
             ..

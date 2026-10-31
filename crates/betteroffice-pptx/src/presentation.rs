@@ -1,4 +1,10 @@
 use std::collections::BTreeMap;
+#[cfg(feature = "fonts")]
+use std::collections::HashSet;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+#[cfg(feature = "fonts")]
+use betteroffice_fonts::{FontManager, LastResortOffice};
 
 use pptx_edit::structured::{
     PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxStructuredContent,
@@ -19,9 +25,23 @@ use pptx_parse::{
 };
 use pptx_render::{RenderError, RenderedSlide, SlideRenderer};
 
+#[cfg(feature = "fonts")]
+use crate::OpenOptions;
 use crate::Result;
 
 const STANDALONE_CLIENT_ID: u64 = 1;
+#[cfg(feature = "fonts")]
+type FontRequestKey = (String, bool, bool, Vec<String>);
+
+#[cfg(feature = "fonts")]
+struct RegisteredFont {
+    family: String,
+    bold: bool,
+    italic: bool,
+    id: u32,
+    embedded: bool,
+    fallback: bool,
+}
 
 fn slide_scope(session: &DeckSession, slide_index: usize) -> Result<SlideScope> {
     session
@@ -34,7 +54,19 @@ fn slide_scope(session: &DeckSession, slide_index: usize) -> Result<SlideScope> 
 
 pub struct Presentation {
     session: DeckSession,
-    renderer: SlideRenderer,
+    renderer: Mutex<SlideRenderer>,
+    #[cfg(feature = "fonts")]
+    font_manager: FontManager,
+    #[cfg(feature = "fonts")]
+    embedded_fonts: HashSet<(String, bool, bool)>,
+    #[cfg(feature = "fonts")]
+    primary_font_families: HashSet<String>,
+    #[cfg(feature = "fonts")]
+    registered_fonts: Vec<RegisteredFont>,
+    #[cfg(feature = "fonts")]
+    application_fallbacks: usize,
+    #[cfg(feature = "fonts")]
+    resolved_fonts: Mutex<HashSet<FontRequestKey>>,
     #[cfg(feature = "raster")]
     caches: crate::render::RenderCaches,
 }
@@ -59,10 +91,12 @@ impl Presentation {
     pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
         let preview = self.session.proposal_preview_session(id)?;
         let scope = slide_scope(&preview, slide_index)?;
-        self.with_fonts(
-            self.renderer
-                .layout_scoped_slide(preview.package(), &scope)?,
-        )
+        #[cfg(feature = "fonts")]
+        self.prepare_fonts(preview.package(), std::slice::from_ref(&scope))?;
+        let rendered = self
+            .renderer()
+            .layout_scoped_slide(preview.package(), &scope)?;
+        self.with_fonts(rendered)
     }
 
     pub fn layout_proposal_diff_slide(
@@ -79,8 +113,10 @@ impl Presentation {
                 }
                 error => error.into(),
             })?;
+        #[cfg(feature = "fonts")]
+        self.prepare_fonts(self.session.package(), std::slice::from_ref(&preview.scope))?;
         let rendered = self
-            .renderer
+            .renderer()
             .layout_scoped_slide(self.session.package(), &preview.scope)?;
         Ok(crate::ProposalDiffSlide {
             proposal: preview.proposal,
@@ -102,6 +138,22 @@ impl Presentation {
         Self::open_with_limits_internal(bytes, &ParseLimits::default(), STANDALONE_CLIENT_ID)
     }
 
+    #[cfg(feature = "fonts")]
+    pub fn open_with_options(bytes: &[u8], options: &OpenOptions) -> Result<Self> {
+        let mut presentation = Self::open(bytes)?;
+        presentation.font_manager = FontManager::new(&options.font_source, options.font_loading)?;
+        for font in &options.fonts {
+            presentation.register_font(&font.family, font.bold, font.italic, &font.data)?;
+        }
+        if options.font_loading == betteroffice_fonts::FontLoading::Preload {
+            let scopes = (0..presentation.slides().len())
+                .map(|index| slide_scope(&presentation.session, index))
+                .collect::<Result<Vec<_>>>()?;
+            presentation.prepare_fonts(presentation.session.package(), &scopes)?;
+        }
+        Ok(presentation)
+    }
+
     pub fn open_with_limits(bytes: &[u8], limits: &ParseLimits) -> Result<Self> {
         Self::open_with_limits_internal(bytes, limits, STANDALONE_CLIENT_ID)
     }
@@ -116,12 +168,32 @@ impl Presentation {
             Some(source) => session.attach_source_if_matching(source)?,
             None => session,
         };
-        Ok(Self {
+        let presentation = Self {
             session,
-            renderer: SlideRenderer::new(),
+            renderer: Mutex::new(SlideRenderer::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: FontManager::new(
+                &OpenOptions::default().font_source,
+                OpenOptions::default().font_loading,
+            )?,
+            #[cfg(feature = "fonts")]
+            embedded_fonts: HashSet::new(),
+            #[cfg(feature = "fonts")]
+            primary_font_families: HashSet::new(),
+            #[cfg(feature = "fonts")]
+            registered_fonts: Vec::new(),
+            #[cfg(feature = "fonts")]
+            application_fallbacks: 0,
+            #[cfg(feature = "fonts")]
+            resolved_fonts: Mutex::new(HashSet::new()),
             #[cfg(feature = "raster")]
             caches: crate::render::RenderCaches::default(),
-        })
+        };
+        #[cfg(feature = "fonts")]
+        let mut presentation = presentation;
+        #[cfg(feature = "fonts")]
+        presentation.load_embedded_fonts()?;
+        Ok(presentation)
     }
 
     pub fn open_collaborative_with_limits(
@@ -139,12 +211,149 @@ impl Presentation {
     ) -> Result<Self> {
         let package = pptx_parse::parse_pptx_with_limits(bytes, limits)?;
         let session = DeckSession::from_package_with_source(package, bytes, client_id)?;
-        Ok(Self {
+        let presentation = Self {
             session,
-            renderer: SlideRenderer::new(),
+            renderer: Mutex::new(SlideRenderer::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: FontManager::new(
+                &OpenOptions::default().font_source,
+                OpenOptions::default().font_loading,
+            )?,
+            #[cfg(feature = "fonts")]
+            embedded_fonts: HashSet::new(),
+            #[cfg(feature = "fonts")]
+            primary_font_families: HashSet::new(),
+            #[cfg(feature = "fonts")]
+            registered_fonts: Vec::new(),
+            #[cfg(feature = "fonts")]
+            application_fallbacks: 0,
+            #[cfg(feature = "fonts")]
+            resolved_fonts: Mutex::new(HashSet::new()),
             #[cfg(feature = "raster")]
             caches: crate::render::RenderCaches::default(),
-        })
+        };
+        #[cfg(feature = "fonts")]
+        let mut presentation = presentation;
+        #[cfg(feature = "fonts")]
+        presentation.load_embedded_fonts()?;
+        Ok(presentation)
+    }
+
+    #[cfg(feature = "fonts")]
+    fn load_embedded_fonts(&mut self) -> Result<()> {
+        let package = self.session.package();
+        let owner = &package.presentation.part_path;
+        let (directory, name) = owner.rsplit_once('/').unwrap_or(("", owner));
+        let relationships = format!("{directory}/_rels/{name}.rels");
+        let fonts = betteroffice_fonts::embedded_font_definitions(
+            owner,
+            package.part_bytes(owner).unwrap_or_default(),
+            package.part_bytes(&relationships).unwrap_or_default(),
+            |path| package.part_bytes(path),
+        );
+        for font in fonts {
+            let id = match self.renderer().register_font(
+                &font.family,
+                font.bold,
+                font.italic,
+                &font.data,
+            ) {
+                Ok(id) => id,
+                Err(RenderError::Font(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            self.embedded_fonts
+                .insert((font.family.trim().to_lowercase(), font.bold, font.italic));
+            self.primary_font_families
+                .insert(font.family.trim().to_lowercase());
+            self.registered_fonts.push(RegisteredFont {
+                family: font.family.trim().to_lowercase(),
+                bold: font.bold,
+                italic: font.italic,
+                id,
+                embedded: true,
+                fallback: false,
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "fonts")]
+    fn prepare_fonts(&self, package: &PptxPackage, scopes: &[SlideScope]) -> Result<()> {
+        let mut renderer = self.renderer();
+        let requests = renderer.requested_font_faces_with_scripts(package, scopes)?;
+        let mut resolved = self
+            .resolved_fonts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for request in requests {
+            let key = (
+                request.family.trim().to_lowercase(),
+                request.bold,
+                request.italic,
+                request.scripts.clone(),
+            );
+            if resolved.contains(&key) {
+                continue;
+            }
+            let mut owned: Vec<_> = self
+                .registered_fonts
+                .iter()
+                .filter(|font| font.family == key.0)
+                .collect();
+            owned.sort_by_key(|font| {
+                (
+                    !font.embedded,
+                    2 * u8::from(font.bold != request.bold)
+                        + u8::from(font.italic != request.italic),
+                )
+            });
+            let mut seen = HashSet::new();
+            for (index, font) in owned
+                .into_iter()
+                .filter(|font| seen.insert(font.id))
+                .enumerate()
+            {
+                renderer.register_priority_fallback_face(
+                    &font.family,
+                    request.bold,
+                    request.italic,
+                    font.id,
+                    index,
+                )?;
+            }
+            let has_primary = self
+                .primary_font_families
+                .contains(&request.family.trim().to_lowercase())
+                || renderer.has_font_face(&request.family, request.bold, request.italic);
+            let faces = self.font_manager.resolve(
+                &request.family,
+                request.bold,
+                request.italic,
+                &request.scripts,
+                LastResortOffice::PowerPoint,
+            );
+            for (index, face) in faces.into_iter().enumerate() {
+                let bytes = face.load()?;
+                if index == 0 && !has_primary {
+                    renderer.register_font(
+                        &request.family,
+                        request.bold,
+                        request.italic,
+                        &bytes,
+                    )?;
+                } else if !renderer.has_fallback_font(&face.family, face.bold, face.italic) {
+                    renderer.register_fallback_font(
+                        &face.family,
+                        face.bold,
+                        face.italic,
+                        &bytes,
+                    )?;
+                }
+            }
+            resolved.insert(key);
+        }
+        Ok(())
     }
 
     pub fn client_id(&self) -> u64 {
@@ -760,7 +969,62 @@ impl Presentation {
         italic: bool,
         bytes: &[u8],
     ) -> Result<u32> {
-        Ok(self.renderer.register_font(family, bold, italic, bytes)?)
+        #[cfg(feature = "fonts")]
+        if self
+            .embedded_fonts
+            .iter()
+            .any(|(name, _, _)| *name == family.trim().to_lowercase())
+        {
+            return self.register_fallback_font(family, bold, italic, bytes);
+        }
+        let id = self.renderer().register_font(family, bold, italic, bytes)?;
+        #[cfg(feature = "fonts")]
+        {
+            let family = family.trim().to_lowercase();
+            let replaced: Vec<_> = self
+                .registered_fonts
+                .iter()
+                .filter(|font| {
+                    !font.embedded
+                        && !font.fallback
+                        && font.id != id
+                        && (font.family.as_str(), font.bold, font.italic)
+                            == (family.as_str(), bold, italic)
+                })
+                .map(|font| font.id)
+                .collect();
+            self.registered_fonts.retain(|font| {
+                font.embedded
+                    || font.fallback
+                    || (font.family.as_str(), font.bold, font.italic)
+                        != (family.as_str(), bold, italic)
+            });
+            self.registered_fonts.push(RegisteredFont {
+                family: family.clone(),
+                bold,
+                italic,
+                id,
+                embedded: false,
+                fallback: false,
+            });
+            if self.primary_font_families.insert(family.clone()) {
+                self.renderer().retain_font_style(&family, bold, italic);
+            }
+            for id in replaced {
+                if !self.registered_fonts.iter().any(|font| font.id == id) {
+                    self.renderer().remove_fallback_face(id);
+                    self.resolved_fonts
+                        .get_mut()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clear();
+                }
+            }
+            self.resolved_fonts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|(name, _, _, _)| name != &family);
+        }
+        Ok(id)
     }
 
     pub fn register_fallback_font(
@@ -770,9 +1034,36 @@ impl Presentation {
         italic: bool,
         bytes: &[u8],
     ) -> Result<u32> {
-        Ok(self
-            .renderer
-            .register_fallback_font(family, bold, italic, bytes)?)
+        #[cfg(feature = "fonts")]
+        {
+            let id = self.renderer().register_priority_fallback_font(
+                family,
+                bold,
+                italic,
+                bytes,
+                self.application_fallbacks,
+            )?;
+            self.application_fallbacks += 1;
+            self.registered_fonts.push(RegisteredFont {
+                family: family.trim().to_lowercase(),
+                bold,
+                italic,
+                id,
+                embedded: false,
+                fallback: true,
+            });
+            self.resolved_fonts
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+            Ok(id)
+        }
+        #[cfg(not(feature = "fonts"))]
+        {
+            Ok(self
+                .renderer()
+                .register_fallback_font(family, bold, italic, bytes)?)
+        }
     }
 
     /// Tests a slide point in display-list pixels, measured from the top left.
@@ -783,15 +1074,16 @@ impl Presentation {
         y: f32,
     ) -> Result<Option<crate::HitTestResult>> {
         let scope = slide_scope(&self.session, slide_index)?;
+        #[cfg(feature = "fonts")]
+        self.prepare_fonts(self.session.package(), std::slice::from_ref(&scope))?;
         Ok(self
-            .renderer
+            .renderer()
             .layout_scoped_slide(self.session.package(), &scope)?
             .hit_test(x, y))
     }
 
-    #[cfg(feature = "raster")]
-    pub(crate) fn renderer(&self) -> &SlideRenderer {
-        &self.renderer
+    pub(crate) fn renderer(&self) -> MutexGuard<'_, SlideRenderer> {
+        self.renderer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     #[cfg(feature = "raster")]
@@ -801,16 +1093,18 @@ impl Presentation {
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
         let scope = slide_scope(&self.session, slide_index)?;
-        self.with_fonts(
-            self.renderer
-                .layout_scoped_slide(self.session.package(), &scope)?,
-        )
+        #[cfg(feature = "fonts")]
+        self.prepare_fonts(self.session.package(), std::slice::from_ref(&scope))?;
+        let rendered = self
+            .renderer()
+            .layout_scoped_slide(self.session.package(), &scope)?;
+        self.with_fonts(rendered)
     }
 
     /// Native hosts draw text from the registered faces' outlines, so a slide
     /// with text needs one; the layout's fontless fallback is for browser hosts.
     fn with_fonts(&self, rendered: RenderedSlide) -> Result<RenderedSlide> {
-        if rendered.display_list.has_glyphs() && self.renderer.fonts().font_count() == 0 {
+        if rendered.display_list.has_glyphs() && self.renderer().fonts().font_count() == 0 {
             return Err(RenderError::NoFont.into());
         }
         Ok(rendered)
@@ -821,7 +1115,14 @@ impl Presentation {
     /// The container is rebuilt, so the output is not byte-identical to the
     /// source even without edits.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(self.renderer.save(&self.session)?)
+        #[cfg(feature = "fonts")]
+        {
+            let scopes = (0..self.slides().len())
+                .map(|index| slide_scope(&self.session, index))
+                .collect::<Result<Vec<_>>>()?;
+            self.prepare_fonts(self.session.package(), &scopes)?;
+        }
+        Ok(self.renderer().save(&self.session)?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {

@@ -122,6 +122,15 @@ describe('computeLayout retained kernel inputs', () => {
   });
 });
 
+test('buildResidentRegionLayoutRequest forwards the parsed theme without changing it', () => {
+  const document = stylesDoc([]);
+  const theme = { fontScheme: { majorFont: { latin: 'Calibri' }, minorFont: { latin: 'Arial' } } };
+  document.package.theme = theme;
+  const request = buildResidentRegionLayoutRequest(document, 24, {});
+  expect(request.renderEnv.fontTheme).toBe(theme);
+  expect(document.package.theme).toBe(theme);
+});
+
 describe('buildResidentRegionLayoutRequest compatibilityFlags', () => {
   test('forwards document spacing compatibility settings to lowering', () => {
     const document = stylesDoc([]);

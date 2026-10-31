@@ -15,6 +15,7 @@ categories = ["rendering", "graphics"]
 name = "pptx_render"
 
 [features]
+font-registration = []
 fuzzing = []
 
 [dependencies]

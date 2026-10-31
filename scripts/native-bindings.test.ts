@@ -400,6 +400,11 @@ describe('native package release wiring', () => {
     expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
     expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
+    const fonts = steps.find((step: any) => step.name === 'Build the font packages');
+    expect(fonts.run).toContain("bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build");
+    expect(fonts.run).toContain('(cd packages/fonts && bunx tsup)');
+    expect(fonts.shell).toBe('bash');
+    expect(steps.indexOf(fonts)).toBeLessThan(steps.indexOf(testing));
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
     expect(steps.indexOf(loader)).toBeGreaterThan(steps.indexOf(testing));
   });
@@ -423,7 +428,7 @@ describe('native package release wiring', () => {
     expect(job.steps.some((step: any) => step.with?.tool === 'wasm-pack@0.15.0')).toBe(true);
     const wasmCache = job.steps.find((step: any) => step.with?.path === 'target/wasm-pack');
     expect(wasmCache.with.key).toBe('wasm-pack-${{ steps.wasm.outputs.key }}');
-    const runtime = job.steps.find((step: any) => step.uses === 'actions/setup-node@v7.0.0');
+    const runtime = job.steps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
     expect(runtime.with['node-version']).toBe('24');
     const deno = job.steps.find((step: any) => step.uses === 'denoland/setup-deno@v2');
     expect(deno.with['deno-version']).toBe('v2.9.0');
@@ -434,6 +439,8 @@ describe('native package release wiring', () => {
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
     expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeGreaterThan(-1);
+    expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
     const nativeDeclarations = job.steps.find((step: any) => step.name === 'Check native declarations');
     expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
     expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');
@@ -540,7 +547,7 @@ describe('native package release wiring', () => {
     expect(job.steps[0].with.ref).toBe('${{ github.event.pull_request.head.sha || github.sha }}');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
     expect(bun.with['bun-version']).toBe('1.4.3');
-    const runtime = job.steps.find((step: any) => step.uses === 'actions/setup-node@v7.0.0');
+    const runtime = job.steps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
     expect(runtime.with['node-version']).toBe('24');
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const download = job.steps.find(

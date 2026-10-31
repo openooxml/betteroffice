@@ -99,7 +99,7 @@ fn an_unmoved_placeholder_keeps_inheriting_across_an_edit_to_its_slide() {
     let saved = session.save().unwrap();
     let slide = String::from_utf8(parts(&saved)["ppt/slides/slide2.xml"].clone()).unwrap();
     assert!(slide.contains("edited "));
-    assert_eq!(slide.matches("<p:spPr/>").count(), 5);
+    assert_eq!(slide.matches("<p:spPr></p:spPr>").count(), 5);
     let reopened = DeckSession::open(&saved, 905).unwrap();
     let untouched = &reopened.snapshot().unwrap().slides[1].shapes[0];
     assert_eq!(

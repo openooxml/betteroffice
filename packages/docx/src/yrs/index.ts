@@ -21,6 +21,7 @@ import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
 import type { Document, ParagraphFormatting, Table, TextFormatting } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
+import type { Theme } from '../types/drawingml';
 import type {
   DocxParagraphAnchor,
   DocxParagraphAnchorResult,
@@ -630,6 +631,7 @@ export interface YrsRenderEnv {
   docDefaultFontSize?: number;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
+  fontTheme?: Theme;
   /** The document default tab stop in twips. */
   defaultTabStopTwips?: number | null;
   /** Current page content height in CSS px, for proportional drawing constraints. */

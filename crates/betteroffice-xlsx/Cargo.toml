@@ -12,13 +12,18 @@ keywords = ["xlsx", "spreadsheet", "ooxml", "excel"]
 categories = ["parser-implementations", "rendering"]
 
 [features]
-default = ["raster"]
+default = ["fonts", "raster", "fonts-latin", "fonts-intl", "fonts-cjk"]
+fonts = ["betteroffice-fonts/manager", "dep:ooxml-text", "xlsx-raster?/fonts"]
+fonts-latin = ["fonts", "betteroffice-fonts/fonts-latin"]
+fonts-intl = ["fonts", "betteroffice-fonts/fonts-intl"]
+fonts-cjk = ["fonts", "betteroffice-fonts/fonts-cjk"]
 raster = ["dep:xlsx-raster"]
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-opc.workspace = true
+ooxml-text = { workspace = true, optional = true }
 xlsx-model.workspace = true
 xlsx-parse.workspace = true
 xlsx-calc.workspace = true

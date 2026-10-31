@@ -19,9 +19,25 @@ function builtinModule<T>(name: string): T | undefined {
   }
 }
 
+const OLD_NODE =
+  'Reading bundled fonts from installed packages needs Node.js 20.16+ or 22.3+ (process.getBuiltinModule); upgrade Node.js or pass a font baseUrl.';
+let warnedOldNode = false;
+
 /** Node fetch cannot read file: package assets, so server imports use built-in I/O. */
 function readFileAsset(url: URL): ArrayBuffer | undefined {
   if (url.protocol !== 'file:') return undefined;
+  const runtime = globalThis as {
+    process?: { versions?: { node?: string }; getBuiltinModule?: unknown };
+    Deno?: unknown;
+  };
+  if (runtime.process?.versions?.node !== undefined && runtime.Deno === undefined
+    && typeof runtime.process.getBuiltinModule !== 'function') {
+    if (!warnedOldNode) {
+      warnedOldNode = true;
+      console.warn(`[@betteroffice/fonts] ${OLD_NODE}`);
+    }
+    throw new Error(OLD_NODE);
+  }
   const fs = builtinModule<NodeFsLike>('node:fs');
   const nodeUrl = builtinModule<NodeUrlLike>('node:url');
   if (!fs || !nodeUrl) return undefined;

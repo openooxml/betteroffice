@@ -91,7 +91,7 @@ fn a_slide_past_the_deck_is_refused() {
 
 #[test]
 fn text_without_a_registered_font_needs_one_for_layout_and_png() {
-    let presentation = Presentation::open(FIXTURE).unwrap();
+    let presentation = Presentation::open_with_options(FIXTURE, &backstop_options()).unwrap();
     let Err(error) = presentation.render_slide(0) else {
         panic!("slide text laid out without a registered font");
     };
@@ -123,7 +123,8 @@ fn nested_text_without_fonts_is_refused() {
     let group = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/><a:chOff x="0" y="0"/><a:chExt cx="3000000" cy="1000000"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="3" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"/><a:t>Grouped text</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp>"#;
     for content in [table, group] {
         let bytes = text_container_deck(content);
-        let mut presentation = Presentation::open(&bytes).unwrap();
+        let mut presentation =
+            Presentation::open_with_options(&bytes, &backstop_options()).unwrap();
         let Err(error) = presentation.render_slide(0) else {
             panic!("nested text rendered without a registered font");
         };
@@ -397,4 +398,14 @@ fn pictures_received_from_a_peer_render_before_save() {
         .unwrap();
     assert_eq!(rendered.skipped_images, 0);
     assert_ne!(rendered.bytes, before.bytes);
+}
+
+fn backstop_options() -> betteroffice_pptx::OpenOptions {
+    let options = betteroffice_pptx::OpenOptions::default();
+    #[cfg(feature = "fonts")]
+    let options = betteroffice_pptx::OpenOptions {
+        font_source: betteroffice_pptx::fonts::FontSource::Backstop,
+        ..options
+    };
+    options
 }

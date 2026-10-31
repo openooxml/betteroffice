@@ -103,6 +103,7 @@ test('linked font decoder returns known answers and matching native and wasm err
     expect(actual).toBeInstanceOf(Error);
     expect(expected).toMatchObject({ name: 'Error', message: entry.message });
     expect(actual).toMatchObject({ name: 'Error', message: entry.message });
+    expect('code' in (actual as Error)).toBe('code' in (expected as Error));
   }
 });
 

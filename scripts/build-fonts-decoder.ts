@@ -10,9 +10,10 @@ requireWasmOpt();
 const build = spawnSync(
   'cargo',
   [
-    'build',
+    'rustc',
     '-p',
     'betteroffice-fonts',
+    '--lib',
     '--target',
     'wasm32-unknown-unknown',
     '--profile',
@@ -23,6 +24,9 @@ const build = spawnSync(
     '--locked',
     '--target-dir',
     resolve(root, 'target/fonts-decoder'),
+    '--',
+    '-C',
+    'link-arg=--max-memory=1073741824',
   ],
   { cwd: root, stdio: 'inherit' },
 );

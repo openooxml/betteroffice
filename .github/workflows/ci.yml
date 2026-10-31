@@ -128,6 +128,11 @@ jobs:
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
 
+      - name: Check Wasm memory limits
+        env:
+          BETTEROFFICE_REQUIRE_WASM: "1"
+        run: bun test scripts/wasm-memory.test.ts
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
@@ -140,6 +145,14 @@ jobs:
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --test fonts
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown --no-default-features --features raster
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown --no-default-features --features raster
           cargo check -p pptx-wasm --target wasm32-unknown-unknown
           cargo check -p vsdx-wasm --target wasm32-unknown-unknown --no-default-features
 

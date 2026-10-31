@@ -22,6 +22,7 @@ import { useLayoutPipeline, type UseLayoutPipelineReturn } from './hooks/useLayo
 import { useLayoutTriggers } from './hooks/useLayoutTriggers';
 import { useRevisionPreview } from './hooks/useRevisionPreview';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
+import { stampSourceVersion } from './internals/layoutProvenance';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -495,6 +496,50 @@ test('a local Delete reveals a distant caret even when its collapsed selection i
   expect(t.scroller.scrollTop).toBe(t.scrollTop + delta);
   expect(t.scrollChanges).toEqual([t.scrollTop + delta]);
   expect(t.onError).not.toHaveBeenCalled();
+});
+
+test('a local layout commit reveals the caret once, so later frames of it leave a newer scroll alone', async () => {
+  const t = await mount(false, true);
+  t.expectCaret(0);
+  stampSourceVersion(t.queries, 'v1');
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 2 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 3 })));
+  expect(t.scroller.scrollTop).toBe(2300);
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 2, layoutCommitVersion: 'v1', displayListFrameEpoch: 4 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+});
+
+test('a local layout commit keeps its reveal for the frame of its version when an older frame shows first', async () => {
+  const t = await mount(false, true);
+  t.expectCaret(0);
+  stampSourceVersion(t.queries, 'v1');
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v2', displayListFrameEpoch: 2 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+  t.scroller.scrollTop = 2300;
+  stampSourceVersion(t.queries, 'v2');
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v2', displayListFrameEpoch: 3 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v2', displayListFrameEpoch: 4 })));
+  expect(t.scroller.scrollTop).toBe(2300);
+});
+
+test('a local layout commit whose caret is not laid out yet reveals it on the frame that lays it out', async () => {
+  const t = await mount(false, true);
+  t.expectCaret(0);
+  t.scroller.scrollTop = 2300;
+  stampSourceVersion(t.queries, 'v1');
+  const ready = spyOn(t.queries, 'isReady').mockReturnValue(false);
+  restoreMocks.push(() => ready.mockRestore());
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 2 })));
+  expect(t.scroller.scrollTop).toBe(2300);
+  ready.mockReturnValue(true);
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 3 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
 });
 
 test('a resident Delete frame reveals an unchanged distant caret after a remote layout', async () => {

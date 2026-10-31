@@ -59,7 +59,7 @@ export default defineConfig([
     treeshake: true,
     minify: true,
     injectStyle: false,
-    external: ['@betteroffice/fonts', '#session-worker'],
+    external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'],
     esbuildPlugins: [nativeEnginePlugin('docx')],
     esbuildOptions(options) {
       options.chunkNames = 'chunk-[hash]';

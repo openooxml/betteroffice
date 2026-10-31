@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, spyOn, test } from 'bun:test';
 import { documentFixture, exercisePackage } from './package-script';
@@ -29,11 +30,34 @@ describe('@betteroffice/docx-native', () => {
     expect(manifest.module).toBe(wasmManifest.module);
     expect(manifest.types).toBe(wasmManifest.types);
     expect(manifest.files).toEqual(['dist', 'index.js', 'index.d.ts']);
-    expect(manifest.dependencies).toEqual(wasmManifest.dependencies);
+    expect(manifest.dependencies).toEqual({
+      ...wasmManifest.dependencies,
+      '@betteroffice/fonts-cjk': 'workspace:^0',
+      '@betteroffice/fonts-intl': 'workspace:^0',
+      '@betteroffice/fonts-latin': 'workspace:^0',
+    });
     expect(manifest.peerDependencies).toEqual(wasmManifest.peerDependencies);
     expect(manifest.peerDependenciesMeta).toEqual(wasmManifest.peerDependenciesMeta);
     expect(readFileSync(new URL('./dist/core.mjs', import.meta.url), 'utf8').length).toBeGreaterThan(0);
     expect(readFileSync(new URL('./dist/core.d.mts', import.meta.url), 'utf8').length).toBeGreaterThan(0);
+  });
+
+  test('loads every font pack from the installed packages without fetching', async () => {
+    const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
+    try {
+      const fonts = await import(Bun.resolveSync('@betteroffice/fonts', fileURLToPath(new URL('.', import.meta.url)))) as
+        typeof import('../../packages/fonts/src/index');
+      const { decodeFontFace } = await import('@betteroffice/docx-native') as typeof import('../../packages/docx/src/core');
+      const source = fonts.createFontProvider(undefined, { decoder: decodeFontFace });
+      for (const family of ['Carlito', 'Noto Sans Devanagari', 'Noto Sans JP']) {
+        const face = fonts.BUNDLED_FONTS.find((face) => face.family === family && face.weight === 400 && face.style === 'normal')!;
+        const bytes = await (source.resolve(family, false, false) ?? source.resolveFamily(family, false, false))!();
+        expect(bytes.byteLength).toBe(face.byteLength);
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   test('browser conditions reject every entry', () => {

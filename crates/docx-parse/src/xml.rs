@@ -1269,6 +1269,9 @@ pub(crate) fn parse_xml_strict(
     budget: &mut ParseBudget<'_>,
 ) -> Result<XmlDocument, ParseError> {
     budget.charge_xml_bytes(xml.len(), part)?;
+    // The reader skips a UTF-8 byte order mark without counting it, so its offsets index the
+    // bytes after it; slice retained source XML from those same bytes.
+    let xml = xml.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(xml);
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     reader.config_mut().check_end_names = true;
@@ -1961,6 +1964,27 @@ mod tests {
             parse_twips_measure(&format!("{}in", "9".repeat(310)), true),
             None
         );
+    }
+
+    #[test]
+    fn retained_bookmark_xml_after_a_byte_order_mark_is_the_source_element() {
+        let start = "<w:bookmarkStart w:id=\"0\" w:name=\"_Toc1\"/>";
+        let end = "<w:bookmarkEnd w:id=\"0\"/>";
+        let part = format!(
+            "<w:document xmlns:w=\"urn:w\"><w:body>{start}<w:p/>{end}</w:body></w:document>"
+        );
+        for input in [part.clone(), format!("\u{feff}{part}")] {
+            let document = parse(&input).unwrap();
+            let retained: Vec<_> = document
+                .root()
+                .unwrap()
+                .child_by_local_name("body")
+                .unwrap()
+                .child_elements()
+                .filter_map(|element| element.bookmark_xml.as_deref())
+                .collect();
+            assert_eq!(retained, [start, end], "{input:?}");
+        }
     }
 
     fn parse(input: &str) -> Result<XmlDocument, ParseError> {
