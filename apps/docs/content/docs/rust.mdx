@@ -236,19 +236,47 @@ presentation.add_comment(
 
 Supply a creation timestamp when adding a comment. Coordinates use EMUs.
 
+## Fonts
+
+The DOCX, PPTX, XLSX and VSDX crates resolve each face from the fonts embedded in
+the document, then the faces you register with `register_font` or pass in
+`OpenOptions::fonts`, then the bundled packs, then a last resort. The packs are
+embedded through default features: `fonts-latin` (4.6 MB), `fonts-intl` (2.2 MB)
+and `fonts-cjk` (26.7 MB). Turn off default features to leave them out:
+
+```toml
+betteroffice-docx = { version = "0.5", default-features = false, features = ["fonts-latin"] }
+```
+
+`open_with_options` reads the packs from a local directory or a provider you
+implement instead; nothing is fetched:
+
+```rust
+use betteroffice_docx::fonts::{BundledFontOptions, FontPack, FontSource};
+use betteroffice_docx::{Document, OpenOptions};
+
+let options = OpenOptions {
+    font_source: FontSource::Bundled(BundledFontOptions {
+        packs: vec![FontPack::Latin],
+        base_url: Some("/srv/betteroffice-fonts".into()),
+    }),
+    ..OpenOptions::default()
+};
+let document = Document::open_with_options(&docx_bytes, &options)?;
+```
+
 ## Rendering
 
-XLSX includes PNG rendering by default. `render_sheet` uses the bundled Carlito
-font to measure and draw cell text. Enable the `raster` feature for native DOCX
-and PPTX PNG rendering:
+XLSX includes PNG rendering by default. `render_sheet` measures and draws cell
+text with the face resolved for each font family, with Carlito as the last
+resort. Enable the `raster` feature for native DOCX and PPTX PNG rendering:
 
 ```bash
 cargo add betteroffice-docx --features raster
 cargo add betteroffice-pptx --features raster
 ```
 
-`render_slide` returns a display list and hit-test metadata. Register at least
-one font face before rendering. With the `raster` feature enabled, `render_png`
+`render_slide` returns a display list and hit-test metadata. With the `raster` feature enabled, `render_png`
 produces PNG bytes and reads embedded images from the presentation. SVG pictures
 draw their paths, basic shapes, gradients, clip paths, symbols, `use` references
 and hyperlinked content, and leave out their text and embedded raster images. A

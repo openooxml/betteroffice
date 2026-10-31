@@ -145,6 +145,14 @@ jobs:
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --test fonts
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown --no-default-features --features raster
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown --no-default-features --features raster
           cargo check -p pptx-wasm --target wasm32-unknown-unknown
           cargo check -p vsdx-wasm --target wasm32-unknown-unknown --no-default-features
 

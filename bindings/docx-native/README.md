@@ -25,7 +25,8 @@ try {
 All 28 public entry points, exports and declarations match `@betteroffice/docx`.
 Select the engine by importing `@betteroffice/docx-native` or `@betteroffice/docx`;
 there is no runtime engine switch. Native initialization needs no WebAssembly assets.
-`@betteroffice/fonts` is an optional peer for font assets.
+Default fonts need no setup: the Latin, international and CJK font packs install with this
+package and each face is read from disk the first time a document needs it; nothing is fetched.
 
 The previous `Document` and `openDocument` facade has been removed. Use the
 [DOCX API](https://docs.betteroffice.dev/docs/javascript) with the native package name.

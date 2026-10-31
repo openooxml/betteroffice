@@ -47,6 +47,7 @@ import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
+import { sourceVersionOf } from './internals/layoutProvenance';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
@@ -140,6 +141,10 @@ export interface YrsInputProps {
   residentCaret?: YrsResidentCaretSnapshot | null;
   residentCaretAuthoritative?: boolean;
   layoutUpdateOrigin?: LayoutUpdateOrigin;
+  /** The layout commit `layoutUpdateOrigin` belongs to; a local origin reveals the caret once per commit. */
+  layoutCommit?: number;
+  /** The source version of that commit; frames of another version do not use up its reveal. */
+  layoutCommitVersion?: string | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /** Called for selection-only changes and direct document mutations. */
   onStateChange(
@@ -308,6 +313,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     residentCaret = null,
     residentCaretAuthoritative = false,
     layoutUpdateOrigin = 'local',
+    layoutCommit,
+    layoutCommitVersion,
     canvasHostRef,
     onStateChange,
     onDirectInput,
@@ -397,6 +404,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
   const heldReplayBatchRef = useRef<HeldReplayBatch | null>(null);
   const pendingCaretTableRef = useRef<(() => boolean) | undefined>(undefined);
+  const revealedLayoutCommitRef = useRef<number | undefined>(undefined);
   const pendingLocalCaretRevealRef = useRef<{
     scroller: HTMLElement;
     scrollTop: number;
@@ -2134,13 +2142,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       !selectionIsQuiet;
     const scroller = findVerticalScrollParentOrRoot(host);
     const pendingReveal = pendingLocalCaretRevealRef.current;
+    const freshCommit = layoutCommit === undefined || revealedLayoutCommitRef.current !== layoutCommit;
+    if (sourceVersionOf(displayListQueries) === layoutCommitVersion) revealedLayoutCommitRef.current = layoutCommit;
     const caretRevealOrigin =
       pendingReveal &&
       pendingReveal.scroller === scroller &&
       pendingReveal.scrollTop === scroller.scrollTop &&
       !selectionIsQuiet
         ? 'local'
-        : layoutUpdateOrigin;
+        : freshCommit ? layoutUpdateOrigin : 'remote';
     pendingLocalCaretRevealRef.current = null;
     if (
       selection.anchor === selection.head &&
@@ -2155,6 +2165,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     displayListQueries,
     displaySelection,
     enabled,
+    layoutCommit,
+    layoutCommitVersion,
     layoutUpdateOrigin,
     onStateChange,
     readOnly,

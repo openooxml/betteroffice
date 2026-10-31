@@ -23,7 +23,7 @@ required-features = ["build"]
 default = []
 wasm = ["dep:lol_alloc"]
 build = ["dep:zstd", "dep:serde", "dep:serde_json", "dep:sha2", "dep:semver", "wuff/brotli"]
-manager = ["dep:serde", "dep:serde_json"]
+manager = ["dep:serde", "dep:serde_json", "dep:quick-xml"]
 fonts-latin = ["manager", "dep:betteroffice-fonts-latin"]
 fonts-intl = ["manager", "dep:betteroffice-fonts-intl"]
 fonts-cjk = ["manager", "dep:betteroffice-fonts-cjk"]
@@ -36,6 +36,7 @@ wuff = { version = "=0.2.9", default-features = false }
 zstd = { version = "0.14.3", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+quick-xml = { version = "0.41", optional = true }
 sha2 = { version = "0.10", optional = true }
 semver = { version = "1", optional = true }
 

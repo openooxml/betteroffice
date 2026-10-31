@@ -12,7 +12,11 @@ keywords = ["pptx", "powerpoint", "ooxml", "presentationml"]
 categories = ["parser-implementations", "rendering"]
 
 [features]
-default = []
+default = ["fonts", "fonts-latin", "fonts-intl", "fonts-cjk"]
+fonts = ["betteroffice-fonts/manager", "pptx-render/font-registration"]
+fonts-latin = ["fonts", "betteroffice-fonts/fonts-latin"]
+fonts-intl = ["fonts", "betteroffice-fonts/fonts-intl"]
+fonts-cjk = ["fonts", "betteroffice-fonts/fonts-cjk"]
 raster = ["dep:pptx-raster"]
 
 [dependencies]

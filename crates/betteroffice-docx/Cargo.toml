@@ -12,7 +12,11 @@ keywords = ["docx", "word", "ooxml", "wordprocessingml"]
 categories = ["parser-implementations", "rendering"]
 
 [features]
-default = []
+default = ["fonts", "fonts-latin", "fonts-intl", "fonts-cjk"]
+fonts = ["betteroffice-fonts/manager", "docx-layout/font-registration", "dep:ooxml-text", "dep:serde_json"]
+fonts-latin = ["fonts", "betteroffice-fonts/fonts-latin"]
+fonts-intl = ["fonts", "betteroffice-fonts/fonts-intl"]
+fonts-cjk = ["fonts", "betteroffice-fonts/fonts-cjk"]
 raster = ["dep:docx-raster", "dep:ooxml-text", "dep:serde_json"]
 
 [dependencies]
