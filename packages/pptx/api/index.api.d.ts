@@ -490,6 +490,8 @@ export type { InspectPresentationOptions, OpenPresentationOptions, SavePresentat
 export type { EditSuccess, OperationFailure, OperationRefusal, PptxEditFailure, PptxEditFailureCode, PptxEditHistory, PptxEditPreview, PptxEditReceipt, PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxEditSource, PptxEditStep, PptxEditTarget, PptxFindMatch, PptxFindRequest, PptxFindResult, PptxFindScope, PptxParagraphText, PptxReadRequest, PptxReadResult, PptxShapeTarget, PptxSlideTarget, PptxStoryTarget, PptxStoryText, PptxTextField, PptxTextGuard, PptxTextRange, PptxTextTarget, PptxValidationResult, ValidationSuccess, } from './edits';
 export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
 /** @internal */
+export { metafileImageBytes } from './render/image';
+/** @internal */
 export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/peerHydrationError';
 /** @internal */
 export { openPresentationSession } from './session/client';
@@ -600,6 +602,12 @@ export declare function browserPresentationImageBlob(bytes: Uint8Array): Blob;
 export declare function needsElementDecode(blob: Blob): boolean;
 export declare function decodeBrowserPresentationImage(bytes: Uint8Array, errorMessage: string, options?: PresentationImageDecodeOptions): Promise<CanvasImageSource>;
 export declare function decodeBrowserImageBlob(blob: Blob, errorMessage: string, options?: PresentationImageDecodeOptions): Promise<CanvasImageSource>;
+/**
+ * A metafile's display bytes: `resolve`'s replay of it, unless the browser
+ * path already draws it (a plain bitmap wrapper). Other images are unchanged.
+ * @internal
+ */
+export declare function metafileImageBytes(bytes: Uint8Array, resolve?: () => Uint8Array | undefined): Uint8Array;
 
 // ---- render/canvas.d.ts ----
 import type { ImageEffect, SlideDisplayList } from '../types';
@@ -634,6 +642,8 @@ export declare function applyImageEffects(data: Uint8ClampedArray, effects: Imag
 // ---- render/image.d.ts ----
 import type { PresentationImageDecodeOptions } from './browserImage';
 export { imageDecodeScale, needsElementDecode, setImageDecodeScale } from './browserImage';
+/** @internal */
+export { metafileImageBytes } from './browserImage';
 export type { PresentationImageDecodeOptions } from './browserImage';
 export declare function presentationImageBlob(bytes: Uint8Array): Blob;
 export declare function decodePresentationImage(bytes: Uint8Array, errorMessage: string, options?: PresentationImageDecodeOptions): Promise<CanvasImageSource>;
@@ -709,7 +719,7 @@ import { type PresentationHandle, type PresentationPeerHandle } from '../wasm/lo
 import { PptxWorkerEditorFailedError } from './peerHydrationError';
 import { type PptxWorkerEditorOperation, type PptxWorkerEditorReply } from './replay';
 import type { PresentationSessionState } from './methods';
-declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
+declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "metafileSvg", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
 export interface PptxWorkerEditorInteractionAccess {
     snapshot(): {
         snapshot: DeckSnapshot;
@@ -2754,6 +2764,7 @@ export class PptxDocument {
     insertTextProfiledJson(args: string): string;
     listProposalsJson(): string;
     mediaBytes(part_path: string): Uint8Array;
+    metafileSvg(part_path: string): Uint8Array | undefined;
     moveShapeJson(args: string): string;
     moveShapeProfiledJson(args: string): string;
     moveSlideJson(args: string): string;
@@ -2963,6 +2974,7 @@ export interface InitOutput {
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveShapeProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3183,6 +3195,7 @@ export interface PresentationHandle extends CollaborationReplica {
     layoutSlideProfiled(slideIndex: number): ProfiledLayout;
     hitTest(x: number, y: number): HitTestResult | null;
     mediaBytes(partPath: string): Uint8Array;
+    metafileSvg(partPath: string): Uint8Array | undefined;
     /**
      * serialize the presentation back to .pptx bytes, edits included. Normal
      * autofit text the edits changed is fitted with the registered faces, or
@@ -3315,7 +3328,7 @@ export interface PresentationReplayReply {
     outcome: PresentationReplayOutcome;
 }
 /** @internal */
-export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
+export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
 /** @internal */
 export declare function openPresentationReplayBaseline(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationPeerHandle;
 /** @internal */
