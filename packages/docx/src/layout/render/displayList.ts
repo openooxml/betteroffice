@@ -454,6 +454,8 @@ export interface GlyphRunPrimitive extends DocAttrs {
   size: number; // px
   color: string; // "#rrggbb"
   text: string; // source text — the a11y mirror renders this as a real text node
+  /** Canvas-only glyph stand-in text for the fillText fallback. */
+  paintText?: string;
   glyphs: PositionedGlyph[];
   echo?: { x: number; right: number; kern?: boolean; primaryFont?: boolean;
     kerning?: number; letterSpacing?: number; position?: number; scale?: number; canEmpty?: boolean;

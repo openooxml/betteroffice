@@ -850,6 +850,9 @@ pub struct GlyphRunPrimitive {
     /// SOURCE TEXT — the a11y mirror renders this as real characters and the
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
+    /// Canvas-only glyph stand-in text for the fillText fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_text: Option<String>,
     pub glyphs: Vec<PlacedGlyph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<EchoRunFacts>,
@@ -4608,7 +4611,18 @@ fn text_paint_override(
     let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
     let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
     let font = fonts.resolve(chain, '\u{2011}')?;
-    let stand_in = ooxml_text::covered_character(fonts.store, font, '\u{2011}').ok()??;
+    glyph_paint_text(fonts.store, font, text)
+}
+
+fn glyph_paint_text(
+    store: &ooxml_text::FontStore,
+    font: ooxml_text::FontId,
+    text: &str,
+) -> Option<String> {
+    if !text.contains('\u{2011}') {
+        return None;
+    }
+    let stand_in = ooxml_text::covered_character(store, font, '\u{2011}').ok()??;
     (stand_in != '\u{2011}').then(|| text.replace('\u{2011}', &stand_in.to_string()))
 }
 
@@ -8172,6 +8186,7 @@ fn try_emit_glyph_runs(
             font_id: font.to_u32(),
             size: round3(size_px),
             color: color.to_string(),
+            paint_text: glyph_paint_text(shape_fonts.store, font, &sub_text),
             text: sub_text,
             glyphs: placed,
             echo: Some(EchoRunFacts {

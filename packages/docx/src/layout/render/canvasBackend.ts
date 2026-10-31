@@ -540,7 +540,8 @@ function drawGlyphRunFallback(ctx: CanvasRenderingContext2D, run: GlyphRunPrimit
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.direction = run.rtl ? 'rtl' : 'ltr';
-  const text = run.allCaps ? run.text.toUpperCase() : run.text;
+  const paintText = run.paintText ?? run.text;
+  const text = run.allCaps ? paintText.toUpperCase() : paintText;
   if (!drawModernRunText(ctx, text, first.x, first.y, run, glyphRunRect(run))) {
     drawCanvasTextWithEffects(ctx, text, first.x, first.y, run);
   }

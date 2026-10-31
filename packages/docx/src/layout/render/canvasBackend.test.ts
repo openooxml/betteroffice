@@ -495,6 +495,26 @@ describe('Canvas text-run slot clipping', () => {
 });
 
 describe('Canvas substitute widths', () => {
+  it('paints the glyph run stand-in when glyph outlines are unavailable', async () => {
+    const { ctx } = recordingContext(new Map([['co-op', { width: 40, ascent: 12, descent: 4 }]]));
+    const fillText = spyOn(ctx, 'fillText');
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 1,
+      size: 16,
+      color: '#000000',
+      text: 'co\u2011op',
+      paintText: 'co-op',
+      fallbackFont: '16px Calibri',
+      glyphs: [{ id: 1, x: 10, y: 20, cluster: 0 }],
+    };
+
+    await drawPrimitive(ctx, run);
+
+    expect(fillText).toHaveBeenCalledWith('co-op', 10, 20);
+    expect(run.text).toBe('co\u2011op');
+  });
+
   it('paints the supplied hyphen stand-in while preserving source text', async () => {
     for (const allCaps of [false, true]) {
       const painted = allCaps ? 'CO-OP' : 'co-op';

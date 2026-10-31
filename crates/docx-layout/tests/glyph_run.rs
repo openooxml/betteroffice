@@ -877,6 +877,7 @@ fn nonbreaking_hyphen_paints_a_covered_glyph_with_original_clusters() {
     assert_eq!(runs.len(), 1);
     let run = runs[0];
     assert_eq!(run.text, text);
+    assert_eq!(run.paint_text.as_deref(), Some("co\u{2010}operate"));
     assert_eq!(
         (run.attrs.doc_start, run.attrs.doc_end),
         (Some(1), Some(11))
