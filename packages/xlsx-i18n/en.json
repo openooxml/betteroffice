@@ -135,6 +135,7 @@
       "unsupportedCommand": "Not supported yet.",
       "invalidArguments": "This value is not valid.",
       "inputFailed": "The cell entry before this could not be saved.",
+      "sheetProtected": "This cell is on a protected sheet.",
       "documentReplaced": "Another workbook was opened.",
       "targetChanged": "The selection changed.",
       "gestureActive": "Finish moving the chart first.",

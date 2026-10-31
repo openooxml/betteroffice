@@ -135,6 +135,7 @@
       "unsupportedCommand": "अभी समर्थित नहीं है।",
       "invalidArguments": "यह मान मान्य नहीं है।",
       "inputFailed": "इससे पहले की सेल प्रविष्टि सहेजी नहीं जा सकी।",
+      "sheetProtected": "यह सेल एक सुरक्षित शीट पर है।",
       "documentReplaced": "दूसरी कार्यपुस्तिका खोली गई।",
       "targetChanged": "चयन बदल गया।",
       "gestureActive": "पहले चार्ट को ले जाना समाप्त करें।",

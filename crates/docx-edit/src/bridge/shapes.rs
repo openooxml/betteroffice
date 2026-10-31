@@ -818,6 +818,16 @@ fn shape_shading(formatting: Option<&Value>, env: &RenderEnv) -> Option<String> 
 
 fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
     let mut formatting = shape_run_formatting(source);
+    if let Some(slots) = formatting.font_slots.as_mut() {
+        super::resolve_font_slots(slots, env);
+        formatting.font_family = slots
+            .ascii
+            .clone()
+            .or_else(|| slots.h_ansi.clone())
+            .or_else(|| slots.east_asia.clone())
+            .or_else(|| slots.cs.clone())
+            .filter(|family| !family.is_empty());
+    }
     formatting.highlight = shape_shading(source, env);
     formatting
 }

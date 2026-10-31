@@ -135,6 +135,7 @@
       "unsupportedCommand": "Noch nicht unterstützt.",
       "invalidArguments": "Dieser Wert ist ungültig.",
       "inputFailed": "Die vorherige Zelleneingabe konnte nicht gespeichert werden.",
+      "sheetProtected": "Diese Zelle liegt auf einem geschützten Blatt.",
       "documentReplaced": "Eine andere Arbeitsmappe wurde geöffnet.",
       "targetChanged": "Die Auswahl hat sich geändert.",
       "gestureActive": "Beenden Sie zuerst das Verschieben des Diagramms.",
