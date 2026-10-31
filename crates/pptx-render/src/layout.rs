@@ -73,6 +73,8 @@ const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
 const MAX_TEXT_RUNS: usize = 100_000;
+/// Source paragraphs a joined story paragraph takes its languages from.
+const MAX_LANGUAGE_SOURCES: usize = 64;
 /// Larger edited shapes save unfitted, as when no fonts are registered.
 const MAX_FITTED_TEXT_UTF16: u32 = 65_536;
 /// Chart parts one slide may draw, shared across its charts.
@@ -1379,10 +1381,12 @@ impl FontRequests {
                 paragraph_scripts_with_languages(pieces.iter().flatten().copied(), false);
             self.record(first.clone(), &[]);
             for (run, run_pieces) in source.paragraph.runs.iter().zip(&pieces) {
-                let unresolved = run_pieces.iter().all(|(_, language)| language.is_none());
-                let mut scripts =
-                    paragraph_scripts_with_languages(run_pieces.iter().copied(), false);
-                if unresolved && scripts.iter().any(|script| script == "cjk-sc") {
+                let (decided, undecided): (Vec<_>, Vec<_>) = run_pieces
+                    .iter()
+                    .copied()
+                    .partition(|(_, language)| language.is_some());
+                let mut scripts = paragraph_scripts_with_languages(undecided, false);
+                if scripts.iter().any(|script| script == "cjk-sc") {
                     let contextual: Vec<_> = paragraph_scripts
                         .iter()
                         .filter(|script| matches!(script.as_str(), "cjk-jp" | "cjk-kr"))
@@ -1395,6 +1399,11 @@ impl FontRequests {
                                 scripts.push(script);
                             }
                         }
+                    }
+                }
+                for script in paragraph_scripts_with_languages(decided, false) {
+                    if !scripts.contains(&script) {
+                        scripts.push(script);
                     }
                 }
                 self.record(resolve_font_request(theme, &run.style, fallback), &scripts);
@@ -1436,41 +1445,58 @@ fn run_language_pieces<'a>(
         .collect()
 }
 
-/// Source languages for each live run of a story paragraph: where the live text still equals
-/// the source text, each run is cut at the source run boundaries; otherwise every run carries
-/// each language the source paragraph uses, so no needed face is dropped.
-fn live_run_languages(
-    source: Option<&pptx_parse::TextParagraph>,
+/// The distinct languages that decide Han glyphs, or one undecided entry when none does.
+fn east_asian_languages<'a>(
+    languages: impl IntoIterator<Item = Option<&'a String>>,
+) -> Vec<Option<String>> {
+    let decided: std::collections::BTreeSet<&String> = languages
+        .into_iter()
+        .flatten()
+        .filter(|tag| han_script_for_language(tag).is_some())
+        .collect();
+    if decided.is_empty() {
+        return vec![None];
+    }
+    decided.into_iter().map(|tag| Some(tag.clone())).collect()
+}
+
+/// Every live run carries each East Asian language its source paragraphs use.
+fn union_languages(
+    sources: &[&pptx_parse::TextParagraph],
     live: &[&str],
 ) -> Vec<Vec<(std::ops::Range<usize>, Option<String>)>> {
-    let Some(source) = source else {
-        return live
+    let languages = east_asian_languages(
+        sources
             .iter()
-            .map(|text| vec![(0..text.len(), None)])
-            .collect();
+            .flat_map(|source| &source.runs)
+            .map(|run| run.properties.language.as_ref()),
+    );
+    live.iter()
+        .map(|text| {
+            languages
+                .iter()
+                .map(|language| (0..text.len(), language.clone()))
+                .collect()
+        })
+        .collect()
+}
+
+/// Source languages for each live run of a story paragraph: where the live text still equals
+/// its one source paragraph, each run is cut at the source run boundaries; otherwise (edited,
+/// joined or new paragraphs) every run carries each East Asian language of its sources.
+fn live_run_languages(
+    sources: &[&pptx_parse::TextParagraph],
+    live: &[&str],
+) -> Vec<Vec<(std::ops::Range<usize>, Option<String>)>> {
+    let [source] = sources else {
+        return union_languages(sources, live);
     };
     let unchanged = live
         .iter()
         .flat_map(|text| text.bytes())
         .eq(source.runs.iter().flat_map(|run| run.text.bytes()));
     if !unchanged {
-        let languages: std::collections::BTreeSet<Option<&String>> = source
-            .runs
-            .iter()
-            .map(|run| run.properties.language.as_ref())
-            .collect();
-        return live
-            .iter()
-            .map(|text| {
-                if languages.is_empty() {
-                    return vec![(0..text.len(), None)];
-                }
-                languages
-                    .iter()
-                    .map(|language| (0..text.len(), language.cloned()))
-                    .collect()
-            })
-            .collect();
+        return union_languages(sources, live);
     }
     let mut source_runs = source
         .runs
@@ -3732,7 +3758,21 @@ fn content_from_story(
                 let insertions = source_para
                     .map(|source| slide_number_insertions(source, &live))
                     .unwrap_or_default();
-                let mut live_languages = live_run_languages(source_para, &live).into_iter();
+                let sources: Vec<&pptx_parse::TextParagraph> = if paragraph.source_paragraphs.len()
+                    > 1
+                {
+                    paragraph
+                        .source_paragraphs
+                        .iter()
+                        .take(MAX_LANGUAGE_SOURCES)
+                        .filter_map(|joined| {
+                            source.and_then(|body| source_paragraph(body, &story.id, &joined.id))
+                        })
+                        .collect()
+                } else {
+                    source_para.into_iter().collect()
+                };
+                let mut live_languages = live_run_languages(&sources, &live).into_iter();
                 let mut runs = Vec::with_capacity(paragraph.runs.len() + insertions.len());
                 let mut insertion_index = 0;
                 let mut offset = 0;
@@ -3758,12 +3798,17 @@ fn content_from_story(
                         .as_ref()
                         .and_then(|values| values.get(run_index))
                         .and_then(|value| value.clone());
+                    let languages = match &replaced {
+                        Some(text) => {
+                            east_asian_languages(languages.iter().map(|(_, tag)| tag.as_ref()))
+                                .into_iter()
+                                .map(|tag| (0..text.len(), tag))
+                                .collect()
+                        }
+                        None => languages,
+                    };
                     runs.push(ContentRun {
-                        languages: if replaced.is_some() {
-                            Vec::new()
-                        } else {
-                            languages
-                        },
+                        languages,
                         text: replaced.unwrap_or_else(|| run.text.clone()),
                         style: run.style.clone(),
                     });

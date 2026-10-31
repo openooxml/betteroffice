@@ -1154,3 +1154,125 @@ fn edited_mixed_paragraphs_keep_every_source_language() {
         ])
     );
 }
+
+#[test]
+fn undecided_han_beside_tagged_pieces_keeps_the_paragraph_context() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            "<a:p>{}{}{}</a:p>",
+            lang_run("漢字", "en-US", "Mixed Piece"),
+            lang_run(" 2026", "ja-JP", "Mixed Piece"),
+            lang_run("かな", "ja-JP", "Kana Piece"),
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([
+            {"family":"Mixed Piece","bold":false,"italic":false,"scripts":["cjk-jp"]},
+            {"family":"Kana Piece","bold":false,"italic":false,"scripts":["cjk-jp"]},
+        ])
+    );
+}
+
+#[test]
+fn edits_beside_untagged_runs_keep_only_east_asian_languages() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            "<a:p>{}{}</a:p>",
+            lang_run("2026 ", "en-US", "Year Edit"),
+            lang_run("推計月間", "ja-JP", "Year Edit"),
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    session
+        .insert_text(
+            &EditCtx::local("fonts"),
+            &story.id,
+            0,
+            "1",
+            &pptx_edit::TextStyle {
+                font_family: Some("Year Edit".to_owned()),
+                ..pptx_edit::TextStyle::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([{"family":"Year Edit","bold":false,"italic":false,"scripts":["cjk-jp"]}])
+    );
+}
+
+#[test]
+fn joined_paragraphs_keep_the_languages_of_both_sources() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            "<a:p>{}</a:p><a:p>{}</a:p>",
+            lang_run("日本", "ja-JP", "Join Jp"),
+            lang_run("繁體", "zh-TW", "Join Tc"),
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    session
+        .delete_text_joining_paragraphs(&EditCtx::local("fonts"), &story.id, 2, 3)
+        .unwrap();
+    let requests = faces(&Renderer::new(), &session, None);
+    let tc = requests
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|face| face["family"] == "Join Tc")
+        .unwrap();
+    assert!(
+        tc["scripts"].as_array().unwrap().contains(&json!("cjk-tc")),
+        "{requests}"
+    );
+}
+
+#[test]
+fn slide_number_fields_keep_their_run_language() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            r#"<a:p>{}<a:fld id="{{A}}" type="slidenum"><a:rPr lang="zh-TW"><a:latin typeface="Footer Face"/></a:rPr><a:t>‹#›</a:t></a:fld>{}</a:p>"#,
+            lang_run("第 ", "zh-TW", "Footer Face"),
+            lang_run(" 頁", "zh-TW", "Footer Face"),
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([{"family":"Footer Face","bold":false,"italic":false,"scripts":["cjk-tc"]}])
+    );
+}
