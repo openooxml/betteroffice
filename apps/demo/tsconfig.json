@@ -20,7 +20,6 @@
       }
     ],
     "paths": {
-      "#session-worker": ["../../packages/xlsx/src/session/sessionWorker.node.ts"],
       "@/*": ["./*"],
       "@betteroffice/xlsx": ["../../packages/xlsx/src/index.ts"],
       "@betteroffice/xlsx/headless": ["../../packages/xlsx/src/headless.ts"],
