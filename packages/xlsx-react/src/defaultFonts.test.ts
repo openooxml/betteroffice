@@ -157,19 +157,41 @@ test('a frame reports settled faces only once its families have loaded', async (
   fonts.dispose();
 });
 
-test('a frame painted before a face fails still repaints once as settled', async () => {
+test('a frame whose faces all fail settles without a repaint', async () => {
   const { added } = browser();
   provider(async () => { throw new Error('Missing optional font pack'); });
-  const repainted = deferred<void>();
-  const repaint = mock(() => repainted.resolve());
-  const fonts = createDefaultFontPainter(decoder(), repaint);
+  const settled = deferred<void>();
+  const onSettled = mock(() => settled.resolve());
+  const repaint = mock(() => {});
+  const fonts = createDefaultFontPainter(decoder(), repaint, { onSettled });
   const list = display({ family: 'Noto Sans Thai' }, { family: 'Unknown Face' });
   expect(fonts.paint(list, () => {})).toBe(false);
-  await repainted.promise;
+  await settled.promise;
   expect(added).toHaveLength(0);
+  expect(repaint).not.toHaveBeenCalled();
   expect(fonts.paint(list, () => {})).toBe(true);
+  expect(onSettled).toHaveBeenCalledTimes(1);
+  fonts.dispose();
+});
+
+test('a newer unsettled frame is not marked settled by an older batch', async () => {
+  browser();
+  const gate = deferred<void>();
+  provider(async (face) => {
+    if (face.family === 'Noto Sans Thai') throw new Error('Missing optional font pack');
+    await gate.promise;
+    return new ArrayBuffer(face.byteLength);
+  });
+  const onSettled = mock(() => {});
+  const repainted = deferred<void>();
+  const fonts = createDefaultFontPainter(decoder(), () => repainted.resolve(), { onSettled });
+  expect(fonts.paint(display({ family: 'Noto Sans Thai' }), () => {})).toBe(false);
+  expect(fonts.paint(display({ family: 'Calibri' }), () => {})).toBe(false);
   await Promise.resolve();
-  expect(repaint).toHaveBeenCalledTimes(1);
+  expect(onSettled).not.toHaveBeenCalled();
+  gate.resolve();
+  await repainted.promise;
+  expect(onSettled).not.toHaveBeenCalled();
   fonts.dispose();
 });
 

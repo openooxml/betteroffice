@@ -73,7 +73,8 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const { run, loading, error, reportError } = useSessionWorkbook(props, commands.store, focus);
   const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
-    () => { if (run?.current) run.schedule(); });
+    () => { if (run?.current) run.schedule(); },
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   const latest = useRef({ run, props, zoom, selectedChart, loading, t, reportError });
   latest.current = { run, props, zoom, selectedChart, loading, t, reportError };
   const pendingSave = useRef<{ run: ViewerSession; promise: Promise<XlsxCommandResult> } | null>(null);

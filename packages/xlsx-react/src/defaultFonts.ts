@@ -36,7 +36,7 @@ function registerFace(
 
 export function createDefaultFontPainter(
   decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
-  repaint: () => void, options: { defaultFonts?: boolean } = {},
+  repaint: () => void, options: { defaultFonts?: boolean; onSettled?: () => void } = {},
 ) {
   const owner = Symbol();
   const interests = new Set<Set<symbol>>();
@@ -46,6 +46,7 @@ export function createDefaultFontPainter(
   let disposed = false;
   let changed = false;
   let unsettledPaint = false;
+  let lastPainted: DisplayList | undefined;
   let provider: Promise<{
     fonts: Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>;
     source: ReturnType<Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>['createFontProvider']>;
@@ -137,10 +138,13 @@ export function createDefaultFontPainter(
           loaded.add(key);
           changed = true;
         }
-        if (!disposed && !pending.size && (changed || unsettledPaint)) {
+        if (!disposed && !pending.size && changed) {
           changed = false;
           unsettledPaint = false;
           repaint();
+        } else if (!disposed && !pending.size && unsettledPaint && lastPainted && isSettled(lastPainted)) {
+          unsettledPaint = false;
+          options.onSettled?.();
         }
         return success;
       });
@@ -152,10 +156,11 @@ export function createDefaultFontPainter(
 
   return {
     load,
-    /** Takes over a frame painted before this painter existed, repainting once its faces settle. */
+    /** Takes over a frame painted before this painter existed. */
     adopt(displayList: DisplayList): void {
+      lastPainted = displayList;
       if (isSettled(displayList)) {
-        if (!disposed) repaint();
+        if (!disposed) options.onSettled?.();
         return;
       }
       unsettledPaint = true;
@@ -163,6 +168,7 @@ export function createDefaultFontPainter(
     },
     /** Paints the frame and reports whether its faces had settled before it was painted. */
     paint(displayList: DisplayList, paint: () => void): boolean {
+      lastPainted = displayList;
       const ready = isSettled(displayList);
       if (!ready) unsettledPaint = true;
       paint();

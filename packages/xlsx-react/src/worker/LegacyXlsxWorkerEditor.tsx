@@ -199,7 +199,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }));
   const { run, error, loading } = useLegacySessionWorkbook(props, commands.store, apiBridge);
   const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
-    () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); });
+    () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); },
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   runRef.current = run;
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
@@ -398,8 +399,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`;
         canvas.style.height = `${request.height}px`;
-        canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
-          () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
+        paintWithDefaultFonts(frame.displayList, () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom));
         canvas.dataset.previewReady = 'true';
       }
     }

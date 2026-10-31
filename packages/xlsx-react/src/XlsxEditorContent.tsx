@@ -819,7 +819,8 @@ export function XlsxEditorContent({
   });
   const [openedHandle, setOpenedHandle] = useState<WorkbookHandle | null>(null);
   const paintWithDefaultFonts = useDefaultFonts(openedHandle, null, defaultFonts,
-    () => setRevision((revision) => revision + 1));
+    () => setRevision((revision) => revision + 1),
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   const pluginSelection = useMemo<XlsxPluginSelection>(() => {
     const sheetId = sheetInfo?.sheetIds[activeSheet];
     if (sheetId === undefined) return null;

@@ -6,10 +6,12 @@ export const defaultFontPainterModule = { load: () => import('./defaultFonts') }
 
 export function useDefaultFonts(
   owner: unknown, decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
-  defaultFonts: boolean | undefined, repaint: () => void,
+  defaultFonts: boolean | undefined, repaint: () => void, settled?: () => void,
 ) {
   const repaintRef = useRef(repaint);
   repaintRef.current = repaint;
+  const settledRef = useRef(settled);
+  settledRef.current = settled;
   const state = useRef<{ painter?: ReturnType<typeof createDefaultFontPainter>; last?: DisplayList }>(undefined);
   useLayoutEffect(() => {
     if (defaultFonts === false || decoder === undefined) return;
@@ -17,7 +19,8 @@ export function useDefaultFonts(
     state.current = current;
     void defaultFontPainterModule.load().then(({ createDefaultFontPainter }) => {
       if (state.current !== current) return;
-      current.painter = createDefaultFontPainter(decoder, () => repaintRef.current());
+      current.painter = createDefaultFontPainter(decoder, () => repaintRef.current(),
+        { onSettled: () => settledRef.current?.() });
       if (current.last) current.painter.adopt(current.last);
     }, () => {});
     return () => {

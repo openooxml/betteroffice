@@ -222,7 +222,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const ownerRef = useRef(run);
   ownerRef.current = run;
   const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
-    () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); });
+    () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); },
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   const sheetSelections = useMemo(() => new Map<string, Selection>(), [run]);
   const sheetScrolls = useMemo(() => new Map<string, { x: number; y: number }>(), [run]);
   const sheetId = (sheet: number) => (ownerRef.current?.session.editState.sheets ??
