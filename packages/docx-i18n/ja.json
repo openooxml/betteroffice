@@ -755,7 +755,11 @@
     "leftIndent": "左インデント",
     "rightIndent": "右インデント",
     "topMargin": "上余白",
-    "bottomMargin": "下余白"
+    "bottomMargin": "下余白",
+    "leftMargin": "左余白",
+    "rightMargin": "右余白",
+    "hangingIndent": "ぶら下げインデント",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "印刷",

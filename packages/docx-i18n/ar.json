@@ -755,7 +755,11 @@
     "leftIndent": "المسافة البادئة اليسرى",
     "rightIndent": "المسافة البادئة اليمنى",
     "topMargin": "الهامش العلوي",
-    "bottomMargin": "الهامش السفلي"
+    "bottomMargin": "الهامش السفلي",
+    "leftMargin": "الهامش الأيسر",
+    "rightMargin": "الهامش الأيمن",
+    "hangingIndent": "مسافة بادئة معلقة",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "طباعة",

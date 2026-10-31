@@ -755,7 +755,11 @@
     "leftIndent": "Retrait gauche",
     "rightIndent": "Retrait droit",
     "topMargin": "Marge supérieure",
-    "bottomMargin": "Marge inférieure"
+    "bottomMargin": "Marge inférieure",
+    "leftMargin": "Marge gauche",
+    "rightMargin": "Marge droite",
+    "hangingIndent": "Retrait négatif",
+    "markerValue": "{name} : {value}"
   },
   "print": {
     "label": "Imprimer",
