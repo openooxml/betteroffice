@@ -79,8 +79,10 @@ enum PlusImage {
 enum Nested {
     TooDeep,
     Failed,
-    /// The drawing, and the path commands each placement of it copies.
-    Drawn(Drawing, usize),
+    /// The drawing, the map from its device units (where GDI+ gives an
+    /// image's source rectangle) to the drawing, and the path commands each
+    /// placement of it copies.
+    Drawn(Drawing, Xform, usize),
 }
 
 struct PlusFont {
@@ -1654,7 +1656,7 @@ fn nested<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8]) -> Option<N
     if budget.exceeded.get() {
         return player.refuse("the metafile draws more than the replay limits");
     }
-    let Ok(drawing) = drawing else {
+    let Ok((drawing, device_to_output)) = drawing else {
         return Some(Nested::Failed);
     };
     let mut commands = 0;
@@ -1679,7 +1681,7 @@ fn nested<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8]) -> Option<N
             at = link.parent.as_deref();
         }
     }
-    Some(Nested::Drawn(drawing, commands))
+    Some(Nested::Drawn(drawing, device_to_output, commands))
 }
 
 /// GDI+ pixel formats to straight RGBA.
@@ -1847,8 +1849,10 @@ fn draw_image<const FULL: bool>(
         PlusImage::Metafile(Nested::Failed) => {
             player.omit("embedded metafiles that could not be replayed")?
         }
-        PlusImage::Metafile(Nested::Drawn(nested, commands)) => {
+        PlusImage::Metafile(Nested::Drawn(nested, device_to_output, commands)) => {
             player.charge(*commands, 0)?;
+            let origin = apply(*device_to_output, (source.0, source.1));
+            let (sw, sh) = (sw * device_to_output[0], sh * device_to_output[3]);
             let (u, v) = ((b.0 - a.0) / sw, (b.1 - a.1) / sw);
             let (p, q) = ((c.0 - a.0) / sh, (c.1 - a.1) / sh);
             let m = [
@@ -1856,8 +1860,8 @@ fn draw_image<const FULL: bool>(
                 v,
                 p,
                 q,
-                a.0 - u * source.0 - p * source.1,
-                a.1 - v * source.0 - q * source.1,
+                a.0 - u * origin.0 - p * origin.1,
+                a.1 - v * origin.0 - q * origin.1,
             ];
             player.charge(5, 0)?;
             let d = (b.0 + c.0 - a.0, b.1 + c.1 - a.1);
@@ -1901,11 +1905,10 @@ fn crop(bitmap: &Arc<Bitmap>, x: u32, y: u32, width: u32, height: u32) -> Option
 
 /// The font's em size in world units, and its face.
 fn world_font(state: &State, font: &PlusFont) -> Font {
-    let size = if font.unit == 0 {
+    let size = if matches!(font.unit, 0 | 2) {
         font.size
     } else {
-        font.size * state.unit_scale(font.unit).1
-            / (state.unit_scale(state.graphics.page_unit).1 * state.graphics.page_scale)
+        font.size * state.unit_scale(font.unit).1 / state.unit_scale(state.graphics.page_unit).1
     };
     Font {
         family: font.family.clone(),

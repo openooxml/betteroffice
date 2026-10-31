@@ -45,6 +45,9 @@ pub struct Emf {
     body: Vec<u8>,
     records: u32,
     handles: u16,
+    device: [i32; 2],
+    millimetres: [i32; 2],
+    frame: Option<[i32; 4]>,
 }
 
 impl Emf {
@@ -55,6 +58,9 @@ impl Emf {
             body: Vec::new(),
             records: 0,
             handles: 16,
+            device: [9600, 9600],
+            millimetres: [2540, 2540],
+            frame: None,
         }
     }
 
@@ -69,6 +75,17 @@ impl Emf {
         self
     }
 
+    pub fn reference_device(mut self, device: [i32; 2], millimetres: [i32; 2]) -> Self {
+        self.device = device;
+        self.millimetres = millimetres;
+        self
+    }
+
+    pub fn frame(mut self, frame: [i32; 4]) -> Self {
+        self.frame = Some(frame);
+        self
+    }
+
     pub fn recs(self, records: Vec<(u32, Vec<u8>)>) -> Self {
         records
             .into_iter()
@@ -77,20 +94,18 @@ impl Emf {
 
     pub fn bytes(self) -> Vec<u8> {
         let frame = |px: i32| (f64::from(px) * 2540.0 / 96.0).round() as i32;
-        let mut header = i32s(&[
-            0,
-            0,
-            self.width - 1,
-            self.height - 1,
+        let mut header = i32s(&[0, 0, self.width - 1, self.height - 1]);
+        header.extend(i32s(&self.frame.unwrap_or([
             0,
             0,
             frame(self.width),
             frame(self.height),
-        ]);
+        ])));
         header.extend(u32s(&[0x464D_4520, 0x0001_0000, 0, self.records + 2]));
         header.extend(u16s(&[self.handles, 0]));
         header.extend(u32s(&[0, 0, 0]));
-        header.extend(i32s(&[9600, 9600, 2540, 2540]));
+        header.extend(i32s(&self.device));
+        header.extend(i32s(&self.millimetres));
         let mut out = u32s(&[1, (header.len() + 8) as u32]);
         out.extend(header);
         out.extend(self.body);

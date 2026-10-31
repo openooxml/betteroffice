@@ -283,6 +283,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       presentationImageBlob,
       needsElementDecode,
       decodePresentationImage,
+      metafileImageBytes,
     } = await import(
       'virtual:office-quality-renderer'
     );
@@ -299,7 +300,12 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
         await paintSlide(canvas.getContext('2d')!, frame, 150 / 96, 1, {
           resolveImage: async (path: string) => {
             if (!images.has(path)) {
-              const bytes = handle.mediaBytes(path);
+              const source = handle.mediaBytes(path);
+              const bytes =
+                typeof metafileImageBytes === 'function' && typeof handle.metafileSvg === 'function'
+                  ? metafileImageBytes(source, () => handle.metafileSvg(path))
+                  : source;
+              if (bytes !== source && !bytes.byteLength) return null;
               const blob =
                 typeof presentationImageBlob === 'function'
                   ? presentationImageBlob(bytes)

@@ -1,3 +1,4 @@
+import { metafileImageBytes } from '../render/browserImage';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { createCommandFontInstallation } from './commandFontInstallation';
 import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -176,6 +177,7 @@ export function createPresentationSessionHost(
         if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
           try { bytes = decodeTiffImage(bytes); } catch {}
         }
+        bytes = metafileImageBytes(bytes, () => opened.metafileSvg(assetId));
         media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
       }
       epoch += 1;
