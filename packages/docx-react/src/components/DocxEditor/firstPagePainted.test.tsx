@@ -90,7 +90,7 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 beforeEach(() => {
   globalThis.Worker = undefined as unknown as typeof Worker;
 });

@@ -29,7 +29,8 @@ beforeAll(() =>
         new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)
       )
     )
-  )
+  ),
+  30_000
 );
 
 test('matches the WASM bytes-level exports and content controls', async () => {

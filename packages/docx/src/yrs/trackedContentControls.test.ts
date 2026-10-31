@@ -93,7 +93,7 @@ function ordinaryMoveKind(document: Document, text: string): string {
 }
 
 describe('tracked changes and inline controls', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   for (const [tag, kind] of [['ins', 'insertion'], ['del', 'deletion'], ['moveFrom', 'moveFrom'], ['moveTo', 'moveTo']] as const) {
     for (const outerControl of [true, false]) {

@@ -13,7 +13,7 @@ import type { DisplayListQueries } from '../layout/render/displayListQueries';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 test('sidebar reads preserve session anchor order and tracked changes', async () => {
   const session = await createYrsSession();

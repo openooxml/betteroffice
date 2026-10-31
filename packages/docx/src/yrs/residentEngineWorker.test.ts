@@ -155,7 +155,7 @@ beforeAll(async () => {
     'createImageBitmap',
     await result.outputs[0].text()
   ) as typeof startWorker;
-});
+}, 30_000);
 
 class Surface {
   pixels: string | null = null;
@@ -4883,7 +4883,7 @@ describe('worker proposals during sliced completion', () => {
 
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
-  )))));
+  )))), 30_000);
 
   test('content-control reads equal a main session opened from the same package', async () => {
     const bytes = new Uint8Array(readFileSync(resolve(

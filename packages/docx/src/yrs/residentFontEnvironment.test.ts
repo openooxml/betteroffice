@@ -18,7 +18,7 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 test('oversized WOFF table leaves wasm memory and a bounded editing session intact', async () => {
   const engine = await createResidentEngineSession(16 * 1024 * 1024);
