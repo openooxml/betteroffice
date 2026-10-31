@@ -79,8 +79,13 @@ import {
 } from '../../../shared/react-toolbar/theme';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
 import { ToolbarButtonBase } from './components/ui/ToolbarPrimitives';
+import {
+  expandRangeToMergedCells,
+  PresenceStrip,
+  RemoteSelections,
+} from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { cellInViewport, deriveLimits, expandRangeToMergedCells, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
+import { cellInViewport, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import type {
   XlsxAdmission,
   XlsxPluginEditorAccess,
@@ -98,10 +103,6 @@ import { WorkbookFailure } from './components/WorkbookFailure';
 
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
-import { presenceViewLoader } from './presence/presenceViewLoader';
-import { useLazyModule } from './presence/useLazyModule';
-
-const presenceGeometry = { rangeRect, expandRangeToMergedCells };
 
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   return {
@@ -1065,8 +1066,6 @@ export function XlsxEditorContent({
     collaborationOnReplica(collaborationReplica);
     return () => collaborationOnReplica(null);
   }, [collaborationOnReplica, collaborationReplica]);
-
-  const presenceView = useLazyModule(collaborationProvider ? presenceViewLoader.load : null, collaborationProvider);
 
   useEffect(() => {
     setAwarenessPeers([]);
@@ -2313,15 +2312,12 @@ export function XlsxEditorContent({
       <div style={xlsxToolbarStyles.rail} role="group" aria-label={t('toolbar.formulaBarLabel')}>
         <EditorToolbar.FormulaBar />
         <div style={toolbarSeparatorStyle} aria-hidden="true" />
-        {collaborationProvider && presenceView && (
-          <presenceView.PresenceStrip
-            t={t}
-            peers={awarenessPeers}
-            sheetIds={sheetInfo?.sheetIds ?? []}
-            sheetNames={sheetInfo?.sheetNames ?? []}
-            activeSheet={activeSheet}
-          />
-        )}
+        <PresenceStrip
+          peers={awarenessPeers}
+          sheetIds={sheetInfo?.sheetIds ?? []}
+          sheetNames={sheetInfo?.sheetNames ?? []}
+          activeSheet={activeSheet}
+        />
         {proposalsAvailable && (
           <div style={xlsxToolbarStyles.proposals}>
             <ProposalsButton />
@@ -2505,17 +2501,14 @@ export function XlsxEditorContent({
                     }}
                   />
                 )}
-                {collaborationProvider && presenceView && (
-                  <presenceView.RemoteSelections
-                    geometry={presenceGeometry}
-                    peers={awarenessPeers}
-                    grid={grid}
-                    sheetIds={sheetInfo?.sheetIds ?? []}
-                    activeSheet={activeSheet}
-                    zoom={zoom}
-                    mergedRanges={visibleMergedRanges}
-                  />
-                )}
+                <RemoteSelections
+                  peers={awarenessPeers}
+                  grid={grid}
+                  sheetIds={sheetInfo?.sheetIds ?? []}
+                  activeSheet={activeSheet}
+                  zoom={zoom}
+                  mergedRanges={visibleMergedRanges}
+                />
                 {!readOnly && editing && scaledEditRect && (
                   <input
                     ref={attachCellInput}

@@ -28,7 +28,6 @@ import type {
   WorkbookHandle,
   XlsxEditResult,
 } from '@betteroffice/xlsx';
-import type { AwarenessPeer } from '@betteroffice/xlsx/collaboration';
 import { isMacPlatform } from './commands/descriptors';
 import { useXlsxCommands } from './commands/hooks';
 import type {
@@ -47,7 +46,6 @@ import {
   type XlsxInThreadEditorProps,
 } from './XlsxEditor';
 import { editableWorkbookSessionBackend } from './worker/useEditableSessionWorkbook';
-import { presenceViewLoader } from './presence/presenceViewLoader';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -3279,41 +3277,6 @@ describe('async editor host props', () => {
     expect(targetChanges).toBe(2);
     first.unmount();
     second.unmount();
-  });
-
-  it('keeps the in-thread collaborative editor mounted and saves edits when the presence chunk rejects', async () => {
-    const load = spyOn(presenceViewLoader, 'load').mockRejectedValue(new Error('Presence import failed'));
-    try {
-      let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
-      const errors: Error[] = [];
-      const saves: Uint8Array[] = [];
-      const peer: AwarenessPeer = { clientId: 202, clock: 1, lastSeen: Date.now(), cursorMovedAt: Date.now(),
-        user: { name: 'Peer', color: '#0B57D0' },
-        cursor: { sheet: 'sheet:0', anchor: { row: 0, col: 1 }, head: { row: 0, col: 1 } } };
-      const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
-        onReady={(value) => { api = value; }} onError={(error) => errors.push(error)} onSave={(bytes) => saves.push(bytes)}
-        collaboration={{ clientId: 101, provider: { peers: [peer], setCursor: () => {},
-          onAwareness(listener) { listener([peer]); return () => {}; } } }} />);
-      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
-      expect(load).toHaveBeenCalledTimes(1);
-      expect(api.collaboration).not.toBeNull();
-      const scroll = view.getByTestId('xlsx-scroll');
-      expect(view.queryByTestId('xlsx-error')).toBeNull();
-      expect(errors).toEqual([]);
-      expect(view.queryByTestId('xlsx-presence-chip-202')).toBeNull();
-      expect(view.queryByTestId('xlsx-remote-selection-202')).toBeNull();
-      fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Keep my edits' } });
-      let bytes!: Uint8Array;
-      await act(async () => { bytes = await api.save(); });
-      const reopened = openWorkbook(bytes);
-      try { expect(reopened.cell(0, 0, 0).input).toBe('Keep my edits'); } finally { reopened.dispose(); }
-      expect(saves).toEqual([bytes]);
-      expect(view.getByTestId('xlsx-scroll')).toBe(scroll);
-      expect(view.queryByTestId('xlsx-error')).toBeNull();
-      expect(view.queryByTestId('xlsx-presence-chip-202')).toBeNull();
-      expect(view.queryByTestId('xlsx-remote-selection-202')).toBeNull();
-      expect(errors).toEqual([]);
-    } finally { load.mockRestore(); }
   });
 
   it('reports a whole-document remote update into a pristine replica to onChange once', async () => {
