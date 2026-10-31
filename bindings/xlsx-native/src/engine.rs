@@ -399,6 +399,22 @@ impl XlsxDocument {
     }
 
     #[napi]
+    pub fn png_display_list_json(&self, env: Env, viewport_json: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .png_display_list_json(&viewport_json)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
+    pub fn range_png_display_list_json(&self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .range_png_display_list_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
     pub fn display_list_profiled_json(&self, env: Env, viewport_json: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?

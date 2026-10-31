@@ -398,6 +398,20 @@ impl XlsxDocument {
         self.inner.move_chart_json(args).map_err(map_engine_error)
     }
 
+    #[wasm_bindgen(js_name = pngDisplayListJson)]
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {
+        self.inner
+            .png_display_list_json(viewport_json)
+            .map_err(map_engine_error)
+    }
+
+    #[wasm_bindgen(js_name = rangePngDisplayListJson)]
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner
+            .range_png_display_list_json(args)
+            .map_err(map_engine_error)
+    }
+
     /// render the current sheet viewport to png bytes (raster feature only).
     #[wasm_bindgen(js_name = renderPng)]
     pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, JsValue> {

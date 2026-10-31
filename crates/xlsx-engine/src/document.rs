@@ -316,6 +316,18 @@ impl Document {
             .map_err(message)
     }
 
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, EngineError> {
+        self.session
+            .png_display_list_json(viewport_json)
+            .map_err(message)
+    }
+
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, EngineError> {
+        self.session
+            .range_png_display_list_json(args)
+            .map_err(message)
+    }
+
     #[cfg(feature = "raster")]
     pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, EngineError> {
         self.session.render_png(viewport_json).map_err(message)

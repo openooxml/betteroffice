@@ -29,6 +29,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
+import { pngDisplayListReaders } from './pngDisplayList';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -1383,6 +1384,10 @@ function wrapWorkbookDocument(
       reportDisplayLimit(JSON.parse(json) as DisplayList);
     }
     return json;
+  });
+  pngDisplayListReaders.set(handle, {
+    viewport: (viewport) => wasmCall(() => doc.pngDisplayListJson(JSON.stringify(viewport))),
+    range: (options) => wasmCall(() => doc.rangePngDisplayListJson(JSON.stringify(options ?? {}))),
   });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));

@@ -246,7 +246,7 @@ export function useLegacySessionWorkbook(
     } else if (props.file) void (async () => {
       try {
         const session = await editableWorkbookSessionBackend.open(props.file!, {
-          signal: controller.signal, retainPeerHydration: true,
+          signal: controller.signal, png: true, retainPeerHydration: true,
         });
         if (!current()) { void session.dispose().catch(() => {}); return; }
         opened = new EditableWorkbookSession(session, token, {

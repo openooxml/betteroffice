@@ -327,6 +327,26 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('PNG display lists are identical on both engines', () => {
+    const charts = readFileSync(new URL('../../packages/xlsx/test-fixtures/charts.xlsx', import.meta.url));
+    for (const bytes of [fixture, charts]) {
+      const wasmDoc = WasmDocument.openWithCalculationJson(new Uint8Array(bytes), context);
+      const nativeDoc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(bytes), context);
+      try {
+        for (const view of [viewport, JSON.stringify({ x: 12.5, y: 40.25, width: 640, height: 360 })]) {
+          expect(nativeDoc.pngDisplayListJson(view)).toBe(wasmDoc.pngDisplayListJson(view));
+        }
+        for (const args of [{}, { range: 'A1:D8', scale: 2 }]) {
+          const json = JSON.stringify(args);
+          expect(nativeDoc.rangePngDisplayListJson(json)).toBe(wasmDoc.rangePngDisplayListJson(json));
+        }
+      } finally {
+        wasmDoc.free();
+        nativeDoc.free();
+      }
+    }
+  });
+
   test('collaborative documents with the same client id encode identical updates', () => {
     const wasmDoc = WasmDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;
     const nativeDoc = native.XlsxDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;

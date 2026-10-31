@@ -51,11 +51,9 @@ use xlsx_ops::{
 };
 use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
 use xlsx_render::chart::chart_regions_with_geometry;
-#[cfg(feature = "raster")]
 use xlsx_render::region::{
     viewport_for_range_with_geometry, viewport_for_used_range_with_geometry,
 };
-#[cfg(feature = "raster")]
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
@@ -64,6 +62,8 @@ use xlsx_render::{
     visible_merged_ranges_with_geometry,
 };
 
+#[cfg(feature = "raster")]
+use crate::RenderedPng;
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
     StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
@@ -79,11 +79,9 @@ use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
-    ProposalRequest, Result, SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent,
-    UpdateOrigin,
+    ProposalRequest, RenderOptions, Result, SelectionFormatting, SheetInfo, TextSearchMatch,
+    UpdateEvent, UpdateOrigin,
 };
-#[cfg(feature = "raster")]
-use crate::{RenderOptions, RenderedPng};
 use batch::DocumentVersion;
 use staging::CommitHistory;
 
@@ -2693,21 +2691,25 @@ impl Workbook {
 
     #[cfg(feature = "raster")]
     pub fn render_png_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<RenderedPng> {
-        validate_viewport(viewport)?;
-        let width = viewport.width.ceil().max(1.0) as u32;
-        let height = viewport.height.ceil().max(1.0) as u32;
-        validate_render_size(width, height)?;
-        let geometry = self.sheet_geometry(sheet)?;
-        validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
-        let display_list = self.display_list_for(sheet, viewport)?;
+        let (display_list, width, height) = self.png_display_list_for(sheet, viewport)?;
+        self.rasterize_display_list(&display_list, width, height)
+    }
+
+    #[cfg(feature = "raster")]
+    fn rasterize_display_list(
+        &self,
+        display_list: &DisplayList,
+        width: u32,
+        height: u32,
+    ) -> Result<RenderedPng> {
         #[cfg(feature = "fonts")]
         let bytes = {
-            let fonts = self.raster_fonts(&display_list)?;
-            xlsx_raster::render_png_with_fonts(&display_list, fonts.fonts())
+            let fonts = self.raster_fonts(display_list)?;
+            xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
                 .map_err(Error::Raster)?
         };
         #[cfg(not(feature = "fonts"))]
-        let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
+        let bytes = xlsx_raster::render_png(display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
             bytes,
             width,
@@ -2715,8 +2717,34 @@ impl Workbook {
         })
     }
 
+    #[doc(hidden)]
+    pub fn png_display_list_for(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+    ) -> Result<(DisplayList, u32, u32)> {
+        validate_viewport(viewport)?;
+        let width = viewport.width.ceil().max(1.0) as u32;
+        let height = viewport.height.ceil().max(1.0) as u32;
+        validate_render_size(width, height)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
+        let display_list = self.display_list_for(sheet, viewport)?;
+        Ok((display_list, width, height))
+    }
+
     #[cfg(feature = "raster")]
     pub fn render_sheet(&self, sheet: SheetId, options: &RenderOptions) -> Result<RenderedPng> {
+        let (display_list, width, height) = self.range_png_display_list_for(sheet, options)?;
+        self.rasterize_display_list(&display_list, width, height)
+    }
+
+    #[doc(hidden)]
+    pub fn range_png_display_list_for(
+        &self,
+        sheet: SheetId,
+        options: &RenderOptions,
+    ) -> Result<(DisplayList, u32, u32)> {
         if !(options.scale.is_finite() && options.scale > 0.0) {
             return Err(Error::InvalidScale(options.scale));
         }
@@ -2757,19 +2785,7 @@ impl Workbook {
         } else {
             scaled(display_list, options.scale)
         };
-        #[cfg(feature = "fonts")]
-        let bytes = {
-            let fonts = self.raster_fonts(&display_list)?;
-            xlsx_raster::render_png_with_fonts(&display_list, fonts.fonts())
-                .map_err(Error::Raster)?
-        };
-        #[cfg(not(feature = "fonts"))]
-        let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
-        Ok(RenderedPng {
-            bytes,
-            width,
-            height,
-        })
+        Ok((display_list, width, height))
     }
 
     pub fn format_address(&self, address: CellAddress) -> String {
@@ -5001,7 +5017,6 @@ impl Workbook {
     }
 }
 
-#[cfg(feature = "raster")]
 fn validate_display_region(
     sheet: &Sheet,
     geometry: &GridGeometry,
@@ -5050,9 +5065,8 @@ fn validate_display_cells(row_count: u64, column_count: u64) -> Result<()> {
 }
 
 /// Whether a default-range render of `viewport` would clear every guard
-/// [`Workbook::render_sheet`] applies. The used range itself is the caller's
+/// the PNG export applies. The used range itself is the caller's
 /// to answer for; this decides only whether a chart may widen the frame.
-#[cfg(feature = "raster")]
 fn renderable(sheet: &Sheet, geometry: &GridGeometry, viewport: &Viewport, scale: f32) -> bool {
     let width = ((viewport.width * scale).ceil() as u32).max(1);
     let height = ((viewport.height * scale).ceil() as u32).max(1);
@@ -5060,7 +5074,6 @@ fn renderable(sheet: &Sheet, geometry: &GridGeometry, viewport: &Viewport, scale
         && validate_display_region(sheet, geometry, viewport).is_ok()
 }
 
-#[cfg(feature = "raster")]
 fn validate_render_size(width: u32, height: u32) -> Result<()> {
     if width > MAX_PIXMAP_DIM || height > MAX_PIXMAP_DIM {
         return Err(Error::RenderTooLarge {
