@@ -614,7 +614,8 @@ describe('Canvas2D wrapped text', () => {
   });
 
   it('stacks wrapped vertical lines across the cell from where the text starts', () => {
-    for (const [deg, order] of [[90, ['ab', 'cd']], [-90, ['cd', 'ab']]] as const) {
+    const cases = [[90, 100, ['ab', 'cd']], [-90, 100, ['cd', 'ab']], [90, 50, ['ab']]] as const;
+    for (const [deg, clipWidth, order] of cases) {
       const lines: { text: string; x: number }[] = [];
       let x = 0;
       const context = {
@@ -630,13 +631,13 @@ describe('Canvas2D wrapped text', () => {
       paintDisplayList(context as unknown as CanvasRenderingContext2D, {
         width: 200, height: 200,
         commands: [{ op: 'text', x: 50, y: 50, text: 'ab cd', fontSize: 11, color: '#000000',
-          align: 'center', clip: { x: 0, y: 0, w: 100, h: 100 }, rotationDeg: deg,
+          align: 'center', clip: { x: 0, y: 0, w: clipWidth, h: 100 }, rotationDeg: deg,
           rotationBox: { x: 0, y: 0, w: 100, h: 30 }, rotationValign: 'center',
           wrap: { width: 30, lineHeight: 20, valign: 'center' },
         } as unknown as TextCmd],
       }, 1);
       expect(lines.sort((a, b) => a.x - b.x).map((line) => line.text)).toEqual([...order]);
-      expect(lines.map((line) => line.x).sort((a, b) => a - b)).toEqual([40, 60]);
+      expect(lines.map((line) => line.x).sort((a, b) => a - b)).toEqual([40, 60].slice(0, order.length));
     }
   });
 });

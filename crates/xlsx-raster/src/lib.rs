@@ -255,6 +255,17 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                         font::measure_text(line, *font_size)
                     });
                     for (index, line) in lines.iter().enumerate() {
+                        let strip = xlsx_render::wrap::rotated_line_box(
+                            cell,
+                            *deg,
+                            index,
+                            lines.len(),
+                            wrap,
+                            *align,
+                        );
+                        if strip.x + strip.w <= clip.x || strip.x >= clip.x + clip.w {
+                            continue;
+                        }
                         font::paint_rotated_text(
                             &mut pixmap,
                             &font::TextRun {
@@ -263,14 +274,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                                 ..run
                             },
                             *deg,
-                            &xlsx_render::wrap::rotated_line_box(
-                                cell,
-                                *deg,
-                                index,
-                                lines.len(),
-                                wrap,
-                                *align,
-                            ),
+                            &strip,
                             (*rotation_valign).unwrap_or(xlsx_render::TextValign::Bottom),
                             None,
                         );

@@ -256,9 +256,11 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null && cmd.wrap) {
     const { rotationDeg: deg, wrap } = cmd;
     const box = cmd.rotationBox ?? cmd.clip ?? { x: cmd.x, y: cmd.y, w: 0, h: 0 };
+    const clip = cmd.clip ?? box;
     const lines = wrapLines(cmd.text, wrap.width, (run) => ctx.measureText(run).width);
     lines.forEach((line, index) => {
       const rotationBox = rotatedLineBox(box, deg, index, lines.length, wrap, cmd.align ?? 'left');
+      if (rotationBox.x + rotationBox.w <= clip.x || rotationBox.x >= clip.x + clip.w) return;
       paintRotatedText(ctx, { ...cmd, text: line, align: 'center', rotationBox, numberFormat: undefined }, deg);
     });
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
