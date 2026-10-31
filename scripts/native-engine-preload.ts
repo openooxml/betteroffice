@@ -12,9 +12,10 @@ plugin({
   },
 });
 
-(globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testEngine')] = 'native';
-
 const preload = fileURLToPath(import.meta.url);
+(globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testEngine')] = 'native';
+(globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testPreload')] = preload;
+
 const BaseWorker = globalThis.Worker;
 globalThis.Worker = class extends BaseWorker {
   constructor(url: string | URL, options: WorkerOptions & { preload?: string | string[] } = {}) {
@@ -22,7 +23,7 @@ globalThis.Worker = class extends BaseWorker {
     super(url, { ...options, preload: [...preloads, preload] } as WorkerOptions);
   }
 } as typeof Worker;
-const option = `--preload ${preload}`;
+const option = `--preload ${preload.replace(/\s/g, '\\$&')}`;
 if (!process.env.BUN_OPTIONS?.includes(option)) {
   process.env.BUN_OPTIONS = [process.env.BUN_OPTIONS, option].filter(Boolean).join(' ');
 }

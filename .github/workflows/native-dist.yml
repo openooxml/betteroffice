@@ -55,6 +55,9 @@ jobs:
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release -- --locked
 
+      - name: Build the JS entries
+        run: bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js
+
       - name: Test binding
         run: bun test bindings/${{ inputs.binding }}-native/index.test.ts
 

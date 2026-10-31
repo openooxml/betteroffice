@@ -4,11 +4,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { nativeBuildSource } from "./native-engine";
 
 interface FormatConfig {
   packageDir: string;
   packageName: string;
   entries: Record<string, string>;
+  /** Declarations of the -native package built from these sources: checked against the wasm package's snapshots. */
+  native?: "xlsx" | "pptx";
 }
 
 interface DeclarationOptions {
@@ -38,6 +41,8 @@ export const FORMATS: Record<string, FormatConfig> = {
     },
   },
 };
+
+FORMATS["xlsx-native"] = { ...FORMATS.xlsx, native: "xlsx" };
 
 export function entryFileName(entry: string): string {
   if (entry === ".") return "index.api.d.ts";
@@ -191,7 +196,18 @@ function emitDeclarations(config: FormatConfig, root: string) {
     outDir: undefined,
     declarationDir: undefined,
   };
-  const program = ts.createProgram(entryFiles, options);
+  const host = ts.createCompilerHost(options);
+  if (config.native) {
+    const native = config.native;
+    const getSourceFile = host.getSourceFile;
+    host.getSourceFile = (fileName: string, languageVersion: unknown, ...rest: unknown[]) => {
+      const replaced = nativeBuildSource(native, fileName);
+      return replaced === undefined
+        ? getSourceFile.call(host, fileName, languageVersion, ...rest)
+        : ts.createSourceFile(fileName, replaced, languageVersion, true);
+    };
+  }
+  const program = ts.createProgram(entryFiles, options, host);
   const files = new Map<string, string>();
   const filePaths = new Map<string, string>();
   const addFile = (fileName: string, text: string) => {
@@ -259,6 +275,10 @@ function main(): void {
     process.exit(2);
   }
   const config = FORMATS[format];
+  if (config.native && mode === "--write") {
+    console.error(`${format} declarations are checked against the ${config.packageName} snapshots; write those instead`);
+    process.exit(2);
+  }
   const root = join(import.meta.dir, "..");
   const apiDir = join(root, config.packageDir, "api");
   const snapshots = generateSnapshots(format);

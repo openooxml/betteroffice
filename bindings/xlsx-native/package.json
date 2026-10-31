@@ -3,14 +3,37 @@
   "version": "0.5.1",
   "private": true,
   "description": "Native Rust bindings for the BetterOffice XLSX engine in Node.js, Bun and Deno.",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/index.js"
+    },
+    "./headless": {
+      "types": "./dist/headless.d.ts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/headless.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/worker.js"
+    },
+    "./collaboration": {
+      "types": "./dist/collaboration.d.ts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/collaboration.js"
+    }
+  },
   "files": [
+    "dist",
     "index.js",
     "index.d.ts"
   ],
   "napi": {
-    "dtsHeaderFile": "types.d.ts",
     "binaryName": "betteroffice-xlsx-native",
     "packageName": "@betteroffice/xlsx-native",
     "npmClient": "npm",
@@ -28,11 +51,12 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release",
+    "build": "napi build --platform --release && bun run build:js",
     "build:debug": "napi build --platform",
     "prepublishOnly": "napi pre-publish --tag-style npm --no-gh-release",
     "test": "bun test",
-    "typecheck": "tsc --noEmit --types node --target es2022 --module nodenext index.d.ts && tsc -p js"
+    "typecheck": "tsc --noEmit --types node --target es2022 --module nodenext index.d.ts && tsc -p js",
+    "build:js": "cd js && tsup"
   },
   "keywords": [
     "xlsx",
@@ -58,8 +82,13 @@
     "provenance": true
   },
   "type": "commonjs",
+  "sideEffects": [
+    "**/xlsxSessionWorker.*",
+    "**/session/worker.*"
+  ],
   "devDependencies": {
     "@types/node": "^26.0.0",
+    "tsup": "^8.5.1",
     "typescript": "^6.0.3"
   }
 }
