@@ -514,6 +514,10 @@ jobs:
           bun scripts/check-engine-surface.ts xlsx
           bun scripts/check-engine-surface.ts pptx
           bun scripts/check-engine-surface.ts docx
+          bun scripts/check-engine-surface.ts docx-parse
+          bun scripts/check-engine-surface.ts docx-query
+          bun scripts/check-engine-surface.ts docx-opc
+          bun scripts/check-engine-surface.ts docx-preflight
 
       - name: Test the pptx packages on the native engine
         run: |
