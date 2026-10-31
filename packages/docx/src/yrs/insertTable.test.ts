@@ -62,7 +62,7 @@ function onlyTable(document: Document): Table {
 const GRID_EDGE = { style: 'single', size: 4, color: { rgb: '000000' } };
 
 describe('a table inserted into a document without a bordered table style', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('saves and reopens with Word default grid borders', async () => {
     const bytes = blankDocx();

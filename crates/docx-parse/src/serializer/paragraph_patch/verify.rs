@@ -55,7 +55,17 @@ pub(super) fn markers(
 ) -> Result<(), Failure> {
     let mut bookmarks = Vec::new();
     let mut comments = Vec::new();
+    let mut drawing_end = 0;
     for node in &lowered.xml.nodes {
+        #[cfg(test)]
+        super::work::add(1);
+        if node.span.start < drawing_end {
+            continue;
+        }
+        if node.word("drawing") {
+            drawing_end = node.span.end;
+            continue;
+        }
         if node.namespace != WORD
             || !matches!(
                 node.local.as_str(),
@@ -67,6 +77,14 @@ pub(super) fn markers(
         let before = lowered
             .cells
             .partition_point(|cell| cell.raw.end <= node.span.start);
+        if lowered.cells.get(before).is_some_and(|cell| {
+            cell.retained
+                && matches!(cell.unit, UnitV1::Atom { .. })
+                && cell.raw.start <= node.span.start
+                && node.span.end <= cell.raw.end
+        }) {
+            continue;
+        }
         let offset = before.checked_sub(1).map_or(0, |at| lowered.cells[at].to);
         let number = |name| {
             node.attr(source, name)
@@ -155,8 +173,14 @@ pub(super) fn seed(
         })
         .collect::<Result<_, _>>()?;
     for (cell, unit) in lowered.cells.iter().zip(flatten(units)) {
+        if cell.retained && matches!(cell.unit, UnitV1::Atom { .. }) {
+            continue;
+        }
         let attrs = unit_attrs(&unit);
         let node = &lowered.xml.nodes[cell.node];
+        if node.word("drawing") {
+            continue;
+        }
         if node.word("commentReference") {
             if !attrs.is_empty() {
                 return Err(mismatch("commentReference"));

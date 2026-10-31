@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { DisplayListRect } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from '../DocxEditor/types';
 import { useTranslation } from '../../i18n';
@@ -104,6 +104,11 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     items, itemIndices, navigate, measureCard, ambiguous }),
   [options, peers, collaboration?.user, collaboration?.clientId, items, itemIndices, navigate, measureCard, ambiguous]);
   const laidOut = useRef(false);
+  useLayoutEffect(() => {
+    if (!dotsMode || !active) return;
+    const width = cards.current.get(active.id)?.getBoundingClientRect().width || balloon.current?.offsetWidth;
+    if (width) setLayout(previous => previous.width === width ? previous : { ...previous, width });
+  }, [dotsMode, active?.id]);
   useEffect(() => {
     const host = hostRef.current;
     if (!host || dotsMode) return;

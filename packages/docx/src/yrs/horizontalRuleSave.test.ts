@@ -13,7 +13,7 @@ import { yrsToDocument } from './yrsToDocument';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 const rule: HorizontalRuleContent = {
   type: 'horizontalRule',

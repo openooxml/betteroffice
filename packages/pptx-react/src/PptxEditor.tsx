@@ -168,6 +168,7 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   fileName?: string;
   /** 1-based; clamped to the deck. */
   initialSlide?: number;
+  /** Called once an opened deck's first slide is painted. */
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
@@ -219,6 +220,12 @@ export interface PptxAsyncPresentationProps {
   loadingIndicator?: ReactNode;
   /** Inline styles for the editor root. */
   style?: CSSProperties;
+  /**
+   * Loads bundled faces before the first paint for document families that
+   * `fonts` does not supply; supplied families keep the app's faces. Pass
+   * false to fetch no default fonts. Defaults to true.
+   */
+  defaultFonts?: boolean;
 }
 
 export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,

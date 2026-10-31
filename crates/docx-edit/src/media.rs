@@ -146,12 +146,13 @@ impl MediaSources {
 
     /// The key and digests, for a replica that did not seed.
     pub fn to_json(&self) -> String {
-        let parts: Vec<(String, u32)> = self
+        let mut parts: Vec<(String, u32)> = self
             .0
             .parts
             .iter()
             .map(|(digest, index)| (format!("{digest:016x}"), *index))
             .collect();
+        parts.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
         serde_json::json!({
             "key": [format!("{:016x}", self.0.key.0), format!("{:016x}", self.0.key.1)],
             "parts": parts,
@@ -237,8 +238,12 @@ pub(crate) fn write_data_urls<'a>(
     let mut seen = HashMap::new();
     for (index, url) in writer.urls {
         if let Some(url) = url {
-            parts.insert(digest(key, &url), index as u32);
-            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index as u32));
+            let index = index as u32;
+            parts
+                .entry(digest(key, &url))
+                .and_modify(|kept: &mut u32| *kept = (*kept).min(index))
+                .or_insert(index);
+            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index));
         }
     }
     Ok(MediaSources(Arc::new(Sources {
@@ -254,24 +259,69 @@ pub(crate) fn write_segment_data_urls(
     table: &MediaTable,
 ) -> Result<(), String> {
     let mut writer = DataUrls::new(table);
-    for segment in segments {
-        let payload = match &mut segment.content {
-            SegmentContent::Pilcrow(properties) => Some(&mut properties.values),
-            SegmentContent::OtherEmbed { payload, .. } => Some(payload),
-            SegmentContent::Text(_) => None,
-        };
-        if let Some(payload) = payload {
-            for (key, value) in payload.iter_mut() {
-                writer.any(key, value);
-            }
-        }
-        for (key, value) in segment.attributes.iter_mut() {
-            writer.any(key, value);
-        }
-    }
+    writer.segments(segments);
     match writer.error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+/// [`write_segment_data_urls`] writing at most `budget` bytes of URLs, each
+/// counted at every value it is written into, and of rewritten payloads,
+/// taking them off `budget`; false once it runs out, leaving `segments`
+/// partly written.
+pub(crate) fn write_segment_data_urls_within(
+    segments: &mut [StorySegment],
+    table: &MediaTable,
+    budget: &mut usize,
+) -> Result<bool, String> {
+    let mut writer = DataUrls::new(table);
+    writer.budget = Some(*budget);
+    writer.segments(segments);
+    *budget = writer.budget.unwrap_or(0);
+    match writer.error {
+        Some(error) => Err(error),
+        None => Ok(!writer.spent),
+    }
+}
+
+impl DataUrls<'_> {
+    fn segments(&mut self, segments: &mut [StorySegment]) {
+        for segment in segments {
+            if self.spent {
+                return;
+            }
+            let payload = match &mut segment.content {
+                SegmentContent::Pilcrow(properties) => Some(&mut properties.values),
+                SegmentContent::OtherEmbed { payload, .. } => Some(payload),
+                SegmentContent::Text(_) => None,
+            };
+            if let Some(payload) = payload {
+                for (key, value) in payload.iter_mut() {
+                    self.any(key, value);
+                }
+            }
+            for (key, value) in segment.attributes.iter_mut() {
+                self.any(key, value);
+            }
+        }
+    }
+}
+
+/// Takes `bytes` off `budget` when it has one; false, marking it `spent`, when they do not fit.
+fn spend(budget: &mut Option<usize>, spent: &mut bool, bytes: usize) -> bool {
+    let Some(left) = budget else {
+        return true;
+    };
+    match left.checked_sub(bytes) {
+        Some(rest) => {
+            *left = rest;
+            true
+        }
+        None => {
+            *spent = true;
+            false
+        }
     }
 }
 
@@ -279,6 +329,8 @@ struct DataUrls<'a> {
     table: &'a MediaTable,
     urls: HashMap<usize, Option<Arc<str>>>,
     error: Option<String>,
+    budget: Option<usize>,
+    spent: bool,
     keep_json_sources: bool,
     json_sources: HashMap<usize, (Arc<str>, Arc<str>)>,
 }
@@ -289,6 +341,8 @@ impl<'a> DataUrls<'a> {
             table,
             urls: HashMap::new(),
             error: None,
+            budget: None,
+            spent: false,
             keep_json_sources: false,
             json_sources: HashMap::new(),
         }
@@ -296,6 +350,13 @@ impl<'a> DataUrls<'a> {
 
     fn url(&mut self, index: usize) -> Option<Arc<str>> {
         let table = self.table;
+        if let Some(left) = self.budget
+            && !self.urls.contains_key(&index)
+            && table.data_url_len(index).is_none_or(|len| len > left)
+        {
+            self.spent = true;
+            return None;
+        }
         let error = &mut self.error;
         self.urls
             .entry(index)
@@ -317,9 +378,13 @@ impl<'a> DataUrls<'a> {
 
     /// `value` with its tokens written as URLs, or `None` when it has none.
     fn written(&mut self, key: &str, value: &Any) -> Option<Any> {
+        if self.spent {
+            return None;
+        }
         match value {
             Any::String(text) if key == "src" => media_token_index(text)
                 .and_then(|index| self.url(index))
+                .filter(|url| spend(&mut self.budget, &mut self.spent, url.len()))
                 .map(Any::String),
             Any::String(text)
                 if JSON_PAYLOADS.contains(&key) && text.contains("\"src\":\"media:") =>
@@ -373,12 +438,17 @@ impl<'a> DataUrls<'a> {
         while let Some(at) = rest.find(KEY) {
             let value = &rest[at + KEY.len()..];
             let end = value.find('"').unwrap_or(value.len());
-            let url = media_token_index(&value[..end]).and_then(|index| self.url(index));
+            let url = media_token_index(&value[..end])
+                .and_then(|index| self.url(index))
+                .filter(|url| spend(&mut self.budget, &mut self.spent, url.len()));
             if let Some(url) = &url {
-                len = len - end + url.len();
+                len = len.wrapping_sub(end).wrapping_add(url.len());
             }
             sources.push((&rest[..at + KEY.len()], &value[..end], url));
             rest = &value[end..];
+        }
+        if !spend(&mut self.budget, &mut self.spent, json.len()) {
+            return String::new();
         }
         let mut out = String::with_capacity(len);
         for (before, token, url) in sources {
@@ -569,6 +639,51 @@ mod tests {
     }
 
     #[test]
+    fn identical_parts_map_to_the_lowest_index_in_index_order() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3]),
+            ("word/media/b.png".to_owned(), vec![9]),
+            ("word/media/c.png".to_owned(), vec![1, 2, 3]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let index = |path| {
+            (0..table.len())
+                .find(|&i| table.path(i) == Some(path))
+                .unwrap() as u32
+        };
+        let (a, b, c) = (
+            index("word/media/a.png"),
+            index("word/media/b.png"),
+            index("word/media/c.png"),
+        );
+        let mut expected = vec![a.min(c), b];
+        expected.sort_unstable();
+        for _ in 0..32 {
+            let mut ops: Vec<RawOp> = [c, b, a]
+                .iter()
+                .enumerate()
+                .map(|(at, part)| RawOp::InsertEmbed {
+                    index: at as u32,
+                    kind: "image".to_owned(),
+                    payload: vec![("src".to_owned(), Any::from(format!("media:{part}")))],
+                    attrs: crate::Attrs::new(),
+                })
+                .collect();
+            let sources = write_data_urls(&mut ops, &table, true).unwrap();
+            let json: Value = serde_json::from_str(&sources.to_json()).unwrap();
+            let indices: Vec<u32> = json["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part[1].as_u64().unwrap() as u32)
+                .collect();
+            assert_eq!(indices, expected);
+        }
+    }
+
+    #[test]
     fn json_payload_sources_become_data_urls() {
         let bytes = ooxml_opc::rezip_parts(&[
             ("word/media/a.png".to_owned(), vec![1, 2, 3, 4]),
@@ -603,5 +718,47 @@ mod tests {
         assert!(writer.error.is_none());
         assert_eq!(writer.json(r#"{"src":"media:9"}"#), r#"{"src":"media:9"}"#);
         assert!(writer.error.is_some());
+    }
+
+    #[test]
+    fn a_budgeted_writer_spends_each_written_url_and_payload_and_stops_when_out() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3, 4]),
+            ("word/media/b.png".to_owned(), vec![5]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let a = (0..table.len())
+            .find(|&i| table.path(i) == Some("word/media/a.png"))
+            .unwrap();
+        let url = "data:image/png;base64,AQIDBA==";
+        assert_eq!(table.data_url_len(a), Some(url.len()));
+        let mut writer = DataUrls::new(&table);
+        writer.budget = Some(url.len() - 1);
+        assert!(writer.url(a).is_none());
+        assert!(writer.spent && writer.urls.is_empty());
+
+        let token = Any::String(Arc::from(format!("media:{a}")));
+        let mut writer = DataUrls::new(&table);
+        writer.budget = Some(2 * url.len());
+        for _ in 0..2 {
+            let written = writer.written("src", &token);
+            assert!(matches!(written, Some(Any::String(ref text)) if text.as_ref() == url));
+        }
+        assert_eq!(writer.budget, Some(0));
+        assert!(!writer.spent);
+        assert!(writer.written("src", &token).is_none());
+        assert!(writer.spent);
+
+        let json = format!(r#"{{"src":"media:{a}"}}"#);
+        let rewritten = format!(r#"{{"src":"{url}"}}"#);
+        let mut writer = DataUrls::new(&table);
+        writer.budget = Some(json.len() + url.len());
+        assert_eq!(writer.json(&json), rewritten);
+        assert!(!writer.spent);
+        assert_eq!(writer.json(&json), "");
+        assert!(writer.spent);
+        assert!(writer.error.is_none());
     }
 }

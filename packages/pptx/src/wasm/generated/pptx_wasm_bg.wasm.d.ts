@@ -11,6 +11,7 @@ export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_start: () => void;
 export const compileSlideJson: (a: number, b: number) => [number, number, number, number];
+export const decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const decodeTiffPng: (a: number, b: number) => [number, number, number, number];
 export const exportPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -123,6 +124,7 @@ export const pptxrenderer_registerFont: (a: number, b: number, c: number, d: num
 export const pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
 export const pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+export const pptxrenderer_setBrowserCoverageFallback: (a: number, b: number) => void;
 export const pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_snapshotWithLayoutKeysJson: (a: number, b: number) => [number, number, number, number];
 export const renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

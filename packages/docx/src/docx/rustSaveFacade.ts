@@ -100,9 +100,11 @@ export async function writeDocumentWithRust(
   selective?: RustSelectiveSave,
   determinism?: RustSaveDeterminism,
   paragraphIds?: RustParagraphIds,
-  skipMutations = false
+  skipMutations = false,
+  yieldSave?: () => Promise<void>
 ): Promise<RustSaveResult> {
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
+  if (yieldSave) await yieldSave();
   for (const part of paragraphIds?.splicedParts ?? []) {
     if (part.changed.length && paragraphPatchWriterVersionWire() !== PARAGRAPH_PATCH_WRITER_VERSION) {
       throw new Error(
@@ -118,6 +120,7 @@ export async function writeDocumentWithRust(
       now: new Date().toISOString(),
     } satisfies RustSaveDeterminism);
   validateDeterminism(fixed);
+  if (yieldSave) await yieldSave();
 
   const pkg = document.package;
   const request = {
@@ -152,9 +155,11 @@ export async function writeDocumentWithRust(
   engineProgress();
   const wire = withSessionRevisionIds(request, () => JSON.stringify(request));
   engineProgress();
+  if (yieldSave) await yieldSave();
   const { bytes, warnings } = writeDocxS13WithWarningsWire(wire, new Uint8Array(originalBuffer));
   engineProgress();
   const buffer = exactArrayBuffer(bytes);
+  if (yieldSave) await yieldSave();
   if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
   return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
 }
@@ -338,19 +343,39 @@ function validateDeterminism(value: RustSaveDeterminism): void {
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
-function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
-  if (value === null || typeof value !== 'object') return;
-  if (active.has(value)) throw new TypeError(`${path} contains a cycle`);
-  active.add(value);
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => assertSafeSaveTree(entry, `${path}[${index}]`, active));
-  } else {
-    for (const key of Object.keys(value)) {
-      if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${path} contains forbidden key ${key}`);
-      assertSafeSaveTree((value as Record<string, unknown>)[key], `${path}.${key}`, active);
+/** @internal */
+export function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
+  const segments: Array<string | number> = [];
+  const currentPath = (): string => {
+    let result = path;
+    for (const segment of segments) {
+      result += typeof segment === 'number' ? `[${segment}]` : `.${segment}`;
     }
-  }
-  active.delete(value);
+    return result;
+  };
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== 'object') return;
+    if (active.has(value)) throw new TypeError(`${currentPath()} contains a cycle`);
+    active.add(value);
+    if (Array.isArray(value)) {
+      const length = value.length;
+      for (let index = 0; index < length; index += 1) {
+        if (!(index in value)) continue;
+        segments.push(index);
+        visit(value[index]);
+        segments.pop();
+      }
+    } else {
+      for (const key of Object.keys(value)) {
+        if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
+        segments.push(key);
+        visit((value as Record<string, unknown>)[key]);
+        segments.pop();
+      }
+    }
+    active.delete(value);
+  };
+  visit(value);
 }
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {

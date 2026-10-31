@@ -47,6 +47,7 @@ for (const name of readdirSync('bindings')) {
   if (!existsSync(path)) continue;
   const json = JSON.parse(readFileSync(path, 'utf8')) as PackageManifest;
   if (json.name && json.version) versions.set(json.name, json.version);
+  manifests.push({ path, json });
 }
 
 function resolve(dep: string, range: string): string {

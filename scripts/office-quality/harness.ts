@@ -13,6 +13,7 @@ import {
   type BundledFontScript,
 } from '../../packages/fonts/src/manifest';
 import { normalFontIndex } from './xlsx-styles';
+import { SCRIPT_PATTERNS } from '../../packages/fonts/src/scripts';
 
 const api = window as any;
 const format = new URLSearchParams(location.search).get('format');
@@ -100,10 +101,6 @@ async function registerBrowserFace(
   registeredBrowserFaces.set(key, { family, face: fontFace, lastResort });
 }
 
-const RTL_SCRIPTS: Array<[BundledFontScript, RegExp]> = [
-  ['arabic', /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/],
-  ['hebrew', /[\u0590-\u05FF\uFB1D-\uFB4F]/],
-];
 const HAN = /[\u3400-\u4DBF\u4E00-\u9FFF]/;
 
 /** The CJK bucket a `lang` tag asks for, or none. */
@@ -139,7 +136,7 @@ async function fallbackFontsFor(
       }
     }
   }
-  const scripts = RTL_SCRIPTS.filter(([, pattern]) => pattern.test(text)).map(([script]) => script);
+  const scripts = SCRIPT_PATTERNS.filter(([, pattern]) => pattern.test(text)).map(([script]) => script);
   const cjk = new Set<BundledFontScript>();
   if (/[\u3040-\u30FF]/.test(text)) cjk.add('cjk-jp');
   if (/[\u1100-\u11FF\uAC00-\uD7AF]/.test(text)) cjk.add('cjk-kr');
@@ -268,9 +265,16 @@ function cell(value: string) {
 
 api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
   const bytes = new Uint8Array(input);
-  const fonts = useFonts ? await fontsFor(bytes) : [];
+  const params = new URLSearchParams(location.search);
+  const workerHost = format === 'pptx' ? params.get('pptxWorker') : null;
+  const fonts = useFonts && !workerHost ? await fontsFor(bytes) : [];
   let pages: number;
-  if (format === 'pptx') {
+  if (workerHost) {
+    const { openWorkerCapture } = await import('./pptx-worker-capture');
+    const opened = await openWorkerCapture(bytes, workerHost, fontProvider() as never, params.get('defaultFonts') !== '0');
+    pages = opened.pages;
+    capture = (index) => opened.capture(index);
+  } else if (format === 'pptx') {
     const {
       initWasm,
       openPresentation,

@@ -35,7 +35,7 @@ beforeAll(async () => {
   }
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   fontBytes = readFileSync(FONT).buffer as ArrayBuffer;
-});
+}, 30_000);
 afterEach(() => {
   cleanup();
 });

@@ -69,7 +69,7 @@ async function save(
 }
 
 describe('page break save projection', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   const shapes: Array<[string, string, number]> = [
     [

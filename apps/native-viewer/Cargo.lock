@@ -177,10 +177,12 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-drawingml",
  "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "foldhash 0.2.0",
+ "libm",
  "ryu-js",
  "serde",
  "serde_json",
@@ -198,6 +200,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "foldhash 0.2.0",
  "js-sys",
+ "libm",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -213,6 +216,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
  "indexmap",
+ "libm",
  "memchr",
  "quick-xml",
  "ryu-js",
@@ -245,6 +249,15 @@ dependencies = [
  "indexmap",
  "libm",
  "serde",
+]
+
+[[package]]
+name = "betteroffice-fonts"
+version = "0.5.1"
+dependencies = [
+ "cc",
+ "ruzstd",
+ "wuff",
 ]
 
 [[package]]
@@ -323,6 +336,7 @@ dependencies = [
 name = "betteroffice-pptx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
@@ -388,6 +402,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "unicode-properties",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -395,6 +411,7 @@ name = "betteroffice-xlsx"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -431,6 +448,7 @@ dependencies = [
  "betteroffice-xlsx-model",
  "quick-xml",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2602,6 +2620,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu-js"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3178,6 +3205,12 @@ dependencies = [
  "sha1",
  "thiserror 2.0.20",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typed-path"

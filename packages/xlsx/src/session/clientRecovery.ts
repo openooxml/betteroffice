@@ -1,6 +1,7 @@
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { missingWebWorker } from '../../../../shared/office-session/webWorker';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import type { OpenWorkbookSessionOptions, WorkbookSession } from './client';
 import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContext, WorkbookSharedCommand } from './commandProtocol';
@@ -47,6 +48,7 @@ export const workbookSessionRecovery = new WeakMap<WorkbookSession, WorkbookSess
 export const workbookRecoveryBackend = {
   open(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession> {
     if (options.collaborative) return Promise.reject(new Error('Recovery is unavailable for collaborative workbooks'));
+    if (!options.worker && typeof Worker !== 'function') return Promise.reject(missingWebWorker('openWorkbook'));
     const transport = createWorkerTransport(options.worker ? options.worker() :
       new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' }));
     return createWorkbookRecoverySession(bytes, options, transport, checkpoint, version);
@@ -61,9 +63,9 @@ export async function createWorkbookRecoverySession(
     if (options.collaborative) throw new Error('Recovery is unavailable for collaborative workbooks');
     const wasm = options.wasm instanceof ArrayBuffer ? options.wasm.slice(0) : options.wasm;
     const opened = checkpoint
-      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm })
+      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm, png: options.png })
       : await client.call.open(bytes.slice().buffer, { collaborative: options.collaborative,
-        clientId: options.clientId, calculation: options.calculation, wasm,
+        clientId: options.clientId, calculation: options.calculation, wasm, png: options.png,
         initialViewport: options.initialViewport, includeEditState: true, recoveryVersion: version });
     const context: WorkbookCommandContext | undefined = opened.commandContext;
     if (!context) throw new Error('Workbook recovery omitted command context');

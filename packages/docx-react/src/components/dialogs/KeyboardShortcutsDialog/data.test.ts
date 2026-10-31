@@ -1,12 +1,17 @@
 import { describe, expect, test } from 'bun:test';
-import { DOCX_COMMAND_DESCRIPTORS, formatChord } from '../../../commands/descriptors';
+import {
+  DOCX_COMMAND_DESCRIPTORS,
+  formatChord,
+  shortcutMatchesPlatform,
+} from '../../../commands/descriptors';
 import type { DocxCommandShortcut } from '../../../commands/types';
-import { COMMAND_SHORTCUTS, DEFAULT_SHORTCUTS } from './data';
+import { COMMAND_SHORTCUTS, DEFAULT_SHORTCUTS, getCommandShortcuts } from './data';
 
 describe('keyboard help', () => {
   test('lists every command binding the descriptors define, and no other', () => {
     const bound = Object.values(DOCX_COMMAND_DESCRIPTORS)
       .flatMap((descriptor) => descriptor.shortcuts as readonly DocxCommandShortcut[])
+      .filter((shortcut) => shortcutMatchesPlatform(shortcut))
       .map((shortcut) => formatChord(shortcut.chord, false))
       .sort();
     const listed = COMMAND_SHORTCUTS.flatMap((shortcut) =>
@@ -27,5 +32,20 @@ describe('keyboard help', () => {
     expect(DEFAULT_SHORTCUTS.find((shortcut) => shortcut.id === 'superscript')?.keys).toBe(
       'Ctrl+Shift+='
     );
+  });
+
+  test('lists only the platform clear formatting binding next to subscript', () => {
+    for (const mac of [false, true]) {
+      const shortcuts = getCommandShortcuts(mac);
+      const subscript = shortcuts.findIndex((shortcut) => shortcut.id === 'subscript');
+      expect(shortcuts[subscript + 1]).toMatchObject({
+        id: 'clearFormatting',
+        nameKey: 'dialogs.keyboardShortcuts.shortcuts.clearFormatting',
+        descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.clearFormattingDescription',
+        category: 'formatting',
+        keys: mac ? 'Ctrl+\\' : 'Ctrl+Space',
+      });
+      expect(shortcuts[subscript + 1].altKeys).toBeUndefined();
+    }
   });
 });
