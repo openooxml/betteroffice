@@ -57,6 +57,7 @@ export interface PeerlessPresentation {
   readonly client: PresentationCommandClient;
   readonly store: PeerlessViewStore;
   readonly images: CommandFrameImages;
+  readonly thumbnailImages?: CommandFrameImages;
   readonly visual: PeerlessVisualStore;
   readonly ready: Promise<void>;
   readonly current: boolean;
@@ -73,6 +74,8 @@ export interface PeerlessPresentation {
   setChangeObserver(enabled: boolean): void;
   recover(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
 }
+
+const THUMBNAIL_IMAGE_DIMENSION = 512;
 
 export function usePeerlessPresentation(
   props: PptxAsyncEditorInternalProps, canvas: RefObject<HTMLCanvasElement | null>,
@@ -119,6 +122,7 @@ export function usePeerlessPresentation(
     let displayedPainter: ReturnType<typeof createCommandFramePainter> | undefined;
     let echoPainter: ReturnType<typeof createLocalEchoPainter> | undefined;
     const images = createCommandFrameImages();
+    const thumbnailImages = createCommandFrameImages({ maxDimension: THUMBNAIL_IMAGE_DIMENSION, reuse: images });
     let activeImages: ReturnType<typeof images.pin> | undefined;
     let fatal: PptxWorkerEditorFailedError | undefined;
     let failedView: PeerlessViewSnapshot | undefined;
@@ -198,6 +202,7 @@ export function usePeerlessPresentation(
       echoPainter?.dispose(); echoPainter = undefined;
       activeImages?.release(); activeImages = undefined;
       images.dispose();
+      thumbnailImages.dispose();
       for (const face of installedFonts.splice(0)) document.fonts.delete(face);
       if (base) {
         const view = paintedView ?? base.getSnapshot();
@@ -532,7 +537,7 @@ export function usePeerlessPresentation(
           return () => { visualListeners.delete(listener); };
         };
         run = {
-          fileGeneration, session: owner, client, store, images, collaborationClientId: sessionCollaboration?.clientId,
+          fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual, subscribeVisual,
           get ready() { return whenPainted(); },
@@ -675,6 +680,7 @@ export function usePeerlessPresentation(
       ctx?.clearRect(0, 0, surface.width, surface.height);
       activeImages?.release();
       images.dispose();
+      thumbnailImages.dispose();
       pendingMedia.clear();
       for (const face of installedFonts) document.fonts.delete(face);
       cancelCheckpoint?.();
