@@ -20,6 +20,7 @@ import {
   openWorkbook,
   selectionAt,
 } from '@betteroffice/xlsx';
+import * as xlsx from '@betteroffice/xlsx';
 import type {
   CellAddr,
   ChartRegion,
@@ -2001,6 +2002,25 @@ describe('XlsxEditor commands', () => {
       expect(hits).toEqual([{ sheet: 0, row: 3, col: 0 }, { sheet: 0, row: 3, col: 0 }]);
     } finally {
       HTMLCanvasElement.prototype.getBoundingClientRect = getRect;
+    }
+  });
+
+  it('fires onReady once and shows the error when the first frame cannot be painted', async () => {
+    const paint = spyOn(xlsx, 'paintDisplayList').mockImplementation(() => {
+      throw new Error('pattern tile has no context');
+    });
+    const ready: XlsxEditorApi[] = [];
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
+        onReady={(api) => { ready.push(api); }} />);
+      await waitFor(() => expect(ready).toHaveLength(1), MOUNTED);
+      expect(view.getByTestId('xlsx-render-error').textContent).toContain('pattern tile has no context');
+      paint.mockRestore();
+      fireEvent.scroll(view.getByTestId('xlsx-scroll'));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(ready).toHaveLength(1);
+    } finally {
+      paint.mockRestore();
     }
   });
 

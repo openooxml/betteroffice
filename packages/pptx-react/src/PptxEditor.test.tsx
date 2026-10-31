@@ -143,6 +143,42 @@ it('calls the legacy onReady only after the first slide painted', async () => {
   }
 });
 
+it('holds the legacy onReady while the editor is hidden and calls it once shown', async () => {
+  const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+  const observers: Array<() => void> = [];
+  const OriginalObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(private readonly callback: () => void) { observers.push(() => this.callback()); }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+  const rects = spyOn(HTMLElement.prototype, 'getClientRects').mockImplementation(
+    () => ({ length: 0 }) as unknown as DOMRectList
+  );
+  let painted = 0;
+  const paint = spyOn(pptx, 'paintSlide').mockImplementation(() => { painted += 1; return Promise.resolve(); });
+  const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    return { canvas: this, fillStyle: '#000000', save() {}, restore() {}, setTransform() {}, drawImage() {}, fillRect() {} };
+  } as unknown as HTMLCanvasElement['getContext']);
+  const ready: PptxEditorApi[] = [];
+  try {
+    render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
+      onReady={(api) => { ready.push(api); }} />);
+    await waitFor(() => expect(painted).toBeGreaterThan(0));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(ready).toHaveLength(0);
+    rects.mockRestore();
+    await act(async () => { for (const notify of observers) notify(); });
+    await waitFor(() => expect(ready).toHaveLength(1));
+  } finally {
+    rects.mockRestore();
+    paint.mockRestore();
+    context.mockRestore();
+    globalThis.ResizeObserver = OriginalObserver;
+  }
+});
+
 it('calls the legacy onReady once when the first slide cannot be laid out', async () => {
   const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
   const failure = new Error('layout failed');

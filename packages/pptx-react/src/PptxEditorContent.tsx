@@ -593,6 +593,12 @@ export function PptxEditorContent({
     pendingReadyRef.current = null;
     ready.fire();
   }, []);
+  const shownHandleRef = useRef<PresentationHandle | null>(null);
+  const releaseShown = useCallback(() => {
+    const host = canvasHostRef.current;
+    if (!host || host.getClientRects().length === 0) return;
+    releaseReady(shownHandleRef.current);
+  }, [releaseReady]);
   readOnlyRef.current = readOnly;
   initialSlideRef.current = initialSlide;
   onChangeRef.current = onChange;
@@ -1248,7 +1254,10 @@ export function PptxEditorContent({
         const { snapshot, slideIndex, version } = painted;
         presentFrame({ frame, snapshot, slideIndex, version, scale, canvas });
         if (worker && workerFrame) worker.didPaint(workerFrame, workerNavigation!);
-        if (!backend) releaseReady(owner);
+        if (!backend) {
+          shownHandleRef.current = owner;
+          releaseShown();
+        }
       },
       (value: unknown) => {
         if (!current()) return;
@@ -1261,7 +1270,11 @@ export function PptxEditorContent({
       cancelled = true;
     };
   }, [backend, worker, workerFrame, workerNavigation, workerSequence, decodeImageError, model?.frame,
-    model?.snapshot, model?.slideIndex, model?.version, presentFrame, releaseReady, reportError, resolveSlideImage, scale]);
+    model?.snapshot, model?.slideIndex, model?.version, presentFrame, releaseReady, releaseShown, reportError, resolveSlideImage, scale]);
+
+  useEffect(() => {
+    if (!backend) releaseShown();
+  }, [backend, viewport, releaseShown]);
 
   useEffect(() => {
     if (backend) return;

@@ -1115,17 +1115,20 @@ export function XlsxEditorContent({
       height: logicalHeight,
     };
     const handle = handleRef.current;
+    const failPaint = (paintError: unknown) => {
+      frameRef.current = null;
+      paintedRef.current = null;
+      presentGrid(null);
+      setFrame(null);
+      setRenderError(paintError instanceof Error ? paintError.message : String(paintError));
+      if (handle) releaseReady(pendingReadyRef, handle);
+    };
     let dl: DisplayList;
     if (handle) {
       try {
         dl = handle.displayList(viewport);
       } catch (paintError) {
-        frameRef.current = null;
-        paintedRef.current = null;
-        presentGrid(null);
-        setFrame(null);
-        setRenderError(paintError instanceof Error ? paintError.message : String(paintError));
-        releaseReady(pendingReadyRef, handle);
+        failPaint(paintError);
         return;
       }
     } else {
@@ -1143,7 +1146,12 @@ export function XlsxEditorContent({
           .slice(0, MAX_OVERLAY_MERGED_RANGES);
       } catch {}
     }
-    paintDisplayList(ctx, dl, dpr * zoom);
+    try {
+      paintDisplayList(ctx, dl, dpr * zoom);
+    } catch (paintError) {
+      failPaint(paintError);
+      return;
+    }
     frameRef.current = dl;
     paintedRef.current = { frame: dl, zoom, sheet: activeSheet, handle };
     let version: string | null = null;
