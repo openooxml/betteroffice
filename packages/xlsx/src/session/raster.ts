@@ -1,10 +1,10 @@
 import { rasterWasmAssetUrl } from '../wasm/asset';
 
-type Raster = typeof import('../wasm/generated/raster/xlsx_raster.js');
+type Raster = typeof import('../wasm/engineRaster');
 let initialization: Promise<Raster> | undefined;
 
 export async function renderPng(displayListJson: string): Promise<Uint8Array> {
-  const pending = initialization ??= import('../wasm/generated/raster/xlsx_raster.js').then(async (raster) => {
+  const pending = initialization ??= import('../wasm/engineRaster').then(async (raster) => {
     await raster.default({ module_or_path: rasterWasmAssetUrl() });
     return raster;
   });
