@@ -96,22 +96,34 @@ if (process.argv.includes('--keep-alive-child')) {
     }
 
     const { DocxSourceWorkerClient } = await import(`@betteroffice/docx${suffix}/worker`);
-    const { createYrsSession } = await import(`@betteroffice/docx${suffix}/yrs`);
     const document = new DocxSourceWorkerClient();
-    let peer;
     let reopenedDocument;
     try {
       await document.openSource({ bytes: docxBytes });
       const before = await document.documentRead({ kind: 'readParagraphs', request: { view: 'accepted' } });
       assert.equal(before.value.ok, true);
       assert.ok(before.value.paragraphs.length > 0);
-      peer = await createYrsSession();
-      peer.applyUpdate(await document.encodeState());
-      const vector = peer.encodeStateVector();
-      const first = peer.paragraphs('body')[0];
-      assert.ok(first);
-      peer.insertText({ story: 'body', paraId: first.paraId, offset: 0 }, 'Node worker smoke ');
-      await document.syncUpdate(peer.encodeStateAsUpdate(vector), peer.encodeStateVector());
+      const point = { story: 'body', paraId: before.value.paragraphs[0].paraId, offset: 0 };
+      const selection = { anchor: point, focus: point };
+      const fontChains = { 'liberation sans|0|0': [0], 'calibri|0|0': [0] };
+      const initial = await document.commandInit({
+        session: 'node-worker-smoke', incarnation: 1, epoch: 1, readOnly: false, selection,
+        fonts: [fixture('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')],
+        fontRegistrationSlots: true,
+        layoutInput: JSON.stringify({
+          bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
+          measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, fontChains },
+          renderEnv: {},
+        }),
+        layoutWithRegions: true, layoutRevision: 1, extras: JSON.stringify({ fontChains }),
+        displayWindow: [0, 1], retainBuiltPages: false,
+      });
+      const edited = await document.edit({
+        session: initial.session, incarnation: initial.incarnation, seq: 1,
+        basis: { epoch: initial.epoch, version: initial.version },
+        kind: 'insertText', payload: { text: 'Node worker smoke ', selection },
+      });
+      assert.equal(edited.outcomes[0]?.status, 'applied');
       const after = await document.documentRead({ kind: 'readParagraphs', request: { view: 'accepted' } });
       assert.equal(after.value.ok, true);
       assert.ok(after.value.paragraphs[0].text.startsWith('Node worker smoke '));
@@ -125,7 +137,6 @@ if (process.argv.includes('--keep-alive-child')) {
     } finally {
       reopenedDocument?.destroy();
       document.destroy();
-      peer?.destroy();
     }
     console.log(`Node XLSX/PPTX/DOCX${suffix} worker read, edit and save/reopen checks passed.`);
   }
