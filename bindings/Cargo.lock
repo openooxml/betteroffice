@@ -140,7 +140,6 @@ dependencies = [
 name = "betteroffice-docx-native"
 version = "0.5.1"
 dependencies = [
- "betteroffice-docx",
  "betteroffice-docx-engine",
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",

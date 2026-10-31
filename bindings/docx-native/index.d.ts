@@ -9,42 +9,6 @@
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
-export declare class Document {
-  get author(): string
-  set author(author: string)
-  get origin(): string
-  set origin(value: string)
-  get timestamp(): string
-  set timestamp(timestamp: string)
-  get paragraphIds(): Promise<Array<string | null>>
-  get warnings(): Promise<string[]>
-  get templateVariables(): Promise<string[]>
-  get text(): Promise<string>
-  get structure(): Promise<DocumentStructure>
-  body(): Promise<any>
-  headers(): Promise<any>
-  footers(): Promise<any>
-  sections(): Promise<any>
-  paragraphs(): Promise<any>
-  tables(): Promise<any>
-  paragraph(paragraphId: string): Promise<any | null>
-  /** Same shape as DocxStructuredContent from @betteroffice/docx. */
-  exportStructured(options: DocxExportOptions): Promise<unknown>
-  /** Same shape as DocxMarkdownContent from @betteroffice/docx. */
-  exportMarkdown(options: DocxExportOptions): Promise<unknown>
-  /** Same shape as DocxContentControlsSnapshot from @betteroffice/docx. */
-  listContentControls(options?: DocxContentControlsOptions | undefined | null): Promise<unknown>
-  /** Same shape as DocxContentControlsSnapshot from @betteroffice/docx. */
-  findContentControls(query: DocxContentControlQuery, options?: DocxContentControlsOptions | undefined | null): Promise<unknown>
-  replaceParagraphText(paragraphId: string, text: string): Promise<EditReceipt>
-  layout(input: any): Promise<LayoutResult>
-  registerFont(face: FontFace): Promise<number>
-  registerImage(image: ImageResource): Promise<void>
-  renderPage(displayList: any, page?: number | undefined | null): Promise<RenderedPage>
-  save(options?: SaveDocumentOptions | undefined | null): Promise<Buffer>
-}
-export type DocxDocument = Document
-
 export declare class EditSession {
   free(): void
   register_measure_font(bytes: Uint8Array): number
@@ -305,53 +269,9 @@ export interface DecodedFontFace {
   payload?: Uint8Array
 }
 
-/** Decodes one font pack face using this engine's linked decoder. */
 export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace
 
 export declare function decodeTiffPng(data: Uint8Array): Uint8Array
-
-export interface DocumentStructure {
-  bodyParagraphs: number
-  bodyTables: number
-  sections: number
-  headers: number
-  footers: number
-  footnotes: number
-  endnotes: number
-}
-
-export type DocxContentControlQuery =
-  | { kind: 'id'; controlId: string }
-  | { kind: 'tag'; tag: string }
-  | { kind: 'ooxmlId'; ooxmlId: string }
-  | { kind: 'alias'; alias: string }
-
-export interface DocxContentControlsOptions {
-  stories?: ReadonlyArray<'body' | 'headers' | 'footers' | 'footnotes' | 'endnotes' | 'comments'>
-  maxControls?: number
-  maxBytes?: number
-}
-
-export interface DocxExportOptions {
-  revisionView: 'accepted' | 'original' | 'markup'
-  stories?: ReadonlyArray<'body' | 'headers' | 'footers' | 'footnotes' | 'endnotes' | 'comments'>
-  includeFormatting?: boolean
-  maxBlocks?: number
-  maxBytes?: number
-}
-
-export interface DocxMarkdownOptions {
-  maxBytes?: number
-}
-
-export interface EditReceipt {
-  paragraphId?: string
-  story?: string
-  start?: number
-  end?: number
-  newParagraphIds: Array<string>
-  revisionIds: Array<string>
-}
 
 export declare function export_docx_markdown_json(bytes: Uint8Array, options: string): string
 
@@ -359,14 +279,7 @@ export declare function export_docx_structured_json(bytes: Uint8Array, options: 
 
 export declare function find_docx_content_controls_json(bytes: Uint8Array, query: string, options: string): string
 
-export interface FontFace {
-  family: string
-  data: Buffer
-  bold?: boolean
-  italic?: boolean
-}
-
-export declare function fontPreflight(bytes: Buffer): string
+export declare function font_preflight(bytes: Uint8Array): string
 
 export declare function hit_test_json(displayList: string, pageIndex: number, x: number, y: number): string
 
@@ -374,55 +287,15 @@ export declare function hit_test_regions_by_handle(handle: number, pageIndex: nu
 
 export declare function hit_test_regions_json(displayList: string, pageIndex: number, x: number, y: number): string
 
-export interface ImageResource {
-  relationshipId: string
-  data: Buffer
-  scope?: string
-  part?: string
-}
-
 export declare function install_panic_hook(): void
 
 export declare function layout_document_json(input: string): string
-
-export interface LayoutResult {
-  layout: any
-  displayList: any
-}
 
 export declare function list_docx_content_controls_json(bytes: Uint8Array, options: string): string
 
 export declare function measure_paragraph_json(input: string): string
 
 export declare function open_display_list(displayList: string): number
-
-export declare function openDocument(data: Buffer, options?: OpenDocumentOptions | undefined | null): Promise<Document>
-
-export interface OpenDocumentLimits {
-  maxXmlBytes?: number
-  maxXmlEvents?: number
-  maxXmlTextBytes?: number
-  maxXmlDepth?: number
-  maxAttributesPerElement?: number
-  maxAttributeBytes?: number
-  maxRelationships?: number
-  maxLeafValues?: number
-  maxBlocks?: number
-  maxParagraphs?: number
-  maxTables?: number
-  maxTableRows?: number
-  maxTableCells?: number
-  maxNotes?: number
-  maxComments?: number
-  maxNestingDepth?: number
-}
-
-export interface OpenDocumentOptions {
-  author?: string
-  origin?: string
-  timestamp?: string
-  limits?: OpenDocumentLimits
-}
 
 export declare function outline_glyph_json(fontId: number, glyphId: number): string
 
@@ -468,27 +341,12 @@ export declare function render_docx_markdown_json(content: string, options: stri
 
 export declare function render_docx_markdown_with_pages_json(content: string, options: string): string
 
-/** Input has the same shape as DocxStructuredContent from @betteroffice/docx. */
-export declare function renderDocxMarkdown(content: unknown, options?: DocxMarkdownOptions | undefined | null): Promise<string>
-
-export interface RenderedPage {
-  data: Buffer
-  skippedImages: number
-}
-
 /** Native no-op; native allocations are not counted. */
 export declare function reset_wasm_peak_bytes(): void
 
 export declare function rezip_docx(entries: any): Uint8Array
 
 export declare function sanitizeOoxml(data: Uint8Array, expectedFormat: string): Uint8Array
-
-export interface SaveDocumentOptions {
-  timestamp?: string
-  now?: string
-  updateModifiedDate?: boolean
-  modifiedBy?: string
-}
 
 export declare function serialize_docx_s10(requestJson: string): string
 
