@@ -52,7 +52,7 @@ edits, and exports. Release a direct session with `session.destroy()` when finis
 
 ## Worker sessions
 
-Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed.
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`openDocx` / `EditSession`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
 
 ## Undo grouping
 

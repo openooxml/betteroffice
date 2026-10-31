@@ -1690,6 +1690,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
     return;
   }
   if (request.type === 'commandInit') {
+    if (typeof OffscreenCanvas !== 'function') {
+      throw new Error('DOCX worker editing paints frames and needs OffscreenCanvas, which this runtime lacks; edit documents headless with the in-thread edit session');
+    }
     if (!session || !openedDocument || previewing) {
       throw new Error('Worker commands require a whole opened document');
     }
