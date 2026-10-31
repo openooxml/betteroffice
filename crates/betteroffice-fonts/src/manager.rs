@@ -20,6 +20,14 @@ pub enum FontPack {
 }
 
 impl FontPack {
+    pub fn is_compiled_in(self) -> bool {
+        match self {
+            Self::Latin => cfg!(feature = "fonts-latin"),
+            Self::Intl => cfg!(feature = "fonts-intl"),
+            Self::Cjk => cfg!(feature = "fonts-cjk"),
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Latin => "latin",
@@ -59,7 +67,10 @@ pub struct BundledFontOptions {
 impl Default for BundledFontOptions {
     fn default() -> Self {
         Self {
-            packs: vec![FontPack::Latin, FontPack::Intl, FontPack::Cjk],
+            packs: [FontPack::Latin, FontPack::Intl, FontPack::Cjk]
+                .into_iter()
+                .filter(|pack| pack.is_compiled_in())
+                .collect(),
             base_url: None,
         }
     }
@@ -94,6 +105,85 @@ pub struct FontDefinition {
     pub data: Vec<u8>,
     pub bold: bool,
     pub italic: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OpenOptions {
+    pub font_source: FontSource,
+    pub font_loading: FontLoading,
+    pub fonts: Vec<FontDefinition>,
+}
+
+#[doc(hidden)]
+pub struct FontManager {
+    provider: Option<Arc<dyn FontProvider>>,
+    packs: Option<Vec<FontPack>>,
+}
+
+impl FontManager {
+    pub fn new(source: &FontSource, loading: FontLoading) -> Result<Self, FontError> {
+        if let FontSource::Bundled(options) = source {
+            let bundled = BundledFonts::new(options.clone())?;
+            if loading == FontLoading::Preload {
+                bundled.preload()?;
+            }
+            return Ok(Self {
+                provider: Some(Arc::new(bundled)),
+                packs: Some(options.packs.clone()),
+            });
+        }
+        Ok(Self {
+            provider: source.provider()?,
+            packs: None,
+        })
+    }
+
+    pub fn resolve(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[String],
+        office: LastResortOffice,
+    ) -> Vec<FontFaceHandle> {
+        let Some(provider) = &self.provider else {
+            return Vec::new();
+        };
+        let mut faces = Vec::new();
+        let mut push = |face: FontFaceHandle| {
+            if let Some(packs) = &self.packs
+                && crate::resolve_bundled_family_face(&face.family, face.bold, face.italic)
+                    .is_none_or(|entry| !packs.contains(&entry.pack))
+            {
+                return;
+            }
+            if !faces.iter().any(|known: &FontFaceHandle| {
+                known.family == face.family
+                    && known.bold == face.bold
+                    && known.italic == face.italic
+            }) {
+                faces.push(face);
+            }
+        };
+        let primary = provider.resolve_family(family, bold, italic);
+        let has_primary = primary.is_some();
+        if let Some(primary) = primary {
+            push(primary);
+        }
+        for script in scripts {
+            if let Some(face) = provider.resolve_script_fallback(script, bold, italic) {
+                push(face);
+            }
+        }
+        if let Some(face) = provider.resolve_glyph_fallback(family, bold, italic, office) {
+            push(face);
+        }
+        let face = provider.resolve_last_resort(family, bold, italic, office);
+        if !face.only_if_primary_fails || !has_primary {
+            push(face);
+        }
+        faces
+    }
 }
 
 #[derive(Debug)]
@@ -244,6 +334,16 @@ impl BundledFonts {
                         })?
                         .join(base),
                 );
+            }
+        }
+        if options.base_url.is_none() {
+            for pack in &options.packs {
+                if !pack.is_compiled_in() {
+                    return Err(FontError::MissingFontPack {
+                        pack: *pack,
+                        action: format!("enable the `{}` Cargo feature", pack.feature()),
+                    });
+                }
             }
         }
         Ok(Self { options })

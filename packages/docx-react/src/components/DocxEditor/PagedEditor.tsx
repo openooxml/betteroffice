@@ -788,6 +788,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const {
       layout,
       layoutUpdateOrigin,
+      layoutCommit,
+      layoutCommitVersion,
       runLayoutPipeline,
       scheduleLayout,
       cancelPendingScrollRestore,
@@ -2266,6 +2268,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             residentCaret={residentCaret}
             residentCaretAuthoritative={residentCaretAuthoritative}
             layoutUpdateOrigin={layoutUpdateOrigin}
+            layoutCommit={layoutCommit}
+            layoutCommitVersion={layoutCommitVersion}
             canvasHostRef={canvasHostRef ?? pagesContainerRef}
             onStateChange={handleYrsStateChange}
             onDirectInput={publishYrsDirectInput}

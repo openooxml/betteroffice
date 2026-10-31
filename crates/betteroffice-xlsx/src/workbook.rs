@@ -387,6 +387,10 @@ fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
 }
 
 pub struct Workbook {
+    #[cfg(feature = "fonts")]
+    pub(crate) font_manager: betteroffice_fonts::FontManager,
+    #[cfg(all(feature = "fonts", feature = "raster"))]
+    pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     authority: WorkbookAuthority,
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
@@ -591,6 +595,19 @@ impl Workbook {
 
     pub fn open(bytes: &[u8]) -> Result<Self> {
         Self::open_internal(bytes, true, None)
+    }
+
+    #[cfg(feature = "fonts")]
+    pub fn open_with_options(bytes: &[u8], options: &crate::OpenOptions) -> Result<Self> {
+        let font_manager =
+            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)?;
+        let mut workbook = Self::open(bytes)?;
+        workbook.font_manager = font_manager;
+        #[cfg(feature = "raster")]
+        for font in &options.fonts {
+            workbook.register_font(&font.family, font.bold, font.italic, &font.data)?;
+        }
+        Ok(workbook)
     }
 
     pub fn open_for_read(bytes: &[u8]) -> Result<Self> {
@@ -810,6 +827,13 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
         })
     }
 
@@ -2668,7 +2692,24 @@ impl Workbook {
     #[cfg(feature = "raster")]
     pub fn render_png_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<RenderedPng> {
         let (display_list, width, height) = self.png_display_list_for(sheet, viewport)?;
-        let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
+        self.rasterize_display_list(&display_list, width, height)
+    }
+
+    #[cfg(feature = "raster")]
+    fn rasterize_display_list(
+        &self,
+        display_list: &DisplayList,
+        width: u32,
+        height: u32,
+    ) -> Result<RenderedPng> {
+        #[cfg(feature = "fonts")]
+        let bytes = {
+            let fonts = self.raster_fonts(display_list)?;
+            xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
+                .map_err(Error::Raster)?
+        };
+        #[cfg(not(feature = "fonts"))]
+        let bytes = xlsx_raster::render_png(display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
             bytes,
             width,
@@ -2695,12 +2736,7 @@ impl Workbook {
     #[cfg(feature = "raster")]
     pub fn render_sheet(&self, sheet: SheetId, options: &RenderOptions) -> Result<RenderedPng> {
         let (display_list, width, height) = self.range_png_display_list_for(sheet, options)?;
-        let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
-        Ok(RenderedPng {
-            bytes,
-            width,
-            height,
-        })
+        self.rasterize_display_list(&display_list, width, height)
     }
 
     #[doc(hidden)]
@@ -5528,6 +5564,13 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
         })
     }
 }

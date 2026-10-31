@@ -23,6 +23,8 @@ use core::ptr::{self, NonNull};
 mod allocator;
 #[cfg(feature = "manager")]
 pub mod catalog;
+#[cfg(feature = "manager")]
+mod embedded;
 mod face;
 #[cfg(feature = "manager")]
 mod manager;
@@ -41,6 +43,8 @@ pub use face::{
 
 #[cfg(feature = "manager")]
 pub use catalog::BundledFontFace;
+#[cfg(feature = "manager")]
+pub use embedded::embedded_font_definitions;
 #[cfg(feature = "manager")]
 pub use manager::*;
 #[cfg(feature = "manager")]

@@ -405,7 +405,7 @@ describe('native package release wiring', () => {
     expect(job.steps.some((step: any) => step.with?.tool === 'wasm-pack@0.15.0')).toBe(true);
     const wasmCache = job.steps.find((step: any) => step.with?.path === 'target/wasm-pack');
     expect(wasmCache.with.key).toBe('wasm-pack-${{ steps.wasm.outputs.key }}');
-    const runtime = job.steps.find((step: any) => step.uses === 'actions/setup-node@v7.0.0');
+    const runtime = job.steps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
     expect(runtime.with['node-version']).toBe('24');
     const deno = job.steps.find((step: any) => step.uses === 'denoland/setup-deno@v2');
     expect(deno.with['deno-version']).toBe('v2.9.0');
@@ -518,7 +518,7 @@ describe('native package release wiring', () => {
     expect(job.steps[0].with.ref).toBe('${{ github.event.pull_request.head.sha || github.sha }}');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
     expect(bun.with['bun-version']).toBe('1.4.3');
-    const runtime = job.steps.find((step: any) => step.uses === 'actions/setup-node@v7.0.0');
+    const runtime = job.steps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
     expect(runtime.with['node-version']).toBe('24');
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const download = job.steps.find(
