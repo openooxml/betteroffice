@@ -91,6 +91,7 @@ export function DocxEditorDialogs({
   showPageSetup,
   onPageSetupClose,
   onPageSetupApply,
+  pageSetupUnit,
   showWatermark,
   onWatermarkClose,
   onWatermarkApply,
@@ -134,6 +135,7 @@ export function DocxEditorDialogs({
   showPageSetup: boolean;
   onPageSetupClose: () => void;
   onPageSetupApply: (props: Partial<SectionProperties>) => void;
+  pageSetupUnit?: 'inch' | 'cm';
   // Watermark
   showWatermark: boolean;
   onWatermarkClose: () => void;
@@ -224,6 +226,7 @@ export function DocxEditorDialogs({
           onClose={onPageSetupClose}
           onApply={onPageSetupApply}
           currentProps={document?.package.document?.finalSectionProperties}
+          unit={pageSetupUnit}
         />
       )}
       {showWatermark && (

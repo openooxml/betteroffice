@@ -56,6 +56,11 @@ export function legacyDocx() {
   return query.get("peerless") === "0";
 }
 
+function rulerUnit(): "inch" | "cm" {
+  if (typeof location === "undefined") return "inch";
+  return new URLSearchParams(location.search).get("rulerUnit") === "cm" ? "cm" : "inch";
+}
+
 function trackedChanges(): TrackedChangesOptions | undefined {
   if (typeof location === "undefined") return undefined;
   const query = new URLSearchParams(location.search);
@@ -490,6 +495,7 @@ export default function Editor({
         onOpen={onOpen}
         showToolbar
         showRuler
+        rulerUnit={rulerUnit()}
         showZoomControl
         colorMode={colorMode()}
         onPrint={() => undefined}

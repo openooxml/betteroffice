@@ -4,10 +4,10 @@
  * Modal for editing page layout properties:
  * - Page size (Letter, A4, Legal, etc.)
  * - Orientation (portrait/landscape)
- * - Margins (top, bottom, left, right) in inches
+ * - Margins (top, bottom, left, right) in inches or centimeters
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useId } from 'react';
 import type { CSSProperties } from 'react';
 import type { SectionProperties } from '@betteroffice/docx/types/document';
 import { TWIPS_PER_INCH } from '@betteroffice/docx/utils';
@@ -33,18 +33,26 @@ export interface PageSetupDialogProps {
   onClose: () => void;
   onApply: (props: Partial<SectionProperties>) => void;
   currentProps?: SectionProperties;
+  /** Unit margins are shown and typed in (default: 'inch'). */
+  unit?: 'inch' | 'cm';
 }
 
 // ============================================================================
 // HELPERS
 // ============================================================================
 
-function twipsToInches(twips: number): number {
-  return Math.round((twips / TWIPS_PER_INCH) * 100) / 100;
+const CM_PER_INCH = 2.54;
+
+function twipsPerUnit(unit: 'inch' | 'cm'): number {
+  return unit === 'cm' ? TWIPS_PER_INCH / CM_PER_INCH : TWIPS_PER_INCH;
 }
 
-function inchesToTwips(inches: number): number {
-  return Math.round(inches * TWIPS_PER_INCH);
+function twipsToUnit(twips: number, unit: 'inch' | 'cm'): number {
+  return Math.round((twips / twipsPerUnit(unit)) * 100) / 100;
+}
+
+function unitToTwips(value: number, unit: 'inch' | 'cm'): number {
+  return Math.round(value * twipsPerUnit(unit));
 }
 
 /** Find matching page size preset, ignoring orientation */
@@ -164,8 +172,10 @@ export function PageSetupDialog({
   onClose,
   onApply,
   currentProps,
+  unit = 'inch',
 }: PageSetupDialogProps): React.ReactElement | null {
   const { t } = useTranslation();
+  const id = useId();
   const [pageWidth, setPageWidth] = useState(DEFAULT_WIDTH);
   const [pageHeight, setPageHeight] = useState(DEFAULT_HEIGHT);
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('portrait');
@@ -248,6 +258,8 @@ export function PageSetupDialog({
   if (!isOpen) return null;
 
   const sizeIndex = findPageSizeIndex(pageWidth, pageHeight);
+  const maxMargin = unit === 'cm' ? 25.4 : 10;
+  const unitLabel = t(unit === 'cm' ? 'common.units.cm' : 'common.units.inch');
 
   return (
     <div style={overlayStyle} onClick={onClose} onKeyDown={handleKeyDown}>
@@ -265,8 +277,10 @@ export function PageSetupDialog({
           <div style={sectionLabelStyle}>{t('dialogs.pageSetup.pageSize')}</div>
 
           <div style={rowStyle}>
-            <label style={labelStyle}>{t('dialogs.pageSetup.sizeLabel')}</label>
+            <label style={labelStyle} htmlFor={`${id}-size`}>{t('dialogs.pageSetup.sizeLabel')}</label>
             <select
+              id={`${id}-size`}
+              autoFocus
               style={selectStyle}
               value={sizeIndex}
               onChange={(e) => handlePageSizeChange(Number(e.target.value))}
@@ -281,8 +295,9 @@ export function PageSetupDialog({
           </div>
 
           <div style={rowStyle}>
-            <label style={labelStyle}>{t('dialogs.pageSetup.orientation')}</label>
+            <label style={labelStyle} htmlFor={`${id}-orientation`}>{t('dialogs.pageSetup.orientation')}</label>
             <select
+              id={`${id}-orientation`}
               style={selectStyle}
               value={orientation}
               onChange={(e) => handleOrientationChange(e.target.value as 'portrait' | 'landscape')}
@@ -296,59 +311,63 @@ export function PageSetupDialog({
           <div style={{ ...sectionLabelStyle, marginTop: 4 }}>{t('dialogs.pageSetup.margins')}</div>
 
           <div style={rowStyle}>
-            <label style={labelStyle}>{t('dialogs.pageSetup.top')}</label>
+            <label style={labelStyle} htmlFor={`${id}-top`}>{t('dialogs.pageSetup.top')}</label>
             <input
+              id={`${id}-top`}
               type="number"
               style={inputStyle}
               min={0}
-              max={10}
+              max={maxMargin}
               step={0.1}
-              value={twipsToInches(marginTop)}
-              onChange={(e) => setMarginTop(inchesToTwips(Number(e.target.value) || 0))}
+              value={twipsToUnit(marginTop, unit)}
+              onChange={(e) => setMarginTop(unitToTwips(Number(e.target.value) || 0, unit))}
             />
-            <span style={unitStyle}>{t('common.units.inch')}</span>
+            <span style={unitStyle}>{unitLabel}</span>
           </div>
 
           <div style={rowStyle}>
-            <label style={labelStyle}>{t('dialogs.pageSetup.bottom')}</label>
+            <label style={labelStyle} htmlFor={`${id}-bottom`}>{t('dialogs.pageSetup.bottom')}</label>
             <input
+              id={`${id}-bottom`}
               type="number"
               style={inputStyle}
               min={0}
-              max={10}
+              max={maxMargin}
               step={0.1}
-              value={twipsToInches(marginBottom)}
-              onChange={(e) => setMarginBottom(inchesToTwips(Number(e.target.value) || 0))}
+              value={twipsToUnit(marginBottom, unit)}
+              onChange={(e) => setMarginBottom(unitToTwips(Number(e.target.value) || 0, unit))}
             />
-            <span style={unitStyle}>{t('common.units.inch')}</span>
+            <span style={unitStyle}>{unitLabel}</span>
           </div>
 
           <div style={rowStyle}>
-            <label style={labelStyle}>{t('dialogs.pageSetup.left')}</label>
+            <label style={labelStyle} htmlFor={`${id}-left`}>{t('dialogs.pageSetup.left')}</label>
             <input
+              id={`${id}-left`}
               type="number"
               style={inputStyle}
               min={0}
-              max={10}
+              max={maxMargin}
               step={0.1}
-              value={twipsToInches(marginLeft)}
-              onChange={(e) => setMarginLeft(inchesToTwips(Number(e.target.value) || 0))}
+              value={twipsToUnit(marginLeft, unit)}
+              onChange={(e) => setMarginLeft(unitToTwips(Number(e.target.value) || 0, unit))}
             />
-            <span style={unitStyle}>{t('common.units.inch')}</span>
+            <span style={unitStyle}>{unitLabel}</span>
           </div>
 
           <div style={rowStyle}>
-            <label style={labelStyle}>{t('dialogs.pageSetup.right')}</label>
+            <label style={labelStyle} htmlFor={`${id}-right`}>{t('dialogs.pageSetup.right')}</label>
             <input
+              id={`${id}-right`}
               type="number"
               style={inputStyle}
               min={0}
-              max={10}
+              max={maxMargin}
               step={0.1}
-              value={twipsToInches(marginRight)}
-              onChange={(e) => setMarginRight(inchesToTwips(Number(e.target.value) || 0))}
+              value={twipsToUnit(marginRight, unit)}
+              onChange={(e) => setMarginRight(unitToTwips(Number(e.target.value) || 0, unit))}
             />
-            <span style={unitStyle}>{t('common.units.inch')}</span>
+            <span style={unitStyle}>{unitLabel}</span>
           </div>
         </div>
 
