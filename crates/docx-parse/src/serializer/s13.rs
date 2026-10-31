@@ -41,7 +41,7 @@ use super::paragraph_ids::{
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_document_part, serialize_endnotes_part,
-    serialize_footnotes_part, serialize_header_footer_part, try_serialize_comments_with_info,
+    serialize_footnotes_part, serialize_header_footer_part,
 };
 use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::s10::SerializerDeterminism;
@@ -1590,8 +1590,10 @@ fn serialize_comment_parts(
         .then(|| package.original_bytes(COMMENTS_PART))
         .flatten()
         .map(|source| (source, context.clone()));
-    let (mut comments_xml, mut infos) = try_serialize_comments_with_info(comments, context)?;
+    let (mut comments_xml, mut infos) =
+        super::parts::serialize_comments_projection(comments, context)?;
     let mut spliced_companions = None;
+    let mut spliced_source = false;
     if let Some((source, source_context)) = source_context {
         let original_infos = infos.clone();
         match super::comment_splice::splice_comments(
@@ -1606,9 +1608,13 @@ fn serialize_comment_parts(
             Ok(spliced) => {
                 comments_xml = spliced.xml;
                 spliced_companions = spliced.companions;
+                spliced_source = true;
             }
             Err(_) => infos = original_infos,
         }
+    }
+    if !spliced_source && comments.iter().any(super::parts::has_nested_bookmarks) {
+        return Err(super::parts::nested_comment_bookmarks());
     }
     package.set_text("word/comments.xml", comments_xml);
 

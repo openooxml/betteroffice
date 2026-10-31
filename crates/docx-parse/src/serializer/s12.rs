@@ -114,15 +114,15 @@ pub fn serialize_s12_wire(
             try_serialize_comments_with_info(&comments, &mut context)?.0,
         ),
         S12SerializeRequest::CommentsExtended { comments, .. } => {
-            let (_, infos) = try_serialize_comments_with_info(&comments, &mut context)?;
+            let (_, infos) = super::parts::serialize_comments_projection(&comments, &mut context)?;
             ("commentsExtended", serialize_comments_extended_part(&infos))
         }
         S12SerializeRequest::CommentsIds { comments, .. } => {
-            let (_, infos) = try_serialize_comments_with_info(&comments, &mut context)?;
+            let (_, infos) = super::parts::serialize_comments_projection(&comments, &mut context)?;
             ("commentsIds", serialize_comments_ids_part(&infos))
         }
         S12SerializeRequest::CommentsExtensible { comments, .. } => {
-            let (_, infos) = try_serialize_comments_with_info(&comments, &mut context)?;
+            let (_, infos) = super::parts::serialize_comments_projection(&comments, &mut context)?;
             (
                 "commentsExtensible",
                 serialize_comments_extensible_part(&infos, &comments),

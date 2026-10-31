@@ -382,6 +382,29 @@ pub fn try_serialize_comments_with_info(
     comments: &[Comment],
     context: &mut SerializerContext,
 ) -> Result<(String, Vec<CommentParaInfo>), ParseError> {
+    if comments.iter().any(has_nested_bookmarks) {
+        return Err(nested_comment_bookmarks());
+    }
+    serialize_comments_projection(comments, context)
+}
+
+/// Whether a comment holds bookmark boundaries inside a table or block control, which the comment writer cannot emit.
+pub(crate) fn has_nested_bookmarks(comment: &Comment) -> bool {
+    comment.block_content.iter().any(|block| {
+        matches!(block, BlockContent::BlockSdt(_) | BlockContent::Table(_))
+            && crate::block::contains_bookmark_block(block)
+    })
+}
+
+pub(crate) fn nested_comment_bookmarks() -> ParseError {
+    ParseError::Canonical("comment bookmarks in nested blocks cannot be serialized".to_owned())
+}
+
+/// The comments part as the writer emits it, without nested blocks; callers that write it check [`has_nested_bookmarks`].
+pub(crate) fn serialize_comments_projection(
+    comments: &[Comment],
+    context: &mut SerializerContext,
+) -> Result<(String, Vec<CommentParaInfo>), ParseError> {
     if comments.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
@@ -506,14 +529,6 @@ fn serialize_comment(
     durable_ids: &mut std::collections::HashSet<String>,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    if comment.block_content.iter().any(|block| {
-        matches!(block, BlockContent::BlockSdt(_) | BlockContent::Table(_))
-            && crate::block::contains_bookmark_block(block)
-    }) {
-        return Err(ParseError::Canonical(
-            "comment bookmarks in nested blocks cannot be serialized".to_owned(),
-        ));
-    }
     let valid = |id: Option<&str>| {
         id.filter(|id| parse_paragraph_id(id).is_some())
             .map(str::to_owned)

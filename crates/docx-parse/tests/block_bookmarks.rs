@@ -857,6 +857,35 @@ fn a_note_bookmark_nested_in_a_cell_keeps_a_root_declared_prefix() {
 }
 
 #[test]
+fn untouched_comments_with_nested_block_bookmarks_save_from_source() {
+    let source = fixture(
+        "comment",
+        &format!(
+            "<w:sdt><w:sdtPr><w:id w:val=\"5\"/></w:sdtPr><w:sdtContent>{START}{}{END}</w:sdtContent></w:sdt>{}",
+            p("00000002", "Nested"),
+            p("00000003", "After")
+        ),
+    );
+    let original = ooxml_opc::unzip_parts(&source)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "word/comments.xml")
+        .unwrap()
+        .1;
+    let mut model = package(&source);
+    for edited in [false, true] {
+        if edited {
+            model["document"]["content"][0]["content"][0]["content"][0]["text"] = json!("Edited");
+        }
+        let saved = save(&source, &model);
+        assert_eq!(part(&saved, "comment").into_bytes(), original);
+        if edited {
+            assert!(part(&saved, "cell").contains("Edited"));
+        }
+    }
+}
+
+#[test]
 fn a_legacy_comment_rewrite_rejects_bookmarks_only_in_nested_blocks() {
     let source = fixture(
         "comment",

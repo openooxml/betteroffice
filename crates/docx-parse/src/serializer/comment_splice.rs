@@ -20,7 +20,7 @@ use crate::xml::{
 use super::context::SerializerContext;
 use super::parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
-    serialize_comments_ids_part, try_serialize_comments_with_info,
+    serialize_comments_ids_part, serialize_comments_projection,
 };
 use super::xml_writer::{escape_xml, js_number};
 
@@ -94,6 +94,9 @@ pub(super) fn splice_comments(
         return Err(error_xml("comment ids or order changed"));
     }
     let (kept, added) = comments.split_at(kept_original.len());
+    if added.iter().any(super::parts::has_nested_bookmarks) {
+        return Err(super::parts::nested_comment_bookmarks());
+    }
     let thread_changed = !removed.is_empty()
         || added.iter().any(|comment| comment.parent_id.is_some())
         || kept.iter().zip(&kept_original).any(|(comment, source)| {
@@ -159,8 +162,8 @@ pub(super) fn splice_comments(
         }
     }
     let (source_xml, source_infos) =
-        try_serialize_comments_with_info(&kept_original, &mut source_context.clone())?;
-    let (kept_xml, kept_infos) = try_serialize_comments_with_info(kept, &mut source_context)?;
+        serialize_comments_projection(&kept_original, &mut source_context.clone())?;
+    let (kept_xml, kept_infos) = serialize_comments_projection(kept, &mut source_context)?;
     let infos_changed = if thread_changed {
         source_infos.iter().zip(&kept_infos).any(|(source, kept)| {
             source.comment_id != kept.comment_id
@@ -1494,7 +1497,7 @@ mod tests {
             })
             .unwrap();
             let (serialized, mut infos) =
-                try_serialize_comments_with_info(&comments, &mut context.clone()).unwrap();
+                serialize_comments_projection(&comments, &mut context.clone()).unwrap();
             let spliced = splice_comments(
                 source.as_bytes(),
                 &parts,
@@ -1546,7 +1549,7 @@ mod tests {
         })
         .unwrap();
         let (serialized, mut infos) =
-            try_serialize_comments_with_info(&comments, &mut context.clone()).unwrap();
+            serialize_comments_projection(&comments, &mut context.clone()).unwrap();
         let spliced = splice_comments(
             source.as_bytes(),
             &parts,
