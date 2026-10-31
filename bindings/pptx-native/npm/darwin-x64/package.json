@@ -26,7 +26,7 @@
   "homepage": "https://betteroffice.dev/",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.16"
   },
   "repository": {
     "type": "git",
