@@ -447,7 +447,7 @@ type SeededUnitDigests = BTreeMap<String, Option<(String, [u8; 32])>>;
 
 #[derive(Default)]
 struct SeedStates {
-    stories: HashMap<String, StoryState>,
+    stories: HashMap<String, Arc<StoryState>>,
     patch_table_styles: crate::seed::PatchTableStyles,
 }
 
@@ -789,14 +789,17 @@ impl SourceIndex {
     }
 
     /// Every story as seeded; see [`StoryState`].
-    fn seed_states(&self) -> &HashMap<String, StoryState> {
+    fn seed_states(&self) -> &HashMap<String, Arc<StoryState>> {
         &self.seed_states.get_or_init(|| self.reseeded()).stories
     }
 
     /// [`Self::seed_states`], taken from `seeded` when not yet known: what a session's stories
     /// hold while unchanged since it seeded them from this package, which seeding a scratch
     /// document again would only repeat.
-    fn seed_states_or(&self, seeded: impl FnOnce() -> SeedStates) -> &HashMap<String, StoryState> {
+    fn seed_states_or(
+        &self,
+        seeded: impl FnOnce() -> SeedStates,
+    ) -> &HashMap<String, Arc<StoryState>> {
         &self.seed_states.get_or_init(seeded).stories
     }
 
@@ -857,7 +860,7 @@ pub(crate) fn source_index(source: &Mutex<Option<SourcePackage>>) -> Option<Arc<
 
 /// What a save projects from one story, compared with the story as seeded
 /// to decide whether its part saves as its source bytes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct StoryState {
     root: String,
     /// Digest of every segment the projection reads: see [`story_fingerprint`].
@@ -869,20 +872,93 @@ struct StoryState {
     comments: BTreeMap<String, Vec<(u32, u32)>>,
 }
 
+impl StoryState {
+    fn same_projection(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.fingerprint == other.fingerprint
+            && self.comments == other.comments
+            && self.units.len() == other.units.len()
+            && self
+                .units
+                .iter()
+                .zip(&other.units)
+                .all(|(unit, other)| unit.same_projection(other))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct StoryStateCache {
+    generation: u64,
     media: Option<Arc<docx_parse::media::MediaTable>>,
     entries: HashMap<String, CachedStoryState>,
 }
 
 struct CachedStoryState {
     revision: u64,
-    state: StoryState,
+    state: Arc<StoryState>,
+    pending_trim: bool,
 }
 
 impl StoryStateCache {
     pub(crate) fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            generation: self.generation.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
+    fn has_media(&self, media: &Option<Arc<docx_parse::media::MediaTable>>) -> bool {
+        match (&self.media, media) {
+            (Some(before), Some(now)) => Arc::ptr_eq(before, now),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn retain_patch_segments(
+        &mut self,
+        seeded: &HashMap<String, Arc<StoryState>>,
+        by_key: &HashMap<&str, (&str, &UnitState)>,
+    ) {
+        if !self.entries.values().any(|cached| cached.pending_trim) {
+            return;
+        }
+        let seeded_keys = seeded
+            .values()
+            .flat_map(|state| &state.units)
+            .filter(|unit| unit.key.is_some())
+            .count();
+        if seeded_keys != by_key.len() {
+            return;
+        }
+        for (story, cached) in &mut self.entries {
+            if !cached.pending_trim {
+                continue;
+            }
+            if let Some(seed) = seeded.get(story) {
+                if Arc::ptr_eq(&cached.state, seed) {
+                    cached.pending_trim = false;
+                    continue;
+                }
+                if cached.state.same_projection(seed) {
+                    cached.state = Arc::clone(seed);
+                    cached.pending_trim = false;
+                    continue;
+                }
+            }
+            let Some(state) = Arc::get_mut(&mut cached.state) else {
+                continue;
+            };
+            for unit in &mut state.units {
+                if let Some((_, seed)) = unit.key.as_deref().and_then(|key| by_key.get(key))
+                    && unit.digest == seed.digest
+                    && unit.content_digest == seed.content_digest
+                {
+                    unit.segments = None;
+                }
+            }
+            cached.pending_trim = false;
+        }
     }
 
     pub(crate) fn evict_root_changes(
@@ -917,23 +993,34 @@ struct UnitState {
     section_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
-    segments: Vec<crate::StorySegment>,
+    segments: Option<Vec<crate::StorySegment>>,
     markers: Vec<(u32, String, bool)>,
 }
 
 impl UnitState {
+    fn same_projection(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.digest == other.digest
+            && self.blocks == other.blocks
+            && self.block_content == other.block_content
+            && self.content_digest == other.content_digest
+            && self.section_digest == other.section_digest
+            && self.inline == other.inline
+            && self.markers == other.markers
+    }
+
     fn has_blocks(&self) -> bool {
         use sha2::{Digest, Sha256};
         self.blocks != <[u8; 32]>::from(Sha256::new().finalize())
     }
 }
 
-fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
+fn story_states(doc: &EditingDoc) -> HashMap<String, Arc<StoryState>> {
     let txn = doc.yrs_doc().transact();
     story_states_in(doc, &txn)
 }
 
-fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, StoryState> {
+fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, Arc<StoryState>> {
     let scan = doc.committed_scan(txn);
     let revisions: Vec<_> = {
         let revisions = doc.story_revisions.lock().unwrap();
@@ -943,53 +1030,103 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, S
             .collect()
     };
     let media = doc.media_table();
-    let mut cache = doc.save_story_states.lock().unwrap();
-    let same_media = match (&cache.media, &media) {
-        (Some(before), Some(now)) => Arc::ptr_eq(before, now),
-        (None, None) => true,
-        _ => false,
-    };
-    if !same_media {
-        cache.clear();
-        cache.media = media;
-    }
-    cache
-        .entries
-        .retain(|story, _| scan.stories.binary_search(story).is_ok());
+    let comments = scan
+        .stories
+        .iter()
+        .map(|story| crate::canonical::story_comment_anchors(txn, story));
+    let inputs: Vec<_> = scan.stories.iter().zip(revisions).zip(comments).collect();
     let mut states = HashMap::new();
-    for (story, revision) in scan.stories.iter().zip(revisions) {
-        let comments = crate::canonical::story_comment_anchors(txn, story);
-        let root = scan.root(story);
-        if let Some(cached) = cache.entries.get(story)
-            && revision == Some(cached.revision)
-            && cached.state.root == root
-            && cached.state.comments == comments
-        {
-            states.insert(story.clone(), cached.state.clone());
-            continue;
+    let mut missing = Vec::new();
+    let generation = {
+        let mut cache = doc.save_story_states.lock().unwrap();
+        if !cache.has_media(&media) {
+            cache.clear();
+            cache.media = media.clone();
         }
-        cache.entries.remove(story);
+        cache
+            .entries
+            .retain(|story, _| scan.stories.binary_search(story).is_ok());
+        for ((story, revision), comments) in inputs {
+            if let Some(cached) = cache.entries.get(story)
+                && revision == Some(cached.revision)
+                && cached.state.root == scan.root(story)
+                && cached.state.comments == comments
+            {
+                states.insert(story.clone(), Arc::clone(&cached.state));
+            } else {
+                cache.entries.remove(story);
+                missing.push((story, revision, comments));
+            }
+        }
+        cache.generation
+    };
+    let mut computed = Vec::new();
+    for (story, revision, comments) in missing {
         let Some((fingerprint, units)) =
             story_fingerprint_within(doc, txn, story, &comments, &mut None)
         else {
             continue;
         };
-        let state = StoryState {
-            root: root.to_owned(),
+        let state = Arc::new(StoryState {
+            root: scan.root(story).to_owned(),
             fingerprint,
             units,
             comments,
-        };
+        });
         if let Some(revision) = revision {
+            computed.push((story, revision));
+        }
+        states.insert(story.clone(), state);
+    }
+    if computed.is_empty() {
+        return states;
+    }
+    let current_scan = doc.committed_scan(txn);
+    let current_media = doc.media_table();
+    let current_revisions: Vec<_> = {
+        let revisions = doc.story_revisions.lock().unwrap();
+        computed
+            .iter()
+            .map(|(story, _)| revisions.stamped.get(story.as_str()).copied())
+            .collect()
+    };
+    let validated: Vec<_> = computed
+        .into_iter()
+        .zip(current_revisions)
+        .filter_map(|((story, revision), current)| {
+            let state = &states[story];
+            (current == Some(revision)
+                && current_scan.stories.binary_search(story).is_ok()
+                && state.root == current_scan.root(story)
+                && crate::canonical::story_comment_anchors(txn, story) == state.comments)
+                .then_some((story, revision))
+        })
+        .collect();
+    let mut cache = doc.save_story_states.lock().unwrap();
+    if cache.generation != generation
+        || !cache.has_media(&media)
+        || !cache.has_media(&current_media)
+    {
+        return states;
+    }
+    for (story, revision) in validated {
+        let state = &states[story];
+        if let Some(cached) = cache.entries.get(story)
+            && cached.revision == revision
+            && cached.state.root == state.root
+            && cached.state.comments == state.comments
+        {
+            states.insert(story.clone(), Arc::clone(&cached.state));
+        } else {
             cache.entries.insert(
                 story.clone(),
                 CachedStoryState {
                     revision,
-                    state: state.clone(),
+                    state: Arc::clone(state),
+                    pending_trim: true,
                 },
             );
         }
-        states.insert(story.clone(), state);
     }
     states
 }
@@ -1001,7 +1138,7 @@ fn story_states_within(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
     mut budget: Option<usize>,
-) -> Option<HashMap<String, StoryState>> {
+) -> Option<HashMap<String, Arc<StoryState>>> {
     let (scan, mut comments) = {
         let scan = doc.committed_scan(txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
@@ -1025,12 +1162,12 @@ fn story_states_within(
             continue;
         };
         let root = scan.root(story).to_owned();
-        let state = StoryState {
+        let state = Arc::new(StoryState {
             root,
             fingerprint,
             units,
             comments,
-        };
+        });
         states.insert(story.clone(), state);
     }
     Some(states)
@@ -1493,7 +1630,7 @@ fn story_fingerprint_within(
                     content_digest: std::mem::take(&mut inline_content).finalize().into(),
                     section_digest: std::mem::take(&mut section_content).finalize().into(),
                     inline: std::mem::take(&mut inline),
-                    segments: std::mem::take(&mut unit_segments),
+                    segments: Some(std::mem::take(&mut unit_segments)),
                     markers: std::mem::take(&mut markers),
                 });
             }
@@ -1526,7 +1663,7 @@ fn story_fingerprint_within(
             content_digest: inline_content.finalize().into(),
             section_digest: section_content.finalize().into(),
             inline,
-            segments: unit_segments,
+            segments: Some(unit_segments),
             markers,
         });
     }
@@ -3218,7 +3355,7 @@ impl EditingDoc {
         }
     }
 
-    fn live_save_seed_states(&self, stories: HashMap<String, StoryState>) -> SeedStates {
+    fn live_save_seed_states(&self, stories: HashMap<String, Arc<StoryState>>) -> SeedStates {
         SeedStates {
             stories,
             patch_table_styles: self
@@ -3287,7 +3424,17 @@ impl EditingDoc {
         let txn = self.yrs_doc().transact();
         let assignments = source_assignments(&txn);
         let scan = self.committed_scan(&txn);
-        let live = story_states_in(self, &txn);
+        let by_key: HashMap<&str, &Pilcrow> = scan
+            .pilcrows
+            .iter()
+            .map(|pilcrow| (pilcrow.key.as_str(), pilcrow))
+            .collect();
+        let live = if by_key.len() == scan.pilcrows.len() {
+            story_states_in(self, &txn)
+        } else {
+            self.save_story_states.lock().unwrap().clear();
+            story_states_within(self, &txn, None).unwrap_or_default()
+        };
         let mut plan = ParagraphSavePlan {
             assignments: source
                 .unbacked()
@@ -3309,17 +3456,12 @@ impl EditingDoc {
         };
         let seeded_units = units_by_key(seeded);
         let live_units = units_by_key(&live);
-        let stories_of = |states: &HashMap<String, StoryState>, part: &SourcePart| {
+        let stories_of = |states: &HashMap<String, Arc<StoryState>>, part: &SourcePart| {
             part_stories(states, part)
                 .into_iter()
                 .map(|(story, state)| (story.clone(), (state.fingerprint, state.comments.clone())))
                 .collect::<BTreeMap<_, _>>()
         };
-        let by_key: HashMap<&str, &Pilcrow> = scan
-            .pilcrows
-            .iter()
-            .map(|pilcrow| (pilcrow.key.as_str(), pilcrow))
-            .collect();
         'parts: for (index, part) in source.parts.iter().enumerate() {
             if seeded.is_empty() {
                 continue;
@@ -3345,8 +3487,8 @@ impl EditingDoc {
                             live_markers: &now.markers,
                         };
                         match crate::paragraph_patch_plan::diff_paragraph_v1(
-                            &was.segments,
-                            &now.segments,
+                            was.segments.as_deref().expect("seeded segments retained"),
+                            now.segments.as_deref().expect("changed segments retained"),
                             context,
                         ) {
                             Ok(patch) => spliced.paragraph_patches.push(patch),
@@ -3381,11 +3523,22 @@ impl EditingDoc {
             }
             plan.patched_parts.push((part.path().to_owned(), patches));
         }
+        drop(live_units);
+        drop(live);
+        if self
+            .source_index()
+            .is_some_and(|current| Arc::ptr_eq(&source, &current))
+        {
+            self.save_story_states
+                .lock()
+                .unwrap()
+                .retain_patch_segments(seeded, &seeded_units);
+        }
         plan
     }
 }
 
-fn units_by_key(states: &HashMap<String, StoryState>) -> HashMap<&str, (&str, &UnitState)> {
+fn units_by_key(states: &HashMap<String, Arc<StoryState>>) -> HashMap<&str, (&str, &UnitState)> {
     states
         .iter()
         .flat_map(|(story, state)| {
@@ -3398,7 +3551,7 @@ fn units_by_key(states: &HashMap<String, StoryState>) -> HashMap<&str, (&str, &U
 
 /// The stories seeded from `part`, cells and content controls nested in them included.
 fn part_stories<'a>(
-    states: &'a HashMap<String, StoryState>,
+    states: &'a HashMap<String, Arc<StoryState>>,
     part: &SourcePart,
 ) -> BTreeMap<&'a String, &'a StoryState> {
     let prefix = match part.kind {
@@ -3412,6 +3565,7 @@ fn part_stories<'a>(
             part.roots.contains(&state.root)
                 || prefix.is_some_and(|prefix| state.root.starts_with(prefix))
         })
+        .map(|(story, state)| (story, state.as_ref()))
         .collect()
 }
 
@@ -3705,8 +3859,8 @@ fn admit_row_splices(
 fn spliced_part(
     source: &SourceIndex,
     index: usize,
-    seeded: &HashMap<String, StoryState>,
-    live: &HashMap<String, StoryState>,
+    seeded: &HashMap<String, Arc<StoryState>>,
+    live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
 ) -> Option<SplicedPart> {
     let part = &source.parts[index];
@@ -4067,11 +4221,27 @@ mod tests {
 
     fn save_plans_agree(doc: &EditingDoc) {
         let plan = doc.paragraph_save_plan();
+        assert_eq!(plan, doc.paragraph_save_plan());
         let states = story_states(doc);
         doc.save_story_states.lock().unwrap().clear();
         assert_eq!(plan, doc.paragraph_save_plan());
         let txn = doc.yrs_doc().transact();
-        assert_eq!(states, story_states_within(doc, &txn, None).unwrap());
+        let mut fresh = story_states_within(doc, &txn, None).unwrap();
+        let source = doc.source_index().unwrap();
+        let seeded = units_by_key(source.seed_states());
+        for (story, state) in &mut fresh {
+            let state = Arc::get_mut(state).unwrap();
+            for (unit, cached) in state.units.iter_mut().zip(&states[story].units) {
+                if cached.segments.is_none() {
+                    let (_, seed) = seeded[unit.key.as_deref().unwrap()];
+                    assert_eq!(unit.digest, seed.digest);
+                    assert_eq!(unit.content_digest, seed.content_digest);
+                    assert!(seed.segments.is_some());
+                    unit.segments = None;
+                }
+            }
+        }
+        assert_eq!(states, fresh);
     }
 
     fn save_plan_media(bytes: Vec<u8>) -> docx_parse::media::MediaTable {
@@ -4095,7 +4265,32 @@ mod tests {
         )
         .unwrap();
         save_plans_agree(&doc);
+        {
+            let cache = doc.save_story_states.lock().unwrap();
+            let body = &cache.entries["body"].state;
+            assert!(body.units[0].segments.is_some());
+            assert!(body.units.iter().skip(1).any(|unit| unit.segments.is_none()));
+        }
         doc.delete_range(&ctx(), StoryRange::new("body", 0, 4))
+            .unwrap();
+        save_plans_agree(&doc);
+        {
+            let source = doc.source_index().unwrap();
+            let cache = doc.save_story_states.lock().unwrap();
+            assert!(Arc::ptr_eq(
+                &cache.entries["body"].state,
+                &source.seed_states()["body"]
+            ));
+        }
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "Again ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 6))
             .unwrap();
         save_plans_agree(&doc);
 
@@ -4214,6 +4409,140 @@ mod tests {
         doc.paragraph_save_plan();
         STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
         save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn save_plans_share_story_states_with_the_cache() {
+        let doc = save_plan_doc();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        doc.paragraph_save_plan();
+        let before = story_states(&doc);
+        {
+            let cache = doc.save_story_states.lock().unwrap();
+            for (story, state) in &before {
+                assert!(Arc::ptr_eq(state, &cache.entries[story].state));
+            }
+        }
+        doc.paragraph_save_plan();
+        let after = story_states(&doc);
+        for (story, state) in &before {
+            assert!(Arc::ptr_eq(state, &after[story]));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn progress_hooks_can_reenter_save_planning_without_publishing_cleared_states() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        thread_local! {
+            static TARGET: RefCell<Option<(Rc<EditingDoc>, bool)>> = const {
+                RefCell::new(None)
+            };
+            static RESULT: RefCell<Option<(ParagraphSavePlan, Arc<StoryState>)>> = const {
+                RefCell::new(None)
+            };
+        }
+
+        fn reenter() {
+            ooxml_opc::progress::set_hook(None);
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            let (doc, clear) = TARGET.with(|target| target.borrow().as_ref().unwrap().clone());
+            let plan = doc.paragraph_save_plan();
+            let state = Arc::clone(&doc.save_story_states.lock().unwrap().entries["body"].state);
+            if clear {
+                let media = doc.media_table();
+                let mut cache = doc.save_story_states.lock().unwrap();
+                cache.clear();
+                cache.media = media;
+            }
+            RESULT.with(|result| *result.borrow_mut() = Some((plan, state)));
+        }
+
+        struct ResetHook;
+
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                ooxml_opc::progress::set_hook(None);
+                TARGET.with(|target| *target.borrow_mut() = None);
+                RESULT.with(|result| *result.borrow_mut() = None);
+            }
+        }
+
+        let _reset = ResetHook;
+        let body: String = (1..=ooxml_opc::progress::EVERY)
+            .map(|id| {
+                crate::engine::preview_fixture::paragraph(
+                    id,
+                    &crate::engine::preview_fixture::run("Seed"),
+                )
+            })
+            .collect();
+        let bytes = crate::engine::preview_fixture::document(&body);
+        let doc = Rc::new(EditingDoc::new(41));
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        doc.paragraph_save_plan();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "New ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        {
+            let txn = doc.yrs_doc().transact();
+            doc.committed_scan(&txn);
+        }
+        for clear in [false, true] {
+            doc.save_story_states.lock().unwrap().clear();
+            TARGET.with(|target| *target.borrow_mut() = Some((Rc::clone(&doc), clear)));
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            ooxml_opc::progress::set_hook(Some(reenter));
+            let plan = doc.paragraph_save_plan();
+            ooxml_opc::progress::set_hook(None);
+            let (nested, state) = RESULT.with(|result| result.borrow_mut().take().unwrap());
+            assert_eq!(plan, nested);
+            {
+                let cache = doc.save_story_states.lock().unwrap();
+                if clear {
+                    assert!(cache.entries.is_empty());
+                } else {
+                    assert!(Arc::ptr_eq(&state, &cache.entries["body"].state));
+                }
+            }
+            save_plans_agree(&doc);
+        }
+    }
+
+    #[test]
+    fn duplicate_live_keys_use_full_save_states() {
+        let doc = save_plan_doc();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        doc.paragraph_save_plan();
+        let revision = doc.story_revisions.lock().unwrap().stamped["body"];
+        let key = {
+            let cache = doc.save_story_states.lock().unwrap();
+            let body = &cache.entries["body"].state;
+            body.units
+                .iter()
+                .find(|unit| unit.segments.is_none())
+                .unwrap()
+                .key
+                .clone()
+                .unwrap()
+        };
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let header = story_ref(&txn, "hf:rIdHeader1").unwrap();
+            let pilcrow = pilcrows(&header, &txn).remove(0).1;
+            pilcrow.insert(&mut txn, PARA_ID, key);
+        }
+        assert_eq!(doc.story_revisions.lock().unwrap().stamped["body"], revision);
+        doc.paragraph_save_plan();
+        assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
     }
 
     #[test]
@@ -4712,7 +5041,7 @@ mod tests {
         for unit in units {
             assert_eq!(
                 run_size_fingerprint(
-                    unit.segments.into_iter(),
+                    unit.segments.unwrap().into_iter(),
                     unit.markers
                         .iter()
                         .map(|(at, key, end)| (*at, key.as_str(), *end)),
