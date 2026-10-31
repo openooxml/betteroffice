@@ -4,8 +4,7 @@ use betteroffice_xlsx::{
     PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, RenderOptions,
     SelectionDirection, SheetId, SheetInfoWire as SheetInfo, SnapshotBudget, StylePatch,
-    UpdateEvent, UpdateSubscription,
-    Viewport, Workbook, WorkbookSnapshotEncoder,
+    UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
 
