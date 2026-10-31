@@ -128,6 +128,11 @@ jobs:
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
 
+      - name: Check Wasm memory limits
+        env:
+          BETTEROFFICE_REQUIRE_WASM: "1"
+        run: bun test scripts/wasm-memory.test.ts
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
