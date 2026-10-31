@@ -165,7 +165,7 @@ describe('CDN font provider', () => {
         }) as typeof fetch;
         const provider = entry.createFontProvider({ baseUrl });
         await expect(provider.resolveScriptFallback('thai', false, false)())
-          .rejects.toThrow('Cannot load font decoder wasm: HTTP 404');
+          .rejects.toThrow(`Font decoder wasm not found: ${decoder} (HTTP 404)`);
         expect(requested).toEqual([pack, decoder]);
       }
     } finally {
