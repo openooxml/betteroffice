@@ -325,7 +325,7 @@ fn a_marker_its_bullet_font_cannot_draw_keeps_its_slot_but_paints_nothing() {
             if path == "ppt/slides/slide1.xml" {
                 let xml = String::from_utf8(bytes.clone()).unwrap();
                 let pp = format!(
-                    r#"<a:pPr lvl="0"><a:buFont typeface="Georgia" /><a:buChar char="{marker}" /></a:pPr><a:r><a:rPr /><a:t>First level</a:t>"#
+                    r#"<a:pPr lvl="0"><a:buFont typeface="Liberation Sans" /><a:buChar char="{marker}" /></a:pPr><a:r><a:rPr /><a:t>First level</a:t>"#
                 );
                 let rewritten = xml.replacen(
                     r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
@@ -340,7 +340,7 @@ fn a_marker_its_bullet_font_cannot_draw_keeps_its_slot_but_paints_nothing() {
         let mut renderer = renderer();
         for bold in [false, true] {
             renderer
-                .register_font("Georgia", bold, false, FONT)
+                .register_font("Liberation Sans", bold, false, FONT)
                 .unwrap();
         }
         let list = renderer

@@ -31,7 +31,7 @@ pub(crate) fn measure_paragraph(
 ) -> Option<crate::types::ParagraphExtent> {
     let block = block_in(paragraph, content_width)?;
     let defaults = defaults_in(&config.defaults)?;
-    let compat = compat_in(&config.compat)?;
+    let compat = compat_in(&config.compat, &block)?;
     let zones = match floating_zones {
         None => None,
         Some(zones) => Some(
@@ -55,7 +55,9 @@ pub(crate) fn measure_paragraph(
         authoritative_shaping: config.authoritative_shaping,
     };
     let extent = crate::measure_paragraph_typed_resident(&request).ok()?;
-    Some(extent_from_out(extent))
+    let mut extent = extent_from_out(extent);
+    crate::leading_inline_box::restore_extent(paragraph, &mut extent);
+    Some(extent)
 }
 
 pub(crate) fn intrinsic_widths(
@@ -82,7 +84,7 @@ pub(crate) fn intrinsic_widths(
         max_width: content_width as f32,
         font_chains: FontChains::BTree(&config.font_chains),
         defaults: &defaults,
-        compat: compat_in(&config.compat)?,
+        compat: compat_in(&config.compat, &block)?,
         floating_zones: None,
         paragraph_y_offset: None,
         authoritative_shaping: config.authoritative_shaping,
@@ -109,7 +111,7 @@ pub(crate) fn min_content_width(
         max_width: content_width as f32,
         font_chains: FontChains::BTree(&config.font_chains),
         defaults: &defaults,
-        compat: compat_in(&config.compat)?,
+        compat: compat_in(&config.compat, &block)?,
         floating_zones: None,
         paragraph_y_offset: None,
         authoritative_shaping: config.authoritative_shaping,
@@ -120,6 +122,8 @@ pub(crate) fn min_content_width(
 }
 
 fn block_in(paragraph: &ParagraphBlock, content_width: f64) -> Option<BlockIn> {
+    let measured = crate::leading_inline_box::measurement_paragraph(paragraph);
+    let paragraph = measured.as_ref();
     let attrs = paragraph.attrs.as_ref();
     let indent = attrs.and_then(|attrs| attrs.indent.as_ref());
     let rule_width = (content_width
@@ -163,11 +167,14 @@ fn defaults_in(defaults: &Value) -> Option<DefaultsIn> {
     DefaultsIn::deserialize(defaults).ok()
 }
 
-fn compat_in(compat: &Value) -> Option<CompatIn> {
-    if compat.is_null() {
-        return Some(CompatIn::default());
-    }
-    CompatIn::deserialize(compat).ok()
+fn compat_in(compat: &Value, block: &BlockIn) -> Option<CompatIn> {
+    let mut parsed = if compat.is_null() {
+        CompatIn::default()
+    } else {
+        CompatIn::deserialize(compat).ok()?
+    };
+    parsed.space_shrink_limit = Some(crate::docx_space_shrink_limit(compat, block));
+    Some(parsed)
 }
 
 fn zone_in(zone: &FloatingZone) -> Option<FloatZoneIn> {
@@ -196,6 +203,7 @@ fn zone_in(zone: &FloatingZone) -> Option<FloatZoneIn> {
 
 fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
     Some(AttrsIn {
+        justification_mode: attrs.justification_mode.clone(),
         alignment: attrs.alignment.clone(),
         spacing: attrs.spacing.as_ref().map(|spacing| SpacingIn {
             before: spacing.before.and_then(finite),
@@ -496,6 +504,266 @@ mod parity_tests {
                 compat: json!({}),
                 authoritative_shaping: true,
             },
+        }
+    }
+
+    #[test]
+    fn compatibility_mode_controls_justified_latin_space_shrink() {
+        let fixture = fixture();
+        let natural = 12.0 * (1139.0 / 128.0) + 3.0 * (569.0 / 128.0);
+        for (mode, ratio, expected) in [
+            (None, 0.15, 2),
+            (Some(11), 0.15, 2),
+            (Some(12), 0.15, 2),
+            (Some(14), 0.15, 2),
+            (Some(15), 0.15, 1),
+            (Some(15), 0.22, 1),
+            (Some(15), 0.26, 2),
+            (Some(16), 0.15, 1),
+        ] {
+            let paragraph = paragraph(
+                vec![text_run("000 000 000 000")],
+                Some(crate::types::ParagraphAttrs {
+                    alignment: Some("justify".to_owned()),
+                    justification_mode: Some("both".to_owned()),
+                    ..Default::default()
+                }),
+            );
+            let config = MeasurementConfig {
+                compat: json!({"compatibilityMode": mode}),
+                ..fixture.config.clone()
+            };
+            let width = natural - ratio * 3.0 * (569.0 / 128.0);
+            let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+            let json = legacy_measure(&paragraph, width, &config, None, 0.0).unwrap();
+            assert_eq!(typed, json);
+            assert_eq!(typed.lines.len(), expected, "mode {mode:?}, ratio {ratio}");
+            if expected == 1 {
+                assert!((typed.lines[0].width - width).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_mode_controls_latin_soft_break_space_shrink() {
+        let fixture = fixture();
+        let paragraph = paragraph(
+            vec![
+                text_run("000 000 000 000"),
+                Run::LineBreak(crate::types::LineBreakRun {
+                    pm_start: None,
+                    pm_end: None,
+                }),
+                text_run("000"),
+            ],
+            Some(crate::types::ParagraphAttrs {
+                alignment: Some("justify".to_owned()),
+                justification_mode: Some("both".to_owned()),
+                ..Default::default()
+            }),
+        );
+        let width = 12.0 * (1139.0 / 128.0) + 0.85 * 3.0 * (569.0 / 128.0);
+        for (mode, expected, limit) in [(14, 3, 0.0), (15, 2, 0.25)] {
+            let config = MeasurementConfig {
+                compat: json!({"compatibilityMode": mode}),
+                ..fixture.config.clone()
+            };
+            let block = block_in(&paragraph, width).unwrap();
+            assert_eq!(
+                compat_in(&config.compat, &block)
+                    .unwrap()
+                    .space_shrink_limit,
+                Some(limit)
+            );
+            let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+            assert_eq!(typed.lines.len(), expected, "mode {mode}");
+            assert_eq!(typed.lines.last().unwrap().head_run, 2);
+            assert_eq!(
+                typed,
+                legacy_measure(&paragraph, width, &config, None, 0.0).unwrap()
+            );
+            if mode == 15 {
+                assert!((typed.lines[0].width - width).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_mode_controls_decomposed_latin_space_shrink() {
+        let fixture = fixture();
+        for (name, runs, old_lines, old_limit) in [
+            (
+                "decomposed",
+                vec![text_run("e\u{0301}00 000 000 000")],
+                2,
+                0.0,
+            ),
+            (
+                "split accent",
+                vec![text_run("e"), text_run("\u{0301}00 000 000 000")],
+                2,
+                0.0,
+            ),
+            (
+                "non Latin run",
+                vec![text_run("000 000 000 "), text_run("\u{03b1}00")],
+                1,
+                0.25,
+            ),
+        ] {
+            let paragraph = paragraph(
+                runs,
+                Some(crate::types::ParagraphAttrs {
+                    alignment: Some("justify".to_owned()),
+                    justification_mode: Some("both".to_owned()),
+                    ..Default::default()
+                }),
+            );
+            let natural =
+                measure_paragraph(&paragraph, 1000.0, &fixture.config, None, 0.0).unwrap();
+            assert_eq!(natural.lines.len(), 1);
+            let width = natural.lines[0].width - 0.15 * 3.0 * (569.0 / 128.0);
+            for (mode, expected, limit) in [(14, old_lines, old_limit), (15, 1, 0.25)] {
+                let config = MeasurementConfig {
+                    compat: json!({"compatibilityMode": mode}),
+                    ..fixture.config.clone()
+                };
+                let block = block_in(&paragraph, width).unwrap();
+                assert_eq!(
+                    compat_in(&config.compat, &block)
+                        .unwrap()
+                        .space_shrink_limit,
+                    Some(limit),
+                    "{name}, mode {mode}"
+                );
+                let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+                assert_eq!(typed.lines.len(), expected, "{name}, mode {mode}");
+                assert_eq!(
+                    typed,
+                    legacy_measure(&paragraph, width, &config, None, 0.0).unwrap()
+                );
+                if expected == 1 {
+                    assert!((typed.lines[0].width - width).abs() < 0.001);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn latin_space_shrink_accepts_combining_mark_ranges() {
+        for (start, end) in [
+            ('\u{0300}', '\u{036f}'),
+            ('\u{1ab0}', '\u{1aff}'),
+            ('\u{1dc0}', '\u{1dff}'),
+            ('\u{20d0}', '\u{20ff}'),
+            ('\u{fe20}', '\u{fe2f}'),
+        ] {
+            for mark in [start, end] {
+                let paragraph = paragraph(vec![text_run(&format!("e{mark}"))], None);
+                let block = block_in(&paragraph, 1000.0).unwrap();
+                assert_eq!(
+                    crate::docx_space_shrink_limit(&json!({"compatibilityMode": 14}), &block),
+                    0.0,
+                    "{mark:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn latin_space_shrink_skips_textless_runs_only_when_text_is_present() {
+        let compat = json!({"compatibilityMode": 14});
+        for kind in ["lineBreak", "tab", "fieldBegin", "fieldEnd", "text"] {
+            for rtl in [false, true] {
+                let mut run = bare_run(kind);
+                run.rtl = rtl;
+                let mut block = BlockIn {
+                    kind: "paragraph".to_owned(),
+                    runs: vec![run],
+                    attrs: None,
+                };
+                assert_eq!(
+                    crate::docx_space_shrink_limit(&compat, &block),
+                    if kind == "lineBreak" || rtl {
+                        0.25
+                    } else {
+                        0.0
+                    },
+                    "textless {kind}, rtl {rtl}"
+                );
+                block.runs.push(run_in(&text_run("Latin")).unwrap());
+                assert_eq!(
+                    crate::docx_space_shrink_limit(&compat, &block),
+                    0.0,
+                    "Latin with {kind}, rtl {rtl}"
+                );
+                block.runs.last_mut().unwrap().rtl = true;
+                assert_eq!(crate::docx_space_shrink_limit(&compat, &block), 0.25);
+            }
+        }
+    }
+
+    #[test]
+    fn mode_14_scout_wraps_before_scenario() {
+        crate::clear_measure_fonts();
+        let id = crate::register_measure_font(include_bytes!(
+            "../../../packages/fonts/assets/LiberationSerif-Regular.ttf"
+        ))
+        .unwrap();
+        let text = concat!(
+            "As there are no fixed effects, we add a constant, which measures the value ",
+            "for the baseline scenario, while the condition fixed effects"
+        );
+        let paragraph = paragraph(
+            vec![text_run(text)],
+            Some(crate::types::ParagraphAttrs {
+                alignment: Some("justify".to_owned()),
+                justification_mode: Some("both".to_owned()),
+                ..Default::default()
+            }),
+        );
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("times new roman|0|0".to_owned(), vec![id])]),
+            defaults: json!({"fontFamily": "Times New Roman", "fontSize": 12}),
+            compat: json!({"compatibilityMode": 14}),
+            authoritative_shaping: true,
+        };
+        let typed = measure_paragraph(&paragraph, 624.0, &config, None, 0.0).unwrap();
+        let json = legacy_measure(&paragraph, 624.0, &config, None, 0.0).unwrap();
+        assert_eq!(typed, json);
+        let start = typed.lines[1].head_char;
+        assert!(text[start..].starts_with("scenario,"));
+        assert!(typed.lines[0].width <= 624.0);
+    }
+
+    #[test]
+    fn unmeasured_justification_modes_keep_space_shrink() {
+        let fixture = fixture();
+        for (justification_mode, bidi, text) in [
+            ("distribute", false, "000 000 000 000"),
+            ("thaiDistribute", false, "000 000 000 000"),
+            ("both", true, "000 000 000 000"),
+        ] {
+            let paragraph = paragraph(
+                vec![text_run(text)],
+                Some(crate::types::ParagraphAttrs {
+                    alignment: Some("justify".to_owned()),
+                    justification_mode: Some(justification_mode.to_owned()),
+                    bidi: Some(bidi),
+                    ..Default::default()
+                }),
+            );
+            let config = MeasurementConfig {
+                compat: json!({"compatibilityMode": 14}),
+                ..fixture.config.clone()
+            };
+            let width = 12.0 * (1139.0 / 128.0) + 0.8 * 3.0 * (569.0 / 128.0);
+            let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+            assert_eq!(typed.lines.len(), 1);
+            assert_eq!(
+                typed,
+                legacy_measure(&paragraph, width, &config, None, 0.0).unwrap()
+            );
         }
     }
 

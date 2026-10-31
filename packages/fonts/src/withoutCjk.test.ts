@@ -1,4 +1,7 @@
 import { afterEach, expect, mock, test } from 'bun:test';
+import { createHash } from 'node:crypto';
+import pack from '../../fonts-cjk/assets/manifest.json';
+import { fontAssetResponse } from './test-assets';
 
 type CjkAddon = { CJK_FONT_ASSET_URLS?: unknown };
 
@@ -32,9 +35,9 @@ test('missing CJK assets fall back without hiding unknown asset errors', async (
       cjk.family.includes('Serif') ? 'Times New Roman' : 'Arial', false, false
     )!;
     const bytes = await loadBundledFontBytes(cjk);
-    expect(bytes).toBe(await loadBundledFontBytes(fallback));
+    expect(bytes).toEqual(await loadBundledFontBytes(fallback));
     const { script: _script, ...withoutScript } = cjk;
-    expect(await loadBundledFontBytes(withoutScript)).toBe(bytes);
+    expect(await loadBundledFontBytes(withoutScript)).toEqual(bytes);
   }
 });
 
@@ -55,7 +58,7 @@ test('CJK provider loaders return shipped bytes without changing resolver metada
         resolveMetricCompatFace(family, bold, italic) ??
         resolveLastResortFace(family, bold, italic);
       const load = provider.resolve(family, bold, italic) ?? provider.resolveLastResort(family, bold, italic);
-      expect(await load()).toBe(await provider.resolve('Arial', false, false)!());
+      expect(await load()).toEqual(await provider.resolve('Arial', false, false)!());
       expect(
         resolveMetricCompatFace(family, bold, italic) ??
         resolveLastResortFace(family, bold, italic)
@@ -64,11 +67,11 @@ test('CJK provider loaders return shipped bytes without changing resolver metada
   }
   expect(resolveMetricCompatFamily('Microsoft YaHei')).toBe('Noto Sans SC');
   expect(resolveBundledFamilyFace('DengXian', true, true)).toBeUndefined();
-  expect(resolveScriptFallbackFace('cjk-sc', false, false)?.file).toBe('NotoSansSC-Regular.otf');
+  expect(resolveScriptFallbackFace('cjk-sc', false, false)?.file).toBe('NotoSansSC-Regular.otf.zst');
   expect(provider.resolveFamily('Noto Sans SC', true, true)).toBeUndefined();
   const sans = await provider.resolve('Arial', false, false)!();
-  expect(await provider.resolveFamily('Noto Sans SC', false, false)!()).toBe(sans);
-  expect(await provider.resolveScriptFallback('cjk-sc', true, true)!()).toBe(sans);
+  expect(await provider.resolveFamily('Noto Sans SC', false, false)!()).toEqual(sans);
+  expect(await provider.resolveScriptFallback('cjk-sc', true, true)!()).toEqual(sans);
 });
 
 test('invalid CJK add-on exports reject without Latin fallback and remain retryable', async () => {
@@ -86,9 +89,31 @@ test('invalid CJK add-on exports reject without Latin fallback and remain retrya
   }
 });
 
+test('custom CJK roots bypass the missing add-on and propagate packed asset failures', async () => {
+  const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
+  const face = resolveScriptFallbackFace('cjk-sc', false, false)!;
+  const realFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (String(input).endsWith('.wasm')) return fontAssetResponse(input);
+    expect(String(input)).toBe(`https://cjk-custom.example/${face.file}`);
+    attempts++;
+    return attempts === 1 ? new Response(new Uint8Array(4)) : fontAssetResponse(input);
+  }) as typeof fetch;
+  try {
+    const options = { baseUrl: 'https://cjk-custom.example/' };
+    await expect(loadBundledFontBytes(face, options)).rejects.toThrow('encoded bytes; expected');
+    expect((await loadBundledFontBytes(face, options)).byteLength).toBe(face.byteLength);
+    expect(attempts).toBe(2);
+    expect(importCjk).not.toHaveBeenCalled();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test('CJK import failures reject without Latin fallback and retry after recovery', async () => {
   const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
-  const face = { ...resolveScriptFallbackFace('cjk-sc', false, false)!, byteLength: 4 };
+  const face = resolveScriptFallbackFace('cjk-sc', false, false)!;
   const failure = new TypeError('Failed to fetch dynamically imported module');
   importCjk.mockImplementation(() => {
     throw failure;
@@ -96,16 +121,18 @@ test('CJK import failures reject without Latin fallback and retry after recovery
 
   await expect(loadBundledFontBytes(face)).rejects.toBe(failure);
 
-  const expected = new Uint8Array([0x4f, 0x54, 0x54, 0x4f]);
-  const url = new URL('https://cjk-retry.example/NotoSansSC-Regular.otf');
+  const entry = pack.faces.find((entry) => entry.file === face.file)!;
+  const url = new URL('https://cjk-retry.example/NotoSansSC-Regular.otf.zst');
   importCjk.mockImplementation(() => ({
     CJK_FONT_ASSET_URLS: { [face.file]: () => url },
   }));
   const realFetch = globalThis.fetch;
-  const fetchCjk = mock(async () => new Response(expected));
+  const fetchCjk = mock(fontAssetResponse);
   globalThis.fetch = fetchCjk as unknown as typeof fetch;
   try {
-    expect(await loadBundledFontBytes(face)).toEqual(expected.buffer);
+    const bytes = await loadBundledFontBytes(face);
+    expect(bytes.byteLength).toBe(face.byteLength);
+    expect(createHash('sha256').update(new Uint8Array(bytes)).digest('hex')).toBe(entry.sha256);
     expect(fetchCjk).toHaveBeenCalledWith(url, undefined);
   } finally {
     globalThis.fetch = realFetch;

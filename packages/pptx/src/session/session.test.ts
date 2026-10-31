@@ -12,7 +12,7 @@ import type { PptxEditRequest, PptxReadResult } from '../edits';
 import {
   decodeTiffImage, initWasm, openPresentation, type PresentationHandle,
 } from '../wasm/loader';
-import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import { PptxDocument } from '../wasm/engine';
 import { createPresentationSession, type PresentationSession } from './client';
 import { createPresentationSessionHost } from './host';
 import {
@@ -155,7 +155,7 @@ describe('presentation sessions', () => {
     const open = PptxDocument.openCollaborative;
     const documents: PptxDocument[] = [];
     const openSpy = spyOn(PptxDocument, 'openCollaborative').mockImplementation((...args) => {
-      const document = open(...args);
+      const document = open.call(PptxDocument, ...args);
       documents.push(document);
       return document;
     });

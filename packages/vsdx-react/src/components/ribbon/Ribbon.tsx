@@ -94,7 +94,7 @@ function ConnectorToggle({ t, connector }: { t: TFunction; connector: RibbonConn
   return <button type="button" disabled={connector.disabled} aria-label={label} aria-pressed={connector.active} title={label} onMouseDown={(event) => event.preventDefault()} onClick={() => connector.onToggle()} className="vsdx-cmd-btn" style={{ ...styles.button, color: connector.disabled ? '#b4b4b4' : '#242424', background: connector.active ? '#ebf3fc' : 'transparent', cursor: connector.disabled ? 'default' : 'pointer' }}><RibbonIcon name="connector" size={20} /></button>;
 }
 
-function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { defaultId: RibbonCommandId; defaultIcon: IconName; entries: ReadonlyArray<{ id: RibbonCommandId; icon: IconName }>; label: (id: RibbonCommandId) => string }) {
+function RibbonSplitButton({ defaultId, defaultIcon, entries, label, t }: { defaultId: RibbonCommandId; defaultIcon: IconName; entries: ReadonlyArray<{ id: RibbonCommandId; icon: IconName }>; label: (id: RibbonCommandId) => string; t: TFunction }) {
   const commands = useRibbonCommands();
   const [open, setOpen] = useState(false);
   const [intent, setIntent] = useState<'first' | 'last'>('first');
@@ -118,9 +118,9 @@ function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { default
   return (
     <span style={styles.split}>
       <button type="button" disabled={!current.enabled} aria-label={label(fallback.id)} title={label(fallback.id)} data-command-id={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => current.run()} className="vsdx-cmd-btn vsdx-split-main" style={{ ...styles.splitMain, color: current.enabled ? '#242424' : '#b4b4b4', cursor: current.enabled ? 'pointer' : 'default' }}><RibbonIcon name={fallback.icon} size={20} /></button>
-      <button ref={triggerRef} type="button" disabled={!anyEnabled} aria-label={`${label(fallback.id)} options`} title={`${label(fallback.id)} options`} aria-haspopup="menu" aria-expanded={open} data-split-toggle={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!anyEnabled) return; if (open) close(); else openMenu('first'); }} onKeyDown={onTriggerKeyDown} className="vsdx-cmd-btn" style={{ ...styles.splitChevron, color: anyEnabled ? '#242424' : '#b4b4b4', background: open ? '#ebebeb' : 'transparent', cursor: anyEnabled ? 'pointer' : 'default' }}><svg width={10} height={10} viewBox="0 0 10 10" aria-hidden="true" focusable="false" style={{ display: 'block' }}><path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
+      <button ref={triggerRef} type="button" disabled={!anyEnabled} aria-label={t('ribbon.options', { label: label(fallback.id) })} title={t('ribbon.options', { label: label(fallback.id) })} aria-haspopup="menu" aria-expanded={open} data-split-toggle={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!anyEnabled) return; if (open) close(); else openMenu('first'); }} onKeyDown={onTriggerKeyDown} className="vsdx-cmd-btn" style={{ ...styles.splitChevron, color: anyEnabled ? '#242424' : '#b4b4b4', background: open ? '#ebebeb' : 'transparent', cursor: anyEnabled ? 'pointer' : 'default' }}><svg width={10} height={10} viewBox="0 0 10 10" aria-hidden="true" focusable="false" style={{ display: 'block' }}><path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
       {open && (
-        <CommandMenu menuLabel={`${label(fallback.id)} options`} entries={entries} position={pos} anchorRef={triggerRef} initialFocus={intent} label={label} onClose={close} onCloseAndFocus={closeAndFocus} />
+        <CommandMenu menuLabel={t('ribbon.options', { label: label(fallback.id) })} entries={entries} position={pos} anchorRef={triggerRef} initialFocus={intent} label={label} onClose={close} onCloseAndFocus={closeAndFocus} />
       )}
     </span>
   );
@@ -129,8 +129,8 @@ function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { default
 function ArrangeRun({ t }: { t: TFunction }) {
   const label = (id: RibbonCommandId) => t(`ribbon.commands.${id}`);
   return <RibbonRun label={t('ribbon.groups.arrange')}>
-    <RibbonSplitButton defaultId="bringToFront" defaultIcon="front" label={label} entries={[{ id: 'bringToFront', icon: 'front' }, { id: 'bringForward', icon: 'forward' }, { id: 'sendBackward', icon: 'backward' }, { id: 'sendToBack', icon: 'back' }]} />
-    <RibbonSplitButton defaultId="rotateRight" defaultIcon="rotateRight" label={label} entries={[{ id: 'rotateRight', icon: 'rotateRight' }, { id: 'rotateLeft', icon: 'rotateLeft' }, { id: 'flipHorizontal', icon: 'flipHorizontal' }, { id: 'flipVertical', icon: 'flipVertical' }]} />
+    <RibbonSplitButton defaultId="bringToFront" defaultIcon="front" label={label} t={t} entries={[{ id: 'bringToFront', icon: 'front' }, { id: 'bringForward', icon: 'forward' }, { id: 'sendBackward', icon: 'backward' }, { id: 'sendToBack', icon: 'back' }]} />
+    <RibbonSplitButton defaultId="rotateRight" defaultIcon="rotateRight" label={label} t={t} entries={[{ id: 'rotateRight', icon: 'rotateRight' }, { id: 'rotateLeft', icon: 'rotateLeft' }, { id: 'flipHorizontal', icon: 'flipHorizontal' }, { id: 'flipVertical', icon: 'flipVertical' }]} />
   </RibbonRun>;
 }
 

@@ -390,6 +390,8 @@ export type Run = TextRun | TabRun | ImageRun | LineBreakRun | FieldRun;
 
 /** Paragraph spacing (w:spacing): above/below plus the w:lineRule line rule. */
 export type ParagraphSpacing = {
+  beforeAuto?: boolean;
+  afterAuto?: boolean;
   beforeLines?: number;
   afterLines?: number;
   before?: number;
@@ -457,6 +459,7 @@ export type ListNumPr = {
  * w:pPr plus resolved list/numbering state).
  */
 export type ParagraphAttrs = {
+  leadingInlineBox?: { width: number; height: number };
   alignment?: 'left' | 'center' | 'right' | 'justify';
   spacing?: ParagraphSpacing;
   /** See ParagraphFormatting.spacingExplicit. */

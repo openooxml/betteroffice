@@ -589,6 +589,41 @@ describe('PPTX canvas replay', () => {
     expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05b8\u05d1', x: 50 }]);
   });
 
+  test('keeps a right-to-left run whole when its second cluster opens with a dots glyph', async () => {
+    const run = syntheticPositionedRun('\u0648\u062a\u0645', [
+      [0, 135, 11], [1, 135, 0], [1, 127, 8], [2, 114, 13],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u0648\u062a\u0645', x: 114 }]);
+  });
+
+  test('keeps a right-to-left run whole when its second cluster opens with a point', async () => {
+    const run = syntheticPositionedRun('\u05d0\u05d1\u05b8\u05d2', [
+      [0, 90], [1, 90, 0], [1, 80], [3, 70],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05d1\u05b8\u05d2', x: 70 }]);
+  });
+
+  test('reads a right-to-left run past a zero-width second cluster', async () => {
+    const run = syntheticPositionedRun('בָ​אב', [
+      [0, 90, 0], [0, 80], [2, 80, 0], [3, 70], [4, 60],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: 'בָ​אב', x: 60 },
+    ]);
+    const rounded = syntheticPositionedRun('בָ​אב', [
+      [0, 57.912, 0], [0, 47.9119987487793], [2, 47.91200256347656, 0], [3, 37.912], [4, 27.912],
+    ]);
+    expect((await paintPositionedRun(rounded)).calls).toEqual([
+      { text: 'בָ​אב', x: 27.912 },
+    ]);
+  });
+
+  test('keeps a left-to-right run whose second cluster opens with a zero-width glyph', async () => {
+    const run = syntheticPositionedRun('ab', [[0, 40], [1, 50, 0], [1, 50]]);
+    run.width = 20;
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'ab', x: 40 }]);
+  });
+
   test('scales a word to the width the layout gave it when the browser draws it narrower', async () => {
     const calls: unknown[] = [];
     const state: Record<string, unknown> = {
@@ -617,6 +652,24 @@ describe('PPTX canvas replay', () => {
     run.width = 50;
     await paintPositionedRun(run, state);
     expect(calls).toEqual([['text', 'ab ', 40], ['text', 'cd', 70]]);
+  });
+
+  test('positions proportional Japanese kana at table advances without scaling their outlines', async () => {
+    for (const family of ['MS UI Gothic', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS PMincho', 'ＭＳ Ｐ明朝']) {
+      const advance = family === 'MS UI Gothic' ? 13.056
+        : family.includes('Mincho') || family.includes('明朝') ? 14.128 : 15.056;
+      const run = syntheticPositionedRun('ああ中', [
+        [0, 40, advance], [1, 40 + advance, advance], [2, 40 + 2 * advance, 16],
+      ]);
+      run.fontFamily = family;
+      run.fontSizePx = 16;
+      run.width = 2 * advance + 16;
+      const { calls, scales } = await fittedPositionedRun(run, 16);
+      expect(calls).toEqual([
+        { text: 'あ', x: 40 }, { text: 'あ', x: 40 + advance }, { text: '中', x: 40 + 2 * advance },
+      ]);
+      expect(scales).toEqual([1, 1, 1]);
+    }
   });
 
   test('paints named family width departures at each glyph position without scaling', async () => {
@@ -685,13 +738,13 @@ describe('PPTX canvas replay', () => {
     expect(scales[0]).toBeCloseTo(1, 6);
   });
 
-  async function fittedPositionedRun(run: PositionedTextRun) {
+  async function fittedPositionedRun(run: PositionedTextRun, naturalAdvance = 8) {
     const calls: Array<{ text: string; x: number }> = [];
     const scales: number[] = [];
     let x = 0;
     let scale = 1;
     const state: Record<string, unknown> = {
-      measureText: (text: string) => ({ width: text.length * 8 }),
+      measureText: (text: string) => ({ width: text.length * naturalAdvance }),
       translate: (value: number) => { x = value; },
       scale: (value: number) => { scale = value; },
       restore: () => { x = 0; scale = 1; },

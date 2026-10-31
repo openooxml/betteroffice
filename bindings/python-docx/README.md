@@ -52,6 +52,7 @@ print(edit.para_id, edit.start, edit.end)
 document.save_path("report-edited.docx")
 ```
 
+`replace_paragraph_text(para_id, text)` is an alias of `replace_text`.
 `replace_text` rewrites one paragraph and keeps its style, alignment, and the
 run formatting it already had. The engine rebuilds the paragraph from a single
 run, so a paragraph that mixes runs (half bold, a hyperlink, a field) raises
@@ -228,9 +229,12 @@ A `Document` is not pinned to a thread: the engine's document type is `Send` and
 layout, rasterization, and saving release the GIL for their duration, so several
 documents genuinely proceed in parallel.
 
-## Status
+## Compatibility
 
-Pre-1.0: the API may change between minor versions. Text replacement preserves
+Releases are versioned with Changesets. The API can change between minor versions; every change
+is listed in the changelog, and deprecations are announced before removal.
+
+Text replacement preserves
 paragraph and run formatting.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows

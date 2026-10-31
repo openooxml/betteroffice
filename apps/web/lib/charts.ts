@@ -81,6 +81,7 @@ export function evalsHeadline(basic: AgentEvals | null, complex: AgentEvals | nu
   return parts.length ? `${subject}: ${parts.join("; ")}.` : `${subject}.`;
 }
 
+// one legend row, one footnote line; basic tiers are translucent with a full-colour outline
 export function evalsChartSvg(basic: AgentEvals | null, complex: AgentEvals | null, theme: Theme, model: string | null = null): string | null {
   const formats = [...new Set([...(basic?.rows ?? []), ...(complex?.rows ?? [])].map((row) => row.format)), "total"];
   const groups = formats.map((format) => ({ format, bars: evalBars(basic, complex, format) })).filter((group) => group.bars.length > 0);
@@ -88,42 +89,41 @@ export function evalsChartSvg(basic: AgentEvals | null, complex: AgentEvals | nu
   const c = PALETTE[theme];
   const width = WIDTH;
   const left = 38;
-  const top = 74;
-  const plotHeight = 170;
-  const height = top + plotHeight + 62;
+  const top = 58;
+  const plotHeight = 160;
+  const height = top + plotHeight + 50;
   const groupWidth = (width - left) / groups.length;
   const perGroup = Math.max(...groups.map((group) => group.bars.length));
-  const barWidth = Math.min(34, (groupWidth - 30) / perGroup - 6);
+  const barWidth = Math.min(34, (groupWidth - 26) / perGroup - 5);
   const title = model ? `Agent edits with ${model}: pass rate by format` : "Agent edits: pass rate by format";
-  let body = `<text x="0" y="12" font-size="12" font-weight="600" fill="${c.fg}">${esc(title)}</text>`;
+  let body = `<text x="0" y="13" font-size="13" font-weight="600" fill="${c.fg}">${esc(title)}</text>`;
   const legend = [
     { label: "Generic complex", fill: c.other, basic: false },
     { label: "BetterOffice complex", fill: c.ours, basic: false },
     { label: "Generic basic", fill: c.other, basic: true },
     { label: "BetterOffice basic", fill: c.ours, basic: true },
   ];
-  legend.forEach((item, index) => {
-    const x = (index % 2) * 190;
-    const y = 26 + Math.floor(index / 2) * 18;
-    body += `<rect x="${x + 0.75}" y="${y}" width="11" height="11" fill="${item.fill}" fill-opacity="${item.basic ? 0.2 : 1}" stroke="${item.fill}" stroke-width="1.5"/><text x="${x + 17}" y="${y + 10}" font-size="12" fill="${c.dim}">${item.label}</text>`;
-  });
+  let x = 0;
+  for (const item of legend) {
+    body += `<rect x="${x + 0.75}" y="24" width="11" height="11" fill="${item.fill}" fill-opacity="${item.basic ? 0.2 : 1}" stroke="${item.fill}" stroke-width="1.5"/><text x="${x + 16}" y="34" font-size="11.5" fill="${c.dim}">${item.label}</text>`;
+    x += 16 + item.label.length * 6.1 + 12;
+  }
   for (const tick of [0, 0.5, 1]) {
     const y = top + plotHeight * (1 - tick);
     body += `<line x1="${left}" y1="${y}" x2="${width}" y2="${y}" stroke="${c.line}"/><text x="0" y="${y + 4}" font-size="11" fill="${c.dim}">${percent(tick)}</text>`;
   }
   groups.forEach((group, index) => {
-    const start = left + groupWidth * index + (groupWidth - group.bars.length * (barWidth + 6) + 6) / 2;
+    const start = left + groupWidth * index + (groupWidth - group.bars.length * (barWidth + 5) + 5) / 2;
     group.bars.forEach((bar, position) => {
       const h = Math.max(1, plotHeight * Math.min(1, bar.share));
-      const bx = start + position * (barWidth + 6);
+      const bx = start + position * (barWidth + 5);
       const fill = bar.ours ? c.ours : c.other;
       body += `<rect x="${bx.toFixed(1)}" y="${(top + plotHeight - h).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" fill="${fill}" fill-opacity="${bar.basic ? 0.2 : 1}"${bar.basic ? ` stroke="${fill}" stroke-width="1.5"` : ""}/>`;
-      body += `<text x="${(bx + barWidth / 2).toFixed(1)}" y="${(top + plotHeight - h - 5).toFixed(1)}" font-size="10" text-anchor="middle" fill="${c.fg}">${percent(bar.share)}</text>`;
+      body += `<text x="${(bx + barWidth / 2).toFixed(1)}" y="${(top + plotHeight - h - 4).toFixed(1)}" font-size="11" text-anchor="middle" fill="${c.fg}">${percent(bar.share)}</text>`;
     });
-    body += `<text x="${(left + groupWidth * (index + 0.5)).toFixed(1)}" y="${top + plotHeight + 20}" font-size="13" font-weight="600" text-anchor="middle" fill="${c.fg}">${esc(group.format === "total" ? "Total" : group.format.toUpperCase())}</text>`;
+    body += `<text x="${(left + groupWidth * (index + 0.5)).toFixed(1)}" y="${top + plotHeight + 20}" font-size="14" font-weight="600" text-anchor="middle" fill="${c.fg}">${esc(group.format === "total" ? "Total" : group.format.toUpperCase())}</text>`;
   });
-  body += `<text x="0" y="${height - 16}" font-size="11" fill="${c.dim}">Basic: single edits. Complex: multi-step tasks.</text>`;
-  body += `<text x="0" y="${height - 4}" font-size="11" fill="${c.dim}">A run passes only if the edit is right and nothing else changed.</text>`;
+  body += `<text x="0" y="${height - 6}" font-size="11" fill="${c.dim}">Basic: single edits. Complex: multi-step tasks. Pass: right edit, no other change.</text>`;
   return frame(width, height, evalsHeadline(basic, complex, model), body);
 }
 
@@ -164,12 +164,17 @@ export type TableRow = {
 const TABLE_ONLY = /^(scored\/total|parse success)$/i;
 const lowerIsBetter = (label: string) => /error|time/i.test(label);
 const isTime = (label: string) => /time/i.test(label);
+const isSsim = (label: string) => /^ssim$/i.test(label);
 
-// every other row the README publishes for each format, quality rows before timing rows, sized for a bar:
+// every other row the README publishes for each format, SSIM first, then the other quality rows, then timing rows, sized for a bar:
 // ratios, percentages and SSIM sit on a fixed 0 to 1 scale, errors and times on the larger of the two
 export function tableRows(formats: FidelityFormat[]): TableRow[] {
   return formats.flatMap((f) =>
-    [...f.rows.filter((row) => !isTime(row.label)), ...f.rows.filter((row) => isTime(row.label))]
+    [
+      ...f.rows.filter((row) => isSsim(row.label)),
+      ...f.rows.filter((row) => !isSsim(row.label) && !isTime(row.label)),
+      ...f.rows.filter((row) => isTime(row.label)),
+    ]
       .filter((row) => !TABLE_ONLY.test(row.label))
       .map((row) => {
         const ours = quantity(row.ours);
@@ -191,43 +196,45 @@ export function tableRows(formats: FidelityFormat[]): TableRow[] {
 
 const shown = (row: TableRow) => row.label.replace(/ \(avg\)$/, "");
 
+// slim bar pairs; a down arrow after the label marks lower-is-better rows, explained once in the legend
 export function benchmarksChartSvg(formats: FidelityFormat[], theme: Theme): string | null {
   const rows = tableRows(formats);
   if (rows.length === 0) return null;
   const c = PALETTE[theme];
   const width = WIDTH;
-  const barX = 204;
+  const barX = 190;
   const valueColumn = 60;
   const plot = width - barX - valueColumn;
-  const barHeight = 15;
-  const pair = 2 * barHeight + 3;
-  const pitch = pair + 11;
-  let y = 52;
+  const barHeight = 8;
+  const pair = 2 * barHeight + 2;
+  const pitch = pair + 5;
+  let y = 40;
   let body = `<text x="0" y="12" font-size="12.8" font-weight="600" fill="${c.fg}">Scored against Microsoft Office</text>`;
-  body += `<rect x="0.75" y="26" width="11" height="11" fill="${c.ours}"/><text x="17" y="36" font-size="12" fill="${c.dim}">BetterOffice</text><rect x="110.75" y="26" width="11" height="11" fill="${c.other}"/><text x="127" y="36" font-size="12" fill="${c.dim}">LibreOffice</text>`;
+  body += `<rect x="0.75" y="22" width="11" height="11" fill="${c.ours}"/><text x="16.4" y="32" font-size="12" fill="${c.dim}">BetterOffice</text>`;
+  body += `<rect x="108.75" y="22" width="11" height="11" fill="${c.other}"/><text x="124.4" y="32" font-size="12" fill="${c.dim}">LibreOffice</text>`;
+  if (rows.some((row) => row.better === "lower")) body += `<text x="208.8" y="32" font-size="12" fill="${c.dim}">↓ lower is better</text>`;
   let section = "";
   for (const row of rows) {
     if (row.format !== section) {
       section = row.format;
       body += `<text x="0" y="${y + 12}" font-size="13" font-weight="600" fill="${c.fg}">${esc(section.toUpperCase())}</text><line x1="${barX}" y1="${y + 8}" x2="${width}" y2="${y + 8}" stroke="${c.line}"/>`;
-      y += 24;
+      y += 18;
     }
-    const lower = row.better === "lower";
-    body += `<g data-row="${esc(row.format)}:${esc(row.label)}"><text x="0" y="${y + (lower ? 14 : pair / 2 + 4)}" font-size="12" fill="${c.fg}">${esc(shown(row))}</text>`;
-    if (lower) body += `<text x="0" y="${y + 27}" font-size="10" font-style="italic" fill="${c.dim}">lower is better</text>`;
-    for (const [offset, bar, ours] of [[0, row.ours, true], [barHeight + 3, row.theirs, false]] as const) {
+    const arrow = row.better === "lower" ? ` <tspan fill="${c.dim}">↓</tspan>` : "";
+    body += `<g data-row="${esc(row.format)}:${esc(row.label)}"><text x="0" y="${y + pair / 2 + 4}" font-size="12" fill="${c.fg}">${esc(shown(row))}${arrow}</text>`;
+    for (const [offset, bar, ours] of [[0, row.ours, true], [barHeight + 2, row.theirs, false]] as const) {
       body += `<rect x="${barX}" y="${y + offset}" width="${plot}" height="${barHeight}" fill="${c.track}" fill-opacity="${c.trackOpacity}"/>`;
       if (bar.share !== null) {
         const w = Math.max(1, plot * Math.min(1, bar.share));
         body += `<rect x="${barX}" y="${y + offset}" width="${w.toFixed(1)}" height="${barHeight}" fill="${ours ? c.ours : c.other}"/>`;
       }
-      body += `<text x="${width}" y="${y + offset + 12}" font-size="11" text-anchor="end" fill="${bar.share === null ? c.dim : c.fg}">${esc(bar.text)}</text>`;
+      body += `<text x="${width}" y="${y + offset + 8}" font-size="10.5" text-anchor="end" fill="${ours && bar.share !== null ? c.fg : c.dim}">${esc(bar.text)}</text>`;
     }
     body += "</g>";
     y += pitch;
   }
-  body += `<text x="0" y="${y + 8}" font-size="11" fill="${c.dim}">Same scorer and Office references for both engines.</text>`;
-  return frame(width, y + 16, benchmarksHeadline(formats), body);
+  body += `<text x="0" y="${y + 6}" font-size="11" fill="${c.dim}">Same scorer and Office references for both engines.</text>`;
+  return frame(width, y + 12, benchmarksHeadline(formats), body);
 }
 
 export const publishedEvalTiers = (section: string) => ({

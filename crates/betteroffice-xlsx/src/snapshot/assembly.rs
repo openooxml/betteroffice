@@ -55,6 +55,10 @@ pub(super) struct Lineage {
 impl Lineage {
     fn capture(workbook: &Workbook) -> SnapshotResult<Self> {
         let Workbook {
+            #[cfg(feature = "fonts")]
+                font_manager: _,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+                fonts: _,
             authority,
             mode: _,
             pending_remote_updates,
@@ -1865,11 +1869,12 @@ impl WorkbookSnapshotBuilder {
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
         authority.set_snapshot_projection_valid(projection_valid);
-        let model = self
+        let model_builder = self
             .model
             .take()
-            .ok_or_else(|| error("snapshot model builder is missing"))?
-            .finish()?;
+            .ok_or_else(|| error("snapshot model builder is missing"))?;
+        let full_precision = model_builder.full_precision_setting();
+        let mut model = model_builder.finish()?;
         if model.styles.snapshot_field_counts() != style_counts
             || model.sheets.get(header.active_sheet.0 as usize).is_none()
         {
@@ -1898,6 +1903,26 @@ impl WorkbookSnapshotBuilder {
             .map(SourceBuilder::finish)
             .transpose()
             .map_err(error)?;
+        if full_precision.is_none() {
+            model.full_precision = match authority.full_precision_setting() {
+                Some(precision) => precision,
+                None => crate::snapshot::source_full_precision(source_container.as_ref())?,
+            };
+        }
+        if authority
+            .full_precision_setting()
+            .is_some_and(|precision| precision != model.full_precision)
+        {
+            return Err(error("snapshot calculation precision differs"));
+        }
+        authority.restore_full_precision(model.full_precision);
+        if !model.styles.has_xf_xml_markers()
+            && let Some(source) = &source_container
+            && let Some(styles) = super::source_style_xml_markers(source.as_bytes())
+        {
+            model.styles.inherit_xf_xml_markers(&styles);
+            authority.inherit_xf_xml_markers(&styles);
+        }
         let source_package = if package_present {
             let facts = self
                 .facts
@@ -1945,6 +1970,14 @@ impl WorkbookSnapshotBuilder {
             authority_revision: authority.snapshot_revision(),
         });
         self.restored = Some(Workbook {
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )
+            .map_err(|source| error(source.to_string()))?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
             authority,
             mode: WorkbookMode::Standalone,
             pending_remote_updates: Vec::new(),

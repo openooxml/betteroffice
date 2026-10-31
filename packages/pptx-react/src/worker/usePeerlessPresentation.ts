@@ -13,7 +13,8 @@ import { flushSync } from 'react-dom';
 import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
-import { installFonts, useStableFonts } from './peerlessFonts';
+import { installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
+import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
@@ -29,6 +30,12 @@ export const peerlessViewStoreFactory = {
 export const peerlessPainterFactories = {
   frame: createCommandFramePainter,
   echo: createLocalEchoPainter,
+};
+export const peerlessCheckpointTimer = {
+  start(callback: () => void): () => void {
+    const id = setTimeout(callback, 1000);
+    return () => clearTimeout(id);
+  },
 };
 
 function idle(callback: () => void): () => void {
@@ -78,7 +85,7 @@ export function usePeerlessPresentation(
     initialUpdate.current.length !== update.length || !initialUpdate.current.every((byte, index) => byte === update[index]))) {
     initialUpdate.current = update;
   }
-  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, Boolean(collaboration),
+  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.clientId, Boolean(collaboration),
     collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
   const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
@@ -129,11 +136,16 @@ export function usePeerlessPresentation(
       try { callbacks.current.onDocumentChange?.({ version }); }
       catch (error) { console.error('documentChange listener threw:', error); }
     };
-    let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
-    const recoveryBase = props.file instanceof Uint8Array ? props.file.slice() : new Uint8Array(props.file).slice();
-    let checkpoint = { bytes: recoveryBase, throughSeq: 0, version: '' };
-    let checkpointUpdate: Uint8Array | undefined;
-    let journal: { throughSeq: number; version: string; updates: Uint8Array[] }[] = [];
+    let cancelCheckpoint: (() => void) | undefined;
+    const fileView = props.file instanceof Uint8Array ? props.file : new Uint8Array(props.file);
+    let recoveryBase: Blob | undefined = new Blob([fileView.buffer instanceof ArrayBuffer &&
+      !(fileView.buffer as ArrayBuffer & { resizable?: boolean }).resizable ? fileView as Uint8Array<ArrayBuffer> : new Uint8Array(fileView)]);
+    const recovery = peerlessRecoveryFactory.create(recoveryBase);
+    const readRecoveryBase = async () => {
+      if (!recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+      try { return new Uint8Array(await recoveryBase.arrayBuffer()); }
+      catch { throw new Error('Recovery baseline is unavailable'); }
+    };
     let firstPainted = false;
     let published = false;
     let paintedFrame: PresentationCommandFrame | undefined;
@@ -148,6 +160,7 @@ export function usePeerlessPresentation(
     const vanished = new Set<string>();
     const pendingMedia = new Map<string, ArrayBuffer>();
     const installedFonts: FontFace[] = [];
+    const suppliedFamilies = new Set(fonts.map((font) => font.family.trim().toLowerCase()));
     const disposers: (() => void)[] = [];
     const failureListeners = new Set<() => void>();
     const visualListeners = new Set<() => void>();
@@ -179,7 +192,7 @@ export function usePeerlessPresentation(
         notifyDocumentVersion(event?.version ?? modeClient.state.version);
       }
       cancelIdle?.(); cancelIdle = undefined;
-      clearTimeout(checkpointTimer); checkpointTimer = undefined;
+      cancelCheckpoint?.(); cancelCheckpoint = undefined;
       framePainter?.freeze();
       if (framePainter !== displayedPainter) framePainter?.dispose();
       echoPainter?.dispose(); echoPainter = undefined;
@@ -284,17 +297,13 @@ export function usePeerlessPresentation(
     async function saveCheckpoint(client: PresentationCommandClient): Promise<void> {
       await base?.fence(); await whenPainted();
       if (!current()) return;
-      const result = await client.checkpoint?.();
-      if (current() && result && result.throughSeq >= checkpoint.throughSeq) {
-        checkpoint = { bytes: new Uint8Array(result.bytes).slice(), throughSeq: result.throughSeq, version: result.version };
-        checkpointUpdate = result.recoveryUpdate ? new Uint8Array(result.recoveryUpdate).slice() : undefined;
-        journal = journal.filter((entry) => entry.throughSeq > result.throughSeq);
-      }
+      const result = await client.checkpoint?.({ rebase: recovery.needsRebase() });
+      if (current() && result) recovery.checkpoint(result);
     }
 
     function scheduleCheckpoint(client: PresentationCommandClient): void {
-      if (checkpointTimer) return;
-      checkpointTimer = setTimeout(() => { checkpointTimer = undefined; void saveCheckpoint(client).catch(report); }, 1000);
+      if (cancelCheckpoint) return;
+      cancelCheckpoint = peerlessCheckpointTimer.start(() => { cancelCheckpoint = undefined; void saveCheckpoint(client).catch(report); });
     }
 
     async function drain(client: PresentationCommandClient): Promise<void> {
@@ -371,15 +380,22 @@ export function usePeerlessPresentation(
     }
 
     try {
-      session = peerlessSessionOpener.open(props.file, {
-        fonts, clientId: props.clientId, collaboration: sessionCollaboration,
+      session = peerlessSessionOpener.open(props.file, Object.assign({
+        fonts, defaultFonts: props.defaultFonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
-      });
+      }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0], allowed?: (family: string) => boolean) =>
+        installDefaultFonts(faces, installedFonts, current, warnFonts,
+          (family) => !suppliedFamilies.has(family.trim().toLowerCase()) && (allowed?.(family) ?? true)) }));
       disposers.push(session.subscribeFailure(report));
       const owner = session;
       void owner.ready.then((client) => {
         if (!current()) return;
+        recovery.open(client.takeRecoveryUpdate?.(), client.state.throughSeq, client.state.version,
+          client.state.recoveryBaseline, client.state.recoveryEngine);
+        disposers.push(client.subscribe((ack) => {
+          if (current()) recovery.append(ack.throughSeq, ack.version, ack.updates ?? []);
+        }));
         const cacheMedia = (assets: PresentationCommandFrame['media']) => {
           if (!current()) return;
           for (const asset of assets) pendingMedia.set(asset.assetId, asset.bytes);
@@ -395,8 +411,6 @@ export function usePeerlessPresentation(
       void Promise.all([owner.ready, fontsReady]).then(async ([client]) => {
         while (current() && openingModes.size) await Promise.all([...openingModes]);
         if (!current()) return;
-        checkpoint.version = client.state.version;
-        checkpointUpdate = client.state.recoveryUpdate ? new Uint8Array(client.state.recoveryUpdate).slice() : undefined;
         base = peerlessViewStoreFactory.create(client, {
           checkpoint(pixels) {
             const restoreFrame = framePainter?.checkpoint(pixels);
@@ -488,10 +502,6 @@ export function usePeerlessPresentation(
         }
         disposers.push(client.subscribe((ack) => {
           if (!current()) return;
-          if (ack.throughSeq > checkpoint.throughSeq && ack.updates?.length) {
-            journal.push({ throughSeq: ack.throughSeq, version: ack.version,
-              updates: ack.updates.map((update) => new Uint8Array(update.bytes).slice()) });
-          }
           if (ack.slides) {
             const restored = new Set(ack.slides.map((slide) => slide.id));
             for (const id of vanished) if (restored.has(id)) vanished.delete(id);
@@ -541,12 +551,27 @@ export function usePeerlessPresentation(
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             if (!fatal) await saveCheckpoint(client);
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-            if (!journal.length) return { ...checkpoint, bytes: checkpoint.bytes.slice(), recovery: true };
-            if (!checkpointUpdate) throw new Error('Recovery baseline is unavailable');
-            const recovering = peerlessSessionOpener.open(recoveryBase, { fonts, initialUpdate: checkpointUpdate });
+            const baseline = recovery.baseline && recovery.validate();
+            if (baseline?.kind === 'source' && !recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+            if (!recovery.hasUncheckpointedUpdates()) {
+              const saved = recovery.saved;
+              const bytes = saved.bytes?.slice() ?? await readRecoveryBase();
+              if (!currentFile()) throw new PptxWorkerEditorDisposedError();
+              return { ...saved, bytes, recovery: true };
+            }
+            if (!baseline) throw new Error('Recovery baseline is unavailable');
+            const journal = recovery.journal.slice();
+            let source: Uint8Array | undefined = await readRecoveryBase();
+            if (!currentFile()) throw new PptxWorkerEditorDisposedError();
+            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
+              ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
+            source = undefined;
             try {
               const replay = await recovering.ready;
-              for (const entry of journal) for (const update of entry.updates) {
+              if (baseline.kind === 'source' && replay.state.recoveryEngine !== baseline.engine) {
+                throw new Error('Recovery baseline is unavailable');
+              }
+              for (const entry of journal.filter((entry) => entry.throughSeq > baseline.throughSeq)) for (const update of entry.updates) {
                 if (!currentFile()) throw new PptxWorkerEditorDisposedError();
                 const ack = await replay.dispatch({ kind: 'applyRemoteUpdate', payload: { bytes: update.slice().buffer,
                   inputTime: 0, undoGroup: 'recovery' } });
@@ -562,6 +587,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
+            suppliedFamilies.add(face.family.trim().toLowerCase());
             await installFonts([face], installedFonts, current, warnFonts);
             require();
           },
@@ -635,6 +661,7 @@ export function usePeerlessPresentation(
     } catch (error) { report(error); }
     return () => {
       alive = false;
+      recoveryBase = undefined;
       if (requestMode.current === setReadOnly) requestMode.current = null;
       signal();
       cancelIdle?.();
@@ -650,7 +677,7 @@ export function usePeerlessPresentation(
       images.dispose();
       pendingMedia.clear();
       for (const face of installedFonts) document.fonts.delete(face);
-      clearTimeout(checkpointTimer);
+      cancelCheckpoint?.();
       visualListeners.clear(); failureListeners.clear();
       if (!fatal) void session?.dispose().catch(() => {});
     };

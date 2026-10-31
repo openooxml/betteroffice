@@ -11,6 +11,7 @@ import type {
   CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary,
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
+import { useDefaultFonts } from '../useDefaultFonts';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
@@ -23,7 +24,7 @@ import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
 import { useSaveRequest } from '../commands/useSaveRequest';
 import { usePeerlessWorkerXlsxCommands } from '../commands/usePeerlessWorkerXlsxCommands';
-import { WorkerInputRefusal } from '../commands/workerInputCoordinator';
+import { WorkerInputRefusal } from '../commands/workerInputErrors';
 import { readWorkerCellInput } from './WorkerCellInputReader';
 import {
   createPeerlessWorkerInputCoordinator, PeerlessWorkerCommandRefusal, type PeerlessWorkerCommandInput,
@@ -220,6 +221,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   });
   const ownerRef = useRef(run);
   ownerRef.current = run;
+  const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
+    () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); },
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   const sheetSelections = useMemo(() => new Map<string, Selection>(), [run]);
   const sheetScrolls = useMemo(() => new Map<string, { x: number; y: number }>(), [run]);
   const sheetId = (sheet: number) => (ownerRef.current?.session.editState.sheets ??
@@ -946,7 +950,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         canvas.width = Math.round(request.width * request.dpr);
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`; canvas.style.height = `${request.height}px`;
-        paintDisplayList(context, frame.displayList, request.dpr * request.zoom);
+        canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
+          () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
         canvas.dataset.workerSequence = String(frame.sequence);
         canvas.dataset.commandCoverage = String(frame.coversThroughSeq ?? 0);
         canvas.dataset.paintSource = frame.source; canvas.dataset.workerZoom = String(request.zoom);
@@ -1456,7 +1461,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     <PeerlessChromeContext.Provider value={true}>
     <PeerlessWorkerInputs onNavigate={navigateFromNameBox} controller={draftController} presentation={presentation} run={run} active={active}
       selectedChart={selectedChart !== null} error={Boolean(error)} readOnly={Boolean(props.readOnly)} navigation={navigation}>
-      <div ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
+      <div dir="ltr" ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
         onKeyDownCapture={(event) => {
           if (!fromPlugin(event) && event.key === 'Escape') { cellClipboard.cancelCut(); setFormatToken(null); commands.refresh(); }
         }}

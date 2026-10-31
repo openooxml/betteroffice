@@ -986,7 +986,12 @@ fn write_if_changed(
     value: CellValue,
     budget: &EvaluationBudget,
 ) -> bool {
-    if *wb.value_cow(u.0, cell_of(u)) == value {
+    let value = precision_as_displayed(wb, u, value);
+    let previous = wb.value_cow(u.0, cell_of(u));
+    let negative_zero = !wb.full_precision
+        && matches!(previous.as_ref(), CellValue::Number { value } if *value == 0.0 && value.is_sign_negative())
+        && matches!(&value, CellValue::Number { value } if *value == 0.0 && value.is_sign_positive());
+    if *previous == value && !negative_zero {
         return false;
     }
     budget.invalidate_criteria_cell(u.0, cell_of(u));
@@ -995,6 +1000,34 @@ fn write_if_changed(
         sheet.set_calculated_value(at, value);
     }
     true
+}
+
+fn precision_as_displayed(wb: &Workbook, u: Key, value: CellValue) -> CellValue {
+    if wb.full_precision {
+        return value;
+    }
+    let CellValue::Number { value: number } = value else {
+        return value;
+    };
+    let style = wb
+        .sheet(u.0)
+        .and_then(|sheet| sheet.effective_style(cell_of(u)));
+    let code = match wb.styles.resolved_format(style).number_format {
+        xlsx_model::styles::FormatCode::Custom(code) => Some(code),
+        xlsx_model::styles::FormatCode::Builtin(id) => xlsx_model::numfmt::builtin_format_code(id),
+    };
+    let Some(digits) = code.and_then(|code| xlsx_model::numfmt::displayed_precision(number, code))
+    else {
+        return value;
+    };
+    let rounded = crate::functions::math::round_number(number, digits);
+    if rounded.is_finite() {
+        CellValue::Number {
+            value: if rounded == 0.0 { 0.0 } else { rounded },
+        }
+    } else {
+        value
+    }
 }
 
 fn sort_key(a: &(SheetId, CellRef), b: &(SheetId, CellRef)) -> std::cmp::Ordering {
@@ -1639,6 +1672,50 @@ mod tests {
         put_formula(&mut wb, s, "B1", "A1+0");
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(41_390.0));
+    }
+
+    /// a TEXT conversion that fails must not poison the cell with an
+    /// unsupported flag: the cell and its dependents recalc normally.
+    #[test]
+    fn a_failed_text_conversion_recalcs_after_an_edit() {
+        let (mut wb, s) = one_sheet();
+        let text = |v: &str| CellValue::Text { value: v.into() };
+        put_text(&mut wb, s, "A1", "99-1");
+        put_num(&mut wb, s, "B1", 5.0);
+        put_cached_formula(&mut wb, s, "C1", "TEXT(A1,\"0\")&B1", text("99-15"));
+        put_cached_formula(&mut wb, s, "D1", "C1", text("99-15"));
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C1"), text("99-15"));
+
+        put_num(&mut wb, s, "B1", 10.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("B1"))], None);
+        assert_eq!(value(&wb, s, "C1"), text("99-110"));
+        assert_eq!(value(&wb, s, "D1"), text("99-110"));
+    }
+
+    /// date text TEXT converts in a 1904 workbook lands on the same date.
+    #[test]
+    fn text_converts_date_text_in_a_1904_workbook() {
+        let (mut wb, s) = one_sheet();
+        wb.date_system = xlsx_model::DateSystem::V1904;
+        put_text(&mut wb, s, "A1", "November 2025");
+        put_formula(&mut wb, s, "B1", "TEXT(A1,\"MMMM YYYY \")");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "B1"),
+            CellValue::Text {
+                value: "November 2025 ".into()
+            }
+        );
+        put_text(&mut wb, s, "A2", "November 1902");
+        put_formula(&mut wb, s, "B2", "TEXT(A2,\"MMMM YYYY \")");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "B2"),
+            CellValue::Text {
+                value: "November 1902".into()
+            }
+        );
     }
 
     /// excel trims only ascii spaces off date text, so other unicode spaces,
@@ -2307,7 +2384,7 @@ mod tests {
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
         assert!(result.cycle_cells.is_empty());
         for at in 0..N - 1 {
-            let expected = num(2f64.powi((N - 2 - at) as i32));
+            let expected = num(crate::fmath::powi(2.0, (N - 2 - at) as i32));
             assert_eq!(value(&wb, s, &column(at)), expected);
             assert_eq!(value(&wb, s, &row(at)), expected);
         }

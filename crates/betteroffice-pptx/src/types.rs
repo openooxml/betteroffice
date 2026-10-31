@@ -18,17 +18,21 @@ pub use pptx_edit::{
     oversized_request,
 };
 pub use pptx_edit::{
-    CaretAnchor, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx,
-    EditError, EditOrigin, GradientFill, GradientStop as ModelGradientStop, InheritedGeometry,
-    ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
-    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, SlideBackgroundReceipt, SlideLayoutSnapshot, SlideReceipt, SlideSnapshot,
-    StorySnapshot, TextReceipt, TextRunSnapshot, TextSearchMatch, TextStyle, TextStylePatch,
-    TransformReceipt, UpdateEvent, UpdateOrigin, UpdateSubscription,
+    CaretAnchor, ColorValue, CommandParagraphSource, CommandReadResponse, CommandStorySource,
+    CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError, EditOrigin,
+    GradientFill, GradientStop as ModelGradientStop, HeaderFooterSettings, HistoryReceipt,
+    InheritedGeometry, ParagraphSnapshot, PictureDraft, PresetShapeDraft, ShapeAdjustReceipt,
+    ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot,
+    ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideBackgroundReceipt, SlideDateText,
+    SlideHeaderFooter, SlideHeaderFooterText, SlideLayoutSnapshot, SlideReceipt, SlideSnapshot,
+    StorySnapshot, TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt,
+    TextParagraphDraft, TextReceipt, TextRunDraft, TextRunSnapshot, TextSearchMatch, TextStyle,
+    TextStylePatch, TransformReceipt, UndoCaptureMode, UpdateEvent, UpdateOrigin,
+    UpdateSubscription,
 };
 pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,
-    ProposalRequest, ProposalResult,
+    ProposalRequest, ProposalResult, ProposalTextChange, ProposalTextChangeKind,
 };
 pub use pptx_parse::{
     BlipEffect, Bullet, Comment, CommentAuthor, GraphicFrame, GraphicFrameData, GroupShape,
@@ -41,6 +45,7 @@ pub use pptx_parse::{
 pub use pptx_render::{
     CONTRACT_VERSION, CaretStop, FontSubstitution, GradientStop, GradientType, HitTestResult,
     ImageCrop, ImageEffect, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun,
-    Primitive, RenderError, RenderedSlide, Stroke, SurfaceDisplayList, TextAlign, TextAnchor,
-    TextParagraph as DisplayTextParagraph, TextRun as DisplayTextRun, Transform,
+    Primitive, ProposalDiffSlide, RenderError, RenderedSlide, Stroke, SurfaceDisplayList,
+    TextAlign, TextAnchor, TextParagraph as DisplayTextParagraph, TextRun as DisplayTextRun,
+    Transform,
 };

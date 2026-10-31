@@ -13,6 +13,8 @@ license-files = [
   "NOTICE",
   "THIRD-PARTY-NOTICES.md",
   "licenses/Carlito-OFL.txt",
+  "licenses/BSD-3-Clause-Zstandard.txt",
+  "licenses/MIT-wuff.txt",
 ]
 requires-python = ">=3.9"
 authors = [{ name = "OpenOOXML" }]
@@ -30,7 +32,6 @@ keywords = [
   "rust",
 ]
 classifiers = [
-  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: Apache Software License",
   "Operating System :: OS Independent",

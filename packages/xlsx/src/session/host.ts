@@ -10,11 +10,11 @@ import type { XlsxEditRefusal } from '../edits';
 import type { XlsxExportOptions, XlsxExportResult, XlsxStructuredContent } from '../exports';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  engineAllocationFailure, initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
+  decodeFontFace, engineAllocationFailure, initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   workbookPeerSnapshot,
   openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion,
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
-  type Viewport,
+  type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
@@ -58,7 +58,7 @@ function commandId(): string {
 export function createWorkbookSessionHost(
   transport: SessionTransport,
   options: {
-    initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
+    initWasm?: (source?: ArrayBuffer | WebAssembly.Module, options?: WasmInitOptions) => Promise<void>;
     wasmModule?(): WebAssembly.Module | undefined;
   } = {}
 ): SessionHost<Events> {
@@ -362,6 +362,13 @@ export function createWorkbookSessionHost(
   }
 
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
+    async decodeFontFace(_, bytes, input, wasm) {
+      if (disposed) throw new Error('Workbook session is disposed');
+      await (options.initWasm ?? initWasm)(wasm);
+      if (disposed) throw new Error('Workbook session is disposed');
+      const face = await decodeFontFace(bytes, input);
+      return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
+    },
     async openRecovery(_, checkpoint, input = {}) {
       if (disposed) throw new Error('Workbook session is disposed');
       if (handle) throw new Error('Workbook session is already open');
@@ -369,7 +376,7 @@ export function createWorkbookSessionHost(
       if (checkpoint.epoch !== recovery.epoch || checkpoint.version !== recovery.revision ||
         checkpoint.throughSeq !== recovery.throughSeq) throw new TypeError('Workbook recovery envelope mismatch');
       if (isCollaborativeWorkbookRecovery(recovery.engine)) throw new Error('Recovery is unavailable for collaborative workbooks');
-      await (options.initWasm ?? initWasm)(input.wasm);
+      await (options.initWasm ?? initWasm)(input.wasm, { png: input.png });
       if (disposed) throw new Error('Workbook session is disposed');
       const opened = openWorkbookRecoveryCheckpoint(recovery.engine, recovery.throughSeq);
       try {
@@ -407,7 +414,7 @@ export function createWorkbookSessionHost(
       retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
-      await (options.initWasm ?? initWasm)(wasm);
+      await (options.initWasm ?? initWasm)(wasm, { png: input.png });
       wasm ??= options.wasmModule?.();
       if (disposed) throw new Error('Workbook session is disposed');
       const calculation = input.calculation ?? (retainPeerHydration && !input.collaborative ? {
@@ -443,7 +450,7 @@ export function createWorkbookSessionHost(
         }
         if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
           transport.post({
-            protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm,
+            protocol: 1, kind: 'wasm-module', url: wasmAssetUrl(input.png !== false).href, module: wasm,
             hydration: previewSource!.hydration, version: opened.version(), sequence,
           });
         }

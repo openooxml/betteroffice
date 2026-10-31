@@ -4,6 +4,7 @@ import {
   resolveScriptFallbackFace,
   resolveLastResortChoice,
   resolveGlyphFallbackFace,
+  resolveLightVariantFace,
   type BundledFontFace,
   type LastResortOffice,
   type BundledFontScript,
@@ -46,16 +47,34 @@ export interface BundledFontSource {
     italic: boolean,
     office?: LastResortOffice,
   ): BundledFontLoader;
+  /** A lighter member of a bundled family, such as `Calibri Light`, drawn with its regular face. */
+  resolveLightVariant?(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+  ): (() => Promise<ArrayBuffer>) | undefined;
 }
 
 export function fontProvider(
   loadBytes: (face: BundledFontFace) => Promise<ArrayBuffer>,
 ): BundledFontSource {
-  const load = (face: BundledFontFace) => () => loadBytes(face);
+  const loaders = new Map<string, BundledFontLoader>();
+  const load = (
+    face: BundledFontFace,
+    options?: Pick<BundledFontLoader, 'measureAs' | 'onlyIfPrimaryFails'>,
+  ): BundledFontLoader => {
+    const key = `${face.file}|${options?.measureAs ?? ''}|${options?.onlyIfPrimaryFails ?? false}`;
+    let loader = loaders.get(key);
+    if (loader === undefined) {
+      loader = Object.assign(() => loadBytes(face), options);
+      loaders.set(key, loader);
+    }
+    return loader;
+  };
   return {
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
-      return face ? Object.assign(load(face), { measureAs: face.family === 'Selawik' ? 'Segoe UI' : undefined }) : undefined;
+      return face ? load(face, { measureAs: face.family === 'Selawik' ? face.metricCompatWith : undefined }) : undefined;
     },
     resolveFamily(family, bold, italic) {
       const face = resolveBundledFamilyFace(family, bold, italic);
@@ -69,9 +88,13 @@ export function fontProvider(
       const face = resolveGlyphFallbackFace(family, bold, italic, office);
       return face ? load(face) : undefined;
     },
+    resolveLightVariant(family, bold, italic) {
+      const face = resolveLightVariantFace(family, bold, italic);
+      return face ? load(face) : undefined;
+    },
     resolveLastResort(family, bold, italic, office) {
       const { face, onlyIfPrimaryFails } = resolveLastResortChoice(family, bold, italic, office);
-      return onlyIfPrimaryFails ? Object.assign(load(face), { onlyIfPrimaryFails }) : load(face);
+      return load(face, onlyIfPrimaryFails ? { onlyIfPrimaryFails } : undefined);
     },
   };
 }

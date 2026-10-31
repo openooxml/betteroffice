@@ -6,6 +6,8 @@
 //! the final mark is never addressable. Soft line breaks read as `\n` inside a paragraph; the
 //! paragraph records tell them apart from separators.
 
+use std::collections::HashMap;
+
 use pptx_parse::{GraphicFrameData, PptxPackage, ShapeNode, TextBody, TextParagraph};
 use serde::{Deserialize, Serialize};
 
@@ -14,14 +16,14 @@ use crate::batch::{
     MAX_REQUEST_BYTES, SlideTarget, failure, quoted, refusal, request_limit,
 };
 use crate::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, effective_list, is_title_placeholder,
-    shape_cascade, slide_hidden,
+    ListCounters, ParagraphCascade, SlideParents, effective_list, field_spans,
+    is_title_placeholder, resolved_field_text, shape_cascade, slide_hidden, source_paragraph,
 };
 use crate::search::Needle;
 use crate::story::selects_paragraph;
 use crate::{
-    DeckSession, DeckSnapshot, EditResult, ShapeKind, ShapeSnapshot, SlideLayoutSnapshot,
-    SlideSnapshot, StorySnapshot,
+    DeckSession, DeckSnapshot, EditResult, ShapeKind, ShapeSnapshot, SlideDateText,
+    SlideHeaderFooter, SlideHeaderFooterText, SlideLayoutSnapshot, SlideSnapshot, StorySnapshot,
 };
 
 /// Deepest shape nesting a target may address.
@@ -105,31 +107,31 @@ pub struct ReadResponse {
     pub stories: Vec<StoryText>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CommandReadResponse {
+pub struct CommandReadResponse {
     #[serde(flatten)]
-    read: ReadResponse,
-    sources: Vec<CommandStorySource>,
+    pub read: ReadResponse,
+    pub sources: Vec<CommandStorySource>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CommandStorySource {
-    story_id: String,
-    paragraphs: Vec<CommandParagraphSource>,
+pub struct CommandStorySource {
+    pub story_id: String,
+    pub paragraphs: Vec<CommandParagraphSource>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CommandParagraphSource {
-    paragraph_id: String,
-    text: String,
-    fields: Vec<TextField>,
-    editable: bool,
+pub struct CommandParagraphSource {
+    pub paragraph_id: String,
+    pub text: String,
+    pub fields: Vec<TextField>,
+    pub editable: bool,
 }
 
 /// One story's projected text.
@@ -420,6 +422,111 @@ fn find_shape<'s>(
     })
 }
 
+fn visible_shapes_in_order<'s>(
+    shapes: &'s [ShapeSnapshot],
+    hidden: bool,
+    ordered: &mut Vec<&'s ShapeSnapshot>,
+) {
+    for shape in shapes {
+        let hidden = hidden || shape.hidden;
+        if !hidden {
+            ordered.push(shape);
+        }
+        visible_shapes_in_order(&shape.children, hidden, ordered);
+    }
+}
+
+fn shape_text(shape: &ShapeSnapshot) -> String {
+    shape
+        .text_stories
+        .iter()
+        .map(StorySnapshot::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn resolved_shape_text(
+    package: &PptxPackage,
+    slide: &SlideSnapshot,
+    shape: &ShapeSnapshot,
+    slide_number: i64,
+) -> String {
+    shape
+        .text_stories
+        .iter()
+        .map(|story| {
+            story
+                .paragraphs
+                .iter()
+                .map(|paragraph| {
+                    let live: String = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
+                    let Some(body) = source_body(package, slide, shape, &story.id) else {
+                        return live;
+                    };
+                    let Some(source) = source_paragraph(body, &story.id, &paragraph.id) else {
+                        return live;
+                    };
+                    resolved_field_text(source, &live, slide_number)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn first_datetime_field(
+    package: &PptxPackage,
+    slide: &SlideSnapshot,
+    shape: &ShapeSnapshot,
+) -> Option<String> {
+    shape.text_stories.iter().find_map(|story| {
+        let body = source_body(package, slide, shape, &story.id)?;
+        body.paragraphs
+            .iter()
+            .flat_map(|paragraph| &paragraph.runs)
+            .find_map(|run| {
+                run.field_type
+                    .as_ref()
+                    .filter(|field_type| field_type.starts_with("datetime"))
+                    .cloned()
+            })
+    })
+}
+
+fn slide_header_footer(
+    package: &PptxPackage,
+    slide: &SlideSnapshot,
+    slide_number: i64,
+) -> SlideHeaderFooter {
+    let mut ordered = Vec::new();
+    visible_shapes_in_order(&slide.shapes, false, &mut ordered);
+    let placeholder = |kind: &str| {
+        ordered.iter().copied().find(|shape| {
+            shape
+                .placeholder
+                .as_ref()
+                .and_then(|placeholder| placeholder.placeholder_type.as_deref())
+                == Some(kind)
+        })
+    };
+    SlideHeaderFooter {
+        footer: placeholder("ftr").map(|shape| SlideHeaderFooterText {
+            shape_id: shape.id.clone(),
+            text: resolved_shape_text(package, slide, shape, slide_number),
+        }),
+        slide_number: placeholder("sldNum").map(|shape| SlideHeaderFooterText {
+            shape_id: shape.id.clone(),
+            text: resolved_shape_text(package, slide, shape, slide_number),
+        }),
+        date: placeholder("dt").map(|shape| SlideDateText {
+            shape_id: shape.id.clone(),
+            text: shape_text(shape),
+            field: first_datetime_field(package, slide, shape),
+        }),
+    }
+}
+
 /// Shapes and their descendants in document order.
 fn shapes_in_order(shapes: &[ShapeSnapshot]) -> Vec<&ShapeSnapshot> {
     let mut ordered = Vec::new();
@@ -471,73 +578,6 @@ fn source_body<'p>(
         }
         _ => None,
     }
-}
-
-/// The source paragraph a seeded paragraph id names.
-pub(crate) fn source_paragraph<'b>(
-    body: &'b TextBody,
-    story_id: &str,
-    paragraph_id: &str,
-) -> Option<&'b TextParagraph> {
-    let index = paragraph_id
-        .strip_prefix("para:")?
-        .strip_prefix(story_id)?
-        .strip_prefix(':')?
-        .parse::<usize>()
-        .ok()?;
-    body.paragraphs.get(index)
-}
-
-/// The leading and trailing bytes `source` and `target` share, compared by character, the
-/// trailing ones within what the leading ones leave. Saving keeps source runs verbatim there.
-pub(crate) fn common_ends(source: &str, target: &str) -> (usize, usize) {
-    let prefix: usize = source
-        .chars()
-        .zip(target.chars())
-        .take_while(|(left, right)| left == right)
-        .map(|(value, _)| value.len_utf8())
-        .sum();
-    let suffix = source[prefix..]
-        .chars()
-        .rev()
-        .zip(target[prefix..].chars().rev())
-        .take_while(|(left, right)| left == right)
-        .map(|(value, _)| value.len_utf8())
-        .sum();
-    (prefix, suffix)
-}
-
-/// A source paragraph's field results as byte spans of `text`, its current text, empty results
-/// included. `None` when a field left the unchanged leading or trailing text: only there does
-/// saving provably keep a field.
-fn field_spans(
-    source: &TextParagraph,
-    text: &str,
-) -> Option<Vec<(std::ops::Range<usize>, Option<String>)>> {
-    let mut seeded = String::new();
-    let mut fields = Vec::new();
-    for run in &source.runs {
-        let start = seeded.len();
-        seeded.push_str(&run.text);
-        if run.field_id.is_some() || run.field_type.is_some() {
-            fields.push((start..seeded.len(), run.field_type.clone()));
-        }
-    }
-    let (prefix, suffix) = common_ends(&seeded, text);
-    let (tail, moved_tail) = (seeded.len() - suffix, text.len() - suffix);
-    fields
-        .into_iter()
-        .map(|(span, field_type)| {
-            if span.end <= prefix {
-                Some((span, field_type))
-            } else if span.start >= tail {
-                let start = moved_tail + (span.start - tail);
-                Some((start..start + span.len(), field_type))
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 /// Field results of a seeded paragraph at their story offsets, and whether saving provably keeps
@@ -919,8 +959,8 @@ impl DeckSession {
         self.read_snapshot(request, snapshot, version)
     }
 
-    #[cfg(any(feature = "wasm", test))]
-    pub(crate) fn read_command_content(
+    #[cfg(any(feature = "engine", test))]
+    pub fn read_command_content(
         &self,
         request: &ReadRequest,
     ) -> EditResult<Result<CommandReadResponse, EditRefusal>> {
@@ -977,7 +1017,16 @@ impl DeckSession {
         mut snapshot: DeckSnapshot,
         version: DocumentVersion,
     ) -> EditResult<ReadOutcome> {
+        let first_slide_num = i64::from(self.package.presentation.first_slide_num);
+        let positions: HashMap<String, i64> = self
+            .slide_ids()?
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| (id, index as i64))
+            .collect();
         for slide in &mut snapshot.slides {
+            let slide_number = first_slide_num + positions.get(&slide.id).copied().unwrap_or(0);
+            slide.header_footer = Some(slide_header_footer(&self.package, slide, slide_number));
             slide.hidden = slide_hidden(&self.package, slide.source_part_path.as_deref());
             let parents = SlideParents::resolve(
                 &self.package,
@@ -985,6 +1034,11 @@ impl DeckSession {
                 slide.layout_part_path.as_deref(),
             );
             slide.layout = parents.layout.map(|layout| SlideLayoutSnapshot {
+                header_footer: layout.header_footer.clone().or_else(|| {
+                    parents
+                        .master
+                        .and_then(|master| master.header_footer.clone())
+                }),
                 name: layout.name.clone(),
                 r#type: layout.layout_type.clone(),
             });
@@ -1150,5 +1204,47 @@ impl DeckSession {
             }),
             Err(failure) => Err(refusal(version, failure)),
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../pptx-parse/tests/support/header_footer.rs"]
+mod header_footer_support;
+
+#[cfg(test)]
+mod tests {
+    use super::header_footer_support::{deck, field, placeholder};
+    use crate::{DeckSession, ReadRequest};
+
+    #[test]
+    fn command_reads_number_selected_slides_in_deck_order() {
+        let paragraphs = format!("<a:p>{}</a:p>", field("slidenum", "9"));
+        let shape = placeholder(2, "sldNum", &paragraphs, false);
+        let slides = [
+            (shape.as_str(), false),
+            (shape.as_str(), true),
+            (shape.as_str(), false),
+        ];
+        let session = DeckSession::open(&deck(&slides, "", "", "", Some(5)), 920).unwrap();
+        let ids = session.slide_ids().unwrap();
+        let read = session
+            .read_command_content(&ReadRequest {
+                slide_ids: Some(vec![ids[2].clone(), ids[1].clone()]),
+            })
+            .unwrap()
+            .unwrap();
+        let texts = read
+            .read
+            .slides
+            .iter()
+            .map(|slide| {
+                let number = slide.header_footer.as_ref().unwrap().slide_number.as_ref();
+                (slide.id.as_str(), number.unwrap().text.as_str())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[ids[1].as_str()], "6");
+        assert_eq!(texts[ids[2].as_str()], "7");
     }
 }

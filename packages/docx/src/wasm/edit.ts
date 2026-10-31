@@ -12,7 +12,9 @@
 
 import wasmInit, {
   initSync,
+  engineKind,
   EditSession,
+  decodeFontFace as decodePackedFontFace,
   export_docx_markdown_json,
   export_docx_structured_json,
   find_docx_content_controls_json,
@@ -24,13 +26,17 @@ import wasmInit, {
   wasm_heap_counted,
   wasm_live_bytes,
   wasm_peak_bytes,
-} from './generated/edit/docx_edit.js';
+} from './engineEdit';
+import * as editGlue from './engineEdit';
+import { wasmAssetUrl } from './assetEdit';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
+import { registerResidentEngine } from './residentEngine';
 
-const state = createWasmModuleState({
+export const editWasmState = createWasmModuleState({
   label: 'docx-edit',
   preloadName: 'preloadEditWasm',
-  assetUrl: () => new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url),
+  assetUrl: wasmAssetUrl,
+  engineKind,
   initAsync: wasmInit,
   initSync,
   shareModule: true,
@@ -44,19 +50,21 @@ const state = createWasmModuleState({
       : undefined,
 });
 
+registerResidentEngine(editWasmState, editGlue);
+
 /** Load + instantiate the editing-core wasm (browser path). Idempotent. */
 export function preloadEditWasm(input?: WasmAsyncInput): Promise<void> {
-  return state.preload(input);
+  return editWasmState.preload(input);
 }
 
 /** @internal */
 export function editWasmModule(): Promise<WebAssembly.Module | null> {
-  return state.sharedModule();
+  return editWasmState.sharedModule();
 }
 
 /** @internal */
 export function preloadEditWasmFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
-  return state.preloadFrom(source);
+  return editWasmState.preloadFrom(source);
 }
 
 /**
@@ -64,7 +72,7 @@ export function preloadEditWasmFrom(source: Promise<WebAssembly.Module | null>):
  * allocation past the cap fails as if the memory were full. Undefined removes it.
  */
 export function setEditWasmHeapLimit(bytes: number | undefined): void {
-  state.ensure();
+  editWasmState.ensure();
   set_wasm_heap_limit(bytes ?? Infinity);
 }
 
@@ -74,31 +82,31 @@ export function setEditWasmHeapLimit(bytes: number | undefined): void {
  * surface — nothing else should call it.
  */
 export function createEditSession(clientId: number): EditSession {
-  state.ensure();
+  editWasmState.ensure();
   return new EditSession(clientId);
 }
 
 /** Structured export of DOCX bytes: `{ok: true, content}` or `{ok: false, failure}` JSON. */
 export function exportDocxStructuredJson(bytes: Uint8Array, options: string): string {
-  state.ensure();
+  editWasmState.ensure();
   return export_docx_structured_json(bytes, options);
 }
 
 /** {@link exportDocxStructuredJson} rendered as Markdown. */
 export function exportDocxMarkdownJson(bytes: Uint8Array, options: string): string {
-  state.ensure();
+  editWasmState.ensure();
   return export_docx_markdown_json(bytes, options);
 }
 
 /** Markdown rendering of structured content JSON. */
 export function renderDocxMarkdownJson(content: string, options: string): string {
-  state.ensure();
+  editWasmState.ensure();
   return render_docx_markdown_json(content, options);
 }
 
 /** Content controls of DOCX bytes: `{ok: true, content}` or `{ok: false, failure}` JSON. */
 export function listDocxContentControlsJson(bytes: Uint8Array, options: string): string {
-  state.ensure();
+  editWasmState.ensure();
   return list_docx_content_controls_json(bytes, options);
 }
 
@@ -108,14 +116,15 @@ export function findDocxContentControlsJson(
   query: string,
   options: string
 ): string {
-  state.ensure();
+  editWasmState.ensure();
   return find_docx_content_controls_json(bytes, query, options);
 }
 
 /** Markdown rendering of a paged export's JSON, with optional page markers. */
 export function renderDocxMarkdownWithPagesJson(content: string, options: string): string {
-  state.ensure();
+  editWasmState.ensure();
   return render_docx_markdown_with_pages_json(content, options);
 }
 
 export type { EditSession };
+export { decodePackedFontFace };

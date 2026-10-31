@@ -96,6 +96,86 @@ struct Change {
     children: BTreeMap<&'static str, Change>,
 }
 
+fn normalized_run_attrs(attrs: &Attrs) -> Attrs {
+    let mut result = attrs.clone();
+    if let Some(value @ Value::String(_)) = result.get("highlight") {
+        let value = serde_json::json!({"color": value});
+        result.insert("highlight".to_owned(), value);
+    }
+    if let Some(Value::Object(underline)) = result.get_mut("underline")
+        && let Some(value @ Value::String(_)) = underline.get("color")
+    {
+        let value = serde_json::json!({"rgb": value});
+        underline.insert("color".to_owned(), value);
+    }
+    result
+}
+
+pub(super) fn restyle_run_deltas(
+    source: &str,
+    deltas: &[AttrDeltaV1],
+    seeded: &Attrs,
+    previous: &Attrs,
+    next: &Attrs,
+) -> Result<Vec<AttrDeltaV1>, Failure> {
+    let direct = if source.is_empty() {
+        serde_json::json!({})
+    } else {
+        super::verify::formatting(source, false)?
+    };
+    let mut seeded = normalized_run_attrs(seeded);
+    let previous = normalized_run_attrs(previous);
+    let next = normalized_run_attrs(next);
+    for key in ["boldCs", "italicCs"] {
+        if !seeded.contains_key(key)
+            && let Some(value @ Value::Bool(_)) = direct.get(key).or_else(|| previous.get(key))
+        {
+            seeded.insert(key.to_owned(), value.clone());
+        }
+    }
+    let authored = |path: &[String]| {
+        let has = |key: &str| direct.get(key).is_some_and(|value| !value.is_null());
+        match path.first().map(String::as_str) {
+            Some("fontSize") => match path.get(1).map(String::as_str) {
+                Some("size") => has("fontSize"),
+                Some("sizeCs") => has("fontSizeCs"),
+                _ => has("fontSize") || has("fontSizeCs"),
+            },
+            Some("fontFamily") if path.len() > 1 => direct
+                .get("fontFamily")
+                .and_then(|font| font.get(&path[1]))
+                .is_some_and(|value| !value.is_null()),
+            Some("textColor") => has("color"),
+            Some("strike" | "doubleStrike") => has("strike") || has("doubleStrike"),
+            Some("superscript" | "subscript") => has("vertAlign"),
+            Some("highlight") => has("highlight") || has("shading"),
+            Some(key) => has(key),
+            None => true,
+        }
+    };
+    let mut direct_deltas = Vec::new();
+    for delta in deltas {
+        expand(delta, &mut |path, after| {
+            let before = attr_at(&seeded, path);
+            if authored(path) || before != attr_at(&previous, path) || after != attr_at(&next, path)
+            {
+                let slot = |value: Option<&Value>| {
+                    value.map_or(SlotV1::Missing, |value| SlotV1::Present {
+                        value: value.clone(),
+                    })
+                };
+                direct_deltas.push(AttrDeltaV1 {
+                    path: path.to_vec(),
+                    before: slot(before),
+                    after: slot(after),
+                });
+            }
+            Ok(())
+        })?;
+    }
+    Ok(direct_deltas)
+}
+
 pub(super) fn run_properties(
     source: &str,
     deltas: &[AttrDeltaV1],
@@ -185,13 +265,47 @@ pub(super) fn paragraph_properties(
     deltas: &[AttrDeltaV1],
     inherit: &Attrs,
     target: &Attrs,
+    seed_inherit: &Attrs,
 ) -> Result<String, Failure> {
     if deltas.is_empty() {
         return Ok(source.to_owned());
     }
+    let restyle = deltas
+        .iter()
+        .any(|delta| delta.path.first().is_some_and(|key| key == "pStyle"));
     let mut changes = Change::default();
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
+        if restyle && key != "pStyle" {
+            let list_indent = matches!(
+                key,
+                "indentLeft"
+                    | "indentFirstLine"
+                    | "hangingIndent"
+                    | "indentLeftChars"
+                    | "indentFirstLineChars"
+                    | "hangingIndentChars"
+            );
+            if present_slot(&delta.after) == attr_at(inherit, &delta.path)
+                && (present_slot(&delta.before) == attr_at(seed_inherit, &delta.path)
+                    || list_indent)
+            {
+                continue;
+            }
+            return Err(unsupported(&delta.path));
+        }
+        if key == "pStyle" {
+            if delta.path.len() != 1 {
+                return Err(unsupported(&delta.path));
+            }
+            match slot(&delta.after) {
+                Some(value) => set(&mut changes, "pStyle", "w:val", string(Some(value))?),
+                None => {
+                    changes.children.entry("pStyle").or_default().remove = true;
+                }
+            }
+            continue;
+        }
         if !matches!(
             key,
             "alignment"
@@ -308,6 +422,21 @@ pub(super) fn expand(
         slot(&delta.after),
         emit,
     )
+}
+
+fn attr_at<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
+    attrs
+        .get(&path[0])
+        .and_then(|value| {
+            path[1..]
+                .iter()
+                .try_fold(value, |value, key| value.get(key.as_str()))
+        })
+        .filter(|value| !value.is_null())
+}
+
+fn present_slot(value: &SlotV1) -> Option<&Value> {
+    slot(value).filter(|value| !value.is_null())
 }
 
 pub(super) fn slot(slot: &SlotV1) -> Option<&Value> {
@@ -792,7 +921,7 @@ fn write_child(
     let fragment = if let Some(fragment) = sparse_fragment(parent, child, &change.attributes)? {
         fragment
     } else {
-        let qualified = qualified(child);
+        let qualified = qualified(child)?;
         let mut writer = XmlWriter::with_capacity(64);
         if change.attributes.len() == 1 && change.attributes.contains_key("w:val") {
             if let Some(value) = &change.attributes["w:val"] {
@@ -1105,10 +1234,11 @@ fn patch_attributes(
     Ok(whole[node.span.start..end].to_owned())
 }
 
-fn qualified(child: &str) -> &'static str {
-    match child {
+fn qualified(child: &str) -> Result<&'static str, Failure> {
+    Ok(match child {
         "rPr" => "w:rPr",
         "pPr" => "w:pPr",
+        "pStyle" => "w:pStyle",
         "rFonts" => "w:rFonts",
         "b" => "w:b",
         "bCs" => "w:bCs",
@@ -1135,6 +1265,29 @@ fn qualified(child: &str) -> &'static str {
         "widowControl" => "w:widowControl",
         "pageBreakBefore" => "w:pageBreakBefore",
         "contextualSpacing" => "w:contextualSpacing",
-        _ => unreachable!("checked property name"),
+        _ => {
+            return Err(Failure::new(
+                PatchErrorCode::UnsupportedKey,
+                format!("key:{child}"),
+            ));
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_property_elements_return_an_unsupported_error() {
+        let mut changes = Change::default();
+        set(
+            &mut changes,
+            "unsupportedProperty",
+            "w:val",
+            Some("1".to_owned()),
+        );
+        let error = write_container("", "pPr", &changes).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedKey);
     }
 }

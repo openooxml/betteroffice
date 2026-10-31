@@ -37,7 +37,9 @@ import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
+import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
+import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 
 /** @internal */
 export interface ResidentProposalReply
@@ -149,7 +151,7 @@ type PendingRequest = {
 
 type AwaitedRequest = Exclude<
   ResidentEngineWorkerRequestWithoutId,
-  { type: 'applyUpdate' | 'eraseCaret' | 'destroy' }
+  { type: 'applyUpdate' | 'eraseCaret' | 'prepare-save' | 'destroy' }
 >;
 
 /**
@@ -179,6 +181,20 @@ function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
 export class ResidentEngineWorkerClient implements DocxCommandClient {
+  readonly fontRuntime: { decoder: FontDecoder } = {
+    decoder: (bytes, options) => this.decodeFontFace(bytes, options),
+  };
+
+  async decodeFontFace(bytes: ArrayBuffer | Uint8Array,
+    { codec, dict, maxOutput }: Parameters<FontDecoder>[1]): ReturnType<FontDecoder> {
+    const encoded = fontBytes(bytes).buffer;
+    const dictionary = dict === undefined ? undefined : fontBytes(dict).buffer;
+    const response = await this.request({ type: 'decodeFontFace', bytes: encoded, codec, dict: dictionary, maxOutput },
+      dictionary === undefined ? [encoded] : [encoded, dictionary]);
+    if (!response.decodedFontFace) throw new ResidentWorkerFailureError('Document worker omitted the decoded font');
+    return response.decodedFontFace;
+  }
+
   protected readonly pending = new Map<number, PendingRequest>();
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private nextId = 1;
@@ -774,6 +790,12 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     };
   }
 
+  prepareSave(): void {
+    if (this.terminalError) return;
+    const id = this.nextId++;
+    try { this.worker.postMessage({ id, type: 'prepare-save' }); } catch {}
+  }
+
   async revisionCount(): Promise<number> {
     const response = await this.request({ type: 'revisionCount' });
     if (
@@ -786,7 +808,11 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     return response.revisionCount;
   }
 
-  async warm(): Promise<void> {
+  async warm(hostModule = false): Promise<void> {
+    if (!hostModule || !shipsWasmAsset) {
+      await this.request({ type: 'warm' });
+      return;
+    }
     const response = this.request({ type: 'warm', hostModule: true });
     const postModule = (module: WebAssembly.Module | null): void => {
       if (this.terminalError) return;

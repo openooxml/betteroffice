@@ -160,6 +160,23 @@ formats and styles. `validate_edits` stages a batch without changing anything,
 `find_text` searches display text exactly, and `history: "none"` keeps a batch
 out of undo. A malformed request raises `ValueError`.
 
+## Workbook reads
+
+`cell(sheet, row, col)` reads editable input at zero-based coordinates, and
+`range_cells(sheet, range)` returns a row-major matrix of those cells.
+`sheet_info()` and `sheet_info_for(sheet)` include sheet metadata and filters;
+`calculation_status()` reports calculation limits. `list_defined_names(request=None)`,
+`conditional_formats(sheet)`, and `charts(sheet)` return workbook metadata.
+`search_text(query, case_sensitive=False, limit=None)` searches formatted text;
+its options are keyword-only. `selection_formatting(sheet, range)` reads uniform
+formatting. `merged_range_list(sheet, range)` and
+`visible_merged_ranges(sheet, viewport)` return coordinate ranges, while
+`merged_ranges` continues to return A1 strings. A viewport is a dictionary with
+`x`, `y`, `width`, and `height` in pixels.
+
+These reads return plain dictionaries and lists with camelCase wire keys.
+Sheet arguments accept a name or index, and reads never recalculate.
+
 ## Structured export
 
 `export_structured` returns sparse cells, sheet metadata and diagnostics with
@@ -302,9 +319,10 @@ are the last four in that order. `StaleProposalError.cells` lists the changed A1
 addresses and `targets` their sheets and coordinates, and an unknown proposal ID
 raises `KeyError`.
 
-## Status
+## Compatibility
 
-Pre-1.0: the API may change between minor versions.
+Releases are versioned with Changesets. The API can change between minor versions; every change
+is listed in the changelog, and deprecations are announced before removal.
 
 `save` keeps the parts the model does not represent (charts, drawings, pivot
 tables, comments, macros, custom XML, and their relationships) rather than

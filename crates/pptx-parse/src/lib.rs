@@ -8,6 +8,7 @@ mod comments;
 mod custom_geometry;
 mod drawing;
 mod error;
+mod fmath;
 mod inventory;
 mod model;
 mod notes;

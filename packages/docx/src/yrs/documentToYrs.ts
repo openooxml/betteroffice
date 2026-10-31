@@ -41,6 +41,8 @@ import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount 
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
+import { recoverGroupedStorySeeds } from './groupedStorySeed';
+import { sessionMaterializedSource } from './sessionInternals';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -839,13 +841,13 @@ function runContentToUnits(
         }),
       ];
     case 'drawing':
-      return [embedUnit('image', imagePayload(content.image), trackedMarks(marks))];
+      return [embedUnit('image', { ...imagePayload(content.image), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
     case 'horizontalRule':
       return [embedUnit('horizontalRule', { rule: content.rule }, marks)];
     case 'shape':
-      return [embedUnit('shape', shapePayload(content.shape), trackedMarks(marks))];
+      return [embedUnit('shape', { ...shapePayload(content.shape), ...(content.drawing ? { docPr: content.drawing } : {}) }, content.shape.drawingRunXml || content.shape.drawingXml ? drawingMarks(marks) : trackedMarks(marks))];
     case 'chart':
-      return [embedUnit('chart', chartPayload(content.chart), trackedMarks(marks))];
+      return [embedUnit('chart', { ...chartPayload(content.chart), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
     case 'opaqueDrawing':
       return [embedUnit('opaqueDrawing', {
         kind: content.kind,
@@ -853,6 +855,7 @@ function runContentToUnits(
         ...(content.preview ? { preview: imagePayload(content.preview) } : {}),
         ...(content.previews?.length ? { previews: content.previews.map(imagePayload) } : {}),
         ...(content.textBox ? { textBoxJson: JSON.stringify(content.textBox, withoutSourceOrdinal) } : {}),
+        ...(content.drawing ? { docPr: content.drawing } : {}),
       }, drawingMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
@@ -871,7 +874,27 @@ function runToUnits(
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences));
+  return run.content.flatMap((content) => replayedRunContentToUnits(run, content, marks, opaqueSequences));
+}
+
+function replayedRunContentToUnits(
+  run: Run,
+  content: RunContent,
+  marks: readonly MarkDescriptor[],
+  opaqueSequences: string[]
+): InlineUnit[] {
+  const units = runContentToUnits(content, marks, opaqueSequences);
+  if ((content.type === 'shape' && content.shape.drawingRunXml) ||
+    (content.type === 'opaqueDrawing' && content.kind === 'drawingRun')) {
+    for (const unit of units) {
+      if (unit.kind === 'embed') unit.payload.sourceRun = {
+        formatting: run.formatting ?? {},
+        attributes: { ...unit.attrs },
+        propertyChanges: run.propertyChanges ?? null,
+      };
+    }
+  }
+  return units;
 }
 
 function hyperlinkToUnits(
@@ -886,7 +909,7 @@ function hyperlinkToUnits(
   for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
     if (child.type === 'run') {
       const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
-      for (const content of child.content) units.push(...runContentToUnits(content, marks, opaqueSequences));
+      for (const content of child.content) units.push(...replayedRunContentToUnits(child, content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);
@@ -1111,8 +1134,11 @@ function runBoundary(
   const marks = noteRefMarkTypes(run);
   const breaks = flowBreakOffsets(run);
   const key = keys[0];
+  const text = unitsText(units);
+  const storyText = units.map((unit) => unit.kind === 'text' ? unit.text : '\uFFFC').join('');
   return {
-    text: unitsText(units),
+    text,
+    ...(storyText !== text ? { storyText } : {}),
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
     ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
@@ -2167,9 +2193,10 @@ export function documentToYrs(
   document: Document,
   options: YrsOpeningOptions = {}
 ): void {
+  const restoreGroups = recoverGroupedStorySeeds(document, () => sessionMaterializedSource(session));
   const restore = seedFontNames(document);
   try { seedDocument(session, document, options); }
-  finally { restore(); }
+  finally { restore(); restoreGroups(); }
 }
 
 function seedDocument(

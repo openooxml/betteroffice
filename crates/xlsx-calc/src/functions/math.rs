@@ -4,6 +4,7 @@
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_text};
+use crate::fmath;
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -11,7 +12,7 @@ use super::{collect_numbers, finite, nth_int, nth_number};
 
 pub(crate) fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) => num(nums.iter().sum()),
+        Ok(nums) => super::stats::sum_of(&nums),
         Err(e) => err(e),
     }
 }
@@ -19,8 +20,7 @@ pub(crate) fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// PRODUCT of every numeric argument; no numbers -> 0 (excel).
 pub(crate) fn product(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.iter().product()),
+        Ok(nums) => super::stats::product_of(&nums),
         Err(e) => err(e),
     }
 }
@@ -1487,17 +1487,17 @@ pub(crate) fn sqrt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 pub(crate) fn exp(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match one_number(args, ctx) {
-        Ok(x) => finite(x.exp()),
+        Ok(x) => finite(fmath::exp(x)),
         Err(e) => err(e),
     }
 }
 
 pub(crate) fn ln(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    positive_log(args, ctx, f64::ln)
+    positive_log(args, ctx, fmath::ln)
 }
 
 pub(crate) fn log10(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    positive_log(args, ctx, f64::log10)
+    positive_log(args, ctx, fmath::log10)
 }
 
 /// LOG(number, [base]); base defaults to 10.
@@ -1515,7 +1515,7 @@ pub(crate) fn log(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     match nth_number(args, ctx, 0) {
         Ok(x) if x <= 0.0 || base <= 0.0 || base == 1.0 => err(ErrorValue::Num),
-        Ok(x) => finite(x.log(base)),
+        Ok(x) => finite(fmath::log(x, base)),
         Err(e) => err(e),
     }
 }
@@ -1543,7 +1543,7 @@ pub(crate) fn power(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
-        (Ok(x), Ok(y)) => finite(x.powf(y)),
+        (Ok(x), Ok(y)) => finite(fmath::pow(x, y)),
         (Err(e), _) | (_, Err(e)) => err(e),
     }
 }
@@ -1623,7 +1623,7 @@ pub(crate) fn seriessum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     let mut total = 0.0;
     for (i, a) in coefficients.iter().enumerate() {
-        total += a * x.powf(n + (i as f64) * m);
+        total += a * fmath::pow(x, n + (i as f64) * m);
     }
     finite(total)
 }
@@ -1662,8 +1662,12 @@ pub(crate) fn round(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(d) => d as i32,
         Err(e) => return err(e),
     };
-    let factor = 10f64.powi(digits);
-    finite((x * factor).round() / factor)
+    finite(round_number(x, digits))
+}
+
+pub(crate) fn round_number(value: f64, digits: i32) -> f64 {
+    let factor = fmath::powi(10.0, digits);
+    (value * factor).round() / factor
 }
 
 /// MROUND(number, multiple): nearest multiple, half away from zero. opposite
@@ -1734,51 +1738,51 @@ fn directional(args: &[Expr], ctx: &EvalContext<'_>, rule: fn(f64) -> f64) -> Ce
     } else {
         0
     };
-    let factor = 10f64.powi(digits);
+    let factor = fmath::powi(10.0, digits);
     finite(rule(x * factor) / factor)
 }
 
 pub(crate) fn tanh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    unary(args, ctx, f64::tanh)
+    unary(args, ctx, fmath::tanh)
 }
 
 pub(crate) fn sin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    unary(args, ctx, f64::sin)
+    unary(args, ctx, fmath::sin)
 }
 
 pub(crate) fn cos(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    unary(args, ctx, f64::cos)
+    unary(args, ctx, fmath::cos)
 }
 
 pub(crate) fn tan(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    unary(args, ctx, f64::tan)
+    unary(args, ctx, fmath::tan)
 }
 
 pub(crate) fn sinh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    unary(args, ctx, f64::sinh)
+    unary(args, ctx, fmath::sinh)
 }
 
 pub(crate) fn cosh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    unary(args, ctx, f64::cosh)
+    unary(args, ctx, fmath::cosh)
 }
 
 /// ASIN/ACOS are `#NUM!` outside [-1, 1]; `finite` turns the NaN into it.
 pub(crate) fn asin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match one_number(args, ctx) {
-        Ok(x) => finite(x.asin()),
+        Ok(x) => finite(fmath::asin(x)),
         Err(e) => err(e),
     }
 }
 
 pub(crate) fn acos(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match one_number(args, ctx) {
-        Ok(x) => finite(x.acos()),
+        Ok(x) => finite(fmath::acos(x)),
         Err(e) => err(e),
     }
 }
 
 pub(crate) fn atan(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    unary(args, ctx, f64::atan)
+    unary(args, ctx, fmath::atan)
 }
 
 /// ATAN2(x, y) — excel takes the x coordinate first, the reverse of `f64::atan2`.
@@ -1789,7 +1793,7 @@ pub(crate) fn atan2(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
         (Ok(0.0), Ok(0.0)) => err(ErrorValue::Div0),
-        (Ok(x), Ok(y)) => finite(y.atan2(x)),
+        (Ok(x), Ok(y)) => finite(fmath::atan2(y, x)),
         (Err(e), _) | (_, Err(e)) => err(e),
     }
 }

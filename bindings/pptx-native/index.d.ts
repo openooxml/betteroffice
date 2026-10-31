@@ -9,117 +9,146 @@
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
-export declare class Presentation {
-  get author(): string
-  set author(author: string)
-  get origin(): string
-  set origin(value: string)
-  get collaborative(): boolean
-  get clientId(): Promise<number>
-  snapshot(): Promise<any>
-  get slideCount(): Promise<number>
-  get slideIds(): Promise<string[]>
-  get widthEmu(): Promise<number>
-  get heightEmu(): Promise<number>
-  slide(slide: number): Promise<any>
-  story(storyId: string): Promise<any>
-  layouts(): Promise<any>
-  media(): Promise<MediaResource[]>
-  insertSlide(index: number, layout?: string | undefined | null): Promise<any>
-  deleteSlide(slideId: string): Promise<any>
-  moveSlide(slideId: string, index: number): Promise<any>
-  setSlideNotes(slideId: string, text: string): Promise<void>
-  addTextBox(slideId: string, draft: any): Promise<any>
-  addShape(slideId: string, draft: any): Promise<any>
-  removeShape(slideId: string, shapeId: string): Promise<any>
-  setShapeFill(slideId: string, shapeId: string, color?: string | undefined | null): Promise<any>
-  setShapeStroke(slideId: string, shapeId: string, stroke: any): Promise<any>
-  setShapeAdjust(slideId: string, shapeId: string, adjustments: any): Promise<any>
-  moveShape(slideId: string, shapeId: string, x: number, y: number): Promise<any>
-  resizeShape(slideId: string, shapeId: string, width: number, height: number): Promise<any>
-  setShapeRect(slideId: string, shapeId: string, rect: any): Promise<any>
-  insertText(storyId: string, index: number, text: string, style?: any | undefined | null): Promise<any>
-  deleteText(storyId: string, start: number, end: number): Promise<any>
-  formatText(storyId: string, start: number, end: number, patch: any): Promise<any>
-  setParagraphAlignment(storyId: string, start: number, end: number, alignment?: string | undefined | null): Promise<any>
-  insertParagraphBreak(storyId: string, index: number): Promise<any>
-  deleteParagraphBreak(storyId: string, index: number): Promise<any>
-  addComment(comment: CommentInput): Promise<any>
-  replyToComment(reply: CommentReplyInput): Promise<any>
-  setCommentStatus(commentId: string, resolved: boolean): Promise<any>
-  removeComment(commentId: string): Promise<any>
-  get comments(): Promise<any>
-  get commentFlavor(): Promise<string>
-  setCommentFlavor(flavor: string): Promise<string>
-  registerFont(face: FontFace): Promise<number>
-  renderSlide(slide: number, options?: RenderSlideOptions | undefined | null): Promise<RenderedSlide>
-  encodeStateVector(): Promise<Buffer>
-  encodeStateAsUpdate(): Promise<Buffer>
-  encodeDiff(stateVector: Buffer): Promise<Buffer>
-  applyUpdate(update: Buffer): Promise<any>
-  propose(request: any): Promise<any>
-  get proposals(): Promise<any>
-  previewProposal(proposalId: string): Promise<any>
-  acceptProposal(proposalId: string, force?: boolean | undefined | null): Promise<any>
-  rejectProposal(proposalId: string): Promise<boolean>
-  get canUndo(): Promise<boolean>
-  get canRedo(): Promise<boolean>
-  undo(): Promise<boolean>
-  redo(): Promise<boolean>
-  addUndoBarrier(): Promise<void>
-  save(): Promise<Buffer>
-}
-export type PptxPresentation = Presentation
-
-export interface CommentInput {
-  slideId: string
-  text: string
-  author: string
-  initials?: string
-  created: string
-  x?: number
-  y?: number
-}
-
-export interface CommentReplyInput {
-  commentId: string
-  text: string
-  author: string
-  initials?: string
-  created: string
-}
-
-export interface FontFace {
-  family: string
-  data: Buffer
-  bold?: boolean
-  italic?: boolean
-}
-
-export interface MediaResource {
-  path: string
-  contentType: string
-  data: Buffer
-}
-
-export declare function openPresentation(data: Buffer, options?: OpenPresentationOptions | undefined | null): Promise<Presentation>
-
-export interface OpenPresentationOptions {
-  clientId?: number
-  author?: string
-  origin?: string
+export declare class PptxDocument {
+  free(): void
+  static openReplayBaseline(source: Uint8Array, clientId?: number | undefined | null, initialUpdate?: Uint8Array | undefined | null): PptxDocument
+  static openPeerDeckJson(source: Uint8Array, identityJson: string, initialUpdate?: Uint8Array | undefined | null): PptxDocument
+  static openCollaborative(bytes: Uint8Array, clientId: number): PptxDocument
+  static openCollaborativeFromUpdate(update: Uint8Array, clientId: number, source?: Uint8Array | undefined | null): PptxDocument
+  peerHydrationJson(fontsJson: string): string
+  registerPeerFontsJson(fontsJson: string): void
+  adoptPeerIdentity(): void
+  replayJson(envelope: string): string
+  proposeJson(args: string): string
+  listProposalsJson(): string
+  previewProposalJson(args: string): string
+  acceptProposalJson(args: string): string
+  rejectProposalJson(args: string): string
+  get clientId(): number
+  snapshotJson(): string
+  sessionMetadataJson(): string
+  documentVersion(): string
+  readContentJson(request: string): string
+  readCommandContentJson(request: string): string
+  findTextJson(request: string): string
+  validateEditsJson(request: string): string
+  applyEditsJson(request: string): string
+  exportStructuredJson(options: string): string
+  exportMarkdownJson(options: string): string
+  searchTextJson(args: string): string
+  storyJson(args: string): string
+  storyFormattingJson(args: string): string
+  anchorCaretJson(args: string): string
+  resolveCaretAnchorJson(args: string): string
+  mediaBytes(partPath: string): Uint8Array
+  saveBytes(): Uint8Array
+  encodeStateVector(): Uint8Array
+  encodeStateAsUpdate(): Uint8Array
+  encodeDiff(remoteStateVector: Uint8Array): Uint8Array
+  setCollaborative(): void
+  applyUpdateJson(update: Uint8Array): string
+  startUpdateObservation(): void
+  clearUpdateObservation(): void
+  drainUpdateEvent(): Uint8Array
+  insertTextJson(args: string): string
+  insertTextProfiledJson(args: string): string
+  deleteTextJson(args: string): string
+  deleteTextProfiledJson(args: string): string
+  formatTextJson(args: string): string
+  setParagraphAlignmentJson(args: string): string
+  addCommentJson(args: string): string
+  replyToCommentJson(args: string): string
+  setCommentPositionJson(args: string): string
+  setCommentStatusJson(args: string): string
+  removeCommentJson(args: string): string
+  setCommentFlavorJson(args: string): string
+  commentsJson(): string
+  insertParagraphBreakJson(args: string): string
+  setStoryParagraphsJson(args: string): string
+  insertTableRowJson(args: string): string
+  checkTableEditJson(args: string): void
+  deleteTableRowJson(args: string): string
+  insertTableColumnJson(args: string): string
+  deleteTableColumnJson(args: string): string
+  insertSlideJson(args: string): string
+  duplicateSlideJson(args: string): string
+  insertSlideProfiledJson(args: string): string
+  deleteSlideJson(args: string): string
+  setSlideLayoutJson(args: string): string
+  setSlideNotesJson(args: string): string
+  moveSlideJson(args: string): string
+  addTextBoxJson(args: string): string
+  addTextBoxProfiledJson(args: string): string
+  addShapeJson(args: string): string
+  addPictureJson(args: string): string
+  removeShapeJson(args: string): string
+  bringShapeToFrontJson(args: string): string
+  sendShapeToBackJson(args: string): string
+  bringShapeForwardJson(args: string): string
+  sendShapeBackwardJson(args: string): string
+  moveShapeJson(args: string): string
+  moveShapeProfiledJson(args: string): string
+  resizeShapeJson(args: string): string
+  setShapeRectJson(args: string): string
+  setShapeFillJson(args: string): string
+  setShapeStrokeJson(args: string): string
+  setShapeAdjustJson(args: string): string
+  undoCaptureMode(): string
+  setUndoCaptureMode(mode: string): void
+  addUndoBoundary(): void
+  undoJson(): string
+  undoReceiptJson(): string
+  redoReceiptJson(): string
+  undoProfiledJson(): string
+  redoJson(): string
+  canUndo(): boolean
+  canRedo(): boolean
+  static version(): string
 }
 
-export interface RenderedSlide {
-  data: Buffer
-  width: number
-  height: number
-  skippedImages: number
+export declare class PptxRenderer {
+  constructor()
+  free(): void
+  registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number
+  registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number
+  saveBytes(document: PptxDocument): Uint8Array
+  layoutSlideJson(document: PptxDocument, slideIndex: number): string
+  layoutSlideProfiledJson(document: PptxDocument, slideIndex: number): string
+  hitTestJson(x: number, y: number): string
+  setActiveSlide(document: PptxDocument, id: string, key: string): boolean
+  snapshotWithLayoutKeysJson(document: PptxDocument): string
+  slideLayoutKey(document: PptxDocument, slideIndex: number): string
+  hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string
+  /** Enables browser metrics for uncovered characters. Off by default. */
+  setBrowserCoverageFallback(enabled: boolean): void
+  /** Requested faces with optional script coverage buckets, before layout. */
+  requestedFontFacesJson(document: PptxDocument, slideId?: string | undefined | null): string
+  layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
+  layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
 }
 
-export interface RenderSlideOptions {
-  scale?: number
-  transparent?: boolean
-  background?: string
-  maxShadowPixels?: number
+export declare function compileSlideJson(slideJson: string): string
+
+export interface DecodedFontFace {
+  font: Uint8Array
+  payload?: Uint8Array
 }
+
+/** Decodes one font pack face using this engine's linked decoder. */
+export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace
+
+export declare function decodeTiffPng(data: Uint8Array): Uint8Array
+
+export declare function engineVersion(): string
+
+export declare function exportPptxMarkdownJson(data: Uint8Array, options: string): string
+
+export declare function exportPptxStructuredJson(data: Uint8Array, options: string): string
+
+export declare function parsePptxJson(data: Uint8Array): string
+
+export declare function parsePptxJsonWithoutMedia(data: Uint8Array): string
+
+export declare function rendererVersion(): string
+
+export declare function renderPptxMarkdownJson(content: string, options: string): string

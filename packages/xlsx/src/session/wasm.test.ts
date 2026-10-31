@@ -5,6 +5,7 @@ import {
   createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
   isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
 } from 'typescript';
+import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
@@ -19,19 +20,51 @@ beforeAll(async () => {
   );
 });
 
-function input(worker: WasmTestWorker): { wasm?: ArrayBuffer | WebAssembly.Module } {
+function input(worker: WasmTestWorker): { wasm?: ArrayBuffer | WebAssembly.Module; png?: boolean } {
   const open = worker.requests.find((message) =>
     isClientMessage(message) && message.kind === 'call' && message.method === 'open'
   );
   if (!open || open.kind !== 'call') throw new Error('Missing open request');
-  return open.args[1] as { wasm?: ArrayBuffer | WebAssembly.Module };
+  return open.args[1] as { wasm?: ArrayBuffer | WebAssembly.Module; png?: boolean };
 }
 
 function compileRequests(worker: WasmTestWorker) {
   return worker.requests.filter((message) => message.kind === 'wasm-compile');
 }
 
-describe('workbook session wasm reuse', () => {
+describe.skipIf(engineKind === 'native')('workbook session wasm reuse', () => {
+  test('loads and caches full and lean modules separately', async () => {
+    const h = factory();
+    const spies = mainThreadWasmSpies();
+    try {
+      const full = await h.client.openWorkbookSession(new Uint8Array());
+      expect(h.workers[0].urls).toEqual(['https://example.test/session.wasm']);
+      await full.dispose();
+
+      const lean = await h.client.openWorkbookSession(new Uint8Array(), { png: false });
+      expect(input(h.workers[1]).png).toBe(false);
+      expect(input(h.workers[1]).wasm).toBeUndefined();
+      expect(compileRequests(h.workers[1])).toEqual([]);
+      expect(h.workers[1].urls).toEqual(['https://example.test/session_lean.wasm']);
+      expect(h.compiles).toBe(2);
+      await lean.dispose();
+
+      const cachedLean = await h.client.openWorkbookSession(new Uint8Array(), { png: false });
+      expect(input(h.workers[2]).wasm).toBe(h.workers[1].modules[0]);
+      expect(h.workers[2].urls).toEqual([]);
+      await cachedLean.dispose();
+
+      const cachedFull = await h.client.openWorkbookSession(new Uint8Array());
+      expect(input(h.workers[3]).wasm).toBe(h.workers[0].modules[0]);
+      expect(h.workers[3].urls).toEqual([]);
+      expect(h.compiles).toBe(2);
+      await cachedFull.dispose();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
   test('keeps worker URLs and options statically evaluable', () => {
     const source = createSourceFile('client.ts',
       readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);

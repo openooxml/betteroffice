@@ -8,6 +8,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::date::DateSystem;
+use crate::fmath;
 use crate::value::CellValue;
 
 /// the display string plus the `#rrggbb` color a bracket prefix (`[Red]`) requested.
@@ -215,6 +216,7 @@ impl Condition {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Section {
+    unclassified: bool,
     toks: Vec<Tok>,
     color: Option<String>,
     condition: Option<Condition>,
@@ -386,6 +388,8 @@ fn tokenize(input: &str) -> Section {
                 }
                 if i < n {
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
                 section.toks.push(Tok::Literal(s));
             }
@@ -394,6 +398,8 @@ fn tokenize(input: &str) -> Section {
                 if i < n {
                     section.toks.push(Tok::Literal(chars[i].to_string()));
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
             }
             '_' => {
@@ -401,6 +407,8 @@ fn tokenize(input: &str) -> Section {
                 if i < n {
                     section.toks.push(Tok::Width(chars[i]));
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
             }
             '*' => {
@@ -410,6 +418,8 @@ fn tokenize(input: &str) -> Section {
                         section.toks.push(Tok::Fill(chars[i]));
                     }
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
             }
             '[' => {
@@ -421,6 +431,8 @@ fn tokenize(input: &str) -> Section {
                 }
                 if i < n {
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
                 parse_bracket(&inner, &mut section);
             }
@@ -483,6 +495,7 @@ fn tokenize(input: &str) -> Section {
                     i += len;
                 }
                 None => {
+                    section.unclassified = true;
                     section.toks.push(Tok::Literal(c.to_string()));
                     i += 1;
                 }
@@ -492,6 +505,7 @@ fn tokenize(input: &str) -> Section {
                 i += 7;
             }
             _ => {
+                section.unclassified |= c.is_ascii_alphabetic();
                 section.toks.push(Tok::Literal(c.to_string()));
                 i += 1;
             }
@@ -552,6 +566,8 @@ fn parse_bracket(inner: &str, section: &mut Section) {
         if !sym.is_empty() {
             section.toks.push(Tok::Literal(sym.to_string()));
         }
+    } else {
+        section.unclassified = true;
     }
 }
 
@@ -698,6 +714,22 @@ pub fn format_is_approximate(value: &CellValue, code: &str) -> bool {
         && (degrades_to_general(section) || fraction_falls_back(section, value.abs()))
 }
 
+/// whether formatting `value` with `code` would render the number itself
+/// (or a date/time) rather than echoing text: the section selected for
+/// `value` carries digit placeholders, date/time tokens or a fraction
+/// pattern, and is neither a `General` section nor a text (`@`) section.
+pub fn format_renders_number(code: &str, value: f64) -> bool {
+    if code.trim().is_empty() {
+        return false;
+    }
+    let parsed = parsed_sections(code);
+    let sec = &parsed[select(&parsed, value).0];
+    if sec.has(|t| matches!(t, Tok::General | Tok::At)) {
+        return false;
+    }
+    sec.has_date() || sec.fraction.is_some() || sec.has(|t| matches!(t, Tok::Digit(_)))
+}
+
 fn fraction_falls_back(sec: &Section, mag: f64) -> bool {
     let Some(pattern) = sec.fraction else {
         return false;
@@ -709,6 +741,79 @@ fn degrades_to_general(sec: &Section) -> bool {
     !sec.has(|t| matches!(t, Tok::General))
         && sec.has(|t| matches!(t, Tok::Slash))
         && sec.fraction.is_none()
+}
+
+/// decimal places to retain for numeric display formats; unsupported formats return none.
+pub fn displayed_precision(value: f64, code: &str) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+    let parsed = parsed_sections(code);
+    if parsed
+        .iter()
+        .take(3)
+        .any(|section| section.condition.is_some())
+    {
+        return None;
+    }
+    let section = &parsed[select(&parsed, value).0];
+    if section.unclassified
+        || section.has_date()
+        || section.fraction.is_some()
+        || section.has(|t| matches!(t, Tok::General | Tok::At | Tok::Slash))
+    {
+        return None;
+    }
+    let toks = &section.toks;
+    let exp = toks.iter().position(|t| matches!(t, Tok::Exp(_)));
+    let mantissa = &toks[..exp.unwrap_or(toks.len())];
+    let first = mantissa.iter().position(|t| matches!(t, Tok::Digit(_)))?;
+    let last = mantissa.iter().rposition(|t| matches!(t, Tok::Digit(_)))?;
+    if mantissa[first..=last]
+        .iter()
+        .any(|t| !matches!(t, Tok::Digit(_) | Tok::Dot | Tok::Comma))
+        || mantissa.iter().filter(|t| matches!(t, Tok::Dot)).count() > 1
+    {
+        return None;
+    }
+    let dot = mantissa.iter().position(|t| matches!(t, Tok::Dot));
+    let decimals = dot.map_or(0, |at| {
+        mantissa[at + 1..]
+            .iter()
+            .filter(|t| matches!(t, Tok::Digit(_)))
+            .count() as i32
+    });
+    let percent = toks.iter().filter(|t| matches!(t, Tok::Percent)).count() as i32;
+    let (_, mut scale) = scan_commas(&mantissa[..dot.unwrap_or(mantissa.len())]);
+    if let Some(dot) = dot {
+        scale += scan_commas(&mantissa[dot + 1..]).1;
+    }
+    if let Some(at) = exp {
+        let exponent = &toks[at + 1..];
+        if scale != 0
+            || !exponent.iter().any(|t| matches!(t, Tok::Digit(_)))
+            || exponent.iter().any(|t| {
+                !matches!(
+                    t,
+                    Tok::Digit(_) | Tok::Literal(_) | Tok::Width(_) | Tok::Fill(_)
+                )
+            })
+        {
+            return None;
+        }
+        let integer_digits = mantissa[..dot.unwrap_or(mantissa.len())]
+            .iter()
+            .filter(|t| matches!(t, Tok::Digit(_)))
+            .count() as i32;
+        if integer_digits != 1 || value == 0.0 {
+            return None;
+        }
+        let magnitude = fmath::log10(value.abs()) + f64::from(percent) * 2.0;
+        let exponent = magnitude.floor() as i32;
+        Some(decimals + 2 * percent - exponent)
+    } else {
+        Some(decimals + 2 * percent - 3 * scale as i32)
+    }
 }
 
 fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
@@ -1016,7 +1121,7 @@ fn digit_kinds(toks: &[Tok]) -> Vec<char> {
 /// split a non-negative magnitude into (integer digits, fraction digits) after
 /// rounding half-away-from-zero (excel's display rule) to `frac_len` places.
 fn split_digits(mag: f64, frac_len: usize) -> (String, String) {
-    let factor = 10f64.powi(frac_len as i32);
+    let factor = fmath::powi(10.0, frac_len as i32);
     let scaled = (mag * factor).round();
     let mut s = format!("{scaled:.0}");
     while s.len() < frac_len + 1 {
@@ -1169,14 +1274,14 @@ fn render_scientific(sec: &Section, mag: f64) -> FormattedValue {
     let (mantissa, exp_val) = if v == 0.0 {
         (0.0, 0i32)
     } else {
-        let e = v.log10().floor() as i32;
+        let e = fmath::log10(v).floor() as i32;
         let mut exp = e.div_euclid(p) * p;
-        let mut m = v / 10f64.powi(exp);
+        let mut m = v / fmath::powi(10.0, exp);
         // rounding can overflow the mantissa (9.99 -> 10): bump exponent, recompute
         let (id, _) = split_digits(m, qf);
         if id.len() as i32 > p {
             exp += p;
-            m = v / 10f64.powi(exp);
+            m = v / fmath::powi(10.0, exp);
         }
         (m, exp)
     };
@@ -1215,7 +1320,7 @@ fn format_general(n: f64) -> String {
     }
     let neg = n < 0.0;
     let a = n.abs();
-    let e = a.log10().floor() as i32;
+    let e = fmath::log10(a).floor() as i32;
     let body = if !(-4..11).contains(&e) {
         scientific_precision(a, 5)
     } else {
@@ -1276,7 +1381,7 @@ pub fn fit_general(value: f64, width: f32, mut measure: impl FnMut(&str) -> f32)
     if !value.is_finite() || value == 0.0 {
         return None;
     }
-    let exponent = value.abs().log10().floor() as i32;
+    let exponent = fmath::log10(value.abs()).floor() as i32;
     if (-4..11).contains(&exponent) {
         for decimals in (0..=(10 - exponent).clamp(0, 15) as usize).rev() {
             let mut candidate = round_fixed(value, decimals);
@@ -1301,7 +1406,7 @@ pub fn fit_general(value: f64, width: f32, mut measure: impl FnMut(&str) -> f32)
 }
 
 fn round_fixed(a: f64, decimals: usize) -> String {
-    let factor = 10f64.powi(decimals as i32);
+    let factor = fmath::powi(10.0, decimals as i32);
     let r = (a * factor).round() / factor;
     format!("{r:.decimals$}")
 }

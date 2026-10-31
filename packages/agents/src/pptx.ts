@@ -1,13 +1,15 @@
 import { imageSize } from 'image-size';
 import { pptxBatchSchema, type PptxAgentBatch, type PptxAgentEdit } from './pptx-schema';
-import { renderPptxSlide } from './pptx-render';
+import { loadPptxFonts, pptxFontFaces, pptxThemeFonts, renderPptxSlide, type PptxThemeFonts } from './pptx-render';
 import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
-import { DocumentToolError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
+import { DocumentToolError, unknownMatchError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
 export interface SlideTextChange { ref: string; slide: number; story: string; start: number; oldText: string; newText: string }
 interface Paragraph { ref: string; paragraphId: string; slide: number; story: PptxStoryText; start: number; end: number; editable: boolean }
 interface HeldMatch { ref: string; slide: number; target: PptxStoryTarget; start: number; paragraphStart: number; text: string; version: string }
+
+const SAVE_FONT_STYLES = 192;
 
 export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, PptxEditStep> {
   readonly format = 'pptx' as const;
@@ -17,13 +19,24 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   private nextRef = 1;
   private cachedLayouts?: ReturnType<PresentationHandle['layouts']>;
 
-  private constructor(private readonly handle: PresentationHandle, readonly name = 'presentation.pptx', private readonly owned = true) { super(); }
+  /** The version of a deck this document opened, before any edit. */
+  private readonly sourceVersion?: string;
+
+  private constructor(
+    private readonly handle: PresentationHandle,
+    readonly name = 'presentation.pptx',
+    private readonly owned = true,
+    private readonly themeFonts?: PptxThemeFonts,
+  ) {
+    super();
+    if (owned) this.sourceVersion = handle.version();
+  }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
     await initialize('pptx', initWasm, options.wasm);
     if (bytes.length > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a PPTX file up to 64 MiB.');
     const source = bytes.slice();
-    return new PptxAgentPresentation(openPresentation(source), options.name);
+    return new PptxAgentPresentation(openPresentation(source), options.name, true, pptxThemeFonts(source));
   }
 
   static attach(handle: PresentationHandle, options: { name?: string } = {}) {
@@ -79,7 +92,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       const match = `${this.prefix}:match${this.nextMatch++}`;
       if (this.matches.size >= 1024) this.matches.delete(this.matches.keys().next().value!);
       this.matches.set(match, { ref: p.ref, slide: p.slide, target: { slideId: p.story.slideId, shapeId: p.story.shapeId, storyId: p.story.storyId }, start: p.start + hit.start, paragraphStart: p.start, text: hit.text, version: read.version });
-      return { ...hit, match };
+      return { ...hit, text: hit.text.replaceAll('\n', '\v'), context: hit.context.replaceAll('\n', '\v'), match };
     }) };
   }
 
@@ -102,7 +115,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     for (const edit of input.edits) {
       if (!('match' in edit)) throw new DocumentToolError('UNSUPPORTED', 'PPTX replacements require a match ID from grep.');
       const hit = this.matches.get(edit.match);
-      if (!hit) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another deck. Grep again.');
+      if (!hit) throw unknownMatchError(edit.match, `${this.prefix}:match1`, /^[^:\s]+:match\d+$/u, 'Match expired or belongs to another deck. Grep again.');
       if (hit.version !== version) throw new DocumentToolError('STALE_TARGET', 'Presentation changed. Grep for fresh matches.');
       plainText(edit.newText);
       if (/[\r\n\ufffc]/u.test(edit.newText) || edit.newText.length > 16000) throw new DocumentToolError('INVALID_ARGUMENT', 'Replacement must be plain text in one paragraph, up to 16000 UTF-16 units.');
@@ -219,15 +232,15 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   async preview(slideId: string | number, options: { scale?: number } = {}) {
     const deck = this.snapshot();
     const slide = this.slide(this.handle, slideId);
-    return renderPptxSlide(this.handle, deck.slides.findIndex(s => s.id === slide.id) + 1, options.scale);
+    return renderPptxSlide(this.handle, deck.slides.findIndex(s => s.id === slide.id) + 1, options.scale, undefined, this.themeFonts);
   }
 
   override async render(page?: number, proposal?: string): Promise<RenderedPage> {
     this.alive();
     if (page === undefined) throw new DocumentToolError('UNSUPPORTED', 'Use pptx_preview with a slide ID, or render(1) with a one-based slide index.');
-    if (!proposal) return renderPptxSlide(this.handle, page);
+    if (!proposal) return renderPptxSlide(this.handle, page, undefined, undefined, this.themeFonts);
     const draft = openPresentation(await this.export(proposal));
-    try { return await renderPptxSlide(draft, page); }
+    try { return await renderPptxSlide(draft, page, undefined, undefined, this.themeFonts); }
     finally { draft.dispose(); }
   }
 
@@ -241,32 +254,56 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       return { changed: true, slideId: receipt.slideId, index, layout: layout ?? null };
     }
     if (edit.op === 'find_replace') {
-      plainText(edit.query); plainText(edit.replacement);
-      if (/[\r\n]/u.test(edit.query + edit.replacement)) throw new DocumentToolError('INVALID_ARGUMENT', 'find_replace stays within paragraphs. Use set_paragraphs to replace multiple paragraphs.');
+      plainText(edit.query.replaceAll('\v', ' ')); plainText(edit.replacement.replaceAll('\v', ' '));
+      if (/[\r\n]/u.test(edit.query + edit.replacement)) throw new DocumentToolError('INVALID_ARGUMENT', 'find_replace stays within paragraphs; use \\u000b for a soft line break. Use set_paragraphs to replace multiple paragraphs.');
+      const query = edit.query.replaceAll('\v', '\n');
+      const replacement = edit.replacement.replaceAll('\v', '\n');
+      const softBreak = query !== edit.query || replacement !== edit.replacement;
       const scope = edit.shape ? this.shapeSlide(handle, edit.shape, edit.slide) : edit.slide !== undefined ? this.slide(handle, edit.slide) : undefined;
       const read = unwrap(handle.readContent(scope ? { slideIds: [scope.id] } : undefined));
-      const pattern = new RegExp(edit.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), edit.caseSensitive ? 'gu' : 'giu');
-      const steps: PptxEditStep[] = [];
+      const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), edit.caseSensitive ? 'gu' : 'giu');
       const changes = new Map<string, { slideId: string; shapeId: string; replacements: number }>();
       const stories = read.stories.filter(story => !edit.shape || story.shapeId === edit.shape);
       if (edit.shape && !stories.length) {
         const children = this.flatten(this.shape(scope!, edit.shape).children).map(node => node.shape.id).slice(0, 20);
         throw new DocumentToolError('INVALID_ARGUMENT', `Shape ${edit.shape} has no text.${children.length ? ` Target one of its child shapes: ${children.join(', ')}.` : ''} Or omit shape to search the slide.`, { shapeId: edit.shape, childShapes: children });
       }
+      const found: Array<{ story: (typeof stories)[number]; paragraph: (typeof stories)[number]['paragraphs'][number]; start: number; end: number; text: string }> = [];
       for (const story of stories) for (const paragraph of story.paragraphs) {
         pattern.lastIndex = 0;
         const text = story.text.slice(paragraph.start, paragraph.end);
         for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-          if (steps.length === 128) throw new DocumentToolError('EDIT_LIMIT', 'More than 128 occurrences. Narrow query or supply a slide ID, then retry.');
-          steps.push({ op: 'replaceText', target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: paragraph.start + match.index, end: paragraph.start + match.index + match[0].length }, text: edit.replacement, expect: { text: match[0] } });
+          if (found.length === 128) throw new DocumentToolError('EDIT_LIMIT', 'More than 128 occurrences. Narrow query or supply a slide ID, then retry.');
+          found.push({ story, paragraph, start: match.index, end: match.index + match[0].length, text: match[0] });
           const change = changes.get(story.shapeId) ?? { slideId: story.slideId, shapeId: story.shapeId, replacements: 0 };
           change.replacements++; changes.set(story.shapeId, change);
         }
       }
-      if (!steps.length) return { changed: false, replacements: 0, changes: [] };
-      const receipt = unwrap(handle.applyEdits({ expectVersion: read.version, steps, source: 'agent' }));
+      if (!found.length) return { changed: false, replacements: 0, changes: [] };
       const changed = this.bounded([...changes.values()], changeBudget);
-      return { changed: receipt.applied, replacements: steps.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
+      if (!softBreak) {
+        const steps: PptxEditStep[] = found.map(hit => ({ op: 'replaceText', target: { kind: 'range', slideId: hit.story.slideId, shapeId: hit.story.shapeId, storyId: hit.story.storyId, start: hit.paragraph.start + hit.start, end: hit.paragraph.start + hit.end }, text: replacement, expect: { text: hit.text } }));
+        const receipt = unwrap(handle.applyEdits({ expectVersion: read.version, steps, source: 'agent' }));
+        return { changed: receipt.applied, replacements: steps.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
+      }
+      if (found.some(hit => hit.paragraph.fields.length || !hit.paragraph.editable)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'find_replace cannot change soft line breaks in a paragraph with text fields.');
+      const snapshotStories = new Map(handle.snapshot().slides.flatMap(slide => this.flatten(slide.shapes)).flatMap(node => node.shape.textStories.map(story => [story.id, story] as const)));
+      const styleOf = (run: StorySnapshot['paragraphs'][number]['runs'][number]) => Object.fromEntries(Object.entries(run.style).filter(([, value]) => value !== null)) as TextStyle;
+      const edits = found.filter(hit => hit.text !== replacement).map(hit => {
+        const paragraph = snapshotStories.get(hit.story.storyId)?.paragraphs.find(paragraph => paragraph.id === hit.paragraph.paragraphId);
+        if (!paragraph) throw new DocumentToolError('UNKNOWN_REF', 'Copy a paragraph ID from pptx_read_slide.');
+        let position = 0;
+        const run = paragraph.runs.find(run => { position += run.text.length; return hit.start < position; });
+        if (!run) throw new DocumentToolError('INVALID_EDIT', 'Match is outside its paragraph. Read fresh text and retry.');
+        return { type: 'replaceText' as const, storyId: hit.story.storyId, start: hit.paragraph.start + hit.start, end: hit.paragraph.start + hit.end, text: replacement, style: styleOf(run) };
+      }).reverse();
+      let applied = false;
+      if (edits.length) {
+        const proposal = handle.propose('agent', null, edits);
+        try { applied = handle.acceptProposal(proposal.id).applied; }
+        finally { handle.rejectProposal(proposal.id); }
+      }
+      return { changed: applied, replacements: found.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
     }
     if (edit.op === 'insert_table_row' || edit.op === 'delete_table_row' || edit.op === 'insert_table_column' || edit.op === 'delete_table_column') {
       if (handle.isCollaborative()) throw new DocumentToolError('UNSUPPORTED', 'Table row and column edits are unavailable while the deck is in a collaborative session. Edit cell text instead.');
@@ -533,11 +570,34 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const result = unwrap(this.handle.applyEdits({ expectVersion: version, steps, source: 'agent' }));
     return { applied: result.applied, version: result.version, changedSlides: result.changedSlides.length, changedStories: result.changedStories.length };
   }
-  protected save(steps?: PptxEditStep[]) {
-    if (!steps) return this.handle.save();
+  protected async save(steps?: PptxEditStep[]) {
+    if (!steps) return this.owned ? this.saveFitted(this.handle) : this.handle.save();
     const draft = this.handle.fork();
-    try { unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' })); return draft.save(); }
-    finally { draft.dispose(); }
+    try {
+      unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' }));
+      return this.owned ? await this.saveFitted(draft) : draft.save();
+    } finally { draft.dispose(); }
+  }
+
+  /**
+   * Saves an unedited deck as it is, and otherwise with the bundled faces of
+   * every slide so edited autofit text is fitted. The faces are loaded for the
+   * version that is saved: an edit made while they load loads them again, and
+   * a document closed meanwhile is not saved.
+   */
+  private async saveFitted(handle: PresentationHandle) {
+    for (;;) {
+      const version = handle.version();
+      if (version === this.sourceVersion) return handle.save();
+      const fonts = await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts, SAVE_FONT_STYLES));
+      this.alive();
+      if (handle.version() !== version) continue;
+      try { return handle.save(fonts); }
+      catch (error) {
+        if (error instanceof Error && /^(?:could not write PPTX: )?render resource limit exceeded(?::|$)/u.test(error.message)) return handle.save({ fonts: [] });
+        throw error;
+      }
+    }
   }
   protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }
   protected dispose() { this.refs.clear(); this.matches.clear(); if (this.owned) this.handle.dispose(); }

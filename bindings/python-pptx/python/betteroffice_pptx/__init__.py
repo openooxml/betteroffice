@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import json
-from typing import Any, Iterator, Mapping, Sequence, Union
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Union, overload
 from .edits import (
     PptxEditFailure,
     PptxEditFailureCode,
@@ -22,6 +22,8 @@ from .edits import (
     PptxParagraphText,
     PptxReadRequest,
     PptxReadResult,
+    PptxShapeAdjustStep,
+    PptxSlideBackgroundStep,
     PptxShapeTarget,
     PptxSlideTarget,
     PptxStoryTarget,
@@ -44,9 +46,22 @@ from .exports import (
     PptxStructuredResult,
 )
 from .proposals import Proposal, ProposalChange, ProposalPreview
+from .render import (
+    HitTestResult,
+    MediaContent,
+    MediaSummary,
+    PresentationInspection,
+    ProposalDiffSlide,
+    ProposalTextChange,
+    ShapeHit,
+    SlideDisplayList,
+    TextHit,
+)
 
 from ._betteroffice_pptx import (
+    decode_font_face,
     AdjustEdit,
+    CaretAnchor,
     CollaborativeStateError,
     Comment,
     CommentEdit,
@@ -75,15 +90,21 @@ from ._betteroffice_pptx import (
     TextEdit,
     TextRun,
     TransformEdit,
+    UpdateSubscription,
     export_pptx_markdown_json as _export_pptx_markdown_json,
     export_pptx_structured_json as _export_pptx_structured_json,
+    inspect_presentation as _inspect_presentation,
     render_pptx_markdown_json as _render_pptx_markdown_json,
 )
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
 
 __all__ = [
+    "decode_font_face",
     "AdjustEdit",
+    "CaretAnchor",
+    "PptxShapeAdjustStep",
+    "PptxSlideBackgroundStep",
     "CollaborativeStateError",
     "Comment",
     "CommentEdit",
@@ -94,15 +115,19 @@ __all__ = [
     "EMU_PER_POINT",
     "ExportError",
     "FillEdit",
+    "HitTestResult",
     "InvalidUpdateError",
     "MAX_COLLABORATION_BYTES",
     "Media",
+    "MediaContent",
+    "MediaSummary",
     "NotCollaborativeError",
     "Paragraph",
     "ParseError",
     "Png",
     "PptxError",
     "Presentation",
+    "PresentationInspection",
     "PptxAnchor",
     "PptxAnchorScope",
     "PptxEditFailure",
@@ -139,13 +164,18 @@ __all__ = [
     "PptxValidationResult",
     "Proposal",
     "ProposalChange",
+    "ProposalDiffSlide",
     "ProposalPreview",
+    "ProposalTextChange",
     "StaleProposalError",
     "RangeError",
     "Rect",
     "RenderError",
     "Shape",
     "ShapeEdit",
+    "ShapeHit",
+    "SlideDisplayList",
+    "TextHit",
     "Slide",
     "SlideEdit",
     "SlideKey",
@@ -155,9 +185,11 @@ __all__ = [
     "TextEdit",
     "TextRun",
     "TransformEdit",
+    "UpdateSubscription",
     "__version__",
     "export_pptx_markdown",
     "export_pptx_structured",
+    "inspect_presentation",
     "render_pptx_markdown",
 ]
 
@@ -166,6 +198,13 @@ EMU_PER_CENTIMETER = 360000
 EMU_PER_POINT = 12700
 
 SlideKey = Union[int, str]
+
+
+def inspect_presentation(
+    data: "bytes | bytearray | memoryview", *, include_media: bool = True,
+) -> PresentationInspection:
+    """Parse package JSON; ``include_media=False`` omits media bytes."""
+    return _inspect_presentation(_as_bytes(data), include_media=include_media)
 
 
 class Presentation:
@@ -219,14 +258,41 @@ class Presentation:
             )
         )
 
+    @classmethod
+    def open_from_update(
+        cls,
+        update: "bytes | bytearray | memoryview",
+        *,
+        client_id: int,
+        source: "bytes | bytearray | memoryview | None" = None,
+    ) -> "Presentation":
+        """Join an update; matching source bytes also enable saving."""
+        return cls(
+            _Presentation.open_from_update(
+                _as_bytes(update, max_length=MAX_COLLABORATION_BYTES),
+                client_id=client_id,
+                source=None if source is None else _as_bytes(source),
+            )
+        )
+
     @property
     def client_id(self) -> int:
         return self._inner.client_id
 
     @property
     def is_collaborative(self) -> bool:
-        """True only for ``open_collaborative`` decks, which alone may sync."""
+        """Whether opened for sync or explicitly marked shared."""
         return self._inner.is_collaborative
+
+    def set_collaborative(self) -> None:
+        """Refuse structural table edits; use a collaborative constructor for state exchange."""
+        self._inner.set_collaborative()
+
+    def on_update(
+        self, callback: Callable[[bytes, Literal["local", "remote"]], None],
+    ) -> UpdateSubscription:
+        """Deliver updates on this thread; re-raise the first callback error after flushing."""
+        return self._inner.on_update(callback)
 
     @property
     def is_edited(self) -> bool:
@@ -291,6 +357,21 @@ class Presentation:
         """Every embedded binary part, such as slide images."""
         return self._inner.media()
 
+    def media_bytes(self, asset_id: str) -> bytes:
+        """Resolve a media path or an unsaved picture's ``pending-media:<shape_id>``."""
+        return self._inner.media_bytes(asset_id)
+
+    def search_text(
+        self, query: str, *, case_sensitive: bool = False, limit: "int | None" = None,
+    ) -> list[dict[str, Any]]:
+        return self._inner.search_text(query, case_sensitive=case_sensitive, limit=limit)
+
+    def anchor_caret(self, story_id: str, index: int) -> CaretAnchor:
+        return self._inner.anchor_caret(story_id, index)
+
+    def resolve_caret_anchor(self, anchor: CaretAnchor) -> "int | None":
+        return self._inner.resolve_caret_anchor(anchor)
+
     def insert_slide(self, index: int, *, layout: "str | None" = None) -> SlideEdit:
         """Insert a blank slide at ``index``."""
         return self._inner.insert_slide(index, layout=layout)
@@ -300,6 +381,34 @@ class Presentation:
 
     def move_slide(self, slide: SlideKey, index: int) -> SlideEdit:
         return self._inner.move_slide(slide, index)
+
+    def duplicate_slide(self, slide: SlideKey, index: int) -> SlideEdit:
+        return self._inner.duplicate_slide(slide, index)
+
+    def set_slide_notes(self, slide: SlideKey, text: str) -> None:
+        self._inner.set_slide_notes(slide, text)
+
+    def set_slide_layout(
+        self, slide: SlideKey, layout: str, mapping: Sequence[tuple[str, int]] = (),
+    ) -> None:
+        self._inner.set_slide_layout(slide, layout, list(mapping))
+
+    def set_slide_background(
+        self, slide: SlideKey, background: "Mapping[str, Any] | None",
+    ) -> dict[str, Any]:
+        return self._inner.set_slide_background_json(
+            slide, json.dumps(None if background is None else dict(background), allow_nan=False),
+        )
+
+    def add_picture(
+        self, slide: SlideKey, data: "bytes | bytearray | memoryview", *,
+        content_type: str, x: int, y: int, width: int, height: int,
+        name: "str | None" = None,
+    ) -> ShapeEdit:
+        return self._inner.add_picture(
+            slide, _as_bytes(data), content_type=content_type,
+            x=x, y=y, width=width, height=height, name=name,
+        )
 
     def add_text_box(
         self,
@@ -317,6 +426,10 @@ class Presentation:
         color: "str | None" = None,
         font_family: "str | None" = None,
         underline: "str | None" = None,
+        spacing_pt: "float | None" = None,
+        baseline_pct: "float | None" = None,
+        kern_pt: "float | None" = None,
+        caps: "Literal['none', 'small', 'all'] | None" = None,
     ) -> ShapeEdit:
         """Add a text box. Geometry is in EMU."""
         return self._inner.add_text_box(
@@ -333,6 +446,10 @@ class Presentation:
             color=color,
             font_family=font_family,
             underline=underline,
+            spacing_pt=spacing_pt,
+            baseline_pct=baseline_pct,
+            kern_pt=kern_pt,
+            caps=caps,
         )
 
     def add_shape(
@@ -380,6 +497,56 @@ class Presentation:
     def remove_shape(self, slide: SlideKey, shape_id: str) -> ShapeEdit:
         return self._inner.remove_shape(slide, shape_id)
 
+    def bring_shape_to_front(self, slide: SlideKey, shape_id: str) -> dict[str, Any]:
+        return self._inner.bring_shape_to_front(slide, shape_id)
+
+    def send_shape_to_back(self, slide: SlideKey, shape_id: str) -> dict[str, Any]:
+        return self._inner.send_shape_to_back(slide, shape_id)
+
+    def bring_shape_forward(self, slide: SlideKey, shape_id: str) -> dict[str, Any]:
+        return self._inner.bring_shape_forward(slide, shape_id)
+
+    def send_shape_backward(self, slide: SlideKey, shape_id: str) -> dict[str, Any]:
+        return self._inner.send_shape_backward(slide, shape_id)
+
+    def insert_table_row(
+        self, slide: SlideKey, shape_id: str, index: int,
+        position: Literal["before", "after"], cells: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        return self._inner.insert_table_row(slide, shape_id, index, position, list(cells))
+
+    def delete_table_row(
+        self, slide: SlideKey, shape_id: str, index: int,
+    ) -> dict[str, Any]:
+        return self._inner.delete_table_row(slide, shape_id, index)
+
+    def insert_table_column(
+        self, slide: SlideKey, shape_id: str, index: int,
+        position: Literal["before", "after"], cells: Sequence[str] = (), *,
+        width: "Literal['split', 'copy'] | None" = None,
+    ) -> dict[str, Any]:
+        return self._inner.insert_table_column(
+            slide, shape_id, index, position, list(cells), width=width,
+        )
+
+    def delete_table_column(
+        self, slide: SlideKey, shape_id: str, index: int,
+    ) -> dict[str, Any]:
+        return self._inner.delete_table_column(slide, shape_id, index)
+
+    def check_table_edit(
+        self,
+        method: Literal[
+            "insert_table_row", "delete_table_row", "insert_table_column", "delete_table_column",
+        ],
+        slide: SlideKey, shape_id: str, index: int,
+        position: Literal["before", "after"] = "before", cells: Sequence[str] = (), *,
+        width: "Literal['split', 'copy'] | None" = None,
+    ) -> None:
+        self._inner.check_table_edit(
+            method, slide, shape_id, index, position, list(cells), width=width,
+        )
+
     def move_shape(
         self, slide: SlideKey, shape_id: str, x: int, y: int
     ) -> TransformEdit:
@@ -413,6 +580,10 @@ class Presentation:
         color: "str | None" = None,
         font_family: "str | None" = None,
         underline: "str | None" = None,
+        spacing_pt: "float | None" = None,
+        baseline_pct: "float | None" = None,
+        kern_pt: "float | None" = None,
+        caps: "Literal['none', 'small', 'all'] | None" = None,
     ) -> TextEdit:
         """Insert text at a UTF-16 offset in a story."""
         return self._inner.insert_text(
@@ -425,6 +596,10 @@ class Presentation:
             color=color,
             font_family=font_family,
             underline=underline,
+            spacing_pt=spacing_pt,
+            baseline_pct=baseline_pct,
+            kern_pt=kern_pt,
+            caps=caps,
         )
 
     def delete_text(self, story_id: str, start: int, end: int) -> TextEdit:
@@ -443,8 +618,10 @@ class Presentation:
         color: "str | None" = None,
         font_family: "str | None" = None,
         underline: "str | None" = None,
+        spacing_pt: "float | None" = None,
+        baseline_pct: "float | None" = None,
     ) -> TextEdit:
-        """Patch run styling over a UTF-16 range. Omitted arguments are left as they are."""
+        """Patch run styling over a UTF-16 range. None leaves a field unchanged."""
         return self._inner.format_text(
             story_id,
             start,
@@ -455,10 +632,27 @@ class Presentation:
             color=color,
             font_family=font_family,
             underline=underline,
+            spacing_pt=spacing_pt,
+            baseline_pct=baseline_pct,
         )
 
     def insert_paragraph_break(self, story_id: str, index: int) -> TextEdit:
         return self._inner.insert_paragraph_break(story_id, index)
+
+    def delete_paragraph_break(self, story_id: str, index: int) -> TextEdit:
+        return self._inner.delete_paragraph_break(story_id, index)
+
+    def set_paragraph_alignment(
+        self, story_id: str, start: int, end: int, alignment: "str | None",
+    ) -> TextEdit:
+        return self._inner.set_paragraph_alignment(story_id, start, end, alignment)
+
+    def set_story_paragraphs(
+        self, story_id: str, paragraphs: Sequence[Mapping[str, Any]],
+    ) -> Story:
+        return self._inner.set_story_paragraphs_json(
+            story_id, json.dumps([dict(paragraph) for paragraph in paragraphs], allow_nan=False),
+        )
 
     def add_comment(
         self,
@@ -498,6 +692,9 @@ class Presentation:
         """Remove a comment; a thread root takes its replies with it."""
         return self._inner.remove_comment(comment_id)
 
+    def set_comment_position(self, comment_id: str, x: int, y: int) -> CommentEdit:
+        return self._inner.set_comment_position(comment_id, x, y)
+
     def comments(self) -> "list[Comment]":
         """Every comment on the deck, replies included."""
         return self._inner.comments()
@@ -528,6 +725,23 @@ class Presentation:
         """Lay a slide out into the renderer's display list."""
         return self._inner.render_slide(slide)
 
+    def register_fallback_font(
+        self,
+        family: str,
+        data: "bytes | bytearray | memoryview",
+        *,
+        bold: bool = False,
+        italic: bool = False,
+    ) -> int:
+        """Register a fallback face for missing glyphs."""
+        return self._inner.register_fallback_font(
+            family, _as_bytes(data), bold=bold, italic=italic
+        )
+
+    def hit_test(self, slide: SlideKey, x: float, y: float) -> HitTestResult | None:
+        """Test display-list pixels from the slide's top-left corner."""
+        return self._inner.hit_test(slide, x, y)
+
     def propose(
         self, agent_id: str, edits: Sequence[Mapping[str, object]], *,
         note: str | None = None,
@@ -546,6 +760,10 @@ class Presentation:
             for value in json.loads(self._inner.proposals_json())
         ]
 
+    def list_proposals(self) -> list[Proposal]:
+        """Alias of proposals, named as in the TypeScript API."""
+        return self.proposals()
+
     def preview_proposal(self, proposal_id: str) -> ProposalPreview:
         """Preview edits against the current document without applying them."""
         return ProposalPreview._from_dict(
@@ -556,9 +774,32 @@ class Presentation:
         """Render one proposed slide without changing the presentation."""
         return self._inner.render_proposal(proposal_id, slide)
 
-    def accept_proposal(self, proposal_id: str, *, force: bool = False) -> bool:
-        """Apply the proposal atomically as one local undo step."""
-        return self._inner.accept_proposal(proposal_id, force=force)
+    def layout_proposal_diff_slide(
+        self, proposal_id: str, slide: SlideKey,
+    ) -> ProposalDiffSlide:
+        """Lay out proposal changes against the current slide."""
+        return self._inner.layout_proposal_diff_slide(proposal_id, slide)
+
+    @overload
+    def accept_proposal(
+        self, proposal_id: str, *, force: bool = False, receipt: Literal[False] = False,
+    ) -> bool: ...
+
+    @overload
+    def accept_proposal(
+        self, proposal_id: str, *, force: bool = False, receipt: Literal[True],
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def accept_proposal(
+        self, proposal_id: str, *, force: bool = False, receipt: bool,
+    ) -> bool | dict[str, Any]: ...
+
+    def accept_proposal(
+        self, proposal_id: str, *, force: bool = False, receipt: bool = False,
+    ) -> bool | dict[str, Any]:
+        """Accept a proposal; receipt=True returns proposalId, applied, and snapshot."""
+        return self._inner.accept_proposal(proposal_id, force=force, receipt=receipt)
 
     def reject_proposal(self, proposal_id: str) -> bool:
         """Remove a proposal without changing the presentation."""
@@ -571,6 +812,11 @@ class Presentation:
     def read_content(self, request: "PptxReadRequest | None" = None) -> PptxReadResult:
         """Slides and their stories' text, with the version they were read at."""
         return json.loads(self._inner.read_content_json(_request_json(request or {})))
+
+    def read_command_content(
+        self, request: "PptxReadRequest | None" = None,
+    ) -> dict[str, Any]:
+        return json.loads(self._inner.read_command_content_json(_request_json(request or {})))
 
     def find_text(self, request: PptxFindRequest) -> PptxFindResult:
         """Exact, case-sensitive, paragraph-local search; overlapping matches all count."""
@@ -650,9 +896,12 @@ class Presentation:
         *,
         scale: float = 1.0,
         background: str = "slide",
+        max_shadow_pixels: "int | None" = None,
     ) -> Png:
         """Rasterize a slide to PNG bytes. Register a font first."""
-        return self._inner.render_png(slide, scale=scale, background=background)
+        return self._inner.render_png(
+            slide, scale=scale, background=background, max_shadow_pixels=max_shadow_pixels
+        )
 
     def save(self) -> bytes:
         """Serialize back to PPTX bytes, edits included."""
@@ -669,15 +918,31 @@ class Presentation:
         """
         return self._inner.state_vector()
 
+    def encode_state_vector(self) -> bytes:
+        """Alias of state_vector, named as in the TypeScript API."""
+        return self.state_vector()
+
     def state_as_update(self) -> bytes:
         """The whole document as one update, for a peer joining from nothing."""
         return self._inner.state_as_update()
+
+    def encode_state_as_update(
+        self, remote_state_vector: "bytes | bytearray | memoryview | None" = None,
+    ) -> bytes:
+        """Encode the full state, or a diff for the given remote state vector."""
+        if remote_state_vector is None:
+            return self.state_as_update()
+        return self.diff(remote_state_vector)
 
     def diff(self, state_vector: "bytes | bytearray | memoryview") -> bytes:
         """The update carrying everything the peer's state vector is missing."""
         return self._inner.diff(
             _as_bytes(state_vector, max_length=MAX_COLLABORATION_BYTES)
         )
+
+    def encode_diff(self, remote_state_vector: "bytes | bytearray | memoryview") -> bytes:
+        """Alias of diff, named as in the TypeScript API."""
+        return self.diff(remote_state_vector)
 
     def apply_update(self, update: "bytes | bytearray | memoryview") -> Deck:
         """Merge a peer's update and return the deck it produced."""
@@ -699,9 +964,23 @@ class Presentation:
     def redo(self) -> bool:
         return self._inner.redo()
 
+    def history_step(self, direction: Literal["undo", "redo"]) -> dict[str, Any]:
+        return self._inner.history_step(direction)
+
     def add_undo_barrier(self) -> None:
         """Close the current undo step so the next edit starts a new one."""
         self._inner.add_undo_barrier()
+
+    def add_undo_boundary(self) -> None:
+        """Alias of add_undo_barrier, named as in the TypeScript API."""
+        self.add_undo_barrier()
+
+    @property
+    def undo_capture_mode(self) -> Literal["auto", "manual"]:
+        return self._inner.undo_capture_mode
+
+    def set_undo_capture_mode(self, mode: Literal["auto", "manual"]) -> None:
+        self._inner.set_undo_capture_mode(mode)
 
     def __getitem__(self, slide: SlideKey) -> Slide:
         return self._inner.slide(slide)

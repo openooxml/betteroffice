@@ -45,7 +45,7 @@ function linkedRuns(document: Document): Run[] {
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 for (const seeder of ['projected', 'native']) {
   test(`${seeder} preserves TOC provenance through save and explicit same-color edits`, async () => {

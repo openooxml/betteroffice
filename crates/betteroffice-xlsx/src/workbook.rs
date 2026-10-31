@@ -9,6 +9,7 @@ mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
 mod geometry;
+pub(crate) mod reads;
 mod recovery;
 mod rich_text;
 #[cfg(test)]
@@ -100,6 +101,29 @@ const MAX_PENDING_COLLABORATION_UPDATES: usize = 4_096;
 pub const MAX_DISPLAY_CELLS: u64 = 250_000;
 pub const MAX_PIXMAP_DIM: u32 = 16_384;
 pub const MAX_PIXMAP_PIXELS: u64 = 16_777_216;
+
+fn source_style_xml_markers(source: &[u8]) -> Option<Stylesheet> {
+    let rels =
+        ooxml_opc::unzip_parts_where(source, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |name| {
+            name.trim_start_matches('/') == "xl/_rels/workbook.xml.rels"
+        })
+        .ok()?;
+    let path =
+        xlsx_parse::styles_part_name(rels.first().map(|(_, bytes)| bytes.as_slice())).ok()?;
+    let parts =
+        ooxml_opc::unzip_parts_where(source, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |name| {
+            name.trim_start_matches('/') == path.trim_start_matches('/')
+        })
+        .ok()?;
+    let (_, bytes) = parts.first()?;
+    let markers = xlsx_parse::source_style_xml_markers(bytes).ok()?;
+    let mut styles = Stylesheet::default();
+    for index in markers {
+        styles.mark_xf_extra_xml(index);
+    }
+    styles.inherit_xf_xml_markers(&Stylesheet::default());
+    Some(styles)
+}
 
 #[must_use = "dropping the subscription stops update delivery"]
 pub struct UpdateSubscription {
@@ -365,6 +389,10 @@ fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
 }
 
 pub struct Workbook {
+    #[cfg(feature = "fonts")]
+    pub(crate) font_manager: betteroffice_fonts::FontManager,
+    #[cfg(all(feature = "fonts", feature = "raster"))]
+    pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     authority: WorkbookAuthority,
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
@@ -571,6 +599,19 @@ impl Workbook {
         Self::open_internal(bytes, true, None)
     }
 
+    #[cfg(feature = "fonts")]
+    pub fn open_with_options(bytes: &[u8], options: &crate::OpenOptions) -> Result<Self> {
+        let font_manager =
+            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)?;
+        let mut workbook = Self::open(bytes)?;
+        workbook.font_manager = font_manager;
+        #[cfg(feature = "raster")]
+        for font in &options.fonts {
+            workbook.register_font(&font.family, font.bold, font.italic, &font.data)?;
+        }
+        Ok(workbook)
+    }
+
     pub fn open_for_read(bytes: &[u8]) -> Result<Self> {
         Self::open_internal(bytes, false, None)
     }
@@ -587,6 +628,9 @@ impl Workbook {
     }
 
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        xlsx_model::open_timing! {
+            let timing_parse = xlsx_model::open_timing::span("package_parse");
+        }
         let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
         let mut names = HashSet::with_capacity(parts.len());
         for (name, _) in &parts {
@@ -595,6 +639,7 @@ impl Workbook {
             }
         }
         let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        xlsx_model::open_timing! { drop(timing_parse); }
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -610,6 +655,9 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("recalculate");
+        }
         workbook.recalculate(options);
         Ok(workbook)
     }
@@ -715,12 +763,13 @@ impl Workbook {
         }
         let model = projected;
         validate_model(&model)?;
-        let opened_anchors = model
-            .sheets
-            .iter()
-            .flat_map(|sheet| &sheet.charts)
-            .map(|chart| (chart.frame_id(), chart.anchor))
-            .collect();
+        let opened_anchors = model.sheets.iter().flat_map(|sheet| &sheet.charts).fold(
+            BTreeMap::new(),
+            |mut anchors, chart| {
+                anchors.insert(chart.frame_id(), chart.anchor);
+                anchors
+            },
+        );
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
@@ -780,6 +829,13 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
         })
     }
 
@@ -1601,13 +1657,11 @@ impl Workbook {
     pub fn capture_format(&self, sheet: SheetId, range: CellRange) -> Result<CapturedFormat> {
         let (rows, columns) = self.validate_bounded_range(sheet, range)?;
         let formats = self.range_formats(sheet, range)?;
+        let mut defaults =
+            xlsx_model::workbook::ColumnDefaults::new(&self.model.sheets[sheet.0 as usize]);
         let source_styles: Vec<_> = formats
             .iter()
-            .map(|(at, _)| {
-                self.model.sheets[sheet.0 as usize]
-                    .cell(*at)
-                    .and_then(|cell| cell.style)
-            })
+            .map(|(at, _)| defaults.effective_style(*at))
             .collect();
         Ok(CapturedFormat {
             rows: rows as u32,
@@ -2646,6 +2700,13 @@ impl Workbook {
         let geometry = self.sheet_geometry(sheet)?;
         validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
         let display_list = self.display_list_for(sheet, viewport)?;
+        #[cfg(feature = "fonts")]
+        let bytes = {
+            let fonts = self.raster_fonts(&display_list)?;
+            xlsx_raster::render_png_with_fonts(&display_list, fonts.fonts())
+                .map_err(Error::Raster)?
+        };
+        #[cfg(not(feature = "fonts"))]
         let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
             bytes,
@@ -2696,6 +2757,13 @@ impl Workbook {
         } else {
             scaled(display_list, options.scale)
         };
+        #[cfg(feature = "fonts")]
+        let bytes = {
+            let fonts = self.raster_fonts(&display_list)?;
+            xlsx_raster::render_png_with_fonts(&display_list, fonts.fonts())
+                .map_err(Error::Raster)?
+        };
+        #[cfg(not(feature = "fonts"))]
         let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
             bytes,
@@ -5060,8 +5128,9 @@ enum CalculationScope {
 impl CalculationScope {
     /// What `ops` require of the engine, judged against `model` before they
     /// apply. The engine reads values, formulas, sheet names, defined names,
-    /// tables, array extents and used extents; styles, merges, panes and
-    /// charts never reach it.
+    /// tables, array extents and used extents; merges, panes and charts never
+    /// reach it, and styles reach it only through the number formats a
+    /// workbook that calculates with precision as displayed rounds to.
     fn of(model: &WorkbookModel, ops: &[Op]) -> Self {
         ops.iter()
             .map(|op| Self::of_op(model, op))
@@ -5071,6 +5140,15 @@ impl CalculationScope {
 
     fn of_op(model: &WorkbookModel, op: &Op) -> Self {
         match op {
+            Op::PatchRangeStyle { .. }
+            | Op::SetRangeNumberFormat { .. }
+            | Op::ApplyRangeFormat { .. }
+            | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
+                if !model.full_precision =>
+            {
+                Self::Full
+            }
             Op::PatchRangeStyle { .. }
             | Op::SetRangeNumberFormat { .. }
             | Op::ApplyRangeFormat { .. }
@@ -5090,7 +5168,13 @@ impl CalculationScope {
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. } => Self::Kept,
             Op::SetCell { sheet, at, cell } => {
-                if cell_content(model, *sheet, *at) == (&cell.value, cell.formula.as_deref()) {
+                let style = model
+                    .sheet(*sheet)
+                    .and_then(|sheet| sheet.cell(*at))
+                    .and_then(|cell| cell.style);
+                if cell_content(model, *sheet, *at) == (&cell.value, cell.formula.as_deref())
+                    && (model.full_precision || style == cell.style)
+                {
                     Self::Kept
                 } else {
                     Self::Full
@@ -5467,6 +5551,13 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
         })
     }
 }

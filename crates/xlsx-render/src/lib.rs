@@ -3,6 +3,7 @@
 
 pub mod chart;
 pub mod display_list;
+mod fmath;
 pub mod geometry;
 pub mod hit;
 pub mod number_format;
@@ -1426,8 +1427,16 @@ fn emit_inherited_fills(
     merges: &MergeIndex,
     geom: &GridGeometry,
 ) {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("style_fills");
+    }
     if sheet.col_styles.is_empty() && sheet.row_styles.is_empty() && fx.xf(None).fill.is_none() {
         return;
+    }
+    xlsx_model::open_timing! {
+        xlsx_model::open_timing::count("style_fill_rows", rows.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_fill_cols", cols.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_fill_cells", (rows.tracks.len() * cols.tracks.len()) as u64);
     }
     for col in &cols.tracks {
         let origin_x = if col.pinned { 0.0 } else { -cols.scroll };
@@ -1519,8 +1528,16 @@ fn emit_inherited_borders(
     merges: &MergeIndex,
     geom: &GridGeometry,
 ) {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("style_borders");
+    }
     if sheet.row_styles.is_empty() && sheet.col_styles.is_empty() && fx.xf(None).border.is_none() {
         return;
+    }
+    xlsx_model::open_timing! {
+        xlsx_model::open_timing::count("style_border_rows", rows.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_border_cols", cols.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_border_cells", (rows.tracks.len() * cols.tracks.len()) as u64);
     }
     for row in &rows.tracks {
         for col in &cols.tracks {
@@ -2243,8 +2260,8 @@ fn resolve_text_rotation(raw: Option<u16>) -> (Option<f32>, bool) {
 pub fn rotated_available_length(cell_w: f32, cell_h: f32, deg: f32, font_size_pt: f32) -> f32 {
     let line = font_size_pt * geometry::PX_PER_PT as f32 * 1.2;
     let rad = deg.abs().to_radians();
-    let cos = rad.cos().abs();
-    let sin = rad.sin().abs();
+    let cos = fmath::cos(rad).abs();
+    let sin = fmath::sin(rad).abs();
     let mut available = f32::INFINITY;
     if cos > 1e-6 {
         available = available.min((cell_w - line * sin) / cos);

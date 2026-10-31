@@ -50,6 +50,7 @@ import type { DocxSvgMedia } from './residentCommandProtocol';
 import { projectResidentComments, type ResidentCommentRecoveryState, type ResidentCommentProjection } from './residentCommentProjection';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
+import { editSessionUpdateEvents } from './updateEvents';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 import { decodeDocxHostJson, forgetMaterializedSource, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
 import { documentToYrs } from './documentToYrs';
@@ -252,6 +253,8 @@ export type ResidentEngineSession = Pick<
   decodeFont(bytes: Uint8Array): Uint8Array;
   openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
+  /** Caches save seed states while unchanged, within a paragraph and inflated package budget. */
+  primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
@@ -272,7 +275,8 @@ export type ResidentEngineSession = Pick<
     host: Document | undefined,
     comments: Comment[],
     record: ResidentSaveRecord,
-    stories?: readonly string[]
+    stories?: readonly string[],
+    yieldSave?: () => Promise<void>
   ): Promise<ArrayBuffer>;
 };
 
@@ -283,7 +287,16 @@ export async function createResidentEngineSession(
   requireUnreservedClientId(clientId);
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
-  const session = createEditSession(requireUnreservedClientId(clientId));
+  return residentEngineSession(clientId);
+}
+
+export function createResidentSaveWarmupSession(): ResidentEngineSession {
+  return residentEngineSession(randomClientId());
+}
+
+function residentEngineSession(clientId: number): ResidentEngineSession {
+  const hub = editSessionUpdateEvents(createEditSession(requireUnreservedClientId(clientId)));
+  const session = hub.session;
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
   let commentsInitialized = false;
@@ -457,28 +470,36 @@ export async function createResidentEngineSession(
     undoTracked = true;
   };
 
+  let unsubscribeUpdates: (() => void) | null = null;
+
   const detachObserver = (): void => {
     if (destroyed || !observing || listeners.size > 0) return;
-    session.clear_update_observer();
+    const unsubscribe = unsubscribeUpdates;
+    unsubscribeUpdates = null;
     observing = false;
+    unsubscribe?.();
   };
 
   const destroyNative = (): void => {
     if (observing) {
-      session.clear_update_observer();
+      const unsubscribe = unsubscribeUpdates;
+      unsubscribeUpdates = null;
       observing = false;
+      unsubscribe?.();
     }
     session.free();
   };
 
   const ensureObserver = (): void => {
     if (observing) return;
-    session.set_update_observer((update: Uint8Array, origin: number) => {
-      if (origin !== 0 && origin !== 1) return;
+    unsubscribeUpdates = hub.subscribe((update, origin) => {
       dispatchingUpdates = true;
       try {
         for (const listener of [...listeners]) {
-          listener(update, origin === 0 ? 'local' : 'remote');
+          if (!listeners.has(listener)) continue;
+          try {
+            listener(update.slice(), origin);
+          } catch {}
         }
       } finally {
         dispatchingUpdates = false;
@@ -943,6 +964,7 @@ export async function createResidentEngineSession(
       markProjectionStories(session.story_ids());
       parsedStoryRevision = syncStoryRevisions();
     },
+    primeSaveSeedStates: (maxParagraphs, maxInflatedBytes) => session.prime_save_seed_states(maxParagraphs, maxInflatedBytes),
     saveDocument: async (host, comments, record) => {
       if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');
@@ -1032,13 +1054,14 @@ export async function createResidentEngineSession(
       }
       return session.encode_diff_chunks(remoteStateVector.slice(), maxChunkBytes) as Uint8Array[];
     },
-    save: async (source, hostJson, host, comments, record, stories) => {
+    save: async (source, hostJson, host, comments, record, stories, yieldSave) => {
       const { saveResidentDocument } = await import('./residentSave');
+      if (yieldSave) await yieldSave();
       let projectedHost = partsTouched || session.part_metadata_json() !== '{}'
         ? withPartMetadata(host ?? partDocument(), partMetadata(partDocument())) : host;
       if (marginsTouched || sectionsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties());
       return saveResidentDocument(
-        session, clientId, source, hostJson, projectedHost, comments, record, projectionStories, stories
+        session, clientId, source, hostJson, projectedHost, comments, record, projectionStories, stories, yieldSave
       );
     },
     markProjectionStories,

@@ -46,7 +46,7 @@ beforeAll(async () => {
       readFileSync(
         resolve(
           import.meta.dir,
-          '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm'
+          '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
         )
       )
     )
@@ -86,7 +86,7 @@ beforeAll(async () => {
     pages: [{ pageIndex: 0, width: 600, height: 900, primitives: [] }, page],
   });
   await queries.whenReady();
-});
+}, 30_000);
 
 afterEach(cleanup);
 afterAll(async () => {

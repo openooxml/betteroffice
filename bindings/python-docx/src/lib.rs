@@ -1174,6 +1174,10 @@ impl PyDocument {
         Ok(PyEdit::from_core(receipt))
     }
 
+    fn replace_paragraph_text(&mut self, para_id: &str, text: &str) -> PyResult<PyEdit> {
+        self.replace_text(para_id, text)
+    }
+
     /// Export the document as read-only structured content: a dict with the
     /// camelCase `schemaVersion: 1` schema, anchors scoped to this snapshot.
     ///
@@ -1417,6 +1421,7 @@ impl PyDocument {
 
 #[pymodule]
 fn _betteroffice_docx(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
     let py = module.py();
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyDocument>()?;

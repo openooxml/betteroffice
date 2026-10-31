@@ -1,4 +1,5 @@
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
+import { createCommandFontInstallation } from './commandFontInstallation';
 import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { MethodHandlers } from '../../../../shared/office-session/types';
@@ -6,6 +7,7 @@ import { compileWasm } from '../../../../shared/office-session/wasm';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import { wasmAssetUrl } from '../wasm/asset';
+import { engineKind } from '../wasm/engine';
 import {
   decodeTiffImage, initWasm, openPresentation, presentationDisplayListJson, presentationMetadata,
   openPresentationReplayBaseline, presentationPeerHydration, presentationPeerMetadata,
@@ -16,6 +18,7 @@ import { frameAssetIds } from './frame';
 import { registerPresentationCommandHandlers } from './commandHost';
 import type { PresentationCommandEvents, PresentationCommandMethods } from './commandProtocol';
 import type { PresentationSharedMethods } from './commandSharedAdapter';
+import type { DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { peerHydrationError } from './editorPeerHydrationError';
 import { PptxPeerHydrationError } from './peerHydrationError';
 import {
@@ -29,13 +32,20 @@ import {
   type PresentationWireFrame,
 } from './methods';
 
-type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] } & PresentationCommandEvents;
+type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] } & PresentationCommandEvents & {
+  defaultFonts: PresentationCommandEvents['ack'] & DefaultFontPayload;
+  defaultFontInstall: DefaultFontInstallRequest;
+};
 
 function fonts(faces?: readonly PresentationSessionFont[]): PptxFontFace[] | undefined {
   return faces?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) }));
 }
 
 export async function initializePresentationEditorWasm(source?: ArrayBuffer | WebAssembly.Module) {
+  if (engineKind === 'native') {
+    await initWasm(source);
+    return undefined;
+  }
   const module = source instanceof WebAssembly.Module ? source : source === undefined
     ? await compileWasm(wasmAssetUrl()) : await WebAssembly.compile(source);
   await initWasm(module);
@@ -47,7 +57,7 @@ export function createPresentationSessionHost(
   transport: SessionTransport,
   options: {
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
-    initEditorWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<WebAssembly.Module>;
+    initEditorWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<WebAssembly.Module | undefined>;
   } = {}
 ): SessionHost<Events> {
   let handle: PresentationHandle | PresentationPeerHandle | undefined;
@@ -122,7 +132,7 @@ export function createPresentationSessionHost(
         clientId: input.clientId,
         fonts: fonts(input.fonts),
         fallbackFonts: fonts(input.fallbackFonts),
-        initialUpdate: input.initialUpdate,
+        initialUpdate: input.initialUpdate, retainSource: false,
       });
       try {
         const projection = metadata(opened);
@@ -258,7 +268,10 @@ export function createPresentationSessionHost(
   };
 
   let pipeOutputTimer: ReturnType<typeof setTimeout> | undefined;
-  const commands = registerPresentationCommandHandlers({ initWasm: options.initWasm, onPipeOutput() {
+  const fontInstallation = createCommandFontInstallation((request, transfer) => host.emit('defaultFontInstall', request, transfer));
+  const commands = registerPresentationCommandHandlers({ initWasm: options.initWasm,
+    installDefaultFonts: fontInstallation.install,
+    onDefaultFonts: (result) => host.emit('defaultFonts', result.value, result.transfer), onPipeOutput() {
     if (disposed || pipeOutputTimer !== undefined) return;
     pipeOutputTimer = setTimeout(() => {
       pipeOutputTimer = undefined;
@@ -266,12 +279,15 @@ export function createPresentationSessionHost(
       if (output) host.emit('collaborationPipe', output.batches, output.transfer);
     }, 0);
   } });
-  const replyTransport: SessionTransport = { ...transport, post(message, transfer) {
-    const output = isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')
-      ? commands.drainPipe() : undefined;
-    transport.post(output ? { ...(message as object), collabPipe: output.batches } : message,
-      output ? [...(transfer ?? []), ...output.transfer] : transfer);
-  } };
+  const replyTransport: SessionTransport = { ...transport,
+    listen: (listener) => transport.listen((message) => { if (!fontInstallation.receive(message)) listener(message); }),
+    post(message, transfer) {
+      const output = isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')
+        ? commands.drainPipe() : undefined;
+      transport.post(output ? { ...(message as object), collabPipe: output.batches } : message,
+        output ? [...(transfer ?? []), ...output.transfer] : transfer);
+    },
+  };
   const host = createSessionHost<
     PresentationSessionMethods & PresentationEditorMethods & PresentationCommandMethods & PresentationSharedMethods, Events, null
   >(replyTransport, {
@@ -279,7 +295,7 @@ export function createPresentationSessionHost(
     policies: { ...PRESENTATION_SESSION_POLICIES, ...PRESENTATION_EDITOR_POLICIES, ...commands.policies },
     context: null, onDispose() {
       if (pipeOutputTimer !== undefined) clearTimeout(pipeOutputTimer);
-      try { dispose(); } finally { commands.dispose(); }
+      try { dispose(); } finally { fontInstallation.dispose(); commands.dispose(); }
     },
   });
   return host;

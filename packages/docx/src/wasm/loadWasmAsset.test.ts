@@ -194,7 +194,9 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => ASSET, seen, true);
     try {
+      expect(state.status()).toBe('idle');
       state.ensure();
+      expect(state.status()).toBe('ready');
       expect(await state.sharedModule()).toBeNull();
       expect(seen).toEqual([]);
       expect(fetch).not.toHaveBeenCalled();
@@ -219,7 +221,9 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => remote, seen, true);
     try {
+      expect(state.status()).toBe('idle');
       const loading = state.preload(WASM_BYTES);
+      expect(state.status()).toBe('loading');
       expect(await state.sharedModule()).toBeNull();
       expect(seen).toEqual([WASM_BYTES]);
       expect(fetch).not.toHaveBeenCalled();
@@ -229,6 +233,7 @@ describe('shared module', () => {
 
       resolve(module);
       await loading;
+      expect(state.status()).toBe('ready');
       expect(await state.sharedModule()).toBeNull();
       expect(seen).toEqual([WASM_BYTES]);
       expect(fetch).not.toHaveBeenCalled();
@@ -246,12 +251,17 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => remote, seen, true);
     try {
+      expect(state.status()).toBe('idle');
       const compiling = state.sharedModule();
+      expect(state.status()).toBe('loading');
+      await compiling;
+      expect(state.status()).toBe('loading');
       expect(state.sharedModule()).toBe(compiling);
       expect(fetch).toHaveBeenCalledTimes(1);
       const loading = state.preload();
       expect(state.module()).toBe(compiling as Promise<WebAssembly.Module>);
       await loading;
+      expect(state.status()).toBe('ready');
       const module = await compiling;
       if (!module) throw new Error('Expected a shared module');
       expect(module).toBeInstanceOf(WebAssembly.Module);
@@ -298,9 +308,12 @@ describe('shared module', () => {
     const loading = state.preload();
     const failed = state.module();
     await expect(loading).rejects.toThrow();
+    expect(state.status()).toBe('idle');
     const retried = state.module();
+    expect(state.status()).toBe('loading');
     expect(retried).not.toBe(failed);
     await state.preload();
+    expect(state.status()).toBe('ready');
     expect(seen).toEqual([await retried]);
     expect(fetch).toHaveBeenCalledTimes(2);
   });
@@ -326,6 +339,7 @@ describe('shared module', () => {
       const loading = state.preload();
       const compiling = state.module();
       await expect(loading).rejects.toBe(error);
+      expect(state.status()).toBe('idle');
       const first = await compiling;
       expect(seen).toEqual([first]);
       expect(fetch).toHaveBeenCalledTimes(1);
@@ -351,9 +365,11 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => remote, seen, true);
     const loading = state.preloadFrom(Promise.resolve(module));
+    expect(state.status()).toBe('loading');
     expect(state.preload()).toBe(loading);
     expect(state.preloadFrom(Promise.resolve(null))).toBe(loading);
     await loading;
+    expect(state.status()).toBe('ready');
     expect(seen).toEqual([module]);
     expect(await state.module()).toBe(module);
     await state.preloadFrom(Promise.resolve(null));
@@ -419,6 +435,33 @@ describe('readWasmSync', () => {
 });
 
 describe('wasmModuleMemories', () => {
+  it.each([4096, 4096n])('reports a reflected lower memory maximum of %s pages', async (maximum) => {
+    const memory = new WebAssembly.Memory({ initial: 1, maximum: 4096 });
+    Object.defineProperty(memory, 'type', { value: () => ({ maximum }) });
+    const label = `memory-maximum-${typeof maximum}`;
+    const state = createWasmModuleState({
+      label, preloadName: 'preloadMemoryMaximumWasm', assetUrl: () => ASSET,
+      initAsync: async () => ({ memory }), initSync: () => ({ memory }),
+    });
+    await state.preload(new Uint8Array());
+    expect(wasmModuleMemories().find((module) => module.label === label)).toEqual({
+      label, bufferBytes: 65536, maximumBytes: 4096 * 65536,
+    });
+  });
+
+  it('keeps memory stats available when maximum reflection is unavailable', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    Object.defineProperty(memory, 'type', { value: () => { throw new Error('reflection unavailable'); } });
+    const state = createWasmModuleState({
+      label: 'memory-maximum-unavailable', preloadName: 'preloadMemoryMaximumUnavailableWasm', assetUrl: () => ASSET,
+      initAsync: async () => ({ memory }), initSync: () => ({ memory }),
+    });
+    await state.preload(new Uint8Array());
+    expect(wasmModuleMemories().find((module) => module.label === 'memory-maximum-unavailable')).toEqual({
+      label: 'memory-maximum-unavailable', bufferBytes: 65536,
+    });
+  });
+
   it('lists a module once it is initialized, with its allocator counters', async () => {
     const memory = new WebAssembly.Memory({ initial: 2 });
     const heap = { liveBytes: 10, peakBytes: 20, failedAllocationBytes: 0 };
@@ -460,4 +503,27 @@ describe('wasmModuleMemories', () => {
       bufferBytes: 65536,
     });
   });
+});
+
+it('native state becomes ready without touching assets, initialization or WebAssembly', async () => {
+  const assetUrl = mock(() => { throw new Error('Unexpected asset read'); });
+  const initAsync = mock(async () => { throw new Error('Unexpected async init'); });
+  const initSync = mock(() => { throw new Error('Unexpected sync init'); });
+  const options = { label: 'native', preloadName: 'preloadNative', engineKind: 'native' as const, assetUrl, initAsync, initSync, shareModule: true };
+  const asyncState = createWasmModuleState(options);
+  expect(asyncState.status()).toBe('idle');
+  expect(await asyncState.sharedModule()).toBeNull();
+  await expect(asyncState.module()).rejects.toThrow('Native engines have no WebAssembly module');
+  await asyncState.preload(new URL('https://invalid.example/unused'));
+  expect(asyncState.status()).toBe('ready');
+  const syncState = createWasmModuleState(options);
+  syncState.ensure();
+  expect(syncState.status()).toBe('ready');
+  const workerState = createWasmModuleState(options);
+  await workerState.preloadFrom(new Promise<WebAssembly.Module | null>(() => {}));
+  expect(workerState.status()).toBe('ready');
+  expect(await workerState.sharedModule()).toBeNull();
+  expect(assetUrl).not.toHaveBeenCalled();
+  expect(initAsync).not.toHaveBeenCalled();
+  expect(initSync).not.toHaveBeenCalled();
 });

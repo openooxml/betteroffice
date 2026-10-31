@@ -1883,6 +1883,162 @@ fn hanging_list_first_line_body_sits_at_the_text_indent() {
     );
 }
 
+#[test]
+fn inherited_list_indents_match_measured_text_and_marker_positions() {
+    use serde_json::{Value, json};
+
+    let mut fonts = ooxml_text::FontStore::new();
+    let font = fonts
+        .register(
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec(),
+        )
+        .unwrap();
+    for left_twips in [-720, 720] {
+        let left = f64::from(left_twips) / 15.0;
+        let hanging = 360.0 / 15.0;
+        let block = json!({
+            "kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 8,
+            "attrs": {
+                "styleId": "Heading1", "effectiveStyleId": "Heading1",
+                "indent": {"left": left, "hanging": hanging},
+                "listMarker": "1.", "listMarkerFontFamily": "Liberation Sans",
+                "listMarkerFontSize": 12
+            },
+            "runs": [{"kind": "text", "text": "heading", "pmStart": 1, "pmEnd": 8}]
+        });
+        let request = json!({
+            "block": block, "maxWidth": 500,
+            "fontChains": {"liberation sans|0|0": [font.to_u32()]},
+            "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12}
+        });
+        let measure: Value = serde_json::from_str(
+            &ooxml_text::measure_paragraph_json(&fonts, &request.to_string()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(measure["lines"].as_array().unwrap().len(), 1);
+        let line = &measure["lines"][0];
+        let measured_start = 100.0 + left + line["markerTabOffset"].as_f64().unwrap_or(0.0);
+        assert_eq!(measured_start, if left_twips < 0 { 52.0 } else { 148.0 });
+        let input = json!({
+            "measured": [{"block": block, "measure": measure}],
+            "options": {},
+            "layout": {"pages": [{"size": {"w": 700, "h": 400}, "margins": {},
+                "fragments": [{"kind": "paragraph", "blockId": 1, "x": 100, "y": 50,
+                    "width": 500, "height": measure["totalHeight"],
+                    "fromLine": 0, "toLine": 1, "pmStart": 1, "pmEnd": 8}]
+            }]}
+        });
+        let dl = build_dl(&input.to_string());
+        let body = dl.pages[0]
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Text(text) if text.text == "heading" => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        let marker = dl.pages[0]
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Text(text) if text.attrs.list_marker == Some(true) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(body.x.as_f64(), Some(measured_start), "left {left_twips}");
+        assert_eq!(
+            marker.x.as_f64(),
+            Some(measured_start - hanging),
+            "left {left_twips}"
+        );
+        assert_eq!(marker.width.as_f64(), Some(hanging));
+        assert!((body.width.as_f64().unwrap() - line["width"].as_f64().unwrap()).abs() < 0.001);
+    }
+}
+
+#[test]
+fn signed_paragraph_indents_keep_first_and_continuation_line_positions() {
+    use serde_json::json;
+
+    for (left, hanging, first_line, marker, hidden, expected) in [
+        (-48, 24, 0, true, false, [52.0, 52.0]),
+        (-48, 24, 0, true, true, [28.0, 52.0]),
+        (-48, 24, 0, false, false, [28.0, 52.0]),
+        (-48, 0, 12, false, false, [64.0, 52.0]),
+        (48, 0, -12, false, false, [136.0, 148.0]),
+        (48, -12, 0, false, false, [160.0, 148.0]),
+        (48, 24, -12, false, false, [112.0, 148.0]),
+        (48, 24, -12, true, false, [148.0, 148.0]),
+        (48, 24, 0, true, false, [148.0, 148.0]),
+        (0, 24, 0, true, false, [124.0, 124.0]),
+        (12, 24, 0, true, false, [124.0, 112.0]),
+    ] {
+        let indent = json!({"left": left, "hanging": hanging, "firstLine": first_line});
+        let input = json!({
+            "measured": [{
+                "block": {"kind": "paragraph", "id": 1,
+                    "attrs": {"indent": indent, "listMarker": marker.then_some("1."),
+                        "listMarkerHidden": hidden},
+                    "runs": [{"kind": "text", "text": "firstsecond"}]},
+                "measure": {"kind": "paragraph", "totalHeight": 40, "lines": [
+                    {"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 5,
+                        "width": 30, "ascent": 14, "descent": 4, "lineHeight": 20},
+                    {"headRun": 0, "headChar": 5, "tailRun": 0, "tailChar": 11,
+                        "width": 36, "ascent": 14, "descent": 4, "lineHeight": 20}
+                ]}
+            }],
+            "options": {},
+            "layout": {"pages": [{"size": {"w": 700, "h": 400}, "margins": {},
+                "fragments": [{"kind": "paragraph", "blockId": 1, "x": 100, "y": 50,
+                    "width": 500, "height": 40, "fromLine": 0, "toLine": 2}]
+            }]}
+        });
+        let dl = build_dl(&input.to_string());
+        let positions: Vec<_> = dl.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Text(text) if text.attrs.list_marker != Some(true) => {
+                    Some(text.x.as_f64().unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            positions, expected,
+            "{indent}, marker {marker}, hidden {hidden}"
+        );
+    }
+}
+
+#[test]
+fn negative_right_indent_expands_the_painted_alignment_width() {
+    use serde_json::json;
+
+    for (alignment, expected_x) in [("center", 371.0), ("right", 594.0)] {
+        let input = json!({
+            "measured": [{
+                "block": {"kind": "paragraph", "id": 1,
+                    "attrs": {"alignment": alignment, "indent": {"left": 48, "right": -24}},
+                    "runs": [{"kind": "text", "text": "heading"}]},
+                "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [
+                    {"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 7,
+                        "width": 30, "ascent": 14, "descent": 4, "lineHeight": 20}
+                ]}
+            }],
+            "options": {},
+            "layout": {"pages": [{"size": {"w": 700, "h": 400}, "margins": {},
+                "fragments": [{"kind": "paragraph", "blockId": 1, "x": 100, "y": 50,
+                    "width": 500, "height": 20, "fromLine": 0, "toLine": 1}]
+            }]}
+        });
+        let dl = build_dl(&input.to_string());
+        let text = text_prims(&dl.pages[0].primitives);
+        assert_eq!(text.len(), 1);
+        assert_eq!(text[0].1, expected_x, "{alignment}");
+    }
+}
+
 /// `jc=both` stretches expandable spaces to fill the usable width. A
 /// non-last line reaches the right margin and carries the per-space add as
 /// `wordSpacing`; the paragraph's closing line stays at natural width.
@@ -3281,11 +3437,16 @@ fn unbuilt_page_spans_read_positions_as_a_fresh_build_does() {
 #[test]
 fn paragraph_borders_enclose_a_hanging_first_line() {
     let edge = serde_json::json!({ "style": "single", "width": 1.0, "space": 0.0 });
-    for (hanging, left_edge) in [(60.0, 50.0), (20.0, 90.0), (0.0, 110.0)] {
+    for (left, hanging, left_edge) in [
+        (60.0, 60.0, 50.0),
+        (60.0, 20.0, 90.0),
+        (60.0, 0.0, 110.0),
+        (-48.0, 24.0, -22.0),
+    ] {
         let mut input = serde_json::json!({
             "measured": [{
                 "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 6,
-                    "attrs": { "indent": { "left": 60.0, "right": 0.0, "hanging": hanging },
+                    "attrs": { "indent": { "left": left, "right": 0.0, "hanging": hanging },
                         "borders": { "top": edge, "bottom": edge, "left": edge, "right": edge } },
                     "runs": [{ "kind": "text", "text": "Remark", "pmStart": 1 }] },
                 "measure": { "kind": "paragraph", "totalHeight": 20.0,
@@ -3313,7 +3474,11 @@ fn paragraph_borders_enclose_a_hanging_first_line() {
                 _ => None,
             })
             .collect();
-        assert_eq!(verticals, vec![left_edge, 380.0], "hanging {hanging}");
+        assert_eq!(
+            verticals,
+            vec![left_edge, 380.0],
+            "left {left}, hanging {hanging}"
+        );
     }
 }
 

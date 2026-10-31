@@ -16,6 +16,8 @@ pub(crate) struct PatchContext<'a> {
     pub session_key: &'a str,
     pub story: &'a str,
     pub metadata: Option<&'a crate::seed::SourceMetadata>,
+    pub source_paragraph: Option<&'a dyn Fn() -> Option<String>>,
+    pub source: Option<&'a crate::identity::SourceIndex>,
     pub seeded_markers: &'a [(u32, String, bool)],
     pub live_markers: &'a [(u32, String, bool)],
 }
@@ -53,6 +55,17 @@ impl PatchContext<'_> {
                 .collect()
         };
         (normalize(properties), normalize(run))
+    }
+
+    fn plain_style_supported(&self, properties: &Attrs) -> bool {
+        match (self.metadata, self.source) {
+            (Some(metadata), Some(source)) => metadata.plain_patch_style_supported(
+                self.story,
+                properties.get("pStyle").and_then(Value::as_str),
+                source,
+            ),
+            _ => false,
+        }
     }
 }
 
@@ -233,6 +246,14 @@ fn run_key(path: &[String]) -> bool {
         || (path.len() == 2 && children.is_some_and(|keys| keys.contains(&path[1].as_str())))
 }
 
+fn para_key_or_style(path: &[String]) -> bool {
+    para_key(path) || (path.len() == 1 && path[0] == "pStyle")
+}
+
+fn restyle_key(path: &[String]) -> bool {
+    para_key_or_style(path) || path.first().is_some_and(|key| key == "borders")
+}
+
 fn para_key(path: &[String]) -> bool {
     let Some(key) = path.first().map(String::as_str) else {
         return false;
@@ -293,10 +314,8 @@ fn delta_at(
     let old = before.and_then(Value::as_object);
     let new = after.and_then(Value::as_object);
     if (old.is_some() || before.is_none())
-        && (new.is_some() || after.is_none())
-        && (old.is_some() || new.is_some())
         && !old.is_some_and(|map| map.is_empty())
-        && !new.is_some_and(|map| map.is_empty())
+        && new.is_some_and(|map| !map.is_empty())
     {
         let keys: BTreeSet<_> = old
             .into_iter()
@@ -499,25 +518,61 @@ impl Alignment {
     }
 }
 
-fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &'static str> {
+fn single_run_insertion_alignment(
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Option<Vec<(usize, usize)>> {
+    let ([UnitV1::Text { text, .. }], [UnitV1::Text { text: target, .. }]) =
+        (before.units.as_slice(), after.units.as_slice())
+    else {
+        return None;
+    };
+    let boundaries = before.carriers.get("_originalRunBoundaries")?.as_array()?;
+    let [boundary] = boundaries.as_slice() else {
+        return None;
+    };
+    if boundary.get("text").and_then(Value::as_str) != Some(text.as_str())
+        || boundary.get("breaks").is_some()
+        || boundary.get("noteMarks").is_some()
+        || target.len() <= text.len()
+    {
+        return None;
+    }
+    let offset = target
+        .strip_suffix(text.as_str())
+        .map(|prefix| prefix.chars().count())
+        .or_else(|| target.strip_prefix(text.as_str()).map(|_| 0))?;
+    Some(
+        text.chars()
+            .enumerate()
+            .map(|(at, _)| (at, at + offset))
+            .collect(),
+    )
+}
+
+fn alignment(
+    before: &[Token],
+    after: &[Token],
+    context: &PatchContext<'_>,
+) -> Result<Vec<(usize, usize)>, &'static str> {
     const WORK_LIMIT: usize = 4_000_000;
-    let prefix = before
+    let shared_prefix = before
         .iter()
         .zip(after)
         .take_while(|(old, new)| old.content == new.content)
         .count();
-    if prefix == before.len() && prefix == after.len() {
-        return Ok((0..prefix).map(|at| (at, at)).collect());
+    if shared_prefix == before.len() && shared_prefix == after.len() {
+        return Ok((0..shared_prefix).map(|at| (at, at)).collect());
     }
-    let suffix = before[prefix..]
+    let shared_suffix = before[shared_prefix..]
         .iter()
         .rev()
-        .zip(after[prefix..].iter().rev())
+        .zip(after[shared_prefix..].iter().rev())
         .take_while(|(old, new)| old.content == new.content)
         .count();
     // Keep one boundary token on each side to detect ambiguous edge matches.
-    let prefix = prefix.saturating_sub(1);
-    let suffix = suffix.saturating_sub(1);
+    let prefix = shared_prefix.saturating_sub(1);
+    let suffix = shared_suffix.saturating_sub(1);
     let old_end = before.len() - suffix;
     let new_end = after.len() - suffix;
     let old_middle = &before[prefix..old_end];
@@ -528,13 +583,236 @@ fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &
     {
         return Err("ambiguous: alignment too large");
     }
-    let middle =
-        middle_alignment(old_middle, new_middle).ok_or("ambiguous: nonunique content alignment")?;
+    let middle = match middle_alignment(old_middle, new_middle) {
+        Some(middle) => middle,
+        None => {
+            let old_end = before.len() - shared_suffix;
+            let new_end = after.len() - shared_suffix;
+            if !homogeneous_replacement(
+                &before[shared_prefix..old_end],
+                &after[shared_prefix..new_end],
+            ) || !context
+                .source_paragraph
+                .and_then(|load| load())
+                .is_some_and(|source| {
+                    homogeneous_source_replacement(&source, before, shared_prefix..old_end)
+                })
+            {
+                return Err("ambiguous: nonunique content alignment");
+            }
+            return Ok((0..shared_prefix)
+                .map(|at| (at, at))
+                .chain((0..shared_suffix).map(|at| (old_end + at, new_end + at)))
+                .collect());
+        }
+    };
     Ok((0..prefix)
         .map(|at| (at, at))
         .chain(middle.into_iter().map(|(i, j)| (prefix + i, prefix + j)))
         .chain((0..suffix).map(|at| (old_end + at, new_end + at)))
         .collect())
+}
+
+fn preserved_drawing(kind: &str, payload: &Attrs) -> bool {
+    match kind {
+        "shape" => payload
+            .get("shapeJson")
+            .and_then(Value::as_str)
+            .and_then(|json| serde_json::from_str::<Value>(json).ok())
+            .is_some_and(|shape| {
+                ["drawingXml", "drawingRunXml"]
+                    .iter()
+                    .any(|key| shape.get(key).and_then(Value::as_str).is_some())
+            }),
+        "opaqueDrawing" => payload
+            .get("xml")
+            .and_then(Value::as_str)
+            .is_some_and(|xml| {
+                xml.contains("http://schemas.openxmlformats.org/drawingml/2006/diagram")
+            }),
+        _ => false,
+    }
+}
+
+fn drawing_text_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
+    if !before.iter().any(|token| {
+        matches!(&token.content,
+        Content::Atom(kind, payload) if preserved_drawing(kind, payload))
+    }) {
+        return None;
+    }
+    let prefix = before
+        .iter()
+        .zip(after)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let old_end = before.len() - suffix;
+    let new_end = after.len() - suffix;
+    let old = &before[prefix..old_end];
+    let new = &after[prefix..new_end];
+    let donor = old.first().or_else(|| new.first())?;
+    if old
+        .iter()
+        .chain(new)
+        .any(|token| !token.is_text() || !same_attrs(&token.attrs, &donor.attrs))
+    {
+        return None;
+    }
+    Some(
+        (0..prefix)
+            .map(|at| (at, at))
+            .chain((0..suffix).map(|at| (old_end + at, new_end + at)))
+            .collect(),
+    )
+}
+
+fn homogeneous_replacement(before: &[Token], after: &[Token]) -> bool {
+    let homogeneous = |tokens: &[Token]| {
+        tokens.first().is_some_and(|first| {
+            tokens
+                .iter()
+                .all(|token| token.is_text() && same_attrs(&first.attrs, &token.attrs))
+        })
+    };
+    let subsequence = |short: &[Token], long: &[Token]| {
+        let mut at = 0;
+        for token in long {
+            if short
+                .get(at)
+                .is_some_and(|next| next.content == token.content)
+            {
+                at += 1;
+            }
+        }
+        at == short.len()
+    };
+    homogeneous(before)
+        && homogeneous(after)
+        && !subsequence(before, after)
+        && !subsequence(after, before)
+}
+
+fn homogeneous_source_replacement(
+    source: &str,
+    before: &[Token],
+    range: std::ops::Range<usize>,
+) -> bool {
+    fn visit<'a>(
+        source: &'a str,
+        element: &docx_parse::XmlElement,
+        path: &mut Vec<u32>,
+        before: &[Token],
+        range: &std::ops::Range<usize>,
+        cursor: &mut usize,
+        properties: &mut Option<&'a str>,
+    ) -> Option<()> {
+        if *cursor >= range.end {
+            return Some(());
+        }
+        match element.name.as_str() {
+            "w:p" | "w:hyperlink" | "w:smartTag" => {
+                for (index, child) in element.child_elements().enumerate() {
+                    path.push(index as u32);
+                    visit(source, child, path, before, range, cursor, properties)?;
+                    path.pop();
+                }
+            }
+            "w:r" => {
+                let start = *cursor;
+                for child in element.child_elements() {
+                    if *cursor >= range.end {
+                        break;
+                    }
+                    let text = match child.name.as_str() {
+                        "w:rPr" => continue,
+                        "w:t" => child.text_content(),
+                        "w:tab" => "\t".to_owned(),
+                        "w:softHyphen" => "\u{ad}".to_owned(),
+                        "w:noBreakHyphen" => "\u{2011}".to_owned(),
+                        "w:drawing" | "w:pict" => {
+                            if before.get(*cursor)?.is_text() {
+                                return None;
+                            }
+                            *cursor += 1;
+                            continue;
+                        }
+                        _ if child.local_name() == "AlternateContent" => {
+                            if before.get(*cursor)?.is_text() {
+                                return None;
+                            }
+                            *cursor += 1;
+                            continue;
+                        }
+                        _ => return None,
+                    };
+                    for value in text.chars() {
+                        if *cursor >= range.end {
+                            break;
+                        }
+                        if before.get(*cursor)?.content != Content::Text(value) {
+                            return None;
+                        }
+                        *cursor += 1;
+                    }
+                }
+                if start < range.end && range.start < *cursor {
+                    let rpr = element
+                        .child_elements()
+                        .enumerate()
+                        .find(|(_, child)| child.name == "w:rPr");
+                    let raw = if let Some((index, _)) = rpr {
+                        path.push(index as u32);
+                        let span = docx_parse::serializer::element_span(source, path)?;
+                        path.pop();
+                        &source[span]
+                    } else {
+                        ""
+                    };
+                    if properties.is_some_and(|previous| previous != raw) {
+                        return None;
+                    }
+                    *properties = Some(raw);
+                }
+            }
+            "w:pPr"
+            | "w:proofErr"
+            | "w:smartTagPr"
+            | "w:bookmarkStart"
+            | "w:bookmarkEnd"
+            | "w:commentRangeStart"
+            | "w:commentRangeEnd"
+            | "w:permStart"
+            | "w:permEnd" => {}
+            _ => return None,
+        }
+        Some(())
+    }
+    let limits = docx_parse::xml::ParseLimits::default();
+    let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+    let Ok(document) = docx_parse::xml::parse_xml(source.as_bytes(), "", &mut budget) else {
+        return false;
+    };
+    let Some(root) = document.root() else {
+        return false;
+    };
+    let mut cursor = 0;
+    let matched = visit(
+        source,
+        root,
+        &mut Vec::new(),
+        before,
+        &range,
+        &mut cursor,
+        &mut None,
+    )
+    .is_some();
+    matched && cursor == range.end
 }
 
 fn middle_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
@@ -643,13 +921,22 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
             } => {
                 let comment = atom_kind == "field"
                     && payload.get("modelKind").and_then(Value::as_str) == Some("commentReference");
-                if !matches!(atom_kind.as_str(), "break" | "noteRef") && !comment {
+                if !matches!(
+                    atom_kind.as_str(),
+                    "break"
+                        | "noteRef"
+                        | "image"
+                        | "shape"
+                        | "shapeGroup"
+                        | "chart"
+                        | "opaqueDrawing"
+                        | "horizontalRule"
+                ) && !comment
+                {
                     let kind = match atom_kind.as_str() {
                         "field" => "field",
                         "sdt" | "blockSdt" => "sdt",
                         "math" => "math",
-                        "image" | "shape" | "shapeGroup" | "chart" | "opaqueDrawing"
-                        | "horizontalRule" => "drawing",
                         _ => return Some(format!("key:{atom_kind} unsupported atom")),
                     };
                     return Some(format!("{kind}: atom {atom_kind}"));
@@ -756,7 +1043,11 @@ fn validate_indent_kinds(
     before: &Snapshot,
     after: &Snapshot,
     context: &PatchContext<'_>,
+    patchable_restyle: bool,
 ) -> Result<(), LegacyParagraphV1> {
+    if patchable_restyle {
+        return Ok(());
+    }
     let source = before.carriers.get("_originalFormatting");
     let live = after.carriers.get("_originalFormatting");
     let ambiguous = |key| {
@@ -811,7 +1102,11 @@ fn validate_paragraph_clears(
     after: &Snapshot,
     changes: &[AttrDeltaV1],
     context: &PatchContext<'_>,
+    patchable_restyle: bool,
 ) -> Result<(), LegacyParagraphV1> {
+    if patchable_restyle {
+        return Ok(());
+    }
     let cleared = changes.iter().find_map(|delta| {
         let reset = match &delta.after {
             SlotV1::Missing => true,
@@ -879,8 +1174,10 @@ fn validate_theme_fonts(
 fn validate_carriers(
     before: &Snapshot,
     after: &Snapshot,
+    seeded_inherit: &Attrs,
     inherited: &Attrs,
     context: &PatchContext<'_>,
+    patchable_restyle: bool,
 ) -> Result<(), LegacyParagraphV1> {
     for change in deltas(&before.carriers, &after.carriers) {
         let key = change.path[0].as_str();
@@ -891,19 +1188,53 @@ fn validate_carriers(
                     path[0] = "pStyle".to_owned();
                 }
                 let target = attr_at(&after.properties, &path);
-                if para_key(&path) && attr_at(&before.properties, &path) == target {
+                if patchable_restyle && path == ["pStyle"] {
+                    true
+                } else if para_key(&path) && attr_at(&before.properties, &path) == target {
                     return Err(context.legacy(
                         PatchErrorCode::UnsupportedKey,
                         format!("key:{} direct property change", path.join(".")),
                     ));
+                } else {
+                    para_key(&path)
+                        && match &change.after {
+                            SlotV1::Missing => {
+                                target.is_none() || target == attr_at(inherited, &path)
+                            }
+                            SlotV1::Present { value } => target == Some(value),
+                        }
                 }
-                para_key(&path)
-                    && match &change.after {
-                        SlotV1::Missing => target.is_none() || target == attr_at(inherited, &path),
-                        SlotV1::Present { value } => target == Some(value),
-                    }
             }
             "bookmarks" => true,
+            "defaultTextFormatting" => {
+                let value = |slot: &SlotV1| match slot {
+                    SlotV1::Present { value } if !value.is_null() => Some(value.clone()),
+                    _ => None,
+                };
+                let direct = |snapshot: &Snapshot| {
+                    snapshot
+                        .carriers
+                        .get("_originalFormatting")
+                        .and_then(|value| value.get("runProperties"))
+                        .and_then(|value| {
+                            change.path[1..]
+                                .iter()
+                                .try_fold(value, |value, key| value.get(key))
+                        })
+                        .is_some_and(|value| !value.is_null())
+                };
+                patchable_restyle
+                    && !direct(before)
+                    && !direct(after)
+                    && value(&change.before)
+                        == attr_at(seeded_inherit, &change.path)
+                            .filter(|value| !value.is_null())
+                            .cloned()
+                    && value(&change.after)
+                        == attr_at(inherited, &change.path)
+                            .filter(|value| !value.is_null())
+                            .cloned()
+            }
             "spacingExplicit" => {
                 deltas(&before.properties, &after.properties)
                     .iter()
@@ -1013,18 +1344,97 @@ pub(crate) fn diff_paragraph_v1(
             after.properties.remove(key);
         }
     }
-    for key in ["pStyle", "styleId", "numPr"] {
-        if before.properties.get(key) != after.properties.get(key) {
-            return Err(context.restyle(key));
-        }
+    fn original_numpr(snapshot: &Snapshot) -> Option<&Value> {
+        snapshot
+            .carriers
+            .get("_originalFormatting")
+            .and_then(|value| value.get("numPr"))
+            .filter(|value| !value.is_null())
     }
     let (seeded_properties, _) = context.inheritance(&before.properties, &Attrs::new());
     let (para_inherit, _) = context.inheritance(&after.properties, &Attrs::new());
     let seeded_mark = mark_inheritance(&context, &before);
     let mark_inherit = mark_inheritance(&context, &after);
-    if seeded_properties != para_inherit
-        || seeded_mark != mark_inherit
-        || mark_attrs(&before) != mark_attrs(&after)
+    fn slot_value(slot: &SlotV1) -> Option<&Value> {
+        match slot {
+            SlotV1::Present { value } if !value.is_null() => Some(value),
+            _ => None,
+        }
+    }
+    fn inherited_value<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
+        attr_at(attrs, path).filter(|value| !value.is_null())
+    }
+    fn original_object(snapshot: &Snapshot) -> Option<&serde_json::Map<String, Value>> {
+        snapshot
+            .carriers
+            .get("_originalFormatting")
+            .and_then(Value::as_object)
+    }
+    let mut before_direct = original_object(&before).cloned().unwrap_or_default();
+    let mut after_direct = original_object(&after).cloned().unwrap_or_default();
+    before_direct.remove("styleId");
+    after_direct.remove("styleId");
+    let para_deltas = deltas(&before.properties, &after.properties);
+    let explained = para_deltas.iter().all(|delta| {
+        if delta.path.first().is_some_and(|key| key == "pStyle") {
+            return true;
+        }
+        let key = &delta.path[0];
+        let direct = [original_object(&before), original_object(&after)]
+            .iter()
+            .any(|object| {
+                object
+                    .and_then(|object| object.get(key))
+                    .is_some_and(|value| !value.is_null())
+            });
+        let list_indent = matches!(
+            key.as_str(),
+            "indentLeft"
+                | "indentFirstLine"
+                | "hangingIndent"
+                | "indentLeftChars"
+                | "indentFirstLineChars"
+                | "hangingIndentChars"
+        );
+        !direct
+            && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
+            && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
+                || list_indent)
+    });
+    let plain_restyle = !before.properties.contains_key("numPr")
+        && before_direct.is_empty()
+        && (before.units.is_empty()
+            || before
+                .carriers
+                .get("_originalRunBoundaries")
+                .and_then(Value::as_array)
+                .is_some_and(|runs| {
+                    runs.iter().all(|run| {
+                        run.get("formatting")
+                            .and_then(Value::as_object)
+                            .is_none_or(|formatting| formatting.is_empty())
+                    })
+                }))
+        && para_deltas.iter().all(|delta| restyle_key(&delta.path))
+        && context.plain_style_supported(&before.properties)
+        && context.plain_style_supported(&after.properties);
+    let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")
+        && before.properties.get("numPr") == after.properties.get("numPr")
+        && (original_numpr(&before).is_some() || plain_restyle)
+        && original_numpr(&before) == original_numpr(&after)
+        && before_direct == after_direct
+        && explained;
+    for key in ["pStyle", "styleId", "numPr"] {
+        if key == "pStyle" && patchable_restyle {
+            continue;
+        }
+        if before.properties.get(key) != after.properties.get(key) {
+            return Err(context.restyle(key));
+        }
+    }
+    if mark_attrs(&before) != mark_attrs(&after)
+        || (!patchable_restyle
+            && (seeded_properties != para_inherit || seeded_mark != mark_inherit))
     {
         return Err(context.restyle("paragraph inheritance"));
     }
@@ -1033,6 +1443,9 @@ pub(crate) fn diff_paragraph_v1(
         &["numPr"][..],
         &["runProperties", "styleId"][..],
     ] {
+        if patchable_restyle && *path == ["styleId"] {
+            continue;
+        }
         let source_value = |snapshot: &Snapshot| {
             snapshot
                 .carriers
@@ -1055,11 +1468,27 @@ pub(crate) fn diff_paragraph_v1(
             "tc: run property revision",
         ));
     }
-    let para_deltas = deltas(&before.properties, &after.properties);
-    validate_indent_kinds(&before, &after, &context)?;
-    validate_paragraph_clears(&before, &after, &para_deltas, &context)?;
-    validate_carriers(&before, &after, &para_inherit, &context)?;
-    validate_deltas(&para_deltas, para_key, &context)?;
+    validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
+    validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
+    validate_carriers(
+        &before,
+        &after,
+        &seeded_properties,
+        &para_inherit,
+        &context,
+        patchable_restyle,
+    )?;
+    validate_deltas(
+        &para_deltas,
+        if patchable_restyle && plain_restyle {
+            restyle_key
+        } else if patchable_restyle {
+            para_key_or_style
+        } else {
+            para_key
+        },
+        &context,
+    )?;
     if !verify_changes(&before.properties, &para_deltas, &after.properties) {
         return Err(context.legacy(
             PatchErrorCode::UnsupportedKey,
@@ -1070,8 +1499,19 @@ pub(crate) fn diff_paragraph_v1(
     let new = tokens(&after.units);
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
-    let retained = alignment(&old, &new)
-        .map_err(|detail| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?;
+    let retained = match alignment(&old, &new, &context) {
+        Ok(retained) => retained,
+        Err(detail @ "ambiguous: nonunique content alignment") => {
+            drawing_text_alignment(&old, &new)
+                .or_else(|| {
+                    patchable_restyle
+                        .then(|| single_run_insertion_alignment(&before, &after))
+                        .flatten()
+                })
+                .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?
+        }
+        Err(detail) => return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
+    };
     let donors = DonorIndex::new(&old);
     let offsets = &donors.offsets;
     let mut text_edits = Vec::new();
@@ -1126,7 +1566,7 @@ pub(crate) fn diff_paragraph_v1(
                         .text_donor(previous.0, i)
                         .map_or(&seeded_mark, |at| old_inherit[at].as_ref());
                     if token.attrs.get("runStyle") != donor_attrs.get("runStyle")
-                        || inherit.as_ref() != donor_inherit
+                        || (!patchable_restyle && inherit.as_ref() != donor_inherit)
                     {
                         return Err(context.restyle("inserted run inheritance"));
                     }
@@ -1164,11 +1604,11 @@ pub(crate) fn diff_paragraph_v1(
         }
         if i < old.len() {
             if old[i].attrs.get("runStyle") != new[j].attrs.get("runStyle")
-                || !same_attrs(&old_inherit[i], &new_inherit[j])
+                || (!patchable_restyle && !same_attrs(&old_inherit[i], &new_inherit[j]))
             {
                 return Err(context.restyle("run inheritance"));
             }
-            if marker_atom(&old[i]) && !same_attrs(&old[i].attrs, &new[j].attrs) {
+            if retained_atom(&old[i]) && !same_attrs(&old[i].attrs, &new[j].attrs) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
                     "marker: formatting touches a marker atom",
@@ -1206,7 +1646,7 @@ pub(crate) fn diff_paragraph_v1(
                 }
             }
             let inherit = &new_inherit[j];
-            if !run_changes.is_empty() && !marker_atom(&old[i]) {
+            if !run_changes.is_empty() && !readonly_atom(&old[i]) {
                 if let Some(last) = run_edits.last_mut()
                     && last.to == offsets[i]
                     && (same_run
@@ -1240,6 +1680,18 @@ pub(crate) fn diff_paragraph_v1(
         ));
     }
     validate_markers(&before, &after, &text_edits, &context)?;
+    let mut seed_properties = verification_properties(&before, context.seeded_markers);
+    let mut result_properties = verification_properties(&after, context.live_markers);
+    let para_deltas = if patchable_restyle && plain_restyle {
+        for properties in [&mut seed_properties, &mut result_properties] {
+            properties.retain(|key, _| key == "pStyle" || !restyle_key(std::slice::from_ref(key)));
+        }
+        let changes = deltas(&seed_properties, &result_properties);
+        validate_deltas(&changes, para_key_or_style, &context)?;
+        changes
+    } else {
+        para_deltas
+    };
     let inherit = InheritanceV1 {
         paragraph: seeded_properties,
         runs: before
@@ -1257,7 +1709,7 @@ pub(crate) fn diff_paragraph_v1(
     let seed = SeedV1 {
         inherit,
         unit_sha256: unit_sha256(&before.units),
-        properties: verification_properties(&before, context.seeded_markers),
+        properties: seed_properties,
         units: before.units,
     };
     Ok(ParagraphPatchV1 {
@@ -1269,10 +1721,7 @@ pub(crate) fn diff_paragraph_v1(
         para_deltas,
         para_inherit,
         mark_inherit,
-        result_sha256: result_sha256(
-            &units(&replay),
-            &verification_properties(&after, context.live_markers),
-        ),
+        result_sha256: result_sha256(&units(&replay), &result_properties),
     })
 }
 
@@ -1295,6 +1744,12 @@ fn verification_properties(snapshot: &Snapshot, markers: &[(u32, String, bool)])
     properties
 }
 
+fn readonly_atom(token: &Token) -> bool {
+    marker_atom(token)
+        || matches!(&token.content,
+        Content::Atom(kind, payload) if preserved_drawing(kind, payload))
+}
+
 fn marker_atom(token: &Token) -> bool {
     matches!(
         &token.content,
@@ -1302,6 +1757,10 @@ fn marker_atom(token: &Token) -> bool {
             if kind == "field"
                 && payload.get("modelKind").and_then(Value::as_str) == Some("commentReference")
     )
+}
+
+fn retained_atom(token: &Token) -> bool {
+    matches!(&token.content, Content::Atom(kind, _) if kind != "break" && kind != "noteRef")
 }
 
 fn shifted_marker(at: u32, edits: &[TextEditV1]) -> Option<u32> {
@@ -1407,9 +1866,110 @@ mod tests {
             session_key: "p1",
             story: "body",
             metadata: None,
+            source_paragraph: None,
+            source: None,
             seeded_markers: &[],
             live_markers: &[],
         }
+    }
+
+    #[test]
+    fn retained_drawing_atoms_allow_neighbour_text_but_no_payload_or_format_changes() {
+        let mut before = paragraph("old", json!({}));
+        before.insert(
+            1,
+            StorySegment {
+                content: SegmentContent::OtherEmbed {
+                    kind: "shape".to_owned(),
+                    payload: BTreeMap::from([("id".to_owned(), Any::String("box".into()))]),
+                },
+                attributes: BTreeMap::new(),
+            },
+        );
+        let mut after = before.clone();
+        after[0].content = SegmentContent::Text("new".to_owned());
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        assert!(!patch.text_edits.is_empty());
+        assert!(patch.run_edits.is_empty());
+        for payload in [false, true] {
+            let mut changed = after.clone();
+            if payload {
+                let SegmentContent::OtherEmbed { payload, .. } = &mut changed[1].content else {
+                    unreachable!()
+                };
+                payload.insert("id".to_owned(), Any::String("other".into()));
+            } else {
+                changed[1]
+                    .attributes
+                    .insert("bold".to_owned(), Any::Bool(true));
+            }
+            let legacy = diff_paragraph_v1(&before, &changed, context()).unwrap_err();
+            assert_eq!(legacy.code, PatchErrorCode::UnsupportedStructure);
+            assert!(legacy.detail.starts_with("marker:"));
+        }
+    }
+
+    #[test]
+    fn homogeneous_replacements_keep_retained_atoms_outside_the_edit() {
+        for drawing in [false, true] {
+            let mut before = paragraph("Caption ", json!({}));
+            if drawing {
+                before.insert(
+                    1,
+                    StorySegment {
+                        content: SegmentContent::OtherEmbed {
+                            kind: "shape".to_owned(),
+                            payload: BTreeMap::from([("id".to_owned(), Any::String("box".into()))]),
+                        },
+                        attributes: BTreeMap::new(),
+                    },
+                );
+            }
+            let mut after = before.clone();
+            after[0].content = SegmentContent::Text("Title ".to_owned());
+            let source = || {
+                let drawing = if drawing {
+                    "<w:r><w:drawing/></w:r>"
+                } else {
+                    ""
+                };
+                Some(format!(
+                    "<w:p><w:r><w:t xml:space=\"preserve\">Caption </w:t></w:r>{drawing}</w:p>"
+                ))
+            };
+            let patch = diff_paragraph_v1(
+                &before,
+                &after,
+                PatchContext {
+                    source_paragraph: Some(&source),
+                    ..context()
+                },
+            )
+            .unwrap();
+            assert_eq!(patch.text_edits.len(), 1);
+            let edit = &patch.text_edits[0];
+            assert_eq!((edit.from, edit.to), (0, 7));
+            assert_eq!(edit.insert.len(), 1);
+            assert_eq!(edit.insert[0].text, "Title");
+            assert!(patch.run_edits.is_empty());
+        }
+    }
+
+    #[test]
+    fn ambiguous_replacements_across_different_run_properties_are_legacy() {
+        let mut before = paragraph("Cap", json!({}));
+        before.insert(
+            1,
+            StorySegment {
+                content: SegmentContent::Text("tion".to_owned()),
+                attributes: BTreeMap::from([("bold".to_owned(), Any::Bool(true))]),
+            },
+        );
+        let mut after = before.clone();
+        after[0].content = SegmentContent::Text("Tit".to_owned());
+        after[1].content = SegmentContent::Text("le".to_owned());
+        let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
     }
 
     fn bookmarks(start: u32, end: u32) -> Value {
@@ -1495,6 +2055,115 @@ mod tests {
                 assert_eq!(legacy.detail, format!("key:{key}.{leaf}"));
             }
         }
+    }
+
+    #[test]
+    fn numbered_restyle_with_direct_numbering_stays_a_patch() {
+        let numbering = json!({"numId": 43, "ilvl": 0});
+        let before = paragraph(
+            "x",
+            json!({
+                "pStyle": "ListParagraph",
+                "numPr": numbering.clone(),
+                "_originalFormatting": {"styleId": "ListParagraph", "numPr": numbering.clone()}
+            }),
+        );
+        let after = paragraph(
+            "x",
+            json!({
+                "pStyle": "Heading1",
+                "numPr": numbering.clone(),
+                "_originalFormatting": {"styleId": "Heading1", "numPr": numbering.clone()}
+            }),
+        );
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        assert_eq!(patch.para_deltas.len(), 1);
+        assert_eq!(patch.para_deltas[0].path, ["pStyle"]);
+    }
+
+    #[test]
+    fn numbered_restyle_refuses_repeated_alignment_without_one_source_run() {
+        for boundaries in [
+            Value::Null,
+            json!([{"text": "Some "}, {"text": "heading"}]),
+            json!([{"text": "other text"}]),
+        ] {
+            let paragraph = |text, style| {
+                paragraph(
+                    text,
+                    json!({
+                        "pStyle": style,
+                        "numPr": {"numId": 43, "ilvl": 0},
+                        "_originalFormatting": {
+                            "styleId": style, "numPr": {"numId": 43, "ilvl": 0}
+                        },
+                        "_originalRunBoundaries": boundaries
+                    }),
+                )
+            };
+            let legacy = diff_paragraph_v1(
+                &paragraph("Some heading", "ListParagraph"),
+                &paragraph("Some Some heading", "Heading1"),
+                context(),
+            )
+            .unwrap_err();
+            assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
+            assert_eq!(legacy.detail, "ambiguous: nonunique content alignment");
+        }
+    }
+
+    #[test]
+    fn numbered_restyle_with_a_direct_change_is_not_a_patch() {
+        let numbering = json!({"numId": 43, "ilvl": 0});
+        let before = paragraph(
+            "x",
+            json!({
+                "pStyle": "ListParagraph",
+                "numPr": numbering.clone(),
+                "_originalFormatting": {"styleId": "ListParagraph", "numPr": numbering.clone()}
+            }),
+        );
+        let after = paragraph(
+            "x",
+            json!({
+                "pStyle": "Heading1",
+                "numPr": numbering.clone(),
+                "alignment": "center",
+                "_originalFormatting": {
+                    "styleId": "Heading1", "numPr": numbering.clone(), "alignment": "center"
+                }
+            }),
+        );
+        let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::UnsupportedStructure);
+        assert!(legacy.detail.starts_with("restyle:"));
+    }
+
+    #[test]
+    fn numbered_restyle_with_an_unexplained_mark_change_is_not_a_patch() {
+        let paragraph = |style: &str, italic: bool| {
+            paragraph(
+                "x",
+                json!({
+                    "pStyle": style,
+                    "numPr": {"numId": 43, "ilvl": 0},
+                    "defaultTextFormatting": {"italic": italic},
+                    "_originalFormatting": {
+                        "styleId": style,
+                        "numPr": {"numId": 43, "ilvl": 0},
+                        "runProperties": {"italic": true}
+                    }
+                }),
+            )
+        };
+        let legacy = diff_paragraph_v1(
+            &paragraph("ListParagraph", true),
+            &paragraph("Heading1", false),
+            context(),
+        )
+        .unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::UnsupportedKey);
+        assert_eq!(legacy.detail, "key:defaultTextFormatting.italic");
     }
 
     #[test]
@@ -1587,6 +2256,51 @@ mod tests {
                 DonorV1::At { at }
             );
         }
+    }
+
+    #[test]
+    fn smart_art_allows_an_ambiguous_text_replacement_beside_an_unchanged_atom() {
+        let drawing = StorySegment {
+            content: SegmentContent::OtherEmbed {
+                kind: "shape".to_owned(),
+                payload: BTreeMap::from([(
+                    "shapeJson".to_owned(),
+                    crate::seed::any_from_value(json!(
+                        json!({"drawingXml": "<w:drawing/>"}).to_string()
+                    ))
+                    .unwrap(),
+                )]),
+            },
+            attributes: BTreeMap::new(),
+        };
+        let with_drawing = |text| {
+            let mut segments = paragraph(text, json!({}));
+            let mark = segments.pop().unwrap();
+            segments.push(drawing.clone());
+            segments.push(StorySegment {
+                content: SegmentContent::Text(" and after the diagram.".to_owned()),
+                attributes: BTreeMap::new(),
+            });
+            segments.push(mark);
+            segments
+        };
+        let before = with_drawing("Process overview before ");
+        let after = with_drawing("Process overview ahead of ");
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        assert_eq!(patch.text_edits.len(), 1);
+        assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (17, 23));
+        assert_eq!(patch.text_edits[0].insert[0].text, "ahead of");
+        assert!(patch.run_edits.is_empty());
+        let mut changed = before.clone();
+        changed[1]
+            .attributes
+            .insert("bold".to_owned(), Any::Bool(true));
+        assert_eq!(
+            diff_paragraph_v1(&before, &changed, context())
+                .unwrap_err()
+                .detail,
+            "marker: formatting touches a marker atom"
+        );
     }
 
     #[test]

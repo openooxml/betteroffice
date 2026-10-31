@@ -1,6 +1,7 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { createFontProvider, resolveGlyphFallbackFace, resolveScriptFallbackFace } from '@betteroffice/fonts';
 import type {
   PresentationHandle,
@@ -10,6 +11,8 @@ import type {
   TextBoxPrimitive,
 } from '../index';
 import { initWasm, openPresentation, paintSlide, StaleProposalError } from '../index';
+import { engineKind } from './engine';
+import { PptxDocument, PptxRenderer } from './generated/pptx_wasm.js';
 
 const root = resolve(import.meta.dir, '../../../..');
 let handle: PresentationHandle;
@@ -73,6 +76,54 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 });
 
 afterAll(() => handle.dispose());
+
+for (const fallback of [false, true]) test.skipIf(engineKind === 'native')(`failed ${fallback ? 'fallback ' : ''}font registration frees the renderer and document`, () => {
+  const original = Object.assign(new Error('render resource limit exceeded: more than 256 font faces'), {
+    name: 'PptxResourceLimitError', code: 'font-face-limit',
+  });
+  const register = spyOn(PptxRenderer.prototype, fallback ? 'registerFallbackFont' : 'registerFont')
+    .mockImplementation(() => { throw original; });
+  const freeRenderer = spyOn(PptxRenderer.prototype, 'free');
+  const freeDocument = spyOn(PptxDocument.prototype, 'free');
+  try {
+    let failure: unknown;
+    try {
+      openPresentation(fixture, { clientId: 9304,
+        [fallback ? 'fallbackFonts' : 'fonts']: [{ family: 'Liberation Sans', bytes: fontBytes }] }).dispose();
+    } catch (error) { failure = error; }
+    expect(failure).toBe(original);
+    expect(freeRenderer).toHaveBeenCalledTimes(1);
+    expect(freeDocument).toHaveBeenCalledTimes(1);
+  } finally { register.mockRestore(); freeRenderer.mockRestore(); freeDocument.mockRestore(); }
+});
+
+test('worker handles without retained source still edit and save but cannot fork', () => {
+  const source = openPresentation(fixture, { clientId: 9301, retainSource: false });
+  try {
+    expect(source.snapshot().slides.length).toBeGreaterThan(0);
+    expect(() => source.fork()).toThrow('Presentation source is unavailable for fork');
+    expect(() => source.layouts()).toThrow('Presentation source is unavailable for layouts');
+    const slide = source.snapshot().slides[0]!;
+    const content = source.readContent();
+    if (!content.ok) throw new Error(content.failure.message);
+    const story = content.stories[0]!;
+    source.insertText(story.storyId, 0, 'Worker edit ', {});
+    source.setSlideNotes(slide.id, 'Worker notes');
+    const reopened = openPresentation(source.save(), { clientId: 9303 });
+    try {
+      const saved = reopened.readContent();
+      if (!saved.ok) throw new Error(saved.failure.message);
+      expect(saved.stories.some((item) => item.text === `Worker edit ${story.text}`)).toBe(true);
+      expect(reopened.snapshot().slides[0]!.notes).toBe('Worker notes');
+    } finally { reopened.dispose(); }
+  } finally { source.dispose(); }
+  const retained = openPresentation(fixture, { clientId: 9302 });
+  try {
+    const forked = retained.fork();
+    try { expect(forked.snapshot()).toEqual(retained.snapshot()); } finally { forked.dispose(); }
+    expect(retained.layouts().length).toBeGreaterThan(0);
+  } finally { retained.dispose(); }
+});
 
 test('ordinary text deletion refuses paragraph joins without changing state or history', () => {
   const source = openPresentation(fixture, { clientId: 9210 });
@@ -548,6 +599,39 @@ describe('PPTX wasm boundary', () => {
     attached.dispose();
     reopened.dispose();
     bare.dispose();
+  });
+
+  test('save with fonts fits edited autofit text in a renderer of its own', async () => {
+    const zip = new JSZip();
+    const ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"';
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="2476500" cy="952500"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="2400"><a:latin typeface="Liberation Sans"/></a:rPr><a:t>Start</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`);
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const slide = async (saved: Uint8Array) => (await JSZip.loadAsync(saved)).file('ppt/slides/slide1.xml')!.async('string');
+    const edit = (target: PresentationHandle) => {
+      const story = firstStory(target.snapshot().slides[0].shapes);
+      target.insertText(story.id, 5, ' words that must shrink to stay inside the box'.repeat(8));
+    };
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const bare = openPresentation(bytes, { clientId: 9301 });
+    const loaded = openPresentation(bytes, { clientId: 9302, fonts });
+    try {
+      edit(bare);
+      edit(loaded);
+      const plain = await slide(bare.save());
+      expect(plain).not.toContain('fontScale');
+      const fitted = await slide(bare.save({ fonts }));
+      expect(fitted).toMatch(/<a:normAutofit fontScale="\d+"/);
+      expect(await slide(loaded.save())).toBe(fitted);
+      expect(await slide(bare.save())).toBe(plain);
+    } finally {
+      bare.dispose();
+      loaded.dispose();
+    }
   });
 
   test('edits survive a save and reopen', () => {

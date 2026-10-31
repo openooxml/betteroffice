@@ -172,6 +172,7 @@ import { clampZoom } from '../commands/evaluate';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
+import { hostedFontProvider } from '../hooks/hostedFonts';
 import { useTableSelection } from '../hooks/useTableSelection';
 import { useDocumentHistory } from '../hooks/useHistory';
 
@@ -484,10 +485,10 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Translation overrides. Import a locale JSON file and pass it directly. */
   i18n?: Translations;
   /**
-   * Font provider for this editor, overriding whatever `configureDefaultFonts`
-   * set globally. With neither, measurement falls back to the browser and may
-   * not paginate like Word. Call `configureDefaultFonts` before editors load;
-   * existing registries retain their provider, so it is not per editor or tenant.
+   * Font provider for this editor, overriding the `configureDefaultFonts`
+   * source and the default fonts manager. Call `configureDefaultFonts` before
+   * editors load; existing registries retain their provider, so it is not per
+   * editor or tenant.
    */
   measurementFontProvider?: BundledFontProvider;
 }
@@ -869,10 +870,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   ref
 ) {
   const props = useDocxFileAliases(aliasedProps);
+  const hostedFamilies = props.fonts?.map(font => font.family.trim().toLowerCase()).sort().join('\n') ?? '';
+  const measurementFontProvider = useMemo(
+    () => hostedFontProvider(props.measurementFontProvider, hostedFamilies ? props.fonts : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.measurementFontProvider, hostedFamilies]
+  );
   const choice = useDocxEditorRoute(props);
   if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
-  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;
-  return <LegacyDocxEditor key={choice.route} {...props} ref={ref} />;
+  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
+  return <LegacyDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
 });
 
 function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className' | 'style'>) {
@@ -885,7 +892,7 @@ function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className'
     reported.current = true;
     try { latest.current?.(error); } catch {}
   }, [error]);
-  return <div role="alert" className={props.className} style={props.style}>{error.message}</div>;
+  return <div dir="ltr" role="alert" className={props.className} style={props.style}>{error.message}</div>;
 }
 
 const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function LegacyDocxEditor(
@@ -1020,7 +1027,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
-  const fontScope = useFontLoadScope();
+  const fontScope = useFontLoadScope(fonts);
 
   const {
     comments,
@@ -2559,6 +2566,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   if (state.isLoading) {
     return (
       <div
+        dir="ltr"
         className={cn('oox-root docx-editor docx-editor-loading', isDark && 'dark', className)}
         style={containerStyle}
         data-testid="docx-editor"
@@ -2572,6 +2580,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   if (state.parseError) {
     return (
       <div
+        dir="ltr"
         className={cn('oox-root docx-editor docx-editor-error', isDark && 'dark', className)}
         style={containerStyle}
         data-testid="docx-editor"
@@ -2585,6 +2594,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   if (!history.state) {
     return (
       <div
+        dir="ltr"
         className={cn('oox-root docx-editor docx-editor-empty', isDark && 'dark', className)}
         style={containerStyle}
         data-testid="docx-editor"

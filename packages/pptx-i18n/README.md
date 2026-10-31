@@ -23,8 +23,8 @@ export function Editor({ file, fonts }: Pick<PptxAsyncEditorProps, 'file' | 'fon
 }
 ```
 
-Override individual strings by spreading a locale. Keys that are missing or `null` fall back to
-English.
+Override individual strings by spreading a locale. Keys that are missing or `null` in an override fall
+back to English.
 
 ```ts
 const custom = { ...de, toolbar: { ...de.toolbar, addSlide: 'Neue Folie' } };
@@ -32,8 +32,9 @@ const custom = { ...de, toolbar: { ...de.toolbar, addSlide: 'Neue Folie' } };
 
 ## Locales
 
-`en` (source), `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr` and `zh-CN`. The
-exports for `pt-BR` and `zh-CN` are `ptBR` and `zhCN`.
+`en` (source), `ar`, `de`, `es`, `fr`, `he`, `hi`, `id`, `it`, `ja`, `ko`, `nl`, `pl`, `pt-BR`, `ru`,
+`tr`, `uk`, `vi`, `zh-CN` and `zh-TW`. The exports for `pt-BR`, `zh-CN` and `zh-TW` are `ptBR`,
+`zhCN` and `zhTW`. Every locale translates every string.
 
 Each locale is also its own subpath, for example `@betteroffice/pptx-i18n/pl`, so an app that picks
 the locale at runtime can load only the one it needs. `locales` maps every tag to its strings and

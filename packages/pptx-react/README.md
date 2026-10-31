@@ -96,8 +96,8 @@ Calling `save()` directly returns bytes without invoking those save callbacks.
 
 ## Toolbar
 
-The toolbar composition API is experimental. `api.commands` is shared by the built-in controls and
-host toolbar parts. Replace controls with
+The toolbar composition API can change in minor releases. `api.commands` is shared by the
+built-in controls and host toolbar parts. Replace controls with
 `toolbar`, or hide the region with `showToolbar={false}`.
 See [Compose the PPTX toolbar](https://docs.betteroffice.dev/docs/javascript#compose-the-pptx-toolbar)
 for composition, external controls, command state, and overflow.
@@ -108,7 +108,7 @@ use `EditorToolbar` with `mode="commands"`.
 ## Plugins
 
 `definePptxPlugin` defines tools installed through `plugins`, with permissions supplied by
-`pluginGrants`. This plugin API is experimental and may change in minor releases.
+`pluginGrants`. This plugin API can change in minor releases.
 See [Host PPTX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-pptx-editor-plugins)
 for panels, overlays, lifecycle, permissions, and error handling.
 

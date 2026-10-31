@@ -76,6 +76,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
+ "libm",
  "serde",
 ]
 
@@ -88,7 +89,10 @@ dependencies = [
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
+ "betteroffice-xlsx-ops",
  "libfuzzer-sys",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -97,6 +101,7 @@ version = "0.5.1"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
+ "libm",
 ]
 
 [[package]]
@@ -147,6 +152,7 @@ dependencies = [
  "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "quick-xml",
  "serde",
  "thiserror",
@@ -176,9 +182,39 @@ dependencies = [
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "betteroffice-xlsx-calc"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-xlsx-model",
+ "libm",
+]
+
+[[package]]
+name = "betteroffice-xlsx-model"
+version = "0.5.1"
+dependencies = [
+ "libm",
+ "serde",
+]
+
+[[package]]
+name = "betteroffice-xlsx-ops"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-xlsx-calc",
+ "betteroffice-xlsx-model",
+ "quick-xml",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -627,9 +663,9 @@ dependencies = [
 
 [[package]]
 name = "libm"
-version = "0.2.16"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "lock_api"
@@ -1187,6 +1223,12 @@ name = "unicode-script"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "usvg"

@@ -14,12 +14,18 @@ categories = ["rendering", "graphics"]
 [lib]
 name = "xlsx_raster"
 
+[features]
+fonts = []
+
 [dependencies]
 tiny-skia = "0.12"
 png = "0.18"
 rustybuzz = "0.20"
 unicode-segmentation = "1.12"
 xlsx-render.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libm.workspace = true
 
 [dev-dependencies]
 xlsx-model.workspace = true

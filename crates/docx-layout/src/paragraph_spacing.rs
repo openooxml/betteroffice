@@ -37,6 +37,13 @@ fn resolve_shape_line_spacing(shape: &mut ShapeBlock, line_px: f64) {
 }
 
 fn resolve_paragraph_line_spacing(paragraph: &mut ParagraphBlock, line_px: f64) {
+    for run in &mut paragraph.runs {
+        if let Run::Image(image) = run
+            && let Some(shape) = &mut image.inline_shape
+        {
+            resolve_shape_line_spacing(shape, line_px);
+        }
+    }
     let Some(spacing) = paragraph
         .attrs
         .as_mut()
@@ -64,16 +71,7 @@ fn resolve_paragraph_line_spacing(paragraph: &mut ParagraphBlock, line_px: f64) 
 /// without an activating grid measure exactly as before.
 pub fn resolve_doc_grid_pitch(block: &mut LayoutBlock, pitch_px: Option<f64>) {
     match block {
-        LayoutBlock::Paragraph(paragraph) => {
-            if let Some(attrs) = paragraph.attrs.as_mut() {
-                attrs.doc_grid_pitch_px = pitch_px;
-            } else if pitch_px.is_some() {
-                paragraph.attrs = Some(crate::types::ParagraphAttrs {
-                    doc_grid_pitch_px: pitch_px,
-                    ..crate::types::ParagraphAttrs::default()
-                });
-            }
-        }
+        LayoutBlock::Paragraph(paragraph) => resolve_paragraph_doc_grid_pitch(paragraph, pitch_px),
         LayoutBlock::Table(table) => {
             for row in &mut table.rows {
                 for cell in &mut row.cells {
@@ -85,14 +83,7 @@ pub fn resolve_doc_grid_pitch(block: &mut LayoutBlock, pitch_px: Option<f64>) {
         }
         LayoutBlock::TextBox(text_box) => {
             for paragraph in &mut text_box.content {
-                if let Some(attrs) = paragraph.attrs.as_mut() {
-                    attrs.doc_grid_pitch_px = pitch_px;
-                } else if pitch_px.is_some() {
-                    paragraph.attrs = Some(crate::types::ParagraphAttrs {
-                        doc_grid_pitch_px: pitch_px,
-                        ..crate::types::ParagraphAttrs::default()
-                    });
-                }
+                resolve_paragraph_doc_grid_pitch(paragraph, pitch_px);
             }
         }
         LayoutBlock::Shape(shape) => resolve_shape_doc_grid_pitch(shape, pitch_px),
@@ -103,18 +94,29 @@ pub fn resolve_doc_grid_pitch(block: &mut LayoutBlock, pitch_px: Option<f64>) {
 fn resolve_shape_doc_grid_pitch(shape: &mut ShapeBlock, pitch_px: Option<f64>) {
     if let Some(paragraphs) = &mut shape.inner_text {
         for paragraph in paragraphs {
-            if let Some(attrs) = paragraph.attrs.as_mut() {
-                attrs.doc_grid_pitch_px = pitch_px;
-            } else if pitch_px.is_some() {
-                paragraph.attrs = Some(crate::types::ParagraphAttrs {
-                    doc_grid_pitch_px: pitch_px,
-                    ..crate::types::ParagraphAttrs::default()
-                });
-            }
+            resolve_paragraph_doc_grid_pitch(paragraph, pitch_px);
         }
     }
     for child in &mut shape.children {
         resolve_shape_doc_grid_pitch(child, pitch_px);
+    }
+}
+
+fn resolve_paragraph_doc_grid_pitch(paragraph: &mut ParagraphBlock, pitch_px: Option<f64>) {
+    if let Some(attrs) = paragraph.attrs.as_mut() {
+        attrs.doc_grid_pitch_px = pitch_px;
+    } else if pitch_px.is_some() {
+        paragraph.attrs = Some(crate::types::ParagraphAttrs {
+            doc_grid_pitch_px: pitch_px,
+            ..crate::types::ParagraphAttrs::default()
+        });
+    }
+    for run in &mut paragraph.runs {
+        if let Run::Image(image) = run
+            && let Some(shape) = &mut image.inline_shape
+        {
+            resolve_shape_doc_grid_pitch(shape, pitch_px);
+        }
     }
 }
 
@@ -176,6 +178,117 @@ fn effective_style_id(block: &ParagraphBlock) -> &str {
         .unwrap_or("")
 }
 
+fn effective_num_id(block: &ParagraphBlock) -> Option<f64> {
+    block
+        .attrs
+        .as_ref()?
+        .num_pr
+        .as_ref()?
+        .num_id
+        .filter(|id| id.is_finite() && *id > 0.0)
+}
+
+pub fn suppress_document_auto_before(block: &mut LayoutBlock) {
+    if let LayoutBlock::Paragraph(paragraph) = block
+        && let Some(spacing) = paragraph
+            .attrs
+            .as_mut()
+            .and_then(|attrs| attrs.spacing.as_mut())
+        && spacing.before_auto == Some(true)
+    {
+        spacing.before = Some(0.0);
+    }
+}
+
+pub fn suppress_break_auto_before(block: &mut LayoutBlock, previous: Option<&LayoutBlock>) {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return;
+    };
+    let breaks_before = paragraph.attrs.as_ref().is_some_and(|attrs| {
+        attrs.page_break_before == Some(true) || attrs.page_break_before_run == Some(true)
+    }) || matches!(previous, Some(LayoutBlock::PageBreak(_)));
+    if !breaks_before {
+        return;
+    }
+    if let Some(spacing) = paragraph
+        .attrs
+        .as_mut()
+        .and_then(|attrs| attrs.spacing.as_mut())
+        && spacing.before_auto == Some(true)
+    {
+        spacing.before = Some(0.0);
+    }
+}
+
+pub fn suppress_list_auto_spacing(
+    block: &mut LayoutBlock,
+    previous: Option<&LayoutBlock>,
+    next: Option<&LayoutBlock>,
+) {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return;
+    };
+    let Some(num_id) = effective_num_id(paragraph) else {
+        return;
+    };
+    let same_list = |neighbor: Option<&LayoutBlock>| {
+        matches!(neighbor, Some(LayoutBlock::Paragraph(other))
+            if effective_num_id(other) == Some(num_id))
+    };
+    let Some(spacing) = paragraph
+        .attrs
+        .as_mut()
+        .and_then(|attrs| attrs.spacing.as_mut())
+    else {
+        return;
+    };
+    if spacing.before_auto == Some(true) && same_list(previous) {
+        spacing.before = Some(0.0);
+    }
+    if spacing.after_auto == Some(true) && same_list(next) {
+        spacing.after = Some(0.0);
+    }
+}
+
+/// The indices of the blocks that take part in the text flow; anchored
+/// drawings are lowered ahead of their paragraph and sit outside it.
+fn flow_indices<T>(items: &[T], block: impl Fn(&T) -> &LayoutBlock) -> Vec<usize> {
+    (0..items.len())
+        .filter(|&index| crate::header_footer::contributes_to_flow(block(&items[index])))
+        .collect()
+}
+
+/// Splits `items` into the flow neighbours of `flow[k]` and the item itself.
+fn flow_window<'a, T>(
+    items: &'a mut [T],
+    flow: &[usize],
+    k: usize,
+) -> (Option<&'a T>, &'a mut T, Option<&'a T>) {
+    let index = flow[k];
+    let (head, tail) = items.split_at_mut(index);
+    let (current, rest) = tail.split_first_mut().unwrap();
+    let previous = k.checked_sub(1).map(|j| &head[flow[j]]);
+    let next = flow.get(k + 1).map(|&n| &rest[n - index - 1]);
+    (previous, current, next)
+}
+
+pub fn apply_list_auto_spacing_blocks(blocks: &mut [LayoutBlock]) {
+    let flow = flow_indices(blocks, |block| block);
+    for k in 0..flow.len() {
+        let (previous, current, next) = flow_window(blocks, &flow, k);
+        suppress_list_auto_spacing(current, previous, next);
+    }
+    for block in blocks.iter_mut() {
+        if let LayoutBlock::Table(table) = block {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    apply_list_auto_spacing_blocks(&mut cell.blocks);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     let LayoutBlock::Paragraph(c) = curr else {
         return;
@@ -216,6 +329,7 @@ pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutB
 }
 
 pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
+    apply_list_auto_spacing_blocks(blocks);
     for i in 0..blocks.len().saturating_sub(1) {
         let (head, tail) = blocks.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i], &mut tail[0]);
@@ -232,6 +346,19 @@ pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
 }
 
 pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
+    let flow = flow_indices(measured, |entry| &entry.block);
+    if let Some(&first) = flow.first() {
+        suppress_document_auto_before(&mut measured[first].block);
+    }
+    for k in 0..flow.len() {
+        let (previous, current, next) = flow_window(measured, &flow, k);
+        suppress_break_auto_before(&mut current.block, previous.map(|entry| &entry.block));
+        suppress_list_auto_spacing(
+            &mut current.block,
+            previous.map(|entry| &entry.block),
+            next.map(|entry| &entry.block),
+        );
+    }
     for i in 0..measured.len().saturating_sub(1) {
         let (head, tail) = measured.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i].block, &mut tail[0].block);
@@ -251,6 +378,8 @@ pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) 
 mod tests {
     use super::*;
     use crate::types::{BlockId, ParagraphAttrs, ParagraphBlock, ParagraphSpacing};
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
 
     fn paragraph(style_id: Option<&str>, effective_style_id: Option<&str>) -> LayoutBlock {
         LayoutBlock::Paragraph(ParagraphBlock {
@@ -283,6 +412,70 @@ mod tests {
                 .and_then(|spacing| spacing.after)
                 .unwrap_or(-1.0),
             _ => -1.0,
+        }
+    }
+
+    #[test]
+    fn inline_shapes_resolve_section_spacing_and_grid_recursively() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let font = crate::register_measure_font_bytes(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = crate::measure_blocks::MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..Default::default()
+        };
+        let paragraph = json!({
+            "kind":"paragraph", "id":"inner", "runs":[{"kind":"text","text":"Box text"}],
+            "attrs":{"spacing":{"beforeLines":100,"afterLines":200,"before":16,"after":32}}
+        });
+        let shape = |id: &str, inner_text: Vec<Value>, children: Vec<Value>| {
+            json!({
+                "id":id,"shapeType":"rect","geometryPath":[],"width":100,"height":100,
+                "innerText":inner_text,"children":children
+            })
+        };
+        let nested = shape("nested", vec![paragraph.clone()], vec![]);
+        let carrier = json!({
+            "kind":"paragraph","id":"carrier","runs":[{
+                "kind":"image","src":"","width":100,"height":100,"inlineShape":nested
+            }]
+        });
+        let child = shape("child", vec![paragraph.clone()], vec![]);
+        let mut block: LayoutBlock = serde_json::from_value(json!({
+            "kind":"paragraph","id":"outer","runs":[{
+                "kind":"image","src":"","width":100,"height":100,
+                "inlineShape":shape("box", vec![paragraph, carrier], vec![child])
+            }]
+        }))
+        .unwrap();
+        resolve_line_unit_spacing(&mut block, 32.0);
+        resolve_doc_grid_pitch(&mut block, Some(32.0));
+        crate::measure_blocks::measure_block(&mut block, 200.0, &config).unwrap();
+        let value = serde_json::to_value(&block).unwrap();
+        let shape = &value["runs"][0]["inlineShape"];
+        assert_eq!(shape["innerMeasures"][0]["lines"][0]["lineHeight"], 32.0);
+        for paragraph in [
+            &shape["innerText"][0],
+            &shape["innerText"][1]["runs"][0]["inlineShape"]["innerText"][0],
+            &shape["children"][0]["innerText"][0],
+        ] {
+            assert_eq!(paragraph["attrs"]["spacing"]["before"], 32.0);
+            assert_eq!(paragraph["attrs"]["spacing"]["after"], 64.0);
+            assert_eq!(paragraph["attrs"]["docGridPitchPx"], 32.0);
+        }
+        resolve_doc_grid_pitch(&mut block, None);
+        let value = serde_json::to_value(&block).unwrap();
+        let shape = &value["runs"][0]["inlineShape"];
+        for paragraph in [
+            &shape["innerText"][0],
+            &shape["innerText"][1]["runs"][0]["inlineShape"]["innerText"][0],
+            &shape["children"][0]["innerText"][0],
+        ] {
+            assert!(paragraph["attrs"]["docGridPitchPx"].is_null());
         }
     }
 

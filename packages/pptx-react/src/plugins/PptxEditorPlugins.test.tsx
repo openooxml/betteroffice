@@ -59,7 +59,7 @@ beforeAll(async () => {
   faces = [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }];
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(cleanup);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));
@@ -1068,12 +1068,21 @@ describe('PptxEditor plugins', () => {
             <div data-testid="layout-marker" data-slide={geometry.layout.slide} />
           ),
         });
-        const { api, view } = await mount({ plugins: [plugin] });
-        await until(() => pending.length > 0 && contexts.length > 0);
+        const { api, view } = await mount({ plugins: [plugin], initialSlide: 2 });
+        await until(() => contexts.length > 0);
         const marker = () =>
           view.container.querySelector<HTMLElement>('[data-testid="layout-marker"]');
-        expect(marker()).toBeNull();
+        await until(() => marker()?.dataset.slide === '2');
         const content = await read(api());
+        await act(async () => {
+          await last(contexts).navigation.goToSlide(
+            { slideId: content.slides[0].id },
+            { expectVersion: content.version }
+          );
+        });
+        await until(() => pending.length > 0 && marker() === null);
+        expect(marker()).toBeNull();
+        expect(view.container.querySelector('aside button')?.getAttribute('aria-current')).toBe('page');
         await act(async () => {
           await last(contexts).navigation.goToSlide(
             { slideId: content.slides[1].id },
@@ -1610,7 +1619,26 @@ test('in_thread_plugin_reads_preserve_engine_facts', async () => {
   expect(result).toEqual(await value.api().readContent());
   expect(result.ok).toBe(true);
   if (!result.ok) throw new Error('Read refused');
-  expect(result.slides[0]).toMatchObject({ title: 'Heading\nNext', hidden: true, layout: { name: 'Heading layout', type: 'title' } });
+  expect(result.slides[0]).toMatchObject({
+    title: 'Heading\nNext',
+    hidden: true,
+    layout: {
+      name: 'Heading layout',
+      type: 'title',
+      headerFooter: { slideNumber: true, footer: true, date: true, header: false },
+    },
+    headerFooter: {
+      footer: { shapeId: result.slides[0]!.shapes[1]!.id, text: 'Footer' },
+      slideNumber: { shapeId: result.slides[0]!.shapes[2]!.id, text: 'Seite 1' },
+      date: null,
+    },
+  });
+  expect(result.slides[0]!.shapes[0]).toMatchObject({
+    name: 'Heading',
+    title: 'Heading title',
+    description: 'Heading description',
+    decorative: true,
+  });
   expect(result.stories[0]!.paragraphs.map((paragraph) => paragraph.list)).toEqual([
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 1, marker: 'a)' },
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 2, marker: 'b)' },

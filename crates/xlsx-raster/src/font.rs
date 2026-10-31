@@ -9,6 +9,8 @@ use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transfo
 use unicode_segmentation::UnicodeSegmentation;
 use xlsx_render::{Align, NumberFormatLayout, Rect as DlRect, TextValign};
 
+use crate::fmath;
+
 // synthetic bold nudges a second glyph pass right; synthetic italic shears.
 const BOLD_OFFSET_PX: f32 = 0.35;
 const ITALIC_SHEAR: f32 = 0.21;
@@ -39,7 +41,7 @@ pub fn measure_text(text: &str, font_size_pt: f32) -> f32 {
     let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
     total as f32 * scale
 }
-
+#[cfg(not(feature = "fonts"))]
 /// a single-line text run; `x`/`y` are the align anchor and alphabetic baseline.
 pub struct TextRun<'a> {
     pub x: f32,
@@ -56,7 +58,7 @@ pub struct TextRun<'a> {
     pub highlight: Option<Color>,
     pub dashed_underline: bool,
 }
-
+#[cfg(not(feature = "fonts"))]
 /// paint one shaped, single-line run, clipped strictly to the run's clip rect.
 pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 {
@@ -259,7 +261,7 @@ fn paint_decorations(
         }
     }
 }
-
+#[cfg(not(feature = "fonts"))]
 pub fn paint_rotated_text(
     pixmap: &mut Pixmap,
     run: &TextRun,
@@ -313,7 +315,7 @@ pub fn paint_rotated_text(
     let descent = -face.descender() as f32 * scale;
     let line_h = ascent + descent;
     let a = -deg.to_radians();
-    let (sin, cos) = a.sin_cos();
+    let (sin, cos) = fmath::sin_cos(a);
     let bbox_w = (run_width * cos).abs() + (line_h * sin).abs();
     let bbox_h = (run_width * sin).abs() + (line_h * cos).abs();
     let bbox_left = match run.align {
@@ -424,7 +426,7 @@ pub fn paint_rotated_text(
         None,
     );
 }
-
+#[cfg(not(feature = "fonts"))]
 pub fn paint_stacked_text(pixmap: &mut Pixmap, run: &TextRun, cell: &DlRect, valign: TextValign) {
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 {
         return;
@@ -535,3 +537,11 @@ mod tests {
         assert!(measure_text("mmmm", 11.0) > measure_text("ii", 11.0));
     }
 }
+
+#[cfg(feature = "fonts")]
+#[path = "font_native.rs"]
+mod native;
+#[cfg(feature = "fonts")]
+pub(crate) use native::{FontFace, measure_text_with_fonts};
+#[cfg(feature = "fonts")]
+pub use native::{TextRun, paint_rotated_text, paint_stacked_text, paint_text};

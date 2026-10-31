@@ -35,6 +35,7 @@ pub mod comments;
 pub mod content_control;
 pub mod document;
 pub mod drawingml;
+mod fmath;
 pub mod fonts;
 pub mod formatting;
 pub mod header_footer;
@@ -73,6 +74,9 @@ pub mod xml;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm-layout")]
+pub use docx_layout as layout;
 
 pub use block::{BlockContent, BlockSdt, StoryParser, story_block_elements, table_part_elements};
 pub use borders::{
@@ -209,137 +213,209 @@ pub use xml::{
     XmlNode, namespaces, parse_xml,
 };
 
+pub fn parse_docx_relationships_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_relationship_parts(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
+}
+
 /// Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_relationships(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_relationship_parts(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_relationships_json(data).map_err(js_error)
+}
+
+pub fn parse_relationships_xml_json(xml: &[u8], part_path: &str) -> Result<String, String> {
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let relationships =
+        parse_relationships(xml, part_path, &mut budget).map_err(|error| error.to_string())?;
+    let part = RelationshipPart::from_map(part_path.to_owned(), relationships)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&part).map_err(|error| error.to_string())
 }
 
 /// Focused wasm leaf used by hostile-input and facade tests.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_relationships_xml(xml: &[u8], part_path: &str) -> Result<String, JsValue> {
-    let limits = ParseLimits::default();
-    let mut budget = ParseBudget::new(&limits);
-    let relationships = parse_relationships(xml, part_path, &mut budget).map_err(js_error)?;
-    let part = RelationshipPart::from_map(part_path.to_owned(), relationships).map_err(js_error)?;
-    serde_json::to_string(&part).map_err(|error| js_error(error.to_string()))
+    parse_relationships_xml_json(xml, part_path).map_err(js_error)
+}
+
+pub fn parse_docx_s2_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_s2_wire(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses an S2 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s2(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_s2_wire(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s2_json(data).map_err(js_error)
+}
+
+pub fn parse_docx_s3_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_s3_wire(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses an S3 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s3(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_s3_wire(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s3_json(data).map_err(js_error)
+}
+
+pub fn parse_docx_s4_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_s4_wire(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses an S4 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s4(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_s4_wire(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s4_json(data).map_err(js_error)
+}
+
+pub fn parse_docx_s5_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_s5_wire(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses an S5 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s5(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_s5_wire(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s5_json(data).map_err(js_error)
+}
+
+pub fn parse_docx_s6_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_s6_wire(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses an S6 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s6(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_s6_wire(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s6_json(data).map_err(js_error)
+}
+
+pub fn parse_docx_s7_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_s7_wire(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses an S7 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s7(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_s7_wire(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s7_json(data).map_err(js_error)
+}
+
+pub fn parse_docx_s8_json(data: &[u8]) -> Result<String, String> {
+    let envelope = parse_docx_s8_wire(data).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses an S8 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s8(data: &[u8]) -> Result<String, JsValue> {
-    let envelope = parse_docx_s8_wire(data).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s8_json(data).map_err(js_error)
+}
+
+pub fn parse_docx_s9_json(data: &[u8], options_json: &str) -> Result<String, String> {
+    let options = if options_json.is_empty() {
+        S9ParseOptions::default()
+    } else {
+        serde_json::from_str(options_json).map_err(|error| error.to_string())?
+    };
+    let envelope = parse_docx_s9_wire(data, options).map_err(|error| error.to_string())?;
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
 /// Parses the full document wire in one package pass.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s9(data: &[u8], options_json: &str) -> Result<String, JsValue> {
-    let options = if options_json.is_empty() {
-        S9ParseOptions::default()
-    } else {
-        serde_json::from_str(options_json).map_err(|error| js_error(error.to_string()))?
-    };
-    let envelope = parse_docx_s9_wire(data, options).map_err(js_error)?;
-    serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
+    parse_docx_s9_json(data, options_json).map_err(js_error)
+}
+
+pub fn serialize_docx_s10_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
+    let response = serialize_s10_wire(request).map_err(|error| error.to_string())?;
+    serde_json::to_string(&response).map_err(|error| error.to_string())
 }
 
 /// Serializes an S10 request.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s10(request_json: &str) -> Result<String, JsValue> {
-    let request =
-        serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
-    let response = serialize_s10_wire(request).map_err(js_error)?;
-    serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
+    serialize_docx_s10_json(request_json).map_err(js_error)
+}
+
+pub fn serialize_docx_s11_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
+    let response = serialize_s11_wire(request).map_err(|error| error.to_string())?;
+    serde_json::to_string(&response).map_err(|error| error.to_string())
 }
 
 /// Serializes an S11 request.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s11(request_json: &str) -> Result<String, JsValue> {
-    let request =
-        serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
-    let response = serialize_s11_wire(request).map_err(js_error)?;
-    serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
+    serialize_docx_s11_json(request_json).map_err(js_error)
+}
+
+pub fn serialize_docx_s12_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
+    let response = serialize_s12_wire(request).map_err(|error| error.to_string())?;
+    serde_json::to_string(&response).map_err(|error| error.to_string())
 }
 
 /// Serializes an S12 request.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s12(request_json: &str) -> Result<String, JsValue> {
-    let request =
-        serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
-    let response = serialize_s12_wire(request).map_err(js_error)?;
-    serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
+    serialize_docx_s12_json(request_json).map_err(js_error)
+}
+
+pub fn paragraph_patch_writer_version_native() -> u32 {
+    paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = paragraphPatchWriterVersion)]
 pub fn paragraph_patch_writer_version() -> u32 {
-    paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION
+    paragraph_patch_writer_version_native()
+}
+
+pub fn write_docx_s13_json(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, String> {
+    let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
+    write_docx_s13(request, original_docx).map_err(|error| error.to_string())
 }
 
 /// Writes a DOCX from a typed model and original package.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, JsValue> {
-    let request =
-        serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
-    write_docx_s13(request, original_docx).map_err(js_error)
+    write_docx_s13_json(request_json, original_docx).map_err(js_error)
+}
+
+pub fn write_docx_s13_with_warnings_json(
+    request_json: &str,
+    original_docx: &[u8],
+) -> Result<Vec<u8>, String> {
+    let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
+    let (bytes, warnings) =
+        write_docx_s13_with_warnings(request, original_docx).map_err(|error| error.to_string())?;
+    let warnings = serde_json::to_vec(&warnings).map_err(|error| error.to_string())?;
+    let mut framed = (warnings.len() as u64).to_le_bytes().to_vec();
+    framed.extend_from_slice(&warnings);
+    framed.extend_from_slice(&bytes);
+    Ok(framed)
 }
 
 /// [`write_docx_s13_wasm`], framing save diagnostics ahead of the package
@@ -350,22 +426,19 @@ pub fn write_docx_s13_wasm_with_warnings(
     request_json: &str,
     original_docx: &[u8],
 ) -> Result<Vec<u8>, JsValue> {
-    let request =
-        serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
-    let (bytes, warnings) =
-        write_docx_s13_with_warnings(request, original_docx).map_err(js_error)?;
-    let warnings = serde_json::to_vec(&warnings).map_err(|error| js_error(error.to_string()))?;
-    let mut framed = (warnings.len() as u64).to_le_bytes().to_vec();
-    framed.extend_from_slice(&warnings);
-    framed.extend_from_slice(&bytes);
-    Ok(framed)
+    write_docx_s13_with_warnings_json(request_json, original_docx).map_err(js_error)
+}
+
+#[cfg(feature = "tiff")]
+pub fn decode_tiff_png_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    ooxml_drawingml::media::decode_tiff_png(data).map_err(|error| error.to_string())
 }
 
 /// Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
 #[cfg(all(feature = "wasm", feature = "tiff"))]
 #[wasm_bindgen(js_name = decodeTiffPng)]
 pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
-    ooxml_drawingml::media::decode_tiff_png(data).map_err(js_error)
+    decode_tiff_png_bytes(data).map_err(js_error)
 }
 
 #[cfg(feature = "wasm")]

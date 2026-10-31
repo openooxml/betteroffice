@@ -1,10 +1,10 @@
 ---
 title: Visio VSDX
-description: Work with Visio diagrams using the source-preview packages
+description: Work with Visio diagrams using the VSDX packages built from source
 ---
 
 VSDX support is available from source. [Try the diagram editor](https://demo.betteroffice.dev/vsdx)
-or build the packages from the repository. The packages are not yet published on
+or build the packages from the repository. The packages are not published on
 npm, crates.io, or PyPI.
 
 ## Rust packages
@@ -29,6 +29,8 @@ bounds.
 ## JavaScript and React
 
 `@betteroffice/vsdx` provides the Wasm engine and Canvas display-list painter. Initialize the Wasm module before opening a diagram.
+
+`decodeFontFace(bytes, { codec, dict?, maxOutput? })` from `@betteroffice/vsdx` asynchronously decodes a packed font with the engine into `{ font, payload? }` ArrayBuffers; it rejects on invalid options or decode errors without retrying another decoder.
 
 `@betteroffice/vsdx-react` provides the React editor. Its strings are supplied by `@betteroffice/vsdx-i18n`. Pass font bytes to the editor so layout and painting use the same faces.
 

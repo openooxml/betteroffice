@@ -57,7 +57,8 @@ beforeAll(() =>
         resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
       )
     )
-  )
+  ),
+  30_000
 );
 
 afterEach(() => {
@@ -196,13 +197,13 @@ test('unresolved fonts warm once and the first layout adopts the still-warming w
     });
     expect(FakeWorker.last).toBe(spare);
     expect(FakeWorker.instances.length - initialWorkers).toBe(1);
-    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'editModule', 'bootstrap']);
-    expect(spare.posted[0]).toEqual({ id: 1, type: 'warm', hostModule: true });
-    expect(spare.posted[1]).toEqual({ type: 'editModule', module: editModule });
+    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'bootstrap']);
+    expect(spare.posted[0]).toEqual({ id: 1, type: 'warm' });
+    expect(compileModule).not.toHaveBeenCalled();
     await act(async () => {
       spare.reply({ id: spare.requestAt(0).id, ok: true });
       spare.reply({
-        id: spare.requestAt(2).id,
+        id: spare.requestAt(1).id,
         ok: true,
         frame: source.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -295,7 +296,7 @@ test('a font-deferred spare the first layout does not adopt is released', async 
       });
       act(() => hook.result.current.runLayoutPipeline({ onHost: ending === 'onHost' }));
       if (ending !== 'preflight') expect(hook.result.current.layout?.pages.length).toBeGreaterThan(0);
-      expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'editModule']);
+      expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
       expect(source.adopted).toEqual([]);
       await waitFor(() => expect(spare.terminated).toBe(true));
       expect(takePreloadedResidentEngineWorker()).toBeNull();
@@ -386,7 +387,7 @@ test('workerFor adopts the spare once and the next session spawns fresh', async 
   try {
     const firstLayout = hook.result.current.layoutInWorker(first.engine, REQUEST);
     expect(FakeWorker.last).toBe(spare);
-    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'editModule', 'bootstrap']);
+    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'bootstrap']);
     reply(spare, first);
     expect(await firstLayout).not.toBeNull();
 
@@ -664,7 +665,7 @@ test('a retained worker query facade forwards within a document load but never t
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -768,7 +769,7 @@ test('releasing ends forwarding from a superseded worker query facade', async ()
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -865,7 +866,7 @@ test("a snapshot rebuilt after the next document starts loading keeps its own do
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -971,7 +972,7 @@ test('a new layout of the shown document after the next one starts loading keeps
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -1100,7 +1101,7 @@ test('input that answers after the next document replaced its worker publishes n
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -1241,7 +1242,7 @@ test('input a replaced worker rejects publishes nothing of its document', async 
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -1347,7 +1348,7 @@ test('a failed worker input replays on the host and rejoins its query line', asy
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );

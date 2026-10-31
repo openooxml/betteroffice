@@ -252,10 +252,11 @@ for (const shared of [true, false]) test(`worker burst merges once with ${shared
     expect(command.kind === 'collabPipe' && command.payload.ops.filter((op) => op.op === 'event')).toHaveLength(24);
     expect(room.transferred[room.transferred.length - 1]).toHaveLength(24);
     expect(room.transferred[room.transferred.length - 1].every((buffer) => buffer.byteLength === 0)).toBe(true);
-    expect(acks).toHaveLength(1);
-    expect(acks[0].frame?.epoch).toBe(before.frame + 1);
-    expect(acks[0].version).not.toBe(before.version);
-    expect(acks[0].outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    const commandAcks = acks.filter((ack) => !('defaultFonts' in ack));
+    expect(commandAcks.map((ack) => ack.throughSeq)).toEqual([command.seq]);
+    expect(commandAcks[0].frame?.epoch).toBe(before.frame + 1);
+    expect(commandAcks[0].version).not.toBe(before.version);
+    expect(commandAcks[0].outcomes).toMatchObject([{ status: 'applied', committed: true }]);
     expect(room.client.state.editState.canUndo).toBe(false);
     const converged = content((await room.client.read()).result).stories[0]!;
     expect(converged.text).toBe(content(peer.readContent()).stories[0]!.text);
@@ -453,6 +454,92 @@ test('pipe payloads reject invalid cursors, frame sizes and worker options', asy
       expect(ack.version).toBe(before);
     }
     expect(room.provider.status).toBe('connected');
+    expect(room.errors).toEqual([]);
+  } finally { await room.dispose(); }
+});
+
+for (const shared of [false, true]) test(`remote applyRemoteUpdate stamped before a local applyEdits is not refused for its basis (${shared ? 'shared' : 'command'} client)`, async () => {
+  const room = await open({}, shared);
+  const peer = openPresentation(bytes, { clientId: 8104 });
+  try {
+    const story = content((await room.client.read()).result).stories[0]!;
+    const basis = { epoch: room.client.state.epoch, version: room.client.state.version };
+    const restyled = await room.client.dispatch({ kind: 'applyEdits', payload: { inputTime: 1, undoGroup: 'agent', request: {
+      expectVersion: basis.version, steps: [{ op: 'formatText', target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 3 }, patch: { bold: true } }] } } });
+    expect(restyled.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    const peerStory = content(peer.readContent()).stories[0]!;
+    peer.insertText(peerStory.storyId, 0, 'Z');
+    const ack = await room.client.dispatch({ kind: 'applyRemoteUpdate', payload: { bytes: peer.encodeStateAsUpdate().slice().buffer, inputTime: 2, undoGroup: 'remote' } }, basis);
+    expect(ack.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    const text = content((await room.client.read()).result).stories[0]!.text;
+    expect(text).toBe(content(peer.readContent()).stories[0]!.text);
+    expect(text.split('Z')).toHaveLength(2);
+    const runs = (await room.client.access!('story', story.storyId)).paragraphs[0]!.runs;
+    expect(runs.map((run) => run.text).join('')).toBe(text);
+    expect(runs.find((run) => run.text.includes('a'))?.style.bold).toBe(true);
+    expect(room.errors).toEqual([]);
+  } finally { peer.dispose(); await room.dispose(); }
+});
+
+for (const shared of [false, true]) test(`remote collabPipe stamped before a local applyEdits is not refused for its basis (${shared ? 'shared' : 'command'} client)`, async () => {
+  const room = await open({}, shared);
+  const peer = openPresentation(bytes, { clientId: 8104 });
+  try {
+    await sync(room, peer);
+    const story = content((await room.client.read()).result).stories[0]!;
+    const restyled = room.client.dispatch({ kind: 'applyEdits', payload: { inputTime: 1, undoGroup: 'agent', request: {
+      expectVersion: room.client.state.version, steps: [{ op: 'formatText', target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 3 }, patch: { bold: true } }] } } });
+    const peerStory = content(peer.readContent()).stories[0]!;
+    const vector = peer.encodeStateVector();
+    peer.insertText(peerStory.storyId, 0, 'Z');
+    room.wire.emit({ type: 'message', data: encodeUpdate(peer.encodeStateAsUpdate(vector)) });
+    expect((await restyled).outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    await room.client.flush();
+    const text = content((await room.client.read()).result).stories[0]!.text;
+    expect(room.errors).toEqual([]);
+    expect(room.provider.status).toBe('connected');
+    expect(text).toBe(content(peer.readContent()).stories[0]!.text);
+    expect(text.split('Z')).toHaveLength(2);
+    const runs = (await room.client.access!('story', story.storyId)).paragraphs[0]!.runs;
+    expect(runs.map((run) => run.text).join('')).toBe(text);
+    expect(runs.find((run) => run.text.includes('a'))?.style.bold).toBe(true);
+  } finally { peer.dispose(); await room.dispose(); }
+});
+
+test('remote frame stamped before several local text commands is not refused for its basis', async () => {
+  const room = await open();
+  const peer = openPresentation(bytes, { clientId: 8105 });
+  try {
+    const story = content((await room.client.read()).result).stories[0]!;
+    const basis = { epoch: room.client.state.epoch, version: room.client.state.version };
+    for (const [index, text] of ['1', '2', '3'].entries()) {
+      const ack = await room.client.dispatch({ kind: 'insertText', payload: { inputTime: 10 + index, undoGroup: 'typing', text,
+        at: { source: 'confirmed', selection: { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 0, focus: 0, affinity: 'downstream' } } } });
+      expect(ack.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    }
+    const peerStory = content(peer.readContent()).stories[0]!;
+    peer.insertText(peerStory.storyId, 0, 'Z');
+    const ack = await room.client.dispatch({ kind: 'applyRemoteUpdate', payload: { bytes: peer.encodeStateAsUpdate().slice().buffer, inputTime: 20, undoGroup: 'remote' } }, basis);
+    expect(ack.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    const text = content((await room.client.read()).result).stories[0]!.text;
+    expect(text.split('Z')).toHaveLength(2);
+    expect(text.replace('Z', '')).toBe('321abc');
+    expect(room.errors).toEqual([]);
+  } finally { peer.dispose(); await room.dispose(); }
+});
+
+test('a local text command stamped on a pruned basis is still refused', async () => {
+  const room = await open();
+  try {
+    const story = content((await room.client.read()).result).stories[0]!;
+    const basis = { epoch: room.client.state.epoch, version: room.client.state.version };
+    const restyled = await room.client.dispatch({ kind: 'applyEdits', payload: { inputTime: 1, undoGroup: 'agent', request: {
+      expectVersion: basis.version, steps: [{ op: 'formatText', target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 3 }, patch: { bold: true } }] } } });
+    expect(restyled.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    const refused = await room.client.dispatch({ kind: 'insertText', payload: { inputTime: 3, undoGroup: 'typing', text: 'Q',
+      at: { source: 'confirmed', selection: { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 0, focus: 0, affinity: 'downstream' } } } }, basis);
+    expect(refused.outcomes).toMatchObject([{ status: 'refused', reason: 'stale-basis', committed: false }]);
+    expect(content((await room.client.read()).result).stories[0]!.text).toBe('abc');
     expect(room.errors).toEqual([]);
   } finally { await room.dispose(); }
 });

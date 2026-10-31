@@ -47,12 +47,16 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSES"
   ],
   "scripts": {
     "build": "bun run build:wasm && tsup",
     "build:wasm": "bun ../../scripts/build-pptx-wasm.ts",
     "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@betteroffice/fonts": "workspace:^"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

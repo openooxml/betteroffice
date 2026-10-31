@@ -6,6 +6,7 @@ import type { DocxFontEnvironmentEvent } from './residentFontEnvironment';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
+import { retainEmbeddedFontFaces } from '../utils/embeddedFonts';
 import type { DocxSvgMedia } from './residentCommandProtocol';
 
 export interface DocxEngineWorkerSourceOpened {
@@ -24,6 +25,7 @@ export interface DocxEngineWorkerSourceOpened {
 export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
   private fontListeners = new Set<(event: DocxFontEnvironmentEvent) => void>();
   private memoryListeners = new Set<(samples: WasmModuleMemory[]) => void>();
+  private requirementsListeners = new Set<() => void>();
   private presentedFontsRevision = 0;
   private cutReservation: { bytes?: number } | null = null;
 
@@ -38,6 +40,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
     const source = client as DocxSourceWorkerClient;
     source.fontListeners = new Set();
     source.memoryListeners = new Set();
+    source.requirementsListeners = new Set();
     source.presentedFontsRevision = 0;
     source.observe();
     return source;
@@ -62,6 +65,13 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
         const identity = this.commandIdentity;
         if (identity && event.session === identity.session && event.incarnation === identity.incarnation && event.epoch === identity.epoch) {
           for (const listener of this.fontListeners) { try { listener(structuredClone(event)); } catch {} }
+        }
+      }
+      if (response.ok && response.fontRequirementsHint) {
+        const hint = response.fontRequirementsHint;
+        const identity = this.commandIdentity;
+        if (identity && hint.session === identity.session && hint.incarnation === identity.incarnation && hint.epoch === identity.epoch) {
+          for (const listener of this.requirementsListeners) { try { listener(); } catch {} }
         }
       }
       if (response.ok) {
@@ -98,6 +108,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
         return null;
       }
       if (!response.sourceDocument) throw new ResidentWorkerFailureError('Document worker omitted the opened source');
+      if (response.embeddedFontFaces) retainEmbeddedFontFaces(response.sourceDocument, response.embeddedFontFaces);
       return response.sourceDocument;
     } catch (error) {
       this.releaseCut(reservation);
@@ -133,6 +144,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
       if (!response.sourceDocument || !response.stateVector) {
         throw new ResidentWorkerFailureError('Document worker omitted the opened source');
       }
+      if (response.embeddedFontFaces) retainEmbeddedFontFaces(response.sourceDocument, response.embeddedFontFaces);
       if (this.cutReservation === cut) this.cutReservation = null;
       if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
       return {
@@ -165,6 +177,12 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
     return () => { this.fontListeners.delete(listener); };
   }
 
+  /** @internal Called when an applied edit may need fonts the last `fontRequirements` answer lacked. */
+  onFontRequirementsHint(listener: () => void): () => void {
+    this.requirementsListeners.add(listener);
+    return () => { this.requirementsListeners.delete(listener); };
+  }
+
   onMemory(listener: (samples: WasmModuleMemory[]) => void): () => void {
     this.memoryListeners.add(listener);
     return () => { this.memoryListeners.delete(listener); };
@@ -187,6 +205,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
   protected override fail(error: Error, notify = true): void {
     this.fontListeners?.clear();
     this.memoryListeners?.clear();
+    this.requirementsListeners?.clear();
     super.fail(error, notify);
   }
 }

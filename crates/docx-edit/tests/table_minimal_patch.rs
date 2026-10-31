@@ -367,7 +367,7 @@ fn cell_text_preserves_both_tables_and_all_nonparagraph_bytes() {
 }
 
 #[test]
-fn merge_cells_uses_the_base_story_fallback() {
+fn merge_cells_splices_the_merged_row_and_keeps_unrelated_paragraphs_byte_for_byte() {
     let first = paragraph(1, "abc");
     let xml = source(&first);
     let (doc, mut model) = open(&xml);
@@ -385,11 +385,12 @@ fn merge_cells_uses_the_base_story_fallback() {
         .as_array_mut()
         .unwrap()
         .extend(removed["content"].as_array().unwrap().iter().cloned());
-    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
-    assert!(warnings.is_empty(), "{warnings:?}");
+    let (output, _) = save(&xml, &doc, model);
     assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
     assert!(output.contains("abc"));
     assert!(output.contains("def"));
+    assert!(output.contains(&paragraph(3, "keep")), "{output}");
+    assert!(output.contains(&paragraph(4, "tail")), "{output}");
 }
 
 #[test]
@@ -1045,6 +1046,72 @@ fn grid_offset_properties_use_the_base_story_fallback() {
 }
 
 #[test]
+fn lowering_and_saving_preserve_all_row_grid_properties_byte_for_byte() {
+    let properties = concat!(
+        r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/>"#,
+        r#"<w:wBefore w:w="2000" w:type="dxa"/><w:wAfter w:w="20" w:type="pct"/></w:trPr>"#,
+    );
+    let row = format!(
+        "<w:tr>{properties}{}</w:tr>",
+        table_cell("", &paragraph(1, "abc")),
+    );
+    let xml = table_document(&row, 3);
+    let (doc, mut model) = open(&xml);
+    let before = doc.encode_state_as_update_v1();
+    let blocks = docx_edit::bridge::yrs_doc_to_layout_blocks(
+        &doc,
+        "body",
+        &docx_edit::bridge::RenderEnv::default(),
+    )
+    .unwrap();
+    assert_eq!(doc.encode_state_as_update_v1(), before);
+    let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+        panic!("table");
+    };
+    assert_eq!(table.rows[0].grid_before, Some(1));
+    assert_eq!(table.rows[0].grid_after, Some(1));
+    let (untouched, warnings) = save(&xml, &doc, model.clone());
+    assert_eq!(untouched, xml);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    replace(&doc, 0, "xyz");
+    model_text(model_cell(&mut model, 0), "xyz");
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(output, xml.replace(">abc<", ">xyz<"));
+    assert!(output.contains(properties));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn authored_span_after_grid_before_survives_lowering_and_saving() {
+    let row = format!(
+        r#"<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr>{}</w:tr>"#,
+        table_cell(r#"<w:gridSpan w:val="2"/>"#, &paragraph(1, "abc")),
+    );
+    let xml = table_document(&row, 2);
+    let (doc, mut model) = open(&xml);
+    let blocks = docx_edit::bridge::yrs_doc_to_layout_blocks(
+        &doc,
+        "body",
+        &docx_edit::bridge::RenderEnv::default(),
+    )
+    .unwrap();
+    let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+        panic!("table");
+    };
+    assert_eq!(table.rows[0].cells[0].col_span, Some(2.0));
+    assert_eq!(docx_layout::table_grid::count_table_columns(table), 3);
+    let (untouched, warnings) = save(&xml, &doc, model.clone());
+    assert_eq!(untouched, xml);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    replace(&doc, 0, "xyz");
+    model_text(model_cell(&mut model, 0), "xyz");
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(output, xml.replace(">abc<", ">xyz<"));
+    assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
 fn merges_with_continuation_paragraphs_use_the_base_story_fallback() {
     for replace_row in [false, true] {
         let owners = (1..=3)
@@ -1215,11 +1282,12 @@ fn merge_then_delete_the_first_paragraph_keeps_live_cell_properties() {
         .as_array_mut()
         .unwrap()
         .remove(0);
-    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
-    assert!(warnings.is_empty(), "{warnings:?}");
+    let (output, _) = save(&xml, &doc, model);
     let first_cell = &output[..output.find("</w:tc>").unwrap()];
     assert!(first_cell.contains(r#"w:fill="AABBCC""#), "{output}");
     assert!(!first_cell.contains(r#"w:fill="DDEEFF""#), "{output}");
+    assert!(output.contains(&paragraph(3, "keep")), "{output}");
+    assert!(output.contains(&paragraph(4, "tail")), "{output}");
 }
 
 #[test]
@@ -1428,7 +1496,8 @@ fn a_simple_row_patch_keeps_an_untouched_table_with_omitted_nested_content() {
 }
 
 #[test]
-fn complex_table_changes_use_the_base_projected_paragraphs() {
+fn merge_with_a_cell_text_edit_splices_the_merged_row_and_keeps_unrelated_paragraphs_byte_for_byte()
+{
     let xml = source(&paragraph(1, "abc"));
     let (doc, mut model) = open(&xml);
     replace(&doc, 0, "xyz");
@@ -1439,10 +1508,11 @@ fn complex_table_changes_use_the_base_projected_paragraphs() {
     .unwrap();
     merge_model_row(&mut model);
     model_text(model_cell(&mut model, 0), "xyz");
-    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
-    assert!(warnings.is_empty(), "{warnings:?}");
+    let (output, _) = save(&xml, &doc, model);
     assert!(output.contains("xyz"), "{output}");
     assert!(!output.contains("abc"), "{output}");
+    assert!(output.contains(&paragraph(3, "keep")), "{output}");
+    assert!(output.contains(&paragraph(4, "tail")), "{output}");
 }
 
 #[test]

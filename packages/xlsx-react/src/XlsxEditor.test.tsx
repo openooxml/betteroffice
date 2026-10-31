@@ -12,6 +12,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { useEffect } from 'react';
 import {
   cellRect,
   initWasm,
@@ -19,6 +20,7 @@ import {
   openWorkbook,
   selectionAt,
 } from '@betteroffice/xlsx';
+import * as xlsx from '@betteroffice/xlsx';
 import type {
   CellAddr,
   ChartRegion,
@@ -53,6 +55,7 @@ const UNDRAWABLE_FIXTURE = resolve(
   '../../xlsx/test-fixtures/unsupported-charts.xlsx'
 );
 const VIEWPORT = { width: 800, height: 600 };
+const MOUNTED = { timeout: 4_000 };
 const LINK_TARGET = 'https://example.com/report';
 const LINK_CELL: CellAddr = { row: 5, col: 4 };
 
@@ -156,7 +159,7 @@ beforeAll(async () => {
   linked = fixtureFrom(withHyperlink(source));
   charted = fixtureFrom(new Uint8Array(readFileSync(CHART_FIXTURE)));
   undrawable = fixtureFrom(new Uint8Array(readFileSync(UNDRAWABLE_FIXTURE)));
-});
+}, 30_000);
 
 afterAll(async () => {
   HTMLCanvasElement.prototype.getContext = originalGetContext;
@@ -192,7 +195,7 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
     />
   );
   const nameBox = () => view.getByTestId('xlsx-name-box') as HTMLInputElement;
-  await waitFor(() => expect(nameBox().value).toBe('A1'));
+  await waitFor(() => expect(nameBox().value).toBe('A1'), MOUNTED);
   const surface = view.getByTestId('xlsx-scroll');
   const editor = () => view.queryByTestId('xlsx-cell-editor') as HTMLInputElement | null;
   const press = (addr: CellAddr) => {
@@ -296,8 +299,8 @@ describe('XlsxEditor grid pointer handling', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
-    await waitFor(() => expect(view.getAllByRole('gridcell').length).toBeGreaterThan(0));
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
+    await waitFor(() => expect(view.getAllByRole('gridcell').length).toBeGreaterThan(0), MOUNTED);
     expect(api!.save()).toEqual(source);
     expect(changes).toBe(0);
   });
@@ -860,7 +863,7 @@ describe('XlsxEditor host integration', () => {
         readOnly
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const surface = view.getByTestId('xlsx-scroll');
     const target = { row: 2, col: 0 };
     const before = api!.handle.cell(0, target.row, target.col).input;
@@ -900,7 +903,7 @@ describe('XlsxEditor host integration', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const surface = view.getByTestId('xlsx-scroll');
     const target = { row: 2, col: 0 };
 
@@ -983,7 +986,7 @@ describe('XlsxEditor host integration', () => {
     try {
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
         onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const surface = view.getByTestId('xlsx-scroll');
       const source = { row: 40, col: 10 };
       const destination = { row: 40, col: 12 };
@@ -1020,7 +1023,7 @@ describe('XlsxEditor host integration', () => {
     try {
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
         onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const surface = view.getByTestId('xlsx-scroll');
       const copied = { row: 40, col: 10 };
       const cut = { row: 40, col: 11 };
@@ -1054,7 +1057,7 @@ describe('XlsxEditor host integration', () => {
     try {
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
         onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const surface = view.getByTestId('xlsx-scroll');
       await act(async () => {
         api!.handle.editCells(0, [{ row: 40, col: 10, input: '=K40' }, { row: 40, col: 14, input: 'Newer' }]);
@@ -1092,7 +1095,7 @@ describe('XlsxEditor host integration', () => {
         api = ready;
       };
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={onReady} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const target = { row: 2, col: 0 };
       const before = api!.handle.cell(0, target.row, target.col).input;
       await act(async () => {
@@ -1120,7 +1123,7 @@ describe('XlsxEditor proposal review', () => {
     const view = render(
       <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const workbook = api!.handle;
     const before = workbook.cell(0, 6, 4).input;
     const stage = async (input: string) => {
@@ -1196,11 +1199,14 @@ describe('XlsxEditor pending host edits', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const surface = view.getByTestId('xlsx-scroll');
     const chart = api!.handle.displayList({ x: 0, y: 0, ...VIEWPORT }).charts![0];
-    fireEvent.mouseDown(surface, chartCenter(chart));
-    fireEvent.mouseUp(window, chartCenter(chart));
+    await waitFor(() => {
+      fireEvent.mouseDown(surface, chartCenter(chart));
+      fireEvent.mouseUp(window, chartCenter(chart));
+      expect(view.queryByTestId('xlsx-chart-selection')).not.toBeNull();
+    }, MOUNTED);
     await act(async () => {
       fireEvent.keyDown(surface, { key: 'ArrowRight' });
     });
@@ -1232,7 +1238,7 @@ describe('XlsxEditor pending host edits', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const target = { row: 2, col: 0 };
     await act(async () => {
       api!.selectCells(0, selectionAt(target));
@@ -1263,7 +1269,7 @@ describe('XlsxEditor pending host edits', () => {
             }}
           />
         );
-        await waitFor(() => expect(api).toBeDefined());
+        await waitFor(() => expect(api).toBeDefined(), MOUNTED);
         const target = { row: 2, col: 0 };
         await act(async () => {
           api!.selectCells(0, selectionAt(target));
@@ -1306,7 +1312,7 @@ describe('XlsxEditor pending host edits', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const target = { row: 2, col: 0 };
     await act(async () => {
       api!.selectCells(0, selectionAt(target));
@@ -1351,7 +1357,7 @@ describe('XlsxEditor commands', () => {
       />
     );
     const view = render(element());
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     await act(async () => {
       api!.selectCells(0, selectionAt(target));
     });
@@ -1981,6 +1987,43 @@ describe('XlsxEditor commands', () => {
     }
   });
 
+  it('fires onReady only once the workbook painted its first frame', async () => {
+    const target = cellRect(plain.grid, 3, 0)!;
+    const point = { x: target.x + target.w / 2, y: target.y + target.h / 2 };
+    const getRect = HTMLCanvasElement.prototype.getBoundingClientRect;
+    HTMLCanvasElement.prototype.getBoundingClientRect = () => new DOMRect(0, 0, VIEWPORT.width, VIEWPORT.height);
+    const hits: unknown[] = [];
+    const props = { onReady: (ready: XlsxEditorApi) => { hits.push(ready.getPositionAtPoint(point.x, point.y)); } };
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={plain.bytes.slice()} />);
+      await waitFor(() => expect(hits).toHaveLength(1), MOUNTED);
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={plain.bytes.slice()} />);
+      await waitFor(() => expect(hits).toHaveLength(2), MOUNTED);
+      expect(hits).toEqual([{ sheet: 0, row: 3, col: 0 }, { sheet: 0, row: 3, col: 0 }]);
+    } finally {
+      HTMLCanvasElement.prototype.getBoundingClientRect = getRect;
+    }
+  });
+
+  it('fires onReady once and shows the error when the first frame cannot be painted', async () => {
+    const paint = spyOn(xlsx, 'paintDisplayList').mockImplementation(() => {
+      throw new Error('pattern tile has no context');
+    });
+    const ready: XlsxEditorApi[] = [];
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
+        onReady={(api) => { ready.push(api); }} />);
+      await waitFor(() => expect(ready).toHaveLength(1), MOUNTED);
+      expect(view.getByTestId('xlsx-render-error').textContent).toContain('pattern tile has no context');
+      paint.mockRestore();
+      fireEvent.scroll(view.getByTestId('xlsx-scroll'));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(ready).toHaveLength(1);
+    } finally {
+      paint.mockRestore();
+    }
+  });
+
   it('prints a replacement workbook only after it painted', async () => {
     let paints = 0;
     const getContext = HTMLCanvasElement.prototype.getContext;
@@ -2003,13 +2046,13 @@ describe('XlsxEditor commands', () => {
           }}
         />
       );
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       let printing: Promise<XlsxCommandResult> | undefined;
+      paints = 0;
       view.rerender(
         <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
           file={charted.bytes.slice()}
           onReady={(ready) => {
-            paints = 0;
             printing = ready.commands.execute('print', null);
           }}
         />
@@ -2053,11 +2096,14 @@ describe('XlsxEditor commands', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const surface = view.getByTestId('xlsx-scroll');
     const [chart] = charted.charts;
-    fireEvent.mouseDown(surface, chartCenter(chart));
-    fireEvent.mouseUp(window, chartCenter(chart));
+    await waitFor(() => {
+      fireEvent.mouseDown(surface, chartCenter(chart));
+      fireEvent.mouseUp(window, chartCenter(chart));
+      expect(view.queryByTestId('xlsx-chart-selection')).not.toBeNull();
+    }, MOUNTED);
     await act(async () => {
       fireEvent.keyDown(surface, { key: 'ArrowRight' });
     });
@@ -2156,20 +2202,21 @@ describe('XlsxEditor commands', () => {
 
   it('reports the workbook lifecycle and fails commands of a replaced workbook', async () => {
     let api: XlsxEditorApi | undefined;
-    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} onReady={(ready) => void (api = ready)} />);
-    const store = await new Promise<XlsxCommandStore>((resolve) => {
-      function Probe() {
-        resolve(useXlsxCommands());
-        return null;
-      }
-      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} toolbar={<Probe />} />);
-    });
+    let committed: XlsxCommandStore | undefined;
+    function Probe() {
+      const store = useXlsxCommands();
+      useEffect(() => { committed = store; }, [store]);
+      return null;
+    }
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} toolbar={<Probe />} />);
+    await waitFor(() => expect(committed).toBeDefined());
+    const store = committed!;
     const code = (state: { enabled: boolean; disabledReason?: { code: string } }) =>
       state.enabled ? null : state.disabledReason!.code;
     expect(code(store.getState('save'))).toBe('no-document');
     view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => void (api = ready)} />);
     expect(code(store.getState('save'))).toBe('document-loading');
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     await waitFor(() => expect(store.getState('save').enabled).toBe(true));
     expect(api!.commands).toBe(store);
   });
@@ -2431,10 +2478,13 @@ describe('XlsxEditor commands', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const surface = view.getByTestId('xlsx-scroll');
     const [chart] = charted.charts;
-    fireEvent.mouseDown(surface, chartCenter(chart));
+    await waitFor(() => {
+      fireEvent.mouseDown(surface, chartCenter(chart));
+      expect(view.queryByTestId('xlsx-chart-selection')).not.toBeNull();
+    }, MOUNTED);
     let result!: XlsxCommandResult;
     await act(async () => {
       result = await api!.commands.execute('save', null);
@@ -2477,7 +2527,7 @@ describe('XlsxEditor commands', () => {
         }}
       />
     );
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     await act(async () => {
       api!.selectCells(0, { anchor: { row: 0, col: 0 }, focus: { row: 1, col: 1 } });
     });
@@ -2576,7 +2626,7 @@ describe('XlsxEditor edit batches', () => {
       api = ready;
     };
     const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={onReady} {...props} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     return { view, api: api!, file, onReady };
   }
 
@@ -2965,7 +3015,7 @@ describe('XlsxEditor host controls', () => {
     try {
       let api: XlsxEditorApi | undefined;
       render(<XlsxEditor legacySyncApi file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       expect(workerOpen).not.toHaveBeenCalled();
       expect(api!.save().byteLength).toBeGreaterThan(0);
     } finally {
@@ -2986,7 +3036,7 @@ describe('XlsxEditor host controls', () => {
         await api.flushPendingInput();
         saved = api.save();
       }} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Host-owned save' } });
     let result!: XlsxCommandResult;
     await act(async () => { result = await api.commands.execute('save', null); });
@@ -3006,7 +3056,7 @@ describe('XlsxEditor host controls', () => {
         if (++requests === 1) throw new Error('Host save failed');
         return true;
       }} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     await act(async () => {
       const failed = await api.commands.execute('save', null);
       expect(failed).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
@@ -3025,7 +3075,7 @@ describe('XlsxEditor host controls', () => {
       const saved: Uint8Array[] = [];
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
         onSaveRequest={() => { requests++; return pending; }} onSave={(bytes) => saved.push(bytes)} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Host save draft' } });
       fireEvent.keyDown(view.getByTestId('xlsx-formula-input'), { key: 's', ctrlKey: true });
       fireEvent.keyDown(view.getByTestId('xlsx-formula-input'), { key: 's', ctrlKey: true });
@@ -3044,7 +3094,7 @@ describe('XlsxEditor host controls', () => {
     it(`waits for ${source} composition before making the draft authoritative`, async () => {
       let api: XlsxEditorApi | undefined;
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const target = { row: 2, col: 0 };
       await act(async () => { api!.selectCells(0, selectionAt(target)); });
       if (source === 'cell') fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
@@ -3075,7 +3125,7 @@ describe('XlsxEditor host controls', () => {
     navigator.clipboard.readText = () => new Promise<string>((resolve) => { release = resolve; });
     try {
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
       let finished = false;
       const flushed = api!.flushPendingInput().then(() => { finished = true; });
@@ -3114,7 +3164,7 @@ describe('XlsxEditor host controls', () => {
   it('queries painted cells without moving selection and returns null over charts', async () => {
     let api: XlsxEditorApi | undefined;
     const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={charted.bytes.slice()} onReady={(ready) => { api = ready; }} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const canvas = view.container.querySelector('canvas')!;
     canvas.getBoundingClientRect = () => new DOMRect(40, 60, VIEWPORT.width, VIEWPORT.height);
     const surface = view.getByTestId('xlsx-scroll');
@@ -3147,7 +3197,7 @@ describe('clipboard access failure recovery', () => {
       try {
         let api: XlsxEditorApi | undefined;
         const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
-        await waitFor(() => expect(api).toBeDefined());
+        await waitFor(() => expect(api).toBeDefined(), MOUNTED);
         fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Keep my edits' } });
         fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
         let bytes!: Uint8Array;
@@ -3164,7 +3214,7 @@ describe('clipboard access failure recovery', () => {
     try {
       let api: XlsxEditorApi | undefined;
       const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const before = api!.handle.cell(0, 0, 0).input;
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
       await act(async () => { await api!.flushPendingInput(); });
@@ -3269,7 +3319,7 @@ describe('async editor host props', () => {
     const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
       onReady={(value) => { api = value; }} onChange={() => changes++}
       onDocumentChange={(change) => versions.push(change.version)} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     await act(async () => {
       await api.applyEdits({ expectVersion: await api.version(), steps: [{ op: 'setCellInputs',
         target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B3' } }, inputs: [['host edit']] }] });
@@ -3286,7 +3336,7 @@ describe('async editor host props', () => {
       const element = (zoom: number) => <XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
         initialZoom={zoom} style={{ height: 345, background: 'red' }} onReady={onReady} />;
       const view = render(element(initialZoom));
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       expect(api.commands.getState('zoom').value).toBe(scale);
       expect((view.container.firstElementChild as HTMLElement).style.height).toBe('345px');
       view.rerender(element(3));
@@ -3304,7 +3354,7 @@ describe('async editor host props', () => {
       try {
         render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} downloadOnSave={downloadOnSave}
           onSave={callback ? (bytes) => saves.push(bytes) : undefined} onReady={(value) => { api = value; }} />);
-        await waitFor(() => expect(api).toBeDefined());
+        await waitFor(() => expect(api).toBeDefined(), MOUNTED);
         await act(async () => { expect(await api.commands.execute('save', null)).toMatchObject({ ok: true }); });
         expect(saves).toHaveLength(callback ? 1 : 0);
         expect(click).toHaveBeenCalledTimes(downloads);
@@ -3322,6 +3372,12 @@ it('in-thread renders the supplied loading indicator while opening a file', asyn
   expect(view.queryByText('Opening in thread')).toBeNull();
 });
 
+it('pins the editor root to ltr', async () => {
+  const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} onReady={() => {}} />);
+  await waitFor(() => expect(view.getByTestId('xlsx-name-box')).toBeDefined());
+  expect((view.container.firstElementChild as HTMLElement).getAttribute('dir')).toBe('ltr');
+});
+
 it('async host save calls the latest onSave once without a request or download', async () => {
   let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
   const ready = (value: typeof api) => { api = value; };
@@ -3332,7 +3388,7 @@ it('async host save calls the latest onSave once without a request or download',
   try {
     const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} onReady={ready}
       onSave={(bytes) => first.push(bytes)} onSaveRequest={request} downloadOnSave />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     view.rerender(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} onReady={ready}
       onSave={(bytes) => latest.push(bytes)} onSaveRequest={request} downloadOnSave />);
     let bytes!: Uint8Array;

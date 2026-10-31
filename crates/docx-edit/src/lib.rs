@@ -53,7 +53,6 @@
 extern crate self as docx_edit;
 
 use std::cell::RefCell;
-#[cfg(feature = "wasm")]
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -84,6 +83,7 @@ mod ctx;
 mod deterministic;
 mod document_properties;
 mod fingerprint;
+mod fmath;
 mod format;
 mod geometry;
 mod header_footer;
@@ -116,6 +116,8 @@ mod section_margins;
 mod sections;
 pub use sections::SectionInfo;
 mod seed;
+#[doc(hidden)]
+pub use seed::RunInheritance;
 mod segment_json;
 mod segments;
 mod sticky_positions;
@@ -128,6 +130,7 @@ mod update_chunks;
 pub mod canonical;
 pub mod engine;
 pub mod frame_delta;
+pub mod session;
 
 pub use batch::{
     DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
@@ -179,10 +182,10 @@ pub use stories::{
     AllStories, ListStoriesResponse, ListStoryUse, StoryInfo, StoryInfoKind, StorySelection,
 };
 pub use target::{
-    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphList, ParagraphTarget,
-    ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest,
-    ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange,
-    TextTarget,
+    AtomKind, DrawingProperties, EditTextView, FindTextRequest, FindTextResponse, ParagraphList,
+    ParagraphTarget, ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse,
+    ReadStoriesRequest, ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch,
+    TextPosition, TextRange, TextTarget,
 };
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
@@ -673,6 +676,9 @@ pub struct EditingDoc {
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
+    save_story_states: Arc<Mutex<identity::StoryStateCache>>,
+    #[cfg(test)]
+    save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     table_membership: Mutex<Option<TableMembership>>,
@@ -744,14 +750,23 @@ impl EditingDoc {
             })
             .expect("a fresh doc accepts an update observer");
         let story_revisions = Arc::new(Mutex::new(StoryRevisions::default()));
+        let save_story_states = Arc::new(Mutex::new(identity::StoryStateCache::default()));
         let stamped = Arc::clone(&story_revisions);
+        let cached = Arc::clone(&save_story_states);
         let story_revision_sub = doc
             .get_or_insert_map(STORIES)
-            .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
+            .observe_deep(move |txn, events| {
+                stamped.lock().unwrap().stamp(txn, events);
+                identity::StoryStateCache::evict_root_changes(&cached, txn, events);
+            });
         let stamped = Arc::clone(&story_revisions);
-        let removed_story_sub = doc
-            .get_or_insert_map(REMOVED_STORIES)
-            .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
+        let cached = Arc::clone(&save_story_states);
+        let removed_story_sub =
+            doc.get_or_insert_map(REMOVED_STORIES)
+                .observe_deep(move |txn, events| {
+                    stamped.lock().unwrap().stamp(txn, events);
+                    identity::StoryStateCache::evict_root_changes(&cached, txn, events);
+                });
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
@@ -768,6 +783,9 @@ impl EditingDoc {
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
+            save_story_states,
+            #[cfg(test)]
+            save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
             chunk_snapshots: Mutex::default(),
             table_membership: Mutex::default(),
@@ -847,6 +865,7 @@ impl EditingDoc {
 
     /// Invalidates every version handed out so far. `entropy` is mixed into the new nonce.
     pub(crate) fn rotate_version(&self, entropy: u64) {
+        self.save_story_states.lock().unwrap().clear();
         self.version_nonce.store(
             batch::mint_nonce(self.client_id, entropy),
             Ordering::Relaxed,
@@ -865,7 +884,6 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
-    #[cfg(feature = "wasm")]
     pub(crate) fn rebase_comment_writes(&self, mut written: HashSet<(String, Option<String>)>) {
         let Some(source) = self.source_metadata() else {
             return;
@@ -907,6 +925,7 @@ impl EditingDoc {
 
     #[allow(dead_code)]
     pub(crate) fn invalidate_projections(&self) {
+        self.save_story_states.lock().unwrap().clear();
         self.epoch.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1152,6 +1171,7 @@ impl EditingDoc {
 
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
+        self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
         *self.media.lock().unwrap() = None;
         *self.source.lock().unwrap() = Some(source);
@@ -1159,19 +1179,19 @@ impl EditingDoc {
 
     /// Records that the stories now hold exactly what seeding the retained source and its
     /// installed media writes, as a fresh seed of that package would.
-    #[cfg(feature = "wasm")]
     pub(crate) fn mark_seeded(&self) {
+        self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
     #[cfg(all(test, feature = "wasm"))]
     pub(crate) fn forget_seeding(&self) {
+        self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
     }
 
     /// Whether the replica holds nothing yet: no content, local or remote, and no deletions.
-    #[cfg(feature = "wasm")]
     pub(crate) fn holds_nothing(&self) -> bool {
         self.doc.transact().state_vector().is_empty()
     }
@@ -1185,6 +1205,7 @@ impl EditingDoc {
     /// Keeps `media`, read from the retained package, as the table the
     /// stories' `media:{n}` image sources name.
     pub(crate) fn install_media(&self, media: docx_parse::media::MediaTable) {
+        self.save_story_states.lock().unwrap().clear();
         *self.media.lock().unwrap() = Some(Arc::new(media));
     }
 
@@ -1602,7 +1623,6 @@ impl EditingDoc {
         self.write_comment_metadata(comment_id, patch, false)
     }
 
-    #[cfg(feature = "wasm")]
     pub(crate) fn seed_comment_metadata(
         &self,
         comment_id: &str,
@@ -1883,6 +1903,7 @@ impl EditingDoc {
     pub(crate) fn load_state_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        self.save_story_states.lock().unwrap().clear();
         self.integrate_update(update, UpdateOrigin::Remote)
     }
 

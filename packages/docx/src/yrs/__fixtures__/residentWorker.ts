@@ -1,9 +1,11 @@
 import { resolve } from 'node:path';
 import { encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine } from '../../layout/render/rustDisplayList';
 import { createResidentEngineSession, type ResidentEngineSession } from '../residentEngineSession';
-import { preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
+import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
 import { decodeDocxHostJson } from '../yrsSessionFacade';
+import { warmResidentSave } from '../residentSaveWarmup';
 import { wasmModuleMemories } from '../../wasm/loadWasmAsset';
+import { extractEmbeddedFontFaces, getEmbeddedFontFaces } from '../../utils/embeddedFonts';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
   DocxEngineWorkerHostModule,
@@ -25,14 +27,22 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
 }
 
 const STUBS: Record<string, string> = {
-  '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
+  '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
   './residentEngineSession':
     'export const createResidentEngineSession = (heapLimitBytes, clientId) => testHarness.createSession(heapLimitBytes, clientId);',
   './wasm/index': `
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+    export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
   `,
+  '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
+  '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
+  './residentSaveWarmup': 'export const warmResidentSave = (yieldSave) => testHarness.warmResidentSave(yieldSave);',
   './yrsSessionFacade': 'export const decodeDocxHostJson = (...args) => testHarness.decodeDocxHostJson(...args);',
+  '../utils/embeddedFonts': `
+    export const extractEmbeddedFontFaces = (...args) => testHarness.extractEmbeddedFontFaces(...args);
+    export const getEmbeddedFontFaces = (...args) => testHarness.getEmbeddedFontFaces(...args);
+  `,
   '../layout/render/glyphCache': 'export class GlyphCache {}',
   '../layout/render/canvasBackend': `
     export const rasterizeDisplayPageToBackBuffer = async (buffer, page, _options, dpr = 1, zoom = 1) => {
@@ -223,8 +233,13 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
           return session;
         },
         preload: preloadEditWasm,
+        warmResidentSave,
         preloadFrom: preloadEditWasmFrom,
+        decodePackedFontFace,
+        preloadOpcWasm: () => import('../../wasm/opc').then((wasm) => wasm.preloadOpcWasm()),
+        preloadParseWasm: () => import('../../wasm/parse').then((wasm) => wasm.preloadParseWasm()),
         decodeDocxHostJson,
+        extractEmbeddedFontFaces, getEmbeddedFontFaces,
         wasmModuleMemories,
       },
       async (blob: Blob) => { worker.imageBlobs.push(blob); return new Bitmap(1, 1); },

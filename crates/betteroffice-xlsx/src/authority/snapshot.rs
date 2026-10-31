@@ -39,6 +39,34 @@ pub(crate) trait Codec: Sized + Send + Sync + 'static {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CalculationSettings(pub DateSystem, pub Option<bool>);
+
+impl Codec for CalculationSettings {
+    fn write(&self, w: &mut Writer) {
+        let date = match self.0 {
+            DateSystem::V1900 => 0,
+            DateSystem::V1904 => 1,
+        };
+        w.u8(date | if self.1 == Some(false) { 2 } else { 0 });
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        let settings = r.u8()?;
+        let precision = match settings {
+            0 | 1 => None,
+            2 | 3 => Some(false),
+            _ => return Err(SnapshotError::new("invalid snapshot calculation settings")),
+        };
+        let date = if settings & 1 == 0 {
+            DateSystem::V1900
+        } else {
+            DateSystem::V1904
+        };
+        Ok(Self(date, precision))
+    }
+}
+
 const DECODE_PENDING: &str = "authority base decoding is pending";
 const DECODE_RESERVATION: usize = 128;
 
@@ -1627,6 +1655,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
     let WorkbookBase {
         bootstrap_client_id: _,
         date_system: _,
+        full_precision: _,
         defined_names,
         fingerprint: _,
         fingerprints,
@@ -1676,6 +1705,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
     let WorkbookBase {
         bootstrap_client_id,
         date_system,
+        full_precision,
         defined_names: _,
         fingerprint,
         fingerprints: _,
@@ -1693,7 +1723,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
         tables: _,
     } = base;
     bootstrap_client_id.write(w);
-    date_system.write(w);
+    CalculationSettings(*date_system, *full_precision).write(w);
     fingerprint.write(w);
     styles.theme.write(w);
     for count in &base_counts(base)[..manifest_counts(usize::from(manifest_tag(base)))] {
@@ -1729,6 +1759,7 @@ impl BaseCursor {
         let WorkbookBase {
             bootstrap_client_id: _,
             date_system: _,
+            full_precision: _,
             defined_names,
             fingerprint: _,
             fingerprints,
@@ -2052,7 +2083,7 @@ impl WorkbookAuthority {
 
 struct BaseManifest {
     client: u64,
-    date: DateSystem,
+    date: CalculationSettings,
     fingerprint: String,
     theme: Theme,
     counts: [usize; BASE_SECTIONS],
@@ -2087,7 +2118,7 @@ impl BaseRecord {
         match tag {
             0 | 20 | 22 | 24 => {
                 r.value::<u64>()?;
-                r.value::<DateSystem>()?;
+                r.value::<CalculationSettings>()?;
                 r.value::<String>()?;
                 r.value::<Theme>()?;
                 for _ in 0..manifest_counts(tag) {
@@ -2128,7 +2159,7 @@ impl BaseRecord {
         Ok(match tag {
             0 | 20 | 22 | 24 => std::mem::size_of::<BaseManifest>()
                 .max(u64::decode_cost())
-                .max(DateSystem::decode_cost())
+                .max(CalculationSettings::decode_cost())
                 .max(String::decode_cost())
                 .max(Theme::decode_cost())
                 .max(usize::decode_cost()),
@@ -2164,7 +2195,7 @@ impl BaseRecord {
             0 | 20 | 22 | 24 => {
                 let start = r.position;
                 r.prepare::<u64>()?;
-                r.prepare::<DateSystem>()?;
+                r.prepare::<CalculationSettings>()?;
                 r.prepare::<String>()?;
                 r.prepare::<Theme>()?;
                 for _ in 0..manifest_counts(tag) {
@@ -2307,10 +2338,11 @@ impl BaseBuilder {
                 styles.theme = theme;
                 self.base = Some(WorkbookBase {
                     bootstrap_client_id: client,
-                    date_system: date,
+                    date_system: date.0,
+                    full_precision: date.1,
                     defined_names: Vec::new(),
                     fingerprint,
-                    fingerprints: BTreeMap::new(),
+                    fingerprints: BTreeMap::new().into(),
                     freeze_panes: Vec::new(),
                     formats: Vec::new(),
                     col_styles: Vec::new(),
@@ -2387,7 +2419,7 @@ impl BaseBuilder {
         }
         if section == 0 {
             let bootstrap_client_id = Codec::read(&mut r)?;
-            let date_system = Codec::read(&mut r)?;
+            let CalculationSettings(date_system, full_precision) = Codec::read(&mut r)?;
             let fingerprint = Codec::read(&mut r)?;
             let theme = Codec::read(&mut r)?;
             let mut styles = Stylesheet::default();
@@ -2398,9 +2430,10 @@ impl BaseBuilder {
             self.base = Some(WorkbookBase {
                 bootstrap_client_id,
                 date_system,
+                full_precision,
                 defined_names: Vec::new(),
                 fingerprint,
-                fingerprints: BTreeMap::new(),
+                fingerprints: BTreeMap::new().into(),
                 freeze_panes: Vec::new(),
                 formats: Vec::new(),
                 col_styles: Vec::new(),
@@ -2865,6 +2898,27 @@ mod tests {
     use crate::snapshot::wire::unframe;
 
     use super::*;
+
+    #[test]
+    fn precision_settings_are_rejected_by_the_legacy_date_reader() {
+        for date in [DateSystem::V1900, DateSystem::V1904] {
+            for precision in [None, Some(true), Some(false)] {
+                let mut writer = Writer::new();
+                CalculationSettings(date, precision).write(&mut writer);
+                let bytes = writer.into_bytes();
+                let legacy = DateSystem::read(&mut Reader::new(&bytes));
+                if precision == Some(false) {
+                    assert!(legacy.is_err());
+                } else {
+                    assert_eq!(legacy.unwrap(), date);
+                }
+                let CalculationSettings(restored_date, restored_precision) =
+                    CalculationSettings::read(&mut Reader::new(&bytes)).unwrap();
+                assert_eq!(restored_date, date);
+                assert_eq!(restored_precision, precision.filter(|full| !full));
+            }
+        }
+    }
 
     #[test]
     fn pattern_border_authority_codec_round_trip() {
@@ -3689,7 +3743,8 @@ mod tests {
             ),
             (3, Vec::new()),
             (i64::MAX, vec![String::new()]),
-        ]);
+        ])
+        .into();
         base.defined_names = vec![
             DefinedName {
                 name: "Second".into(),

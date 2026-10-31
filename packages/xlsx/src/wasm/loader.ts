@@ -10,13 +10,24 @@ import type { ChartInfo, ChartMutation } from '../charts';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import initWasmModule, {
   XlsxDocument,
+  XlsxSnapshotBuilder,
+  allocationFailure,
+  decodeFontFace as decodePackedFontFace,
+  displayListCellLimit,
+  engineKind,
   exportXlsxMarkdownJson,
   exportXlsxStructuredJson,
   renderXlsxMarkdownJson,
-} from './generated/xlsx_wasm.js';
+} from './engine';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
-import * as xlsxWasm from './generated/xlsx_wasm.js';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import { wasmAssetUrl } from './asset';
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
@@ -645,6 +656,7 @@ export interface WorkbookHandle extends CollaborationReplica {
 let initialized = false;
 let engineMemory: WebAssembly.Memory | undefined;
 let initialization: Promise<void> | undefined;
+let pngExportAvailable = true;
 const displayListJsonReaders = new WeakMap<
   WorkbookHandle, (viewport: Viewport, sheet?: number) => string
 >();
@@ -660,15 +672,49 @@ export function workbookDisplayListJson(
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
+export interface WasmInitOptions {
+  png?: boolean;
+}
+
+async function compileWasmInput(input: WasmInitInput): Promise<WebAssembly.Module> {
+  let source = await input;
+  if (source instanceof WebAssembly.Module ||
+    Object.prototype.toString.call(source) === '[object WebAssembly.Module]') return source as WebAssembly.Module;
+  if (typeof source === 'string' || source instanceof URL ||
+    (typeof Request === 'function' && source instanceof Request)) source = await fetch(source);
+  if (typeof Response === 'function' && source instanceof Response) {
+    if (typeof WebAssembly.compileStreaming === 'function') {
+      try { return await WebAssembly.compileStreaming(source.clone()); }
+      catch (error) {
+        if (!source.ok || !['basic', 'cors', 'default'].includes(source.type) ||
+          source.headers.get('Content-Type') === 'application/wasm') throw error;
+      }
+    }
+    source = await source.arrayBuffer();
+  }
+  return WebAssembly.compile(source as BufferSource);
+}
+
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
 export function initWasm(
-  input: WasmInitInput = wasmAssetUrl()
+  input?: WasmInitInput,
+  options: WasmInitOptions = {}
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
-  initialization = initWasmModule({ module_or_path: input }).then(
+  const png = options.png !== false;
+  let module: WebAssembly.Module | undefined;
+  const source = engineKind === 'native' || (input === undefined && png)
+    ? input ?? wasmAssetUrl()
+    : compileWasmInput(input ?? wasmAssetUrl(png)).then((compiled) => {
+      module = compiled;
+      return compiled;
+    });
+  initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
+      pngExportAvailable = engineKind === 'native' || module === undefined ||
+        WebAssembly.Module.customSections(module, 'betteroffice.xlsx.no-png').length === 0;
       initialized = true;
     },
     (error: unknown) => {
@@ -696,14 +742,14 @@ function toError(e: unknown): Error {
  */
 export function engineAllocationFailure(): { bytes: number; memoryBytes: number } | null {
   if (!initialized) return null;
-  const bytes = xlsxWasm.allocationFailure();
+  const bytes = allocationFailure();
   return bytes > 0 ? { bytes, memoryBytes: engineMemory?.buffer.byteLength ?? 0 } : null;
 }
 
 /** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
 export function getDisplayListCellLimit(): number {
   requireInitialized();
-  return xlsxWasm.displayListCellLimit();
+  return displayListCellLimit();
 }
 
 /**
@@ -719,7 +765,8 @@ export function isWasmAvailable(): boolean {
  * so chrome can disable an export control instead of calling and catching.
  */
 export function isPngExportAvailable(): boolean {
-  return typeof (XlsxDocument.prototype as { renderPng?: unknown }).renderPng === 'function';
+  return pngExportAvailable &&
+    typeof (XlsxDocument.prototype as { renderPng?: unknown }).renderPng === 'function';
 }
 
 /**
@@ -783,9 +830,7 @@ type SnapshotBuilder = {
 
 export function createWorkbookSnapshotBuilder(options: OpenWorkbookOptions) {
   requireInitialized();
-  const Constructor = (xlsxWasm as unknown as {
-    XlsxSnapshotBuilder?: new () => SnapshotBuilder;
-  }).XlsxSnapshotBuilder;
+  const Constructor = XlsxSnapshotBuilder as unknown as (new () => SnapshotBuilder) | undefined;
   if (!Constructor) throw new Error('Workbook wasm does not support peer snapshots');
   let builder: SnapshotBuilder | undefined = new Constructor();
   function active(): SnapshotBuilder {

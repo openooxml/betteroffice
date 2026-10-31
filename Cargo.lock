@@ -89,6 +89,7 @@ dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-docx-raster",
+ "betteroffice-fonts",
  "betteroffice-ooxml-fidelity",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
@@ -103,11 +104,15 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-ooxml-diff",
+ "betteroffice-ooxml-font-preflight",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "foldhash",
  "js-sys",
+ "libm",
  "ryu-js",
  "serde",
  "serde_json",
@@ -119,13 +124,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-docx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-docx-edit",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
+ "betteroffice-opc",
+ "serde_json",
+]
+
+[[package]]
 name = "betteroffice-docx-layout"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-ooxml-text",
  "foldhash",
  "js-sys",
+ "libm",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -138,10 +156,12 @@ name = "betteroffice-docx-parse"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
+ "betteroffice-docx-layout",
  "betteroffice-drawingml",
  "betteroffice-metafile",
  "betteroffice-opc",
  "indexmap",
+ "libm",
  "memchr",
  "quick-xml",
  "ryu-js",
@@ -172,6 +192,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
+ "libm",
  "png",
  "proptest",
  "serde",
@@ -180,11 +201,93 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-fonts"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-fonts-cjk",
+ "betteroffice-fonts-intl",
+ "betteroffice-fonts-latin",
+ "cc",
+ "lol_alloc",
+ "quick-xml",
+ "ruzstd",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wuff",
+ "zstd",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-fonts-cjk-jp",
+ "betteroffice-fonts-cjk-kr",
+ "betteroffice-fonts-cjk-sc",
+ "betteroffice-fonts-cjk-serif-sc",
+ "betteroffice-fonts-cjk-tc",
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-jp"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-kr"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-sc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-serif-sc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-tc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-intl"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-latin"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
+ "libm",
  "png",
  "resvg",
 ]
@@ -203,10 +306,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-ooxml-font-preflight"
+version = "0.5.1"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "quick-xml",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "betteroffice-ooxml-text"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "rustybuzz",
  "serde",
  "serde_json",
@@ -230,12 +344,16 @@ dependencies = [
 name = "betteroffice-pptx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
  "png",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -257,12 +375,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-pptx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-fonts",
+ "betteroffice-opc",
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "betteroffice-pptx-render",
+ "serde",
+ "serde_json",
+ "yrs",
+]
+
+[[package]]
 name = "betteroffice-pptx-parse"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "proptest",
  "quick-xml",
  "serde",
@@ -290,14 +424,19 @@ name = "betteroffice-pptx-render"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libc",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -333,6 +472,7 @@ dependencies = [
 name = "betteroffice-vsdx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
@@ -471,6 +611,8 @@ name = "betteroffice-xlsx"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -490,12 +632,26 @@ name = "betteroffice-xlsx-calc"
 version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-model",
+ "libm",
+]
+
+[[package]]
+name = "betteroffice-xlsx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-opc",
+ "betteroffice-xlsx",
+ "betteroffice-xlsx-model",
+ "betteroffice-xlsx-parse",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
 version = "0.5.1"
 dependencies = [
+ "libm",
  "serde",
  "serde_json",
 ]
@@ -528,6 +684,7 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-render",
+ "libm",
  "png",
  "rustybuzz",
  "serde",
@@ -544,6 +701,7 @@ dependencies = [
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
  "hashbrown 0.17.1",
+ "libm",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -667,6 +825,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -1127,6 +1287,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1157,9 +1327,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libm"
-version = "0.2.16"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1181,6 +1351,15 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "lol_alloc"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e5106554cabc97552dcadf54f57560ae6af3276652f82ca2be06120dc4c5dc"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "memchr"
@@ -1297,6 +1476,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1322,14 +1507,11 @@ dependencies = [
 name = "pptx-wasm"
 version = "0.0.0"
 dependencies = [
- "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-pptx-edit",
- "betteroffice-pptx-parse",
- "betteroffice-pptx-render",
- "serde",
- "serde_json",
+ "betteroffice-pptx-engine",
+ "js-sys",
  "wasm-bindgen",
- "yrs",
 ]
 
 [[package]]
@@ -1605,6 +1787,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu-js"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1624,6 +1815,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -1747,6 +1944,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+dependencies = [
+ "lock_api",
+]
+
+[[package]]
 name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1800,7 +2006,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -1928,6 +2134,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typed-path"
@@ -2078,11 +2290,13 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vsdx-wasm"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-raster",
  "betteroffice-vsdx-render",
  "betteroffice-vsdx-validate",
+ "js-sys",
  "serde_json",
  "wasm-bindgen",
  "yrs",
@@ -2369,8 +2583,10 @@ dependencies = [
 name = "xlsx-wasm"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-xlsx",
+ "betteroffice-xlsx-engine",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
  "js-sys",
@@ -2453,6 +2669,34 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "8.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "zune-core"

@@ -271,6 +271,8 @@ export interface InlineSdtWidgetAttrs {
 
 export interface ChartA11yAttrs {
   label: string;
+  /** The placed chart box every primitive of the chart paints inside. */
+  frame?: { x?: number; y?: number; w?: number; h?: number };
 }
 
 // attributes shared by primitives that map back to document content; replaces
@@ -376,6 +378,8 @@ export interface DocAttrs {
 export interface TextRunPrimitive extends DocAttrs {
   kind: 'text';
   text: string;
+  /** Canvas-only glyph stand-in text. */
+  paintText?: string;
   x: number; // pen origin
   baselineY: number;
   width: number; // measured advance of the whole run
@@ -395,6 +399,10 @@ export interface TextRunPrimitive extends DocAttrs {
   rotationDeg?: number;
   /** Horizontal text scale as a percentage (100 = normal). Absent = 100. */
   horizontalScale?: number;
+  /** Canvas-only width ratio for substitute font bytes. Absent = 1. */
+  substituteScale?: number;
+  /** Browser text clusters at offsets from the run origin. */
+  canvasClusters?: Array<{ text: string; offset: number }>;
   /** Render glyphs uppercase without changing the accessible source text. */
   allCaps?: boolean;
   /** Render lowercase glyphs as small uppercase. */
@@ -446,6 +454,8 @@ export interface GlyphRunPrimitive extends DocAttrs {
   size: number; // px
   color: string; // "#rrggbb"
   text: string; // source text — the a11y mirror renders this as a real text node
+  /** Canvas-only glyph stand-in text for the fillText fallback. */
+  paintText?: string;
   glyphs: PositionedGlyph[];
   echo?: { x: number; right: number; kern?: boolean; primaryFont?: boolean;
     kerning?: number; letterSpacing?: number; position?: number; scale?: number; canEmpty?: boolean;

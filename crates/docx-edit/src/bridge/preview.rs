@@ -190,7 +190,7 @@ impl BoundaryState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PreviewUnits {
     records: Vec<UnitRecord>,
-    comments: Rc<Vec<CommentInterval>>,
+    comments: Rc<CommentIntervals>,
     /// The lowering numbered SEQ fields across the whole body.
     sequences: bool,
     untracked_state: bool,
@@ -754,7 +754,7 @@ impl UnitRecorder {
     pub(super) fn save_chunks(
         &mut self,
         chunks: &[yrs::types::text::Diff<YChange>],
-        comments: Rc<Vec<CommentInterval>>,
+        comments: Rc<CommentIntervals>,
     ) {
         for record in &mut self.units.records {
             if !record.chunks.is_empty() {
@@ -946,6 +946,9 @@ pub(crate) fn replay(
         let mut active_stories = BTreeSet::from(["body".to_owned()]);
         let mut replay_local = local::LocalLowering::new(local.enabled && !local.blocked);
         replay_local.source.clone_from(&local.source);
+        if !env.hyperlink_style_font_sizes.is_empty() {
+            replay_local.run_size_sources = run_size_provenance::Sources::new(doc);
+        }
         let _reads = ReadGuard::new();
         let (replacement, position, hidden_field_blocks) = walk_story_chunks(
             &txn,

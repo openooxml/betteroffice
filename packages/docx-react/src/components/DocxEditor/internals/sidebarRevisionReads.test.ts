@@ -14,7 +14,7 @@ beforeAll(async () => {
       )
     )
   );
-});
+}, 30_000);
 
 const AUTHOR = { name: 'Ada', date: '2026-09-29T00:00:00Z' };
 

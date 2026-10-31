@@ -259,7 +259,12 @@ function withoutSyntheticParagraphs(
   if (synthetic.size === 0) return document;
   return mapStoryParagraphs(document, (paragraph) => {
     const key = projectedSessionKey(paragraph);
-    return paragraph.content.length === 0 && key !== undefined && synthetic.has(key)
+    const empty = paragraph.content.every(node =>
+      node.type === 'run' && node.content.every(content =>
+        content.type === 'break' && (content.breakType === 'page' || content.breakType === 'column')
+      )
+    );
+    return empty && key !== undefined && synthetic.has(key)
       ? null
       : paragraph;
   });
@@ -290,8 +295,10 @@ export interface DocxSessionSave {
 }
 
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
-export function captureSessionSave(session: YrsSession): DocxSessionSave {
-  const identities = session.paragraphIdentities();
+export function captureSessionSave(
+  session: YrsSession,
+  identities: DocxParagraphIdentitySnapshot = session.paragraphIdentities()
+): DocxSessionSave {
   engineProgress();
   const plan = session.paragraphSavePlan();
   engineProgress();
@@ -455,8 +462,10 @@ export async function writeSessionSave(
   options: RepackOptions = {},
   patches: (part: string) => boolean = () => true,
   skipMutations = false,
-  splices: (part: string) => boolean = patches
+  splices: (part: string) => boolean = patches,
+  yieldSave?: () => Promise<void>
 ): Promise<DocxSavedDocument> {
+  if (yieldSave) await yieldSave();
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
   engineProgress();
@@ -486,6 +495,7 @@ export async function writeSessionSave(
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
   const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
+  if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
@@ -516,11 +526,13 @@ export async function writeSessionSave(
           }),
     };
     const { buffer, warnings } = await writeDocumentWithRust(
-      withSourceOrdinals(output, spliced), sectionEdits ? sourceBuffer : originalBuffer, options, undefined, undefined, plan, skipMutations
+      withSourceOrdinals(output, spliced), sectionEdits ? sourceBuffer : originalBuffer, options, undefined, undefined, plan, skipMutations, yieldSave
     );
     for (const warning of warnings) {
       if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
         console.debug(warning);
+      } else if (warning.startsWith('SmartArt ') || warning.startsWith('Drawing run ')) {
+        console.warn(warning);
       }
     }
     return { buffer, plan };
@@ -540,6 +552,7 @@ export async function writeSessionSave(
     result = await write(undefined);
   }
   const { buffer, plan } = result;
+  if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   const bytes = new Uint8Array(buffer);
   engineProgress();

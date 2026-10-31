@@ -1,0 +1,24 @@
+[package]
+name = "betteroffice-xlsx-engine"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Target-neutral XLSX engine session over the workbook core."
+
+[lib]
+name = "xlsx_engine"
+
+[features]
+default = ["raster"]
+raster = ["betteroffice-xlsx/raster"]
+
+[dependencies]
+betteroffice-xlsx = { workspace = true, default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+ooxml-opc.workspace = true
+xlsx-model = { workspace = true, features = ["test-counters"] }
+xlsx-parse.workspace = true

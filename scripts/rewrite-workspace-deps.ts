@@ -42,6 +42,13 @@ for (const name of readdirSync(PKG_DIR)) {
   if (json.name && json.version) versions.set(json.name, json.version);
   manifests.push({ path, json });
 }
+for (const name of readdirSync('bindings')) {
+  const path = join('bindings', name, 'package.json');
+  if (!existsSync(path)) continue;
+  const json = JSON.parse(readFileSync(path, 'utf8')) as PackageManifest;
+  if (json.name && json.version) versions.set(json.name, json.version);
+  manifests.push({ path, json });
+}
 
 function resolve(dep: string, range: string): string {
   const version = versions.get(dep);

@@ -5,7 +5,12 @@
  */
 
 import type { TranslationKey } from '@betteroffice/docx-i18n';
-import { DOCX_COMMAND_DESCRIPTORS, formatChord } from '../../../commands/descriptors';
+import {
+  DOCX_COMMAND_DESCRIPTORS,
+  formatChord,
+  isMacPlatform,
+  shortcutMatchesPlatform,
+} from '../../../commands/descriptors';
 import type {
   DocxCommandArgs,
   DocxCommandId,
@@ -182,6 +187,15 @@ const COMMAND_HELP: readonly CommandHelp[] = [
     category: 'formatting',
   }),
   help({
+    id: 'clearFormatting',
+    command: 'clearFormatting',
+    name: 'Clear Formatting',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.clearFormatting',
+    description: 'Clear text formatting',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.clearFormattingDescription',
+    category: 'formatting',
+  }),
+  help({
     id: 'superscript',
     command: 'superscript',
     name: 'Superscript',
@@ -251,16 +265,20 @@ const COMMAND_HELP: readonly CommandHelp[] = [
 ];
 
 /** Shortcuts of editor commands, as bound by the command descriptors. */
-export const COMMAND_SHORTCUTS: KeyboardShortcut[] = COMMAND_HELP.flatMap(
-  ({ command, args, ...entry }) => {
+export function getCommandShortcuts(mac = isMacPlatform()): KeyboardShortcut[] {
+  return COMMAND_HELP.flatMap(({ command, args, ...entry }) => {
     const key = JSON.stringify(args ?? null);
     const chords = (DOCX_COMMAND_DESCRIPTORS[command].shortcuts as readonly DocxCommandShortcut[])
-      .filter((shortcut) => JSON.stringify(shortcut.args) === key)
+      .filter(
+        (shortcut) => shortcutMatchesPlatform(shortcut, mac) && JSON.stringify(shortcut.args) === key
+      )
       .map((shortcut) => formatChord(shortcut.chord, false));
     if (chords.length === 0) return [];
     return [{ ...entry, keys: chords[0], ...(chords[1] ? { altKeys: chords[1] } : {}) }];
-  }
-);
+  });
+}
+
+export const COMMAND_SHORTCUTS: KeyboardShortcut[] = getCommandShortcuts();
 
 /** Keys the text input and the browser handle, outside the editor commands. */
 const INPUT_SHORTCUTS: KeyboardShortcut[] = [
@@ -271,6 +289,7 @@ const INPUT_SHORTCUTS: KeyboardShortcut[] = [
     description: 'Delete selected text',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.deleteDescription',
     keys: 'Del',
+    keysKey: 'dialogs.keyboardShortcuts.keys.del',
     altKeys: 'Backspace',
     category: 'editing',
   },
@@ -417,6 +436,7 @@ const INPUT_SHORTCUTS: KeyboardShortcut[] = [
     description: 'Scroll up one page',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.pageUpDescription',
     keys: 'Page Up',
+    keysKey: 'dialogs.keyboardShortcuts.keys.pageUp',
     category: 'navigation',
   },
   {
@@ -426,6 +446,7 @@ const INPUT_SHORTCUTS: KeyboardShortcut[] = [
     description: 'Scroll down one page',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.pageDownDescription',
     keys: 'Page Down',
+    keysKey: 'dialogs.keyboardShortcuts.keys.pageDown',
     category: 'navigation',
   },
 
@@ -451,21 +472,21 @@ export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [...COMMAND_SHORTCUTS, ...I
  * Get all default shortcuts
  */
 export function getDefaultShortcuts(): KeyboardShortcut[] {
-  return [...DEFAULT_SHORTCUTS];
+  return [...getCommandShortcuts(), ...INPUT_SHORTCUTS];
 }
 
 /**
  * Get shortcuts by category
  */
 export function getShortcutsByCategory(category: ShortcutCategory): KeyboardShortcut[] {
-  return DEFAULT_SHORTCUTS.filter((s) => s.category === category);
+  return getDefaultShortcuts().filter((s) => s.category === category);
 }
 
 /**
  * Get common/frequently used shortcuts
  */
 export function getCommonShortcuts(): KeyboardShortcut[] {
-  return DEFAULT_SHORTCUTS.filter((s) => s.common);
+  return getDefaultShortcuts().filter((s) => s.common);
 }
 
 /**

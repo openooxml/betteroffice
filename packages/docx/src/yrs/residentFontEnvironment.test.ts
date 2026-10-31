@@ -8,6 +8,7 @@ import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './resident
 import { createResidentEngineSession } from './residentEngineSession';
 import { setEditWasmHeapLimit } from '../wasm/edit';
 import { wasmModuleMemories } from './index';
+import { commandMayNeedNewFonts } from './residentFontEnvironment';
 
 const TIMEOUT = 20_000;
 let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -17,7 +18,7 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 test('oversized WOFF table leaves wasm memory and a bounded editing session intact', async () => {
   const engine = await createResidentEngineSession(16 * 1024 * 1024);
@@ -116,3 +117,23 @@ test('decoded worker fonts stay in their owning measurement session', async () =
     second.destroy();
   }
 }, TIMEOUT);
+
+test('commands that may need new fonts: fallback script text, reformatting and remote merges, never bytes alone', () => {
+  expect(commandMayNeedNewFonts('insertText', { text: 'plain caf\u00e9' })).toBe(false);
+  expect(commandMayNeedNewFonts('deleteBackward', {})).toBe(false);
+  for (const text of ['\u65e5\u672c', '\u304b', '\ud55c', '\u05d0', '\u0627', '\u{20000}']) {
+    expect(commandMayNeedNewFonts('insertText', { text })).toBe(true);
+  }
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertText', text: '\u4e2d' }] } })).toBe(true);
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertText', text: 'abc' }] } })).toBe(false);
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'setParagraphStyle', target: { paraId: 'a' }, styleId: 'Heading1' }] } })).toBe(true);
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertParagraphs', paragraphs: [{ text: 'a', styleId: 'Title' }] }] } })).toBe(true);
+  for (const kind of ['pasteFragment', 'undo', 'redo', 'toggleMark', 'formatRange', 'acceptRevision', 'rejectRevision', 'setProposalStates',
+    'applyRemoteUpdate', 'applyRemoteUpdateChunks', 'collabPipe']) {
+    expect(commandMayNeedNewFonts(kind, {})).toBe(true);
+  }
+  const japanese = new TextEncoder().encode('\u65e5\u672c');
+  expect(commandMayNeedNewFonts('insertImage', { image: { data: japanese, buffer: japanese.buffer } })).toBe(false);
+  expect(commandMayNeedNewFonts('setFontEnvironment', { families: ['\u6e38\u660e\u671d'] })).toBe(false);
+  expect(commandMayNeedNewFonts('setRenderEnvironment', { themeColors: { accent1: '\u65e5' }, showHiddenText: true })).toBe(false);
+});

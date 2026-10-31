@@ -42,6 +42,10 @@ fn lowered(bytes: &[u8]) -> Value {
 
 fn render(bytes: &[u8]) -> Value {
     let font = docx_layout::register_measure_font(FONT).unwrap();
+    let serif = docx_layout::register_measure_font(include_bytes!(
+        "../../../packages/fonts/assets/LiberationSerif-Regular.ttf"
+    ))
+    .unwrap();
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
         .unwrap()
         .document
@@ -52,7 +56,7 @@ fn render(bytes: &[u8]) -> Value {
                 &json!({
                     "bodyStory": "body", "renderEnv": {},
                     "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
-                    "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
+                    "measurement": {"fontChains": {"arial|0|0": [font], "times new roman|0|0": [serif]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
                 })
                 .to_string(),
             )
@@ -105,7 +109,7 @@ fn close(actual: f64, expected: f64) {
 #[test]
 fn auto_spacing_preserves_the_default_and_uses_fixed_asymmetric_spacing_when_enabled() {
     for (bytes, before, after) in [
-        (AUTO_DEFAULT, 14.0, 14.0),
+        (AUTO_DEFAULT, 280.0 / 15.0, 280.0 / 15.0),
         (AUTO_ENABLED, 100.0 / 15.0, 200.0 / 15.0),
         (AUTO_WITHOUT_FALLBACK, 100.0 / 15.0, 200.0 / 15.0),
     ] {
@@ -235,4 +239,106 @@ fn table_compatibility_preserves_unflagged_measurement_and_allows_cell_spacing()
             * 4.0
             / 3.0,
     );
+}
+
+#[test]
+fn settings_compatibility_mode_controls_scout_line_break() {
+    let text = concat!(
+        "As there are no fixed effects, we add a constant, which measures the value ",
+        "for the baseline scenario, while the condition fixed effects"
+    );
+    let document = format!(
+        concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/",
+            "wordprocessingml/2006/main\"><w:body><w:p><w:pPr>",
+            "<w:jc w:val=\"both\"/></w:pPr><w:r><w:rPr>",
+            "<w:rFonts w:ascii=\"Times New Roman\" w:hAnsi=\"Times New Roman\"/>",
+            "<w:sz w:val=\"24\"/></w:rPr><w:t>{}</w:t></w:r></w:p>",
+            "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/>",
+            "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/>",
+            "</w:sectPr></w:body></w:document>"
+        ),
+        text
+    );
+    for (mode, justification, breaks_before) in [
+        (None, "both", true),
+        (Some(11), "both", true),
+        (Some(12), "both", true),
+        (Some(14), "both", true),
+        (Some(15), "both", false),
+        (Some(14), "distribute", false),
+    ] {
+        let setting = mode.map_or_else(String::new, |mode| {
+            format!(
+                concat!(
+                    "<w:compat><w:compatSetting w:name=\"compatibilityMode\" ",
+                    "w:uri=\"http://schemas.microsoft.com/office/word\" ",
+                    "w:val=\"{}\"/></w:compat>"
+                ),
+                mode
+            )
+        });
+        let parts = [
+            (
+                "[Content_Types].xml",
+                concat!(
+                    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+                    "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-",
+                    "package.relationships+xml\"/><Default Extension=\"xml\" ",
+                    "ContentType=\"application/xml\"/>",
+                    "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.",
+                    "openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>",
+                    "<Override PartName=\"/word/settings.xml\" ContentType=\"application/vnd.",
+                    "openxmlformats-officedocument.wordprocessingml.settings+xml\"/></Types>"
+                )
+                .to_owned(),
+            ),
+            (
+                "_rels/.rels",
+                concat!(
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/",
+                    "package/2006/relationships\"><Relationship Id=\"doc\" ",
+                    "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/",
+                    "relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"
+                )
+                .to_owned(),
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                concat!(
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/",
+                    "package/2006/relationships\"><Relationship Id=\"settings\" ",
+                    "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/",
+                    "relationships/settings\" Target=\"settings.xml\"/></Relationships>"
+                )
+                .to_owned(),
+            ),
+            (
+                "word/document.xml",
+                document.replace("w:val=\"both\"", &format!("w:val=\"{justification}\"")),
+            ),
+            (
+                "word/settings.xml",
+                format!(
+                    concat!(
+                        "<w:settings xmlns:w=\"http://schemas.openxmlformats.org/",
+                        "wordprocessingml/2006/main\">{}</w:settings>"
+                    ),
+                    setting
+                ),
+            ),
+        ];
+        let bytes = ooxml_opc::rezip_parts(
+            &parts
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.into_bytes()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let output = render(&bytes);
+        let next = output["measured"][0]["measure"]["lines"][1]["headChar"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(text[next..].starts_with("scenario,"), breaks_before);
+    }
 }

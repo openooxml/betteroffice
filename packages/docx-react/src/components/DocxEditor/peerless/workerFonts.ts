@@ -2,6 +2,7 @@ import { createRustMeasureSource, type ResidentFontRequirement } from '@betterof
 import type { EmbeddedFontFace, FontDefinition } from '@betteroffice/docx/utils';
 import type { DocxFontEnvironment, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
 import type { DocxEditorProps } from '../../DocxEditor';
+import { hostedFontProvider } from '../../../hooks/hostedFonts';
 
 export async function customWorkerFontFaces(fonts: ReadonlyArray<FontDefinition> | undefined, signal: AbortSignal): Promise<EmbeddedFontFace[]> {
   return Promise.all((fonts ?? []).map(async font => {
@@ -30,17 +31,35 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
   }), chains: structuredClone(chains), families: [...new Set(families)] };
 }
 
+/**
+ * `prepared` extended by every requirement of `next` it does not cover, or null when it covers all.
+ * A requirement covers one with its key only with the same scripts in the same order: they fix the chain.
+ */
+export function uncoveredFontRequirements(prepared: readonly ResidentFontRequirement[],
+  next: readonly ResidentFontRequirement[]): ResidentFontRequirement[] | null {
+  const byKey = new Map(prepared.map(requirement => [requirement.key, requirement]));
+  let uncovered = false;
+  for (const requirement of next) {
+    const known = byKey.get(requirement.key);
+    if (known && (known.scripts ?? []).join() === (requirement.scripts ?? []).join()) continue;
+    byKey.set(requirement.key, requirement);
+    uncovered = true;
+  }
+  return uncovered ? [...byKey.values()] : null;
+}
+
 export async function prepareWorkerFontEnvironment(options: {
   fonts: ReadonlyArray<FontDefinition> | undefined;
   embedded: EmbeddedFontFace[];
   requirements: ResidentFontRequirement[];
   families: string[];
   provider: DocxEditorProps['measurementFontProvider'];
+  runtime?: Parameters<typeof createRustMeasureSource>[0]['runtime'];
   compat: Parameters<ReturnType<typeof createRustMeasureSource>['setCompat']>[0];
   signal: AbortSignal;
 }): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
-  const measurement = createRustMeasureSource({ bundled: options.provider, engine: {
+  const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime, engine: {
     registerFont(bytes) { options.signal.throwIfAborted(); return fonts.push(bytes.slice()) - 1; },
     registerSubstituteFont(substituteOf, family) { return fonts.push({ substituteOf, family }) - 1; },
     clearFonts() { fonts.length = 0; },

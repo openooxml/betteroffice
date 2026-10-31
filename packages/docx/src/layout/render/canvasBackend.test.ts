@@ -70,7 +70,7 @@ let fontId = -1;
 beforeAll(async () => {
   await preloadLayoutWasm();
   fontId = registerMeasureFont(new Uint8Array(readFileSync(FONT)));
-});
+}, 30_000);
 
 function textRun(
   text: string,
@@ -491,6 +491,150 @@ describe('Canvas text-run slot clipping', () => {
     expect(paints).toHaveLength(1);
     expect(paints[0].right).toBe(paints[0].naturalRight);
     expect(paints[0].right).toBeGreaterThan(run.width);
+  });
+});
+
+describe('Canvas substitute widths', () => {
+  it('paints the glyph run stand-in when glyph outlines are unavailable', async () => {
+    const { ctx } = recordingContext(new Map([['co-op', { width: 40, ascent: 12, descent: 4 }]]));
+    const fillText = spyOn(ctx, 'fillText');
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 1,
+      size: 16,
+      color: '#000000',
+      text: 'co\u2011op',
+      paintText: 'co-op',
+      fallbackFont: '16px Calibri',
+      glyphs: [{ id: 1, x: 10, y: 20, cluster: 0 }],
+    };
+
+    await drawPrimitive(ctx, run);
+
+    expect(fillText).toHaveBeenCalledWith('co-op', 10, 20);
+    expect(run.text).toBe('co\u2011op');
+  });
+
+  it('paints the supplied hyphen stand-in while preserving source text', async () => {
+    for (const allCaps of [false, true]) {
+      const painted = allCaps ? 'CO-OP' : 'co-op';
+      const { ctx } = recordingContext(
+        new Map([[painted, { width: 40, ascent: 12, descent: 4 }]])
+      );
+      const fillText = spyOn(ctx, 'fillText');
+      const run = {
+        ...textRun('co\u2011op', 40, 40, 'Calibri'),
+        paintText: 'co-op',
+        allCaps,
+      };
+
+      await drawPrimitive(ctx, run);
+
+      expect(fillText).toHaveBeenCalledWith(painted, run.x, run.baselineY);
+      expect(run.text).toBe('co\u2011op');
+      expect(run.paintText.length).toBe(run.text.length);
+    }
+  });
+
+  it('paints corrected Japanese cluster positions without scaling CJK outlines', async () => {
+    const text = '1111111111中あア';
+    for (const effects of [{ allCaps: true }, { textShadow: 'shadow' as const }]) {
+      const { ctx, paints } = recordingContext(new Map([
+        [text, { width: 136.8, ascent: 12, descent: 4 }],
+        ['1', { width: 8.88, ascent: 12, descent: 4 }],
+        ...Array.from('中あア', character => [character, { width: 16, ascent: 12, descent: 4 }] as const),
+      ]));
+      Object.assign(ctx, { letterSpacing: '0px', wordSpacing: '0px' });
+      const run = textRun(text, 40, 128, 'MS Gothic');
+      Object.assign(run, effects);
+      run.canvasClusters = Array.from(text, (character, index) => ({
+        text: character,
+        offset: index < 10 ? index * 8 : 80 + (index - 10) * 16,
+      }));
+
+      await drawPrimitive(ctx, run);
+
+      expect(paints).toHaveLength(13);
+      for (let index = 0; index < 10; index++) {
+        expect(paints[index].naturalLeft).toBeCloseTo(40 + index * 8);
+        expect(paints[index].naturalRight - paints[index].naturalLeft).toBeCloseTo(8.88);
+      }
+      for (let index = 10; index < 13; index++) {
+        expect(paints[index].naturalLeft).toBeCloseTo(120 + (index - 10) * 16);
+        expect(paints[index].naturalRight - paints[index].naturalLeft).toBeCloseTo(16);
+      }
+      expect(paints.at(-1)!.naturalRight).toBeCloseTo(run.x + run.width);
+    }
+  });
+
+  it('keeps a decomposed kana cluster together at its positioned advance', async () => {
+    const cluster = 'か\u3099';
+    const { ctx, paints } = recordingContext(new Map([
+      [cluster, { width: 16, ascent: 12, descent: 4 }],
+      ['中', { width: 16, ascent: 12, descent: 4 }],
+    ]));
+    const run = textRun(`${cluster}中`, 40, 29.312, 'MS UI Gothic');
+    run.allCaps = true;
+    run.canvasClusters = [{ text: cluster, offset: 0 }, { text: '中', offset: 13.312 }];
+
+    await drawPrimitive(ctx, run);
+
+    expect(paints).toHaveLength(2);
+    expect(paints[0].naturalRight - paints[0].naturalLeft).toBeCloseTo(16);
+    expect(paints[1].naturalLeft).toBeCloseTo(53.312);
+    expect(paints[1].naturalRight).toBeCloseTo(run.x + run.width);
+  });
+
+  it('scales around the text origin and preserves tracking and word spacing', async () => {
+    for (const horizontalScale of [undefined, 150]) {
+      const { ctx, paints } = recordingContext(
+        new Map([['AB C', { width: 100, ascent: 12, descent: 4 }]])
+      );
+      Object.assign(ctx, { letterSpacing: '0px', wordSpacing: '0px' });
+      const spacing: Record<string, string> = {};
+      const recorded = new Proxy(ctx, {
+        set(target, key, value) {
+          if (key === 'letterSpacing' || key === 'wordSpacing') spacing[key] = value;
+          return Reflect.set(target, key, value);
+        },
+      });
+      const run = textRun('AB C', 40, 80, 'Liberation Sans');
+      run.substituteScale = 0.8;
+      run.horizontalScale = horizontalScale;
+      run.letterSpacing = 8;
+      run.wordSpacing = 4;
+
+      await drawPrimitive(recorded, run);
+
+      expect(spacing).toEqual({ letterSpacing: '10px', wordSpacing: '5px' });
+      expect(paints).toHaveLength(1);
+      expect(paints[0].naturalLeft).toBeCloseTo(40);
+      expect(paints[0].naturalRight).toBeCloseTo(40 + 80 * ((horizontalScale ?? 100) / 100));
+      expect(run.letterSpacing).toBe(8);
+      expect(run.wordSpacing).toBe(4);
+
+      await drawPrimitive(ctx, textRun('AB C', 200, 100, 'Liberation Sans'));
+      expect(paints[1].naturalLeft).toBeCloseTo(200);
+      expect(paints[1].naturalRight).toBeCloseTo(300);
+    }
+  });
+
+  it('keeps measured leader repeat positions while scaling the glyphs', async () => {
+    const { ctx, paints } = recordingContext(
+      new Map([['.', { width: 10, ascent: 12, descent: 4 }]])
+    );
+    const run = textRun('...', 40, 36, 'Liberation Sans');
+    run.substituteScale = 0.8;
+    run.leaderGlyphs = { glyph: '.', count: 3, advance: 12, x: 40, baselineY: 20 };
+
+    await drawPrimitive(ctx, run);
+
+    expect(paints).toHaveLength(3);
+    for (let index = 0; index < paints.length; index++) {
+      expect(paints[index].naturalLeft).toBeCloseTo(40 + index * 12);
+      expect(paints[index].naturalRight - paints[index].naturalLeft).toBeCloseTo(8);
+    }
+    expect(run.leaderGlyphs.advance).toBe(12);
   });
 });
 

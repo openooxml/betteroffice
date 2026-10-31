@@ -1,5 +1,12 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
-import { resolveDefaultFontProvider } from './defaultFontProvider';
+import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import {
+  excludeHostedFontFamilies,
+  hostedFontFamilies,
+  IMPLICIT_FONT_COVERAGE,
+  isImplicitFontProvider,
+  resolveDefaultFontProvider,
+} from './defaultFontProvider';
 import {
   TextMeasureFontRegistry,
   type BundledFontProvider,
@@ -30,7 +37,11 @@ export interface ResidentFontRequirement {
 export interface ResidentMeasurementConfig {
   fontChains: Record<string, number[]>;
   defaults: { fontSize: number; fontFamily: string };
-  compat: { noLeading: boolean; doNotExpandShiftReturn: boolean };
+  compat: {
+    compatibilityMode?: number;
+    noLeading: boolean;
+    doNotExpandShiftReturn: boolean;
+  };
   authoritativeShaping: true;
 }
 
@@ -60,12 +71,16 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
   return enginePromise;
 }
 
-/** Builds a source with an explicit provider or the optional default package. */
+/** Builds a source with an explicit or default font provider. */
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
+  runtime?: { decoder?: FontDecoder };
 }): RustMeasureSource {
   const engine = options.engine;
+  const hosted = hostedFontFamilies(options.bundled);
+  let implicit = false;
+  let generation = 0;
   const registry = new TextMeasureFontRegistry(
     {
       registerFont: (bytes) => engine.registerFont(bytes),
@@ -74,7 +89,12 @@ export function createRustMeasureSource(options: {
           engine.registerSubstituteFont!(id, family),
       }),
     },
-    { bundled: options.bundled ?? resolveDefaultFontProvider },
+    { bundled: (hosted ? undefined : options.bundled) ?? (async () => {
+      const current = generation;
+      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
+      if (current === generation) implicit = isImplicitFontProvider(provider);
+      return provider;
+    }) },
   );
   let compat: CompatibilityFlags | undefined;
 
@@ -111,6 +131,10 @@ export function createRustMeasureSource(options: {
           })(),
           ...Array.from(new Set(requirement.scripts ?? []), async (script) => {
             try {
+              if (hosted?.has(requirement.family.trim().toLowerCase())) {
+                await registry.getFontIdChain(requirement.family, requirement.bold, requirement.italic);
+                if (implicit) return false;
+              }
               if (
                 registry.getCachedScriptFallbackIds([script], false) !==
                 undefined
@@ -138,7 +162,7 @@ export function createRustMeasureSource(options: {
           requirement.italic,
           false,
         ),
-        scriptIds: registry.getCachedScriptFallbackIds(
+        scriptIds: implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
           false,
         ),
@@ -157,19 +181,25 @@ export function createRustMeasureSource(options: {
           requirement.bold,
           requirement.italic,
         );
-        const scriptIds = registry.getCachedScriptFallbackIds(
+        const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
         );
         if (familyIds === undefined || scriptIds === undefined)
           return undefined;
+        if (implicit && familyIds.length === 0) continue;
         const chain = Array.from(familyIds);
         for (const id of scriptIds) if (!chain.includes(id)) chain.push(id);
         if (chain.length > 0) fontChains[requirement.key] = chain;
+      }
+      if (implicit) {
+        const ids = [...new Set(Object.values(fontChains).flat())];
+        if (ids.length > 0) fontChains[IMPLICIT_FONT_COVERAGE] = ids;
       }
       return {
         fontChains,
         defaults: { fontSize: 11, fontFamily: 'Calibri' },
         compat: {
+          compatibilityMode: compat?.compatibilityMode ?? 12,
           noLeading: compat?.noLeading ?? false,
           doNotExpandShiftReturn: compat?.doNotExpandShiftReturn ?? false,
         },
@@ -178,6 +208,8 @@ export function createRustMeasureSource(options: {
     },
 
     clear(): void {
+      generation++;
+      implicit = false;
       registry.clear();
     },
   };

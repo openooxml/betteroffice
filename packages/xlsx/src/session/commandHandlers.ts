@@ -16,7 +16,7 @@ import { applyWorkbookReplayOp, workbookReplayRefused, type WorkbookReplayMethod
 const STATUS_CACHE_SIZE = 256;
 const FORMAT_TOKEN_CACHE_SIZE = 64;
 const MAX_VALIDATION_STEPS = 128;
-const MAX_VALIDATION_CELLS = 100_000;
+export const workbookAdmissionBudget = { cells: 100_000 };
 const MAX_VALIDATION_TEXT = 1_048_576;
 const MAX_VALIDATION_BYTES = 16 * 1024 * 1024;
 
@@ -131,9 +131,9 @@ function checkedBatch(handle: WorkbookHandle, steps: XlsxEditStep[]): void {
     const units = step.op === 'setCellInputs' ? step.inputs.flat().reduce((sum, input) => sum + input.length, 0) : 0;
     const probe: XlsxEditStep = { op: 'patchStyle', target: step.target, patch: {} };
     const size = encoder.encode(JSON.stringify(probe)).length + 1;
-    if (chunk.length === MAX_VALIDATION_STEPS || cells + visits > MAX_VALIDATION_CELLS ||
+    if (chunk.length === MAX_VALIDATION_STEPS || cells + visits > workbookAdmissionBudget.cells ||
       text + units > MAX_VALIDATION_TEXT || bytes + size > MAX_VALIDATION_BYTES) flush();
-    if (visits > MAX_VALIDATION_CELLS || units > MAX_VALIDATION_TEXT || bytes + size > MAX_VALIDATION_BYTES) {
+    if (visits > workbookAdmissionBudget.cells || units > MAX_VALIDATION_TEXT || bytes + size > MAX_VALIDATION_BYTES) {
       throw new WorkbookCommandRefusal('limit-exceeded');
     }
     chunk.push(probe);
@@ -161,7 +161,7 @@ function inputSteps(handle: WorkbookHandle, edits: { sheet: number; row: number;
     let text = first.input.length;
     while (at < ordered.length && ordered[at].sheet === first.sheet &&
       ordered[at].row === first.row && ordered[at].col === last.col + 1 &&
-      inputs.length < MAX_VALIDATION_CELLS && text + ordered[at].input.length <= MAX_VALIDATION_TEXT) {
+      inputs.length < workbookAdmissionBudget.cells && text + ordered[at].input.length <= MAX_VALIDATION_TEXT) {
       last = ordered[at++];
       inputs.push(last.input);
       text += last.input.length;
@@ -169,7 +169,7 @@ function inputSteps(handle: WorkbookHandle, edits: { sheet: number; row: number;
     const key = `${first.sheet}:${first.col}:${last.col}`;
     const previous = rectangles.get(key);
     if (previous?.step.target.range.kind === 'rowCol' && previous.step.target.range.end.row === first.row - 1 &&
-      previous.cells + inputs.length <= MAX_VALIDATION_CELLS && previous.text + text <= MAX_VALIDATION_TEXT) {
+      previous.cells + inputs.length <= workbookAdmissionBudget.cells && previous.text + text <= MAX_VALIDATION_TEXT) {
       previous.step.target.range.end.row = first.row;
       previous.step.inputs.push(inputs);
       previous.cells += inputs.length;
@@ -231,7 +231,7 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
     const target = toolbar.id === 'clear' ? usedClearTarget(handle, resolved) : resolved;
     if (!target) return { method: 'editCells', args: [resolved.sheet, []] };
     if (toolbar.id === 'clear' &&
-      (target.end.row - target.start.row + 1) * (target.end.col - target.start.col + 1) > MAX_VALIDATION_CELLS) {
+      (target.end.row - target.start.row + 1) * (target.end.col - target.start.col + 1) > workbookAdmissionBudget.cells) {
       throw new WorkbookCommandRefusal('limit-exceeded');
     }
     if (toolbar.id !== 'clear') admitFormatting(handle, target.sheet, target.range);
@@ -728,8 +728,9 @@ export function applyWorkbookCommand(
   if (cached) return { throughSeq: state.throughSeq, version: handle.version(), statuses: [cached] };
   if (command.seq !== state.throughSeq + 1) throw new Error(`Expected workbook command sequence ${state.throughSeq + 1}`);
   const dependency = command.afterSeq === undefined ? undefined : state.statuses.get(command.afterSeq);
-  const refused = command.afterSeq !== undefined && !dependency ? 'dependency-expired' : undefined;
-  const cancelled = dependency?.status === 'refused' || dependency?.status === 'cancelled';
+  const remote = command.kind === 'applyUpdate' || command.kind === 'collabPipe';
+  const refused = !remote && command.afterSeq !== undefined && !dependency ? 'dependency-expired' : undefined;
+  const cancelled = !remote && (dependency?.status === 'refused' || dependency?.status === 'cancelled');
   const reply = applyWorkbookCommandIntent(handle, state, command, refused, cancelled);
   state.throughSeq = command.seq;
   state.statuses.set(command.seq, structuredClone(reply.statuses[0]));
@@ -742,13 +743,14 @@ export function applyWorkbookCommandIntent(
   refusal?: string, cancelled = false, applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void
 ): WorkbookWireAck {
   let status: CommandStatus;
+  const remote = command.kind === 'applyUpdate' || command.kind === 'collabPipe';
   try {
-    if (refusal) throw new WorkbookCommandRefusal(refusal);
-    if (cancelled) {
+    if (refusal && !remote) throw new WorkbookCommandRefusal(refusal);
+    if (cancelled && !remote) {
       status = { seq: command.seq, status: 'cancelled', reason: 'dependency-refused', committed: false,
         affectedSeqs: [command.seq] };
     } else {
-      if (!state.bases.has(command.basis.version)) throw new WorkbookCommandRefusal('stale-basis');
+      if (!remote && !state.bases.has(command.basis.version)) throw new WorkbookCommandRefusal('stale-basis');
       status = applyIntent(handle, state, command, applyPipe);
     }
   } catch (error) {

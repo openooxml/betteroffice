@@ -4,12 +4,32 @@
 pub mod addr;
 pub mod chart;
 pub mod date;
+mod fmath;
 pub mod numfmt;
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub mod open_timing;
 pub mod progress;
 pub mod rich_text;
+#[doc(hidden)]
+pub mod sort;
 pub mod styles;
 pub mod value;
 pub mod workbook;
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! open_timing {
+    ($($tokens:tt)*) => { $($tokens)* };
+}
+
+#[cfg(not(feature = "test-counters"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! open_timing {
+    ($($tokens:tt)*) => {};
+}
 
 pub use addr::{CellRange, CellRef, ColId, MAX_COLS, MAX_ROWS, RowId, SheetId};
 pub use chart::{

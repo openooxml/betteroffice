@@ -78,6 +78,7 @@
 //! to integers so the fields typed as integers survive a round trip through a
 //! host with a single number type.
 
+use crate::fmath;
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
@@ -282,6 +283,13 @@ pub enum Primitive {
     Decoration(DecorationPrimitive),
 }
 
+/// One browser text cluster at an offset from its run's pen origin.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CanvasTextCluster {
+    pub text: String,
+    pub offset: Number,
+}
+
 /// Everything a primitive carries about the document content it came from:
 /// its position range, block and paragraph identity, enclosing table cell,
 /// content-control ancestry, revision and comment state, and the per-class
@@ -442,6 +450,10 @@ pub struct DocAttrs {
     /// so the fallback keeps the measured face instead of generic sans-serif.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_font: Option<String>,
+    /// Positioned browser text clusters, boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_clusters: Option<Box<Vec<CanvasTextCluster>>>,
     /// Text/GlyphRun-only member: modern w14 text effects payload
     /// (glow/shadow/reflection/textFill/textOutline), passed through losslessly
     /// from `RunFormatting.modernEffects`.
@@ -606,6 +618,9 @@ pub struct HighlightSliceMetadata {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ChartA11yAttrs {
     pub label: String,
+    /// The placed chart box every primitive of the chart paints inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<Box<ContentFrame>>,
 }
 
 /// The grid position of the cell a primitive paints inside.
@@ -765,6 +780,10 @@ pub enum StructuralRevisionKind {
 #[serde(rename_all = "camelCase")]
 pub struct TextRunPrimitive {
     pub text: String,
+    /// Canvas-only glyph stand-in text, boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_text: Option<Box<String>>,
     /// pen origin
     pub x: Number,
     pub baseline_y: Number,
@@ -792,6 +811,9 @@ pub struct TextRunPrimitive {
     pub rotation_deg: Option<Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub horizontal_scale: Option<Number>,
+    /// Canvas-only width ratio for substituted font bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substitute_scale: Option<Number>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub all_caps: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -829,6 +851,11 @@ pub struct GlyphRunPrimitive {
     /// SOURCE TEXT — the a11y mirror renders this as real characters and the
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
+    /// Canvas-only glyph stand-in text for the fillText fallback, boxed to
+    /// keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_text: Option<Box<String>>,
     pub glyphs: Vec<PlacedGlyph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<EchoRunFacts>,
@@ -2118,6 +2145,8 @@ struct FieldRunIn {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ParaAttrsIn {
     #[serde(default)]
+    leading_inline_box: Option<crate::types::LeadingInlineBox>,
+    #[serde(default)]
     horizontal_rules: Vec<crate::types::HorizontalRule>,
     #[serde(default)]
     alignment: Option<String>,
@@ -2269,6 +2298,10 @@ pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 pub(crate) struct TableRowIn {
     #[serde(default)]
     cells: Vec<TableCellIn>,
+    #[serde(default)]
+    grid_before: Option<u64>,
+    #[serde(default)]
+    grid_after: Option<u64>,
     #[serde(default)]
     is_header: Option<bool>,
     #[serde(default)]
@@ -3909,6 +3942,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
     };
     prims.push(Primitive::Text(TextRunPrimitive {
         text,
+        paint_text: None,
         x: px(x),
         baseline_y: px(baseline),
         width: px(width),
@@ -3921,6 +3955,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         opacity: Some(px(opacity)),
         rotation_deg: rotation,
         horizontal_scale: None,
+        substitute_scale: None,
         all_caps: false,
         small_caps: false,
         hidden: false,
@@ -4514,7 +4549,50 @@ impl RenderCtx<'_> {
 /// borrowed by every page/HF `RenderCtx`.
 pub(crate) struct ShapeFonts<'a> {
     store: &'a ooxml_text::FontStore,
-    chains: HashMap<String, Vec<ooxml_text::FontId>>,
+    chains: HashMap<String, ShapeFontChain>,
+    coverage_only: bool,
+}
+
+type FontResolver =
+    fn(&ooxml_text::FontStore, &[ooxml_text::FontId], char) -> Option<ooxml_text::FontId>;
+
+struct ShapeFontChain {
+    ids: Vec<ooxml_text::FontId>,
+    coverage_only: bool,
+    resolve: FontResolver,
+}
+
+impl ShapeFontChain {
+    fn new(ids: Vec<ooxml_text::FontId>, coverage_only: bool) -> Self {
+        Self {
+            ids,
+            coverage_only,
+            resolve: if coverage_only {
+                Self::resolve_covered
+            } else {
+                Self::resolve_with_fallback
+            },
+        }
+    }
+
+    fn resolve_with_fallback(
+        store: &ooxml_text::FontStore,
+        chain: &[ooxml_text::FontId],
+        ch: char,
+    ) -> Option<ooxml_text::FontId> {
+        store.resolve(chain, ch).or_else(|| chain.last().copied())
+    }
+
+    fn resolve_covered(
+        store: &ooxml_text::FontStore,
+        chain: &[ooxml_text::FontId],
+        ch: char,
+    ) -> Option<ooxml_text::FontId> {
+        if !ooxml_text::measure::needs_glyph(ch) {
+            return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
+        }
+        store.resolve(chain, ch)
+    }
 }
 
 impl<'a> ShapeFonts<'a> {
@@ -4527,44 +4605,352 @@ impl<'a> ShapeFonts<'a> {
         if input.font_chains.is_empty() {
             return None;
         }
+        let coverage_only: HashSet<_> = input
+            .font_chains
+            .get("@betteroffice/fonts/coverage")
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
         let chains = input
             .font_chains
             .iter()
             .map(|(k, ids)| {
                 (
                     k.clone(),
-                    ids.iter()
-                        .map(|&id| ooxml_text::FontId::from_u32(id))
-                        .collect(),
+                    ShapeFontChain::new(
+                        ids.iter()
+                            .map(|&id| ooxml_text::FontId::from_u32(id))
+                            .collect(),
+                        ids.last().is_some_and(|id| coverage_only.contains(id)),
+                    ),
                 )
             })
             .collect();
-        Some(ShapeFonts { store, chains })
+        Some(ShapeFonts {
+            store,
+            chains,
+            coverage_only: !coverage_only.is_empty(),
+        })
     }
 
     /// Fallback chain for a `(family, bold, italic)` combination, keyed exactly
     /// like the measure input (`"<family lowercase>|<b>|<i>"`). `None` when the
     /// run's family has no chain — that run falls back to `TextRunPrimitive`.
-    fn chain_for(&self, family: &str, bold: bool, italic: bool) -> Option<&[ooxml_text::FontId]> {
+    fn chain_for(&self, family: &str, bold: bool, italic: bool) -> Option<&ShapeFontChain> {
         let key = format!(
             "{}|{}|{}",
             family.to_lowercase(),
             u8::from(bold),
             u8::from(italic)
         );
-        self.chains.get(&key).map(|v| v.as_slice())
+        self.chains.get(&key)
     }
+}
 
-    /// Resolve `ch` to the first covering font in `chain`, else the chain's
-    /// terminal font — the same policy as ooxml-text `prepare::resolve_with_fallback`
-    /// (the host guarantees the chain ends in a broad-coverage last-resort face,
-    /// so an uncovered char shapes as that face's `.notdef` box rather than
-    /// routing the whole run to the browser).
-    fn resolve(&self, chain: &[ooxml_text::FontId], ch: char) -> Option<ooxml_text::FontId> {
-        self.store
-            .resolve(chain, ch)
-            .or_else(|| chain.last().copied())
+fn text_paint_override(
+    fonts: Option<&ShapeFonts<'_>>,
+    text: &str,
+    fmt: &RunFormattingIn,
+) -> Option<String> {
+    if !text.contains('\u{2011}') {
+        return None;
     }
+    let fonts = fonts?;
+    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
+    let font = (chain.resolve)(fonts.store, &chain.ids, '\u{2011}')?;
+    glyph_paint_text(fonts.store, font, text)
+}
+
+fn glyph_paint_text(
+    store: &ooxml_text::FontStore,
+    font: ooxml_text::FontId,
+    text: &str,
+) -> Option<String> {
+    if !text.contains('\u{2011}') {
+        return None;
+    }
+    let stand_in = ooxml_text::covered_character(store, font, '\u{2011}').ok()??;
+    (stand_in != '\u{2011}').then(|| text.replace('\u{2011}', &stand_in.to_string()))
+}
+
+fn painted_text_width(
+    fonts: &ShapeFonts<'_>,
+    font: ooxml_text::FontId,
+    text: &str,
+    fmt: &RunFormattingIn,
+    bidi_level: u8,
+    authoritative: bool,
+    coverage_only: bool,
+) -> Option<f64> {
+    let size = effective_font_px_of(fmt);
+    let features = kern_features_of(fmt, size);
+    let direction = shape_direction_for_level(bidi_level);
+    let language = fmt.language.as_ref().and_then(|language| {
+        if ooxml_text::level_is_rtl(bidi_level) {
+            language.bidi.as_deref().or(language.latin.as_deref())
+        } else {
+            language.east_asia.as_deref().or(language.latin.as_deref())
+        }
+    });
+    let width = |text: &str, small_caps: bool| {
+        let covered = |ch: char| {
+            ooxml_text::covered_character(fonts.store, font, ch)
+                .ok()
+                .flatten()
+                .is_some()
+        };
+        let uncovered = if coverage_only {
+            text.chars().any(|ch| {
+                ooxml_text::measure::needs_glyph(ch) && !ch.is_whitespace() && !covered(ch)
+            })
+        } else {
+            text.chars().any(|ch| !ch.is_whitespace() && !covered(ch))
+        };
+        if uncovered {
+            return None;
+        }
+        let mut features = features.clone();
+        if small_caps {
+            features.push(ooxml_text::ShapeFeature {
+                tag: *b"smcp",
+                value: 1,
+            });
+        }
+        ooxml_text::shape::shape_with_properties(
+            fonts.store,
+            font,
+            text,
+            size as f32,
+            &features,
+            direction,
+            language,
+        )
+        .ok()
+        .map(|glyphs| {
+            glyphs
+                .iter()
+                .map(|glyph| f64::from(glyph.x_advance))
+                .sum::<f64>()
+        })
+    };
+    if fmt.all_caps == Some(true) {
+        return width(&text.to_uppercase(), false);
+    }
+    if fmt.small_caps != Some(true) {
+        return width(text, false);
+    }
+    let mut total = 0.0;
+    let mut segment = String::new();
+    let mut segment_scale = 1.0;
+    let mut segment_smcp = false;
+    for ch in text.chars() {
+        let real_small_cap = authoritative
+            && ch.is_lowercase()
+            && {
+                let text = ch.to_string();
+                let plain = ooxml_text::shape_with_direction(
+                    fonts.store,
+                    font,
+                    &text,
+                    size as f32,
+                    &[],
+                    direction,
+                );
+                let featured = ooxml_text::shape_with_direction(
+                    fonts.store,
+                    font,
+                    &text,
+                    size as f32,
+                    &[ooxml_text::ShapeFeature {
+                        tag: *b"smcp",
+                        value: 1,
+                    }],
+                    direction,
+                );
+                matches!((plain, featured), (Ok(a), Ok(b)) if a.iter().map(|glyph| glyph.glyph_id).collect::<Vec<_>>() != b.iter().map(|glyph| glyph.glyph_id).collect::<Vec<_>>())
+            };
+        let scale = if ch.is_lowercase() && !real_small_cap {
+            if authoritative {
+                ooxml_text::WORD_SMALL_CAPS_ADVANCE_SCALE
+            } else {
+                ooxml_text::BROWSER_SMALL_CAPS_ADVANCE_SCALE
+            }
+        } else {
+            1.0
+        };
+        if (scale != segment_scale || real_small_cap != segment_smcp) && !segment.is_empty() {
+            total += width(&segment, segment_smcp)? * f64::from(segment_scale);
+            segment.clear();
+        }
+        segment_scale = scale;
+        segment_smcp = real_small_cap;
+        if ch.is_lowercase() && !real_small_cap {
+            segment.extend(ooxml_text::uppercase_for_language(ch, language));
+        } else {
+            segment.push(ch);
+        }
+    }
+    Some(total + width(&segment, segment_smcp)? * f64::from(segment_scale))
+}
+
+fn text_substitute_scale(
+    fonts: Option<&ShapeFonts<'_>>,
+    text: &str,
+    fmt: &RunFormattingIn,
+    bidi_level: u8,
+    authoritative: bool,
+) -> Option<Number> {
+    let ratio = fonts.and_then(|fonts| {
+        let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+        if ooxml_text::word_fonts::requested_line_metrics(family)
+            .is_some_and(|metrics| metrics.east_asian)
+        {
+            return None;
+        }
+        let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
+        let font = *chain.ids.first()?;
+        if fonts.store.family_widths(font).ok()?.is_none()
+            && fonts.store.advance_scale(font).ok()? == 1.0
+        {
+            return None;
+        }
+        let owner = fonts.store.byte_owner(font).ok()?;
+        let coverage_only = chain.coverage_only;
+        let wanted = painted_text_width(
+            fonts,
+            font,
+            text,
+            fmt,
+            bidi_level,
+            authoritative,
+            coverage_only,
+        )?;
+        let own = painted_text_width(
+            fonts,
+            owner,
+            text,
+            fmt,
+            bidi_level,
+            authoritative,
+            coverage_only,
+        )?;
+        let ratio = wanted / own;
+        (ratio.is_finite() && ratio > 0.0 && (ratio - 1.0).abs() > 1e-3).then_some(ratio)
+    });
+    ratio.and_then(Number::from_f64)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn text_canvas_clusters(
+    fonts: Option<&ShapeFonts<'_>>,
+    text: &str,
+    fmt: &RunFormattingIn,
+    bidi_level: u8,
+    authoritative: bool,
+    word_spacing: f64,
+    auto_space: ooxml_text::AutoSpace,
+) -> Option<Vec<CanvasTextCluster>> {
+    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    if !ooxml_text::word_fonts::requested_line_metrics(family)?.east_asian {
+        return None;
+    }
+    let fonts = fonts?;
+    let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
+    let font = *chain.ids.first()?;
+    let coverage_only = chain.coverage_only;
+    fonts.store.family_widths(font).ok()??;
+    let text = if fmt.all_caps == Some(true) {
+        text.to_uppercase()
+    } else {
+        text.to_owned()
+    };
+    if text.chars().any(|ch| {
+        ooxml_text::covered_character(fonts.store, font, ch)
+            .ok()
+            .flatten()
+            .is_none()
+    }) {
+        return None;
+    }
+    let size = effective_font_px_of(fmt);
+    let language = fmt.language.as_ref().and_then(|language| {
+        if ooxml_text::level_is_rtl(bidi_level) {
+            language.bidi.as_deref().or(language.latin.as_deref())
+        } else {
+            language.east_asia.as_deref().or(language.latin.as_deref())
+        }
+    });
+    let glyphs = ooxml_text::shape::shape_with_properties(
+        fonts.store,
+        font,
+        &text,
+        size as f32,
+        &kern_features_of(fmt, size),
+        shape_direction_for_level(bidi_level),
+        language,
+    )
+    .ok()?;
+    let mut advances = std::collections::BTreeMap::<usize, f64>::new();
+    let mut order = Vec::new();
+    for glyph in glyphs {
+        let offset = glyph.cluster as usize;
+        *advances.entry(offset).or_insert_with(|| {
+            order.push(offset);
+            0.0
+        }) += f64::from(glyph.x_advance);
+    }
+    let bounds: Vec<_> = advances
+        .keys()
+        .copied()
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let breaks: std::collections::HashSet<_> = ooxml_text::break_opportunities(&text)
+        .into_iter()
+        .map(|boundary| boundary.byte_index)
+        .collect();
+    let horizontal = fmt.horizontal_scale.unwrap_or(100.0) / 100.0;
+    let mut pen = 0.0;
+    let mut clusters = Vec::new();
+    for start in order {
+        let index = bounds.binary_search(&start).ok()?;
+        let end = *bounds.get(index + 1)?;
+        let cluster = text.get(start..end)?;
+        clusters.push(CanvasTextCluster {
+            text: text_paint_override(Some(fonts), cluster, fmt)
+                .unwrap_or_else(|| cluster.to_owned()),
+            offset: px(pen),
+        });
+        pen += if fmt.small_caps == Some(true) {
+            painted_text_width(
+                fonts,
+                font,
+                cluster,
+                fmt,
+                bidi_level,
+                authoritative,
+                coverage_only,
+            )?
+        } else {
+            advances[&start]
+        };
+        if horizontal > 0.0 {
+            pen +=
+                word_spacing * cluster.chars().filter(|&ch| ch == ' ').count() as f64 / horizontal;
+            if end < text.len() && !breaks.contains(&end) {
+                pen += fmt.letter_spacing.unwrap_or(0.0) / horizontal;
+            }
+            if !ooxml_text::level_is_rtl(bidi_level)
+                && let (Some(left), Some(right)) =
+                    (cluster.chars().next_back(), text[end..].chars().next())
+            {
+                pen += f64::from(auto_space.extra_px(left, right, size as f32, size as f32))
+                    / horizontal;
+            }
+        }
+    }
+    Some(clusters)
 }
 
 fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
@@ -5953,6 +6339,19 @@ pub(crate) fn emit_paragraph_fragment(
     emit_block_chrome: bool,
     stamp_line_range: bool,
 ) {
+    let fallback_ctx;
+    let ctx = if ctx.shape.is_some_and(|fonts| fonts.coverage_only)
+        && measure.lines.iter().any(|line| line.synthetic_fallback)
+    {
+        fallback_ctx = RenderCtx {
+            shape: None,
+            page_label: ctx.page_label.clone(),
+            ..*ctx
+        };
+        &fallback_ctx
+    } else {
+        ctx
+    };
     // primitives emitted for this fragment get the paragraph's paraId stamped
     // afterward (mirror `data-para-id`); remember where they start
     let stamp_from = prims.len();
@@ -5961,15 +6360,15 @@ pub(crate) fn emit_paragraph_fragment(
     let indent = attrs.and_then(|a| a.indent).unwrap_or_default();
 
     // rtl paragraphs mirror the two indent sides
-    let ind_l = indent.left.unwrap_or(0.0).max(0.0);
-    let ind_r = indent.right.unwrap_or(0.0).max(0.0);
+    let ind_l = indent.left.unwrap_or(0.0);
+    let ind_r = indent.right.unwrap_or(0.0);
     let (indent_left, indent_right) = if is_rtl {
         (ind_r, ind_l)
     } else {
         (ind_l, ind_r)
     };
-    let hanging = indent.hanging.unwrap_or(0.0).max(0.0);
-    let first_line = indent.first_line.unwrap_or(0.0).max(0.0);
+    let hanging = indent.hanging.unwrap_or(0.0);
+    let first_line = indent.first_line.unwrap_or(0.0);
 
     let block_ref = BlockRef::of(&frag.block_id);
     let pmark_revision = attrs.and_then(|a| {
@@ -6034,7 +6433,7 @@ pub(crate) fn emit_paragraph_fragment(
                 origin_y,
                 frag.width,
                 frag.height,
-                if !is_rtl && indent_left > 0.0 {
+                if !is_rtl && indent_left != 0.0 {
                     indent_left - hanging
                 } else {
                     indent_left
@@ -6108,6 +6507,7 @@ pub(crate) fn emit_paragraph_fragment(
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: "¶".to_string(),
+            paint_text: None,
             x: px(glyph_x),
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
@@ -6120,6 +6520,13 @@ pub(crate) fn emit_paragraph_fragment(
             opacity: None,
             rotation_deg: None,
             horizontal_scale: None,
+            substitute_scale: text_substitute_scale(
+                ctx.shape,
+                "¶",
+                &RunFormattingIn::default(),
+                0,
+                false,
+            ),
             all_caps: false,
             small_caps: false,
             hidden: false,
@@ -6220,6 +6627,7 @@ fn authoritative_line_items<'a>(
     line: &LineIn,
     ctx: &RenderCtx<'_>,
     default_level: u8,
+    leading_inline_box: bool,
 ) -> Option<Vec<LinePaintItem<'a>>> {
     let mut slices: Vec<(usize, usize, usize, f64, u8, u64, Option<u64>)> = Vec::new();
     if !line.bidi_slices.is_empty() {
@@ -6328,7 +6736,7 @@ fn authoritative_line_items<'a>(
                     run: image,
                     pm_start: image.pm_start,
                     pm_end: image.pm_end,
-                    single_image_line: item_count == 1,
+                    single_image_line: item_count == 1 && !leading_inline_box,
                     level,
                     logical_order,
                 });
@@ -6356,6 +6764,16 @@ pub(crate) fn line_text_insets(
     has_list_marker: bool,
     overrun: f64,
 ) -> (f64, f64) {
+    if indent_left < 0.0 || hanging < 0.0 || first_line < 0.0 {
+        let text_indent = if !is_first_line {
+            0.0
+        } else if has_list_marker && hanging > 0.0 {
+            overrun
+        } else {
+            first_line - hanging
+        };
+        return (indent_left, text_indent);
+    }
     let has_hanging = hanging > 0.0;
     let has_first_line = first_line > 0.0;
     let mut pad_left = indent_left;
@@ -6398,7 +6816,12 @@ fn emit_line(
         attrs.and_then(|attrs| attrs.auto_space_dn),
     );
     let default_bidi_level = base_bidi_level(geom.is_rtl);
-    let authoritative_items = authoritative_line_items(block, line, ctx, default_bidi_level);
+    let leading_inline_box = geom.is_first_line
+        && attrs
+            .and_then(|attrs| attrs.leading_inline_box.as_ref())
+            .is_some();
+    let authoritative_items =
+        authoritative_line_items(block, line, ctx, default_bidi_level, leading_inline_box);
     let authoritative_active = authoritative_items.is_some();
     let authoritative_width = authoritative_items
         .as_ref()
@@ -6559,6 +6982,7 @@ fn emit_line(
         marker_attrs.list_marker_revision = marker_revision;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: marker.to_owned(),
+            paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
             x: px(marker_x),
             baseline_y: px(baseline),
             width: px(slot_width),
@@ -6570,7 +6994,14 @@ fn emit_line(
             rtl: geom.is_rtl.then_some(true),
             opacity: None,
             rotation_deg: None,
-            horizontal_scale: None,
+            horizontal_scale: horizontal_scale_of(&marker_format),
+            substitute_scale: text_substitute_scale(
+                ctx.shape,
+                marker,
+                &marker_format,
+                base_bidi_level(geom.is_rtl),
+                false,
+            ),
             all_caps: false,
             small_caps: false,
             hidden: false,
@@ -6725,7 +7156,7 @@ fn emit_line(
                         run: imr,
                         pm_start: seg.pm_start,
                         pm_end: seg.pm_end,
-                        single_image_line: segments.len() == 1,
+                        single_image_line: segments.len() == 1 && !leading_inline_box,
                         level: default_bidi_level,
                         logical_order: None,
                     });
@@ -6848,6 +7279,7 @@ fn emit_line(
                         *width,
                         *logical_order,
                         block_ref,
+                        ctx.shape,
                     );
                     if run.pm_start.is_some() {
                         emitted_positioned_text = true;
@@ -7038,7 +7470,9 @@ fn emit_line(
     // position, which is `pmStart + 1`. The fragment's own pmStart is the
     // paragraph boundary, and a caret cannot sit there — emitting it would land
     // every click and vertical move BEFORE the paragraph.
-    if !emitted_positioned_text {
+    if !emitted_positioned_text
+        && !(leading_inline_box && segments.is_empty() && !block.runs.is_empty())
+    {
         let pos = line_break_pos.or(geom.frag_pm_start.map(|p| p + 1));
         if let Some(p) = pos {
             let mut marker_attrs = block_ref.attrs();
@@ -7046,6 +7480,7 @@ fn emit_line(
             marker_attrs.doc_end = Some(p);
             prims.push(Primitive::Text(TextRunPrimitive {
                 text: String::new(),
+                paint_text: None,
                 x: px(geom.frag_x + pad_left + text_indent + left_offset),
                 baseline_y: px(baseline),
                 width: px(0.0),
@@ -7058,6 +7493,13 @@ fn emit_line(
                 opacity: None,
                 rotation_deg: None,
                 horizontal_scale: None,
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    "",
+                    &RunFormattingIn::default(),
+                    default_bidi_level,
+                    false,
+                ),
                 all_caps: false,
                 small_caps: false,
                 hidden: false,
@@ -7126,6 +7568,7 @@ fn emit_tab_leader(
     width: f64,
     logical_order: Option<u64>,
     block_ref: &BlockRef,
+    shape: Option<&ShapeFonts<'_>>,
 ) {
     if width <= 0.0 {
         return;
@@ -7150,13 +7593,24 @@ fn emit_tab_leader(
         if let Some(color) = &measured.color {
             fmt.color = Some(color.clone());
         }
+        fmt.all_caps = Some(false);
+        let text = glyph.repeat(count as usize);
+        let substitute_scale = text_substitute_scale(
+            shape,
+            &text,
+            &fmt,
+            base_bidi_level(fmt.rtl == Some(true)),
+            false,
+        );
         let mut attrs = block_ref.attrs();
         attrs.doc_start = tab.pm_start;
         attrs.doc_end = tab.pm_end;
         attrs.logical_order = logical_order.or(tab.fmt.logical_order);
         attrs.bidi_level = tab.fmt.bidi_level;
         attrs.leader_glyphs = Some(Box::new(LeaderGlyphMetadata {
-            glyph: Some(glyph.to_string()),
+            glyph: Some(
+                text_paint_override(shape, glyph, &fmt).unwrap_or_else(|| glyph.to_string()),
+            ),
             count: Some(count),
             x: Some(px(x)),
             baseline_y: Some(px(baseline)),
@@ -7169,7 +7623,8 @@ fn emit_tab_leader(
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
         }));
         prims.push(Primitive::Text(TextRunPrimitive {
-            text: glyph.repeat(count as usize),
+            paint_text: text_paint_override(shape, &text, &fmt).map(Box::new),
+            text,
             x: px(x),
             baseline_y: px(baseline),
             width: px(width),
@@ -7182,6 +7637,7 @@ fn emit_tab_leader(
             opacity: None,
             rotation_deg: None,
             horizontal_scale: horizontal_scale_of(&fmt),
+            substitute_scale,
             all_caps: false,
             small_caps: false,
             hidden: false,
@@ -7469,8 +7925,20 @@ fn emit_text_segment(
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
         text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+        text_attrs.canvas_clusters = text_canvas_clusters(
+            shape,
+            text,
+            fmt,
+            bidi_level,
+            exact_advance,
+            word_spacing.as_ref().map(num_f64).unwrap_or(0.0),
+            auto_space,
+        )
+        .filter(|clusters| !clusters.is_empty())
+        .map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
+            paint_text: text_paint_override(shape, text, fmt).map(Box::new),
             x: px(x),
             baseline_y: px(paint_baseline),
             width: px(width),
@@ -7487,6 +7955,7 @@ fn emit_text_segment(
             opacity: None,
             rotation_deg: None,
             horizontal_scale: horizontal_scale_of(fmt),
+            substitute_scale: text_substitute_scale(shape, text, fmt, bidi_level, exact_advance),
             all_caps: fmt.all_caps == Some(true),
             small_caps: fmt.small_caps == Some(true),
             hidden: fmt.hidden == Some(true),
@@ -7597,9 +8066,11 @@ fn try_emit_glyph_runs(
     let Some(chain) = shape_fonts.chain_for(family, bold, italic) else {
         return false;
     };
-    if chain.is_empty() {
+    if chain.ids.is_empty() {
         return false;
     }
+    let resolve = chain.resolve;
+    let chain = chain.ids.as_slice();
     let echo_font_route = fmt.complex_script != Some(true)
         && fmt.font_slots.as_ref().is_none_or(|slots| {
             slots.ascii == slots.h_ansi
@@ -7627,7 +8098,7 @@ fn try_emit_glyph_runs(
     let mut first_font: Option<ooxml_text::FontId> = None;
     let mut uniform = true;
     for ch in text.chars() {
-        match shape_fonts.resolve(chain, ch) {
+        match resolve(shape_fonts.store, chain, ch) {
             Some(font) => match first_font {
                 None => first_font = Some(font),
                 Some(first) if font != first => uniform = false,
@@ -7662,7 +8133,7 @@ fn try_emit_glyph_runs(
         let chars: Vec<char> = text.chars().collect();
         let mut fonts: Vec<ooxml_text::FontId> = Vec::with_capacity(chars.len());
         for &ch in &chars {
-            match shape_fonts.resolve(chain, ch) {
+            match resolve(shape_fonts.store, chain, ch) {
                 Some(font) => fonts.push(font),
                 None => return false,
             }
@@ -7813,6 +8284,7 @@ fn try_emit_glyph_runs(
             font_id: font.to_u32(),
             size: round3(size_px),
             color: color.to_string(),
+            paint_text: glyph_paint_text(shape_fonts.store, font, &sub_text).map(Box::new),
             text: sub_text,
             glyphs: placed,
             echo: Some(EchoRunFacts {
@@ -8673,7 +9145,7 @@ fn shape_text_bounds(frag: &ShapeFragmentIn, block: &ShapeBlockIn) -> ClipRect {
         .as_ref()
         .and_then(|transform| transform.rotation)
         .unwrap_or(0.0);
-    let (sin, cos) = rotation.to_radians().sin_cos();
+    let (sin, cos) = fmath::sin_cos(rotation.to_radians());
     let width = frag.width * cos.abs() + frag.height * sin.abs();
     let height = frag.width * sin.abs() + frag.height * cos.abs();
     ClipRect {
@@ -8938,7 +9410,7 @@ fn rotate_shape_text(primitives: &mut [Primitive], center: (f64, f64), rotation:
     if rotation == 0.0 {
         return;
     }
-    let (sin, cos) = rotation.to_radians().sin_cos();
+    let (sin, cos) = fmath::sin_cos(rotation.to_radians());
     let delta = |x: f64, y: f64| {
         let dx = x - center.0;
         let dy = y - center.1;
@@ -9413,13 +9885,6 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(block.pm_end);
     attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-    attrs.chart = Some(ChartA11yAttrs {
-        label: chart_aria_label(&chart),
-    });
-    attrs.aria_label = block.chart.title.clone();
-    attrs.aria_description = block.chart.description.clone();
-    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
-
     let width = if frag.width > 0.0 {
         frag.width
     } else {
@@ -9430,6 +9895,18 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     } else {
         block.height
     };
+    attrs.chart = Some(ChartA11yAttrs {
+        label: chart_aria_label(&chart),
+        frame: Some(Box::new(ContentFrame {
+            x: Some(px(frag.x)),
+            y: Some(px(frag.y)),
+            w: Some(px(width)),
+            h: Some(px(height)),
+        })),
+    });
+    attrs.aria_label = block.chart.title.clone();
+    attrs.aria_description = block.chart.description.clone();
+    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
 
     plot_chart_into(
         &chart,
@@ -9485,6 +9962,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 prims.push(Primitive::Text(TextRunPrimitive {
                     x: px(x),
                     text,
+                    paint_text: None,
                     baseline_y: px(baseline_y),
                     width: px(width),
                     paint_clip: None,
@@ -9497,6 +9975,7 @@ impl PlotSink for PrimitiveSink<'_> {
                     opacity: None,
                     rotation_deg: None,
                     horizontal_scale: None,
+                    substitute_scale: None,
                     all_caps: false,
                     small_caps: false,
                     hidden: false,
@@ -9709,12 +10188,12 @@ fn compute_cell_grid(block: &TableBlockIn, column_widths: &[f64]) -> Vec<GridCel
     for (row_index, row) in block.rows.iter().enumerate() {
         let occ = occupied.remove(&row_index).unwrap_or_default();
         let is_occ = |c: usize| occ.contains(&c);
-        let mut column_index = 0;
+        let mut column_index = row.grid_before.unwrap_or(0).min(16_384) as usize;
         while is_occ(column_index) {
             column_index += 1;
         }
         for (cell_index, cell) in row.cells.iter().enumerate() {
-            let col_span = cell.col_span.unwrap_or(1).max(1) as usize;
+            let col_span = cell.col_span.unwrap_or(1).clamp(1, 16_384) as usize;
             let row_span = cell.row_span.unwrap_or(1).max(1) as usize;
             let mut x = 0.0;
             for c in 0..column_index {
@@ -10151,10 +10630,12 @@ impl TablePaintPlan {
 
 /// Whether a grid cell is on the table's outer leading edge, whose border insets content.
 fn is_first_grid_column(g: &GridCell, block: &TableBlockIn, measure: &TableExtentIn) -> bool {
+    let row = &block.rows[g.row_index];
     if block.bidi == Some(true) {
-        g.column_index + g.col_span >= measure.column_widths.len()
+        g.column_index + g.col_span + row.grid_after.unwrap_or(0).min(16_384) as usize
+            >= measure.column_widths.len()
     } else {
-        g.column_index == 0
+        g.column_index == row.grid_before.unwrap_or(0).min(16_384) as usize
     }
 }
 
@@ -11470,6 +11951,17 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
                 }
                 rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h);
             }
+        }
+        if let Some(ContentFrame {
+            x: Some(x),
+            y: Some(y),
+            w: Some(w),
+            h: Some(h),
+        }) = doc_attrs_mut(primitive)
+            .and_then(|attrs| attrs.chart.as_mut())
+            .and_then(|chart| chart.frame.as_deref_mut())
+        {
+            rect(x, y, w, h);
         }
     }
 }
@@ -13494,6 +13986,54 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_visible_font_resolution_is_scoped_to_implicit_defaults() {
+        let mut store = ooxml_text::FontStore::new();
+        let bytes = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let first = store.register(bytes.to_vec()).unwrap();
+        let last = store.register(bytes.to_vec()).unwrap();
+        let chain = [first, last];
+        for ch in ['\t', '\u{2060}', '\u{fe0f}', '\u{feff}'] {
+            assert_eq!(store.resolve(&chain, ch), None);
+            for (marked, expected) in [
+                (vec![], last),
+                (vec![first.to_u32()], last),
+                (vec![first.to_u32(), last.to_u32()], first),
+            ] {
+                let input: BuildInput = serde_json::from_value(serde_json::json!({
+                    "measured": [], "options": {}, "layout": {"pages": []},
+                    "fontChains": {
+                        "calibri|0|0": [first.to_u32(), last.to_u32()],
+                        "@betteroffice/fonts/coverage": marked,
+                    },
+                }))
+                .unwrap();
+                let fonts = ShapeFonts::build(&input, &store).unwrap();
+                let chain = fonts.chain_for("Calibri", false, false).unwrap();
+                assert_eq!((chain.resolve)(&store, &chain.ids, ch), Some(expected));
+                assert_eq!(
+                    (chain.resolve)(&store, &chain.ids, '\u{0939}'),
+                    if chain.coverage_only {
+                        None
+                    } else {
+                        Some(last)
+                    }
+                );
+            }
+            let unknown = ooxml_text::FontId::from_u32(u32::MAX);
+            let chain = ShapeFontChain::new(vec![unknown, first, last], true);
+            assert_eq!((chain.resolve)(&store, &chain.ids, ch), Some(first));
+        }
+        let fonts = ShapeFonts {
+            store: &store,
+            chains: HashMap::new(),
+            coverage_only: false,
+        };
+        let fmt = RunFormattingIn::default();
+        assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, false).is_none());
+        assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, true).is_some());
+    }
 
     #[test]
     fn unequal_column_bounds_and_separators_match_placement() {
@@ -17147,5 +17687,65 @@ mod tests {
             (child["x"].as_i64(), child["y"].as_i64()),
             (Some(145), Some(125))
         );
+    }
+
+    #[test]
+    fn rotated_cell_content_turns_the_chart_frame_with_its_primitives() {
+        let attrs = DocAttrs {
+            chart: Some(ChartA11yAttrs {
+                label: "Chart".to_owned(),
+                frame: Some(Box::new(ContentFrame {
+                    x: Some(px(10.0)),
+                    y: Some(px(20.0)),
+                    w: Some(px(40.0)),
+                    h: Some(px(30.0)),
+                })),
+            }),
+            ..DocAttrs::default()
+        };
+        let mut prims = vec![
+            Primitive::Rect(RectPrimitive {
+                x: px(10.0),
+                y: px(20.0),
+                w: px(40.0),
+                h: px(30.0),
+                fill: "#000000".to_owned(),
+                attrs: attrs.clone(),
+            }),
+            Primitive::Rect(RectPrimitive {
+                x: px(15.0),
+                y: px(25.0),
+                w: px(10.0),
+                h: px(5.0),
+                fill: "#ffffff".to_owned(),
+                attrs,
+            }),
+        ];
+        rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), 90.0);
+        let Primitive::Rect(rect) = &prims[0] else {
+            unreachable!()
+        };
+        let expected = (
+            Some(rect.x.clone()),
+            Some(rect.y.clone()),
+            Some(rect.w.clone()),
+            Some(rect.h.clone()),
+        );
+        assert_ne!(expected.0, Some(px(10.0)));
+        for primitive in &prims {
+            let Primitive::Rect(RectPrimitive { attrs, .. }) = primitive else {
+                unreachable!()
+            };
+            let frame = attrs.chart.as_ref().unwrap().frame.as_ref().unwrap();
+            assert_eq!(
+                (
+                    frame.x.clone(),
+                    frame.y.clone(),
+                    frame.w.clone(),
+                    frame.h.clone()
+                ),
+                expected
+            );
+        }
     }
 }

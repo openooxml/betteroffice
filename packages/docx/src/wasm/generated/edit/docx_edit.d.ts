@@ -1,5 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 /**
  * One yrs replica of the DOCX editing model, held for a JS host.
@@ -861,6 +863,11 @@ export class EditSession {
      * when nothing was changed.
      */
     persist_paragraph_ids(): string;
+    /**
+     * Caches save seed states without reseeding, within the paragraph and
+     * inflated package budgets.
+     */
+    prime_save_seed_states(paragraphs: number, inflated: number): boolean;
     proposal_revision_ranges_json(ids_json: string): string;
     /**
      * Versioned paragraph texts:
@@ -1380,6 +1387,7 @@ export class EditSession {
      * "pageContentHeight":number|null,"numericIds":{yrsId: number},
      * "tocStyleIds":[styleId],"showHiddenText":bool,
      * "defaultParagraphStyleId":string,
+     * "paragraphStyleFontSizes":{styleId: pt},"docDefaultFontSize":number,
      * "revisionPreview":{revisionId: "accepted"|"rejected"}}`, all
      * optional. Errors when the story does not end in a pilcrow, holds a
      * malformed table, references itself through a cell story, or contains an
@@ -1433,6 +1441,13 @@ export function clear_measure_fonts(): void;
  * parsed display list is freed. Idempotent.
  */
 export function close_display_list(handle: number): void;
+
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
 
 /**
  * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
@@ -1650,6 +1665,13 @@ export function render_docx_markdown_with_pages_json(content: string, options: s
 export function reset_wasm_peak_bytes(): void;
 
 /**
+ * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
+ */
+export function rezip_docx(entries: any): Uint8Array;
+
+export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1669,6 +1691,11 @@ export function serialize_docx_s12(request_json: string): string;
  * non-finite or negative value removes the cap.
  */
 export function set_wasm_heap_limit(bytes: number): void;
+
+/**
+ * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
+ */
+export function unzip_docx(data: Uint8Array): any;
 
 /**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
@@ -1732,6 +1759,7 @@ export interface InitOutput {
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => [number, number];
     readonly close_display_list: (a: number) => void;
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1866,6 +1894,7 @@ export interface InitOutput {
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
+    readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1997,13 +2026,16 @@ export interface InitOutput {
     readonly retainedlayoutmeta_page_sizes: (a: number) => [number, number];
     readonly retainedlayoutmeta_partial: (a: number) => number;
     readonly retainedlayoutmeta_provisional: (a: number) => number;
+    readonly rezip_docx: (a: any) => [number, number, number, number];
     readonly runinheritance_attributes: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runinheritance_paragraph_formatting: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runinheritance_table_attributes: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly set_wasm_heap_limit: (a: number) => void;
+    readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

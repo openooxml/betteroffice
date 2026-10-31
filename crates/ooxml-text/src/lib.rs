@@ -53,10 +53,12 @@ pub mod auto_space;
 pub mod bidi;
 pub mod caps;
 pub mod echo;
+pub mod family_metrics;
 pub mod font_store;
 pub mod line_break;
 pub mod measure;
 pub mod outline;
+mod scripts;
 pub mod shape;
 pub mod word_fonts;
 pub mod word_metrics;
@@ -69,7 +71,9 @@ pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
 pub use echo::{EchoGlyphSet, echo_glyph_set};
-pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
+pub use font_store::{
+    FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics, covered_character,
+};
 pub use line_break::{
     BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
 };
@@ -80,6 +84,7 @@ pub use measure::{
 };
 pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};
+pub use scripts::paragraph_scripts_with_han_fallback;
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
 pub use symbol_font::SymbolFont;
 pub use word_metrics::{

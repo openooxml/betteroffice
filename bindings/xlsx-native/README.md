@@ -1,32 +1,31 @@
 # @betteroffice/xlsx-native
 
-Native Rust bindings for the BetterOffice XLSX engine in Node.js, Bun and Deno.
-Facade operations return promises and run in call order on one native worker.
+The `@betteroffice/xlsx` API on the native Rust engine, for Node.js, Bun and Deno.
+Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
 
 ```sh
 npm install @betteroffice/xlsx-native
 ```
 
-```js
-import { readFile, writeFile } from 'node:fs/promises';
-import { openWorkbook } from '@betteroffice/xlsx-native';
+This package has the same entry points (`.`, `./headless`, `./worker`, `./collaboration`), exports
+and type declarations as `@betteroffice/xlsx`, so code written for one runs on the other; pick the
+engine by the package you import. `initWasm()` needs no WebAssembly input here and ignores any it is given.
 
-const workbook = await openWorkbook(await readFile('input.xlsx'));
-await workbook.setNumberFormat(0, 'A1', 'plainText');
-await workbook.setNumberFormat(0, 'B1', { type: 'custom', pattern: '0.000' });
-await workbook.setStyle(0, 'A1:B1', {
-  border: { preset: 'all', style: 'solid', color: '#123456' },
-  horizontalAlignment: 'center', textWrapping: 'wrap'
-});
-await workbook.setStyle(0, 'A1', { clear: ['borders'] });
-const proposal = await workbook.propose({
-  agentId: 'editor',
-  edits: [{ sheet: 0, address: 'C1', input: '12.5', numberFormat: 'currency' }]
-});
-await workbook.acceptProposal(proposal.id);
-await writeFile('output.xlsx', await workbook.save());
+```ts
+import { initWasm, openWorkbook } from '@betteroffice/xlsx-native';
+
+export async function updateWorkbook(bytes: Uint8Array): Promise<Uint8Array> {
+  await initWasm();
+  const workbook = openWorkbook(bytes);
+  try {
+    workbook.editCell(0, 9, 2, '=SUM(C1:C9)');
+    return workbook.save();
+  } finally {
+    workbook.dispose();
+  }
+}
 ```
 
-Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
-The package shares its version with `@betteroffice/xlsx`.
-CommonJS `require()` is also supported.
+Browsers need the WebAssembly engine: the `browser` export condition of this package throws, so
+use `@betteroffice/xlsx` there. Main-thread edit peers hydrated from a worker session
+(`retainPeerHydration`) also need the WebAssembly engine.

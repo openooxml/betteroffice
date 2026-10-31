@@ -359,13 +359,17 @@ export function drawGlyphRunPrimitive(
 // left edge exactly as measured upstream
 function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void {
   const rect = textRunRect(run);
+  const requestedSubstituteScale = finiteOr(run.substituteScale, 1);
+  const substituteScale = requestedSubstituteScale > 0 ? requestedSubstituteScale : 1;
+  const horizontalScale =
+    substituteScale === 1 ? run.horizontalScale : (run.horizontalScale ?? 100) * substituteScale;
   let wrapped = beginTextVisualState(
     ctx,
     rect,
     run.paintClip,
     run.hidden && run.opacity === undefined ? 0.4 : run.opacity,
     run.rotationDeg,
-    run.horizontalScale
+    horizontalScale
   );
   if (!wrapped && textEffectsNeedIsolation(run)) {
     ctx.save();
@@ -379,7 +383,7 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
   if ('letterSpacing' in ctx) {
     // reset to 0 when absent so spacing never leaks between runs
     (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing =
-      `${run.letterSpacing ?? 0}px`;
+      `${(run.letterSpacing ?? 0) / substituteScale}px`;
   }
   if ('wordSpacing' in ctx) {
     // justified lines carry a per-space stretch (Word jc=both/distribute); the
@@ -387,11 +391,21 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
     // paint and the mirror geometry agree. Reset to 0 when absent so the
     // spacing never leaks into the next run.
     (ctx as CanvasRenderingContext2D & { wordSpacing: string }).wordSpacing =
-      `${run.wordSpacing ?? 0}px`;
+      `${(run.wordSpacing ?? 0) / substituteScale}px`;
   }
-  const text = run.allCaps ? run.text.toUpperCase() : run.text;
+  const paintText = run.paintText ?? run.text;
+  const text = run.allCaps ? paintText.toUpperCase() : paintText;
   if (run.leaderGlyphs?.glyph && (run.leaderGlyphs.count ?? 0) > 0) {
-    drawLeaderText(ctx, run);
+    drawLeaderText(ctx, run, substituteScale);
+  } else if (run.canvasClusters?.length) {
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+    if ('wordSpacing' in ctx) ctx.wordSpacing = '0px';
+    for (const cluster of run.canvasClusters) {
+      const x = run.x + cluster.offset;
+      if (!drawModernRunText(ctx, cluster.text, x, run.baselineY, run, rect)) {
+        drawCanvasTextWithEffects(ctx, cluster.text, x, run.baselineY, run);
+      }
+    }
   } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, rect)) {
     drawCanvasTextWithEffects(ctx, text, run.x, run.baselineY, run);
   }
@@ -526,7 +540,8 @@ function drawGlyphRunFallback(ctx: CanvasRenderingContext2D, run: GlyphRunPrimit
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.direction = run.rtl ? 'rtl' : 'ltr';
-  const text = run.allCaps ? run.text.toUpperCase() : run.text;
+  const paintText = run.paintText ?? run.text;
+  const text = run.allCaps ? paintText.toUpperCase() : paintText;
   if (!drawModernRunText(ctx, text, first.x, first.y, run, glyphRunRect(run))) {
     drawCanvasTextWithEffects(ctx, text, first.x, first.y, run);
   }
@@ -1579,11 +1594,15 @@ function beginPrimitiveVisualTransform(
   }
 }
 
-function drawLeaderText(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void {
+function drawLeaderText(
+  ctx: CanvasRenderingContext2D,
+  run: TextRunPrimitive,
+  substituteScale: number
+): void {
   const leader = run.leaderGlyphs;
   if (!leader?.glyph) return;
   const count = Math.max(0, Math.floor(leader.count ?? 0));
-  const advance = finiteOr(leader.advance, 0);
+  const advance = finiteOr(leader.advance, 0) / substituteScale;
   if (count === 0 || advance <= 0) return;
   const x = finiteOr(leader.x, run.x);
   const baselineY = finiteOr(leader.baselineY, run.baselineY);

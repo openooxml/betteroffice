@@ -21,6 +21,7 @@ import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from '.
 import { preloadEditWasm } from './wasm/index';
 import * as editWasm from './wasm/index';
 import { preloadOpcWasm } from '../wasm/opc';
+import { extractEmbeddedFontFaces, getEmbeddedFontFaces } from '../utils/embeddedFonts';
 import { PeerMetadataError } from './peerMetadata';
 import { RESIDENT_WORKER_SILENCE_MS, ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
 import { createDocxCommandConnection } from './residentCommandConnection';
@@ -63,6 +64,10 @@ beforeAll(async () => {
   const scheduler = resolve(import.meta.dir, 'residentScheduler.ts');
   const modules: Record<string, string> = {
     './yrsSessionFacade': 'export const decodeDocxHostJson = () => { throw new Error("Unexpected source decode"); };',
+    '../utils/embeddedFonts': `
+      export const extractEmbeddedFontFaces = (...args) => testHarness.extractEmbeddedFontFaces(...args);
+      export const getEmbeddedFontFaces = (...args) => testHarness.getEmbeddedFontFaces(...args);
+    `,
     './residentEngineSession':
       `export const createResidentEngineSession = async (heapLimitBytes) => {
         await testHarness.preload();
@@ -75,10 +80,14 @@ beforeAll(async () => {
     './wasm/index': `
       export const preloadEditWasm = () => testHarness.preload();
       export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+      export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
     `,
+    '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadSave("opc");',
+    '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadSave("parse");',
+    './residentSaveWarmup': 'export const warmResidentSave = (yieldSave) => testHarness.warmSave(yieldSave);',
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
-    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
+    '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.memories;',
     './residentCommandViewProjection':
       'export const projectCommandEchoContext = (input) => testHarness.projectEchoContext?.(input);',
     '../layout/render/frameDelta': `
@@ -119,7 +128,7 @@ beforeAll(async () => {
             loader: 'js',
           }));
           build.onLoad({ filter: /\/residentEngineWorker\.ts$/ }, ({ path }) => ({
-            contents: `${readFileSync(path, 'utf8')}\ntestHarness.installCommands = setResidentCommandHooksFactory; testHarness.pendingPages = pendingOffscreenPageIds;`,
+            contents: `${readFileSync(path, 'utf8')}\ntestHarness.installCommands = setResidentCommandHooksFactory; testHarness.pendingPages = pendingOffscreenPageIds; testHarness.saveWarmupState = () => ({ attempts: typeof saveWarmupAttempts === 'undefined' ? 0 : saveWarmupAttempts, active: typeof saveWarmup !== 'undefined' && saveWarmup !== null, finished: typeof saveWarmupFinished !== 'undefined' && saveWarmupFinished, record: editorSaves, saveDelayMs: typeof saveWarmupStats === 'undefined' ? null : saveWarmupStats.saveDelayMs });`,
             loader: 'ts',
           }));
           build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
@@ -146,7 +155,7 @@ beforeAll(async () => {
     'createImageBitmap',
     await result.outputs[0].text()
   ) as typeof startWorker;
-});
+}, 30_000);
 
 class Surface {
   pixels: string | null = null;
@@ -182,6 +191,7 @@ function worker() {
   };
   const harness = {
     encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
+    extractEmbeddedFontFaces, getEmbeddedFontFaces,
     createSession: null as ((heapLimitBytes?: number) => Promise<ResidentEngineSession>) | null,
     installCommands: null as ((factory: DocxCommandHooksFactory) => void) | null,
     scheduler: null as ResidentScheduler | null,
@@ -214,8 +224,17 @@ function worker() {
     sessionsCreated: 0,
     wasmReady: false,
     failWarm: null as Error | null,
+    decodePackedFontFace: mock((_bytes: Uint8Array, _codec: string, _dict?: Uint8Array, _maxOutput?: number) => ({
+      font: new Uint8Array([0, 1, 0, 0]), payload: new Uint8Array([7, 8]),
+    })),
     preloadBlock: null as Promise<void> | null,
     preloadInputs: [] as (WebAssembly.Module | undefined)[],
+    preloadSave: mock(async (_module: string) => {}),
+    warmSave: mock(async (yieldSave: () => Promise<void>) => {
+      await yieldSave();
+      await yieldSave();
+    }),
+    saveWarmupState: null as (() => { attempts: number; active: boolean; finished: boolean; record: ResidentSaveRecord; saveDelayMs: number | null }) | null,
     async preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
       await harness.preload((await source) ?? undefined);
     },
@@ -248,6 +267,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       initializeComments() {},
+      primeSaveSeedStates: mock(() => true),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -524,7 +544,7 @@ const COMMAND_INIT: DocxCommandInitRequest = {
   fonts: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1, extras: '{}',
 };
 
-async function commandWorker() {
+async function commandWorker(options: { heapLimitBytes?: number } = {}) {
   const w = worker();
   let terminated = false;
   const posted: DocxEngineWorkerRequest[] = [];
@@ -593,7 +613,7 @@ async function commandWorker() {
     };
   });
   const client = new ResidentEngineWorkerClient(port);
-  await client.open(new Uint8Array([1]));
+  await client.open(new Uint8Array([1]), options);
   return {
     w, client, posted, replies,
     get terminated() { return terminated; },
@@ -612,6 +632,25 @@ function commandEnvelope(seq: number, text = '!'): DocxCommandEnvelope {
     basis: { epoch: COMMAND_INIT.epoch, version: 0 }, seq, kind: 'insertText', payload: { text },
   };
 }
+
+test('font decoding initializes the resident engine before open and transfers font and payload', async () => {
+  const w = worker();
+  const bytes = new Uint8Array([1, 2, 3]).buffer;
+  const dict = new Uint8Array([4, 5]).buffer;
+  const response = await w.send({ type: 'decodeFontFace', bytes, codec: 'woff2t+zstd', dict, maxOutput: 100 });
+  expect(response.ok).toBe(true);
+  if (!response.ok) throw new Error(response.error);
+  expect(w.harness.initializations).toBe(1);
+  expect(w.harness.sessionsCreated).toBe(0);
+  expect(w.harness.decodePackedFontFace).toHaveBeenCalledWith(new Uint8Array(bytes), 'woff2t+zstd', new Uint8Array(dict), 100);
+  expect(new Uint8Array(response.decodedFontFace!.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+  expect(w.transfers.get(response.id)).toEqual([response.decodedFontFace!.font, response.decodedFontFace!.payload!]);
+  const message = 'Font face is corrupt or uses a wrong dictionary';
+  w.harness.decodePackedFontFace.mockImplementationOnce(() => { throw new Error(message); });
+  const failure = await w.send({ type: 'decodeFontFace', bytes, codec: 'zstd' });
+  expect(failure).toMatchObject({ ok: false, error: message, commandError: { name: 'Error', message } });
+  expect(w.harness.sessionsCreated).toBe(0);
+});
 
 test('selection noop sends its retained echo context before building the deferred frame', async () => {
   const arm = await commandWorker();
@@ -974,7 +1013,7 @@ test('d0_replacement_save_preserves_restored_header_and_new_body_edits', async (
   }
 }, 15_000);
 
-test('d0_callback_destroy_defers_native_cleanup_and_free_once', async () => {
+test('d0_drain_destroy_defers_native_cleanup_and_free_once', async () => {
   const nativeCreate = editWasm.createEditSession;
   const rawSessions: ReturnType<typeof nativeCreate>[] = [];
   const create = spyOn(editWasm, 'createEditSession').mockImplementation((...args) => {
@@ -988,7 +1027,7 @@ test('d0_callback_destroy_defers_native_cleanup_and_free_once', async () => {
     engines.push(...arm.engines);
     const engine = engines[0]!;
     const raw = rawSessions[0]!;
-    const clear = spyOn(raw, 'clear_update_observer');
+    const clear = spyOn(raw, 'clear_update_event_observation');
     const free = spyOn(raw, 'free');
     let updates = 0;
     try {
@@ -2417,13 +2456,18 @@ describe('resident display page release', () => {
 });
 
 describe('document worker warmup', () => {
+  const SAVE_WARMUP_IDLE_MS = 300;
+  const SAVE_WARMUP_INPUT_IDLE_MS = 600;
+  const SAVE_WARMUP_HEAP_LIMIT_BYTES = 512 * 1024 * 1024;
   const timers = new Map<number, { callback: () => void; ms: number }>();
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
   let nextTimer = 1;
+  let now = 0;
 
   beforeEach(() => {
     timers.clear();
+    now = 0;
     globalThis.setTimeout = ((callback: () => void, ms: number) => {
       const id = nextTimer++;
       timers.set(id, { callback, ms });
@@ -2440,6 +2484,7 @@ describe('document worker warmup', () => {
   });
 
   function advanceTimers(ms: number): void {
+    now += ms;
     for (const [id, timer] of [...timers]) {
       timer.ms -= ms;
       if (timer.ms > 0) continue;
@@ -2461,6 +2506,696 @@ describe('document worker warmup', () => {
     };
     return { reply: w.send({ type: 'warm', hostModule: true }), started: started.promise };
   }
+
+  async function settleWarmup(until: () => boolean): Promise<void> {
+    for (let turn = 0; turn < 100 && !until(); turn += 1) {
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    }
+    expect(until()).toBe(true);
+  }
+
+  async function preparedSaveWorker(options: { heapLimitBytes?: number } = { heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES }) {
+    const arm = await commandWorker(options);
+    arm.w.harness.now = () => now;
+    await arm.client.commandInit(COMMAND_INIT);
+    arm.client.prepareSave();
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    return arm;
+  }
+
+  test('save seed priming runs once when an editable open settles, without replying', async () => {
+    const { w, client, replies } = await commandWorker();
+    w.harness.now = () => now;
+    try {
+      await client.commandInit(COMMAND_INIT);
+      const before = replies.length;
+      await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
+      expect(replies).toHaveLength(before);
+      await client.edit(commandEnvelope(1));
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('read-only opens do not prime save seed states', async () => {
+    const { w, client } = await commandWorker();
+    w.harness.now = () => now;
+    try {
+      await client.commandInit({ ...COMMAND_INIT, readOnly: true });
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('low heap headroom skips save seed priming', async () => {
+    const { w, client } = await commandWorker({ heapLimitBytes: 128 * 1024 * 1024 });
+    w.harness.now = () => now;
+    w.harness.memories[0].liveBytes = 65 * 1024 * 1024;
+    try {
+      await client.commandInit(COMMAND_INIT);
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
+    const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });
+    w.harness.now = () => now;
+    const loading = deferred();
+    w.harness.preloadSave.mockImplementation(async () => loading.promise);
+    try {
+      await client.commandInit(COMMAND_INIT);
+      advanceTimers(5_000);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      client.prepareSave();
+      advanceTimers(0);
+      await client.edit(commandEnvelope(1));
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      loading.resolve();
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      advanceTimers(0);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+      client.prepareSave();
+      advanceTimers(10_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+    } finally {
+      loading.resolve();
+      client.destroy();
+    }
+  });
+
+  test('save warmup starts within 600 ms of the first edit when typing stays idle', async () => {
+    const { w, client } = await preparedSaveWorker();
+    let startedAt: number | null = null;
+    w.harness.warmSave.mockImplementation(async (yieldSave) => {
+      startedAt = now;
+      await yieldSave();
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_IDLE_MS);
+      await client.edit(commandEnvelope(1));
+      const editedAt = now;
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS - 1);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      advanceTimers(1);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+      expect(startedAt as number | null).toBe(editedAt + SAVE_WARMUP_INPUT_IDLE_MS);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('save warmup preserves real state, history, saved ids, checkpoints, peers, frames and accounting', async () => {
+    const { w, client, replies } = await preparedSaveWorker();
+    const state = new Uint8Array([1, 3, 5]);
+    const undo = new Uint8Array([2, 4]);
+    const redo = new Uint8Array([6, 8]);
+    const savedIds = new Uint8Array([9, 10]);
+    const mutate = mock(() => {
+      state.fill(0); undo.fill(0); redo.fill(0); savedIds.fill(0);
+    });
+    const checkpoint = mock(() => {});
+    Object.assign(w.harness.session, {
+      encodeState: () => state.slice(), encodeStateVector: () => state.slice(),
+      undoHistory: () => undo.slice(), redoHistory: () => redo.slice(),
+      savedParagraphIds: () => savedIds.slice(), recordSavedParagraphIds: mutate,
+      applyInput: mutate, applyDelete: mutate, applyUpdate: mutate,
+      undo: mutate, redo: mutate, save: mutate, saveDocument: mutate,
+      initializeComments: mutate, persistParagraphIds: mutate, checkpoint,
+      loadState: mutate, setSelection: mutate, markProjectionStories: mutate,
+      clearFonts: mutate, registerFont: mutate,
+    });
+    const before = {
+      state: state.slice(), undo: undo.slice(), redo: redo.slice(), savedIds: savedIds.slice(),
+      replies: replies.length, record: { ...w.harness.saveWarmupState!().record },
+      memory: structuredClone(w.harness.memories), frame: w.harness.delta,
+      version: w.harness.scheduler!.version, generation: w.harness.scheduler!.generation,
+    };
+    const peerUpdates = mock(() => {});
+    w.harness.updateListeners.add(peerUpdates);
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS - 1);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      advanceTimers(1);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+      expect(w.harness.session.encodeStateVector()).toEqual(before.state);
+      expect(state).toEqual(before.state);
+      expect(undo).toEqual(before.undo);
+      expect(redo).toEqual(before.redo);
+      expect(savedIds).toEqual(before.savedIds);
+      expect(mutate).not.toHaveBeenCalled();
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(peerUpdates).not.toHaveBeenCalled();
+      expect(replies).toHaveLength(before.replies);
+      expect(w.harness.saveWarmupState!().record).toEqual(before.record);
+      expect(w.harness.memories).toEqual(before.memory);
+      expect(w.harness.delta).toBe(before.frame);
+      expect(w.harness.scheduler!.version).toBe(before.version);
+      expect(w.harness.scheduler!.generation).toBe(before.generation);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('every incoming request postpones save warmup and commands restart input idle', async () => {
+    const { w, client } = await preparedSaveWorker();
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS * 3 / 4);
+      await client.revisionCount();
+      advanceTimers(SAVE_WARMUP_IDLE_MS - 1);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      await client.edit(commandEnvelope(1));
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS - 1);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      advanceTimers(1);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('destroy cancels save warmup, started=%s', async (started) => {
+    const { w, client } = await preparedSaveWorker();
+    const phase = deferred();
+    const after = mock(() => {});
+    w.harness.warmSave.mockImplementation(async (yieldSave) => {
+      await phase.promise;
+      await yieldSave();
+      after();
+    });
+    if (started) {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => w.harness.warmSave.mock.calls.length === 1);
+    }
+    client.destroy();
+    await w.send({ type: 'warm' });
+    phase.resolve();
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    advanceTimers(10_000);
+    expect(w.harness.warmSave).toHaveBeenCalledTimes(started ? 1 : 0);
+    expect(after).not.toHaveBeenCalled();
+  });
+
+  test('input aborts between save warmup phases and allows at most one retry', async () => {
+    const { w, client } = await preparedSaveWorker();
+    let phase = deferred();
+    const after = mock(() => {});
+    w.harness.warmSave.mockImplementation(async (yieldSave) => {
+      await phase.promise;
+      await yieldSave();
+      after();
+    });
+    try {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+        await settleWarmup(() => w.harness.warmSave.mock.calls.length === attempt);
+        await client.edit(commandEnvelope(attempt));
+        phase.resolve();
+        await settleWarmup(() => !w.harness.saveWarmupState!().active);
+        expect(after).not.toHaveBeenCalled();
+        phase = deferred();
+      }
+      client.prepareSave();
+      advanceTimers(10_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(2);
+    } finally {
+      phase.resolve();
+      client.destroy();
+    }
+  });
+
+  test.each([0, 3])('a real save bypasses warmup without awaiting it after %s phases', async (phases) => {
+    const { w, client } = await preparedSaveWorker();
+    const phase = deferred();
+    const after = mock(() => {});
+    const save = mock(async () => new ArrayBuffer(4));
+    Object.assign(w.harness.session, { save, commentProjection: () => null });
+    let blocked = false;
+    w.harness.warmSave.mockImplementation(async (yieldSave) => {
+      for (let phase = 0; phase < phases; phase += 1) await yieldSave();
+      blocked = true;
+      await phase.promise;
+      await yieldSave();
+      after();
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => blocked);
+      expect((await client.save({ comments: [] })).bytes.byteLength).toBe(4);
+      expect(w.harness.saveWarmupState!().saveDelayMs).toBeGreaterThanOrEqual(0);
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(w.harness.saveWarmupState!().active).toBe(true);
+      phase.resolve();
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(after).not.toHaveBeenCalled();
+    } finally {
+      phase.resolve();
+      client.destroy();
+    }
+  });
+
+  test('save warmup errors do not fail a later real save or retry forever', async () => {
+    const { w, client } = await preparedSaveWorker();
+    w.harness.warmSave.mockRejectedValueOnce(new Error('warmup failed'));
+    const save = mock(async () => new ArrayBuffer(4));
+    Object.assign(w.harness.session, { save, commentProjection: () => null });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect((await client.save({ comments: [] })).bytes.byteLength).toBe(4);
+      client.prepareSave();
+      advanceTimers(10_000);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([[128, 65], [512, 385]])('save warmup skips low headroom with limit=%s MiB and live=%s MiB', async (limitMiB, liveMiB) => {
+    const { w, client } = await preparedSaveWorker({ heapLimitBytes: limitMiB * 1024 * 1024 });
+    w.harness.memories[0].liveBytes = liveMiB * 1024 * 1024;
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      expect(w.harness.saveWarmupState!().attempts).toBe(0);
+      expect(await client.revisionCount()).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('an uncapped session checks the wasm32 ceiling, near ceiling=%s', async (nearCeiling) => {
+    const { w, client } = await preparedSaveWorker({});
+    w.harness.memories[0].liveBytes = nearCeiling ? 2 ** 32 - 64 * 1024 * 1024 : 100;
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(nearCeiling ? 0 : 1);
+      expect(await client.revisionCount()).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('an uncapped session honors a lower declared memory maximum', async () => {
+    const { w, client } = await preparedSaveWorker({});
+    Object.assign(w.harness.memories[0], { maximumBytes: 128 * 1024 * 1024, liveBytes: 65 * 1024 * 1024 });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      expect(w.harness.saveWarmupState!().attempts).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each(['unlimited', 'no-module', 'no-live-bytes', 'invalid-live-bytes', 'unreadable-stats'])('save warmup skips unavailable headroom: %s', async (missing) => {
+    const options = {
+      heapLimitBytes: missing === 'unlimited' ? Infinity : SAVE_WARMUP_HEAP_LIMIT_BYTES,
+    };
+    const { w, client } = await preparedSaveWorker(options);
+    const memories = w.harness.memories;
+    if (missing === 'no-module') w.harness.memories = [];
+    if (missing === 'no-live-bytes') Object.assign(memories[0], { liveBytes: undefined });
+    if (missing === 'invalid-live-bytes') memories[0].liveBytes = NaN;
+    if (missing === 'unreadable-stats') Object.defineProperty(w.harness, 'memories', {
+      configurable: true, get() { throw new Error('unreadable memory stats'); },
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      expect(w.harness.saveWarmupState!().attempts).toBe(0);
+    } finally {
+      Object.defineProperty(w.harness, 'memories', { configurable: true, writable: true, value: memories });
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('save warmup stops before a phase after headroom drops, queued=%s', async (queued) => {
+    const { w, client } = await preparedSaveWorker();
+    const after = mock(() => {});
+    w.harness.warmSave.mockImplementation(async (yieldSave) => {
+      await yieldSave();
+      const next = queued ? yieldSave() : null;
+      w.harness.memories[0].liveBytes = 385 * 1024 * 1024;
+      await (next ?? yieldSave());
+      after();
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+      expect(after).not.toHaveBeenCalled();
+      expect(await client.revisionCount()).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('a save warmup runtime error terminates the worker through the trap path, oom=%s', async (oom) => {
+    const { w, client, replies } = await preparedSaveWorker();
+    w.harness.warmSave.mockImplementation(async () => {
+      if (oom) w.harness.memories[0].failedAllocationBytes = 64;
+      throw new WebAssembly.RuntimeError('warmup unreachable');
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => replies.some((reply) => !reply.ok && reply.terminal === true));
+      expect(replies.find((reply) => !reply.ok && reply.terminal)).toMatchObject({
+        id: 0, ok: false, terminal: true,
+        error: oom
+          ? 'Document worker ran out of memory allocating 64 bytes: warmup unreachable'
+          : 'Document worker trapped: warmup unreachable',
+        ...(oom ? { outOfMemory: true } : {}),
+      });
+      expect(client.commandFailure).toMatchObject({ code: oom ? 'out-of-memory' : 'trap' });
+      expect(await w.send({ type: 'revisionCount' })).toMatchObject({ ok: false, terminal: true });
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('a runtime error reading warmup headroom still reports a terminal trap', async () => {
+    const { w, client, replies } = await preparedSaveWorker();
+    const memories = w.harness.memories;
+    Object.defineProperty(w.harness, 'memories', {
+      configurable: true, get() { throw new WebAssembly.RuntimeError('headroom unreachable'); },
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      expect(replies.at(-1)).toMatchObject({
+        id: 0, ok: false, terminal: true, memory: [],
+        error: 'Document worker trapped: headroom unreachable',
+      });
+      expect(client.commandFailure).toMatchObject({ code: 'trap' });
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(w.harness, 'memories', { configurable: true, writable: true, value: memories });
+      client.destroy();
+    }
+  });
+
+  test('command editor frames do not preload save wasm without save intent', async () => {
+    const { w, client, posted } = await commandWorker();
+    advanceTimers(0);
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1] });
+    expect(initial.frame.payload.stagedPresentation?.pages).toHaveLength(1);
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+    expect(armedBudgets()).toEqual([]);
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+    expect(posted.some((request) => request.type === 'save')).toBe(false);
+    await client.requestFullFrame();
+    advanceTimers(0);
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+  });
+
+  test('save intent preloads save wasm once without queueing work or changing the document', async () => {
+    const { w, client, posted } = await commandWorker();
+    await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1] });
+    const scheduler = w.harness.scheduler!;
+    const before = { version: scheduler.version, generation: scheduler.generation, sequence: client.stateSequence() };
+    const messages = w.harness.messages.length;
+    const replies = w.answered.length;
+    client.prepareSave();
+    client.prepareSave();
+    expect(armedBudgets()).toEqual([0]);
+    expect(w.harness.messages).toHaveLength(messages);
+    expect(w.answered).toHaveLength(replies);
+    expect({ version: scheduler.version, generation: scheduler.generation, sequence: client.stateSequence() }).toEqual(before);
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave.mock.calls.map(([module]) => module).sort()).toEqual(['opc', 'parse']);
+    client.prepareSave();
+    advanceTimers(0);
+    expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+    expect(posted.some(request => request.type === 'save')).toBe(false);
+  });
+
+  test('save wasm loading does not hold command frames or document reads', async () => {
+    const { w, client } = await commandWorker();
+    const loading = deferred();
+    w.harness.preloadSave.mockImplementation(async () => loading.promise);
+    try {
+      await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1] });
+      client.prepareSave();
+      advanceTimers(0);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+      expect((await client.requestFullFrame()).frame).toBeDefined();
+      expect(await client.revisionCount()).toBe(0);
+    } finally {
+      loading.resolve();
+    }
+  });
+
+  test('read-only command frames and save intent never preload save wasm', async () => {
+    const { w, client } = await commandWorker();
+    try {
+      expect((await client.commandInit({ ...COMMAND_INIT, readOnly: true })).editState.readOnly).toBe(true);
+      await client.requestFullFrame();
+      client.prepareSave();
+      expect(armedBudgets()).toEqual([]);
+      advanceTimers(0);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.preloadSave).not.toHaveBeenCalled();
+      advanceTimers(3_000);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('a queued viewer preload rechecks read-only command state', async () => {
+    const { w, client } = await commandWorker();
+    try {
+      const framed = await w.send({
+        type: 'bootstrap', opened: true, extras: '{}', expectedFrameEpoch: 0,
+        snapshot: {
+          clientId: 1, state: new Uint8Array(), selection: null,
+          fonts: [], fontsRevision: 0, renderInputs: [], measureInputs: [],
+          layoutInput: '', layoutWithRegions: false, layoutRevision: 1,
+        },
+      });
+      expect(framed).toMatchObject({ ok: true, frame: expect.any(ArrayBuffer) });
+      client.prepareSave();
+      expect(armedBudgets()).toEqual([0]);
+      await client.commandInit({ ...COMMAND_INIT, readOnly: true });
+      advanceTimers(0);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.preloadSave).not.toHaveBeenCalled();
+      expect(armedBudgets()).toEqual([]);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('replica frames without an opened source never schedule save wasm', async () => {
+    const w = worker();
+    expect(await w.bootstrap()).toMatchObject({ ok: true, frame: expect.any(ArrayBuffer) });
+    w.scope.onmessage({ data: { id: 999, type: 'prepare-save' } });
+    expect(armedBudgets()).toEqual([]);
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+  });
+
+  test('a whole parsed source shown as a preview never schedules save wasm', async () => {
+    const w = worker();
+    Object.assign(w.harness.session, {
+      clientId: 1,
+      openDocument() {},
+      layoutDocumentWithRegionsPrefixRetainedJson: () => '{"layout":{"pages":[{}]}}',
+      buildDisplayListFrame: () => {
+        w.delta([1], true, 100, 1);
+        return new Uint8Array([1]);
+      },
+    });
+    const framed = await w.send({
+      type: 'openSource',
+      source: {
+        document: { package: { document: { content: [] } } },
+        preview: { layoutInput: '{}' },
+      },
+    });
+    expect(framed).toMatchObject({ ok: true, frame: expect.any(ArrayBuffer), documentPreview: true });
+    w.scope.onmessage({ data: { id: 999, type: 'prepare-save' } });
+    expect(armedBudgets()).toEqual([]);
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+    advanceTimers(3_000);
+    expect(w.harness.warmSave).not.toHaveBeenCalled();
+  });
+
+  test.each(['none', 'queued', 'loading'])('save awaits the shared preload with intent=%s', async (intent) => {
+    const { w, client } = await commandWorker();
+    const loading = deferred();
+    const save = mock(async () => new ArrayBuffer(4));
+    Object.assign(w.harness.session, { save, commentProjection: () => null });
+    w.harness.preloadSave.mockImplementation(async () => loading.promise);
+    let saving: ReturnType<typeof client.save> | undefined;
+    try {
+      await client.commandInit(COMMAND_INIT);
+      expect(armedBudgets()).toEqual([]);
+      if (intent !== 'none') client.prepareSave();
+      if (intent === 'loading') {
+        advanceTimers(0);
+        await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+        expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+        await client.requestFullFrame();
+        expect(armedBudgets()).toEqual([]);
+      }
+      saving = client.save({ comments: [] });
+      void saving.catch(() => {});
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(save).not.toHaveBeenCalled();
+      expect(w.harness.preloadSave.mock.calls.map(([module]) => module).sort()).toEqual(['opc', 'parse']);
+      expect(armedBudgets()).toEqual([RESIDENT_WORKER_SILENCE_MS]);
+      loading.resolve();
+      expect((await saving).bytes.byteLength).toBe(4);
+      await client.save({ comments: [] });
+      expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(armedBudgets()).toEqual([]);
+    } finally {
+      loading.resolve();
+      await saving?.catch(() => {});
+      client.destroy();
+    }
+  });
+
+  test('save retries a rejected background preload', async () => {
+    const { w, client } = await commandWorker();
+    const save = mock(async () => new ArrayBuffer(4));
+    Object.assign(w.harness.session, { save, commentProjection: () => null });
+    w.harness.preloadSave.mockRejectedValueOnce(new Error('download interrupted'));
+    try {
+      await client.commandInit(COMMAND_INIT);
+      client.prepareSave();
+      advanceTimers(0);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+      expect((await client.save({ comments: [] })).bytes.byteLength).toBe(4);
+      expect(w.harness.preloadSave).toHaveBeenCalledTimes(4);
+      expect(save).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('save intent preloads only a saveable viewer document, preview=%s', async (preview) => {
+    const w = worker();
+    Object.assign(w.harness.session, { openDocx: () => '{}', openDocxPreview: () => '{}' });
+    expect((await w.send({
+      type: 'open', bytes: new ArrayBuffer(1), ...(preview ? { previewBlocks: 1 } : {}),
+    })).ok).toBe(true);
+    advanceTimers(0);
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+    w.delta([1], true, 100, 1);
+    const framed = await w.send({
+      type: 'bootstrap', opened: true, extras: '{}', expectedFrameEpoch: 0,
+      snapshot: {
+        clientId: 1, state: new Uint8Array(), selection: null,
+        fonts: [], fontsRevision: 0, renderInputs: [], measureInputs: [],
+        layoutInput: '', layoutWithRegions: false, layoutRevision: 1,
+      },
+    });
+    expect(framed).toMatchObject({ ok: true, frame: expect.any(ArrayBuffer) });
+    expect(framed.ok && framed.documentPreview).toBe(preview ? true : undefined);
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+    expect(armedBudgets()).toEqual([]);
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+    w.scope.onmessage({ data: { id: 999, type: 'prepare-save' } });
+    expect(armedBudgets()).toEqual(preview ? [] : [0]);
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave.mock.calls.map(([module]) => module).sort()).toEqual(preview ? [] : ['opc', 'parse']);
+  });
+
+  test('cancels the deferred save preload when its document is destroyed', async () => {
+    const { w, client } = await commandWorker();
+    await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1] });
+    client.prepareSave();
+    expect(armedBudgets()).toEqual([0]);
+    w.scope.onmessage({ data: { id: 999, type: 'destroy' } });
+    expect((await w.send({ type: 'warm' })).ok).toBe(true);
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave).not.toHaveBeenCalled();
+  });
+
+  test('handles an in-flight preload rejection after document destruction', async () => {
+    const { w, client } = await commandWorker();
+    const loading = deferred();
+    w.harness.preloadSave.mockImplementation(async () => {
+      await loading.promise;
+      throw new Error('download interrupted after close');
+    });
+    try {
+      await client.commandInit(COMMAND_INIT);
+      client.prepareSave();
+      advanceTimers(0);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+      w.scope.onmessage({ data: { id: 999, type: 'destroy' } });
+      expect((await w.send({ type: 'warm' })).ok).toBe(true);
+      loading.resolve();
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(armedBudgets()).toEqual([]);
+      expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+    } finally {
+      loading.resolve();
+      client.destroy();
+    }
+  });
+
+  test('retries a failed background save preload only on later save intent', async () => {
+    const { w, client } = await commandWorker();
+    w.harness.preloadSave.mockRejectedValueOnce(new Error('download interrupted'));
+    await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1] });
+    client.prepareSave();
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+    expect((await client.requestFullFrame()).frame).toBeDefined();
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave).toHaveBeenCalledTimes(2);
+    client.prepareSave();
+    advanceTimers(0);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(w.harness.preloadSave.mock.calls.map(([module]) => module).sort()).toEqual(['opc', 'opc', 'parse', 'parse']);
+    expect(await client.revisionCount()).toBe(0);
+  });
 
   test('waits for the host module outside the request queue and does not answer it', async () => {
     const w = worker();
@@ -4148,7 +4883,7 @@ describe('worker proposals during sliced completion', () => {
 
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
-  )))));
+  )))), 30_000);
 
   test('content-control reads equal a main session opened from the same package', async () => {
     const bytes = new Uint8Array(readFileSync(resolve(

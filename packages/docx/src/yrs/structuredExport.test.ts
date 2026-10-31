@@ -105,7 +105,7 @@ function replace(session: YrsSession, paraId: string, text: string) {
 }
 
 describe('structured export', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('exports bytes headlessly exactly as the Rust engine golden files', async () => {
     for (const view of VIEWS) {

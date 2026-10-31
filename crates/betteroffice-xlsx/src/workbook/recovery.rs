@@ -601,6 +601,10 @@ fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
     let workbook = [
         ("sheet count", left.sheets.len() != right.sheets.len()),
         ("date system", left.date_system != right.date_system),
+        (
+            "calculation precision",
+            left.full_precision != right.full_precision,
+        ),
         ("defined names", left.defined_names != right.defined_names),
         (
             "shared strings",
@@ -852,7 +856,7 @@ impl Workbook {
         }
         let mut reader = Reader::new(payload);
         let checkpoint: RecoveryCheckpoint =
-            serde_json::from_slice(reader.bytes().map_err(invalid)?).map_err(invalid)?;
+            serde_json::from_str(reader.str().map_err(invalid)?).map_err(invalid)?;
         pulse();
         if checkpoint.engine != env!("CARGO_PKG_VERSION") {
             return Err(invalid("Workbook recovery engine version mismatch"));
@@ -868,6 +872,7 @@ impl Workbook {
         let pending_remote_updates = read_sections(&mut reader)?;
         reader.finish().map_err(invalid)?;
         let header = checkpoint.header;
+        let source_markers = source.and_then(source_style_xml_markers);
         let mut authority = WorkbookAuthority::restore_recovery_state(
             authority_bytes,
             header.client_id,
@@ -875,14 +880,26 @@ impl Workbook {
             codec >= ROW_DEFAULTS_CODEC_VERSION,
         )
         .map_err(invalid)?;
+        if let Some(styles) = &source_markers {
+            authority.inherit_xf_xml_markers(styles);
+        }
         pulse();
+        if authority.full_precision_setting().is_none() {
+            let source = source.map(|bytes| ooxml_opc::SourceContainer::new(bytes.to_vec()));
+            let precision =
+                crate::snapshot::source_full_precision(source.as_ref()).map_err(invalid)?;
+            authority.restore_full_precision(precision);
+        }
         let projection = authority.materialize().map_err(authority_error)?;
         pulse();
         if codec == RELEASED_CODEC_VERSION && !crate::authority::released_styles(&projection.styles)
         {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
-        let model = checkpoint.calculation.apply(projection)?;
+        let mut model = checkpoint.calculation.apply(projection)?;
+        if let Some(styles) = &source_markers {
+            model.styles.inherit_xf_xml_markers(styles);
+        }
         pulse();
         authority.set_snapshot_projection_valid(true);
         let states = preserved_states

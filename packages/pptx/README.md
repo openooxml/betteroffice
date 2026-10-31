@@ -57,6 +57,7 @@ All entry points below are exported from `@betteroffice/pptx`.
 | entry point | description |
 | --- | --- |
 | `initWasm(input?)` | Initialize WebAssembly before opening or inspecting a file. Browsers can omit the input; Node hosts can pass WASM bytes. |
+| `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `openPresentation(bytes, options?)` | Open a synchronous `PresentationHandle` for reads, edits, layout, and saving. |
 | `inspectPresentation(bytes, options?)` | Inspect parsed content without opening an editing handle; `includeMedia: false` omits media. |
 | `sizeCanvasForSlide(canvas, frame, dpr, scale?)` | Set canvas backing dimensions and CSS size for a slide. |
@@ -66,8 +67,8 @@ All entry points below are exported from `@betteroffice/pptx`.
 | `exportPptxMarkdown(bytes, options?)` | Export Markdown and source anchors asynchronously. |
 | `renderPptxMarkdown(content, options?)` | Render structured content as Markdown asynchronously. |
 
-`openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an experimental asynchronous
-worker session.
+`openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an asynchronous
+worker session; its API can change in minor releases.
 
 `openPresentation` accepts `fonts`, `fallbackFonts`, `clientId`, and `initialUpdate`. Fallback fonts
 supply glyphs missing from a run's own face. When opening from a collaboration update, retain the

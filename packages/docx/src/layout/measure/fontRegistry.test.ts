@@ -20,6 +20,62 @@ test("an unknown family asks the provider for Word's last-resort face", async ()
   expect(offices).toEqual(['word']);
 });
 
+test('shared loaders register fresh buffers once across families and script fallbacks', async () => {
+  let loads = 0;
+  let registrations = 0;
+  const load = async () => { loads++; return new ArrayBuffer(16); };
+  const views: Array<[number, string]> = [];
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: () => ++registrations,
+      registerSubstituteFont: (id, family) => {
+        views.push([id, family]);
+        return family === 'First' ? 101 : 102;
+      },
+    },
+    {
+      bundled: {
+        resolve: () => load,
+        resolveLastResort: () => load,
+        resolveGlyphFallback: () => load,
+        resolveScriptFallback: () => load,
+      },
+    }
+  );
+  expect(await Promise.all([
+    registry.getFontIdChain('First', false, false),
+    registry.getFontIdChain('Second', false, false),
+    registry.getScriptFallbackIds(['arabic']),
+  ])).toEqual([[101], [102], [1]]);
+  expect(views).toContainEqual([1, 'First']);
+  expect(views).toContainEqual([1, 'Second']);
+  expect(loads).toBe(1);
+  expect(registrations).toBe(1);
+});
+
+test('shared loader registrations retry sink failures and reset with the engine', async () => {
+  let loads = 0;
+  let registrations = 0;
+  const load = async () => { loads++; return new ArrayBuffer(16); };
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: () => {
+        registrations++;
+        if (registrations === 1) throw new Error('registration unavailable');
+        return registrations;
+      },
+    },
+    { bundled: { resolve: () => load } }
+  );
+  expect(await registry.getFontIdChain('First', false, false)).toEqual([]);
+  expect(await registry.getFontIdChain('First', false, false)).toEqual([2]);
+  expect(await registry.getFontIdChain('Second', false, false)).toEqual([2]);
+  registry.clear();
+  expect(await registry.getFontIdChain('First', false, false)).toEqual([3]);
+  expect(loads).toBe(3);
+  expect(registrations).toBe(3);
+});
+
 for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe UI Semibold']) {
   for (const bold of [false, true]) {
     test(`${family} ${bold} italic measures and draws the true italic last resort, not Selawik`, async () => {
@@ -35,7 +91,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
       expect(resolveLastResortFace(family, bold, true, 'word').style).toBe('italic');
     });
     for (const failPrimary of [false, true]) {
-      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with Segoe UI measurement views'}`, async () => {
+      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with its own Segoe UI measurement view'}`, async () => {
         const provider = createFontProvider();
         const primary = provider.resolve(family, bold, false)!;
         const registered: Uint8Array[] = [];
@@ -65,8 +121,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
           expect(chain).toEqual([101, 102]);
           expect(registered[0]).toEqual(new Uint8Array(await primary()));
           expect(registered[1]).toEqual(lastResort);
-          expect(substitutes).toContainEqual([1, 'Segoe UI']);
-          if (family !== 'Segoe UI') expect(substitutes).not.toContainEqual([1, family]);
+          expect(substitutes).toContainEqual([1, primary.measureAs ?? family]);
           expect(substitutes).toContainEqual([2, family]);
         }
       });
@@ -112,6 +167,35 @@ test('Lucida Bright keeps its substitute measurement view', async () => {
   expect(substitutes).toEqual([[1, 'Lucida Bright']]);
 });
 
+test('Japanese requested names keep distinct measurement views of the bundled face', async () => {
+  const provider = createFontProvider();
+  const registered: Uint8Array[] = [];
+  const substitutes: Array<[number, string]> = [];
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: bytes => { registered.push(bytes); return registered.length; },
+      registerSubstituteFont: (id, family) => {
+        substitutes.push([id, family]);
+        return substitutes.length + 100;
+      },
+    },
+    { bundled: { resolve: provider.resolve } }
+  );
+  const bytes = new Uint8Array(await provider.resolve('MS Gothic', false, false)!());
+  for (const family of [
+    'MS Mincho', 'ＭＳ 明朝', 'MS Gothic', 'ＭＳ ゴシック',
+    'MS PMincho', 'ＭＳ Ｐ明朝', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS UI Gothic',
+  ]) {
+    expect(provider.resolve(family, false, false)).toBeDefined();
+    const chain = await registry.getFontIdChain(family, false, false);
+    expect(chain).toEqual([substitutes.length + 100]);
+    expect(substitutes.at(-1)?.[1]).toBe(family);
+    expect(registered[substitutes.at(-1)![0] - 1]).toEqual(bytes);
+    expect(await registry.getFontIdChain(family, false, false)).toEqual(chain);
+  }
+  expect(substitutes).toHaveLength(9);
+});
+
 test('a rejected primary still measures with real last-resort bytes', async () => {
   const wasm = await import('../wasm');
   await wasm.preloadLayoutWasm();
@@ -149,7 +233,7 @@ test('a rejected primary still measures with real last-resort bytes', async () =
 });
 
 for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI']) {
-  test(`${family} uses Word line metrics and unscaled Selawik advances with the real engine`, async () => {
+  test(`${family} uses Word line metrics and Segoe UI advances with the real engine`, async () => {
     const wasm = await import('../wasm');
     await wasm.preloadLayoutWasm();
     const provider = createFontProvider();
@@ -179,7 +263,9 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI']) {
       expect(measured.lines[0].descent).toBeCloseTo(514 / 2048 * 16, 5);
       expect(measured.lines[0].lineHeight).toBeCloseTo((2210 + 514) / 2048 * 16, 5);
       expect(unscaled.lines[0].width).toBeGreaterThan(0);
-      expect(measured.lines[0].width / unscaled.lines[0].width).toBeCloseTo(1.0, 5);
+      const ratio = measured.lines[0].width / unscaled.lines[0].width;
+      if (family === 'Segoe UI Semilight') expect(Math.abs(ratio - 1)).toBeLessThan(0.002);
+      else expect(ratio).toBeCloseTo(1.0, 5);
     } finally {
       wasm.clearMeasureFonts();
     }

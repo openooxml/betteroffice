@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::drawingml::{ShapeOutline, Transform2D, parse_outline, rot_to_degrees};
+use crate::fmath;
 use crate::media::{MediaMap, resolve_image_data};
 use crate::relationships::{RelationshipMap, resolve_target};
 use crate::xml::{XmlElement, parse_javascript_integer_prefix};
@@ -420,6 +421,143 @@ fn apply_common_image_fields(
     }
 }
 
+/// Where a `w:drawing` sits in its paragraph.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DrawingPlacement {
+    Inline,
+    Anchor,
+}
+
+/// What a `w:drawing` paints, from its `a:graphicData` child.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DrawingType {
+    Picture,
+    Shape,
+    TextBox,
+    Group,
+    Chart,
+    Diagram,
+    Other,
+}
+
+/// The drawing's own `wp:docPr` plus its placement and kind.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawingProperties {
+    pub doc_pr_id: Option<String>,
+    pub name: Option<String>,
+    pub title: Option<String>,
+    pub descr: Option<String>,
+    pub hidden: bool,
+    pub decorative: bool,
+    pub placement: DrawingPlacement,
+    #[serde(rename = "type")]
+    pub drawing_type: DrawingType,
+}
+
+fn descendant_by_local<'a>(
+    element: &'a XmlElement,
+    local: &str,
+    depth: usize,
+) -> Option<&'a XmlElement> {
+    if depth > 64 {
+        return None;
+    }
+    if element.local_name() == local {
+        return Some(element);
+    }
+    element
+        .child_elements()
+        .find_map(|child| descendant_by_local(child, local, depth + 1))
+}
+
+fn decorative_extension(element: &XmlElement) -> bool {
+    fn visit(element: &XmlElement, depth: usize) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        if element.local_name() == "decorative"
+            && (element.name.starts_with("adec:") || element.name.starts_with("a16:"))
+        {
+            return element.parse_boolean_attribute(None, "val").unwrap_or(true);
+        }
+        element
+            .child_elements()
+            .any(|child| visit(child, depth + 1))
+    }
+    visit(element, 0)
+}
+
+/// The properties of one `w:drawing`, from its own `wp:docPr`.
+pub fn parse_drawing_properties(drawing: &XmlElement) -> Option<DrawingProperties> {
+    if drawing.local_name() != "drawing" {
+        return None;
+    }
+    let container = drawing
+        .child_elements()
+        .find(|child| matches!(child.name.as_str(), "wp:inline" | "wp:anchor"))?;
+    let doc_pr = container.child_by_full_name("wp:docPr")?;
+    let placement = if container.name == "wp:anchor" {
+        DrawingPlacement::Anchor
+    } else {
+        DrawingPlacement::Inline
+    };
+    let graphic_data = container
+        .child_by_full_name("a:graphic")
+        .and_then(|graphic| graphic.child_by_full_name("a:graphicData"));
+    let drawing_type = match graphic_data {
+        Some(data) => {
+            let uri = data.attribute(None, "uri").unwrap_or_default();
+            let child = data.child_elements().next();
+            match child {
+                Some(child) if child.name == "pic:pic" => DrawingType::Picture,
+                Some(child) if child.name == "wps:wsp" => {
+                    let text_box = descendant_by_local(child, "txbx", 0).is_some()
+                        || descendant_by_local(child, "cNvSpPr", 0).is_some_and(|locks| {
+                            locks.parse_boolean_attribute(None, "txBox") == Some(true)
+                        });
+                    if text_box {
+                        DrawingType::TextBox
+                    } else {
+                        DrawingType::Shape
+                    }
+                }
+                Some(child) if child.name == "wpg:wgp" => DrawingType::Group,
+                Some(child) if child.local_name() == "chart" => DrawingType::Chart,
+                Some(child)
+                    if uri.contains("diagram")
+                        || child.name.starts_with("dgm:")
+                        || child.local_name() == "relIds" && uri.contains("diagram") =>
+                {
+                    DrawingType::Diagram
+                }
+                _ if uri.contains("diagram") => DrawingType::Diagram,
+                _ => DrawingType::Other,
+            }
+        }
+        None => DrawingType::Other,
+    };
+    let non_empty = |name: &str| {
+        doc_pr
+            .attribute(None, name)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Some(DrawingProperties {
+        doc_pr_id: non_empty("id"),
+        name: non_empty("name"),
+        title: non_empty("title"),
+        descr: non_empty("descr"),
+        hidden: doc_pr.parse_boolean_attribute(None, "hidden") == Some(true),
+        decorative: doc_pr.parse_boolean_attribute(None, "decorative") == Some(true)
+            || decorative_extension(doc_pr),
+        placement,
+        drawing_type,
+    })
+}
+
 #[derive(Default)]
 struct DocProperties {
     id: Option<String>,
@@ -629,8 +767,10 @@ fn rotation_bounds(
 ) -> Option<ImageRotationBounds> {
     let rotation = transform?.rotation.filter(|value| *value != 0.0)?;
     let radians = rotation * std::f64::consts::PI / 180.0;
-    let width = (size.width * radians.cos()).abs() + (size.height * radians.sin()).abs();
-    let height = (size.width * radians.sin()).abs() + (size.height * radians.cos()).abs();
+    let width =
+        (size.width * fmath::cos(radians)).abs() + (size.height * fmath::sin(radians)).abs();
+    let height =
+        (size.width * fmath::sin(radians)).abs() + (size.height * fmath::cos(radians)).abs();
     Some(ImageRotationBounds {
         width: Some(width),
         height: Some(height),
@@ -1020,6 +1160,103 @@ mod tests {
             Some("https://example.test")
         );
         assert_eq!(sanitize_href("data:text/html,x"), None);
+    }
+
+    #[test]
+    fn drawing_properties_classify_type_and_placement() {
+        let cases: &[(&str, &str, DrawingType, DrawingPlacement)] = &[
+            (
+                r#"<wp:inline><wp:docPr id="7" name="N" title="T" descr="D"/><a:graphic><a:graphicData uri="u/pic"><pic:pic/></a:graphicData></a:graphic></wp:inline>"#,
+                "inline",
+                DrawingType::Picture,
+                DrawingPlacement::Inline,
+            ),
+            (
+                r#"<wp:anchor><wp:docPr id="8" name=""/><a:graphic><a:graphicData uri="u/shape"><wps:wsp><wps:spPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor>"#,
+                "anchor",
+                DrawingType::Shape,
+                DrawingPlacement::Anchor,
+            ),
+            (
+                r#"<wp:anchor><wp:docPr id="9"/><a:graphic><a:graphicData uri="u/shape"><wps:wsp><wps:txbx><w:txbxContent/></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor>"#,
+                "anchor",
+                DrawingType::TextBox,
+                DrawingPlacement::Anchor,
+            ),
+            (
+                r#"<wp:inline><wp:docPr id="10"/><a:graphic><a:graphicData uri="u/group"><wpg:wgp/></a:graphicData></a:graphic></wp:inline>"#,
+                "inline",
+                DrawingType::Group,
+                DrawingPlacement::Inline,
+            ),
+            (
+                r#"<wp:inline><wp:docPr id="11"/><a:graphic><a:graphicData uri="u/chart"><c:chart/></a:graphicData></a:graphic></wp:inline>"#,
+                "inline",
+                DrawingType::Chart,
+                DrawingPlacement::Inline,
+            ),
+            (
+                r#"<wp:inline><wp:docPr id="12"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></wp:inline>"#,
+                "inline",
+                DrawingType::Diagram,
+                DrawingPlacement::Inline,
+            ),
+            (
+                r#"<wp:inline><wp:docPr id="13"/><a:graphic><a:graphicData uri="u/other"><x:thing/></a:graphicData></a:graphic></wp:inline>"#,
+                "inline",
+                DrawingType::Other,
+                DrawingPlacement::Inline,
+            ),
+        ];
+        for (container, _, expected_type, expected_placement) in cases {
+            let drawing = root(&format!("<w:drawing>{container}</w:drawing>"));
+            let properties = parse_drawing_properties(&drawing).unwrap();
+            assert_eq!(properties.drawing_type, *expected_type);
+            assert_eq!(properties.placement, *expected_placement);
+        }
+        let drawing = root(
+            r#"<w:drawing><wp:inline><wp:docPr id="7" name="N" title="T" descr="D"/><a:graphic><a:graphicData><pic:pic/></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        let properties = parse_drawing_properties(&drawing).unwrap();
+        assert_eq!(properties.doc_pr_id.as_deref(), Some("7"));
+        assert_eq!(properties.name.as_deref(), Some("N"));
+        assert_eq!(properties.title.as_deref(), Some("T"));
+        assert_eq!(properties.descr.as_deref(), Some("D"));
+        assert!(!properties.hidden);
+        assert!(!properties.decorative);
+        let drawing = root(
+            r#"<w:drawing><wp:anchor><wp:docPr id="8" name=""/><a:graphic><a:graphicData><wps:wsp/></a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        );
+        assert_eq!(parse_drawing_properties(&drawing).unwrap().name, None);
+        let pict = root(r#"<w:pict><v:shape/></w:pict>"#);
+        assert_eq!(parse_drawing_properties(&pict), None);
+    }
+
+    #[test]
+    fn drawing_properties_read_hidden_and_decorative() {
+        for (val, expected) in [("1", true), ("0", false)] {
+            let drawing = root(&format!(
+                r#"<w:drawing><wp:inline><wp:docPr id="1" hidden="1"><a:extLst><a:ext uri="{{C183D7F6-B498-43B3-948B-1728B52AA6E4}}"><adec:decorative val="{val}"/></a:ext></a:extLst></wp:docPr><a:graphic><a:graphicData><pic:pic/></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+            ));
+            let properties = parse_drawing_properties(&drawing).unwrap();
+            assert!(properties.hidden);
+            assert_eq!(properties.decorative, expected, "val={val}");
+        }
+        let drawing = root(
+            r#"<w:drawing><wp:inline><wp:docPr id="1" decorative="true"/><a:graphic><a:graphicData><pic:pic/></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        assert!(parse_drawing_properties(&drawing).unwrap().decorative);
+        let json = serde_json::to_value(
+            parse_drawing_properties(&root(
+                r#"<w:drawing><wp:inline><wp:docPr id="42"/><a:graphic><a:graphicData><pic:pic/></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["docPrId"], "42");
+        assert_eq!(json["placement"], "inline");
+        assert_eq!(json["type"], "picture");
+        assert_eq!(json["name"], serde_json::Value::Null);
     }
 
     #[test]

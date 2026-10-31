@@ -15,7 +15,7 @@ import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import { holdPointerExtension } from './inputAdmission';
-import { geometryMatchesDocument, type PeerlessFrameGeometry } from './viewStore';
+import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessProvisionalCaret, type PeerlessViewStore } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
@@ -153,7 +153,38 @@ function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject
     const blink = setInterval(() => setLit((shown) => !shown), DEFAULT_BLINK_INTERVAL);
     return () => clearInterval(blink);
   }, [focused, caret.x, caret.y]);
-  return <div aria-hidden style={{ position: 'absolute', left: caret.x, top: caret.y, width: Math.max(1, caret.width), height: caret.height, background: 'currentColor', opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
+  return <div aria-hidden style={{ position: 'absolute', left: 0, top: 0, transform: `translate(${caret.x}px, ${caret.y}px)`, willChange: 'transform', width: Math.max(1, caret.width), height: caret.height, background: 'currentColor', opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
+}
+
+function useShownProvisionalCaret(viewStore: PeerlessViewStore): PeerlessProvisionalCaret | null {
+  const subscribe = useCallback((listener: () => void) => viewStore.subscribeProvisionalCaret?.(listener) ?? (() => {}), [viewStore]);
+  const get = useCallback(() => viewStore.getProvisionalCaret?.() ?? null, [viewStore]);
+  return useSyncExternalStore(subscribe, get, get);
+}
+
+function PeerlessSelectionLayer({ viewStore, rects, visible }: {
+  viewStore: PeerlessViewStore;
+  rects: readonly DocxEchoRect[] | undefined;
+  visible: boolean;
+}): ReactElement | null {
+  const provisional = useShownProvisionalCaret(viewStore);
+  if (!visible || provisional || !rects) return null;
+  return <>{rects.map((rect, index) => <div key={index} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: 'rgba(59, 130, 246, 0.25)', pointerEvents: 'none' }} />)}</>;
+}
+
+function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActive, multiCell, input }: {
+  viewStore: PeerlessViewStore;
+  geometryCaret: DocxEchoRect | null;
+  matches: boolean;
+  compositionActive: boolean;
+  multiCell: boolean;
+  input: RefObject<HTMLTextAreaElement | null>;
+}): ReactElement | null {
+  const provisional = useShownProvisionalCaret(viewStore);
+  if (compositionActive) return null;
+  const caret = provisional?.rect ?? (matches ? geometryCaret : null);
+  if (!caret || (!provisional && multiCell)) return null;
+  return <PeerlessCaret caret={caret} input={input} />;
 }
 
 function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, queryEngineReady }: {
@@ -311,6 +342,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
   const [pictureDragging, setPictureDragging] = useState(false);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [selectingPicture, setSelectingPicture] = useState(0);
   const [pictureDropCaret, setPictureDropCaret] = useState<DocxEchoRect | null>(null);
   const canEditPictures = pictures?.canMove() ?? false;
   // Handles follow the worker selection, so a picture selected by click or keyboard shows them and any other selection hides them.
@@ -345,7 +377,12 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     // refuses the picture selection below as stale. The worker then selects the body picture its handle names.
     if (!onPoint(event, false)) return true;
     if (current.objects?.objects.find(object => object.handle === hit.handle)?.story === 'body') {
-      binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
+      const selecting = binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
+      if (selecting.status === 'submitted') {
+        const settle = () => setSelectingPicture(count => count - 1);
+        setSelectingPicture(count => count + 1);
+        void selecting.ticket.presented.then(settle, settle);
+      }
     }
     const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y) ??
       (pictures.canMoveInline() ? inlinePictureAt(current, point.page.page.pageIndex, point.x, point.y) : null);
@@ -391,7 +428,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const previewingPicture = pictureDragging || picturePreview !== null || pictureDropCaret !== null;
   const selectedHandle = selected?.handle ?? null;
   useEffect(() => {
-    if (!selectedHandle && !previewingPicture) return;
+    if (!selectedHandle && !previewingPicture && !selectingPicture) return;
     const cancel = (event: KeyboardEvent) => {
       const active = picture.current;
       // With no gesture running, only Escape typed in the editor leaves the picture; menus and dialogs keep theirs.
@@ -410,7 +447,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     };
     document.addEventListener('keydown', cancel, true);
     return () => document.removeEventListener('keydown', cancel, true);
-  }, [selectedHandle, previewingPicture]);
+  }, [selectedHandle, previewingPicture, selectingPicture]);
   const startResize = (event: PointerEvent<HTMLDivElement>, handle: PictureResizeHandle) => {
     event.stopPropagation();
     event.preventDefault();
@@ -471,7 +508,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalTextHitAtPoint(page, x, y, pageQueries)?.caret ?? null : null;
     const result = binding.commands.submit(intent, { source: 'selection', fence: true });
     if (provisional && result.status === 'submitted') {
-      const caret = { get throughSeq() { return result.ticket.seq; }, pageIndex: page.page.pageIndex, rect: provisional };
+      const caret = { source: 'click' as const, get throughSeq() { return result.ticket.seq; }, pageIndex: page.page.pageIndex, rect: provisional };
       binding.viewStore.setProvisionalCaret(caret);
       void result.ticket.presented.then(() => {
         if (binding.viewStore.getSnapshot().provisionalCaret === caret) binding.viewStore.setProvisionalCaret(null);
@@ -535,9 +572,6 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       dragEnded.current?.(false);
     }
   }, [binding]);
-  const canDisplaySelection = composition?.phase !== 'active' && !snapshot.provisionalCaret && geometryMatchesDocument(snapshot);
-  const caret = composition?.phase === 'active' ? null : snapshot.provisionalCaret?.rect ?? (canDisplaySelection ? geometry?.caret : null);
-  const hideCaret = !snapshot.provisionalCaret && snapshot.editState?.tableContext?.hasMultiCellSelection === true;
   const releasePointer = (event: PointerEvent<HTMLDivElement>) => {
     if (resize.current?.pointerId === event.pointerId) endResize();
     if (touchPointer.current?.pointerId === event.pointerId) cancelTouchPress();
@@ -651,8 +685,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           textMirror={pageMirror === 'text'} />
         {overlay}
         {highlights?.map((rect, index) => <div key={`find-${index}`} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: rect.current ? 'rgba(255, 150, 0, 0.4)' : 'rgba(255, 220, 0, 0.3)', pointerEvents: 'none' }} />)}
-        {canDisplaySelection && geometry?.selectionRects.map((rect, index) => <div key={index} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: 'rgba(59, 130, 246, 0.25)', pointerEvents: 'none' }} />)}
-        {caret && !hideCaret && <PeerlessCaret caret={caret} input={input} />}
+        <PeerlessSelectionLayer viewStore={binding.viewStore} rects={geometry?.selectionRects}
+          visible={composition?.phase !== 'active' && geometryMatchesDocument(snapshot)} />
+        <PeerlessCaretLayer viewStore={binding.viewStore} geometryCaret={geometry?.caret ?? null}
+          matches={geometryMatchesDocument(snapshot)} compositionActive={composition?.phase === 'active'}
+          multiCell={snapshot.editState?.tableContext?.hasMultiCellSelection === true} input={input} />
         {picturePreview && <div className="paged-editor__picture-drag-preview" aria-hidden style={{ position: 'absolute', left: picturePreview.x, top: picturePreview.y,
           width: picturePreview.width, height: picturePreview.height, outline: '1px dashed rgb(59, 130, 246)', background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', cursor: 'move' }} />}
         {pictureDropCaret && <div className="paged-editor__picture-drop-caret" aria-hidden style={{ position: 'absolute', left: pictureDropCaret.x, top: pictureDropCaret.y,

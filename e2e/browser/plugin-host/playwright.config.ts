@@ -1,14 +1,16 @@
 import { defineConfig } from 'playwright/test';
 import { resolve } from 'node:path';
 
+import { shardTestMatch } from '../shards';
+
 const root = resolve(import.meta.dirname, '../../..');
 const output = process.env.BETTEROFFICE_BROWSER_OUTPUT ?? resolve(root, '.source/e2e/browser');
 
 export default defineConfig({
   testDir: import.meta.dirname,
-  testMatch: '*.browser.ts',
+  testMatch: shardTestMatch() ?? '*.browser.ts',
   outputDir: resolve(output, 'plugin-host-results'),
-  reporter: [['list']],
+  reporter: [['list'], ['json', { outputFile: resolve(output, 'plugin-host-report.json') }]],
   fullyParallel: false,
   workers: 1,
   retries: 0,

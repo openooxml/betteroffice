@@ -1,13 +1,16 @@
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { requireWebWorker } from '../../../../shared/office-session/webWorker';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { requestWasmCompile } from '../../../../shared/office-session/client';
-import { wasmAssetUrl } from '../wasm/asset';
+import { shipsWasmAsset, wasmAssetUrl } from '../wasm/asset';
+import { takePresentationFontWorker } from './fontWorker';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
-import { CommandOutcomeUnknown } from './commandProtocol';
+import { CommandOutcomeUnknown, PptxResourceLimitError } from './commandProtocol';
+import type { DefaultFontInstallation } from '../../../../shared/pptxDefaultFonts';
 import type {
   PresentationCommandClient, PresentationCommandFailure, PresentationCommandOpenResult,
 } from './commandProtocol';
@@ -22,6 +25,8 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
   readOnly?: boolean;
   observeChanges?: boolean;
   activeSlideIndex?: number;
+  /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
+  defaultFonts?: boolean;
   collaboration?: { clientId: number; initialUpdate?: Uint8Array };
   signal?: AbortSignal;
   onError?(error: PptxWorkerEditorFailedError): void;
@@ -50,10 +55,12 @@ export function createPptxWorkerSession(
   bytes: Uint8Array | ArrayBuffer, options: PptxWorkerSessionOptions = {},
 ): PptxWorkerSession {
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
-  const cacheUrl = !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
+  const cacheUrl = shipsWasmAsset && !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
+  if (!options.worker) requireWebWorker('openPresentation');
+  const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
   const transport = createWorkerTransport(options.worker ? options.worker() :
-    new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
+    preparedWorker ?? new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
   if (cacheUrl && !wasm) requestWasmCompile(transport);
   const input = {
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
@@ -61,6 +68,7 @@ export function createPptxWorkerSession(
     fonts: options.fonts, fallbackFonts: options.fallbackFonts,
     initialUpdate: options.collaboration?.initialUpdate ?? options.initialUpdate, wasm,
     observeChanges: options.observeChanges, readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
+    defaultFonts: options.defaultFonts,
   };
   const listeners = new Set<(error: PresentationCommandFailure) => void>();
   const connectionErrors = new Set<(error: unknown) => void>();
@@ -76,7 +84,9 @@ export function createPptxWorkerSession(
 
   function fail(cause: unknown): void {
     if (disposed || failure) return;
-    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ? cause
+    failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ||
+      cause instanceof PptxResourceLimitError ? cause
+      : cause instanceof Error && cause.name === 'PptxResourceLimitError' ? new PptxResourceLimitError(cause.message)
       : new SessionFailure(cause instanceof Error && cause.name === 'RuntimeError' ? 'trap' : 'crash',
         cause instanceof Error ? cause.message : String(cause));
     if (client) failedState = { ...client.state, editState: { ...client.state.editState, readOnly: true,
@@ -90,22 +100,33 @@ export function createPptxWorkerSession(
     transport.close();
   }
 
+  const inflight = new Set<{ promise?: Promise<unknown> }>();
+
   function current(): void {
     if (disposed) throw new PptxWorkerEditorDisposedError();
     if (failure) throw failure;
   }
 
-  async function perform<T>(operation: () => Promise<T>): Promise<T> {
-    current();
-    try {
-      const value = await operation();
-      current();
-      return value;
-    } catch (error) {
-      if (error instanceof SessionFailure || error instanceof Error &&
-        (error.name === 'CommandOutcomeUnknown' || error.name === 'RuntimeError')) fail(error);
-      throw failure ?? error;
-    }
+  function perform<T>(operation: () => Promise<T>): Promise<T> {
+    const entry: { promise?: Promise<unknown> } = {};
+    inflight.add(entry);
+    const pending = (async () => {
+      try {
+        current();
+        const value = await operation();
+        current();
+        return value;
+      } catch (error) {
+        if (error instanceof SessionFailure || error instanceof Error &&
+          (error.name === 'CommandOutcomeUnknown' || error.name === 'RuntimeError')) fail(error);
+        throw failure ?? error;
+      } finally {
+        inflight.delete(entry);
+      }
+    })();
+    entry.promise = pending;
+    if (disposed) void pending.catch(() => {});
+    return pending;
   }
 
   const offError = transport.onError(fail);
@@ -126,10 +147,11 @@ export function createPptxWorkerSession(
       return () => { connectionErrors.delete(listener); off(); };
     },
     close() {
-      if (!disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
+      if (client && !disposed && !failure) fail(new SessionFailure('crash', 'Presentation command connection closed'));
       transport.close();
     },
   };
+  Object.assign(input, { pptxDefaultFontInstaller: (options as PptxWorkerSessionOptions & DefaultFontInstallation).pptxDefaultFontInstaller });
   const opening = createSharedPresentationCommandClient(bytes, input, monitored).then((opened) => {
     client = opened;
     offClientFailure = opened.subscribeFailure(fail);
@@ -142,7 +164,8 @@ export function createPptxWorkerSession(
       read: (request) => perform(() => opened.read(request)),
       save: () => perform(() => opened.save()),
       access: (method, ...args) => perform(() => opened.access!(method, ...args)),
-      checkpoint: () => perform(() => opened.checkpoint!()),
+      takeRecoveryUpdate: () => opened.takeRecoveryUpdate?.(),
+      checkpoint: (options) => perform(() => opened.checkpoint!(options)),
       preparePicture: (bytes) => perform(() => opened.preparePicture!(bytes)),
       thumbnail: (slideId, knownRevision) => perform(() => opened.thumbnail(slideId, knownRevision)),
       subscribe: (listener) => opened.subscribe(listener),
@@ -183,6 +206,7 @@ export function createPptxWorkerSession(
       offError();
       offClientFailure?.();
       listeners.clear();
+      for (const entry of inflight) void entry.promise?.catch(() => {});
       for (const listener of [...connectionErrors]) listener(new SessionFailure('disposed', 'Session was disposed'));
       transport.close();
       disposal = client ? client.dispose() : opening.then(

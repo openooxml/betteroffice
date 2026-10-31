@@ -130,9 +130,23 @@ fn paragraph_patch_checks_seed_marker_positions_and_identities() {
 }
 
 #[test]
+fn paragraph_patch_seed_direct_color_auto_agrees_with_an_inherited_seeded_color() {
+    let marks = json!({"textColor": {"rgb": "FF0000"}});
+    let source = r#"<w:p><w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t>a</w:t></w:r></w:p>"#;
+    let mut plan = patch(
+        vec![text("a", marks.clone())],
+        vec![text("b", marks.clone())],
+    );
+    replace(&mut plan, 0, 1, "b", marks);
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        r#"<w:p><w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t>b</w:t></w:r></w:p>"#
+    );
+}
+
+#[test]
 fn paragraph_patch_seed_color_disagreements_request_ambiguous_replace() {
     for (color, marks) in [
-        (r#"w:val="auto""#, json!({"textColor": {"rgb": "FF0000"}})),
         (
             r#"w:val="FF0000""#,
             json!({"textColor": {"rgb": "FF0000", "themeColor": "accent1"}}),
@@ -1041,6 +1055,99 @@ fn paragraph_patch_preserves_proof_errors_and_smart_tags() {
 }
 
 #[test]
+fn paragraph_patch_keeps_complex_fields_beside_a_hyperlink_label_in_an_sdt() {
+    let field = concat!(
+        "<w:r w:rsidR='00112233'><w:fldChar w:fldCharType='begin' w:dirty='1'/></w:r>",
+        "<w:r><w:instrText xml:space='preserve'> PAGEREF _Toc1 \\h </w:instrText></w:r>",
+        "<w:r><w:fldChar w:fldCharType='separate'/></w:r>",
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>2</w:t></w:r>",
+        "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+    );
+    let source = format!(
+        "<w:p><w:hyperlink w:anchor='_Toc1' w:history='1'><w:r><w:t>Background</w:t></w:r><w:r><w:tab/></w:r>{field}</w:hyperlink></w:p>"
+    );
+    let story = format!(
+        "<w:document xmlns:w='{}'><w:body><w:sdt><w:sdtContent>{source}</w:sdtContent></w:sdt></w:body></w:document>",
+        super::lower::WORD
+    );
+    let context = PatchContext::at("word/document.xml", &story, story.find("<w:p>").unwrap());
+    let marks = json!({"hyperlink": {"href": "#_Toc1", "history": true}});
+    let mut plan = patch(
+        vec![text("Background\t2", marks.clone())],
+        vec![text("Context\t2", marks.clone())],
+    );
+    replace(&mut plan, 0, 10, "Context", marks.clone());
+    let written = patch_paragraph_v1(&source, &plan, &context).unwrap();
+    assert_eq!(written, source.replace("Background", "Context"));
+    assert!(written.contains(field));
+
+    let mut touched = patch(
+        vec![text("Background\t2", marks.clone())],
+        vec![text("Background\t3", marks.clone())],
+    );
+    replace(&mut touched, 11, 12, "3", marks.clone());
+    assert_eq!(
+        patch_paragraph_v1(&source, &touched, &context)
+            .unwrap_err()
+            .code,
+        PatchErrorCode::UnsupportedStructure
+    );
+    touched.text_edits.clear();
+    touched.run_edits.push(RunEditV1 {
+        from: 11,
+        to: 12,
+        deltas: vec![delta("bold", None, Some(json!(true)))],
+        target: attrs(json!({"hyperlink": marks["hyperlink"], "bold": true})),
+        inherit: Attrs::new(),
+    });
+    assert_eq!(
+        patch_paragraph_v1(&source, &touched, &context)
+            .unwrap_err()
+            .code,
+        PatchErrorCode::UnsupportedStructure
+    );
+}
+
+#[test]
+fn paragraph_patch_keeps_an_alternate_content_atom_and_its_nested_markup() {
+    let drawing = concat!(
+        "<w:r><w:rPr><w:noProof/></w:rPr>",
+        "<mc:AlternateContent xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' xmlns:v='urn:schemas-microsoft-com:vml'>",
+        "<mc:Choice Requires='v'><w:pict><v:shape id='choice'/></w:pict></mc:Choice>",
+        "<mc:Fallback><w:pict><v:shape id='fallback'><v:textbox><w:txbxContent>",
+        "<w:p><w:bookmarkStart w:id='4' w:name='box'/><w:r><w:t>Box</w:t></w:r><w:bookmarkEnd w:id='4'/></w:p>",
+        "</w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>"
+    );
+    let atom = UnitV1::Atom {
+        atom_kind: "shape".to_owned(),
+        payload: attrs(json!({"id": "choice"})),
+        attrs: Attrs::new(),
+    };
+    let source = format!("<w:p><w:r><w:t>Caption</w:t></w:r>{drawing}</w:p>");
+    let mut plan = patch(
+        vec![text("Caption", json!({})), atom.clone()],
+        vec![text("Title", json!({})), atom],
+    );
+    replace(&mut plan, 0, 7, "Title", json!({}));
+    let written = write(&source, &plan).unwrap();
+    assert_eq!(written, source.replace("Caption", "Title"));
+    assert!(written.contains(drawing));
+
+    plan.text_edits.clear();
+    plan.run_edits.push(RunEditV1 {
+        from: 7,
+        to: 8,
+        deltas: vec![delta("bold", None, Some(json!(true)))],
+        target: attrs(json!({"bold": true})),
+        inherit: Attrs::new(),
+    });
+    assert_eq!(
+        write(&source, &plan).unwrap_err().code,
+        PatchErrorCode::UnsupportedStructure
+    );
+}
+
+#[test]
 fn paragraph_patch_writer_advertises_version_one() {
     assert_eq!(crate::paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION, 1);
 }
@@ -1177,21 +1284,16 @@ fn paragraph_patch_text_donor_changed_inheritance_requests_restyle_replace() {
 }
 
 #[test]
-fn paragraph_patch_style_and_numbering_deltas_request_restyle_replace() {
-    for (key, before, after) in [
-        ("pStyle", json!("A"), json!("B")),
-        (
-            "numPr",
-            json!({"numId": 1, "ilvl": 0}),
-            json!({"numId": 2, "ilvl": 0}),
-        ),
-    ] {
-        let units = vec![text("x", json!({}))];
-        let mut plan = patch(units.clone(), units);
-        plan.seed.properties.insert(key.to_owned(), before.clone());
-        plan.para_deltas = vec![delta(key, Some(before), Some(after))];
-        assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
-    }
+fn paragraph_patch_numbering_and_run_style_deltas_request_restyle_replace() {
+    let units = vec![text("x", json!({}))];
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = attrs(json!({"numPr": {"numId": 1, "ilvl": 0}}));
+    plan.para_deltas = vec![delta(
+        "numPr",
+        Some(json!({"numId": 1, "ilvl": 0})),
+        Some(json!({"numId": 2, "ilvl": 0})),
+    )];
+    assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
     let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
     plan.run_edits.push(RunEditV1 {
         from: 0,
@@ -1201,6 +1303,411 @@ fn paragraph_patch_style_and_numbering_deltas_request_restyle_replace() {
         inherit: Attrs::new(),
     });
     assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
+}
+
+#[test]
+fn paragraph_patch_plain_restyle_inserts_the_style_element() {
+    for properties in ["", "<w:pPr/>"] {
+        let source = format!("<w:p>{properties}<w:r><w:t>x</w:t></w:r></w:p>");
+        let units = vec![text("x", json!({}))];
+        let mut plan = patch(units.clone(), units);
+        plan.para_deltas = vec![delta("pStyle", None, Some(json!("B")))];
+        plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"pStyle": "B"})));
+        assert_eq!(
+            write(&source, &plan).unwrap(),
+            "<w:p><w:pPr><w:pStyle w:val=\"B\"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"
+        );
+    }
+}
+
+#[test]
+fn paragraph_patch_plain_restyle_with_unchanged_inheritance_changes_only_style() {
+    let source = "<w:p><w:pPr><w:pStyle w:val='A'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>";
+    let units = vec![text("x", json!({}))];
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = attrs(json!({"pStyle": "A"}));
+    plan.para_deltas = vec![delta("pStyle", Some(json!("A")), Some(json!("B")))];
+    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"pStyle": "B"})));
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("w:val='A'", "w:val='B'")
+    );
+}
+
+#[test]
+fn paragraph_patch_numbered_restyle_changes_only_the_style_element() {
+    let source = concat!(
+        "<w:p w:rsidR='12345678'><w:pPr><w:pStyle w:val='ListParagraph'/>",
+        "<w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr>",
+        "<w:spacing w:after='160'/></w:pPr>",
+        "<w:r w:rsidR='87654321'><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    let units = vec![text("x", json!({"bold": true}))];
+    let before = attrs(json!({
+        "pStyle": "ListParagraph", "numPr": {"numId": 43, "ilvl": 0}, "spaceAfter": 160
+    }));
+    let after = attrs(json!({
+        "pStyle": "Heading1", "numPr": {"numId": 43, "ilvl": 0}, "outlineLevel": 0,
+        "spaceAfter": 160
+    }));
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = before.clone();
+    seed_inheritance(
+        &mut plan,
+        json!({"spaceAfter": 160}),
+        json!([{}]),
+        json!({}),
+    );
+    plan.para_inherit = attrs(json!({"outlineLevel": 0, "spaceAfter": 160}));
+    plan.mark_inherit = attrs(json!({"bold": true}));
+    plan.para_deltas = vec![
+        delta(
+            "pStyle",
+            Some(json!("ListParagraph")),
+            Some(json!("Heading1")),
+        ),
+        delta("outlineLevel", None, Some(json!(0))),
+    ];
+    plan.result_sha256 = result_sha256(&plan.seed.units.clone(), &after);
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace(
+            "<w:pStyle w:val='ListParagraph'/>",
+            "<w:pStyle w:val='Heading1'/>"
+        )
+    );
+}
+
+#[test]
+fn paragraph_patch_numbered_restyle_with_unchanged_inheritance_changes_only_style() {
+    let source = concat!(
+        "<w:p w:rsidR='12345678'><w:pPr><w:pStyle w:val='A'/>",
+        "<w:numPr w:keep='source'><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr>",
+        "<w:spacing w:after='160'/></w:pPr>",
+        "<w:r w:rsidR='87654321'><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    for inherited in [json!({}), json!({"bold": true, "fontSize": {"size": 24}})] {
+        let mut marks = inherited.clone();
+        marks["bold"] = json!(true);
+        let units = vec![text("x", marks)];
+        let mut plan = patch(units.clone(), units);
+        plan.seed.properties = attrs(json!({
+            "pStyle": "A", "numPr": {"numId": 43, "ilvl": 0}, "spaceAfter": 160
+        }));
+        seed_inheritance(
+            &mut plan,
+            json!({"spaceAfter": 160}),
+            json!([inherited.clone()]),
+            inherited.clone(),
+        );
+        plan.para_inherit = plan.seed.inherit.paragraph.clone();
+        plan.mark_inherit = plan.seed.inherit.paragraph_mark.clone();
+        plan.para_deltas = vec![delta("pStyle", Some(json!("A")), Some(json!("B")))];
+        let mut properties = plan.seed.properties.clone();
+        properties.insert("pStyle".to_owned(), json!("B"));
+        plan.result_sha256 = result_sha256(&plan.seed.units, &properties);
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            source.replace("<w:pStyle w:val='A'/>", "<w:pStyle w:val='B'/>")
+        );
+        let inherited_numbering = source.replace(
+            "<w:numPr w:keep='source'><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr>",
+            "",
+        );
+        plan.seed
+            .inherit
+            .paragraph
+            .insert("numPr".to_owned(), json!({"numId": 43, "ilvl": 0}));
+        plan.para_inherit = plan.seed.inherit.paragraph.clone();
+        assert_restyle_failure(&inherited_numbering, &plan);
+    }
+}
+
+#[test]
+fn paragraph_patch_symbol_font_changes_even_when_run_properties_match() {
+    let source = concat!(
+        "<w:p><w:r><w:rPr><w:rFonts w:ascii='Arial' w:hAnsi='Arial' w:eastAsia='Arial' w:cs='Arial'/></w:rPr>",
+        "<w:sym w:font='Wingdings' w:char='0041'/></w:r></w:p>",
+    );
+    let fonts = |name| json!({"ascii": name, "hAnsi": name, "eastAsia": name, "cs": name});
+    let old = fonts("Wingdings");
+    let new = fonts("Arial");
+    let target = json!({"fontFamily": new});
+    let mut plan = patch(
+        vec![text("A", json!({"fontFamily": old}))],
+        vec![text("A", target.clone())],
+    );
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: 1,
+        deltas: vec![delta("fontFamily", Some(old), Some(new))],
+        target: attrs(target),
+        inherit: Attrs::new(),
+    });
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("w:font='Wingdings'", "w:font='Arial'")
+    );
+}
+
+fn numbered_run_restyle(
+    before: Value,
+    after: Value,
+    previous: Value,
+    next: Value,
+) -> ParagraphPatchV1 {
+    let old = attrs(before.clone());
+    let new = attrs(after.clone());
+    let mut plan = patch(vec![text("x", before)], vec![text("x", after.clone())]);
+    plan.seed.properties = attrs(json!({"pStyle": "Body24", "numPr": {"numId": 43, "ilvl": 0}}));
+    seed_inheritance(&mut plan, json!({}), json!([previous.clone()]), previous);
+    plan.mark_inherit = attrs(next.clone());
+    plan.para_deltas = vec![delta(
+        "pStyle",
+        Some(json!("Body24")),
+        Some(json!("Heading1")),
+    )];
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: 1,
+        deltas: super::attr_deltas(&old, &new),
+        target: new,
+        inherit: attrs(next),
+    });
+    let mut properties = plan.seed.properties.clone();
+    properties.insert("pStyle".to_owned(), json!("Heading1"));
+    plan.result_sha256 = result_sha256(&[text("x", after)], &properties);
+    plan
+}
+
+#[test]
+fn paragraph_patch_restyle_normalizes_inherited_run_fields() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr>",
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    for (before, after) in [
+        (
+            json!({"highlight": "yellow"}),
+            json!({"highlight": "green"}),
+        ),
+        (
+            json!({"highlight": {"color": "yellow"}}),
+            json!({"highlight": "green"}),
+        ),
+        (
+            json!({"highlight": "#FF0000"}),
+            json!({"highlight": "#00FF00"}),
+        ),
+        (
+            json!({"underline": {"style": "single", "color": "FF0000"}}),
+            json!({"underline": {"style": "double", "color": {"rgb": "00FF00"}}}),
+        ),
+        (
+            json!({"textColor": {"rgb": "FF0000"}}),
+            json!({"textColor": {"rgb": "00FF00", "themeColor": "accent1"}}),
+        ),
+        (
+            json!({"fontFamily": {"ascii": "Arial", "csTheme": "minorHAnsi"}}),
+            json!({"fontFamily": {"ascii": "Calibri", "csTheme": "majorBidi"}}),
+        ),
+    ] {
+        let plan = numbered_run_restyle(before.clone(), after.clone(), before, after);
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            source.replace("w:val='Body24'", "w:val='Heading1'")
+        );
+    }
+    let source = source.replace("<w:noProof/>", "<w:noProof/><w:highlight w:val='yellow'/>");
+    let plan = numbered_run_restyle(
+        json!({"highlight": "yellow"}),
+        json!({"highlight": "green"}),
+        json!({"highlight": "yellow"}),
+        json!({"highlight": "green"}),
+    );
+    assert_eq!(
+        write(&source, &plan).unwrap(),
+        source
+            .replace("w:val='Body24'", "w:val='Heading1'")
+            .replace("w:val='yellow'", "w:val='green'")
+    );
+}
+
+#[test]
+fn paragraph_patch_restyle_keeps_complex_script_fields_inherited_or_direct() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr>",
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    for previous in [false, true] {
+        let plan = numbered_run_restyle(
+            json!({}),
+            json!({"boldCs": !previous, "italicCs": !previous}),
+            json!({"boldCs": previous, "italicCs": previous}),
+            json!({"boldCs": !previous, "italicCs": !previous}),
+        );
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            source.replace("w:val='Body24'", "w:val='Heading1'")
+        );
+    }
+    let source = source.replace(
+        "<w:noProof/>",
+        "<w:bCs w:val='0'/><w:iCs w:val='0'/><w:noProof/>",
+    );
+    let plan = numbered_run_restyle(
+        json!({}),
+        json!({"boldCs": false, "italicCs": false}),
+        json!({}),
+        json!({"boldCs": true, "italicCs": true}),
+    );
+    assert_eq!(
+        write(&source, &plan).unwrap(),
+        source.replace("w:val='Body24'", "w:val='Heading1'")
+    );
+}
+
+#[test]
+fn paragraph_patch_restyle_text_replacement_preserves_run_xml() {
+    for direct in [false, true] {
+        for changed in [false, true] {
+            let size = if direct { "<w:sz w:val='24'/>" } else { "" };
+            let source = format!(
+                "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr><w:r w:rsidR='12345678'><w:rPr><w:i/><w:noProof/>{size}</w:rPr><w:t>x</w:t></w:r></w:p>"
+            );
+            let target_size = if changed {
+                40
+            } else if direct {
+                24
+            } else {
+                32
+            };
+            let before = json!({"fontSize": {"size": 24}, "italic": true});
+            let after = json!({"fontSize": {"size": target_size}, "italic": true, "bold": true});
+            let next = json!({"fontSize": {"size": 32}, "bold": true});
+            let mut plan = numbered_run_restyle(
+                before,
+                after.clone(),
+                json!({"fontSize": {"size": 24}}),
+                next.clone(),
+            );
+            plan.run_edits.clear();
+            replace(&mut plan, 0, 1, "y", after.clone());
+            plan.text_edits[0].insert[0].inherit = attrs(next);
+            let mut properties = plan.seed.properties.clone();
+            properties.insert("pStyle".to_owned(), json!("Heading1"));
+            plan.result_sha256 = result_sha256(&[text("y", after)], &properties);
+            let expected = source
+                .replace("w:val='Body24'", "w:val='Heading1'")
+                .replace(">x<", ">y<");
+            let expected = if changed && direct {
+                expected.replace("w:val='24'", "w:val='40'")
+            } else if changed {
+                expected.replace("</w:rPr>", "<w:sz w:val=\"40\"/></w:rPr>")
+            } else {
+                expected
+            };
+            assert_eq!(write(&source, &plan).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn paragraph_patch_restyle_keeps_inherited_run_properties_out_of_xml() {
+    for direct_size in ["", "sz", "szCs"] {
+        for target_size in [32, 40] {
+            let size = if direct_size.is_empty() {
+                String::new()
+            } else {
+                format!("<w:{direct_size} w:val='24'/>")
+            };
+            let source = format!(
+                "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr><w:r w:rsidR='12345678'><w:rPr><w:i/><w:noProof/>{size}</w:rPr><w:t>x</w:t></w:r></w:p>"
+            );
+            let mut old = json!({"fontSize": {"size": 24}, "italic": true});
+            let mut new = json!({"fontSize": {"size": target_size}, "italic": true, "bold": true});
+            if direct_size == "szCs" {
+                old["fontSize"]["sizeCs"] = json!(24);
+                new["fontSize"]["sizeCs"] = json!(24);
+            }
+            let before_size = old["fontSize"].clone();
+            let after_size = new["fontSize"].clone();
+            let mut plan = patch(vec![text("x", old)], vec![text("x", new.clone())]);
+            plan.seed.properties = attrs(json!({
+                "pStyle": "Body24", "numPr": {"numId": 43, "ilvl": 0}
+            }));
+            seed_inheritance(
+                &mut plan,
+                json!({}),
+                json!([{"fontSize": {"size": 24}}]),
+                json!({"fontSize": {"size": 24}}),
+            );
+            plan.mark_inherit = attrs(json!({"fontSize": {"size": 32}, "bold": true}));
+            plan.para_deltas = vec![delta(
+                "pStyle",
+                Some(json!("Body24")),
+                Some(json!("Heading1")),
+            )];
+            plan.run_edits = vec![RunEditV1 {
+                from: 0,
+                to: 1,
+                deltas: vec![
+                    delta("fontSize", Some(before_size), Some(after_size)),
+                    delta("bold", None, Some(json!(true))),
+                ],
+                target: attrs(new.clone()),
+                inherit: attrs(json!({"fontSize": {"size": 32}, "bold": true})),
+            }];
+            let mut after = plan.seed.properties.clone();
+            after.insert("pStyle".to_owned(), json!("Heading1"));
+            plan.result_sha256 = result_sha256(&[text("x", new)], &after);
+            let expected = source.replace("w:val='Body24'", "w:val='Heading1'");
+            let expected = if direct_size == "sz" {
+                expected.replace("w:val='24'", &format!("w:val='{target_size}'"))
+            } else if target_size == 40 {
+                let next = if direct_size == "szCs" {
+                    "<w:szCs"
+                } else {
+                    "</w:rPr>"
+                };
+                expected.replace(next, &format!("<w:sz w:val=\"40\"/>{next}"))
+            } else {
+                expected
+            };
+            assert_eq!(write(&source, &plan).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn paragraph_patch_numbered_restyle_with_an_unexplained_delta_is_refused() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='ListParagraph'/>",
+        "<w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr>",
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    let units = vec![text("x", json!({"bold": true}))];
+    let after = attrs(json!({
+        "pStyle": "Heading1", "numPr": {"numId": 43, "ilvl": 0}, "alignment": "center"
+    }));
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = attrs(json!({
+        "pStyle": "ListParagraph", "numPr": {"numId": 43, "ilvl": 0}
+    }));
+    seed_inheritance(&mut plan, json!({}), json!([{}]), json!({}));
+    plan.para_inherit = attrs(json!({"outlineLevel": 0}));
+    plan.mark_inherit = attrs(json!({"bold": true}));
+    plan.para_deltas = vec![
+        delta(
+            "pStyle",
+            Some(json!("ListParagraph")),
+            Some(json!("Heading1")),
+        ),
+        delta("alignment", None, Some(json!("center"))),
+    ];
+    plan.result_sha256 = result_sha256(&plan.seed.units.clone(), &after);
+    let error = write(source, &plan).unwrap_err();
+    assert_eq!(error.code, PatchErrorCode::UnsupportedKey);
 }
 
 #[test]
@@ -1436,4 +1943,138 @@ fn paragraph_patch_refuses_inserted_breaks_and_symbol_scalars() {
         replace(&mut plan, 1, 1, insert, json!({}));
         assert!(write(source, &plan).is_err(), "{insert:?}");
     }
+}
+
+#[test]
+fn smart_art_text_patch_keeps_the_drawing_run_and_checks_its_source() {
+    for container in ["inline", "anchor"] {
+        let drawing = format!(
+            r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:{container}><wp:extent cx="1000" cy="500"/><wp:effectExtent l="1" t="2" r="3" b="4"/><wp:docPr id="71" name="Keep"><a:extLst><a:ext uri="urn:keep"/></a:extLst></wp:docPr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="dm" r:lo="lo" r:qs="qs" r:cs="cs"/></a:graphicData></a:graphic></wp:{container}></w:drawing>"#
+        );
+        let drawing_run =
+            format!(r#"<w:r w:rsidR="AABBCCDD"><w:rPr><w:noProof/></w:rPr>{drawing}</w:r>"#);
+        let source = format!(
+            "<w:p><w:r><w:t xml:space=\"preserve\">before </w:t></w:r>{drawing_run}<w:r><w:t xml:space=\"preserve\"> after</w:t></w:r></w:p>"
+        );
+        let atom = UnitV1::Atom {
+            atom_kind: "shape".to_owned(),
+            payload: attrs(
+                json!({"shapeJson": json!({"drawingXml": drawing, "drawingRunXml": drawing_run}).to_string()}),
+            ),
+            attrs: Attrs::new(),
+        };
+        let seed = vec![
+            text("before ", json!({})),
+            atom.clone(),
+            text(" after", json!({})),
+        ];
+        let result = vec![
+            text("ahead of ", json!({})),
+            atom.clone(),
+            text(" after", json!({})),
+        ];
+        let mut plan = patch(seed.clone(), result);
+        replace(&mut plan, 0, 6, "ahead of", json!({}));
+        let written = write(&source, &plan).unwrap();
+        assert_eq!(written, source.replace(">before <", ">ahead of <"));
+        assert!(written.contains(&drawing_run));
+        let corrupted = source.replace("id=\"71\"", "id=\"72\"");
+        assert_eq!(
+            write(&corrupted, &plan).unwrap_err().code,
+            PatchErrorCode::SeedMismatch
+        );
+        plan.run_edits.push(RunEditV1 {
+            from: 7,
+            to: 8,
+            deltas: vec![delta("bold", None, Some(json!(true)))],
+            inherit: Attrs::new(),
+            target: attrs(json!({"bold": true})),
+        });
+        let error = write(&source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+        assert_eq!(error.detail, "drawing: formatting touches SmartArt");
+    }
+}
+
+#[test]
+fn smart_art_text_replacement_across_source_runs_keeps_the_drawing_run() {
+    let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;
+    let atom = UnitV1::Atom {
+        atom_kind: "shape".to_owned(),
+        payload: attrs(json!({"shapeJson": json!({"drawingXml": drawing}).to_string()})),
+        attrs: Attrs::new(),
+    };
+    let mut plan = patch(
+        vec![text("before", json!({})), atom.clone()],
+        vec![text("ahead of", json!({})), atom],
+    );
+    replace(&mut plan, 0, 6, "ahead of", json!({}));
+    let source = format!(
+        "<w:p><w:r><w:t>be</w:t></w:r><w:r><w:t>fore</w:t></w:r><w:r>{drawing}</w:r></w:p>"
+    );
+    let output = write(&source, &plan).unwrap();
+    assert!(output.ends_with(&format!("<w:r>{drawing}</w:r></w:p>")));
+    assert_eq!(output.matches("<dgm:relIds/>").count(), 1);
+    assert!(output.contains("ahead of"));
+    assert!(!output.contains(">be<") && !output.contains(">fore<"));
+    let empty_properties = source.replacen("<w:r><w:t>fore", "<w:r><w:rPr/><w:t>fore", 1);
+    let output = write(&empty_properties, &plan).unwrap();
+    assert!(output.contains("ahead of"));
+    assert_eq!(output.matches("<dgm:relIds/>").count(), 1);
+}
+
+#[test]
+fn smart_art_patch_refuses_text_replacement_across_different_source_runs() {
+    let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;
+    let atom = UnitV1::Atom {
+        atom_kind: "shape".to_owned(),
+        payload: attrs(json!({"shapeJson": json!({"drawingXml": drawing}).to_string()})),
+        attrs: Attrs::new(),
+    };
+    let mut plan = patch(
+        vec![text("before", json!({})), atom.clone()],
+        vec![text("ahead of", json!({})), atom],
+    );
+    replace(&mut plan, 0, 6, "ahead of", json!({}));
+    let source = format!(
+        "<w:p><w:r><w:t>be</w:t></w:r><w:r><w:rPr><w:lang w:val=\"de-DE\"/></w:rPr><w:t>fore</w:t></w:r><w:r>{drawing}</w:r></w:p>"
+    );
+    assert_eq!(
+        write(&source, &plan).unwrap_err().detail,
+        "drawing: text edit crosses source runs"
+    );
+}
+
+#[test]
+fn smart_art_many_drawings_patch_with_linear_work() {
+    let measured = |drawings: usize| {
+        let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;
+        let run = format!("<w:r>{drawing}</w:r>");
+        let source = format!(
+            "<w:p><w:r><w:t>before</w:t></w:r>{}</w:p>",
+            run.repeat(drawings)
+        );
+        let atom = UnitV1::Atom {
+            atom_kind: "shape".to_owned(),
+            payload: attrs(json!({"shapeJson": json!({"drawingRunXml": run}).to_string()})),
+            attrs: Attrs::new(),
+        };
+        let mut seed = vec![text("before", json!({}))];
+        seed.extend(std::iter::repeat_n(atom, drawings));
+        let mut result = seed.clone();
+        result[0] = text("after", json!({}));
+        let mut plan = patch(seed, result);
+        replace(&mut plan, 0, 6, "after", json!({}));
+        super::work::reset();
+        let output = write(&source, &plan).unwrap();
+        let work = super::work::get();
+        assert_eq!(output, source.replacen(">before<", ">after<", 1));
+        assert_eq!(output.matches("<dgm:relIds/>").count(), drawings);
+        work
+    };
+    let (small, large) = (measured(2_500), measured(20_000));
+    assert!(
+        linear_work_growth(small, large),
+        "8x the drawings exceeded 10x the work: {small} -> {large}"
+    );
 }

@@ -110,6 +110,25 @@ test('projection echoes the caret line of a wrapped paragraph', () => {
   expect(context?.damage[0]).toMatchObject({ rect: { x: 0, y: 22, width: 100, height: 18 }, omittedPrimitiveIds: ['11'] });
 });
 
+test('echo boundary carets take the top and height of the real caret on their line', () => {
+  const line = (text: string, docStart: number, y: number): GlyphRunPrimitive => ({ kind: 'glyphRun', text, size: 12,
+    fontId: 1, color: '#000', fallbackFont: '12px Arial', docStart, docEnd: docStart + text.length,
+    glyphs: [...text].map((_, index) => ({ id: index + 1, cluster: index, x: index * 10, y, advance: 10 })) });
+  const page: DisplayPage = { pageIndex: 0, width: 100, height: 60, primitives: [line('ab ', 1, 14), line('cd', 4, 34)] };
+  const frame: RetainedFrame = { protocolVersion: 1, docEpoch: 1, layoutEpoch: 1, frameEpoch: 3,
+    pages: [{ pageId: 1n, pageIndex: 0, fingerprint: 1n, primitiveIds: new BigUint64Array([10n, 11n]), page }],
+    damagedPageIds: new Set([1n]), removedPageIds: new Set(), displayList: { pages: [page] } };
+  const engine = {
+    proposalEngine: { readParagraphs: () => ({ ok: true, paragraphs: [{ paraId: 'p', text: 'ab cd', atoms: [] }] }) },
+    geometryReader: { locateParagraph: () => ({ start: 0, end: 5 }) },
+    residentCaretSnapshot: () => ({ frameEpoch: 3, caretRect: { pageId: '1', pageIndex: 0, x: 10, y: 23, height: 13 } }),
+  } as unknown as DocxWorkerCommandEngine;
+  const at = { story: 'body', paraId: 'p', offset: 4 };
+  const context = projectCommandEchoContext({ engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 } });
+  expect(context?.boundaries.map(({ caret }) => [caret.y, caret.height])).toEqual([[23, 13], [23, 13], [23, 13]]);
+  expect(context?.damage[0]?.rect).toMatchObject({ y: 22, height: 18 });
+});
+
 test('projection bounds its scan by the caret line, not by the glyphs on the rest of the page', () => {
   const source = input();
   const other = (index: number): GlyphRunPrimitive => ({ kind: 'glyphRun', text: 'y'.repeat(60), size: 12, fontId: 1,

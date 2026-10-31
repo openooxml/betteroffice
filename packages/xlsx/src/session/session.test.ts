@@ -33,6 +33,22 @@ function target(a1: string, sheetId = 'sheet:0'): XlsxRangeTarget {
   return { sheetId, range: { kind: 'a1', a1 } };
 }
 
+test('font decoder RPC initializes without a workbook and propagates errors', async () => {
+  const pair = createInProcessPair();
+  createWorkbookSessionHost(pair.host, { initWasm: async source => initWasm(source ?? wasmBytes.buffer) });
+  const client = createSessionClient<WorkbookSessionMethods, {}>(pair.client, { methods: WORKBOOK_SESSION_METHODS });
+  const bytes = new Uint8Array([0, 1, 0, 0, 10]).buffer;
+  try {
+    expect(new Uint8Array((await client.call.decodeFontFace(bytes, { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array(bytes));
+    await expect(client.call.version()).rejects.toThrow('not open');
+    await expect(client.call.decodeFontFace(bytes, { codec: 'unsupported' }))
+      .rejects.toThrow('unsupported font face codec: unsupported');
+    expect(new Uint8Array((await client.call.decodeFontFace(bytes, { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array(bytes));
+  } finally { await client.dispose(); }
+});
+
 function read(result: XlsxReadResult): Extract<XlsxReadResult, { ok: true }> {
   if (!result.ok) throw new Error(result.failure.message);
   return result;
@@ -88,6 +104,20 @@ async function matchingSheetView(
 }
 
 describe('workbook sessions', () => {
+  test('forwards PNG initialization options to the host', async () => {
+    const pair = createInProcessPair();
+    const received: Array<{ png?: boolean } | undefined> = [];
+    createWorkbookSessionHost(pair.host, { initWasm: async (source, options) => {
+      received.push(options);
+      await initWasm(source, options);
+    } });
+    const worker = await createWorkbookSession(fixture, { png: false }, pair.client);
+    try {
+      expect(received).toEqual([{ png: false }]);
+      expect((await worker.save()).length).toBeGreaterThan(0);
+    } finally { await worker.dispose(); }
+  });
+
   test('selection queries cross the worker protocol without changing the workbook', async () => {
     const worker = await session();
     try {

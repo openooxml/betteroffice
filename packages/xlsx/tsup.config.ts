@@ -28,5 +28,9 @@ export default defineConfig((options) => ({
       'src/wasm/generated/xlsx_wasm_bg.wasm',
       'dist/generated/xlsx_wasm_bg.wasm'
     );
+    await copyFile(
+      'src/wasm/generated/xlsx_wasm_lean_bg.wasm',
+      'dist/generated/xlsx_wasm_lean_bg.wasm'
+    );
   },
 }));

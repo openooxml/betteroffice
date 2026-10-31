@@ -63,11 +63,10 @@ pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
 pub use group_pictures::GroupPictureSources;
+pub(crate) mod run_size_provenance;
 mod shapes;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
-
-const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 
 /// Document-level values lowering cannot read off a story. Every field
 /// defaults, so an empty env lowers a story with built-in fallbacks.
@@ -116,6 +115,15 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// Resolved paragraph style chain font size in pt, keyed by style id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub paragraph_style_font_sizes: BTreeMap<String, f64>,
+    /// Resolved Hyperlink character style chain font size in pt, keyed by style id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub hyperlink_style_font_sizes: BTreeMap<String, f64>,
+    /// The docDefaults font size in pt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_default_font_size: Option<f64>,
     /// Lower the `data:` image sources seeding wrote as the `media:{n}`
     /// tokens of their parts, which the host then resolves.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -132,6 +140,18 @@ pub struct RenderEnv {
 }
 
 impl RenderEnv {
+    /// The font size in pt Word gives an unsized run in a paragraph of `style_id`.
+    pub fn chain_font_size(&self, style_id: Option<&str>) -> Option<f64> {
+        style_id
+            .and_then(|id| self.paragraph_style_font_sizes.get(id).copied())
+            .or_else(|| {
+                self.default_paragraph_style_id
+                    .as_ref()
+                    .and_then(|id| self.paragraph_style_font_sizes.get(id).copied())
+            })
+            .or(self.doc_default_font_size)
+    }
+
     pub fn with_numeric_id(mut self, yrs_id: impl Into<String>, layout_id: f64) -> Self {
         self.numeric_ids.insert(yrs_id.into(), layout_id);
         self
@@ -402,12 +422,19 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     let env = &with_sources;
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
+    local.run_size_sources = if env.hyperlink_style_font_sizes.is_empty() {
+        run_size_provenance::Sources::default()
+    } else {
+        run_size_provenance::Sources::new(doc)
+    };
     local.block(source.as_ref().is_some_and(|source| {
         source
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
     }));
-    let mut list_state = ListState::new(source.map(|source| source.numbering()));
+    let numbering = source.as_ref().map(|source| source.numbering());
+    let mut list_state = ListState::new(numbering);
+    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     let txn = doc.yrs_doc().transact();
     local.block(
         txn.get_map(COMMENTS)
@@ -666,7 +693,7 @@ fn walk_story_chunks<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     local: &mut local::LocalLowering,
     story: &yrs::TextRef,
-    comments: &[CommentInterval],
+    comments: &CommentIntervals,
     chunks: &[yrs::types::text::Diff<YChange>],
     initial: preview::WalkPosition,
     mut hidden_field_blocks: BTreeSet<String>,
@@ -690,6 +717,7 @@ fn walk_story_chunks<T: ReadTxn>(
     let mut blocks = Vec::new();
     let mut paragraph_runs = Vec::new();
     let mut paragraph_drawings: Vec<DrawingMarker> = Vec::new();
+    let mut alternate_content_sources = HashMap::<u64, Vec<AlternateContentSource>>::new();
     let mut pending_hidden_field_blocks = BTreeSet::new();
     let mut pending_code_join: Option<(Vec<FieldCodeParagraph>, String)> = None;
     let mut field_join: Option<FieldJoin> = None;
@@ -722,7 +750,15 @@ fn walk_story_chunks<T: ReadTxn>(
         };
     }
     let mut plain = local::ParagraphSeed::default();
+    let mut paragraph_chunk_start = 0;
+    let mut paragraph_has_hyperlink_size = false;
+    let mut paragraph_has_toc_field = false;
     for (chunk_index, diff) in chunks.iter().enumerate() {
+        if at_block_boundary && paragraph_start == story_index {
+            paragraph_chunk_start = chunk_index;
+            paragraph_has_hyperlink_size = false;
+            paragraph_has_toc_field = false;
+        }
         let local_safe = !local.legacy
             && !local.blocked
             && pending_hidden_field_blocks.is_empty()
@@ -759,7 +795,7 @@ fn walk_story_chunks<T: ReadTxn>(
         match &diff.insert {
             Out::Any(Any::String(text)) => {
                 let text = text.as_ref();
-                push_text_chunks(
+                paragraph_has_hyperlink_size |= push_text_chunks(
                     &mut paragraph_runs,
                     text,
                     story_index,
@@ -775,6 +811,32 @@ fn walk_story_chunks<T: ReadTxn>(
             Out::YMap(pilcrow) if is_pilcrow(pilcrow, txn) => {
                 let values = pilcrow_values(pilcrow, txn);
                 let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                let proof = (paragraph_has_hyperlink_size
+                    && (paragraph_has_toc_field
+                        || paragraph_style_id(&values).is_some_and(|id| {
+                            is_toc_style(&id) || env.toc_style_ids.contains(&id)
+                        })))
+                .then(|| {
+                    local.run_size_sources.unchanged(
+                        &para_id,
+                        story_id,
+                        txn,
+                        &chunks[paragraph_chunk_start..=chunk_index],
+                        comments.markers(paragraph_start, story_index + 1),
+                    )
+                })
+                .flatten();
+                if let Some(proof) = proof
+                    && proof.inherited(
+                        paragraph_runs
+                            .iter()
+                            .any(|run| run.formatting.rtl == Some(true)),
+                    )
+                {
+                    for run in &mut paragraph_runs {
+                        run.hyperlink_size_inherited = run.inherited_hyperlink.2 && !run.atom;
+                    }
+                }
                 let reserved = env.reservations.paragraph(story_id, &para_id);
                 local.observe_pilcrow(
                     &mut plain,
@@ -841,7 +903,8 @@ fn walk_story_chunks<T: ReadTxn>(
                         if !paragraph_runs.is_empty() {
                             let join = field_join.as_mut().unwrap();
                             let offset = (paragraph_pm_start - join.pm_start) as u32;
-                            let defaults = paragraph_run_defaults(&values);
+                            let defaults =
+                                paragraph_run_defaults(&values, paragraph_chain_size(env, &values));
                             for run in &mut paragraph_runs {
                                 run.pm_start += offset;
                                 run.pm_end += offset;
@@ -904,7 +967,8 @@ fn walk_story_chunks<T: ReadTxn>(
                 if let Some((hidden, target)) = code_join
                     && joinable
                 {
-                    let defaults = paragraph_run_defaults(&values);
+                    let defaults =
+                        paragraph_run_defaults(&values, paragraph_chain_size(env, &values));
                     for run in &mut paragraph_runs {
                         apply_run_defaults(&mut run.formatting, &defaults);
                     }
@@ -1245,7 +1309,8 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1259,6 +1324,12 @@ fn walk_story_chunks<T: ReadTxn>(
             {
                 let instruction =
                     shared_map_string(field, txn, "instruction").filter(|value| !value.is_empty());
+                paragraph_has_toc_field |= instruction.as_deref().is_some_and(|instruction| {
+                    instruction
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC"))
+                });
                 let hidden = instruction
                     .as_deref()
                     .is_some_and(super::seed::numeric_field_instruction);
@@ -1309,7 +1380,8 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1328,7 +1400,8 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1348,7 +1421,8 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1394,7 +1468,8 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1422,7 +1497,8 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1455,7 +1531,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(shape, txn, "_kind").as_deref() == Some("shape") =>
             {
                 let pm_offset = paragraph_pm_units;
-                let Some(block) = lower_shape_block(
+                let Some((block, text_box, provenance)) = lower_shape_block(
                     shape,
                     txn,
                     paragraph_pm_start + 1 + u64::from(pm_offset),
@@ -1521,7 +1597,8 @@ fn walk_story_chunks<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: pm_offset,
                         pm_end: pm_offset + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(attributes),
@@ -1534,6 +1611,15 @@ fn walk_story_chunks<T: ReadTxn>(
                         block: LayoutBlock::Shape(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
+                        formatting: formatting.clone(),
+                        inline_text_box: text_box,
+                        from_opaque: false,
+                        fallback_twin: alternate_content_fallback(
+                            alternate_content_sources
+                                .get(&paragraph_pm_start)
+                                .map(Vec::as_slice),
+                            provenance.as_ref(),
+                        ),
                     });
                 }
                 story_index += 1;
@@ -1544,6 +1630,15 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(opaque, txn, "_kind").as_deref() == Some("opaqueDrawing") =>
             {
                 let values = shared_values(opaque, txn);
+                if map_string(&values, "kind").as_deref() == Some("alternateContent")
+                    && let Some(source) = map_string(&values, "xml")
+                    && let Some(source) = alternate_content_source(&source, paragraph_pm_units)
+                {
+                    alternate_content_sources
+                        .entry(paragraph_pm_start)
+                        .or_default()
+                        .push(source);
+                }
                 if let Some(block) = opaque_text_box(
                     &values,
                     paragraph_pm_start + 1 + u64::from(paragraph_pm_units),
@@ -1557,6 +1652,10 @@ fn walk_story_chunks<T: ReadTxn>(
                         block: LayoutBlock::Shape(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
+                        formatting: lower_run_formatting(attributes, env),
+                        inline_text_box: false,
+                        from_opaque: true,
+                        fallback_twin: None,
                     });
                 }
                 for preview in opaque_image_previews(&values) {
@@ -1568,7 +1667,8 @@ fn walk_story_chunks<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(attributes),
@@ -1582,8 +1682,9 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(chart, txn, "_kind").as_deref() == Some("chart") =>
             {
                 let pm_offset = paragraph_pm_units;
+                let values = shared_values(chart, txn);
                 let Some(block) = lower_chart_block(
-                    &shared_values(chart, txn),
+                    &values,
                     Some(paragraph_pm_start + 1 + u64::from(pm_offset)),
                     env,
                 ) else {
@@ -1592,6 +1693,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         index: story_index,
                     });
                 };
+                let provenance = chart_drawing_provenance(&block.chart);
                 paragraph_drawings.push(DrawingMarker {
                     pm_offset,
                     story_index,
@@ -1599,6 +1701,15 @@ fn walk_story_chunks<T: ReadTxn>(
                     hidden: mark_bool(attributes, "hidden") == Some(true),
                     revision_hidden: env.revision_hidden(attributes),
                     anchored: false,
+                    formatting: lower_run_formatting(attributes, env),
+                    inline_text_box: false,
+                    from_opaque: false,
+                    fallback_twin: alternate_content_fallback(
+                        alternate_content_sources
+                            .get(&paragraph_pm_start)
+                            .map(Vec::as_slice),
+                        provenance.as_ref(),
+                    ),
                 });
                 story_index += 1;
                 paragraph_pm_units += 1;
@@ -2061,6 +2172,24 @@ fn lower_table<T: ReadTxn>(
                 format!("row {row_index} is missing trPr"),
             )
         })?;
+        let row_formatting = tr_pr.get("_originalFormatting").and_then(any_map);
+        let grid_count = |key| {
+            row_formatting
+                .and_then(|value| map_number(value, key))
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.min(16_384.0) as u64)
+        };
+        let grid_before = grid_count("gridBefore");
+        let grid_after = grid_count("gridAfter");
+        let row_width = |key| {
+            row_formatting
+                .and_then(|value| value.get(key))
+                .and_then(any_map)
+                .map(|value| docx_layout::types::PreferredWidth {
+                    value: map_number(value, "value"),
+                    r#type: map_string(value, "type"),
+                })
+        };
         let cell_values = match row.get("cells") {
             Some(Any::Array(values)) => values,
             _ => {
@@ -2074,7 +2203,7 @@ fn lower_table<T: ReadTxn>(
 
         let mut cells = Vec::with_capacity(cell_values.len());
         let mut cell_pm_start = row_pm_start + 1;
-        let mut column = 0usize;
+        let mut column = grid_before.unwrap_or(0) as usize;
         for (cell_index, cell_value) in cell_values.iter().enumerate() {
             let cell = any_map(cell_value).ok_or_else(|| {
                 malformed_table(
@@ -2132,7 +2261,7 @@ fn lower_table<T: ReadTxn>(
             {
                 column += 1;
             }
-            let col_span = map_number(tc_pr, "colspan");
+            let col_span = map_number(tc_pr, "colspan").map(|span| span.min(16_384.0));
             let row_span = map_number(tc_pr, "rowspan");
             let colspan = col_span.unwrap_or(1.0) as usize;
             let width_type = map_string(tc_pr, "widthType");
@@ -2146,7 +2275,12 @@ fn lower_table<T: ReadTxn>(
                 && width_type.as_deref() == Some("pct")
                 && width_value.is_some()
                 && width_value
-                    == synthesized_cell_width(&grid_widths, total_grid_width, column, colspan);
+                    == synthesized_cell_width(
+                        &grid_widths,
+                        total_grid_width,
+                        column.saturating_sub(grid_before.unwrap_or(0) as usize),
+                        colspan,
+                    );
             let width_value =
                 width_value.filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
             let width =
@@ -2193,7 +2327,6 @@ fn lower_table<T: ReadTxn>(
         }
 
         let row_node_size = cell_pm_start + 1 - row_pm_start;
-        let original = tr_pr.get("_originalFormatting").and_then(any_map);
         rows.push(TableRow {
             id: BlockId::Str(format!("{table_id}:r{row_index}")),
             cells,
@@ -2202,13 +2335,17 @@ fn lower_table<T: ReadTxn>(
                 .map(twips_to_pixels),
             height_rule: map_string(tr_pr, "heightRule"),
             is_header: map_bool(tr_pr, "isHeader"),
-            cant_split: original
+            cant_split: row_formatting
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
-            grid_before: None,
-            grid_after: None,
-            width_before: None,
-            width_after: None,
+            grid_before,
+            grid_after,
+            width_before: grid_before
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthBefore")),
+            width_after: grid_after
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthAfter")),
             tracked_ins: tr_pr
                 .get("trIns")
                 .and_then(|value| paragraph_revision_value(value, env)),
@@ -2339,7 +2476,7 @@ fn automatic_text_needs_white(color: &str) -> bool {
         if channel <= 0.04045 {
             channel / 12.92
         } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
+            crate::fmath::pow((channel + 0.055) / 1.055, 2.4)
         }
     };
     let red = linearize((value >> 16) & 255);
@@ -2399,8 +2536,10 @@ fn image_transform_metrics(
         .unwrap_or(0.0)
         .rem_euclid(360.0);
     let radians = rotation.to_radians();
-    let bounds_width = width * radians.cos().abs() + height * radians.sin().abs();
-    let bounds_height = width * radians.sin().abs() + height * radians.cos().abs();
+    let bounds_width =
+        width * crate::fmath::cos(radians).abs() + height * crate::fmath::sin(radians).abs();
+    let bounds_height =
+        width * crate::fmath::sin(radians).abs() + height * crate::fmath::cos(radians).abs();
     let bounds = (rotation != 0.0).then(|| {
         serde_json::json!({
             "width": bounds_width,
@@ -2687,9 +2826,9 @@ fn lower_shape_block<T: ReadTxn>(
     pm_start: u64,
     env: &RenderEnv,
     story_id: &str,
-) -> Option<ShapeBlock> {
+) -> Option<(ShapeBlock, bool, Option<DrawingProvenance>)> {
     let values = shared_values(shape, txn);
-    if let Some(block) = values
+    if let Some((block, text_box, provenance)) = values
         .get("shapeJson")
         .and_then(|value| match value {
             Any::String(source) => Some(env.media.tokenized_json(source)),
@@ -2697,13 +2836,17 @@ fn lower_shape_block<T: ReadTxn>(
         })
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
         .and_then(|value| {
+            let provenance = shape_drawing_provenance(&value);
             let projected =
                 group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
             let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
+            let text_box = rendered.get("textBox").and_then(Value::as_bool) == Some(true)
+                || rendered.get("shapeType").and_then(Value::as_str) == Some("textBox");
             shapes::lower_shape_json(&rendered, pm_start, env)
+                .map(|block| (block, text_box, provenance))
         })
     {
-        return Some(block);
+        return Some((block, text_box, provenance));
     }
     let shape_type = map_string(&values, "shapeType").unwrap_or_else(|| "rect".to_owned());
     let geometry_path = values
@@ -2721,39 +2864,211 @@ fn lower_shape_block<T: ReadTxn>(
             .unwrap_or(80.0),
         env,
     );
-    Some(ShapeBlock {
-        sdt_groups: None,
-        id: BlockId::Str(format!("shape:{pm_start}")),
-        shape_type,
-        geometry_path,
-        fill: shape_fill(&values),
-        stroke: shape_stroke(&values),
-        transform: shape_transform(&values),
-        width,
-        height,
-        x: None,
-        y: None,
-        inner_text: None,
-        nested_sequences: Vec::new(),
-        inner_measures: None,
-        children: Vec::new(),
-        scene: None,
-        effects: None,
-        text_body_properties: None,
-        wrap_distances: None,
-        position: None,
-        wrap_type: None,
-        wrap_text: None,
-        relative_height: None,
-        behind_doc: None,
-        decorative: None,
-        title: None,
-        description: None,
-        doc_start: Some(pm_start as f64),
-        doc_end: Some((pm_start + 1) as f64),
-        pm_start: Some(pm_start as f64),
-        pm_end: Some((pm_start + 1) as f64),
+    let text_box = map_bool(&values, "textBox") == Some(true) || shape_type == "textBox";
+    Some((
+        ShapeBlock {
+            sdt_groups: None,
+            id: BlockId::Str(format!("shape:{pm_start}")),
+            shape_type,
+            geometry_path,
+            fill: shape_fill(&values),
+            stroke: shape_stroke(&values),
+            transform: shape_transform(&values),
+            width,
+            height,
+            x: None,
+            y: None,
+            inner_text: None,
+            nested_sequences: Vec::new(),
+            inner_measures: None,
+            children: Vec::new(),
+            scene: None,
+            effects: None,
+            text_body_properties: None,
+            wrap_distances: None,
+            position: None,
+            wrap_type: None,
+            wrap_text: None,
+            relative_height: None,
+            behind_doc: None,
+            decorative: None,
+            title: None,
+            description: None,
+            doc_start: Some(pm_start as f64),
+            doc_end: Some((pm_start + 1) as f64),
+            pm_start: Some(pm_start as f64),
+            pm_end: Some((pm_start + 1) as f64),
+        },
+        text_box,
+        None,
+    ))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DrawingProvenance {
+    id: String,
+    name: Option<String>,
+    content: DrawingContent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DrawingContent {
+    Shape {
+        shape_type: String,
+        text_box: bool,
+        text: Vec<String>,
+    },
+    Chart(String),
+}
+
+struct AlternateContentSource {
+    offset: u32,
+    choices: Vec<Option<DrawingProvenance>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FallbackTwin {
+    offset: u32,
+    choice: usize,
+    required: usize,
+}
+
+fn shape_drawing_provenance(shape: &Value) -> Option<DrawingProvenance> {
+    fn collect(value: &Value, text: &mut Vec<String>) {
+        if value.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(value) = value.get("text").and_then(Value::as_str)
+        {
+            text.push(value.to_owned());
+        } else {
+            match value {
+                Value::Array(values) => values.iter().for_each(|value| collect(value, text)),
+                Value::Object(values) => values.values().for_each(|value| collect(value, text)),
+                _ => {}
+            }
+        }
+    }
+    let mut text = Vec::new();
+    if let Some(body) = shape.get("textBody").and_then(|body| body.get("content")) {
+        collect(body, &mut text);
+    }
+    Some(DrawingProvenance {
+        id: shape.get("id")?.as_str()?.to_owned(),
+        name: shape.get("name").and_then(Value::as_str).map(str::to_owned),
+        content: DrawingContent::Shape {
+            shape_type: shape.get("shapeType")?.as_str()?.to_owned(),
+            text_box: shape.get("textBox").and_then(Value::as_bool) == Some(true),
+            text,
+        },
     })
+}
+
+fn xml_drawing_provenance(drawing: &docx_parse::xml::XmlElement) -> Option<DrawingProvenance> {
+    fn collect(node: &docx_parse::xml::XmlElement, text: &mut Vec<String>) {
+        if node.name == "w:t" {
+            text.push(node.text_content());
+        } else {
+            for child in node.child_elements() {
+                collect(child, text);
+            }
+        }
+    }
+    let container = drawing
+        .child_elements()
+        .find(|child| matches!(child.name.as_str(), "wp:inline" | "wp:anchor"))?;
+    let properties = container.child_by_full_name("wp:docPr")?;
+    let data = container
+        .child_by_full_name("a:graphic")?
+        .child_by_full_name("a:graphicData")?;
+    let content = if let Some(chart) = data.child_by_full_name("c:chart") {
+        DrawingContent::Chart(chart.attribute(Some("r"), "id")?.to_owned())
+    } else {
+        let wsp = data.child_by_full_name("wps:wsp")?;
+        let shape = docx_parse::shape::parse_shape_from_drawing(drawing)?;
+        let mut text = Vec::new();
+        if let Some(body) = wsp.child_by_full_name("wps:txbx") {
+            collect(body, &mut text);
+        }
+        DrawingContent::Shape {
+            shape_type: shape.shape_type,
+            text_box: shape.text_box == Some(true),
+            text,
+        }
+    };
+    Some(DrawingProvenance {
+        id: properties.attribute(None, "id")?.to_owned(),
+        name: properties.attribute(None, "name").map(str::to_owned),
+        content,
+    })
+}
+
+fn chart_drawing_provenance(chart: &Value) -> Option<DrawingProvenance> {
+    let source = chart.get("drawingXml")?.as_str()?;
+    let limits = docx_parse::xml::ParseLimits::default();
+    let document = docx_parse::xml::parse_xml(
+        source.as_bytes(),
+        "drawing.xml",
+        &mut docx_parse::xml::ParseBudget::new(&limits),
+    )
+    .ok()?;
+    let provenance = xml_drawing_provenance(document.root()?)?;
+    (provenance.content == DrawingContent::Chart(chart.get("rId")?.as_str()?.to_owned()))
+        .then_some(provenance)
+}
+
+fn alternate_content_source(source: &str, offset: u32) -> Option<AlternateContentSource> {
+    let limits = docx_parse::xml::ParseLimits::default();
+    let document = docx_parse::xml::parse_xml(
+        source.as_bytes(),
+        "alternateContent.xml",
+        &mut docx_parse::xml::ParseBudget::new(&limits),
+    )
+    .ok()?;
+    let root = document
+        .root()
+        .filter(|root| root.local_name() == "AlternateContent")?;
+    let choices = root
+        .child_elements()
+        .filter(|branch| branch.local_name() == "Choice")
+        .flat_map(|branch| branch.child_elements())
+        .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+        .map(xml_drawing_provenance)
+        .collect();
+    Some(AlternateContentSource { offset, choices })
+}
+
+fn alternate_content_fallback(
+    sources: Option<&[AlternateContentSource]>,
+    drawing: Option<&DrawingProvenance>,
+) -> Option<FallbackTwin> {
+    let drawing = drawing?;
+    let mut matches = sources?.iter().filter_map(|source| {
+        let choice = source.choices.iter().position(|choice| {
+            choice.as_ref().is_some_and(|choice| {
+                choice.id == drawing.id
+                    && choice
+                        .name
+                        .as_ref()
+                        .is_none_or(|name| drawing.name.as_ref() == Some(name))
+                    && choice.content == drawing.content
+            })
+        })?;
+        Some(FallbackTwin {
+            offset: source.offset,
+            choice,
+            required: source.choices.len(),
+        })
+    });
+    let twin = matches.next()?;
+    matches.next().is_none().then_some(twin)
+}
+
+fn chart_drawing_anchored(chart: &Value) -> bool {
+    chart.get("position").is_some_and(Value::is_object)
+        || chart
+            .get("wrap")
+            .and_then(|wrap| wrap.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|wrap_type| wrap_type != "inline")
 }
 
 fn lower_chart_block(
@@ -3002,7 +3317,8 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + child_size,
-                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: widget.clone(),
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3017,7 +3333,8 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3031,7 +3348,8 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3051,7 +3369,8 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3094,7 +3413,8 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3122,7 +3442,8 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3150,7 +3471,8 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: widget.clone(),
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3294,6 +3616,32 @@ fn lower_cell_border(
     })
 }
 
+#[derive(Clone, Debug, Default)]
+struct CommentIntervals {
+    intervals: Vec<CommentInterval>,
+    boundaries: BTreeMap<u32, Vec<(String, bool)>>,
+}
+
+impl std::ops::Deref for CommentIntervals {
+    type Target = [CommentInterval];
+
+    fn deref(&self) -> &Self::Target {
+        &self.intervals
+    }
+}
+
+impl CommentIntervals {
+    fn markers(&self, start: u32, end: u32) -> impl Iterator<Item = (u32, &str, bool)> {
+        self.boundaries
+            .range(start..end)
+            .flat_map(move |(at, markers)| {
+                markers
+                    .iter()
+                    .map(move |(key, end)| (*at - start, key.as_str(), *end))
+            })
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CommentInterval {
     start: u32,
@@ -3325,7 +3673,8 @@ enum RawRunKind {
 struct RawRun {
     kind: RawRunKind,
     formatting: RunFormatting,
-    inherited_hyperlink: (bool, bool),
+    inherited_hyperlink: (bool, bool, bool),
+    hyperlink_size_inherited: bool,
     /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
@@ -3374,6 +3723,16 @@ struct DrawingMarker {
     hidden: bool,
     revision_hidden: bool,
     anchored: bool,
+    formatting: RunFormatting,
+    /// The source drawing is a `wp:inline` text box (`txBox`) lowered as a
+    /// typed shape, not a plain text shape and not an opaque (VML) text
+    /// box, which keeps its block path.
+    inline_text_box: bool,
+    /// The marker came from an opaque drawing: for an `AlternateContent`
+    /// drawing this is the fallback representation of the same drawing
+    /// a neighbouring typed shape or chart embed also lowers.
+    from_opaque: bool,
+    fallback_twin: Option<FallbackTwin>,
 }
 
 impl DrawingMarker {
@@ -3415,11 +3774,12 @@ fn resolve_comment_intervals<T: ReadTxn>(
     txn: &T,
     story_id: &str,
     env: &RenderEnv,
-) -> Result<Vec<CommentInterval>, BridgeError> {
+) -> Result<CommentIntervals, BridgeError> {
     let comments = txn
         .get_map(COMMENTS)
         .expect("comments root is declared by EditingDoc::new");
     let mut intervals = Vec::new();
+    let mut boundaries = BTreeMap::<u32, Vec<(String, bool)>>::new();
 
     for (comment_id, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
@@ -3439,6 +3799,14 @@ fn resolve_comment_intervals<T: ReadTxn>(
             ) else {
                 continue;
             };
+            boundaries
+                .entry(start.index)
+                .or_default()
+                .push((comment_id.to_owned(), false));
+            boundaries
+                .entry(end.index)
+                .or_default()
+                .push((comment_id.to_owned(), true));
             if start.index < end.index {
                 intervals.push(CommentInterval {
                     start: start.index,
@@ -3455,7 +3823,13 @@ fn resolve_comment_intervals<T: ReadTxn>(
             .then(a.end.cmp(&b.end))
             .then(a.id.total_cmp(&b.id))
     });
-    Ok(intervals)
+    for markers in boundaries.values_mut() {
+        markers.sort_unstable();
+    }
+    Ok(CommentIntervals {
+        intervals,
+        boundaries,
+    })
 }
 
 /// Splits one formatted text chunk into runs. Cuts land at every comment
@@ -3469,7 +3843,7 @@ fn push_text_chunks(
     comments: &[CommentInterval],
     env: &RenderEnv,
     chunk_pm_start: u32,
-) {
+) -> bool {
     let chunk_end = chunk_start + utf16_len(text);
     let mut cuts = BTreeSet::from([chunk_start, chunk_end]);
     for interval in comments {
@@ -3491,6 +3865,7 @@ fn push_text_chunks(
     }
 
     let cuts: Vec<u32> = cuts.into_iter().collect();
+    let inherited_hyperlink = inherited_hyperlink_style(attributes, env);
     for pair in cuts.windows(2) {
         let start = pair[0];
         let end = pair[1];
@@ -3521,12 +3896,14 @@ fn push_text_chunks(
             story_end: end,
             pm_start: chunk_pm_start + start - chunk_start,
             pm_end: chunk_pm_start + end - chunk_start,
-            inherited_hyperlink: inherited_hyperlink_style(attributes),
+            inherited_hyperlink,
+            hyperlink_size_inherited: false,
             inline_sdt_widget: None,
             atom: false,
             revision_hidden: env.revision_hidden(attributes),
         });
     }
+    inherited_hyperlink.2 && cuts.len() > 1
 }
 
 /// Drops the drawings the view hides, keeping the sequences a hidden shape holds opaque.
@@ -3550,18 +3927,25 @@ fn retain_visible_drawings(
 
 /// Keeps the sequences a field run holds opaque when the view leaves it out.
 fn collect_run_sequences(run: &RawRun, opaque_sequences: &mut BTreeSet<String>) {
-    if let RawRunKind::Field {
-        instruction,
-        nested_sequences,
-        ..
-    } = &run.kind
-    {
-        opaque_sequences.extend(
-            instruction
-                .as_deref()
-                .and_then(docx_layout::sequence_fields::sequence_name),
-        );
-        opaque_sequences.extend(nested_sequences.iter().cloned());
+    match &run.kind {
+        RawRunKind::Field {
+            instruction,
+            nested_sequences,
+            ..
+        } => {
+            opaque_sequences.extend(
+                instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+            opaque_sequences.extend(nested_sequences.iter().cloned());
+        }
+        RawRunKind::Image(image) => {
+            if let Some(shape) = &image.inline_shape {
+                collect_shape_sequences(shape, opaque_sequences);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3573,14 +3957,22 @@ fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<S
         .flatten()
         .flat_map(|paragraph| &paragraph.runs)
     {
-        if let Run::Field(field) = run {
-            opaque_sequences.extend(
-                field
-                    .instruction
-                    .as_deref()
-                    .and_then(docx_layout::sequence_fields::sequence_name),
-            );
-            opaque_sequences.extend(field.nested_sequences.iter().cloned());
+        match run {
+            Run::Field(field) => {
+                opaque_sequences.extend(
+                    field
+                        .instruction
+                        .as_deref()
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                opaque_sequences.extend(field.nested_sequences.iter().cloned());
+            }
+            Run::Image(image) => {
+                if let Some(shape) = &image.inline_shape {
+                    collect_shape_sequences(shape, opaque_sequences);
+                }
+            }
+            _ => {}
         }
     }
     for child in &shape.children {
@@ -3597,6 +3989,225 @@ fn lower_nested_sequences(
         .and_then(docx_layout::sequence_fields::sequence_name)
         .into_iter()
         .collect()
+}
+
+/// Whether `run` paints content a shared inline drawing would sit beside
+/// on its line: visible text, an in-line picture or shape carrier, or a field
+/// with visible fallback text. Floating pictures take no room on the line.
+fn run_shares_line(run: &RawRun) -> bool {
+    match &run.kind {
+        RawRunKind::Text(text) => text.chars().any(|ch| !ch.is_whitespace()),
+        RawRunKind::Image(_) => !run.anchored(),
+        RawRunKind::Field { fallback, .. } => fallback
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
+/// Whether `run` is visible text (not a picture or carrier): the content
+/// a following lone text box would have to wrap below.
+fn run_shares_line_text(run: &RawRun) -> bool {
+    match &run.kind {
+        RawRunKind::Text(text) => text.chars().any(|ch| !ch.is_whitespace()),
+        RawRunKind::Field { fallback, .. } => fallback
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
+/// The inline image carrier for a chart or shape block, mirroring the
+/// carrier the shape branch builds for a native inline shape.
+fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun {
+    let DrawingMarker {
+        pm_offset,
+        story_index,
+        block,
+        hidden,
+        revision_hidden,
+        formatting,
+        ..
+    } = drawing;
+    let mut formatting = formatting;
+    if show_hidden_text && formatting.hidden == Some(true) {
+        formatting.hidden = None;
+    } else if hidden && formatting.hidden.is_none() {
+        formatting.hidden = Some(true);
+    }
+    let (width, height, alt, shape_type, decorative, inline_shape, inline_chart) = match block {
+        LayoutBlock::Chart(chart) => {
+            let (width, height) = (chart.width, chart.height);
+            (width, height, None, None, None, None, Some(Box::new(chart)))
+        }
+        LayoutBlock::Shape(shape) => {
+            let (width, height) = (shape.width, shape.height);
+            let alt = shape.description.clone().or_else(|| shape.title.clone());
+            let shape_type = Some(shape.shape_type.clone());
+            let decorative = shape.decorative;
+            (
+                width,
+                height,
+                alt,
+                shape_type,
+                decorative,
+                Some(Box::new(shape)),
+                None,
+            )
+        }
+        _ => unreachable!("only chart and shape drawings convert to inline runs"),
+    };
+    let image = ImageRun {
+        src: String::new(),
+        width,
+        height,
+        alt,
+        shape_type,
+        transform: None,
+        position: None,
+        wrap_type: Some("inline".to_owned()),
+        display_mode: Some("inline".to_owned()),
+        css_float: Some("none".to_owned()),
+        dist_top: None,
+        dist_bottom: None,
+        dist_left: None,
+        dist_right: None,
+        crop_top: None,
+        crop_right: None,
+        crop_bottom: None,
+        crop_left: None,
+        opacity: None,
+        rotation_deg: None,
+        flip_h: None,
+        flip_v: None,
+        rotation_bounds: None,
+        wrap_text: None,
+        wrap_polygon: None,
+        allow_overlap: None,
+        layout_in_cell: None,
+        no_change_aspect: None,
+        effect_extent: None,
+        effects: None,
+        outline: None,
+        decorative,
+        hyperlink: formatting.hyperlink.clone(),
+        inline_shape,
+        inline_chart,
+        horizontal_rule: None,
+        is_insertion: formatting.is_insertion,
+        is_deletion: formatting.is_deletion,
+        change_author: formatting.change_author.clone(),
+        change_date: formatting.change_date.clone(),
+        change_revision_id: formatting.change_revision_id,
+        pm_start: None,
+        pm_end: None,
+    };
+    RawRun {
+        kind: RawRunKind::Image(image),
+        formatting,
+        story_start: story_index,
+        story_end: story_index + 1,
+        pm_start: pm_offset,
+        pm_end: pm_offset + 1,
+        inherited_hyperlink: (false, false, false),
+        hyperlink_size_inherited: false,
+        inline_sdt_widget: None,
+        atom: true,
+        revision_hidden,
+    }
+}
+
+/// Flows the in-flow chart and text box drawings of one paragraph as
+/// inline runs of its line when they share that line with another in-flow
+/// drawing or with visible inline content, as Word draws inline pictures.
+/// A lone chart or text box keeps the block lowering, anchored drawings
+/// never convert, a plain shape with text (no `txBox`) keeps splitting
+/// its paragraph, and an opaque (VML) text box keeps its block path: it
+/// has no `wp:inline` wrapper to flow. Converted drawings keep their
+/// block ids in the carriers.
+fn inline_shared_drawings(
+    raw_runs: &mut Vec<RawRun>,
+    carried: &[(u32, Vec<RawRun>)],
+    drawings: &mut Vec<DrawingMarker>,
+    show_hidden_text: bool,
+    leading_box: bool,
+) {
+    let convertible = |drawing: &DrawingMarker| {
+        !drawing.anchored
+            && match &drawing.block {
+                LayoutBlock::Chart(chart) => !chart_drawing_anchored(&chart.chart),
+                LayoutBlock::Shape(_) => drawing.inline_text_box,
+                _ => false,
+            }
+    };
+    let count = drawings
+        .iter()
+        .filter(|drawing| convertible(drawing))
+        .count();
+    if count == 0 {
+        return;
+    }
+    let shares = leading_box
+        || count > 1
+        || raw_runs
+            .iter()
+            .chain(carried.iter().flat_map(|(_, runs)| runs.iter()))
+            .any(run_shares_line);
+    if !shares {
+        return;
+    }
+    if !leading_box
+        && count == 1
+        && let Some(drawing) = drawings.iter().find(|drawing| convertible(drawing))
+        && matches!(drawing.block, LayoutBlock::Shape(_))
+    {
+        let preceded = carried
+            .iter()
+            .flat_map(|(_, runs)| runs.iter())
+            .any(run_shares_line_text)
+            || raw_runs
+                .iter()
+                .filter(|run| run.pm_end <= drawing.pm_offset)
+                .any(run_shares_line_text);
+        if preceded {
+            return;
+        }
+    }
+    let mut converted_choices = BTreeMap::<u32, (usize, BTreeSet<usize>)>::new();
+    let mut kept = Vec::new();
+    for drawing in drawings.drain(..) {
+        if convertible(&drawing) {
+            if let Some(twin) = drawing.fallback_twin {
+                let converted = converted_choices
+                    .entry(twin.offset)
+                    .or_insert_with(|| (twin.required, BTreeSet::new()));
+                converted.1.insert(twin.choice);
+            }
+            raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
+        } else {
+            kept.push(drawing);
+        }
+    }
+    let converted_fallbacks: BTreeSet<_> = converted_choices
+        .into_iter()
+        .filter_map(|(offset, (required, choices))| (choices.len() == required).then_some(offset))
+        .collect();
+    if !converted_fallbacks.is_empty() {
+        kept.retain(|drawing| {
+            !(drawing.from_opaque && converted_fallbacks.contains(&drawing.pm_offset))
+        });
+        raw_runs.retain(|run| {
+            let RawRunKind::Image(image) = &run.kind else {
+                return true;
+            };
+            !(image.inline_shape.is_none()
+                && image.inline_chart.is_none()
+                && !image.src.is_empty()
+                && converted_fallbacks.contains(&run.pm_start))
+        });
+    }
+    *drawings = kept;
+    raw_runs.sort_by_key(|run| run.pm_start);
 }
 
 /// Emits the blocks one paragraph contributes. Anchored children are lifted
@@ -3644,6 +4255,17 @@ fn flush_paragraph_parts<T: ReadTxn>(
             }
         }
     }
+    let has_source_content = !drawings.is_empty();
+    let leading_box = source == 0
+        && map.stories.first().is_some_and(|story| story == "body")
+        && list_state.first_picture_bullet().is_some();
+    inline_shared_drawings(
+        &mut raw_runs,
+        &carried,
+        &mut drawings,
+        env.show_hidden_text,
+        leading_box,
+    );
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
         map.spans.push(SourceSpan {
@@ -3655,7 +4277,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
             atom: true,
         });
     }
-    let has_source_content = !drawings.is_empty();
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
@@ -3681,6 +4302,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 .has_source_content = Some(true);
         }
         if paragraph.runs.is_empty()
+            && !leading_box
             && (hides_mark
                 || (!env.show_hidden_text
                     && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
@@ -3826,18 +4448,44 @@ fn flush_paragraph<T: ReadTxn>(
         .strip_prefix(&generated_prefix)
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(&values);
-    let defaults = paragraph_run_defaults(&values);
+    let chain_size = paragraph_chain_size(env, &values);
+    let defaults = paragraph_run_defaults(&values, chain_size);
     let semantic_toc = style_id
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
 
+    let toc_field_result = raw_runs.iter().any(|run| {
+        matches!(&run.kind, RawRunKind::Field { instruction: Some(instruction), .. }
+            if instruction.split_whitespace().next()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC")))
+    });
+    let toc_entry =
+        semantic_toc || style_id.as_deref().is_some_and(is_toc_style) || toc_field_result;
     for run in &mut raw_runs {
-        apply_run_defaults(&mut run.formatting, &defaults);
-        if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
-            strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
+        if toc_entry {
+            strip_toc_hyperlink_style(
+                &mut run.formatting,
+                (
+                    run.inherited_hyperlink.0,
+                    run.inherited_hyperlink.1,
+                    run.hyperlink_size_inherited,
+                ),
+            );
         }
+        apply_run_defaults(&mut run.formatting, &defaults);
+    }
+    if toc_entry {
+        clamp_toc_auxiliary_sizes(&mut raw_runs, defaults.font_size);
     }
     let raw_runs = coalesce_runs(raw_runs);
+    let leading_box = (source == 0
+        && map.stories.first().is_some_and(|story| story == "body")
+        && !map
+            .paragraph_blocks
+            .iter()
+            .any(|(_, previous)| *previous == source))
+    .then(|| list_state.first_picture_bullet().cloned())
+    .flatten();
     map.paragraph_blocks.push((paragraph_pm_start, source));
     let carried: Vec<_> = carried
         .into_iter()
@@ -3863,7 +4511,13 @@ fn flush_paragraph<T: ReadTxn>(
         .flat_map(|(_, runs)| runs)
         .chain(raw_runs)
         .collect();
-    let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
+    let can_start_page = story_id == "body" || story_id.starts_with("body:");
+    let mut attrs =
+        lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state, can_start_page);
+    attrs.leading_inline_box = leading_box.map(|size| docx_layout::types::LeadingInlineBox {
+        width: size.width * 96.0 / 72.0,
+        height: size.height * 96.0 / 72.0,
+    });
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();
@@ -4462,6 +5116,7 @@ fn lower_paragraph_attrs(
     pilcrow_attributes: Option<&Attrs>,
     env: &RenderEnv,
     list_state: &mut ListState,
+    can_start_page: bool,
 ) -> ParagraphAttrs {
     let alignment =
         value_string(values.get("alignment")).and_then(|alignment| match alignment.as_str() {
@@ -4471,6 +5126,8 @@ fn lower_paragraph_attrs(
         });
     let mut result = ParagraphAttrs {
         alignment,
+        justification_mode: value_string(values.get("alignment"))
+            .filter(|mode| matches!(mode.as_str(), "distribute" | "thaiDistribute")),
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
@@ -4484,7 +5141,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env);
+    lower_paragraph_spacing(values, &mut result, env, can_start_page);
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -4711,13 +5368,18 @@ fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
     env: &RenderEnv,
+    can_start_page: bool,
 ) {
     let line_px = env
         .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
-    let suppress_before = env.compatibility_flags.suppress_sp_bf_after_pg_brk
-        && true_property(values, "pageBreakBeforeRun") == Some(true);
+    let suppress_before = (env.compatibility_flags.suppress_sp_bf_after_pg_brk
+        && true_property(values, "pageBreakBeforeRun") == Some(true))
+        || (can_start_page
+            && env.compatibility_flags.compatibility_mode >= 15
+            && (true_property(values, "pageBreakBeforeRun") == Some(true)
+                || true_property(values, "pageBreakBefore") == Some(true)));
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
@@ -4727,7 +5389,7 @@ fn lower_paragraph_spacing(
     {
         (twips_to_pixels(100.0), twips_to_pixels(200.0))
     } else {
-        (AUTO_PARAGRAPH_SPACING_PX, AUTO_PARAGRAPH_SPACING_PX)
+        (twips_to_pixels(280.0), twips_to_pixels(280.0))
     };
     let before_lines = (!auto_before && !suppress_before)
         .then(|| value_number(values.get("spaceBeforeLines")))
@@ -4755,6 +5417,8 @@ fn lower_paragraph_spacing(
         || after_lines.is_some()
     {
         let mut spacing = ParagraphSpacing {
+            before_auto: auto_before.then_some(true),
+            after_auto: auto_after.then_some(true),
             before_lines,
             after_lines,
             before: if suppress_before {
@@ -4892,9 +5556,19 @@ fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut Paragra
     }
 }
 
-fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
+fn paragraph_chain_size(env: &RenderEnv, values: &BTreeMap<String, Any>) -> Option<f64> {
+    if let Some(size) = env.chain_font_size(paragraph_style_id(values).as_deref()) {
+        return Some(size);
+    }
+    Some(paragraph_default_font_size(values))
+}
+
+fn paragraph_run_defaults(
+    values: &BTreeMap<String, Any>,
+    chain_size: Option<f64>,
+) -> RunFormatting {
     let mut result = RunFormatting {
-        font_size: Some(paragraph_default_font_size(values)),
+        font_size: Some(chain_size.unwrap_or(10.0)),
         ..RunFormatting::default()
     };
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
@@ -4967,15 +5641,36 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
 }
 
-fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> (bool, bool) {
+fn inherited_hyperlink_style(attributes: Option<&Attrs>, env: &RenderEnv) -> (bool, bool, bool) {
     let inherited = |key| {
         attribute_map(attributes, key).and_then(|map| map_bool(map, "inheritedHyperlink"))
             == Some(true)
     };
-    (inherited("textColor"), inherited("underline"))
+    let color = inherited("textColor");
+    let underline = inherited("underline");
+    let style_id = attribute_map(attributes, "runStyle").and_then(|map| map_string(map, "styleId"));
+    let style_size = style_id
+        .as_ref()
+        .and_then(|id| env.hyperlink_style_font_sizes.get(id));
+    let mut formatting = RunFormatting::default();
+    lower_font_size(attributes, &mut formatting);
+    let size = formatting.font_size.is_some_and(|size| match style_size {
+        Some(style_size) => *style_size == size,
+        None => {
+            (color || underline)
+                && env
+                    .hyperlink_style_font_sizes
+                    .values()
+                    .any(|style_size| *style_size == size)
+        }
+    });
+    (color, underline, size)
 }
 
-fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool)) {
+fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool, bool)) {
+    if inherited.2 {
+        formatting.font_size = None;
+    }
     if let Some(hyperlink) = &mut formatting.hyperlink {
         hyperlink.no_default_style = Some(true);
         if inherited.0 {
@@ -4984,6 +5679,75 @@ fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, b
         if inherited.1 {
             formatting.underline = None;
         }
+    }
+}
+
+fn carries_toc_entry_text(kind: &RawRunKind) -> bool {
+    let text = match kind {
+        RawRunKind::Text(text) => Some(text),
+        RawRunKind::Field {
+            field_type,
+            raw_type,
+            instruction,
+            fallback,
+            ..
+        } => {
+            let field_type = instruction
+                .as_deref()
+                .and_then(|value| value.split_whitespace().next())
+                .or(raw_type.as_deref())
+                .unwrap_or(field_type);
+            if matches!(
+                field_type.to_ascii_uppercase().as_str(),
+                "PAGEREF" | "PAGE" | "NUMPAGES" | "SECTIONPAGES"
+            ) {
+                return false;
+            }
+            fallback.as_ref()
+        }
+        _ => None,
+    };
+    text.is_some_and(|text| text.chars().any(|c| !c.is_whitespace()))
+}
+
+/// Caps TOC tabs, whitespace and auxiliary fields at the entry text size.
+fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun], fallback_size: Option<f64>) {
+    let entry_size = raw_runs
+        .iter()
+        .filter(|run| carries_toc_entry_text(&run.kind))
+        .filter_map(|run| run.formatting.font_size)
+        .fold(None::<f64>, |size, next| {
+            Some(size.map_or(next, |current| current.max(next)))
+        });
+    let Some(entry_size) = entry_size.or(fallback_size) else {
+        for run in raw_runs.iter_mut() {
+            let auxiliary = match &run.kind {
+                RawRunKind::Tab | RawRunKind::Text(_) | RawRunKind::Field { .. } => {
+                    !carries_toc_entry_text(&run.kind)
+                }
+                _ => false,
+            };
+            if auxiliary {
+                run.formatting.font_size = None;
+            }
+        }
+        return;
+    };
+    for run in raw_runs.iter_mut() {
+        let auxiliary = match &run.kind {
+            RawRunKind::Tab | RawRunKind::Text(_) | RawRunKind::Field { .. } => {
+                !carries_toc_entry_text(&run.kind)
+            }
+            _ => false,
+        };
+        if !auxiliary {
+            continue;
+        }
+        run.formatting.font_size = Some(
+            run.formatting
+                .font_size
+                .map_or(entry_size, |size| size.min(entry_size)),
+        );
     }
 }
 
@@ -5361,10 +6125,10 @@ mod tests {
             ..RenderEnv::default()
         };
         let mut attrs = ParagraphAttrs::default();
-        lower_paragraph_spacing(&values, &mut attrs, &env);
+        lower_paragraph_spacing(&values, &mut attrs, &env, true);
         assert_eq!(attrs.spacing.as_ref().unwrap().before, Some(64.0));
         env.compatibility_flags.suppress_sp_bf_after_pg_brk = true;
-        lower_paragraph_spacing(&values, &mut attrs, &env);
+        lower_paragraph_spacing(&values, &mut attrs, &env, true);
         let spacing = attrs.spacing.unwrap();
         assert_eq!(spacing.before, Some(0.0));
         assert_eq!(spacing.before_lines, None);
@@ -5459,7 +6223,7 @@ mod tests {
                 "shading".to_owned(),
                 Any::from_json(&shading.to_string()).unwrap(),
             )]);
-            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default());
+            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default(), true);
             assert_eq!(attrs.shading.as_deref(), expected, "{shading}");
         }
         assert_eq!(
@@ -5490,6 +6254,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
         assert_eq!(attrs.list_marker_bold, Some(true));
@@ -5521,6 +6286,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(false));
         assert_eq!(attrs.list_marker_italic, Some(false));
@@ -5551,6 +6317,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(true));
         assert_eq!(attrs.list_marker_italic, Some(true));
@@ -6246,6 +7013,52 @@ mod tests {
         )
         .unwrap();
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap()
+    }
+
+    #[test]
+    fn hidden_inline_shapes_collect_nested_sequence_metadata() {
+        let nested = json!({
+            "id": "nested", "shapeType": "rect", "width": 20, "height": 20,
+            "geometryPath": [], "children": [], "nestedSequences": ["figure"],
+            "innerText": [{"id": "nested-text", "runs": [{
+                "kind": "field", "fieldType": "OTHER", "rawType": "SEQ",
+                "instruction": "SEQ Table", "nestedSequences": ["listing"], "fallback": "7"
+            }]}]
+        });
+        let shape: ShapeBlock = serde_json::from_value(json!({
+            "id": "box", "shapeType": "rect", "width": 60, "height": 40,
+            "geometryPath": [], "children": [],
+            "innerText": [{"id": "box-text", "runs": [{
+                "kind": "image", "src": "", "width": 20, "height": 20, "inlineShape": nested
+            }]}]
+        }))
+        .unwrap();
+        let expected = BTreeSet::from([
+            "figure".to_owned(),
+            "listing".to_owned(),
+            "table".to_owned(),
+        ]);
+        let mut sequences = BTreeSet::new();
+        collect_shape_sequences(&shape, &mut sequences);
+        assert_eq!(sequences, expected);
+        let carrier = inline_drawing_run(
+            DrawingMarker {
+                pm_offset: 0,
+                story_index: 0,
+                block: LayoutBlock::Shape(shape),
+                hidden: true,
+                revision_hidden: false,
+                anchored: false,
+                formatting: RunFormatting::default(),
+                inline_text_box: true,
+                from_opaque: false,
+                fallback_twin: None,
+            },
+            false,
+        );
+        let mut sequences = BTreeSet::new();
+        collect_run_sequences(&carrier, &mut sequences);
+        assert_eq!(sequences, expected);
     }
 
     #[test]

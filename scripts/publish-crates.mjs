@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { FONT_PACK_CRATES, prepareFontPacks } from './rust-font-packs.mjs';
 import {
   RUST_PUBLISH_CRATES,
   cargoMetadata,
@@ -262,6 +263,7 @@ function publishDryRun(env) {
 }
 
 async function publish() {
+  prepareFontPacks();
   const oidcToken = process.env.CARGO_REGISTRY_TOKEN;
   const bootstrapToken = process.env.CRATES_IO_BOOTSTRAP_TOKEN;
   const noAuthEnv = cargoNoAuthEnv();
@@ -304,7 +306,11 @@ async function publish() {
       bootstrapToken,
       checkVersion: () => crateVersion(crate.name, version),
       runPublish: (token) =>
-        run('cargo', ['publish', '--locked', '--registry', 'crates-io', '-p', crate.name], {
+        run('cargo', [
+          'publish', '--locked', '--registry', 'crates-io',
+          ...(FONT_PACK_CRATES.some((pack) => pack.name === crate.name) ? ['--allow-dirty'] : []),
+          '-p', crate.name
+        ], {
           allowFailure: true,
           env: cargoPublishEnv(token)
         }),

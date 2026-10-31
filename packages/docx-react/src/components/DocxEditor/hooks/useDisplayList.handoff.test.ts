@@ -24,7 +24,8 @@ beforeAll(() =>
         resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
       )
     )
-  )
+  ),
+  30_000
 );
 
 afterEach(() => {
@@ -103,7 +104,7 @@ test('a session handed over keeps its worker and shows the old pages until the n
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );

@@ -3,6 +3,7 @@ import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
+import { PptxDocument } from '../wasm/engine';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -12,12 +13,15 @@ import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
-  decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
+  decodeTiffImage, decodeFontFace, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
 import { buildCommandFrame } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
+import type { createCommandDefaultFonts } from './commandDefaultFonts';
+import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
+import type { DefaultFontFace, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
   type PresentationSharedAck, type PresentationSharedMethods } from './commandSharedAdapter';
 import { findLine, hitGeometry, indexHitGeometry, navigateGeometry, transformedRect,
@@ -43,6 +47,13 @@ const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
+export const commandDefaultFontModule = { load: () => import('./commandDefaultFonts') };
+
+function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer : bytes.slice().buffer;
+}
+
 function normalizeFontSize(size: number): number {
   return Math.round(size * 100) / 100;
 }
@@ -50,6 +61,8 @@ function normalizeFontSize(size: number): number {
 export interface PresentationCommandHostOptions {
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
   onPipeOutput?(): void;
+  onDefaultFonts?(result: TransferResult<PresentationCommandAck & DefaultFontPayload>): void;
+  installDefaultFonts?(faces: readonly DefaultFontFace[]): Promise<readonly DefaultFontFace[]>;
 }
 
 export interface PresentationCommandRegistration {
@@ -57,6 +70,10 @@ export interface PresentationCommandRegistration {
   policies: MethodPolicies<PresentationCommandMethods & PresentationSharedMethods>;
   drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
   dispose(): void;
+}
+
+function engineVersion(): string | undefined {
+  try { return PptxDocument.version(); } catch { return undefined; }
 }
 
 export function registerPresentationCommandHandlers(
@@ -105,6 +122,16 @@ export function registerPresentationCommandHandlers(
   const slideIndices = new Map<string, number>();
   let disposed = false;
   let opening = false;
+  let defaultFonts: ReturnType<typeof createCommandDefaultFonts> | undefined;
+  let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
+  let cancelDefaultFontImport: (() => void) | undefined;
+  let gatingFonts = false;
+  const gatedDefaultFonts: DefaultFontFace[] = [];
+  let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
+  const suppliedFonts: { family: string }[] = [];
+  let fontTimer: ReturnType<typeof setTimeout> | undefined;
+  const fontSlides = new Set<string>();
+  let collectDeckFonts = false;
   let throughSeq = 0;
   let version = '';
   const documentEpoch = 1;
@@ -144,6 +171,81 @@ export function registerPresentationCommandHandlers(
 
   const layouts = new Map<string, { slideIndex: number; revision: number;
     list: SlideDisplayList; geometry: CommandHitGeometryIndex }>();
+
+  function hasDefaultFonts(slideId?: string): boolean {
+    if (disposed || !requestedFonts) return false;
+    if (defaultFonts) return defaultFonts.hasPending(slideId);
+    try {
+      return requestedFonts(slideId).some((face) => face.scripts?.length || !suppliedFonts.some((font) =>
+        font.family.trim().toLowerCase() === face.family.trim().toLowerCase()));
+    } catch { return false; }
+  }
+
+  function requestDefaultFonts(slideId?: string): DefaultFontFace[] | Promise<DefaultFontFace[]> {
+    if (!hasDefaultFonts(slideId)) return [];
+    if (defaultFonts) return defaultFonts.load(slideId);
+    creatingDefaultFonts ??= new Promise<ReturnType<typeof createCommandDefaultFonts> | undefined>((resolve) => {
+      let finished = false;
+      const finish = (fonts?: ReturnType<typeof createCommandDefaultFonts>) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        cancelDefaultFontImport = undefined;
+        if (!fonts) {
+          requestedFonts = undefined;
+          if (fontTimer !== undefined) clearTimeout(fontTimer);
+          fontTimer = undefined;
+          fontSlides.clear();
+          collectDeckFonts = false;
+        }
+        resolve(fonts);
+      };
+      const timer = setTimeout(() => finish(), 5000);
+      cancelDefaultFontImport = () => finish();
+      void commandDefaultFontModule.load().then(({ createCommandDefaultFonts }) => {
+        if (finished || disposed || !requestedFonts) { finish(); return; }
+        defaultFonts = createCommandDefaultFonts(suppliedFonts, requestedFonts,
+          (face) => {
+            const font = { ...face, bytes: new Uint8Array(face.bytes) };
+            if (face.kind === 'coverage') presentation().registerFallbackFont(font);
+            else presentation().registerFont(font);
+          },
+          (faces) => {
+            if (!faces.length || disposed) return;
+            layouts.clear();
+            for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
+            for (const [id, revision] of revisions) revisions.set(id, revision + 1);
+            if (gatingFonts) { gatedDefaultFonts.push(...faces); return; }
+            if (!opening && options.onDefaultFonts) {
+              const result = ack([], [...revisions.keys()]);
+              options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces },
+                [...result.transfer, ...faces.map((face) => face.bytes)]));
+            }
+          }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()));
+        finish(defaultFonts);
+      }).catch(() => finish());
+    });
+    return creatingDefaultFonts.then((fonts) => fonts?.load(slideId) ?? []);
+  }
+
+  function loadDefaultFonts(slideIds?: readonly string[]): void {
+    if (!requestedFonts || disposed) return;
+    if (slideIds) {
+      for (const id of slideIds) if (hasDefaultFonts(id)) fontSlides.add(id);
+    } else if (hasDefaultFonts()) collectDeckFonts = true;
+    if (!collectDeckFonts && !fontSlides.size) return;
+    if (fontTimer !== undefined) return;
+    fontTimer = setTimeout(() => {
+      fontTimer = undefined;
+      const slides = collectDeckFonts ? [undefined] : [...fontSlides];
+      collectDeckFonts = false;
+      fontSlides.clear();
+      for (const slide of slides) {
+        const loading = requestDefaultFonts(slide);
+        if (loading instanceof Promise) void loading.catch(() => {});
+      }
+    }, 0);
+  }
 
   function clearMarks(): void {
     for (const key of Object.keys(storedMarks) as (keyof TextStyle)[]) delete storedMarks[key];
@@ -308,6 +410,8 @@ export function registerPresentationCommandHandlers(
 
   function sharedAck(result: TransferResult<PresentationCommandAck>): TransferResult<PresentationSharedAck> {
     const value = projection.ack(result.value, retainedBasis?.version);
+    const faces = (result.value as DefaultFontPayload).defaultFonts;
+    if (faces?.length) Object.assign(value, { defaultFonts: faces });
     value.outcomes = value.outcomes.map((outcome) => outcome.reason === 'stale-basis' && sharedReasons.has(outcome.seq)
       ? { ...outcome, reason: sharedReasons.get(outcome.seq) } : outcome);
     return transferable(value, result.transfer);
@@ -588,8 +692,9 @@ export function registerPresentationCommandHandlers(
   }
 
   function admit(command: PresentationCommandEnvelope): Admission | PresentationCommandRefusalReason {
+    const remote = command.kind === 'collabPipe' || command.kind === 'applyRemoteUpdate';
     if (!command.basis || command.basis.epoch !== documentEpoch ||
-      typeof command.basis.version !== 'string' || command.basis.version.length === 0) return 'stale-basis';
+      !remote && (typeof command.basis.version !== 'string' || command.basis.version.length === 0)) return 'stale-basis';
     const payload = command.payload;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'invalid-payload';
     if (command.kind !== 'activateSlide' && (!Number.isFinite(command.payload.inputTime) ||
@@ -625,6 +730,20 @@ export function registerPresentationCommandHandlers(
     if (reference?.source === 'afterSeq' && (!Number.isSafeInteger(reference.seq) || reference.seq < 1)) return 'invalid-payload';
     if (reference?.source === 'afterSeq' ? command.afterSeq !== reference.seq
       : command.afterSeq !== undefined) return 'invalid-payload';
+    if (command.kind === 'collabPipe') {
+      return pipe && validPipePayload(command.payload, DEFAULT_MAX_FRAME_BYTES, {
+        validCursor: validPresenceCursor, optionKeys: PIPE_OPTION_KEYS,
+      }) ? { kind: 'remote', pipe: command.payload } : 'invalid-payload';
+    }
+    if (command.kind === 'applyRemoteUpdate') {
+      const bytes: readonly unknown[] = Array.isArray(command.payload.bytes) ? command.payload.bytes : [command.payload.bytes];
+      let total = 0;
+      for (const update of bytes) {
+        if (!(update instanceof ArrayBuffer) || update.byteLength === 0) return 'invalid-payload';
+        total += update.byteLength;
+      }
+      return bytes.length > 0 && total <= 16 * 1024 * 1024 ? { kind: 'remote', bytes: bytes as ArrayBuffer[] } : 'invalid-payload';
+    }
     if (command.afterSeq !== undefined) {
       if (!outcomes.has(command.afterSeq)) return 'stale-basis';
       const dependency = outcomes.get(command.afterSeq)!;
@@ -649,20 +768,6 @@ export function registerPresentationCommandHandlers(
       if (command.basis.version !== version) return 'stale-basis';
       const run = prepareCommandOperation(presentation(), command.payload);
       return run ? { kind: 'invoke', run, method: command.payload.method } : 'invalid-payload';
-    }
-    if (command.kind === 'collabPipe') {
-      return pipe && validPipePayload(command.payload, DEFAULT_MAX_FRAME_BYTES, {
-        validCursor: validPresenceCursor, optionKeys: PIPE_OPTION_KEYS,
-      }) ? { kind: 'remote', pipe: command.payload } : 'invalid-payload';
-    }
-    if (command.kind === 'applyRemoteUpdate') {
-      const bytes: readonly unknown[] = Array.isArray(command.payload.bytes) ? command.payload.bytes : [command.payload.bytes];
-      let total = 0;
-      for (const update of bytes) {
-        if (!(update instanceof ArrayBuffer) || update.byteLength === 0) return 'invalid-payload';
-        total += update.byteLength;
-      }
-      return bytes.length > 0 && total <= 16 * 1024 * 1024 ? { kind: 'remote', bytes: bytes as ArrayBuffer[] } : 'invalid-payload';
     }
     if (command.kind === 'applyEdits') {
       if (composition) return 'invalid-composition';
@@ -1172,6 +1277,8 @@ export function registerPresentationCommandHandlers(
     if (admitted.kind === 'font') {
       const font = { ...admitted.font, bytes: new Uint8Array(admitted.font.bytes) };
       admitted.fontId = admitted.fallback ? opened.registerFallbackFont(font) : opened.registerFont(font);
+      if (requestedFonts) suppliedFonts.push({ family: font.family });
+      defaultFonts?.supply(font.family);
       layouts.clear();
       for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
       return false;
@@ -1300,13 +1407,124 @@ export function registerPresentationCommandHandlers(
     return start !== end || text.length > 0;
   }
 
+  function runCommand(command: PresentationCommandEnvelope): TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
+    presentation();
+    if (command.kind !== 'activateSlide') refreshTopology();
+    if (!matches(command) || !Number.isSafeInteger(command.seq) || command.seq < 1) return ack();
+    const cached = outcomes.get(command.seq);
+    if (cached) return ack([{ ...cached }]);
+    if (command.seq <= throughSeq) return ack([{ seq: command.seq, status: 'refused',
+      reason: 'stale-basis', committed: false }]);
+    if (command.seq !== throughSeq + 1) return ack();
+    const admitted = admit(command);
+    if (typeof admitted === 'string') {
+      if (command.kind === 'compositionCommit' && composition &&
+        composition.id === command.payload?.compositionId) composition = undefined;
+      const outcome: PresentationCommandOutcome = { seq: command.seq,
+        status: admitted === 'dependency-refused' ? 'cancelled' : 'refused',
+        reason: admitted, committed: false };
+      throughSeq = command.seq;
+      outcomes.set(command.seq, outcome);
+      trim();
+      return ack([outcome]);
+    }
+    const previous = { version, selection, objectSelection, activeSlideId, editState: lastEditState };
+    const changedSlideId = 'selection' in admitted ? admitted.selection?.slideId
+      : 'object' in admitted ? admitted.object.slideId : undefined;
+    const previousRevision = changedSlideId === undefined ? undefined : revisions.get(changedSlideId);
+    try {
+      const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
+      const committed = apply(command, admitted);
+      const historyDirtySlideIds = committed && admitted.kind === 'history'
+        ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
+      if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
+      if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
+        const cached = stories.get(storyKey(admitted.selection))!;
+        cached.snapshot = presentation().story(admitted.selection.storyId);
+        cached.formatting = undefined;
+        cached.echoRanges = [];
+      }
+      throughSeq = command.seq;
+      version = presentation().version();
+      metadataVersion = version;
+      if (committed) projection.commit(version);
+      if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
+      const outcome: PresentationCommandOutcome = { seq: command.seq,
+        status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
+          : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
+          admitted.kind === 'format' || admitted.kind === 'alignment' ||
+          admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
+          command.kind === 'compositionStart' || command.kind === 'compositionEnd' ? 'applied' : 'noop',
+        committed };
+      outcomes.set(command.seq, outcome);
+      if (committed && admitted.kind === 'text') {
+        const story = storyKey(admitted.selection);
+        const mutation: Mutation = { seq: command.seq, story, start: admitted.start,
+          deleted: admitted.end - admitted.start, inserted: admitted.text.length, version, beforeText };
+        mutations.set(command.seq, mutation);
+        const records = storyMutations.get(story) ?? new Map<number, Mutation>();
+        records.set(command.seq, mutation);
+        storyMutations.set(story, records);
+      }
+      selections.set(command.seq, selection ? anchor(selection) : null);
+      trim();
+      const dirtySlideIds = admitted.kind === 'font' ? [...revisions.keys()] : admitted.kind === 'batch' && admitted.result?.ok
+        ? admitted.result.changedSlides : historyDirtySlideIds ?? (committed && activeSlideId !== null ? [activeSlideId] : []);
+      for (const slideId of dirtySlideIds) {
+        const revision = revisions.get(slideId);
+        if (revision !== undefined) revisions.set(slideId, revision + 1);
+      }
+      if (committed && requestedFonts) loadDefaultFonts(admitted.kind === 'remote' || admitted.kind === 'history' || admitted.kind === 'invoke'
+        ? undefined : dirtySlideIds);
+      const publish = () => {
+        gatingFonts = false;
+        const faces = gatedDefaultFonts.splice(0);
+        const result = ack([outcome], faces.length ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
+          admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
+          admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
+        if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
+        return faces.length ? transferable({ ...result.value, defaultFonts: faces },
+          [...result.transfer, ...faces.map((face) => face.bytes)]) : result;
+      };
+      if (activeSlideId !== previous.activeSlideId && activeSlideId !== null && hasDefaultFonts(activeSlideId)) {
+        gatingFonts = true;
+        const loading = requestDefaultFonts(activeSlideId);
+        if (loading instanceof Promise) return loading.then(publish);
+      }
+      return publish();
+    } catch (error) {
+      if (version !== previous.version) versions.delete(version);
+      version = previous.version;
+      selection = previous.selection;
+      objectSelection = previous.objectSelection;
+      activeSlideId = previous.activeSlideId;
+      lastEditState = previous.editState;
+      if (changedSlideId !== undefined && previousRevision !== undefined) revisions.set(changedSlideId, previousRevision);
+      failedSeq = command.seq;
+      throughSeq = command.seq;
+      readOnly = true;
+      outcomes.set(command.seq, { seq: command.seq, status: 'refused',
+        reason: 'unknown-outcome', committed: false });
+      throw new CommandOutcomeUnknown(command.seq,
+        `Command ${command.seq} has an unknown outcome: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   const handlers = {
+    async decodeFontFace(_, bytes, input, wasm) {
+      if (disposed) throw new Error('Presentation command session is disposed');
+      await (options.initWasm ?? initWasm)(wasm);
+      if (disposed) throw new Error('Presentation command session is disposed');
+      const face = await decodeFontFace(bytes, input);
+      return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
+    },
     async openCommandEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation command session is disposed');
       if (handle || opening) throw new Error('Presentation command session is already open');
       if (!input || typeof input.session !== 'string' || !input.session ||
         typeof input.incarnation !== 'string' || !input.incarnation ||
-        (input.readOnly !== undefined && typeof input.readOnly !== 'boolean')) {
+        (input.readOnly !== undefined && typeof input.readOnly !== 'boolean') ||
+        (input.defaultFonts !== undefined && typeof input.defaultFonts !== 'boolean')) {
         throw new TypeError('Invalid presentation command open options');
       }
       opening = true;
@@ -1316,7 +1534,12 @@ export function registerPresentationCommandHandlers(
         handle = openPresentation(new Uint8Array(bytes), { clientId: input.clientId,
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           fallbackFonts: input.fallbackFonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
-          initialUpdate: input.initialUpdate });
+          initialUpdate: input.initialUpdate, retainSource: false });
+        if (input.defaultFonts !== false) {
+          for (const face of input.fonts ?? []) suppliedFonts.push({ family: face.family });
+          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId).map((face) => face.scripts
+            ? { ...face, scripts: face.scripts.filter((script) => script.startsWith('cjk-')) } : face);
+        }
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
         });
@@ -1340,105 +1563,29 @@ export function registerPresentationCommandHandlers(
           `Presentation command open refused: ${content.failure.message}`, content.failure.code);
         cacheStories(content);
         for (const slide of openedMetadata.slides) revisions.set(slide.id, 0);
+        const loading = !requestedFonts || activeSlideId === null ? [] : requestDefaultFonts(activeSlideId);
+        const fonts = loading instanceof Promise ? await loading : undefined;
+        if (disposed) throw new Error('Presentation command session is disposed');
         const result = ack();
-        const recoveryUpdate = handle.encodeStateAsUpdate().slice().buffer;
+        const sourceBaseline = input.initialUpdate === undefined && !input.collaboration && !result.value.updates?.length;
+        const recoveryUpdate = sourceBaseline ? undefined : ownedBuffer(handle.encodeStateAsUpdate());
+        if (requestedFonts) loadDefaultFonts();
         return transferable({ ...result.value, shared: projection.ack(result.value),
           slides: openedMetadata.slides, size: openedMetadata.size,
-          activeSlideId, frame: result.value.frame ?? null, recoveryUpdate }, [...result.transfer, recoveryUpdate]);
+          activeSlideId, frame: result.value.frame ?? null, recoveryBaseline: sourceBaseline ? 'source' : 'update',
+          recoveryEngine: engineVersion(), ...(recoveryUpdate ? { recoveryUpdate } : {}),
+          ...(fonts ? { defaultFonts: fonts } : {}) },
+          [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : []), ...(fonts ?? []).map((face) => face.bytes)]);
       } catch (error) {
         dispose();
         throw error;
       } finally { opening = false; }
     },
-    command(_, command) {
-      presentation();
-      if (command.kind !== 'activateSlide') refreshTopology();
-      if (!matches(command) || !Number.isSafeInteger(command.seq) || command.seq < 1) return ack();
-      const cached = outcomes.get(command.seq);
-      if (cached) return ack([{ ...cached }]);
-      if (command.seq <= throughSeq) return ack([{ seq: command.seq, status: 'refused',
-        reason: 'stale-basis', committed: false }]);
-      if (command.seq !== throughSeq + 1) return ack();
-      const admitted = admit(command);
-      if (typeof admitted === 'string') {
-        if (command.kind === 'compositionCommit' && composition &&
-          composition.id === command.payload?.compositionId) composition = undefined;
-        const outcome: PresentationCommandOutcome = { seq: command.seq,
-          status: admitted === 'dependency-refused' ? 'cancelled' : 'refused',
-          reason: admitted, committed: false };
-        throughSeq = command.seq;
-        outcomes.set(command.seq, outcome);
-        trim();
-        return ack([outcome]);
-      }
-      const previous = { version, selection, objectSelection, activeSlideId, editState: lastEditState };
-      const changedSlideId = 'selection' in admitted ? admitted.selection?.slideId
-        : 'object' in admitted ? admitted.object.slideId : undefined;
-      const previousRevision = changedSlideId === undefined ? undefined : revisions.get(changedSlideId);
-      try {
-        const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
-        const committed = apply(command, admitted);
-        const historyDirtySlideIds = committed && admitted.kind === 'history'
-          ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
-        if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
-        if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
-          const cached = stories.get(storyKey(admitted.selection))!;
-          cached.snapshot = presentation().story(admitted.selection.storyId);
-          cached.formatting = undefined;
-          cached.echoRanges = [];
-        }
-        throughSeq = command.seq;
-        version = presentation().version();
-        metadataVersion = version;
-        if (committed) projection.commit(version);
-        if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
-        const outcome: PresentationCommandOutcome = { seq: command.seq,
-          status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
-            : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
-            admitted.kind === 'format' || admitted.kind === 'alignment' ||
-            admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
-            command.kind === 'compositionStart' || command.kind === 'compositionEnd' ? 'applied' : 'noop',
-          committed };
-        outcomes.set(command.seq, outcome);
-        if (committed && admitted.kind === 'text') {
-          const story = storyKey(admitted.selection);
-          const mutation: Mutation = { seq: command.seq, story, start: admitted.start,
-            deleted: admitted.end - admitted.start, inserted: admitted.text.length, version, beforeText };
-          mutations.set(command.seq, mutation);
-          const records = storyMutations.get(story) ?? new Map<number, Mutation>();
-          records.set(command.seq, mutation);
-          storyMutations.set(story, records);
-        }
-        selections.set(command.seq, selection ? anchor(selection) : null);
-        trim();
-        const dirtySlideIds = admitted.kind === 'font' ? [...revisions.keys()] : admitted.kind === 'batch' && admitted.result?.ok
-          ? admitted.result.changedSlides : historyDirtySlideIds ?? (committed && activeSlideId !== null ? [activeSlideId] : []);
-        for (const slideId of dirtySlideIds) {
-          const revision = revisions.get(slideId);
-          if (revision !== undefined) revisions.set(slideId, revision + 1);
-        }
-        const result = ack([outcome], dirtySlideIds, admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
-          admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
-        if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
-        return result;
-      } catch (error) {
-        if (version !== previous.version) versions.delete(version);
-        version = previous.version;
-        selection = previous.selection;
-        objectSelection = previous.objectSelection;
-        activeSlideId = previous.activeSlideId;
-        lastEditState = previous.editState;
-        if (changedSlideId !== undefined && previousRevision !== undefined) revisions.set(changedSlideId, previousRevision);
-        failedSeq = command.seq;
-        throughSeq = command.seq;
-        readOnly = true;
-        outcomes.set(command.seq, { seq: command.seq, status: 'refused',
-          reason: 'unknown-outcome', committed: false });
-        throw new CommandOutcomeUnknown(command.seq,
-          `Command ${command.seq} has an unknown outcome: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    command(_: null, command: PresentationCommandEnvelope):
+      TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
+      return runCommand(command);
     },
-    edit(_, command): TransferResult<PresentationSharedAck> {
+    edit(_, command): TransferResult<PresentationSharedAck> | Promise<TransferResult<PresentationSharedAck>> {
       presentation();
       if (!isCommandEnvelope(command as unknown)) {
         if (!Number.isSafeInteger(command?.seq) || command.seq < 1) {
@@ -1461,7 +1608,8 @@ export function registerPresentationCommandHandlers(
           envelope.basis.version = '';
         }
       }
-      return sharedAck(handlers.command(null, envelope));
+      const result = handlers.command(null, envelope);
+      return result instanceof Promise ? result.then(sharedAck) : sharedAck(result);
     },
     checkpoint() {
       throw new Error('Presentation command checkpoints are unavailable');
@@ -1515,12 +1663,12 @@ export function registerPresentationCommandHandlers(
         default: throw new TypeError('Unsupported access method');
       }
     },
-    checkpointCommandEditor(_, request) {
+    checkpointCommandEditor(_, request, options) {
       fence(request);
-      const bytes = presentation().save().slice().buffer;
-      const recoveryUpdate = presentation().encodeStateAsUpdate().slice().buffer;
+      const bytes = ownedBuffer(presentation().save());
+      const recoveryUpdate = options?.rebase ? ownedBuffer(presentation().encodeStateAsUpdate()) : undefined;
       return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
-        bytes, recoveryUpdate }, [bytes, recoveryUpdate]);
+        bytes, ...(recoveryUpdate ? { recoveryUpdate } : {}) }, recoveryUpdate ? [bytes, recoveryUpdate] : [bytes]);
     },
     prepareCommandPicture(_, request, bytes) {
       fence(request);
@@ -1539,6 +1687,12 @@ export function registerPresentationCommandHandlers(
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (fontTimer !== undefined) clearTimeout(fontTimer);
+    cancelDefaultFontImport?.();
+    defaultFonts?.dispose(); defaultFonts = undefined;
+    requestedFonts = undefined;
+    suppliedFonts.length = 0;
+    fontSlides.clear();
     const opened = handle;
     pipe?.dispose(); pipe = undefined;
     offUpdates?.(); offUpdates = undefined; pendingUpdates.length = 0;
@@ -1568,6 +1722,7 @@ export function registerPresentationCommandHandlers(
   }
 
   return { handlers, policies: {
+    decodeFontFace: { lane: 'interactive' },
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
