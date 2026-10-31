@@ -323,11 +323,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const warmed = useRef(new WeakSet<NonNullable<ReturnType<typeof pageQueries.get>>>());
   const lastInput = useRef(Number.NEGATIVE_INFINITY);
   const lastDocumentChange = useRef(Number.NEGATIVE_INFINITY);
-  const layoutRevision = useRef(geometry?.layoutRevision);
+  const documentState = useRef({ layoutRevision: geometry?.layoutRevision, documentVersion: geometry?.documentVersion });
   useLayoutEffect(() => {
-    if (layoutRevision.current !== undefined && layoutRevision.current !== geometry?.layoutRevision) lastDocumentChange.current = performance.now();
-    layoutRevision.current = geometry?.layoutRevision;
-  }, [geometry?.layoutRevision]);
+    const before = documentState.current;
+    if ((before.layoutRevision !== undefined && before.layoutRevision !== geometry?.layoutRevision) ||
+      (before.documentVersion !== undefined && before.documentVersion !== geometry?.documentVersion)) lastDocumentChange.current = performance.now();
+    documentState.current = { layoutRevision: geometry?.layoutRevision, documentVersion: geometry?.documentVersion };
+  }, [geometry?.layoutRevision, geometry?.documentVersion]);
   useEffect(() => {
     const input = () => { lastInput.current = performance.now(); };
     for (const type of ['keydown', 'beforeinput', 'compositionupdate']) document.addEventListener(type, input, true);
