@@ -1242,6 +1242,7 @@ export function PptxEditorContent({
     }
     const dpr = window.devicePixelRatio || 1;
     presentFrame(null);
+    shownHandleRef.current = null;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     let cancelled = false;
     const images = worker && workerFrame ? worker.images.resolve(workerFrame) : null;

@@ -143,7 +143,7 @@ it('calls the legacy onReady only after the first slide painted', async () => {
   }
 });
 
-it('holds the legacy onReady while the editor is hidden and calls it once shown', async () => {
+it('holds the legacy onReady while the editor is hidden and until its reveal repaint lands', async () => {
   const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
   const observers: Array<() => void> = [];
   const OriginalObserver = globalThis.ResizeObserver;
@@ -168,9 +168,27 @@ it('holds the legacy onReady while the editor is hidden and calls it once shown'
     await waitFor(() => expect(painted).toBeGreaterThan(0));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     expect(ready).toHaveLength(0);
-    rects.mockRestore();
-    await act(async () => { for (const notify of observers) notify(); });
-    await waitFor(() => expect(ready).toHaveLength(1));
+    let finish!: () => void;
+    const repaint = new Promise<void>((resolve) => { finish = resolve; });
+    paint.mockImplementation(() => { painted += 1; return repaint; });
+    const before = painted;
+    const sizes = (['clientWidth', 'clientHeight'] as const).map((name) => {
+      const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+      Object.defineProperty(HTMLElement.prototype, name, { configurable: true, get: () => (name === 'clientWidth' ? 400 : 300) });
+      return () => { if (original) Object.defineProperty(HTMLElement.prototype, name, original); else Reflect.deleteProperty(HTMLElement.prototype, name); };
+    });
+    try {
+      rects.mockRestore();
+      await act(async () => { for (const notify of observers) notify(); });
+      await waitFor(() => expect(painted).toBeGreaterThan(before));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(ready).toHaveLength(0);
+      await act(async () => { finish(); await repaint; });
+      await waitFor(() => expect(ready).toHaveLength(1));
+    } finally {
+      finish();
+      for (const restore of sizes) restore();
+    }
   } finally {
     rects.mockRestore();
     paint.mockRestore();
