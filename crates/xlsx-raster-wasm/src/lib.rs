@@ -20,8 +20,12 @@ mod tests {
         render_png(&json).unwrap()
     }
 
+    fn web_png(display_list: &DisplayList) -> Vec<u8> {
+        xlsx_raster::render_png(display_list).unwrap()
+    }
+
     #[test]
-    fn json_raster_matches_workbook_png_bytes() {
+    fn json_raster_matches_the_web_engine_png_bytes() {
         for bytes in [
             include_bytes!("../../../packages/xlsx/test-fixtures/sample.xlsx").as_slice(),
             include_bytes!("../../../packages/xlsx/test-fixtures/charts.xlsx").as_slice(),
@@ -51,9 +55,13 @@ mod tests {
                 ] {
                     let (display_list, width, height) =
                         workbook.png_display_list_for(sheet, &viewport).unwrap();
+                    assert_eq!(
+                        display_list,
+                        workbook.display_list_for(sheet, &viewport).unwrap()
+                    );
                     let full = workbook.render_png_for(sheet, &viewport).unwrap();
                     assert_eq!((width, height), (full.width, full.height));
-                    assert_eq!(round_trip(&display_list), full.bytes);
+                    assert_eq!(round_trip(&display_list), web_png(&display_list));
                 }
                 for range in [None, Some("A1:B3"), Some("B2:D5")] {
                     for scale in [0.75, 1.0, 1.3, 2.0] {
@@ -68,7 +76,7 @@ mod tests {
                             .unwrap();
                         let full = workbook.render_sheet(sheet, &options).unwrap();
                         assert_eq!((width, height), (full.width, full.height));
-                        assert_eq!(round_trip(&display_list), full.bytes);
+                        assert_eq!(round_trip(&display_list), web_png(&display_list));
                     }
                 }
             }
