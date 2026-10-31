@@ -857,7 +857,7 @@ pub(crate) fn source_index(source: &Mutex<Option<SourcePackage>>) -> Option<Arc<
 
 /// What a save projects from one story, compared with the story as seeded
 /// to decide whether its part saves as its source bytes.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct StoryState {
     root: String,
     /// Digest of every segment the projection reads: see [`story_fingerprint`].
@@ -867,6 +867,40 @@ struct StoryState {
     /// Where each comment anchored in the story starts and ends, carets and
     /// ranges over embeds included: the projection's comment markers.
     comments: BTreeMap<String, Vec<(u32, u32)>>,
+}
+
+#[derive(Default)]
+pub(crate) struct StoryStateCache {
+    media: Option<Arc<docx_parse::media::MediaTable>>,
+    entries: HashMap<String, CachedStoryState>,
+}
+
+struct CachedStoryState {
+    revision: u64,
+    state: StoryState,
+}
+
+impl StoryStateCache {
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn evict_root_changes(
+        cache: &Mutex<Self>,
+        txn: &TransactionMut<'_>,
+        events: &yrs::types::Events,
+    ) {
+        for event in events.iter() {
+            if let Event::Map(event) = event
+                && event.path().is_empty()
+            {
+                let mut cache = cache.lock().unwrap();
+                for story in event.keys(txn).keys() {
+                    cache.entries.remove(story.as_ref());
+                }
+            }
+        }
+    }
 }
 
 /// One paragraph's segments in a story, or the segments after its last pilcrow.
@@ -900,7 +934,64 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
 }
 
 fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, StoryState> {
-    story_states_within(doc, txn, None).unwrap_or_default()
+    let scan = doc.committed_scan(txn);
+    let revisions: Vec<_> = {
+        let revisions = doc.story_revisions.lock().unwrap();
+        scan.stories
+            .iter()
+            .map(|story| revisions.stamped.get(story.as_str()).copied())
+            .collect()
+    };
+    let media = doc.media_table();
+    let mut cache = doc.save_story_states.lock().unwrap();
+    let same_media = match (&cache.media, &media) {
+        (Some(before), Some(now)) => Arc::ptr_eq(before, now),
+        (None, None) => true,
+        _ => false,
+    };
+    if !same_media {
+        cache.clear();
+        cache.media = media;
+    }
+    cache
+        .entries
+        .retain(|story, _| scan.stories.binary_search(story).is_ok());
+    let mut states = HashMap::new();
+    for (story, revision) in scan.stories.iter().zip(revisions) {
+        let comments = crate::canonical::story_comment_anchors(txn, story);
+        let root = scan.root(story);
+        if let Some(cached) = cache.entries.get(story)
+            && revision == Some(cached.revision)
+            && cached.state.root == root
+            && cached.state.comments == comments
+        {
+            states.insert(story.clone(), cached.state.clone());
+            continue;
+        }
+        cache.entries.remove(story);
+        let Some((fingerprint, units)) =
+            story_fingerprint_within(doc, txn, story, &comments, &mut None)
+        else {
+            continue;
+        };
+        let state = StoryState {
+            root: root.to_owned(),
+            fingerprint,
+            units,
+            comments,
+        };
+        if let Some(revision) = revision {
+            cache.entries.insert(
+                story.clone(),
+                CachedStoryState {
+                    revision,
+                    state: state.clone(),
+                },
+            );
+        }
+        states.insert(story.clone(), state);
+    }
+    states
 }
 
 /// [`story_states_in`] within `budget` bytes, when given one, of media URLs
@@ -2322,6 +2413,7 @@ impl EditingDoc {
     /// shared seed needs, and is otherwise freshly minted. System-origin and
     /// outside undo.
     pub fn begin_opening(&self, generation: Option<&str>) {
+        self.save_story_states.lock().unwrap().clear();
         let generation = generation.map_or_else(fresh_generation, str::to_owned);
         let mut txn = self.transact_for(&EditCtx::system(""));
         txn.get_map(SESSION)
@@ -3966,6 +4058,376 @@ mod tests {
         session
     }
 
+    fn save_plan_doc() -> EditingDoc {
+        let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        doc
+    }
+
+    fn save_plans_agree(doc: &EditingDoc) {
+        let plan = doc.paragraph_save_plan();
+        let states = story_states(doc);
+        doc.save_story_states.lock().unwrap().clear();
+        assert_eq!(plan, doc.paragraph_save_plan());
+        let txn = doc.yrs_doc().transact();
+        assert_eq!(states, story_states_within(doc, &txn, None).unwrap());
+    }
+
+    fn save_plan_media(bytes: Vec<u8>) -> docx_parse::media::MediaTable {
+        let package =
+            ooxml_opc::rezip_parts(&[("word/media/picture.png".to_owned(), bytes)]).unwrap();
+        docx_parse::media::MediaTable::new(
+            ooxml_opc::RetainedPackage::new(Arc::from(package)).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cached_save_plans_match_fresh_states_across_edits_undo_and_remote_updates() {
+        let doc = save_plan_doc();
+        save_plans_agree(&doc);
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "New ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 4))
+            .unwrap();
+        save_plans_agree(&doc);
+
+        let cell = {
+            let txn = doc.yrs_doc().transact();
+            let scan = doc.committed_scan(&txn);
+            scan.stories
+                .iter()
+                .find(|story| crate::structured::source::cell_table(story).is_some())
+                .unwrap()
+                .clone()
+        };
+        for story in ["hf:rIdHeader1", "hf:rIdFooter1", "fn:1", cell.as_str()] {
+            doc.insert_text(
+                &ctx(),
+                Position::new(story, 0),
+                "Edited ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            save_plans_agree(&doc);
+        }
+        let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_attr(&para_id, "alignment", Any::from("center"))
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::Format {
+                index: 0,
+                len: 1,
+                attrs: yrs::types::Attrs::from([("bold".into(), Any::Bool(true))]),
+            }],
+            &ctx(),
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+
+        let comment = doc
+            .add_comment(&[StoryRange::new("body", 0, 2)], "Ada", DATE, Any::from("hi"))
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.set_comment_ranges(&comment, &[StoryRange::new("hf:rIdHeader1", 1, 3)])
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::RemoveComment { id: comment }],
+            &ctx(),
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+
+        doc.insert_embed(
+            &ctx(),
+            Position::new("body", 0),
+            "image",
+            vec![("src".to_owned(), Any::from("media:0"))],
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        let before = story_states(&doc)["body"].fingerprint;
+        doc.install_media(save_plan_media(vec![1, 2, 3, 4]));
+        save_plans_agree(&doc);
+        assert_ne!(before, story_states(&doc)["body"].fingerprint);
+
+        let mut undo = doc.undo_manager();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 1),
+            "undo",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        assert!(undo.undo());
+        save_plans_agree(&doc);
+        assert!(undo.redo());
+        save_plans_agree(&doc);
+
+        let remote = EditingDoc::new(9);
+        remote
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        remote
+            .insert_text(
+                &ctx(),
+                Position::new("hf:rIdHeader1", 0),
+                "Remote ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        doc.apply_update_v1(
+            &remote
+                .encode_diff_v1(&doc.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn unchanged_save_plans_skip_fingerprints_and_body_edits_only_hash_body() {
+        let doc = save_plan_doc();
+        let plan = doc.paragraph_save_plan();
+        STORY_FINGERPRINTS.with(|count| count.set(0));
+        assert_eq!(plan, doc.paragraph_save_plan());
+        STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 0));
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "x",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.paragraph_save_plan();
+        STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+        save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn embed_payload_kind_and_media_changes_invalidate_save_states() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        doc.insert_embed(
+            &ctx(),
+            Position::new("body", 0),
+            "image",
+            vec![("src".to_owned(), Any::from("media:0"))],
+        )
+        .unwrap();
+        doc.install_media(save_plan_media(vec![1, 2, 3, 4]));
+        save_plans_agree(doc);
+        let before = story_states(doc)["body"].fingerprint;
+        *doc.media.lock().unwrap() = Some(Arc::new(save_plan_media(vec![1, 2, 3, 5])));
+        save_plans_agree(doc);
+        assert_ne!(before, story_states(doc)["body"].fingerprint);
+        for (key, value) in [
+            ("horizontalRule", Any::Bool(true)),
+            ("src", Any::from("data:image/png;base64,AQIDBQ==")),
+            (KIND_KEY, Any::from("shape")),
+        ] {
+            let revision = doc.story_revisions.lock().unwrap().stamped["body"];
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = story_ref(&txn, "body").unwrap();
+                let embed = crate::ops::embed::embed_map_at(&story, &txn, 0).unwrap();
+                embed.insert(&mut txn, key, value);
+            }
+            assert!(doc.story_revisions.lock().unwrap().stamped["body"] > revision);
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            doc.paragraph_save_plan();
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            save_plans_agree(doc);
+        }
+    }
+
+    #[test]
+    fn side_map_comment_changes_invalidate_save_states_without_story_stamps() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        save_plans_agree(doc);
+        let revision = doc.story_revisions.lock().unwrap().stamped["body"];
+        let mut before = story_states(doc)["body"].fingerprint;
+        let comment = doc
+            .add_comment(&[StoryRange::new("body", 0, 2)], "Ada", DATE, Any::from("hi"))
+            .unwrap();
+        for ranges in [Some((0, 2)), Some((1, 3)), None] {
+            if ranges != Some((0, 2)) {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let comments = txn.get_map(crate::COMMENTS).unwrap();
+                if let Some((start, end)) = ranges {
+                    let story = story_ref(&txn, "body").unwrap();
+                    let start = crate::sticky_positions::sticky_index(
+                        &story,
+                        &txn,
+                        start,
+                        yrs::Assoc::After,
+                    )
+                    .unwrap();
+                    let end = crate::sticky_positions::sticky_index(
+                        &story,
+                        &txn,
+                        end,
+                        yrs::Assoc::Before,
+                    )
+                    .unwrap();
+                    let Out::YMap(entry) = comments.get(&txn, &comment).unwrap() else {
+                        unreachable!();
+                    };
+                    entry.insert(
+                        &mut txn,
+                        "anchors",
+                        Any::Array(Arc::from([crate::anchor_value("body", &start, &end)])),
+                    );
+                } else {
+                    comments.remove(&mut txn, &comment);
+                }
+            }
+            assert_eq!(doc.story_revisions.lock().unwrap().stamped["body"], revision);
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            doc.paragraph_save_plan();
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            let after = story_states(doc)["body"].fingerprint;
+            assert_ne!(before, after);
+            before = after;
+            save_plans_agree(doc);
+        }
+    }
+
+    #[test]
+    fn save_states_track_roots_and_prune_removed_or_unstamped_stories() {
+        let doc = save_plan_doc();
+        doc.create_story("nested", "Child", "Normal", "left")
+            .unwrap();
+        let embed = || crate::RawOp::InsertEmbed {
+            index: 0,
+            kind: "blockSdt".to_owned(),
+            payload: vec![("story".to_owned(), Any::from("nested"))],
+            attrs: Default::default(),
+        };
+        doc.apply_raw_ops("body", vec![embed()], &ctx()).unwrap();
+        save_plans_agree(&doc);
+        let revision = doc.story_revisions.lock().unwrap().stamped["nested"];
+        assert_eq!(story_states(&doc)["nested"].root, "body");
+        doc.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::Delete { index: 0, len: 1 }],
+            &ctx(),
+        )
+        .unwrap();
+        doc.apply_raw_ops("hf:rIdHeader1", vec![embed()], &ctx())
+            .unwrap();
+        assert_eq!(doc.story_revisions.lock().unwrap().stamped["nested"], revision);
+        assert_eq!(story_states(&doc)["nested"].root, "hf:rIdHeader1");
+        save_plans_agree(&doc);
+
+        doc.keep_deleted();
+        doc.delete_story("nested").unwrap();
+        assert!(
+            !doc.save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key("nested")
+        );
+        doc.paragraph_save_plan();
+        doc.create_story("nested", "Replacement", "Normal", "left")
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.story_revisions.lock().unwrap().stamped.remove("nested");
+        for _ in 0..2 {
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            doc.paragraph_save_plan();
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            assert!(
+                !doc.save_story_states
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .contains_key("nested")
+            );
+        }
+    }
+
+    #[test]
+    fn removed_story_entries_release_cached_states_before_the_next_plan() {
+        let doc = save_plan_doc();
+        doc.create_story("transient", "Temporary", "Normal", "left")
+            .unwrap();
+        doc.paragraph_save_plan();
+        assert!(
+            doc.save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key("transient")
+        );
+        doc.delete_story("transient").unwrap();
+        assert!(
+            !doc.save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key("transient")
+        );
+    }
+
+    #[test]
+    fn budgeted_save_states_never_populate_the_story_cache() {
+        let doc = save_plan_doc();
+        {
+            let txn = doc.yrs_doc().transact();
+            assert!(story_states_within(&doc, &txn, Some(1)).is_none());
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+            assert!(story_states_within(&doc, &txn, Some(usize::MAX)).is_some());
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        }
+        doc.paragraph_save_plan();
+        let txn = doc.yrs_doc().transact();
+        assert!(story_states_within(&doc, &txn, Some(1)).is_none());
+    }
+
+    #[test]
+    fn replacing_source_or_opening_state_drops_save_states() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        let bytes = doc.source_index().unwrap().bytes();
+        let resets: [fn(&EditingDoc); 4] = [
+            EditingDoc::mark_seeded,
+            EditingDoc::invalidate_projections,
+            |doc: &EditingDoc| doc.rotate_version(0),
+            |doc: &EditingDoc| doc.begin_opening(Some("reopened")),
+        ];
+        for reset in resets {
+            doc.paragraph_save_plan();
+            assert!(!doc.save_story_states.lock().unwrap().entries.is_empty());
+            reset(doc);
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        }
+        doc.paragraph_save_plan();
+        doc.retain_source_docx(bytes.as_ref());
+        assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        doc.paragraph_save_plan();
+        doc.load_state_v1(&doc.encode_state_as_update_v1()).unwrap();
+        assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        doc.paragraph_save_plan();
+        let media = Arc::downgrade(&doc.media_table().unwrap());
+        drop(session);
+        assert!(media.upgrade().is_none());
+    }
+
     #[test]
     fn priming_save_seed_states_preserves_the_plan_without_reseeding() {
         let primed = save_seed_session();
@@ -3976,6 +4438,16 @@ mod tests {
         assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
         assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
         assert!(source.seed_states_initialized());
+        assert!(
+            primed
+                .engine
+                .doc()
+                .save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .is_empty()
+        );
         for session in [&primed, &fallback] {
             session
                 .engine
