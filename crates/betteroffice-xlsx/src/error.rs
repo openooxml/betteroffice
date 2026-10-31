@@ -5,6 +5,8 @@ use crate::{CellAddress, CellRef, SheetId};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[cfg(feature = "fonts")]
+    FontSource(betteroffice_fonts::FontError),
     Package(String),
     CollaborativeState(String),
     InvalidClientId {
@@ -77,6 +79,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => error.fmt(f),
             Self::Package(error) => f.write_str(error),
             Self::CollaborativeState(error) => {
                 write!(f, "invalid collaborative workbook state: {error}")
@@ -169,6 +173,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => Some(error),
             Self::Spreadsheet(error) => Some(error),
             Self::Operation(error) => Some(error),
             Self::DisplayList(error) => Some(error),
@@ -192,5 +198,12 @@ impl From<xlsx_ops::OpError> for Error {
 impl From<xlsx_render::RenderError> for Error {
     fn from(error: xlsx_render::RenderError) -> Self {
         Self::DisplayList(error)
+    }
+}
+
+#[cfg(feature = "fonts")]
+impl From<betteroffice_fonts::FontError> for Error {
+    fn from(error: betteroffice_fonts::FontError) -> Self {
+        Self::FontSource(error)
     }
 }

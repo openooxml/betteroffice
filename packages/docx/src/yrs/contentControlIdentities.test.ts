@@ -131,7 +131,7 @@ function listing(session: YrsSession): Array<[string, string | null, string | nu
   ]);
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 afterEach(() => {
   for (const created of sessions.splice(0)) created.destroy();

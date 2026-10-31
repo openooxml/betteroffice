@@ -6,3 +6,10 @@ export class WorkerInputRefusal extends XlsxCommandAdmissionError {
     this.message = message;
   }
 }
+
+export class WorkerInputNotReadyError extends Error {
+  constructor() {
+    super('The edit peer and accepted input must be flushed before a synchronous mutation');
+    this.name = 'WorkerInputNotReadyError';
+  }
+}

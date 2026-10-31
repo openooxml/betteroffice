@@ -1,20 +1,33 @@
 # @betteroffice/docx-native
 
-Native Rust bindings for the BetterOffice DOCX engine in Node.js, Bun and Deno.
-Facade operations return promises and run in call order on one native worker.
+The `@betteroffice/docx` API backed by native Rust in Node.js, Bun and Deno.
+Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
 
 ```sh
 npm install @betteroffice/docx-native
 ```
 
-```js
+```ts
 import { readFile, writeFile } from 'node:fs/promises';
-import { openDocument } from '@betteroffice/docx-native';
+import { createYrsSession, saveYrsDocx } from '@betteroffice/docx-native/yrs';
 
-const document = await openDocument(await readFile('input.docx'));
-await writeFile('output.docx', await document.save());
+const session = await createYrsSession();
+try {
+  session.seedFromDocx(await readFile('input.docx'));
+  const first = session.paragraphs('body')[0];
+  session.insertText({ story: 'body', paraId: first.paraId, offset: 0 }, 'Edited ');
+  await writeFile('output.docx', (await saveYrsDocx(session)).bytes);
+} finally {
+  session.destroy();
+}
 ```
 
-Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
-The package shares its version with `@betteroffice/docx`.
-CommonJS `require()` is also supported.
+All 28 public entry points, exports and declarations match `@betteroffice/docx`.
+Select the engine by importing `@betteroffice/docx-native` or `@betteroffice/docx`;
+there is no runtime engine switch. Native initialization needs no WebAssembly assets.
+Default fonts need no setup: the Latin, international and CJK font packs install with this
+package and each face is read from disk the first time a document needs it; nothing is fetched.
+
+The previous `Document` and `openDocument` facade has been removed. Use the
+[DOCX API](https://docs.betteroffice.dev/docs/javascript) with the native package name.
+Browser imports throw; use `@betteroffice/docx` in browsers.

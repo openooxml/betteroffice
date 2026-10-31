@@ -6,6 +6,7 @@ import os
 from typing import Any, Iterator, Mapping, Sequence, Union
 
 from ._betteroffice_docx import (
+    decode_font_face,
     DisplayList,
     Edit,
     EditError,
@@ -32,6 +33,7 @@ from ._betteroffice_docx import Document as _Document
 from ._betteroffice_docx import DocxError, __version__
 
 __all__ = [
+    "decode_font_face",
     "DisplayList",
     "Document",
     "DocxError",
@@ -181,6 +183,10 @@ class Document:
         paragraph the engine cannot rebuild from a single run.
         """
         return self._inner.replace_text(para_id, text)
+
+    def replace_paragraph_text(self, para_id: str, text: str) -> Edit:
+        """Alias of ``replace_text``."""
+        return self._inner.replace_paragraph_text(para_id, text)
 
     def export_structured(
         self,

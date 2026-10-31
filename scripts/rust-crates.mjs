@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { FONT_PACK_CRATES } from './rust-font-packs.mjs';
 
 export const RUST_RELEASE_MANIFEST = 'crates/package.json';
 export const WORKSPACE_MANIFEST = 'Cargo.toml';
 export const STANDALONE_WORKSPACES = ['bindings', 'fuzz', 'apps/native-viewer'];
 
 export const RUST_CRATES = [
+  ...FONT_PACK_CRATES.map(({ name }) => ({ name, dependency: name })),
+  { name: 'betteroffice-fonts', dependency: 'betteroffice-fonts' },
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
   { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
   { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },

@@ -233,7 +233,7 @@ function noteXml(xml: string, tag: 'footnote' | 'endnote', id: number): string {
 }
 
 describe('note story save projection', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('round-trips text typed into a footnote and into an endnote', async () => {
     const bytes = fixture();

@@ -601,6 +601,22 @@ test('Escape typed in the editor on a selected picture puts the caret after it, 
   expect(editor.commands[0]!.payload).toEqual({ unit: 'character', direction: 'forward', extend: false });
 });
 
+test('Escape typed in the editor before a picture press is selected still leaves the picture', async () => {
+  const editor = await pictureEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  fireEvent.pointerUp(editor.host, editor.point);
+  fireEvent.keyDown(editor.textarea, { key: 'Escape' });
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  const fenced = editor.commands.length < 2;
+  if (fenced) await editor.acknowledge(0, 'noop');
+  await waitFor(() => expect(editor.commands.slice(0, 2).map(({ kind }) => kind)).toEqual(['selectPoint', 'select']));
+  expect(editor.overlay()).toBeNull();
+  if (!fenced) await editor.acknowledge(0, 'noop');
+  await editor.acknowledge(1, 'noop');
+  await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['selectPoint', 'select', 'navigate']));
+  expect(editor.commands[2]!.payload).toEqual({ unit: 'character', direction: 'forward', extend: false });
+});
+
 for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
   test(`picture handle captures only a resize and handles ${end}`, async () => {
     const editor = await pictureEditor(true, true, true);

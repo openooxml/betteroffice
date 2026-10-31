@@ -133,6 +133,7 @@ export interface WasmModuleMemory extends Partial<WasmHeapStats> {
    * high-water mark.
    */
   bufferBytes: number;
+  maximumBytes?: number;
 }
 
 /** The address space of a wasm32 memory: 4 GiB. */
@@ -152,9 +153,24 @@ export function wasmModuleMemories(): WasmModuleMemory[] {
   for (const module of registered) {
     const memory = module.memory();
     if (!memory) continue;
-    out.push({ label: module.label, bufferBytes: memory.buffer.byteLength, ...module.heap?.() });
+    const maximumBytes = memoryMaximumBytes(memory);
+    out.push({ label: module.label, bufferBytes: memory.buffer.byteLength,
+      ...(maximumBytes === undefined ? {} : { maximumBytes }), ...module.heap?.() });
   }
   return out;
+}
+
+function memoryMaximumBytes(memory: WebAssembly.Memory): number | undefined {
+  try {
+    const reflected = memory as WebAssembly.Memory & { type?(): { maximum?: number | bigint } };
+    const maximum = reflected.type?.().maximum;
+    if (maximum === undefined) return undefined;
+    const bytes = Number(maximum) * 65536;
+    return Number.isSafeInteger(bytes) && bytes > 0 && bytes < WASM32_MEMORY_LIMIT_BYTES ? bytes : undefined;
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    return undefined;
+  }
 }
 
 function exportedMemory(output: unknown): WebAssembly.Memory | null {
@@ -166,6 +182,7 @@ export function createWasmModuleState(options: {
   label: string;
   preloadName: string;
   assetUrl: () => URL;
+  engineKind?: 'wasm' | 'native';
   initAsync: (input: { module_or_path: WasmAsyncInput | Promise<WasmAsyncInput> }) => Promise<unknown>;
   initSync: (input: { module: WasmSyncInput }) => unknown;
   shareModule?: boolean;
@@ -183,6 +200,9 @@ export function createWasmModuleState(options: {
   });
 
   function module(): Promise<WebAssembly.Module> {
+    if (options.engineKind === 'native') {
+      return Promise.reject(new Error('Native engines have no WebAssembly module'));
+    }
     if (!compiled) {
       const compiling = compileWasm(defaultAsyncInput(options.assetUrl())).catch((error) => {
         if (compiled === compiling) compiled = undefined;
@@ -214,11 +234,16 @@ export function createWasmModuleState(options: {
     },
     module,
     sharedModule(): Promise<WebAssembly.Module | null> {
+      if (options.engineKind === 'native') return Promise.resolve(null);
       if (compiled) return compiled;
       if (initialized || pending) return Promise.resolve(null);
       return module();
     },
     preload(input?: WasmAsyncInput): Promise<void> {
+      if (options.engineKind === 'native') {
+        initialized = true;
+        return Promise.resolve();
+      }
       if (initialized) return Promise.resolve();
       if (pending) return pending;
       if (typeof WebAssembly !== 'undefined' && input instanceof WebAssembly.Module) {
@@ -229,6 +254,11 @@ export function createWasmModuleState(options: {
       );
     },
     preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
+      if (options.engineKind === 'native') {
+        initialized = true;
+        void source.catch(() => {});
+        return Promise.resolve();
+      }
       if (initialized) return Promise.resolve();
       if (pending) return pending;
       return initialize(
@@ -243,6 +273,10 @@ export function createWasmModuleState(options: {
     },
     ensure(): void {
       if (initialized) return;
+      if (options.engineKind === 'native') {
+        initialized = true;
+        return;
+      }
       const bytes = readWasmSync(options.assetUrl());
       if (bytes) {
         memory = exportedMemory(options.initSync({ module: bytes }));

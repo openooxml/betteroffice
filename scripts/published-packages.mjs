@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 
 export { PYPI_DISTRIBUTIONS } from './python-bindings.mjs';
 
+/** Container images built from this repository. */
+export const CONTAINER_IMAGES = ['betteroffice-wopi'];
+
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 function readManifest(directory) {

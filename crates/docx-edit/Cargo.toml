@@ -21,7 +21,7 @@ crate-type = ["cdylib", "rlib"]
 # The JS/wasm session boundary (src/wasm.rs). Off by default so native builds
 # and `cargo test` never pull the wasm-bindgen stack; wasm-pack builds pass
 # `--features wasm` (driven by scripts/build-docx-wasm.ts).
-wasm = ["dep:wasm-bindgen", "dep:js-sys", "ooxml-opc/wasm", "docx-parse/wasm"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:betteroffice-fonts", "ooxml-opc/wasm", "docx-parse/wasm"]
 # Installs the counting global allocator behind the `wasm_*_bytes` exports in a
 # wasm32 build. Only the package's own wasm build enables it, since a binary
 # can have one global allocator.
@@ -33,12 +33,15 @@ tiff = ["docx-parse/tiff"]
 metafile = ["docx-parse/metafile"]
 
 [dependencies]
+betteroffice-fonts = { workspace = true, optional = true }
 # 0.27.3 is the newest crates.io release. The repository's minimumReleaseAge is a Bun/npm
 # policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
 docx-layout.workspace = true
 docx-parse.workspace = true
 foldhash = { version = "0.2", default-features = false }
+libm.workspace = true
 ooxml-diff.workspace = true
+ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-opc.workspace = true
 ooxml-text.workspace = true
 ryu-js = "1"
@@ -54,4 +57,5 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 
 [dev-dependencies]
+ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../ooxml-font-preflight" }
 docx-layout = { workspace = true, features = ["test-support"] }

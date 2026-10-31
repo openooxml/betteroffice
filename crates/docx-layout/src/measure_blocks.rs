@@ -701,58 +701,13 @@ fn paragraph_scripts_with_han_fallback(
     paragraph: &ParagraphBlock,
     include_han_fallback: bool,
 ) -> Vec<String> {
-    let mut han = false;
-    let mut kana = false;
-    let mut hangul = false;
-    let mut arabic = false;
-    let mut hebrew = false;
-    for text in paragraph.runs.iter().filter_map(|run| match run {
-        Run::Text(text) => Some(text.text.as_str()),
-        _ => None,
-    }) {
-        for character in text.chars() {
-            let point = character as u32;
-            match point {
-                0x0590..=0x05ff | 0xfb1d..=0xfb4f => hebrew = true,
-                0x0600..=0x06ff
-                | 0x0750..=0x077f
-                | 0x0870..=0x08ff
-                | 0xfb50..=0xfdff
-                | 0xfe70..=0xfeff => arabic = true,
-                0x1100..=0x11ff
-                | 0x3130..=0x318f
-                | 0xa960..=0xa97f
-                | 0xac00..=0xd7ff
-                | 0xffa0..=0xffdc => hangul = true,
-                0x3040..=0x30ff | 0x31f0..=0x31ff | 0xff66..=0xff9f => kana = true,
-                0x3000..=0x303f
-                | 0x3400..=0x4dbf
-                | 0x4e00..=0x9fff
-                | 0xf900..=0xfaff
-                | 0xfe30..=0xfe4f
-                | 0xff00..=0xff65
-                | 0x20000..=0x3ffff => han = true,
-                _ => {}
-            }
-        }
-    }
-    let mut scripts = Vec::new();
-    if kana {
-        scripts.push("cjk-jp".to_owned());
-    }
-    if hangul {
-        scripts.push("cjk-kr".to_owned());
-    }
-    if han && (include_han_fallback || (!kana && !hangul)) {
-        scripts.push("cjk-sc".to_owned());
-    }
-    if arabic {
-        scripts.push("arabic".to_owned());
-    }
-    if hebrew {
-        scripts.push("hebrew".to_owned());
-    }
-    scripts
+    ooxml_text::paragraph_scripts_with_han_fallback(
+        paragraph.runs.iter().filter_map(|run| match run {
+            Run::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        }),
+        include_han_fallback,
+    )
 }
 
 fn default_true() -> bool {
@@ -1728,7 +1683,11 @@ fn measure_paragraph_with_context(
                     cumulative_y,
                 )
                 .unwrap_or_else(|| {
-                    if config.font_chains.values().all(Vec::is_empty) {
+                    if config.font_chains.values().all(Vec::is_empty)
+                        || config
+                            .font_chains
+                            .contains_key("@betteroffice/fonts/coverage")
+                    {
                         wrapped_synthetic_paragraph_extent(paragraph, content_width)
                     } else {
                         synthetic_paragraph_extent(paragraph, content_width)
@@ -3637,7 +3596,12 @@ fn measure_table_cells(
             } else {
                 measure_blocks(&mut cell.blocks, measure_width.max(1.0), config)?
             };
-            if rotated && config.font_chains.values().all(Vec::is_empty) {
+            if rotated
+                && (config.font_chains.values().all(Vec::is_empty)
+                    || config
+                        .font_chains
+                        .contains_key("@betteroffice/fonts/coverage"))
+            {
                 for (block, measure) in cell.blocks.iter().zip(&mut measures) {
                     if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
                         (block, measure)
@@ -4310,6 +4274,30 @@ mod tests {
             defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn nonbreaking_hyphen_keeps_native_paragraph_measurement() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph = |text| {
+            serde_json::from_value::<ParagraphBlock>(json!({
+                "id": "nonbreaking-hyphen",
+                "runs": [{"kind": "text", "text": text}]
+            }))
+            .unwrap()
+        };
+        let expected = measure_paragraph(&paragraph("co\u{2010}operate"), 300.0, &config).unwrap();
+        let actual = measure_paragraph(&paragraph("co\u{2011}operate"), 300.0, &config).unwrap();
+        assert!(
+            actual
+                .lines
+                .iter()
+                .all(|line| line.synthetic_fallback != Some(true))
+        );
+        assert_eq!(actual.lines[0].width, expected.lines[0].width);
+        assert_eq!(actual.lines[0].tail_char, 10);
     }
 
     #[test]
@@ -7241,6 +7229,60 @@ mod tests {
     }
 
     #[test]
+    fn collects_international_script_fallbacks() {
+        for (script, text) in [
+            ("thai", "ก"),
+            ("lao", "ກ"),
+            ("khmer", "ក"),
+            ("myanmar", "က"),
+            ("devanagari", "क"),
+            ("bengali", "ক"),
+            ("gurmukhi", "ਕ"),
+            ("gujarati", "ક"),
+            ("oriya", "କ"),
+            ("tamil", "க"),
+            ("telugu", "క"),
+            ("kannada", "ಕ"),
+            ("malayalam", "ക"),
+            ("sinhala", "ක"),
+            ("armenian", "Ա"),
+            ("georgian", "ა"),
+            ("ethiopic", "ሀ"),
+            ("tibetan", "ཀ"),
+            ("mongolian", "ᠠ"),
+            ("syriac", "ܐ"),
+            ("thaana", "ހ"),
+            ("cherokee", "Ꭰ"),
+            ("tifinagh", "ⴰ"),
+        ] {
+            let block: LayoutBlock = serde_json::from_value(json!({
+                "kind": "paragraph", "id": "intl", "runs": [{
+                    "kind": "text", "text": text, "fontFamily": "Arial"
+                }]
+            }))
+            .unwrap();
+            let LayoutBlock::Paragraph(paragraph) = block else {
+                panic!("paragraph");
+            };
+            assert_eq!(paragraph_scripts(&paragraph), [script], "{text}");
+        }
+    }
+
+    #[test]
+    fn keeps_nearby_scripts_out_of_international_fallbacks() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "latin", "runs": [{
+                "kind": "text", "text": "Latin Ελληνικά Кириллица", "fontFamily": "Arial"
+            }]
+        }))
+        .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = block else {
+            panic!("paragraph");
+        };
+        assert!(paragraph_scripts(&paragraph).is_empty());
+    }
+
+    #[test]
     fn collects_fonts_from_inline_shape_children_and_nested_carriers() {
         let nested = json!({
             "kind": "image", "src": "", "width": 100, "height": 40,
@@ -7655,6 +7697,109 @@ mod tests {
                 "{fallback:?}"
             );
         }
+    }
+
+    #[test]
+    fn implicit_uncovered_text_matches_no_provider_extents() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = crate::register_measure_font_bytes(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let mut config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Calibri", "fontSize": 12}),
+            ..Default::default()
+        };
+        for family in ["Noto Sans Devanagari", "Calibri"] {
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": "coverage",
+                "runs": [{"kind": "text", "text": "हहहहहहहहहह", "fontFamily": family}]
+            }))
+            .unwrap();
+            config.font_chains.clear();
+            let main = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            config
+                .font_chains
+                .insert(format!("{}|0|0", family.to_lowercase()), vec![font]);
+            config
+                .font_chains
+                .insert("@betteroffice/fonts/coverage".to_owned(), vec![font]);
+            let implicit = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            assert_eq!(
+                serde_json::to_value(implicit).unwrap(),
+                serde_json::to_value(main).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_mixed_runs_paint_with_the_measured_letter_spacing() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = crate::register_measure_font_bytes(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let block = json!({
+            "kind": "paragraph", "id": "tracked",
+            "runs": [
+                {"kind": "text", "text": "ABC", "fontFamily": "Calibri", "fontSize": 12, "letterSpacing": 3},
+                {"kind": "text", "text": "हिन्दी", "fontFamily": "Calibri", "fontSize": 12}
+            ]
+        });
+        let paragraph: ParagraphBlock = serde_json::from_value(block.clone()).unwrap();
+        let mut config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Calibri", "fontSize": 12}),
+            ..Default::default()
+        };
+        let main = measure_paragraph(&paragraph, 400.0, &config).unwrap();
+        config
+            .font_chains
+            .insert("calibri|0|0".to_owned(), vec![font]);
+        config
+            .font_chains
+            .insert("@betteroffice/fonts/coverage".to_owned(), vec![font]);
+        let extent = measure_paragraph(&paragraph, 400.0, &config).unwrap();
+        assert_eq!(
+            serde_json::to_value(&extent).unwrap(),
+            serde_json::to_value(&main).unwrap()
+        );
+        let paint = |chains| {
+            let input = json!({
+                "measured": [{"block": block, "measure": {"kind": "paragraph", "totalHeight": extent.total_height, "lines": extent.lines}}],
+                "fontChains": chains,
+                "options": {},
+                "layout": {"pages": [{
+                    "size": {"w": 600, "h": 800},
+                    "margins": {"top": 50, "right": 50, "bottom": 50, "left": 50},
+                    "number": 1,
+                    "fragments": [{"kind": "paragraph", "blockId": "tracked", "x": 50, "y": 50,
+                        "width": 400, "height": extent.total_height, "fromLine": 0, "toLine": extent.lines.len()}]
+                }]}
+            });
+            serde_json::to_value(crate::build_display_list_value(&input.to_string()).unwrap())
+                .unwrap()["pages"][0]["primitives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|primitive| matches!(primitive["kind"].as_str(), Some("text" | "glyphRun")))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let browser = paint(json!({}));
+        let implicit = paint(serde_json::to_value(&config.font_chains).unwrap());
+        assert_eq!(implicit, browser);
+        assert_eq!(implicit.len(), 2);
+        assert_eq!(implicit[0]["kind"], "text");
+        assert_eq!(implicit[0]["letterSpacing"], 3);
+        let latin_width = implicit[0]["width"].as_f64().unwrap();
+        assert_eq!(latin_width, 57.0);
+        assert_eq!(implicit[1]["x"].as_f64().unwrap(), 50.0 + latin_width);
+        assert_eq!(
+            latin_width + implicit[1]["width"].as_f64().unwrap(),
+            extent.lines[0].width
+        );
     }
 
     #[test]

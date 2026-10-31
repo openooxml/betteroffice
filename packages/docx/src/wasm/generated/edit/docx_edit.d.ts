@@ -1,5 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 /**
  * One yrs replica of the DOCX editing model, held for a JS host.
@@ -861,6 +863,11 @@ export class EditSession {
      * when nothing was changed.
      */
     persist_paragraph_ids(): string;
+    /**
+     * Caches save seed states without reseeding, within the paragraph and
+     * inflated package budgets.
+     */
+    prime_save_seed_states(paragraphs: number, inflated: number): boolean;
     proposal_revision_ranges_json(ids_json: string): string;
     /**
      * Versioned paragraph texts:
@@ -1436,6 +1443,13 @@ export function clear_measure_fonts(): void;
 export function close_display_list(handle: number): void;
 
 /**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
+/**
  * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
  */
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
@@ -1745,6 +1759,7 @@ export interface InitOutput {
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => [number, number];
     readonly close_display_list: (a: number) => void;
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1879,6 +1894,7 @@ export interface InitOutput {
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
+    readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];

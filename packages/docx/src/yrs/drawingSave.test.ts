@@ -31,7 +31,7 @@ function picture(inline: string, effectExtent: string): string {
   );
 }
 
-function fixture(inline: string, effectExtent: string): Uint8Array {
+function fixture(inline: string, effectExtent: string, hiddenStyle = false): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set(
     '[Content_Types].xml',
@@ -61,6 +61,16 @@ function fixture(inline: string, effectExtent: string): Uint8Array {
     )
   );
   parts.set('word/media/image1.png', PNG);
+  if (hiddenStyle) {
+    const text = (name: string) => new TextDecoder().decode(parts.get(name)!);
+    parts.set('[Content_Types].xml', toBytes(text('[Content_Types].xml').replace('</Types>',
+      '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>')));
+    parts.set('word/_rels/document.xml.rels', toBytes(text('word/_rels/document.xml.rels').replace('</Relationships>',
+      `<Relationship Id="rIdStyles" Type="${OFFICE}/styles" Target="styles.xml"/></Relationships>`)));
+    parts.set('word/document.xml', toBytes(text('word/document.xml').replace('<w:p><w:r><w:drawing>',
+      '<w:p><w:pPr><w:pStyle w:val="HiddenImage"/></w:pPr><w:r><w:drawing>')));
+    parts.set('word/styles.xml', toBytes('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="HiddenImage"><w:name w:val="Hidden image"/><w:rPr><w:vanish/></w:rPr></w:style></w:styles>'));
+  }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -109,7 +119,38 @@ function drawingTags(bytes: Uint8Array): { inline: string; effectExtent: string 
   };
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
+
+for (const seeder of ['native', 'projected'] as const) {
+  it(`${seeder} unedited image runs keep inherited hidden formatting`, async () => {
+    const bytes = fixture('<wp:inline>', '', true);
+    const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+    const session = await createYrsSession();
+    try {
+      if (seeder === 'native') session.seedFromDocx(bytes);
+      else documentToYrs(session, parsed);
+      for (const adjacentEdit of [false, true]) {
+        if (adjacentEdit) {
+          const { paraId } = session.paragraphs('body')[0]!;
+          session.insertText({ story: 'body', paraId, offset: 0 }, 'Edited ');
+        }
+        const projected = yrsToDocument(session, parsed);
+        const paragraph = projected.package.document.content[1]!;
+        if (paragraph.type !== 'paragraph') throw new Error('expected picture paragraph');
+        const run = paragraph.content[0];
+        if (run?.type !== 'run') throw new Error('expected picture run');
+        expect(run.formatting).toBeUndefined();
+        const saved = readDocxContainer(await repackDocx(projected));
+        const xml = saved.text('word/document.xml')!;
+        expect(xml).toContain('<w:pStyle w:val="HiddenImage"/>');
+        expect(xml).not.toContain('<w:vanish');
+        expect(saved.text('word/styles.xml')).toBe(readDocxContainer(bytes.buffer as ArrayBuffer).text('word/styles.xml'));
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+}
 
 const CASES = [
   { name: 'absent attributes', inline: '<wp:inline>', effectExtent: '' },

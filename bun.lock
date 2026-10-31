@@ -20,6 +20,8 @@
         "@betteroffice/docx-react": "workspace:*",
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
+        "@betteroffice/fonts-intl": "workspace:*",
+        "@betteroffice/fonts-latin": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
         "@betteroffice/vsdx": "workspace:*",
@@ -57,6 +59,8 @@
         "@betteroffice/docx-react": "workspace:*",
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
+        "@betteroffice/fonts-intl": "workspace:*",
+        "@betteroffice/fonts-latin": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-i18n": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
@@ -188,28 +192,53 @@
       "version": "0.0.1",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
+        "@betteroffice/docx-react": "workspace:*",
+        "@betteroffice/fonts": "workspace:*",
+        "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
+        "@betteroffice/pptx-react": "workspace:*",
         "@betteroffice/xlsx": "workspace:*",
+        "@betteroffice/xlsx-react": "workspace:*",
+        "jszip": "3.10.1",
+        "react": "^19.2.7",
+        "react-dom": "^19.2.7",
         "yjs": "^13.6.32",
       },
       "devDependencies": {
         "@types/bun": "^1.4.2",
+        "@types/react": "^19.2.17",
+        "@types/react-dom": "^19.2.3",
         "typescript": "^6.0.3",
+        "vite": "8.1.6",
       },
     },
     "bindings/docx-native": {
       "name": "@betteroffice/docx-native",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^0",
+        "@betteroffice/fonts-cjk": "workspace:^0",
+        "@betteroffice/fonts-intl": "workspace:^0",
+        "@betteroffice/fonts-latin": "workspace:^0",
+      },
       "devDependencies": {
         "@types/node": "^26.0.0",
+        "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
     },
     "bindings/pptx-native": {
       "name": "@betteroffice/pptx-native",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
+        "@betteroffice/fonts-cjk": "workspace:^",
+        "@betteroffice/fonts-intl": "workspace:^",
+        "@betteroffice/fonts-latin": "workspace:^",
+      },
       "devDependencies": {
         "@types/node": "^26.0.0",
+        "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
     },
@@ -234,6 +263,7 @@
       "version": "0.5.1",
       "devDependencies": {
         "@types/node": "^26.0.0",
+        "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
     },
@@ -264,26 +294,19 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "optionalDependencies": {
-        "@betteroffice/xlsx-native": "workspace:^",
-      },
     },
     "packages/docx": {
       "name": "@betteroffice/docx",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^0",
+      },
       "devDependencies": {
-        "@betteroffice/fonts": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/fonts": "workspace:^0",
-      },
-      "optionalPeers": [
-        "@betteroffice/fonts",
-      ],
     },
     "packages/docx-i18n": {
       "name": "@betteroffice/docx-i18n",
@@ -331,18 +354,25 @@
     "packages/fonts": {
       "name": "@betteroffice/fonts",
       "version": "0.4.2",
+      "dependencies": {
+        "@betteroffice/fonts-latin": "workspace:*",
+      },
       "devDependencies": {
         "@betteroffice/fonts-cjk": "workspace:*",
+        "@betteroffice/fonts-intl": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
+        "esbuild": "^0.28.1",
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
       },
       "peerDependencies": {
         "@betteroffice/fonts-cjk": "workspace:^0",
+        "@betteroffice/fonts-intl": "workspace:^0",
       },
       "optionalPeers": [
         "@betteroffice/fonts-cjk",
+        "@betteroffice/fonts-intl",
       ],
     },
     "packages/fonts-cjk": {
@@ -353,9 +383,28 @@
         "typescript": "^6.0.3",
       },
     },
+    "packages/fonts-intl": {
+      "name": "@betteroffice/fonts-intl",
+      "version": "0.4.2",
+      "devDependencies": {
+        "tsup": "^8.0.1",
+        "typescript": "^6.0.3",
+      },
+    },
+    "packages/fonts-latin": {
+      "name": "@betteroffice/fonts-latin",
+      "version": "0.4.2",
+      "devDependencies": {
+        "tsup": "^8.0.1",
+        "typescript": "^6.0.3",
+      },
+    },
     "packages/pptx": {
       "name": "@betteroffice/pptx",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
+      },
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "@types/node": "^26.0.0",
@@ -445,12 +494,6 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/xlsx-native": "workspace:^",
-      },
-      "optionalPeers": [
-        "@betteroffice/xlsx-native",
-      ],
     },
     "packages/xlsx-i18n": {
       "name": "@betteroffice/xlsx-i18n",
@@ -464,6 +507,7 @@
       "name": "@betteroffice/xlsx-react",
       "version": "0.5.1",
       "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
         "@betteroffice/xlsx": "workspace:*",
         "@betteroffice/xlsx-i18n": "workspace:*",
       },
@@ -703,6 +747,10 @@
     "@betteroffice/fonts": ["@betteroffice/fonts@workspace:packages/fonts"],
 
     "@betteroffice/fonts-cjk": ["@betteroffice/fonts-cjk@workspace:packages/fonts-cjk"],
+
+    "@betteroffice/fonts-intl": ["@betteroffice/fonts-intl@workspace:packages/fonts-intl"],
+
+    "@betteroffice/fonts-latin": ["@betteroffice/fonts-latin@workspace:packages/fonts-latin"],
 
     "@betteroffice/pptx": ["@betteroffice/pptx@workspace:packages/pptx"],
 

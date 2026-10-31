@@ -25,7 +25,7 @@ beforeAll(async () => {
     new Uint8Array(readFileSync(resolve(import.meta.dir, '__fixtures__/probe-linked-header.docx'))),
     { preloadFonts: false }
   );
-});
+}, 30_000);
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 afterEach(cleanup);

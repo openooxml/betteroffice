@@ -9,7 +9,7 @@ function fakeSession(): WorkbookSession {
   return {
     ...testSessionCommands(),
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets: [], activeSheet: 0 },
-    call: { version: unexpected, readCells: unexpected, findText: unexpected, validateEdits: unexpected,
+    call: { decodeFontFace: unexpected, version: unexpected, readCells: unexpected, findText: unexpected, validateEdits: unexpected,
       applyEdits: unexpected, command: unexpected, frame: unexpected, sheetView: unexpected,
       cellGeometry: unexpected, cellInputs: unexpected, selectionData: unexpected, captureFormat: unexpected, sheets: unexpected,
       calculationStatus: unexpected, save: unexpected,

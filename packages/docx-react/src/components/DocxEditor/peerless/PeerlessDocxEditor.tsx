@@ -46,6 +46,7 @@ import { UnifiedSidebar } from '../../UnifiedSidebar';
 import { createWorkerPluginGeometry, workerDocumentVersion, workerReadRefusal } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
 import { workerReviewRects } from './workerReviewRects';
+import { reviewMatches } from './workerReview';
 import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevisions';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
@@ -406,6 +407,23 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     barrier?: Ticket;
     clipboard?: ReturnType<typeof createClipboardPrefetch>;
   } | null>(null);
+  const preparedSaveWorker = useRef<ResidentEngineWorkerClient | null>(null);
+  const prepareSave = useCallback(() => {
+    const client = worker.current;
+    const current = controller.getSnapshot();
+    if (!client || preparedSaveWorker.current === client || settings.current.readOnly ||
+      openedSource.current !== sourceKey || current.status !== 'ready' || current.view?.editState?.readOnly !== false) return;
+    preparedSaveWorker.current = client;
+    client.prepareSave();
+  }, [controller, sourceKey]);
+  useEffect(() => controller.ref.onDocumentChange(prepareSave), [controller, prepareSave]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey) prepareSave();
+    };
+    document.addEventListener('keydown', keydown, true);
+    return () => document.removeEventListener('keydown', keydown, true);
+  }, [prepareSave]);
   const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
   const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
   const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
@@ -495,6 +513,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
         signal.throwIfAborted();
         measurement ??= createRustMeasureSource({
+          runtime: client.fontRuntime,
           engine: {
             registerFont: (data) => {
               const slot = appendFont(data);
@@ -764,7 +783,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         if (!uncovered) { settle(); return; }
         requirements = uncovered;
         const embedded = await extractEmbeddedFontFaces(opened.document);
-        payload = await prepareWorkerFontEnvironment({ fonts, provider, embedded, requirements, families: opened.families,
+        payload = await prepareWorkerFontEnvironment({ fonts, provider, runtime: client.fontRuntime, embedded, requirements, families: opened.families,
           compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
       }
       if (!isCurrent()) return;
@@ -818,6 +837,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       }
       const embedded = await extractEmbeddedFontFaces(opened.document);
       const payload = await prepareWorkerFontEnvironment({ fonts: settings.current.fonts,
+        runtime: client.fontRuntime,
         provider: settings.current.measurementFontProvider, embedded, requirements, families: [...opened.families, family],
         compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
       if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');
@@ -1122,8 +1142,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => controller.revisions(commentReview, revisionRead), [controller, commentReview, revisionRead]);
   const trackedChanges = controller.trackedChanges();
   const revisionCallbacks = useMemo(() => workerRevisionCallbacks(controller), [controller]);
-  const comments = props.comments ?? review?.uiComments ?? sourceComments.current;
   const documentKey = shellState.view?.identity.session;
+  const commentPlacement = useMemo(() => ({ comments: undefined as DocxEditorProps['comments'], positions: new Map<string, number>() }),
+    [sourceKey, documentKey, shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
+  const comments = props.comments ?? review?.uiComments ?? commentPlacement.comments ?? sourceComments.current;
   const dotsMode = props.trackedChanges?.display === 'dots';
   const hasComments = comments.some(comment => comment.parentId == null);
   const hasCards = (dotsMode ? hasComments : comments.length > 0) || (!dotsMode && !!trackedChanges?.entries.length);
@@ -1138,16 +1160,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     [comments, commentsOpen, dotsMode]);
   const commentItems = useCommentSidebarItems({ comments: visibleComments, trackedChanges: commentsOpen || dotsMode ? trackedChanges?.entries ?? EMPTY_CHANGES : EMPTY_CHANGES,
     callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
+  const commentGeometryCurrent = !!(documentReady && shellState.view && review && reviewMatches(shellState.view, review));
   const positionedComments = useMemo(() => commentItems.map(item => {
     if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
+    const previousY = commentPlacement.positions.get(item.id);
+    if (!commentGeometryCurrent && previousY !== undefined) return { ...item, fixedY: previousY };
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
     const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
     const rect = !documentReady ? undefined : (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
       (review && item.anchorKey?.startsWith('comment-') && firstPage !== undefined ? { pageIndex: firstPage, y: 0 } : undefined);
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
-    return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
-  }), [commentItems, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, review != null, documentReady, shellState.view?.geometry, trackedChanges, geometry, zoom]);
+    if (bounds && rect) return { ...item, fixedY: bounds.y + rect.y };
+    return previousY !== undefined ? { ...item, fixedY: previousY } : { ...item, hidden: true };
+  }), [commentItems, commentPlacement, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, commentGeometryCurrent, documentReady, shellState.view?.geometry, trackedChanges, geometry, zoom]);
+  useLayoutEffect(() => {
+    if (review?.uiComments) commentPlacement.comments = review.uiComments;
+    commentPlacement.positions = new Map(positionedComments.flatMap(item =>
+      !item.hidden && !item.isTemporary && item.fixedY != null ? [[item.id, item.fixedY] as const] : []));
+  }, [commentPlacement, review, positionedComments]);
   const selected = shellState.view?.workerSelection;
   const floating = documentReady && !effectiveReadOnly && !workerComments.adding && !dragSelecting && !!selected &&
     (selected.focus.story === 'body' || selected.focus.story.startsWith('body:')) && selected.anchor.story === selected.focus.story &&
@@ -1251,7 +1282,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           if (heading) void navigation.scrollToParagraph(heading.paraId).catch((error) => reportRecoverableError(error)); },
         onClose: () => navigation.setShowOutline(false), scrollLeft: navigation.pageInfo.scrollLeft }}
       onToggleOutline={() => navigation.setShowOutline(!navigation.showOutline)} scrollPageInfo={navigation.pageInfo}
-      toolbar={<EditorChromeContext.Provider value={{ showZoomControl: props.showZoomControl ?? true, toolbarExtra: props.toolbarExtra }}>{chrome}</EditorChromeContext.Provider>}
+      toolbar={<EditorChromeContext.Provider value={{ showZoomControl: props.showZoomControl ?? true, toolbarExtra: props.toolbarExtra, prepareSave }}>{chrome}</EditorChromeContext.Provider>}
       renderDock={(placement, available) => <PluginDock host={pluginHost} placement={placement}
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
       overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}
