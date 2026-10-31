@@ -46,6 +46,7 @@ import { createWorkbookEditSession, type WorkbookEditSession } from './editSessi
 import { attachCollaborationPipe, createAsyncCollaborationReplica, type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
+import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -101,6 +102,7 @@ export interface WorkbookSession {
   readonly call: Promisified<Omit<WorkbookSessionMethods,
     'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' |
     'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    decodeFontFace: FontDecoder;
     renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
     renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
     printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
@@ -554,6 +556,7 @@ export async function createWorkbookSession(
       }
     },
     call: {
+      decodeFontFace: (bytes, options) => calls.decodeFontFace(bytes as ArrayBuffer, options),
       version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
       captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
       collaborationStateVector, collaborationStateAsUpdate,
