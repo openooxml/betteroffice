@@ -45,6 +45,14 @@ impl ListState {
         }
     }
 
+    pub(crate) fn marker_fonts(&self, num_id: f64, level: f64) -> Option<docx_parse::FontFamily> {
+        self.numbering
+            .as_ref()?
+            .get_level(num_id, level)?
+            .r_pr?
+            .font_family
+    }
+
     pub(crate) fn first_picture_bullet(&self) -> Option<&docx_parse::numbering::PictureBulletSize> {
         self.numbering
             .as_ref()?

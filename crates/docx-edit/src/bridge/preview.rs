@@ -912,6 +912,7 @@ pub(crate) fn replay(
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, "body").ok()?;
     let with_sources = RenderEnv {
+        font_theme: env.font_theme.clone().or_else(|| source_font_theme(doc)),
         media: if env.media_tokens && env.media.is_empty() {
             doc.media_sources()
         } else {

@@ -436,6 +436,8 @@ pub(crate) struct SourceIndex {
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
     #[serde(skip)]
+    render_theme: OnceLock<docx_parse::Theme>,
+    #[serde(skip)]
     run_size_sources: Mutex<BTreeMap<String, Option<Arc<ParagraphSizes>>>>,
     #[serde(skip)]
     run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
@@ -509,6 +511,7 @@ impl SourceIndex {
             }
         }
         self.bytes = bytes;
+        self.render_theme = OnceLock::new();
         Ok(())
     }
 
@@ -524,6 +527,16 @@ impl SourceIndex {
         self.group_pictures
             .get_or_init(|| crate::bridge::group_pictures::source_shapes(self.bytes(), &self.roots))
             .clone()
+    }
+
+    pub(crate) fn render_theme(&self) -> &docx_parse::Theme {
+        self.render_theme.get_or_init(|| {
+            ooxml_opc::RetainedPackage::from_bytes(self.bytes())
+                .ok()
+                .as_ref()
+                .and_then(crate::bridge::package_font_theme)
+                .unwrap_or_default()
+        })
     }
 
     pub(crate) fn bytes(&self) -> PackageBytes {
@@ -688,6 +701,7 @@ impl SourceIndex {
             reseed_calls: std::sync::atomic::AtomicUsize::new(0),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
+            render_theme: OnceLock::new(),
             run_size_sources: Mutex::new(BTreeMap::new()),
             run_size_paragraphs: Mutex::new(BTreeMap::new()),
             run_size_seeded: OnceLock::new(),
