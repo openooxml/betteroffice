@@ -104,7 +104,12 @@
     "single": "एकल",
     "double": "दुगुना",
     "lineSpacingTitle": "पंक्ति रिक्ति: {label}",
-    "paragraphSpacing": "पैराग्राफ रिक्ति"
+    "paragraphSpacing": "पैराग्राफ रिक्ति",
+    "addBefore": "अनुच्छेद से पहले रिक्ति जोड़ें",
+    "removeBefore": "अनुच्छेद से पहले की रिक्ति हटाएँ",
+    "addAfter": "अनुच्छेद के बाद रिक्ति जोड़ें",
+    "removeAfter": "अनुच्छेद के बाद की रिक्ति हटाएँ",
+    "options": "पंक्ति रिक्ति विकल्प..."
   },
   "styles": {
     "selectAriaLabel": "पैराग्राफ शैली चुनें",
@@ -480,6 +485,11 @@
       "top": "ऊपर (px)",
       "width": "चौड़ाई (px)",
       "height": "ऊंचाई (px)"
+    },
+    "paragraphSpacing": {
+      "before": "पहले की रिक्ति",
+      "after": "बाद की रिक्ति",
+      "multiple": "गुणक"
     }
   },
   "comments": {

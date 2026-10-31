@@ -104,7 +104,12 @@
     "single": "Enkel",
     "double": "Dubbel",
     "lineSpacingTitle": "Regelafstand: {label}",
-    "paragraphSpacing": "Alinea-afstand"
+    "paragraphSpacing": "Alinea-afstand",
+    "addBefore": "Ruimte vóór alinea toevoegen",
+    "removeBefore": "Ruimte vóór alinea verwijderen",
+    "addAfter": "Ruimte na alinea toevoegen",
+    "removeAfter": "Ruimte na alinea verwijderen",
+    "options": "Opties voor regelafstand..."
   },
   "styles": {
     "selectAriaLabel": "Alineastijl selecteren",
@@ -480,6 +485,11 @@
       "top": "Boven (px)",
       "width": "Breedte (px)",
       "height": "Hoogte (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Afstand vóór",
+      "after": "Afstand na",
+      "multiple": "Meerdere"
     }
   },
   "comments": {

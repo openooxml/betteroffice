@@ -178,7 +178,7 @@ test('docx toolbar line spacing and indent save over direct paragraph properties
     await test.step(label, async () => {
       const input = await openSpaced(page, arm, source);
       const rail = page.getByTestId('formatting-bar');
-      const spacing = rail.getByRole('combobox', { name: 'Line spacing', exact: true });
+      const spacing = rail.getByRole('button', { name: 'Line spacing', exact: true });
       await expect(spacing).toHaveAttribute('title', 'Line spacing: Single');
       for (const step of ['first', 'second']) {
         if (step === 'second') {
@@ -186,7 +186,7 @@ test('docx toolbar line spacing and indent save over direct paragraph properties
           await expect(spacing).toHaveAttribute('title', 'Line spacing: Single');
         }
         await spacing.click();
-        await page.getByRole('option', { name: '1.15', exact: true }).click();
+        await page.getByRole('menuitemradio', { name: '1.15', exact: true }).click();
         await expect(spacing).toHaveAttribute('title', 'Line spacing: 1.15');
         await rail.getByRole('button', { name: 'Increase Indent', exact: true }).click();
       }

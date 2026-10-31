@@ -50,6 +50,28 @@ async function selected(text: string, start: number, end: number) {
 }
 
 describe('toolbar formatting adapter', () => {
+  test('sets paragraph spacing and clears competing spacing on only the supplied side', async () => {
+    const { session, map, selection } = await selected('hello world', 0, 0);
+    session.setParagraphAttrs(selection().range, { spaceAfter: 160, other: {
+      spaceBeforeLines: 200, beforeAutospacing: true, spaceAfterLines: 100, afterAutospacing: true,
+    } });
+    expect(applyYrsToolbarFormatting(session, map(), { type: 'paragraphSpacing', before: 240 })).toBe(true);
+    expect(selection().context.paragraphProperties).toMatchObject({
+      spaceBefore: 240, beforeAutospacing: false, spaceAfter: 160, spaceAfterLines: 100, afterAutospacing: true,
+    });
+    expect(selection().context.paragraphProperties.spaceBeforeLines).toBe(0);
+    expect(applyYrsToolbarFormatting(session, map(), { type: 'paragraphSpacing', after: 0 })).toBe(true);
+    expect(selection().context.paragraphProperties).toMatchObject({ spaceBefore: 240, spaceAfter: 0, afterAutospacing: false });
+    expect(selection().context.paragraphProperties.spaceAfterLines).toBe(0);
+  });
+
+  test('applies dialog line and paragraph spacing together in suggesting mode', async () => {
+    const { session, map, selection } = await selected('hello world', 0, 0);
+    expect(applyYrsToolbarFormatting(session, map(), { type: 'paragraphSpacing', before: 240, after: 120, lineSpacing: 360 },
+      { name: 'Reviewer', date: '2026-10-31T10:00:00Z' })).toBe(true);
+    expect(selection().context.paragraphProperties).toMatchObject({ spaceBefore: 240, spaceAfter: 120, lineSpacing: 360, lineSpacingRule: 'auto' });
+  });
+
   test('toggles superscript and subscript exclusively over a range', async () => {
     const { session, map, selection } = await selected('hello world', 0, 5);
     expect(applyYrsToolbarFormatting(session, map(), 'superscript')).toBe(true);

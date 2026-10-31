@@ -1,4 +1,5 @@
 import { Suspense, lazy } from 'react';
+import type { ParagraphSpacingData } from '../dialogs/ParagraphSpacingDialog';
 import type {
   Document,
   FootnoteProperties,
@@ -35,6 +36,9 @@ const FootnotePropertiesDialog = lazy(() =>
 );
 const PageSetupDialog = lazy(() =>
   import('../dialogs/PageSetupDialog').then((m) => ({ default: m.PageSetupDialog }))
+);
+const ParagraphSpacingDialog = lazy(() =>
+  import('../dialogs/ParagraphSpacingDialog').then((m) => ({ default: m.ParagraphSpacingDialog }))
 );
 const WatermarkDialog = lazy(() =>
   import('../dialogs/WatermarkDialog').then((m) => ({ default: m.WatermarkDialog }))
@@ -88,6 +92,9 @@ export function DocxEditorDialogs({
   onImagePropsClose,
   onApplyImageProperties,
   pmImageContext,
+  paragraphSpacing,
+  onParagraphSpacingClose,
+  onParagraphSpacingApply,
   showPageSetup,
   onPageSetupClose,
   onPageSetupApply,
@@ -131,6 +138,9 @@ export function DocxEditorDialogs({
   onApplyImageProperties: (data: ImagePropertiesData) => void;
   pmImageContext: PmImageContextDialogData | null | undefined;
   // Page setup
+  paragraphSpacing: ParagraphSpacingData | null;
+  onParagraphSpacingClose: () => void;
+  onParagraphSpacingApply: (spacing: ParagraphSpacingData) => void;
   showPageSetup: boolean;
   onPageSetupClose: () => void;
   onPageSetupApply: (props: Partial<SectionProperties>) => void;
@@ -218,6 +228,8 @@ export function DocxEditorDialogs({
           }
         />
       )}
+      {paragraphSpacing && <ParagraphSpacingDialog isOpen currentProps={paragraphSpacing}
+        onClose={onParagraphSpacingClose} onApply={onParagraphSpacingApply} />}
       {showPageSetup && (
         <PageSetupDialog
           isOpen={showPageSetup}

@@ -104,7 +104,12 @@
     "single": "單行",
     "double": "雙行",
     "lineSpacingTitle": "行距：{label}",
-    "paragraphSpacing": "段落間距"
+    "paragraphSpacing": "段落間距",
+    "addBefore": "新增段落前間距",
+    "removeBefore": "移除段落前間距",
+    "addAfter": "新增段落後間距",
+    "removeAfter": "移除段落後間距",
+    "options": "行距選項..."
   },
   "styles": {
     "selectAriaLabel": "選取段落樣式",
@@ -480,6 +485,11 @@
       "top": "上 (px)",
       "width": "寬度 (px)",
       "height": "高度 (px)"
+    },
+    "paragraphSpacing": {
+      "before": "段落前間距",
+      "after": "段落後間距",
+      "multiple": "多倍行高"
     }
   },
   "comments": {

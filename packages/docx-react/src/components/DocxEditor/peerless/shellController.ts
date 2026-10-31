@@ -1,3 +1,4 @@
+import { paragraphSpacingAttrs } from '../../../commands/paragraphSpacing';
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
 import { WASM32_MEMORY_LIMIT_BYTES, type DocxEditRequest, type DocxEditResult, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
   type DocxFontEnvironment, type DocxFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
@@ -45,7 +46,7 @@ const PROPOSAL_FAILURES = {
 } satisfies Record<Extract<DocxProposalResult, { ok: false }>['failure']['code'], true>;
 
 const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor', 'highlightColor',
-  'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'setLtr', 'setRtl',
+  'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'paragraphSpacing', 'setLtr', 'setRtl',
   'bulletList', 'numberedList', 'indent', 'outdent', 'paragraphStyle']);
 
 export interface PeerlessWorkerQuery<K extends DocxDocumentRead['kind'] = DocxDocumentRead['kind']> {
@@ -179,7 +180,7 @@ export function createPeerlessShellController(initial: Options) {
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
       sidebarOpen: options.commentsSidebar?.open ?? false, sidebarControl: options.commentsSidebar?.control ?? 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: options.showHelpMenu !== false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'reportIssue', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
+      supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'reportIssue', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'paragraphSpacingDialog', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
         'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', 'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
@@ -426,6 +427,7 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'clearFormatting') return format({ kind: 'clearFormatting', payload: {} });
       if (id === 'alignment') return format({ kind: 'setParagraphAttrs', payload: { attrs: { alignment: (args as DocxCommandArgs['alignment']).value } } });
       if (id === 'lineSpacing') return format({ kind: 'setParagraphAttrs', payload: { attrs: { lineSpacing: (args as DocxCommandArgs['lineSpacing']).value, lineSpacingRule: 'auto' } } });
+      if (id === 'paragraphSpacing') return format({ kind: 'setParagraphAttrs', payload: { attrs: paragraphSpacingAttrs(args as DocxCommandArgs['paragraphSpacing']) } });
       if (id === 'setLtr' || id === 'setRtl') return format({ kind: 'setParagraphAttrs', payload: { attrs: { bidi: id === 'setRtl' } } });
       if (id === 'bulletList' || id === 'numberedList') return format({ kind: 'toggleList', payload: { kind: id === 'bulletList' ? 'bullet' : 'numbered' } });
       if (id === 'indent' || id === 'outdent') return format({ kind: 'changeIndent', payload: { direction: id === 'indent' ? 'increase' : 'decrease' } });

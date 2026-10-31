@@ -104,7 +104,12 @@
     "single": "יחיד",
     "double": "כפול",
     "lineSpacingTitle": "מרווח בין שורות: {label}",
-    "paragraphSpacing": "מרווח בין פסקאות"
+    "paragraphSpacing": "מרווח בין פסקאות",
+    "addBefore": "הוסף רווח לפני פיסקה",
+    "removeBefore": "הסר רווח לפני פיסקה",
+    "addAfter": "הוסף רווח אחרי פיסקה",
+    "removeAfter": "הסר רווח אחרי פיסקה",
+    "options": "אפשרויות מרווח בין שורות..."
   },
   "styles": {
     "selectAriaLabel": "בחר סגנון פסקה",
@@ -480,6 +485,11 @@
       "top": "למעלה (px)",
       "width": "רוחב (px)",
       "height": "גובה (px)"
+    },
+    "paragraphSpacing": {
+      "before": "מרווח לפני",
+      "after": "מרווח אחרי",
+      "multiple": "מרובה"
     }
   },
   "comments": {

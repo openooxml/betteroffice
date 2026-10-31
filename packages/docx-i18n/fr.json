@@ -104,7 +104,12 @@
     "single": "Simple",
     "double": "Double",
     "lineSpacingTitle": "Interligne : {label}",
-    "paragraphSpacing": "Espacement des paragraphes"
+    "paragraphSpacing": "Espacement des paragraphes",
+    "addBefore": "Ajouter un espace avant le paragraphe",
+    "removeBefore": "Supprimer l’espace avant le paragraphe",
+    "addAfter": "Ajouter un espace après le paragraphe",
+    "removeAfter": "Supprimer l’espace après le paragraphe",
+    "options": "Options d’interligne..."
   },
   "styles": {
     "selectAriaLabel": "Sélectionner le type de paragraphe",
@@ -480,6 +485,11 @@
       "top": "Haut (px)",
       "width": "Largeur (px)",
       "height": "Hauteur (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Espacement avant",
+      "after": "Espacement après",
+      "multiple": "Multiple"
     }
   },
   "comments": {

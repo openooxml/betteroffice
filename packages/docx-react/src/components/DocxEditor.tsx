@@ -98,6 +98,7 @@ import {
   type DocxMemoryPressure,
   type DocxMemoryStats,
 } from './DocxEditor/memoryStats';
+import type { ParagraphSpacingData } from './dialogs/ParagraphSpacingDialog';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
@@ -1497,6 +1498,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     setState((prev) => ({ ...prev, zoom }));
   }, []);
 
+  const [paragraphSpacingDialog, setParagraphSpacingDialog] = useState<ParagraphSpacingData | null>(null);
   const commands = useDocxCommandBinding({
     experimentalWorkerOpen: workerOpen,
     pagedEditorRef,
@@ -1542,6 +1544,11 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
         imageDialogTarget(image, commandBridgeRef.current?.imageHandle(image.pos) ?? null)
       );
       setImagePropsOpen(true);
+    },
+    openParagraphSpacing: () => {
+      const spacing = commandController.store.getState('paragraphSpacing').value;
+      setParagraphSpacingDialog({ before: spacing?.before ?? 0, after: spacing?.after ?? 0,
+        lineSpacing: commandController.store.getState('lineSpacing').value ?? 240 });
     },
     openPageSetup: () => handleOpenPageSetup(),
     openWatermark: () => handleOpenWatermark(),
@@ -2898,6 +2905,12 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
             onImagePropsClose={() => setImagePropsOpen(false)}
             onApplyImageProperties={handleApplyImageProperties}
             pmImageContext={imageTarget}
+            paragraphSpacing={paragraphSpacingDialog}
+            onParagraphSpacingClose={() => setParagraphSpacingDialog(null)}
+            onParagraphSpacingApply={(spacing) => {
+              void commands.complete('paragraphSpacingDialog', () =>
+                commandOutcome(commandBridgeRef.current?.format({ type: 'paragraphSpacing', ...spacing }) ?? false));
+            }}
             showPageSetup={showPageSetup}
             onPageSetupClose={() => setShowPageSetup(false)}
             onPageSetupApply={(properties) => {

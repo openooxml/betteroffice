@@ -104,7 +104,12 @@
     "single": "Einfach",
     "double": "Doppelt",
     "lineSpacingTitle": "Zeilenabstand: {label}",
-    "paragraphSpacing": "Absatzabstand"
+    "paragraphSpacing": "Absatzabstand",
+    "addBefore": "Abstand vor Absatz hinzufügen",
+    "removeBefore": "Abstand vor Absatz entfernen",
+    "addAfter": "Abstand nach Absatz hinzufügen",
+    "removeAfter": "Abstand nach Absatz entfernen",
+    "options": "Zeilenabstandsoptionen..."
   },
   "styles": {
     "selectAriaLabel": "Absatzformatvorlage auswählen",
@@ -480,6 +485,11 @@
       "top": "Oben (px)",
       "width": "Breite (px)",
       "height": "Höhe (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Abstand vor",
+      "after": "Abstand nach",
+      "multiple": "Mehrfach"
     }
   },
   "comments": {

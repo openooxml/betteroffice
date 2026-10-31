@@ -107,6 +107,7 @@ export interface DocxCommandInputs {
   tableAction: (action: DocxTableAction) => DocxTableActionOutcome;
   openImageProperties: (image: PagedEditorSelectedImage) => void;
   openPageSetup: () => void;
+  openParagraphSpacing: () => void;
   openWatermark: () => void;
   refreshTrackedChanges: (session: YrsSession) => void;
 }
@@ -142,6 +143,7 @@ export type DocxCommandDialog =
   | 'splitCell'
   | 'tableProperties'
   | 'pageSetup'
+  | 'paragraphSpacingDialog'
   | 'watermark'
   | 'replace';
 
@@ -154,6 +156,7 @@ const DIALOG_COMMANDS: {
   splitCell: ['tableAction', 'splitCell', 'selection'],
   tableProperties: ['tableAction', { type: 'openTableProperties' }, 'selection'],
   pageSetup: ['pageSetup', null, 'document'],
+  paragraphSpacingDialog: ['paragraphSpacingDialog', null, 'selection'],
   watermark: ['watermark', null, 'document'],
   replace: ['replace', null, 'document'],
 };
@@ -546,6 +549,12 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
             type: 'lineSpacing',
             value: (args as DocxCommandArgs['lineSpacing']).value,
           });
+        case 'paragraphSpacing':
+          return format({ type: 'paragraphSpacing', ...(args as DocxCommandArgs['paragraphSpacing']) });
+        case 'paragraphSpacingDialog':
+          openDialog('paragraphSpacingDialog');
+          current.openParagraphSpacing();
+          return OPENED;
         case 'insertLink': {
           const session = editor?.session();
           if (!session) return executed(false);

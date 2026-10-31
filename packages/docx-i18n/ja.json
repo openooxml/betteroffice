@@ -104,7 +104,12 @@
     "single": "1 行",
     "double": "2 行",
     "lineSpacingTitle": "行間：{label}",
-    "paragraphSpacing": "段落の間隔"
+    "paragraphSpacing": "段落の間隔",
+    "addBefore": "段落前に間隔を追加",
+    "removeBefore": "段落前の間隔を削除",
+    "addAfter": "段落後に間隔を追加",
+    "removeAfter": "段落後の間隔を削除",
+    "options": "行間のオプション..."
   },
   "styles": {
     "selectAriaLabel": "段落スタイルを選択",
@@ -480,6 +485,11 @@
       "top": "上（px）",
       "width": "幅（px）",
       "height": "高さ（px）"
+    },
+    "paragraphSpacing": {
+      "before": "段落前の間隔",
+      "after": "段落後の間隔",
+      "multiple": "倍数"
     }
   },
   "comments": {

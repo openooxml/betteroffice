@@ -129,6 +129,9 @@ describe('command gate', () => {
       'fontSize',
       'paragraphStyle',
       'alignment',
+      'lineSpacing',
+      'paragraphSpacing',
+      'paragraphSpacingDialog',
       'bulletList',
       'insertLink',
       'insertImage',
@@ -301,6 +304,23 @@ describe('command gate', () => {
     expect(codeOf('outdent', listed)).toBeNull();
   });
 
+  test('paragraph spacing follows line spacing gates and defaults missing spacing to zero', () => {
+    for (const overrides of [{}, { mode: 'viewing' as const }, { mode: 'suggesting' as const },
+      { readOnly: true }, { selection: null }, { selection: 'unsupported' as const }]) {
+      const env = testEnvironment(overrides);
+      const expected = codeOf('lineSpacing', env);
+      expect(codeOf('paragraphSpacing', env, { before: 240 })).toBe(expected);
+      expect(codeOf('paragraphSpacingDialog', env, null)).toBe(expected);
+    }
+    expect(evaluateDocxCommand('paragraphSpacing', undefined, testEnvironment()).value).toEqual({ before: 0, after: 0 });
+    for (const args of [{ before: -1 }, { after: 31681 }, { before: NaN }, { after: Infinity }, { before: null }]) {
+      expect(codeOf('paragraphSpacing', testEnvironment(), args as never)).toBe('invalid-arguments');
+    }
+    for (const args of [{ before: 0 }, { after: 31680 }, { before: 240, after: 120 }, {}]) {
+      expect(codeOf('paragraphSpacing', testEnvironment(), args)).toBeNull();
+    }
+  });
+
   test('arguments are validated before anything runs', () => {
     const env = testEnvironment();
     expect(codeOf('fontSize', env, { points: 0 })).toBe('invalid-arguments');
@@ -326,7 +346,7 @@ describe('command gate', () => {
           alignment: 'center',
           styleId: 'Heading1',
           highlight: 'yellow',
-          paragraphProperties: { numPr: { numId: 1, ilvl: 0 }, lineSpacing: 360 },
+          paragraphProperties: { numPr: { numId: 1, ilvl: 0 }, lineSpacing: 360, spaceBefore: 240, spaceAfter: 120 },
         },
         fontFamily: 'Georgia',
         fontSize: 12,
@@ -341,6 +361,7 @@ describe('command gate', () => {
     expect(evaluateDocxCommand('fontFamily', undefined, env).value).toBe('Georgia');
     expect(evaluateDocxCommand('fontSize', undefined, env).value).toBe(12);
     expect(evaluateDocxCommand('highlightColor', undefined, env).value).toBe('yellow');
+    expect(evaluateDocxCommand('paragraphSpacing', undefined, env).value).toEqual({ before: 240, after: 120 });
     expect(evaluateDocxCommand('lineSpacing', undefined, env).value).toBe(360);
     expect(evaluateDocxCommand('lineSpacing', { value: 360 }, env).active).toBe(true);
     expect(evaluateDocxCommand('paragraphStyle', undefined, env).value).toBe('Heading1');

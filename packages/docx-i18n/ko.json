@@ -104,7 +104,12 @@
     "single": "1줄",
     "double": "2줄",
     "lineSpacingTitle": "줄 간격: {label}",
-    "paragraphSpacing": "단락 간격"
+    "paragraphSpacing": "단락 간격",
+    "addBefore": "단락 앞에 공백 추가",
+    "removeBefore": "단락 앞 공백 제거",
+    "addAfter": "단락 뒤에 공백 추가",
+    "removeAfter": "단락 뒤 공백 제거",
+    "options": "줄 간격 옵션..."
   },
   "styles": {
     "selectAriaLabel": "단락 스타일 선택",
@@ -480,6 +485,11 @@
       "top": "위쪽 (px)",
       "width": "너비 (px)",
       "height": "높이 (px)"
+    },
+    "paragraphSpacing": {
+      "before": "단락 앞 간격",
+      "after": "단락 뒤 간격",
+      "multiple": "배수"
     }
   },
   "comments": {
