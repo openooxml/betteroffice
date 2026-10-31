@@ -1,7 +1,7 @@
 /**
- * Google Fonts Loader
+ * Browser Font Loader
  *
- * Dynamically loads fonts from Google Fonts API with:
+ * Dynamically loads managed and app-configured fonts with:
  * - Loading state tracking
  * - Duplicate prevention
  * - Callback notifications
@@ -9,7 +9,11 @@
  */
 
 import {
+  hasConfiguredFontSource,
   hasDefaultFontSource,
+  hostedFontFamilies,
+  ImplicitFontAbsentError,
+  isImplicitFontProvider,
   resolveDefaultFontProvider,
 } from '../layout/measure/defaultFontProvider';
 import type { BundledFontProvider } from '../layout/measure/fontRegistry';
@@ -76,6 +80,7 @@ type Requesters = ReadonlySet<ScopeState | null>;
 
 const MODULE_LEVEL: Requesters = new Set([null]);
 const PERMANENT: FaceOwner = { scope: null };
+const moduleHostedFonts = {};
 const NO_OWNERS: ReadonlySet<FaceOwner> = new Set();
 // Scopes with at least one listener; a scope nobody listens to stays collectable.
 const liveScopes = new Set<ScopeState>();
@@ -213,7 +218,7 @@ const BUNDLED_FONT_DEADLINE_MS = 5000;
 const BUNDLED_ANNOUNCE_BATCH_MS = 500;
 
 // Bundled faces by family|weight|style; a failed face is evicted so a later call retries it.
-const bundledFaces = new Map<string, Promise<boolean>>();
+const bundledFaces = new Map<string, Promise<boolean | undefined>>();
 // The requesters of every load that joined a bundled face still loading, which hear it fail.
 const bundledFaceRequesters = new Map<string, Set<Requesters>>();
 // Families with at least one bundled face registered; like registeredFamilies,
@@ -274,7 +279,7 @@ function registerBundledFace(
   bold: boolean,
   italic: boolean,
   requesters: Requesters
-): Promise<boolean> | undefined {
+): Promise<boolean | undefined> | undefined {
   const key = faceKey(family, bold ? 700 : 400, italic ? 'italic' : 'normal');
   const existing = bundledFaces.get(key);
   if (existing) {
@@ -300,6 +305,7 @@ function registerBundledFace(
       return true;
     } catch (error) {
       if (face) document.fonts.delete(face);
+      if (error instanceof ImplicitFontAbsentError) return undefined;
       reportFontError(
         error,
         `failed to register bundled "${family}"`,
@@ -334,7 +340,8 @@ function registerBundledFamily(
   weights: number[] | undefined,
   styles: ('normal' | 'italic')[] | undefined,
   deadlineMs: number,
-  requesters: Requesters
+  requesters: Requesters,
+  requester: ScopeState | null
 ): Promise<BundledRegistration> {
   if (typeof FontFace === 'undefined' || document.fonts === undefined) {
     return Promise.resolve('none');
@@ -371,6 +378,13 @@ function registerBundledFamily(
       const provider = await resolveDefaultFontProvider();
       if (!provider) return;
       resolvedProvider = true;
+      if (isImplicitFontProvider(provider) && sources.some(source =>
+        hostedFontFamilies(requester ?? undefined)?.has(source.trim().toLowerCase()) ||
+        hostedFontFamilies(moduleHostedFonts)?.has(source.trim().toLowerCase())
+      )) {
+        states.fill('unsupported');
+        return;
+      }
       const source =
         sources.find((candidate) =>
           faces.some(([bold, italic]) => bundledLoad(provider, candidate, bold, italic))
@@ -389,8 +403,14 @@ function registerBundledFamily(
             states[index] = 'unsupported';
             return;
           }
+          if (!isImplicitFontProvider(provider)) bundledFamilies.add(family);
+          const registered = await registration;
+          if (registered === undefined) {
+            states[index] = 'unsupported';
+            return;
+          }
           bundledFamilies.add(family);
-          states[index] = (await registration) ? 'registered' : 'failed';
+          states[index] = registered ? 'registered' : 'failed';
         })
       );
     })()
@@ -484,7 +504,7 @@ function getGoogleFontsUrl(
 }
 
 /**
- * Load a font from Google Fonts
+ * Load a font from the default font provider
  *
  * @param fontFamily - The font family name to load
  * @param options - Optional configuration
@@ -607,19 +627,23 @@ async function loadFontFrom(
           deadlineAt === undefined
             ? BUNDLED_FONT_DEADLINE_MS
             : Math.max(0, deadlineAt - Date.now()),
-          requesters
+          requesters,
+          requester
         );
         if (registration === 'absent') bundledAbsentFamilies.add(normalizedFamily);
         else bundledAbsentFamilies.delete(normalizedFamily);
-        if (registration === 'none' || registration === 'absent') return false;
-        if (registration === 'complete') {
-          partialBundledFamilies.delete(normalizedFamily);
-          markFamilyLoaded(normalizedFamily);
-        } else {
-          partialBundledFamilies.add(normalizedFamily);
+        const remoteFallback = registration === 'absent' && !hasConfiguredFontSource();
+        if (registration === 'none' || (registration === 'absent' && !remoteFallback)) return false;
+        if (registration !== 'absent') {
+          if (registration === 'complete') {
+            partialBundledFamilies.delete(normalizedFamily);
+            markFamilyLoaded(normalizedFamily);
+          } else {
+            partialBundledFamilies.add(normalizedFamily);
+          }
+          notifyCallbacks([normalizedFamily], requesters);
+          return true;
         }
-        notifyCallbacks([normalizedFamily], requesters);
-        return true;
       }
 
       // Remote fetch disabled (no-egress embedder). The font is not locally
@@ -693,7 +717,7 @@ async function loadFontFrom(
 }
 
 /**
- * Load multiple fonts from Google Fonts
+ * Load multiple fonts from the default font provider
  *
  * @param families - Array of font family names to load
  * @param options - Optional configuration
@@ -959,11 +983,9 @@ const cssStringEscape = (s: string) =>
  * Load a font from a raw buffer (e.g., embedded in DOCX)
  *
  * Call before loading the document when possible: registration marks the
- * family as ours, which is what keeps the metric-compatible Google fallback
+ * family as ours, which keeps the managed coverage fallback
  * in play for subsetted faces during the document's font resolution pass.
- * Late registration still self-heals on the next pass. Under
- * `setGoogleFontsEnabled(false)` that fallback fetch is suppressed and
- * glyphs missing from the registered faces render via the CSS stack.
+ * Late registration still self-heals on the next pass.
  *
  * @param fontFamily - The font family name
  * @param buffer - Font file buffer (TTF, OTF, WOFF, WOFF2)
@@ -1365,9 +1387,8 @@ function guessFontFormat(src: string): string {
  *
  * Injects an `@font-face` rule pointing at the URL. Multiple weights of the
  * same family can be registered independently. Families registered here are
- * treated as potentially subsetted: the editor still fetches their
- * metric-compatible Google equivalent as a glyph-coverage fallback, unless
- * disabled via `setGoogleFontsEnabled(false)`.
+ * treated as potentially subsetted: the editor also loads their managed
+ * equivalent as a glyph-coverage fallback.
  *
  * @param fontFamily - CSS font-family name to expose
  * @param src - URL to the font file
@@ -1460,7 +1481,7 @@ async function loadUrlFace(
  * Each entry injects one `@font-face` rule pointing at a URL. Multiple
  * entries can share `family` to register distinct weights as separate faces.
  *
- * For Google Fonts, call `loadFont(family)` directly — the `fonts` prop is
+ * For managed fonts, call `loadFont(family)` directly; the `fonts` prop is
  * for fonts the consumer hosts themselves. For raw bytes already in memory
  * (DOCX-embedded fonts, user uploads), call `loadFontFromBuffer(family, buf)`.
  *
@@ -1501,6 +1522,9 @@ async function loadDefinitionsFor(
   defs: ReadonlyArray<FontDefinition> | undefined,
   requester: ScopeState | null
 ): Promise<void> {
+  Object.assign(requester ?? moduleHostedFonts, {
+    [Symbol.for('@betteroffice/docx/hostedFontFamilies')]: new Set((defs ?? []).map(def => def.family.trim().toLowerCase())),
+  });
   if (!defs || defs.length === 0) return;
   await Promise.all(
     defs.map((def) => loadUrlFace(def.family, def.src, { weight: def.weight }, requester))

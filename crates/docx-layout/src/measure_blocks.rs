@@ -1768,7 +1768,11 @@ fn measure_paragraph_with_context(
                     cumulative_y,
                 )
                 .unwrap_or_else(|| {
-                    if config.font_chains.values().all(Vec::is_empty) {
+                    if config.font_chains.values().all(Vec::is_empty)
+                        || config
+                            .font_chains
+                            .contains_key("@betteroffice/fonts/coverage")
+                    {
                         wrapped_synthetic_paragraph_extent(paragraph, content_width)
                     } else {
                         synthetic_paragraph_extent(paragraph, content_width)
@@ -3677,7 +3681,12 @@ fn measure_table_cells(
             } else {
                 measure_blocks(&mut cell.blocks, measure_width.max(1.0), config)?
             };
-            if rotated && config.font_chains.values().all(Vec::is_empty) {
+            if rotated
+                && (config.font_chains.values().all(Vec::is_empty)
+                    || config
+                        .font_chains
+                        .contains_key("@betteroffice/fonts/coverage"))
+            {
                 for (block, measure) in cell.blocks.iter().zip(&mut measures) {
                     if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
                         (block, measure)
@@ -7749,6 +7758,109 @@ mod tests {
                 "{fallback:?}"
             );
         }
+    }
+
+    #[test]
+    fn implicit_uncovered_text_matches_no_provider_extents() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = crate::register_measure_font_bytes(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let mut config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Calibri", "fontSize": 12}),
+            ..Default::default()
+        };
+        for family in ["Noto Sans Devanagari", "Calibri"] {
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": "coverage",
+                "runs": [{"kind": "text", "text": "हहहहहहहहहह", "fontFamily": family}]
+            }))
+            .unwrap();
+            config.font_chains.clear();
+            let main = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            config
+                .font_chains
+                .insert(format!("{}|0|0", family.to_lowercase()), vec![font]);
+            config
+                .font_chains
+                .insert("@betteroffice/fonts/coverage".to_owned(), vec![font]);
+            let implicit = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            assert_eq!(
+                serde_json::to_value(implicit).unwrap(),
+                serde_json::to_value(main).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_mixed_runs_paint_with_the_measured_letter_spacing() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = crate::register_measure_font_bytes(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let block = json!({
+            "kind": "paragraph", "id": "tracked",
+            "runs": [
+                {"kind": "text", "text": "ABC", "fontFamily": "Calibri", "fontSize": 12, "letterSpacing": 3},
+                {"kind": "text", "text": "हिन्दी", "fontFamily": "Calibri", "fontSize": 12}
+            ]
+        });
+        let paragraph: ParagraphBlock = serde_json::from_value(block.clone()).unwrap();
+        let mut config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Calibri", "fontSize": 12}),
+            ..Default::default()
+        };
+        let main = measure_paragraph(&paragraph, 400.0, &config).unwrap();
+        config
+            .font_chains
+            .insert("calibri|0|0".to_owned(), vec![font]);
+        config
+            .font_chains
+            .insert("@betteroffice/fonts/coverage".to_owned(), vec![font]);
+        let extent = measure_paragraph(&paragraph, 400.0, &config).unwrap();
+        assert_eq!(
+            serde_json::to_value(&extent).unwrap(),
+            serde_json::to_value(&main).unwrap()
+        );
+        let paint = |chains| {
+            let input = json!({
+                "measured": [{"block": block, "measure": {"kind": "paragraph", "totalHeight": extent.total_height, "lines": extent.lines}}],
+                "fontChains": chains,
+                "options": {},
+                "layout": {"pages": [{
+                    "size": {"w": 600, "h": 800},
+                    "margins": {"top": 50, "right": 50, "bottom": 50, "left": 50},
+                    "number": 1,
+                    "fragments": [{"kind": "paragraph", "blockId": "tracked", "x": 50, "y": 50,
+                        "width": 400, "height": extent.total_height, "fromLine": 0, "toLine": extent.lines.len()}]
+                }]}
+            });
+            serde_json::to_value(crate::build_display_list_value(&input.to_string()).unwrap())
+                .unwrap()["pages"][0]["primitives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|primitive| matches!(primitive["kind"].as_str(), Some("text" | "glyphRun")))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let browser = paint(json!({}));
+        let implicit = paint(serde_json::to_value(&config.font_chains).unwrap());
+        assert_eq!(implicit, browser);
+        assert_eq!(implicit.len(), 2);
+        assert_eq!(implicit[0]["kind"], "text");
+        assert_eq!(implicit[0]["letterSpacing"], 3);
+        let latin_width = implicit[0]["width"].as_f64().unwrap();
+        assert_eq!(latin_width, 57.0);
+        assert_eq!(implicit[1]["x"].as_f64().unwrap(), 50.0 + latin_width);
+        assert_eq!(
+            latin_width + implicit[1]["width"].as_f64().unwrap(),
+            extent.lines[0].width
+        );
     }
 
     #[test]

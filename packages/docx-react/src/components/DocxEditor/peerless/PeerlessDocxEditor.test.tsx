@@ -1280,6 +1280,20 @@ test('font callbacks follow worker readiness and a reverted provider is reapplie
   expect(coreSession).not.toHaveBeenCalled();
 });
 
+test('a 404 URL font reports a recoverable error after the peerless editor opens', async () => {
+  const fetchFont = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
+  restorers.push(() => fetchFont.mockRestore());
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} fonts={[{ family: 'Brand Sans', src: '/brand.woff2' }]} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(onError).toHaveBeenCalledWith(
+    expect.objectContaining({ message: 'DOCX font Brand Sans failed to load: 404' }), { recoverable: true }
+  ));
+  expect(fetchFont).toHaveBeenCalled();
+  expect(requests.filter(request => request.type === 'commandInit')).toHaveLength(1);
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
+});
+
 test('custom fonts fetch bytes for worker faces without global CSS and wait for composition', async () => {
   const original = document.head.innerHTML;
   const fontBytes = new Uint8Array(16);
