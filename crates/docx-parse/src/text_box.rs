@@ -8,6 +8,7 @@ use crate::drawingml::{
 use crate::image::{
     ImagePadding, ImagePosition, ImageSize, ImageWrap, parse_anchor_position, parse_anchor_wrap,
 };
+use crate::shape::{Shape, ShapeTextBody};
 use crate::xml::XmlElement;
 
 const DEFAULT_MARGIN_EMU: f64 = 91_440.0;
@@ -158,6 +159,64 @@ pub fn get_text_box_content_element(shape: &XmlElement) -> Option<&XmlElement> {
     shape
         .child_by_full_name("wps:txbx")?
         .child_by_full_name("w:txbxContent")
+}
+
+pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
+    if !has_bookmarked_text_box(source) {
+        return;
+    }
+    shape.drawing_xml = Some(source.to_bookmarked_raw_inline_xml());
+    shape.drawing_run_xml = None;
+    shape.drawing_model = Some(serde_json::json!({
+        "frame": crate::smart_art::frame_model(shape),
+        "otherSha256": crate::smart_art::other_model_sha256(shape),
+        "textBoxContentSha256": shape_text_bodies(shape).iter().map(|body| content_sha256(&body.content)).collect::<Vec<_>>()
+    }));
+}
+
+pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let model = crate::smart_art::wire_model(serde_json::Value::Array(content.to_vec()));
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&model).expect("text box content"))
+    )
+}
+
+pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
+    has_block_bookmarks(element, false)
+}
+
+fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
+    let in_text_box = in_text_box || element.name == "w:txbxContent";
+    if in_text_box && element.name == "w:p" {
+        return false;
+    }
+    (in_text_box && crate::block::has_direct_block_bookmark(element))
+        || element
+            .child_elements()
+            .any(|child| has_block_bookmarks(child, in_text_box))
+}
+
+pub(crate) fn source_xml(source: &XmlElement) -> String {
+    if has_bookmarked_text_box(source) {
+        source.to_bookmarked_raw_inline_xml()
+    } else {
+        source.to_raw_inline_xml()
+    }
+}
+
+pub(crate) fn shape_text_bodies(shape: &Shape) -> Vec<&ShapeTextBody> {
+    fn visit<'a>(shape: &'a Shape, bodies: &mut Vec<&'a ShapeTextBody>) {
+        bodies.extend(shape.text_body.iter());
+        for child in shape.children.iter().flatten() {
+            visit(child, bodies);
+        }
+    }
+    let mut bodies = Vec::new();
+    visit(shape, &mut bodies);
+    bodies
 }
 
 pub fn parse_text_box_from_shape(
