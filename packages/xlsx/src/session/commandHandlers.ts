@@ -1,8 +1,7 @@
 import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
 import type { AwarenessCursor } from '../collaboration/types';
-import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
+import { DEFAULT_MAX_FRAME_BYTES, XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../collaboration/validation';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../collaboration/awareness';
 import type { XlsxEditStep, XlsxRangeAddress, XlsxRangeTarget } from '../edits';
 import { StaleProposalError, type CapturedFormat, type CellPoint, type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
 import {
