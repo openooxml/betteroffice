@@ -8,6 +8,7 @@ import { DocxEditorNotReadyError, WorkerReadSupersededError, type createPeerless
 import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 import { reviewVersionOf } from './workerReview';
+import { sameReservationOwner } from '../internals/layoutProvenance';
 
 export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefined): string {
   return view?.editState?.documentVersion ?? view?.geometry?.documentVersion ?? String(view?.version ?? 0);
@@ -21,12 +22,12 @@ export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerl
     ? pluginRefusal('document-replaced') : null;
 }
 
-/** `reservations` is the set the editor sends, which a frame's boxes answer for only once it was laid out with it. */
+/** Reservation boxes answer from the frame carrying their owner's set. */
 export function createWorkerPluginGeometry(controller: ReturnType<typeof createPeerlessShellController>, pages: () => HTMLElement | null, layer: () => HTMLElement | null, changed: () => void,
   navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null) {
   type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' }>;
   type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string) => Promise<DocxAnchorGeometryResult[]>;
-  let current: { frame: PeerlessFrameGeometry; version: number; pixelRatio: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries;
+  let current: { frame: PeerlessFrameGeometry; version: number; pixelRatio: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries; reservations: DocxReservationsPayload | null;
     readAll: ReadAll } | null = null;
   let repaint: { frame: PeerlessFrameGeometry; next: PeerlessFrameGeometry; same: boolean } | null = null;
   let displaySelection: DocxPluginSelection['displayRange'] = null;
@@ -134,6 +135,9 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const queries = createDisplayListQueries({ pages: frame.pages.map(page => page.displayPage!).filter(Boolean) }, native);
     const layout: DocxPluginLayout = { id: `${view.identity.session}:${view.version}:${frame.frameEpoch}`, version: review.version, previewVersion: review.previewVersion,
       reservationsVersion: frame.reservations?.version ?? null, zoom, pageCount: frame.pages.length };
+    const sent = reservations();
+    const laidReservations = sent?.key !== undefined && frame.reservations?.key === sent.key && frame.reservations.version === sent.version ? sent
+      : current?.frame.reservations?.key != null && current.frame.reservations.key === frame.reservations?.key && current.frame.reservations.version === frame.reservations?.version ? current.reservations : null;
     /** Projections over the pages host and overlay layer, each measured at most once. */
     const measure = () => {
       let host: { x: number; y: number } | null | undefined;
@@ -177,8 +181,10 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const reserved = (owner: string, id: string, measured: ReturnType<typeof measure>): { result: DocxAnchorGeometryResult } | { hide: Read } => {
       if (!shown()) return { result: unavailable() };
       const sent = reservations();
-      if (sent ? sent.key === undefined || frame.reservations?.key !== sent.key : frame.reservations !== undefined) return { result: unavailable() };
       const item = sent?.sets.find(set => set.owner === owner)?.items.find(entry => entry.id === id);
+      if (sent?.key !== undefined && !item) return { result: anchorFailure('missing-target', 'The reservation did not resolve') };
+      if (sent ? sent.key === undefined || (frame.reservations?.key !== sent.key && !sameReservationOwner(laidReservations ? { payload: laidReservations } : null, { payload: sent }, owner))
+        : frame.reservations !== undefined) return { result: unavailable() };
       if (!item) return { result: anchorFailure('missing-target', 'The reservation did not resolve') };
       return item.kind === 'hide' ? { hide: item.anchor } : { result: placeReservation(repeatedOf(measured), owner, id) };
     };
@@ -273,7 +279,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       read: (owner, targets) => readAll(targets, true, owner),
     });
     current?.queries.dispose();
-    current = { frame, version: view.version, pixelRatio: globalThis.devicePixelRatio, layout, geometry, queries, readAll }; displaySelection = null; publish();
+    current = { frame, version: view.version, pixelRatio: globalThis.devicePixelRatio, layout, geometry, queries, reservations: laidReservations, readAll }; displaySelection = null; publish();
     const selection = view.workerSelection;
     if (selection) {
       const accepted = async (point: typeof selection.anchor) => ({ paraId: point.paraId,

@@ -410,6 +410,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
   const [pictureDragging, setPictureDragging] = useState(false);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [selectingPicture, setSelectingPicture] = useState(0);
   const [pictureDropCaret, setPictureDropCaret] = useState<DocxEchoRect | null>(null);
   const canEditPictures = pictures?.canMove() ?? false;
   // Handles follow the worker selection, so a picture selected by click or keyboard shows them and any other selection hides them.
@@ -444,7 +445,12 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     // refuses the picture selection below as stale. The worker then selects the body picture its handle names.
     if (!onPoint(event, false)) return true;
     if (current.objects?.objects.find(object => object.handle === hit.handle)?.story === 'body') {
-      binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
+      const selecting = binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
+      if (selecting.status === 'submitted') {
+        const settle = () => setSelectingPicture(count => count - 1);
+        setSelectingPicture(count => count + 1);
+        void selecting.ticket.presented.then(settle, settle);
+      }
     }
     const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y) ??
       (pictures.canMoveInline() ? inlinePictureAt(current, point.page.page.pageIndex, point.x, point.y) : null);
@@ -490,7 +496,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const previewingPicture = pictureDragging || picturePreview !== null || pictureDropCaret !== null;
   const selectedHandle = selected?.handle ?? null;
   useEffect(() => {
-    if (!selectedHandle && !previewingPicture) return;
+    if (!selectedHandle && !previewingPicture && !selectingPicture) return;
     const cancel = (event: KeyboardEvent) => {
       const active = picture.current;
       // With no gesture running, only Escape typed in the editor leaves the picture; menus and dialogs keep theirs.
@@ -509,7 +515,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     };
     document.addEventListener('keydown', cancel, true);
     return () => document.removeEventListener('keydown', cancel, true);
-  }, [selectedHandle, previewingPicture]);
+  }, [selectedHandle, previewingPicture, selectingPicture]);
   const startResize = (event: PointerEvent<HTMLDivElement>, handle: PictureResizeHandle) => {
     event.stopPropagation();
     event.preventDefault();

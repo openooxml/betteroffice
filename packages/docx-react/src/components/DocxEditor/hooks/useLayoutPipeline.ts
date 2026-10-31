@@ -132,6 +132,10 @@ export interface UseLayoutPipelineOptions {
 export interface UseLayoutPipelineReturn {
   layout: Layout | null;
   layoutUpdateOrigin: LayoutUpdateOrigin;
+  /** Counts committed passes, so a local origin is acted on once per commit. */
+  layoutCommit: number;
+  /** The source version of the committed layout `layoutCommit` counts. */
+  layoutCommitVersion: string | null;
   /** `onHost` lays out on this thread even when a worker could. */
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   /**
@@ -311,6 +315,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   }
   const scrollRestoreController = scrollRestoreControllerRef.current;
   const navigationEpochRef = useRef(0);
+  const localRequestEpochRef = useRef<number | null>(null);
   const cancelPendingScrollRestore = useCallback(() => {
     navigationEpochRef.current += 1;
     scrollRestoreController.cancel();
@@ -325,6 +330,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   }
   const pendingLayoutOriginRef = useRef<LayoutUpdateOrigin | null>(null);
   const layoutUpdateOriginRef = useRef<LayoutUpdateOrigin>('remote');
+  const layoutCommitRef = useRef(0);
   const requestPass = useCallback(() => {
     if (schedulerRef.current != null || unmountedRef.current) return;
     schedulerRef.current = requestAnimationFrame(() => {
@@ -459,6 +465,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       const pass = ++passRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'remote';
       pendingLayoutOriginRef.current = null;
+      const navigationAtStart = layoutUpdateOrigin === 'local'
+        ? localRequestEpochRef.current ?? navigationEpochRef.current
+        : navigationEpochRef.current;
+      localRequestEpochRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
       const pipelineStart = performance.now();
 
@@ -470,6 +480,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           pendingLayoutOriginRef.current,
           layoutUpdateOrigin
         );
+        if (layoutUpdateOrigin === 'local') localRequestEpochRef.current ??= navigationAtStart;
         pendingOnHostRef.current = onHost ? session : null;
         pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
         syncCoordinator.onLayoutComplete(currentEpoch);
@@ -555,6 +566,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             pendingLayoutOriginRef.current,
             layoutUpdateOrigin
           );
+          if (layoutUpdateOrigin === 'local') localRequestEpochRef.current ??= navigationAtStart;
           pendingOnHostRef.current = onHost ? session : null;
           pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
           syncCoordinator.onLayoutComplete(currentEpoch);
@@ -609,13 +621,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           version = sourceVersion,
           final = true
         ) => {
+          const overtaken = navigationEpochRef.current !== navigationAtStart;
           const { layout: newLayout } = computation;
           stampSourceVersion(
             newLayout,
             workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version
           );
           stampRevisionPreviewKey(newLayout, previewKey);
-          stampReservationsKey(newLayout, resolvedReservationsKey(passRenderEnv.reservationSets ?? passRenderEnv.reservations));
+          const reservations = passRenderEnv.reservationSets ?? passRenderEnv.reservations;
+          stampReservationsKey(newLayout, resolvedReservationsKey(reservations), reservations);
           laidOutRef.current = {
             session,
             layout: newLayout,
@@ -642,19 +656,22 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                       anchor: currentViewportAnchor.anchor,
                     }
                   : null
-                : {
-                    kind: 'selection' as const,
-                    anchor: captureDisplayListScrollAnchor(
-                      queries,
-                      interactionHost,
-                      scrollParent,
-                      getSelectionHead?.() ?? 0
-                    ),
-                  }
+                : overtaken
+                  ? null
+                  : {
+                      kind: 'selection' as const,
+                      anchor: captureDisplayListScrollAnchor(
+                        queries,
+                        interactionHost,
+                        scrollParent,
+                        getSelectionHead?.() ?? 0
+                      ),
+                    }
               : null;
 
           viewportAnchorCaptureReadyRef.current = false;
           layoutUpdateOriginRef.current = origin;
+          layoutCommitRef.current += 1;
           setLayout(newLayout);
 
           const vp = viewportLayoutRef.current;
@@ -1022,7 +1039,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   runRef.current = runLayoutPipeline;
   const scheduleLayout = useCallback(
     (origin: LayoutUpdateOrigin = 'local', inWorker = origin === 'remote') => {
-      if (origin === 'local') scrollRestoreController.cancel();
+      if (origin === 'local') {
+        scrollRestoreController.cancel();
+        localRequestEpochRef.current = navigationEpochRef.current;
+      }
       pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
         pendingLayoutOriginRef.current,
         origin
@@ -1090,6 +1110,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   return {
     layout,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
+    layoutCommit: layoutCommitRef.current,
+    layoutCommitVersion: sourceVersionOf(layout),
     runLayoutPipeline,
     scheduleLayout,
     cancelPendingScrollRestore,

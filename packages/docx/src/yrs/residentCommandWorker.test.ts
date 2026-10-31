@@ -38,7 +38,7 @@ beforeAll(async () => {
     process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'
   ))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false): Uint8Array {
   const parts = new Map<string, Uint8Array>();

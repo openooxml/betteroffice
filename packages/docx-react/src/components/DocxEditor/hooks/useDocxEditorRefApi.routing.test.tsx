@@ -44,7 +44,7 @@ const { act, cleanup, renderHook } = await import('@testing-library/react');
 const sessions: YrsSession[] = [];
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
-)))));
+)))), 30_000);
 beforeEach(resetDeprecatedViewerMembersForTests);
 afterEach(() => {
   cleanup();

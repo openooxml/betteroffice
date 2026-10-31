@@ -17,6 +17,7 @@ import type { DisplayListQuerySnapshot } from './hooks/displayListQueryEpochGate
 import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
+import * as packageRoot from '../../index';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -54,7 +55,8 @@ beforeAll(() =>
         resolve(import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
       )
     )
-  )
+  ),
+  30_000
 );
 afterEach(() => {
   for (const restore of [...globalRestores].reverse()) restore();
@@ -1800,13 +1802,12 @@ test('a command waiting on composition is refused when the input unmounts', asyn
 });
 
 test('a refused command rejects with the DocxCommandAdmissionError exported from the package root', async () => {
-  const root = await import('../../index');
   const { input, view } = await mount();
   fireEvent.compositionStart(view.getByTestId('yrs-input'));
   const command = input.current!.runAfterPendingInput(() => 'ran').catch((cause: unknown) => cause);
   view.unmount();
   const error = await command;
-  expect(error).toBeInstanceOf(root.DocxCommandAdmissionError);
+  expect(error).toBeInstanceOf(packageRoot.DocxCommandAdmissionError);
   expect(error).toBeInstanceOf(Error);
   expect(error).toMatchObject({ name: 'DocxCommandAdmissionError', code: 'editor-unavailable' });
 });

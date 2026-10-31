@@ -1,0 +1,189 @@
+{
+  "fixture": "packages/xlsx/test-fixtures/sample.xlsx",
+  "calculation": { "nowSerial": 45000.75, "randSeed": 42 },
+  "note": "All targets open recalculated with nowSerial; TS and Rust also set randSeed. Python has no seed, and the fixture and edits contain no volatile functions. Arguments such as <version:1> refer to first-seen result versions. Undo and redo record applied and sorted changed/limitedCells lists, using A1 on the active sheet and SheetName!A1 otherwise; historyState records the history flags and depths.",
+  "steps": [
+    { "op": "sheetNames", "args": {} },
+    { "op": "version", "args": {} },
+    {
+      "op": "readCells",
+      "args": {
+        "ranges": [
+          { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1:D4" } },
+          { "sheetId": "sheet:1", "range": { "kind": "a1", "a1": "A1:B2" } },
+          { "sheetId": "sheet:2", "range": { "kind": "a1", "a1": "A1:D4" } }
+        ]
+      }
+    },
+    { "op": "findText", "args": { "text": "Quarterly", "limit": 10 } },
+    { "op": "findText", "args": { "text": "Line item", "sheetIds": ["sheet:0"], "limit": 2 } },
+    { "op": "historyState", "args": {} },
+    {
+      "op": "validateEdits",
+      "args": {
+        "expectVersion": "<version:1>",
+        "source": "host",
+        "history": "separate",
+        "calculation": { "nowSerial": 45000.75 },
+        "steps": [
+          {
+            "op": "setCellValues",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3" } },
+            "values": [[{ "kind": "number", "value": 1000 }]]
+          },
+          {
+            "op": "setFormulas",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "C3" } },
+            "formulas": [["B3*2"]]
+          }
+        ]
+      }
+    },
+    { "op": "version", "args": {} },
+    {
+      "op": "applyEdits",
+      "args": {
+        "expectVersion": "<version:1>",
+        "source": "host",
+        "history": "separate",
+        "calculation": { "nowSerial": 45000.75 },
+        "steps": [
+          {
+            "op": "setCellValues",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3" } },
+            "values": [[{ "kind": "number", "value": 1000 }]]
+          },
+          {
+            "op": "setFormulas",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "C3" } },
+            "formulas": [["B3*2"]]
+          }
+        ]
+      }
+    },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3:D3" } }] }
+    },
+    {
+      "op": "applyEdits",
+      "args": {
+        "expectVersion": "<version:1>",
+        "calculation": { "nowSerial": 45000.75 },
+        "steps": [
+          {
+            "op": "setCellValues",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3" } },
+            "values": [[{ "kind": "number", "value": 1 }]]
+          }
+        ]
+      }
+    },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3:D3" } }] }
+    },
+    { "op": "historyState", "args": {} },
+    { "op": "undo", "args": {} },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3:D3" } }] }
+    },
+    { "op": "historyState", "args": {} },
+    { "op": "redo", "args": {} },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3:D3" } }] }
+    },
+    { "op": "historyState", "args": {} },
+    {
+      "op": "exportStructured",
+      "args": {
+        "scope": [{ "sheet": 0, "range": "A1:D4" }, { "sheet": 2, "range": "A1:D4" }],
+        "includeHiddenSheets": false,
+        "includeHiddenRows": false,
+        "includeHiddenColumns": false,
+        "includeDefinedNames": true,
+        "includeHiddenNames": false,
+        "maxCells": 100,
+        "maxBytes": 65536
+      }
+    },
+    {
+      "op": "exportMarkdown",
+      "args": {
+        "options": {
+          "scope": [{ "sheet": 0, "range": "A1:D4" }, { "sheet": 2, "range": "A1:D4" }],
+          "includeHiddenSheets": false,
+          "includeHiddenRows": false,
+          "includeHiddenColumns": false,
+          "includeDefinedNames": true,
+          "includeHiddenNames": false,
+          "maxCells": 100,
+          "maxBytes": 65536
+        },
+        "markdownOptions": { "maxRows": 4, "maxColumns": 4, "maxCells": 100, "maxBytes": 65536 }
+      }
+    },
+    { "op": "save", "args": {} },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "calculationStatus", "args": {} },
+    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 } },
+    {
+      "op": "open",
+      "args": { "fixture": "packages/xlsx/test-fixtures/defined-names.xlsx" }
+    },
+    { "op": "listDefinedNames", "args": { "limit": 2 } },
+    { "op": "listDefinedNames", "args": { "offset": 2 } },
+    { "op": "listDefinedNames", "args": { "scope": null } },
+    { "op": "listDefinedNames", "args": { "scope": 0 } },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "addConditionalFormat",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } },
+            "kind": "cellIs",
+            "operator": "greaterThan",
+            "formulas": ["1"],
+            "format": { "fontColor": "#FF0000", "bold": false, "italic": true, "fill": "#00FF00" }
+          },
+          { "type": "setAutoFilter", "sheet": 0, "range": "A1:A3" }
+        ]
+      },
+      "targets": ["ts", "rust"]
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 0 }, "targets": ["ts", "rust"] },
+    { "op": "sheetInfo", "args": {}, "targets": ["ts", "rust"] },
+    { "op": "version", "args": {}, "targets": ["ts", "rust"] },
+    {
+      "op": "applyEdits",
+      "args": {
+        "expectVersion": "<version:6>",
+        "calculation": { "nowSerial": 45000.75 },
+        "steps": [
+          {
+            "op": "setFormulas",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "C1" } },
+            "formulas": [["SEQUENCE(2)"]]
+          }
+        ]
+      },
+      "targets": ["ts", "rust"]
+    },
+    { "op": "cell", "args": { "sheet": 0, "row": 0, "col": 2 }, "targets": ["ts", "rust"] },
+    { "op": "cell", "args": { "sheet": 0, "row": 1, "col": 2 } },
+    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 } },
+    { "op": "calculationStatus", "args": {} },
+    { "op": "open", "args": { "fixture": "packages/xlsx/test-fixtures/charts.xlsx" } },
+    { "op": "searchText", "args": { "query": "REVENUE" } },
+    { "op": "searchText", "args": { "query": "revenue", "options": { "caseSensitive": true } } },
+    { "op": "searchText", "args": { "query": "Q", "options": { "limit": 2 } } },
+    { "op": "rangeCells", "args": { "sheet": 0, "range": "A1:B2" } },
+    { "op": "selectionFormatting", "args": { "sheet": 0, "range": "A1:B2" } },
+    { "op": "charts", "args": { "sheet": 0 } }
+  ]
+}

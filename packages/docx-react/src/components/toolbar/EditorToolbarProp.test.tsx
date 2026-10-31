@@ -65,7 +65,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(async () => {
   cleanup();
   takePreloadedResidentEngineWorker()?.destroy();

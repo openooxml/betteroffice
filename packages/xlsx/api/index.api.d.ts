@@ -1104,8 +1104,8 @@ export { toTsv, fromTsv } from './clipboard/index';
 export type { A11yStrings, A11yCell, A11yChart, A11yColumnHeader, A11yRow, A11yGrid, } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
 export { paintDisplayList } from './render/canvas2d';
-export { initWasm, isWasmAvailable, isPngExportAvailable, isProposalsAvailable, openWorkbook, wasmVersion, engineBackend, StaleProposalError, DisplayTooLargeError, getDisplayListCellLimit, exportXlsxMarkdown, exportXlsxStructured, renderXlsxMarkdown, } from './wasm/loader';
-export type { WasmInitInput, EngineBackend, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
+export { initWasm, decodeFontFace, isWasmAvailable, isPngExportAvailable, isProposalsAvailable, openWorkbook, wasmVersion, StaleProposalError, DisplayTooLargeError, getDisplayListCellLimit, exportXlsxMarkdown, exportXlsxStructured, renderXlsxMarkdown, } from './wasm/loader';
+export type { WasmInitInput, WasmInitOptions, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
 export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
@@ -1306,6 +1306,7 @@ import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPain
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
 import { type WorkbookEditSession } from './editSession';
 import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
 /**
  * Options for opening a workbook in a dedicated worker.
  * @experimental
@@ -1313,6 +1314,7 @@ import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
     worker?: () => Worker;
     wasm?: ArrayBuffer | WebAssembly.Module;
+    png?: boolean;
     /** Retain source bytes and a compiled module for edit peer hydration. */
     retainPeerHydration?: boolean;
     /** Aborting closes the session worker while the open is still in flight. */
@@ -1342,7 +1344,8 @@ export interface WorkbookSession {
     onAck(listener: (ack: WorkbookAck) => void): () => void;
     markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
     whenPresented(seq: number): Promise<void>;
-    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+        decodeFontFace: FontDecoder;
         renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
         renderRangePng(options?: {
             range?: string;
@@ -1647,6 +1650,7 @@ export declare function createWorkbookEditSession<X = unknown>(options: Omit<Ses
 export {};
 
 // ---- session/methods.d.ts ----
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -1714,6 +1718,7 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
     wasm?: ArrayBuffer | WebAssembly.Module;
+    png?: boolean;
     initialViewport?: WorkbookInitialPaintRequest;
     includeEditState?: boolean;
     initialUpdate?: Uint8Array;
@@ -1784,9 +1789,9 @@ export interface WorkbookSessionEvents {
  * Workbook RPC methods; engine version tokens remain strings.
  * @experimental
  */
-export type WorkbookSessionMethods = {
+export type WorkbookSessionMethods = FontDecoderMethods & {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
-    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm'>): WorkbookSessionOpenReply;
+    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
     collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -1819,6 +1824,7 @@ export type WorkbookSessionMethods = {
     dispose(): void;
 };
 export declare const WORKBOOK_SESSION_METHODS: {
+    decodeFontFace: true;
     open: true;
     openRecovery: true;
     version: true;
@@ -2835,6 +2841,26 @@ export declare function isCommandAck(value: unknown): value is CommandAck<unknow
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
 
+// ---- shared/office-session/fontDecoder.d.ts ----
+export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
+    codec: string;
+    dict?: ArrayBuffer | Uint8Array;
+    maxOutput?: number;
+}) => Promise<{
+    font: ArrayBuffer;
+    payload?: ArrayBuffer;
+}>;
+export type FontDecodeResult = Awaited<ReturnType<FontDecoder>>;
+export type FontDecoderMethods = {
+    decodeFontFace(bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], wasm?: ArrayBuffer | WebAssembly.Module): FontDecodeResult;
+};
+export declare function rpcFontDecoder(call: (bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], transfer: Transferable[]) => Promise<FontDecodeResult>): FontDecoder;
+export declare function fontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer>;
+export declare function copyDecodedFace(face: {
+    font: Uint8Array;
+    payload?: Uint8Array;
+}): FontDecodeResult;
+
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
 import type { SessionTransport } from './transport';
@@ -2883,6 +2909,7 @@ export type ClientMessage = {
 export interface ReplyError {
     name: string;
     message: string;
+    code?: string;
     refusal?: unknown;
 }
 export type HostMessage = {
@@ -3166,6 +3193,8 @@ export interface VisibleCells {
 // ---- wasm/generated/xlsx_wasm.d.ts ----
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 /**
  * a workbook handle exposed to js; wraps the pure `Session`.
@@ -3350,6 +3379,13 @@ export class XlsxSnapshotBuilder {
  */
 export function allocationFailure(): number;
 
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
 export function displayListCellLimit(): number;
 
 export function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdown_options: string): string;
@@ -3381,6 +3417,7 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly allocationFailure: () => number;
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly displayListCellLimit: () => number;
     readonly exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -3499,6 +3536,8 @@ import type { ChartInfo, ChartMutation } from '../charts';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+export declare const decodeFontFace: FontDecoder;
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type { XlsxCellAddress, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
@@ -4018,8 +4057,11 @@ export interface WorkbookHandle extends CollaborationReplica {
 /** @experimental */
 export declare function workbookDisplayListJson(handle: WorkbookHandle, viewport: Viewport, sheet?: number): string;
 export type WasmInitInput = InitInput | Promise<InitInput>;
+export interface WasmInitOptions {
+    png?: boolean;
+}
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
-export declare function initWasm(input?: WasmInitInput): Promise<void>;
+export declare function initWasm(input?: WasmInitInput, options?: WasmInitOptions): Promise<void>;
 /**
  * The allocation the engine could not get, if any. The core aborts when an
  * allocation fails, so a trap after one means the engine ran out of memory.
@@ -4034,9 +4076,6 @@ export declare function getDisplayListCellLimit(): number;
  * Whether this environment exposes the WebAssembly runtime required by the core.
  */
 export declare function isWasmAvailable(): boolean;
-export type EngineBackend = 'wasm' | 'native';
-/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export declare function engineBackend(): EngineBackend;
 /**
  * Whether the embedded wasm core was built with png export (the `raster` cargo
  * feature). The wasm-bindgen method only exists on the class when compiled in,

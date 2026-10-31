@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
 import type { SlideFit } from '../fitSlideScale';
 import { useTranslation } from '../i18n';
@@ -7,6 +7,41 @@ import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessVie
 import { peerlessDeleteSlide, peerlessInsertSlide, peerlessMoveSlide } from './peerlessSlideCommands';
 import { activatePeerlessSlide } from './peerlessNavigation';
 import { peerlessPainterFactories, type PeerlessPresentation } from './usePeerlessPresentation';
+
+const SLIDE_PREVIEW_SETTLE_MS = 400;
+
+function useSettledPreview(frame: PeerlessConfirmedFrame | null | undefined, active: boolean, run: PeerlessPresentation) {
+  const [preview, setPreview] = useState({ run, active, source: frame, frame });
+  const latest = useRef({ run, frame });
+  const slideId = frame?.frame.slideId;
+  useEffect(() => {
+    if (!active) return;
+    const update = () => {
+      const next = run.store.getSnapshot().confirmed;
+      if (next?.frame.slideId === slideId) latest.current = { run, frame: next };
+    };
+    update();
+    return run.store.subscribePresentation(update);
+  }, [run, active, slideId]);
+  let settled = preview;
+  if (preview.run !== run || preview.active !== active || preview.source !== frame) {
+    const departing = latest.current.run === run && preview.active && !active ? latest.current.frame : null;
+    const next = departing && (!frame || departing.frame.slideRevision > frame.frame.slideRevision) ? departing : frame;
+    settled = { run, active, source: frame,
+      frame: preview.run !== run || preview.active !== active || !active || !preview.frame ? next : preview.frame };
+    setPreview(settled);
+  }
+  useEffect(() => {
+    if (!active || settled.frame === frame || !run.current || run.failure) return;
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      if (!alive || !run.current || run.failure || run.store.getSnapshot().confirmed !== frame) return;
+      setPreview((value) => value.run === run && value.active && value.source === frame ? { ...value, frame } : value);
+    }, SLIDE_PREVIEW_SETTLE_MS);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, [frame, active, run, settled.frame]);
+  return settled.frame;
+}
 
 const Preview = memo(function Preview({ frame, run, fit, previewFit, current }: {
   frame: PeerlessConfirmedFrame; run: PeerlessPresentation; fit: SlideFit;
@@ -63,7 +98,8 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
   onNavigate(): void;
 }) {
   const { t } = useTranslation();
-  const fit = useMemo(() => frame ? previewFit(frame, run) : null, [frame, run, previewFit]);
+  const settled = useSettledPreview(frame, active, run);
+  const fit = useMemo(() => settled ? previewFit(settled, run) : null, [settled, run, previewFit]);
   return <button type="button" disabled={disabled}
     aria-current={active ? 'page' : undefined} style={active ? styles.activeSlide : styles.slide}
     draggable={!run.store.getSnapshot().editState.readOnly}
@@ -86,7 +122,7 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
     }}>
     <span style={styles.number}>{index + 1}</span>
     <span style={styles.preview}>
-      {frame && fit ? <Preview frame={frame} run={run} fit={fit} previewFit={previewFit} current={current} /> : <span style={styles.title}>{name ?? t('slides.fallbackTitle', { number: index + 1 })}</span>}
+      {settled && fit ? <Preview frame={settled} run={run} fit={fit} previewFit={previewFit} current={current} /> : <span style={styles.title}>{name ?? t('slides.fallbackTitle', { number: index + 1 })}</span>}
     </span>
   </button>;
 });

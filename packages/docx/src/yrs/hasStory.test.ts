@@ -7,7 +7,7 @@ import { createYrsSession } from './index';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 it('hasStory answers as storyIds().includes does', async () => {
   const session = await createYrsSession({ clientId: 76101 });

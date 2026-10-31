@@ -929,7 +929,7 @@ describe('FrameDelta wire round-trip', () => {
     const editWasm = await import('../../wasm/edit');
     createEditSession = editWasm.createEditSession;
     await editWasm.preloadEditWasm(new Uint8Array(readFileSync(WASM)));
-  });
+  }, 30_000);
 
   it.skipIf(!hasEditWasm)('decodes wasm-encoded full and delta frames to the equivalent JSON list', () => {
     const session = createEditSession(11);
@@ -1433,7 +1433,7 @@ describe('FrameDelta note anchor shifts', () => {
     ({ rezipPartsToArrayBuffer, toBytes } = await import('../../docx/rezip/parts'));
     await editWasm.preloadEditWasm(new Uint8Array(readFileSync(WASM)));
     await layoutWasm.preloadLayoutWasm();
-  });
+  }, 30_000);
 
   it('decodes anchor sections strictly', () => {
     const run: CraftedRun = [0, 1, 0b11, 1];

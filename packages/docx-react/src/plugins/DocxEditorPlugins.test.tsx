@@ -10,6 +10,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { configureDefaultFonts } from '@betteroffice/docx/layout';
 import type { CollaborationReplica } from '@betteroffice/docx/collaboration';
 import {
   createYrsSession,
@@ -80,6 +81,7 @@ const editorEngines: Array<[string, false | undefined]> = [
 ];
 
 beforeAll(async () => {
+  configureDefaultFonts({ fonts: { createFontProvider: () => ({ resolve: () => undefined }) } });
   if (!window.document.fonts) {
     Object.defineProperty(window.document, 'fonts', {
       value: {
@@ -100,7 +102,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(async () => {
   cleanup();
   takePreloadedResidentEngineWorker()?.destroy();
@@ -112,6 +114,7 @@ afterEach(async () => {
   globalThis.Worker = originalWorker;
 });
 afterAll(async () => {
+  configureDefaultFonts({});
   console.error = quiet.error;
   console.warn = quiet.warn;
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -1531,6 +1534,134 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       if (!updated?.ok) throw new Error('missing fresh owner');
       expect(updated.anchor.width).toBeCloseTo(75);
     }
+  });
+
+  test('an unchanged reservation owner stays available while another owner is removed', async () => {
+    let access!: pluginHosts.DocxPluginHostAccess;
+    const createHost = pluginHosts.createDocxPluginHost;
+    const capture = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((next) => {
+      access = next;
+      return createHost(next);
+    });
+    const buffer = await inlineImageDocument('<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p>');
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try { mounted = await mount({}, false, buffer); } finally { capture.mockRestore(); }
+    const { ref, rerender } = mounted;
+    const { version, paragraph } = await firstParagraph(ref);
+    const range = (atVersion: string, start: number, end = start) => ({
+      kind: 'range' as const, version: atVersion, range: {
+        story: 'body', view: 'accepted' as const,
+        start: { paraId: paragraph.paraId, offset: start }, end: { paraId: paragraph.paraId, offset: end },
+      },
+    });
+    const a = defineDocxPlugin({
+      id: 'test.reserve-a', createState: () => null,
+      reservations: () => ({ version, items: [{ id: 'a', kind: 'inline', width: 35, height: 20, anchor: range(version, 0) }] }),
+    });
+    const b = defineDocxPlugin({
+      id: 'test.reserve-b', createState: () => null,
+      reservations: (context) => ({ version: context.snapshot.version, items: [{
+        id: 'b', kind: 'inline', width: context.snapshot.version === version ? 20 : 75,
+        height: 20, hideAnchor: true, anchor: range(context.snapshot.version, 6, 10),
+      }] }),
+    });
+    const geometry = () => {
+      const current = access.geometry();
+      if (!current) return null;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]')) {
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, Number.parseFloat(canvas.style.width), Number.parseFloat(canvas.style.height));
+      }
+      return current;
+    };
+    const answer = (owner: string, id: string) => {
+      const current = geometry();
+      return current && scopePluginGeometry(current, owner).getAnchorGeometry({ kind: 'reservation', id });
+    };
+    rerender({ plugins: [a, b] });
+    await until(() => answer(a.id, 'a')?.ok === true && answer(b.id, 'b')?.ok === true);
+    let changed!: Awaited<ReturnType<DocxEditorRef['applyEdits']>>;
+    await act(async () => { changed = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId)); });
+    if (!changed.ok) throw new Error(changed.failure.message);
+    await until(() => geometry()?.layout.version === changed.version && answer(a.id, 'a')?.ok === true && answer(b.id, 'b')?.ok === true);
+    const laidOut = geometry()!.layout.id;
+    rerender({ plugins: [a] });
+    const samples: ReturnType<typeof answer>[] = [];
+    for (let turn = 0; turn < 20; turn += 1) {
+      samples.push(answer(a.id, 'a'));
+      await Promise.resolve();
+    }
+    await until(() => {
+      const retained = answer(a.id, 'a');
+      samples.push(retained);
+      const removed = answer(b.id, 'b');
+      return geometry()?.layout.id !== laidOut && retained?.ok === true && removed?.ok === false && removed.failure.code === 'missing-target';
+    });
+    expect(samples.map((sample) => (sample?.ok ? Math.round(sample.anchor.width) : (sample?.failure.code ?? null)))).toEqual(samples.map(() => 35));
+  });
+
+  test('a removed reservation owner answers missing-target as soon as the host drops it', async () => {
+    let access!: pluginHosts.DocxPluginHostAccess;
+    const createHost = pluginHosts.createDocxPluginHost;
+    const capture = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((next) => {
+      access = next;
+      return createHost(next);
+    });
+    const buffer = await inlineImageDocument('<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p>');
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try { mounted = await mount({}, false, buffer); } finally { capture.mockRestore(); }
+    const { ref, rerender } = mounted;
+    const { version, paragraph } = await firstParagraph(ref);
+    const range = (atVersion: string, start: number, end = start) => ({
+      kind: 'range' as const, version: atVersion, range: {
+        story: 'body', view: 'accepted' as const,
+        start: { paraId: paragraph.paraId, offset: start }, end: { paraId: paragraph.paraId, offset: end },
+      },
+    });
+    const a = defineDocxPlugin({
+      id: 'test.reserve-a', createState: () => null,
+      reservations: () => ({ version, items: [{ id: 'a', kind: 'inline', width: 35, height: 20, anchor: range(version, 0) }] }),
+    });
+    const b = defineDocxPlugin({
+      id: 'test.reserve-b', createState: () => null,
+      reservations: (context) => ({ version: context.snapshot.version, items: [{
+        id: 'b', kind: 'inline', width: context.snapshot.version === version ? 20 : 75,
+        height: 20, hideAnchor: true, anchor: range(context.snapshot.version, 6, 10),
+      }] }),
+    });
+    const geometry = () => {
+      const current = access.geometry();
+      if (!current) return null;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]')) {
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, Number.parseFloat(canvas.style.width), Number.parseFloat(canvas.style.height));
+      }
+      return current;
+    };
+    const answer = (owner: string, id: string) => {
+      const current = geometry();
+      return current && scopePluginGeometry(current, owner).getAnchorGeometry({ kind: 'reservation', id });
+    };
+    rerender({ plugins: [a, b] });
+    await until(() => answer(a.id, 'a')?.ok === true && answer(b.id, 'b')?.ok === true);
+    let changed!: Awaited<ReturnType<DocxEditorRef['applyEdits']>>;
+    await act(async () => { changed = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId)); });
+    if (!changed.ok) throw new Error(changed.failure.message);
+    await until(() => geometry()?.layout.version === changed.version && answer(a.id, 'a')?.ok === true && answer(b.id, 'b')?.ok === true);
+    const laidOut = geometry()!.layout.id;
+    rerender({ plugins: [a] });
+    const samples: ReturnType<typeof answer>[] = [];
+    for (let turn = 0; turn < 20; turn += 1) {
+      samples.push(answer(b.id, 'b'));
+      await Promise.resolve();
+    }
+    await until(() => {
+      const removed = answer(b.id, 'b');
+      samples.push(removed);
+      return geometry()?.layout.id !== laidOut && removed?.ok === false && removed.failure.code === 'missing-target';
+    });
+    const codes = samples.map((sample) => (sample?.ok ? 'ok' : (sample?.failure.code ?? null)));
+    expect(codes.filter((code) => code !== 'ok' && code !== 'missing-target')).toEqual([]);
   });
 
   test('reservation definition replacement at the same id and revision applies its new width', async () => {

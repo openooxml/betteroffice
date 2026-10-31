@@ -32,4 +32,16 @@ test('parse-only calls use light modules with no engine or an idle engine', asyn
   expect(JSON.parse(parseDocxS9Wire(bytes, '{}')).wireVersion).toBe(1);
   expect(editWasmState.status()).toBe('idle');
   expect(wasmModuleMemories().map(({ label }) => label).sort()).toEqual(['docx-parse', 'ooxml-opc']);
+
+  const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
+  const queries = await loadRustDisplayListQueryEngine();
+  const handle = queries.openDisplayList!('{"pages":[]}');
+  try {
+    expect(queries.hitTestRegionsByHandle!(handle, 0, 0, 0)).toBe('null');
+    expect(editWasmState.status()).toBe('idle');
+    expect(wasmModuleMemories().map(({ label }) => label).sort())
+      .toEqual(['docx-parse', 'docx-query', 'ooxml-opc']);
+  } finally {
+    queries.closeDisplayList!(handle);
+  }
 });

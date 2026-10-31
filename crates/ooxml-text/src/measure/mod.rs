@@ -138,6 +138,11 @@ pub use intrinsic::measure_intrinsic_widths;
 
 use crate::font_store::{FontId, FontStore};
 
+#[doc(hidden)]
+pub fn needs_glyph(ch: char) -> bool {
+    !ch.is_whitespace() && !ch.is_control() && !crate::shape::is_default_ignorable(ch)
+}
+
 /// Why measurement refused an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeasureError {

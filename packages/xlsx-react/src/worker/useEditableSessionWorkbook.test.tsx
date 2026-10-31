@@ -543,7 +543,7 @@ describe('editable session workbook', () => {
     expect(editor.frame).not.toHaveBeenCalled();
     expect(editor.sheetView).not.toHaveBeenCalled();
     expect(editor.errors).not.toHaveBeenCalled();
-    mounted.rerender(<XlsxWorkerEditor backend="legacy" file={file} showToolbar={false}
+    mounted.rerender(<XlsxWorkerEditor backend="peerless" file={file} showToolbar={false}
       onReady={editor.ready} onError={editor.errors} />);
     await editor.tick();
     expect(editor.opener).toHaveBeenCalledTimes(1);

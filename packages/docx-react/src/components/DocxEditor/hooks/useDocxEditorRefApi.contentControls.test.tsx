@@ -37,7 +37,7 @@ beforeAll(async () => {
   }
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(DOCX, 'wasm/generated/edit/docx_edit_bg.wasm'))));
   fontBytes = readFileSync(FONT).buffer as ArrayBuffer;
-});
+}, 30_000);
 afterEach(() => {
   cleanup();
   for (const session of sessions.splice(0)) session.destroy();

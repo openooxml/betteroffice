@@ -4,12 +4,32 @@ export const MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
 export const V = 'urn:schemas-microsoft-com:vml';
 export const WPS = 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape';
 
+export const WORD_2007_ROOTS = [
+  { name: 've without Ignorable', root: `<w:document xmlns:w="${W}" xmlns:ve="${MC}">` },
+  { name: 've with Ignorable and drawing aliases', root: `<w:document xmlns:w="${W}" xmlns:ve="${MC}" xmlns:draw="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:legacy="urn:schemas-microsoft-com:office:word" ve:Ignorable="draw legacy">` },
+  { name: 'two MC aliases', root: `<w:document xmlns:w="${W}" xmlns:ve="${MC}" xmlns:mc="${MC}">` },
+  { name: 'default document tasks namespace', root: `<w:document xmlns:w="${W}" xmlns:mc="${MC}" xmlns="http://schemas.microsoft.com/office/tasks/2019/documenttasks">` },
+];
+
 const rich = (id: string, text: string) =>
   `<w:p w14:paraId="${id}" w:rsidR="00752A6D" w:rsidRDefault="00593C67"><w:pPr><w:rPr><w:lang w:val="en-US"/></w:rPr></w:pPr><w:proofErr w:type="spellStart"/><w:r w:rsidR="00761B10"><w:rPr><w:color w:val="auto"/><w:lang w:val="en-US"/></w:rPr><w:t>${text}</w:t></w:r><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:br/></w:r><w:proofErr w:type="spellEnd"/></w:p>`;
+
+export function word2007Body(): string {
+  return `${rich('10000001', 'Replace target words')}${rich('10000002', 'Retained paragraph words')}`.replace(/ w14:paraId="[^"]*"/g, '');
+}
 
 const textbox = (id: string) =>
   `<w:pict><v:shape id="${id}" style="width:72pt;height:36pt"><v:textbox><w:txbxContent><w:p w:rsidR="00112233"><w:r><w:rPr><w:lang w:val="en-CA"/></w:rPr><w:t>Retained ${id}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>`;
 export const DRAWING = `<w:r><mc:AlternateContent><mc:Choice Requires="wps">${textbox('choice')}</mc:Choice><mc:Fallback>${textbox('fallback')}</mc:Fallback></mc:AlternateContent></w:r>`;
+
+export const ALTERNATE_TEXTBOX_RUN = '<w:r w:rsidR="00112233"><w:rPr><w:noProof/></w:rPr><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/><wp:docPr id="41" name="Retained text box"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p w14:paraId="40000009"><w:r><w:t>Box text</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape id="Retained text box" style="width:72pt;height:36pt" type="#_x0000_t202"><v:textbox><w:txbxContent><w:p w14:paraId="40000008"><w:r><w:t>Box text</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>';
+
+export function fieldLabelBody(): string {
+  const opening = '<w:p w14:paraId="20000000"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>';
+  const entries = [1, 2, 3].map(index => `<w:p w14:paraId="2000000${index}"><w:hyperlink w:anchor="_Toc${index}" w:history="1"><w:r><w:t>Background ${index}</w:t></w:r><w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGEREF _Toc${index} \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${index}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink></w:p>`).join('');
+  const end = '<w:p w14:paraId="20000009"><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>';
+  return `<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Table of Contents"/><w:docPartUnique/></w:docPartObj></w:sdtPr><w:sdtContent>${opening}${entries}${end}</w:sdtContent></w:sdt>${rich('30000001', 'After contents')}`;
+}
 const protectedParagraph = rich('1000000F', 'Protected text').replace('</w:p>', `${DRAWING}</w:p>`);
 
 export function bodyMarkerBody(): string {
