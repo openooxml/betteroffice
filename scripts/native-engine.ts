@@ -21,6 +21,10 @@ export const NATIVE_ASSETS = {
     asset: 'packages/xlsx/src/wasm/asset.ts',
     native: 'bindings/xlsx-native/js/asset.ts',
   },
+  pptx: {
+    asset: 'packages/pptx/src/wasm/asset.ts',
+    native: 'bindings/pptx-native/js/asset.ts',
+  },
 } as const;
 
 export const NATIVE_ENGINE_FILTER = /[\\/]src[\\/]wasm[\\/]engine\.ts$/;

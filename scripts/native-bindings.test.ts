@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,6 +65,30 @@ describe('native package registry', () => {
         expect(platform.private).not.toBe(true);
         expect(platform.publishConfig.access).toBe('public');
       }
+    }
+  });
+
+  test('pins workspace dependencies in native package manifests before packing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'native-workspace-deps-'));
+    const nativeManifest = join(root, 'bindings/pptx-native/package.json');
+    const fontsManifest = join(root, 'packages/fonts/package.json');
+    try {
+      mkdirSync(join(root, 'bindings/pptx-native'), { recursive: true });
+      mkdirSync(join(root, 'packages/fonts'), { recursive: true });
+      writeFileSync(fontsManifest, JSON.stringify({ name: '@betteroffice/fonts', version: '0.4.2' }));
+      writeFileSync(nativeManifest, JSON.stringify({
+        name: '@betteroffice/pptx-native', version: '0.5.1', private: true,
+        dependencies: { '@betteroffice/fonts': 'workspace:^' },
+      }));
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('./rewrite-workspace-deps.ts', import.meta.url))], {
+        cwd: root, encoding: 'utf8',
+      });
+      expect(result.status).toBe(0);
+      const manifest = JSON.parse(readFileSync(nativeManifest, 'utf8'));
+      expect(manifest.dependencies).toEqual({ '@betteroffice/fonts': '^0.4.2' });
+      expect(manifest.private).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -279,7 +303,11 @@ describe('native package release wiring', () => {
     expect(makePublic.if).toBeUndefined();
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
-    expect(steps.indexOf(entries)).toBeLessThan(steps.indexOf(makePublic));
+    const pin = steps.find((step: any) => step.name === 'Pin workspace dependencies');
+    expect(pin.run).toBe('bun scripts/rewrite-workspace-deps.ts');
+    expect(pin.if).toBeUndefined();
+    expect(steps.indexOf(entries)).toBeLessThan(steps.indexOf(pin));
+    expect(steps.indexOf(pin)).toBe(steps.indexOf(makePublic) - 1);
     const contents = steps.find((step: any) => step.name === 'Check root contents');
     expect(contents.run).toBe(
       `npm pack --dry-run --json | jq -e --slurpfile manifest package.json '(["index.js", "index.d.ts"] + [$manifest[0].exports // {} | .. | strings | ltrimstr("./")]) - [.[0].files[].path] == []'`
@@ -348,6 +376,8 @@ describe('native package release wiring', () => {
   });
 
   test('CI builds every path and checks declarations and all three runtimes', () => {
+    const api = ci.jobs.packages.steps.find((step: any) => step.name === 'Check API surface');
+    expect(api.run).toContain('bun scripts/api-surface.ts --check pptx-native');
     const job = ci.jobs.native;
     expect(job.name).toBe('Native gate');
     expect(job['runs-on']).toBe('ubuntu-latest');
@@ -377,6 +407,10 @@ describe('native package release wiring', () => {
     const nativeDeclarations = job.steps.find((step: any) => step.name === 'Check native declarations');
     expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
     expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');
+    expect(nativeDeclarations.run).toContain('(cd packages/pptx && bunx tsup)');
+    expect(nativeDeclarations.run).toContain('ls packages/pptx/dist/*.d.ts');
+    expect(nativeDeclarations.run).toContain('ls bindings/pptx-native/dist/*.d.ts');
+    expect(nativeDeclarations.run).toContain('cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"');
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(nativeDeclarations));
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
     expect(wasm.run).toContain('bun run --filter @betteroffice/xlsx build:wasm');
@@ -428,6 +462,8 @@ describe('native package release wiring', () => {
       'scripts/native-engine.ts',
       'packages/xlsx/src/**',
       'packages/xlsx/package.json',
+      'packages/pptx/src/**',
+      'packages/pptx/package.json',
       'shared/**',
       'scripts/version-packages.mjs',
       '.github/workflows/native-packages.yml',
@@ -496,6 +532,10 @@ describe('native package release wiring', () => {
     const entries = job.steps.find((step: any) => step.name === 'Build the JS entries');
     expect(entries.run).toBe('bun run --cwd bindings/${{ matrix.binding }}-native --if-present build:js');
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(entries));
+    const pin = job.steps.find((step: any) => step.name === 'Pin workspace dependencies');
+    expect(pin.run).toBe('bun scripts/rewrite-workspace-deps.ts');
+    expect(job.steps.indexOf(entries)).toBeLessThan(job.steps.indexOf(pin));
+    expect(job.steps.indexOf(pin)).toBe(job.steps.indexOf(makePublic) - 1);
     const pack = job.steps.find((step: any) => step.name === 'Check package contents');
     expect(pack['working-directory']).toBe('bindings/${{ matrix.binding }}-native');
     expect(pack.run).toStartWith(

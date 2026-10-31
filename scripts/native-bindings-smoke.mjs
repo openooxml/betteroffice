@@ -31,19 +31,6 @@ for (const load of [(name) => import(name), async (name) => require(name)]) {
   assert.deepEqual(page.data.subarray(0, 8), pngSignature);
   const reopenedDocument = await openDocument(await document.save());
   assert.equal((await reopenedDocument.structure).bodyParagraphs, structure.bodyParagraphs);
-
-  const { openPresentation } = await load('@betteroffice/pptx-native');
-  const presentation = await openPresentation(pptxBytes);
-  const slideCount = await presentation.slideCount;
-  assert.ok(slideCount > 0);
-  await presentation.registerFont({
-    family: 'Arial',
-    data: fixture('crates/pptx-raster/tests/assets/Carlito-Regular.ttf')
-  });
-  const slide = await presentation.renderSlide(0);
-  assert.deepEqual(slide.data.subarray(0, 8), pngSignature);
-  const reopenedPresentation = await openPresentation(await presentation.save());
-  assert.equal(await reopenedPresentation.slideCount, slideCount);
 }
 assert.ok(process.env.BETTEROFFICE_EXPORT_KEYS, 'BETTEROFFICE_EXPORT_KEYS names the export names of each wasm entry');
 const exportKeys = JSON.parse(readFileSync(process.env.BETTEROFFICE_EXPORT_KEYS, 'utf8'));
@@ -53,6 +40,32 @@ for (const [format, entries] of Object.entries(exportKeys)) {
     assert.deepEqual(Object.keys(await import(name)).sort(), keys, name);
   }
 }
+const { initWasm: initPptx, openPresentation } = await import('@betteroffice/pptx-native');
+await initPptx();
+const presentation = openPresentation(pptxBytes);
+const snapshot = presentation.snapshot();
+assert.ok(snapshot.slides.length > 0);
+presentation.registerFont({
+  family: 'Arial',
+  bytes: fixture('crates/pptx-raster/tests/assets/Carlito-Regular.ttf')
+});
+const added = presentation.addTextBox(snapshot.slides[0].id, {
+  name: 'Native smoke', rect: { x: 100000, y: 200000, width: 3000000, height: 1000000 },
+  text: 'Native', style: { fontFamily: 'Arial', fontSizePt: 18 }
+});
+const shape = presentation.snapshot().slides[0].shapes.find((shape) => shape.id === added.shapeId);
+assert.ok(shape);
+presentation.insertText(shape.textStories[0].id, 6, ' package API');
+assert.ok(presentation.layoutSlide(0).primitives.length > 0);
+const reopenedPresentation = openPresentation(presentation.save());
+const saved = reopenedPresentation.snapshot();
+assert.equal(saved.slides.length, snapshot.slides.length);
+const textBox = saved.slides[0].shapes.find((shape) => shape.name === 'Native smoke');
+assert.ok(textBox);
+assert.equal(reopenedPresentation.story(textBox.textStories[0].id).paragraphs
+  .flatMap((paragraph) => paragraph.runs.map((run) => run.text)).join(''), 'Native package API');
+presentation.dispose();
+reopenedPresentation.dispose();
 const { initWasm, openWorkbook, exportXlsxMarkdown } = await import('@betteroffice/xlsx-native');
 await initWasm();
 const workbook = openWorkbook(xlsxBytes);
@@ -73,4 +86,4 @@ assert.deepEqual(reopenedWorkbook.readCells({ ranges: [target] }).ranges[0].cell
 assert.ok((await exportXlsxMarkdown(xlsxBytes)).markdown.length > 0);
 workbook.dispose();
 reopenedWorkbook.dispose();
-console.log('Native DOCX/PPTX import, require, save/reopen and PNG checks and XLSX package API, recalculation and save/reopen checks passed.');
+console.log('Native DOCX import, require, save/reopen and PNG checks and XLSX/PPTX package API, edit and save/reopen checks passed.');

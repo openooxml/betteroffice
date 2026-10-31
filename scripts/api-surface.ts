@@ -43,6 +43,7 @@ export const FORMATS: Record<string, FormatConfig> = {
 };
 
 FORMATS["xlsx-native"] = { ...FORMATS.xlsx, native: "xlsx" };
+FORMATS["pptx-native"] = { ...FORMATS.pptx, native: "pptx" };
 
 export function entryFileName(entry: string): string {
   if (entry === ".") return "index.api.d.ts";

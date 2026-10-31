@@ -223,8 +223,12 @@
     "bindings/pptx-native": {
       "name": "@betteroffice/pptx-native",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
+      },
       "devDependencies": {
         "@types/node": "^26.0.0",
+        "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
     },

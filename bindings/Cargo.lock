@@ -303,14 +303,11 @@ name = "betteroffice-pptx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-fonts",
- "betteroffice-pptx",
  "betteroffice-pptx-engine",
  "getrandom 0.3.4",
  "napi",
  "napi-build",
  "napi-derive",
- "serde",
- "serde_json",
 ]
 
 [[package]]
