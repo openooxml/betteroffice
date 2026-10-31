@@ -66,7 +66,7 @@ function pointPayload(arm: CommandArm, text: string, shift = false) {
 
 afterEach(closeCommandEngines);
 
-beforeAll(loadRustDisplayListQueryEngine);
+beforeAll(loadRustDisplayListQueryEngine, 30_000);
 
 test('select_table_cells_covers_table_row_and_column_without_version_change', async () => {
   const arm = await inCell();

@@ -70,7 +70,7 @@ let fontId = -1;
 beforeAll(async () => {
   await preloadLayoutWasm();
   fontId = registerMeasureFont(new Uint8Array(readFileSync(FONT)));
-});
+}, 30_000);
 
 function textRun(
   text: string,
