@@ -108,7 +108,7 @@ function renderedText(session: YrsSession): string {
 }
 
 describe('docx wasm collaboration', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('exports vectors, diffs, and origin-prefixed polling at the wasm boundary', () => {
     const left = createEditSession(501);

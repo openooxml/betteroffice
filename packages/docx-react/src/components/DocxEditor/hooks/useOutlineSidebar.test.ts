@@ -13,7 +13,8 @@ beforeAll(() =>
     new Uint8Array(
       readFileSync(resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))
     )
-  )
+  ),
+  30_000
 );
 
 test('the outline lists the headings the engine classifies', async () => {

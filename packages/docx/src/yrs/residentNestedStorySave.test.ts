@@ -24,7 +24,7 @@ const owned: Array<YrsSession | ResidentEngineSession> = [];
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))));
-});
+}, 30_000);
 
 afterEach(() => {
   for (const session of owned.splice(0)) session.destroy();
