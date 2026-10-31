@@ -14,7 +14,6 @@ crate-type = ["cdylib"]
 [dependencies]
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../../crates/ooxml-font-preflight" }
-betteroffice-docx = { path = "../../crates/betteroffice-docx", features = ["raster"] }
 docx-engine = { package = "betteroffice-docx-engine", path = "../../crates/docx-engine" }
 getrandom = "0.3"
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }

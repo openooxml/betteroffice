@@ -358,7 +358,7 @@ describe('native package release wiring', () => {
     expect(loader.if).toBe("matrix.platform.target == 'x86_64-unknown-linux-gnu'");
     expect(loader.with).toEqual({
       name: '${{ inputs.binding }}-native-loader',
-      path: 'bindings/${{ inputs.binding }}-native/index.js',
+      path: 'bindings/${{ inputs.binding }}-native/index.js\nbindings/${{ inputs.binding }}-native/dist\n',
       'if-no-files-found': 'error'
     });
     const binary = steps.find(
@@ -415,6 +415,7 @@ describe('native package release wiring', () => {
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
     expect(wasm.run).toContain('bun run --filter @betteroffice/xlsx build:wasm');
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
+    expect(wasm.run).toContain('bun run --filter @betteroffice/docx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
       'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts'
@@ -433,6 +434,13 @@ describe('native package release wiring', () => {
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
     expect(root.scripts.test).toContain('scripts');
+    expect(nativeDeclarations.run).toContain('(cd packages/docx && bunx tsup)');
+    expect(nativeDeclarations.run).toContain('for asset in edit/docx_edit parse/docx_parse query/docx_query opc/ooxml_opc preflight/docx_preflight; do');
+    expect(nativeDeclarations.run).toContain('test "$(dirname "$chunk")" = packages/docx/dist');
+    expect(nativeDeclarations.run).toContain("find . -type f");
+    expect(nativeDeclarations.run).toContain("-name '*.d.ts' -o -name '*.d.mts'");
+    expect(nativeDeclarations.run).toContain('cmp "$RUNNER_TEMP/docx-declarations.txt" "$RUNNER_TEMP/docx-native-declarations.txt"');
+    expect(nativeDeclarations.run).toContain('cmp "packages/docx/dist/$declaration" "bindings/docx-native/dist/$declaration"');
     const declarations = job.steps.find((step: any) => step.name === 'Check generated declarations');
     expect(declarations.run).toBe("git diff --exit-code -- 'bindings/*-native/index.d.ts'");
     const smoke = job.steps.find((step: any) => step.name === 'Check runtimes');
@@ -464,6 +472,8 @@ describe('native package release wiring', () => {
       'packages/xlsx/package.json',
       'packages/pptx/src/**',
       'packages/pptx/package.json',
+      'packages/docx/src/**',
+      'packages/docx/package.json',
       'shared/**',
       'scripts/version-packages.mjs',
       '.github/workflows/native-packages.yml',

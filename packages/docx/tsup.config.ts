@@ -57,6 +57,7 @@ export default defineConfig([
     treeshake: true,
     minify: true,
     injectStyle: false,
+    external: ['@betteroffice/fonts'],
     esbuildOptions(options) {
       options.chunkNames = 'chunk-[hash]';
     },

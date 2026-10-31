@@ -16,6 +16,39 @@ use napi::bindgen_prelude::{
 use napi::{Env, Error, Result, Status, Unknown, ValueType};
 use napi_derive::napi;
 
+#[napi(object)]
+pub struct DecodedFontFace {
+    pub font: Uint8Array,
+    pub payload: Option<Uint8Array>,
+}
+
+#[napi(
+    js_name = "decodeFontFace",
+    ts_args_type = "bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null",
+    ts_return_type = "DecodedFontFace"
+)]
+pub fn decode_font_face(
+    bytes: Uint8Array,
+    codec: String,
+    dict: Option<Uint8Array>,
+    max_output: Option<f64>,
+) -> Result<DecodedFontFace> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
+            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+    Ok(DecodedFontFace {
+        font: Uint8Array::new(decoded.font),
+        payload: decoded.payload.map(Uint8Array::new),
+    })
+}
+
+#[napi(js_name = "font_preflight")]
+pub fn font_preflight(bytes: Uint8Array) -> napi::Result<String> {
+    ooxml_font_preflight::docx_font_preflight(&bytes)
+        .map(|result| result.to_json())
+        .map_err(|error| Error::from_reason(error.to_string()))
+}
+
 fn byte_result(env: Env, bytes: Vec<u8>) -> Result<Uint8Array> {
     let mut buffer = ArrayBuffer::copy_from(&env, &bytes)?;
     unsafe { buffer.as_mut() }.copy_from_slice(&bytes);

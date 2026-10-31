@@ -12,6 +12,8 @@ on:
       - 'packages/xlsx/package.json'
       - 'packages/pptx/src/**'
       - 'packages/pptx/package.json'
+      - 'packages/docx/src/**'
+      - 'packages/docx/package.json'
       - 'shared/**'
       - 'scripts/version-packages.mjs'
       - '.github/workflows/native-packages.yml'
