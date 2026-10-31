@@ -32,6 +32,7 @@
     "ariaLabel": "Панель інструментів форматування",
     "file": "Файл",
     "format": "Формат",
+    "layout": "Макет",
     "insert": "Вставлення",
     "open": "Відкрити",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,15 @@
     "imageWrap": {
       "current": "Поточний"
     }
+  },
+  "layout": {
+    "normal": "Звичайні",
+    "narrow": "Вузькі",
+    "moderate": "Помірні",
+    "wide": "Широкі",
+    "customMargins": "Настроювані поля...",
+    "morePaperSizes": "Інші розміри паперу...",
+    "indent": "Відступ"
   },
   "formattingBar": {
     "groups": {

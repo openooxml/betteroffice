@@ -32,6 +32,7 @@
     "ariaLabel": "Barra degli strumenti di formattazione",
     "file": "File",
     "format": "Formato",
+    "layout": "Layout",
     "insert": "Inserisci",
     "open": "Apri",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,15 @@
     "imageWrap": {
       "current": "Corrente"
     }
+  },
+  "layout": {
+    "normal": "Normale",
+    "narrow": "Stretto",
+    "moderate": "Moderato",
+    "wide": "Largo",
+    "customMargins": "Margini personalizzati...",
+    "morePaperSizes": "Altri formati di carta...",
+    "indent": "Rientro"
   },
   "formattingBar": {
     "groups": {

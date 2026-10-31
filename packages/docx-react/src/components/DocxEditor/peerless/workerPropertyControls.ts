@@ -8,6 +8,17 @@ import { applyWorkerProperty, readWorkerSection, type WorkerPropertyQuery, type 
 
 export function useWorkerPageSetupControls(controller: WorkerShellController, onError?: (error: Error) => void) {
   const [query, setQuery] = useState<WorkerPropertyQuery | null>(null);
+  const [layoutProps, setLayoutProps] = useState<SectionProperties>();
+  const layoutRequest = useRef(0);
+  const readCurrent = useCallback(async () => {
+    const request = ++layoutRequest.current;
+    setLayoutProps(undefined);
+    try {
+      const result = await readWorkerSection(controller);
+      if (result.value?.kind !== 'section') throw new Error('Section properties are unavailable');
+      if (request === layoutRequest.current) setLayoutProps(result.value.properties);
+    } catch (error) { onError?.(error instanceof Error ? error : new Error(String(error))); }
+  }, [controller, onError]);
   const handleOpenPageSetup = useCallback(async () => {
     try {
       const result = await readWorkerSection(controller);
@@ -18,12 +29,20 @@ export function useWorkerPageSetupControls(controller: WorkerShellController, on
       return { ok: false, failure: { code: 'command-failed', message: 'Section properties are unavailable.' } } as const; }
   }, [controller, onError]);
   const handlePageSetupApply = useCallback(async (patch: Partial<SectionProperties>) => {
-    if (!query || query.value?.kind !== 'section') return;
-    if (await applyWorkerProperty(controller, query, { kind: 'setSectionProperties',
-      payload: { section: query.value.section, patch, expectVersion: query.version } }, onError)) setQuery(null);
-  }, [controller, query, onError]);
-  return { showPageSetup: query !== null, close: () => setQuery(null), currentProps: query?.value?.kind === 'section' ? query.value.properties : undefined,
-    handleOpenPageSetup, handlePageSetupApply };
+    try {
+      if (!query) await controller.ref.flushPendingInput();
+      const source = query ?? await readWorkerSection(controller);
+      if (source.value?.kind !== 'section') return;
+      if (await applyWorkerProperty(controller, source, { kind: 'setSectionProperties',
+        payload: { section: source.value.section, patch, expectVersion: source.version } }, onError)) {
+        setQuery(null);
+        if (!query) await readCurrent();
+      }
+    } catch (error) { onError?.(error instanceof Error ? error : new Error(String(error))); }
+  }, [controller, query, onError, readCurrent]);
+  return { showPageSetup: query !== null, close: () => setQuery(null),
+    currentProps: query?.value?.kind === 'section' ? query.value.properties : layoutProps,
+    readCurrent, handleOpenPageSetup, handlePageSetupApply };
 }
 
 export function useWorkerWatermarkControls(controller: WorkerShellController, onError?: (error: Error) => void) {

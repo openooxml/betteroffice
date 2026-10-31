@@ -32,6 +32,7 @@
     "ariaLabel": "Bilah alat pemformatan",
     "file": "File",
     "format": "Format",
+    "layout": "Tata Letak",
     "insert": "Sisipkan",
     "open": "Buka",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,15 @@
     "imageWrap": {
       "current": "Saat ini"
     }
+  },
+  "layout": {
+    "normal": "Normal",
+    "narrow": "Sempit",
+    "moderate": "Sedang",
+    "wide": "Lebar",
+    "customMargins": "Margin kustom...",
+    "morePaperSizes": "Ukuran kertas lainnya...",
+    "indent": "Indentasi"
   },
   "formattingBar": {
     "groups": {

@@ -32,6 +32,7 @@
     "ariaLabel": "Панель инструментов форматирования",
     "file": "Файл",
     "format": "Формат",
+    "layout": "Макет",
     "insert": "Вставка",
     "open": "Открыть",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,15 @@
     "imageWrap": {
       "current": "Текущий"
     }
+  },
+  "layout": {
+    "normal": "Обычные",
+    "narrow": "Узкие",
+    "moderate": "Умеренные",
+    "wide": "Широкие",
+    "customMargins": "Настраиваемые поля...",
+    "morePaperSizes": "Другие размеры бумаги...",
+    "indent": "Отступ"
   },
   "formattingBar": {
     "groups": {

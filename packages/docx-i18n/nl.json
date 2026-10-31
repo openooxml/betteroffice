@@ -32,6 +32,7 @@
     "ariaLabel": "Werkbalk voor opmaak",
     "file": "Bestand",
     "format": "Opmaak",
+    "layout": "Indeling",
     "insert": "Invoegen",
     "open": "Openen",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,15 @@
     "imageWrap": {
       "current": "Huidige"
     }
+  },
+  "layout": {
+    "normal": "Normaal",
+    "narrow": "Smal",
+    "moderate": "Gemiddeld",
+    "wide": "Breed",
+    "customMargins": "Aangepaste marges...",
+    "morePaperSizes": "Meer papierformaten...",
+    "indent": "Inspringing"
   },
   "formattingBar": {
     "groups": {

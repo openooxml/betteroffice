@@ -32,6 +32,7 @@
     "ariaLabel": "Outils de mise en forme",
     "file": "Fichier",
     "format": "Format",
+    "layout": "Disposition",
     "insert": "Insertion",
     "open": "Ouvrir",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,15 @@
     "imageWrap": {
       "current": "Actuel"
     }
+  },
+  "layout": {
+    "normal": "Normal",
+    "narrow": "Étroit",
+    "moderate": "Modéré",
+    "wide": "Large",
+    "customMargins": "Marges personnalisées...",
+    "morePaperSizes": "Autres tailles de papier...",
+    "indent": "Retrait"
   },
   "formattingBar": {
     "groups": {
