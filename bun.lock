@@ -296,19 +296,15 @@
     "packages/docx": {
       "name": "@betteroffice/docx",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^0",
+      },
       "devDependencies": {
-        "@betteroffice/fonts": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/fonts": "workspace:^0",
-      },
-      "optionalPeers": [
-        "@betteroffice/fonts",
-      ],
     },
     "packages/docx-i18n": {
       "name": "@betteroffice/docx-i18n",

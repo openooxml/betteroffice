@@ -314,6 +314,7 @@ name = "betteroffice-pptx-engine"
 version = "0.0.0"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
@@ -369,6 +370,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
  "unicode-segmentation",
 ]
 
