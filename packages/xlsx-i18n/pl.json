@@ -135,6 +135,7 @@
       "unsupportedCommand": "Nie jest jeszcze obsługiwane.",
       "invalidArguments": "Ta wartość jest nieprawidłowa.",
       "inputFailed": "Poprzedniego wpisu w komórce nie można było zapisać.",
+      "sheetProtected": "Ta komórka znajduje się w chronionym arkuszu.",
       "documentReplaced": "Otwarto inny skoroszyt.",
       "targetChanged": "Zaznaczenie uległo zmianie.",
       "gestureActive": "Najpierw zakończ przenoszenie wykresu.",
