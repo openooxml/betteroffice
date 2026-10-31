@@ -5276,7 +5276,18 @@ fn lower_paragraph_attrs(
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
     if let Some(fonts) = result.num_pr.as_ref().and_then(|properties| {
         list_state.marker_fonts(properties.num_id?, properties.ilvl.unwrap_or(0.0))
-    }) {
+    }) && result
+        .list_marker_font_family
+        .as_deref()
+        .is_none_or(|stored| {
+            fonts
+                .ascii
+                .as_deref()
+                .filter(|font| !font.is_empty())
+                .or_else(|| fonts.h_ansi.as_deref().filter(|font| !font.is_empty()))
+                == Some(stored)
+        })
+    {
         let mut slots = RunFontSlots {
             ascii: fonts.ascii.filter(|font| !font.is_empty()),
             h_ansi: fonts.h_ansi.filter(|font| !font.is_empty()),
