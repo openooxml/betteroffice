@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
-import initWasm, { XlsxDocument as WasmDocument, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
+import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 
 const native = require('./index.js');
@@ -63,6 +63,7 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
     .toBe(expected instanceof Error ? expected.name : undefined);
   expect(actual instanceof Error ? actual.message : String(actual))
     .toBe(expected instanceof Error ? expected.message : String(expected));
+  expect(actual instanceof Error && 'code' in actual).toBe(expected instanceof Error && 'code' in expected);
   return actual;
 }
 
@@ -405,6 +406,21 @@ describe('xlsx native engine parity', () => {
     expect(() => doc.sheetInfoJson()).toThrow('XlsxDocument was freed');
     doc.free();
     expect(() => doc.sheetInfoJson()).toThrow('XlsxDocument was freed');
+  });
+
+  test('snapshot builder errors have the wasm error shape', () => {
+    const wasmBuilder = new WasmSnapshotBuilder();
+    const nativeBuilder = new native.XlsxSnapshotBuilder();
+    try {
+      const error = expectThrownParity(
+        () => wasmBuilder.push(new Uint8Array([1, 2, 3])),
+        () => nativeBuilder.push(new Uint8Array([1, 2, 3])),
+      );
+      expect(error).toBeInstanceOf(Error);
+    } finally {
+      wasmBuilder.free();
+      nativeBuilder.free();
+    }
   });
 
   test('free drops the native snapshot builder and later calls throw', () => {
