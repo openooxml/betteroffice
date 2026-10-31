@@ -70,7 +70,9 @@ pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
 pub use echo::{EchoGlyphSet, echo_glyph_set};
-pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
+pub use font_store::{
+    FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics, covered_character,
+};
 pub use line_break::{
     BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
 };

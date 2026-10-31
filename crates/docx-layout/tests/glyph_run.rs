@@ -351,6 +351,29 @@ fn shaped_width(store: &FontStore, font: FontId, text: &str) -> f64 {
 }
 
 #[test]
+fn browser_painted_nonbreaking_hyphen_keeps_substitute_width_correction() {
+    let mut store = FontStore::new();
+    let base = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let text = "co\u{2011}operate";
+    let run = browser_text_run(
+        &store,
+        "Arial Narrow",
+        view,
+        text,
+        serde_json::json!({"textShadow": true}),
+    );
+    let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+    let expected = shaped_width(&store, view, text) / shaped_width(&store, base, text);
+    assert!((scale - expected).abs() < 1e-5);
+    assert_eq!(run.text, text);
+}
+
+#[test]
 fn browser_painted_all_caps_use_substitute_widths() {
     let mut store = store_with_liberation();
     let base = FontId::from_u32(0);
@@ -739,6 +762,52 @@ fn max_glyph_x(g: &GlyphRunPrimitive) -> f64 {
 
 fn min_glyph_x(g: &GlyphRunPrimitive) -> f64 {
     g.glyphs.iter().map(|gl| gl.x).fold(f64::MAX, f64::min)
+}
+
+#[test]
+fn nonbreaking_hyphen_paints_a_covered_glyph_with_original_clusters() {
+    let store = store_with_liberation();
+    let font = FontId::from_u32(0);
+    let text = "co\u{2011}operate";
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input(text, 0.0, None, false, Some(&[0]))).unwrap();
+    let measure = ooxml_text::measure_paragraph_json(
+        &store,
+        &serde_json::json!({
+            "block": input["measured"][0]["block"],
+            "maxWidth": FRAG_WIDTH,
+            "fontChains": input["fontChains"],
+            "defaults": {"fontSize": 12.0, "fontFamily": "Liberation Sans"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    input["measured"][0]["measure"] = serde_json::from_str(&measure).unwrap();
+    let json = build_display_list_json_with_fonts(&input.to_string(), &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    assert!(
+        list.pages[0]
+            .primitives
+            .iter()
+            .all(|primitive| !matches!(primitive, Primitive::Text(_)))
+    );
+    let runs = glyph_runs(&list);
+    assert_eq!(runs.len(), 1);
+    let run = runs[0];
+    assert_eq!(run.text, text);
+    assert_eq!(
+        (run.attrs.doc_start, run.attrs.doc_end),
+        (Some(1), Some(11))
+    );
+    let hyphen = run.glyphs.iter().find(|glyph| glyph.cluster == 2).unwrap();
+    assert_eq!(
+        hyphen.id,
+        u32::from(store.glyph_id(font, '\u{2010}').unwrap().unwrap())
+    );
+    assert_eq!(run.glyphs[3].cluster, 5);
+    let rects = range_rects(&list, 3, 4);
+    assert_eq!(rects.len(), 1);
+    assert!((rects[0].width - hyphen.advance).abs() < 0.01);
 }
 
 #[test]

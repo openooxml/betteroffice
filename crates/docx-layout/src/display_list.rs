@@ -4611,10 +4611,13 @@ fn painted_text_width(
         }
     });
     let width = |text: &str, small_caps: bool| {
-        if text
-            .chars()
-            .any(|ch| !ch.is_whitespace() && !fonts.store.covers(font, ch).unwrap_or(false))
-        {
+        if text.chars().any(|ch| {
+            !ch.is_whitespace()
+                && ooxml_text::covered_character(fonts.store, font, ch)
+                    .ok()
+                    .flatten()
+                    .is_none()
+        }) {
             return None;
         }
         let mut features = features.clone();
@@ -4754,10 +4757,12 @@ fn text_canvas_clusters(
     } else {
         text.to_owned()
     };
-    if text
-        .chars()
-        .any(|ch| !fonts.store.covers(font, ch).unwrap_or(false))
-    {
+    if text.chars().any(|ch| {
+        ooxml_text::covered_character(fonts.store, font, ch)
+            .ok()
+            .flatten()
+            .is_none()
+    }) {
         return None;
     }
     let size = effective_font_px_of(fmt);

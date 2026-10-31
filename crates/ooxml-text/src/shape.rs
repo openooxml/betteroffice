@@ -7,7 +7,9 @@
 //! [`crate::bidi`] runs, so text handed in here is a single directional run.
 
 use crate::family_metrics::{FamilyMetrics, family_cluster_advance};
-use crate::font_store::{FontError, FontId, FontStore, MAX_CACHED_SHAPE_TEXT_BYTES, ShapeCacheKey};
+use crate::font_store::{
+    FontError, FontId, FontStore, MAX_CACHED_SHAPE_TEXT_BYTES, ShapeCacheKey, covered_character,
+};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -121,8 +123,26 @@ pub fn shape_with_properties(
         .shaping_face(font)?
         .ok_or_else(|| FontError::Parse("rustybuzz rejected font bytes".to_string()))?;
 
+    let no_break_hyphen = if text.contains('\u{2011}') {
+        covered_character(store, font, '\u{2011}')?.unwrap_or('\u{2011}')
+    } else {
+        '\u{2011}'
+    };
     let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
+    if no_break_hyphen == '\u{2011}' {
+        buffer.push_str(text);
+    } else {
+        for (byte, ch) in text.char_indices() {
+            buffer.add(
+                if ch == '\u{2011}' {
+                    no_break_hyphen
+                } else {
+                    ch
+                },
+                byte as u32,
+            );
+        }
+    }
     match direction {
         ShapeDirection::Auto => {}
         ShapeDirection::Ltr => buffer.set_direction(rustybuzz::Direction::LeftToRight),
@@ -170,7 +190,7 @@ pub fn shape_with_properties(
         glyphs.reverse();
     }
     if let Some(widths) = store.family_widths(font)? {
-        apply_family_widths(&mut glyphs, text, size, widths);
+        apply_family_widths(&mut glyphs, text, size, widths, no_break_hyphen);
     }
     if let Some(cache_key) = cache_key {
         store.cache_shape(cache_key, &glyphs);
@@ -178,7 +198,13 @@ pub fn shape_with_properties(
     Ok(glyphs)
 }
 
-fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths: &FamilyMetrics) {
+fn apply_family_widths(
+    glyphs: &mut [ShapedGlyph],
+    text: &str,
+    size: f32,
+    widths: &FamilyMetrics,
+    no_break_hyphen: char,
+) {
     let mut clusters: BTreeMap<u32, (bool, Option<f32>)> = BTreeMap::new();
     for glyph in glyphs.iter() {
         let (has_advance, _) = clusters.entry(glyph.cluster).or_insert((false, None));
@@ -195,7 +221,23 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
         }
         let advance = text
             .get(bounds[0]..bounds[1])
-            .and_then(|cluster| family_cluster_advance(widths, cluster))
+            .and_then(|cluster| {
+                if no_break_hyphen != '\u{2011}' && cluster.contains('\u{2011}') {
+                    let substituted: String = cluster
+                        .chars()
+                        .map(|ch| {
+                            if ch == '\u{2011}' {
+                                no_break_hyphen
+                            } else {
+                                ch
+                            }
+                        })
+                        .collect();
+                    family_cluster_advance(widths, &substituted)
+                } else {
+                    family_cluster_advance(widths, cluster)
+                }
+            })
             .map(|advance| (advance * 1000.0).round());
         clusters.insert(
             bounds[0] as u32,
@@ -292,7 +334,7 @@ mod tests {
                     y_offset: 0.0,
                 },
             ];
-            apply_family_widths(&mut glyphs, &format!("f{ch}i"), 32.0, widths);
+            apply_family_widths(&mut glyphs, &format!("f{ch}i"), 32.0, widths, '\u{2011}');
             let expected = expected
                 + if ch == '-' {
                     family_advance(widths, ch).unwrap() * 32.0
@@ -321,7 +363,7 @@ mod tests {
             if rtl {
                 glyphs.reverse();
             }
-            apply_family_widths(&mut glyphs, "fiA\u{03A9}", 32.0, widths);
+            apply_family_widths(&mut glyphs, "fiA\u{03A9}", 32.0, widths, '\u{2011}');
             let cluster: Vec<_> = glyphs.iter().filter(|glyph| glyph.cluster == 0).collect();
             let expected = (family_advance(widths, 'f').unwrap()
                 + family_advance(widths, 'i').unwrap())
