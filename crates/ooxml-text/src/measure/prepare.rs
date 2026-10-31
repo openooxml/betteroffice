@@ -36,7 +36,7 @@ use crate::auto_space::AutoSpace;
 use crate::caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
-use crate::font_store::{FontId, FontStore};
+use crate::font_store::{FontId, FontStore, covered_character};
 use crate::line_break::break_opportunities;
 use crate::shape::{ShapeDirection, ShapeFeature, shape_with_direction, shape_with_properties};
 use crate::word_metrics::{kern_enabled, kern_features};
@@ -615,7 +615,14 @@ pub(super) fn measure_plain_text(
         let Some(font) = resolve(store, chain, ch) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
-        plan.push((ch, font, levels[i]));
+        let shaped = if ch == '\u{2011}' {
+            covered_character(store, font, ch)
+                .map_err(|e| MeasureError::Invalid(format!("glyph coverage failed: {e}")))?
+                .unwrap_or(ch)
+        } else {
+            ch
+        };
+        plan.push((shaped, font, levels[i]));
     }
 
     // shape maximal same-font single-level subranges and sum advances
@@ -878,6 +885,11 @@ fn prepare_text_run(
                 tag: *b"smcp",
                 value: 1,
             });
+        }
+        for ch in shaped.iter_mut().filter(|ch| **ch == '\u{2011}') {
+            *ch = covered_character(store, font, *ch)
+                .map_err(|e| MeasureError::Invalid(format!("glyph coverage failed: {e}")))?
+                .unwrap_or(*ch);
         }
         let first = shaped[0];
         // Chars a resolved font doesn't cover (e.g. a rare char in a multi-char

@@ -780,6 +780,10 @@ pub enum StructuralRevisionKind {
 #[serde(rename_all = "camelCase")]
 pub struct TextRunPrimitive {
     pub text: String,
+    /// Canvas-only glyph stand-in text, boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_text: Option<Box<String>>,
     /// pen origin
     pub x: Number,
     pub baseline_y: Number,
@@ -847,6 +851,11 @@ pub struct GlyphRunPrimitive {
     /// SOURCE TEXT — the a11y mirror renders this as real characters and the
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
+    /// Canvas-only glyph stand-in text for the fillText fallback, boxed to
+    /// keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_text: Option<Box<String>>,
     pub glyphs: Vec<PlacedGlyph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<EchoRunFacts>,
@@ -3933,6 +3942,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
     };
     prims.push(Primitive::Text(TextRunPrimitive {
         text,
+        paint_text: None,
         x: px(x),
         baseline_y: px(baseline),
         width: px(width),
@@ -4638,6 +4648,33 @@ impl<'a> ShapeFonts<'a> {
     }
 }
 
+fn text_paint_override(
+    fonts: Option<&ShapeFonts<'_>>,
+    text: &str,
+    fmt: &RunFormattingIn,
+) -> Option<String> {
+    if !text.contains('\u{2011}') {
+        return None;
+    }
+    let fonts = fonts?;
+    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
+    let font = (chain.resolve)(fonts.store, &chain.ids, '\u{2011}')?;
+    glyph_paint_text(fonts.store, font, text)
+}
+
+fn glyph_paint_text(
+    store: &ooxml_text::FontStore,
+    font: ooxml_text::FontId,
+    text: &str,
+) -> Option<String> {
+    if !text.contains('\u{2011}') {
+        return None;
+    }
+    let stand_in = ooxml_text::covered_character(store, font, '\u{2011}').ok()??;
+    (stand_in != '\u{2011}').then(|| text.replace('\u{2011}', &stand_in.to_string()))
+}
+
 fn painted_text_width(
     fonts: &ShapeFonts<'_>,
     font: ooxml_text::FontId,
@@ -4658,15 +4695,18 @@ fn painted_text_width(
         }
     });
     let width = |text: &str, small_caps: bool| {
+        let covered = |ch: char| {
+            ooxml_text::covered_character(fonts.store, font, ch)
+                .ok()
+                .flatten()
+                .is_some()
+        };
         let uncovered = if coverage_only {
             text.chars().any(|ch| {
-                ooxml_text::measure::needs_glyph(ch)
-                    && !ch.is_whitespace()
-                    && !fonts.store.covers(font, ch).unwrap_or(false)
+                ooxml_text::measure::needs_glyph(ch) && !ch.is_whitespace() && !covered(ch)
             })
         } else {
-            text.chars()
-                .any(|ch| !ch.is_whitespace() && !fonts.store.covers(font, ch).unwrap_or(false))
+            text.chars().any(|ch| !ch.is_whitespace() && !covered(ch))
         };
         if uncovered {
             return None;
@@ -4826,10 +4866,12 @@ fn text_canvas_clusters(
     } else {
         text.to_owned()
     };
-    if text
-        .chars()
-        .any(|ch| !fonts.store.covers(font, ch).unwrap_or(false))
-    {
+    if text.chars().any(|ch| {
+        ooxml_text::covered_character(fonts.store, font, ch)
+            .ok()
+            .flatten()
+            .is_none()
+    }) {
         return None;
     }
     let size = effective_font_px_of(fmt);
@@ -4876,7 +4918,8 @@ fn text_canvas_clusters(
         let end = *bounds.get(index + 1)?;
         let cluster = text.get(start..end)?;
         clusters.push(CanvasTextCluster {
-            text: cluster.to_owned(),
+            text: text_paint_override(Some(fonts), cluster, fmt)
+                .unwrap_or_else(|| cluster.to_owned()),
             offset: px(pen),
         });
         pen += if fmt.small_caps == Some(true) {
@@ -6464,6 +6507,7 @@ pub(crate) fn emit_paragraph_fragment(
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: "¶".to_string(),
+            paint_text: None,
             x: px(glyph_x),
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
@@ -6938,6 +6982,7 @@ fn emit_line(
         marker_attrs.list_marker_revision = marker_revision;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: marker.to_owned(),
+            paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
             x: px(marker_x),
             baseline_y: px(baseline),
             width: px(slot_width),
@@ -7435,6 +7480,7 @@ fn emit_line(
             marker_attrs.doc_end = Some(p);
             prims.push(Primitive::Text(TextRunPrimitive {
                 text: String::new(),
+                paint_text: None,
                 x: px(geom.frag_x + pad_left + text_indent + left_offset),
                 baseline_y: px(baseline),
                 width: px(0.0),
@@ -7562,7 +7608,9 @@ fn emit_tab_leader(
         attrs.logical_order = logical_order.or(tab.fmt.logical_order);
         attrs.bidi_level = tab.fmt.bidi_level;
         attrs.leader_glyphs = Some(Box::new(LeaderGlyphMetadata {
-            glyph: Some(glyph.to_string()),
+            glyph: Some(
+                text_paint_override(shape, glyph, &fmt).unwrap_or_else(|| glyph.to_string()),
+            ),
             count: Some(count),
             x: Some(px(x)),
             baseline_y: Some(px(baseline)),
@@ -7575,6 +7623,7 @@ fn emit_tab_leader(
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
         }));
         prims.push(Primitive::Text(TextRunPrimitive {
+            paint_text: text_paint_override(shape, &text, &fmt).map(Box::new),
             text,
             x: px(x),
             baseline_y: px(baseline),
@@ -7889,6 +7938,7 @@ fn emit_text_segment(
         .map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
+            paint_text: text_paint_override(shape, text, fmt).map(Box::new),
             x: px(x),
             baseline_y: px(paint_baseline),
             width: px(width),
@@ -8234,6 +8284,7 @@ fn try_emit_glyph_runs(
             font_id: font.to_u32(),
             size: round3(size_px),
             color: color.to_string(),
+            paint_text: glyph_paint_text(shape_fonts.store, font, &sub_text).map(Box::new),
             text: sub_text,
             glyphs: placed,
             echo: Some(EchoRunFacts {
@@ -9911,6 +9962,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 prims.push(Primitive::Text(TextRunPrimitive {
                     x: px(x),
                     text,
+                    paint_text: None,
                     baseline_y: px(baseline_y),
                     width: px(width),
                     paint_clip: None,

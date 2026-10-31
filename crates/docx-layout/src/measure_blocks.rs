@@ -4277,6 +4277,30 @@ mod tests {
     }
 
     #[test]
+    fn nonbreaking_hyphen_keeps_native_paragraph_measurement() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph = |text| {
+            serde_json::from_value::<ParagraphBlock>(json!({
+                "id": "nonbreaking-hyphen",
+                "runs": [{"kind": "text", "text": text}]
+            }))
+            .unwrap()
+        };
+        let expected = measure_paragraph(&paragraph("co\u{2010}operate"), 300.0, &config).unwrap();
+        let actual = measure_paragraph(&paragraph("co\u{2011}operate"), 300.0, &config).unwrap();
+        assert!(
+            actual
+                .lines
+                .iter()
+                .all(|line| line.synthetic_fallback != Some(true))
+        );
+        assert_eq!(actual.lines[0].width, expected.lines[0].width);
+        assert_eq!(actual.lines[0].tail_char, 10);
+    }
+
+    #[test]
     fn column_bands_past_the_zone_limit_measure_at_the_narrowest_slot() {
         let fonts = crate::MeasureFonts::default();
         let _fonts = fonts.enter();
