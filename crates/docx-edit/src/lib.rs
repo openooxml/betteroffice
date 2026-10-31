@@ -677,6 +677,8 @@ pub struct EditingDoc {
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
+    #[cfg(test)]
+    save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     table_membership: Mutex<Option<TableMembership>>,
@@ -782,6 +784,8 @@ impl EditingDoc {
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
             save_story_states,
+            #[cfg(test)]
+            save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
             chunk_snapshots: Mutex::default(),
             table_membership: Mutex::default(),

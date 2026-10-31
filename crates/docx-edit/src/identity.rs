@@ -790,7 +790,7 @@ impl SourceIndex {
 
     /// Every story as seeded; see [`StoryState`].
     fn seed_states(&self) -> &HashMap<String, Arc<StoryState>> {
-        &self.seed_states.get_or_init(|| self.reseeded()).stories
+        self.seed_states_or(|| self.reseeded())
     }
 
     /// [`Self::seed_states`], taken from `seeded` when not yet known: what a session's stories
@@ -800,7 +800,11 @@ impl SourceIndex {
         &self,
         seeded: impl FnOnce() -> SeedStates,
     ) -> &HashMap<String, Arc<StoryState>> {
-        &self.seed_states.get_or_init(seeded).stories
+        if let Some(seeded) = self.seed_states.get() {
+            return &seeded.stories;
+        }
+        let seeded = seeded();
+        &self.seed_states.get_or_init(|| seeded).stories
     }
 
     /// Whether the package was opened under its own digest, the one seeding it again derives
@@ -818,8 +822,9 @@ impl SourceIndex {
         if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
             return SeedStates::default();
         }
+        let txn = scratch.yrs_doc().transact();
         SeedStates {
-            stories: story_states(&scratch),
+            stories: story_states_within(&scratch, &txn, None).unwrap_or_default(),
             patch_table_styles: scratch
                 .source_metadata()
                 .map(|metadata| metadata.patch_table_styles().clone())
@@ -918,17 +923,12 @@ impl StoryStateCache {
     fn retain_patch_segments(
         &mut self,
         seeded: &HashMap<String, Arc<StoryState>>,
-        by_key: &HashMap<&str, (&str, &UnitState)>,
+        by_key: &UnitIndex<'_>,
     ) {
         if !self.entries.values().any(|cached| cached.pending_trim) {
             return;
         }
-        let seeded_keys = seeded
-            .values()
-            .flat_map(|state| &state.units)
-            .filter(|unit| unit.key.is_some())
-            .count();
-        if seeded_keys != by_key.len() {
+        if !by_key.unique {
             return;
         }
         for (story, cached) in &mut self.entries {
@@ -1015,7 +1015,36 @@ impl std::ops::Deref for UnitState {
 
 impl UnitState {
     fn same_projection(&self, other: &Self) -> bool {
-        self.projection == other.projection
+        self.projection.same_projection(&other.projection)
+    }
+
+    fn from_projection(
+        projection: UnitProjection,
+        segments: Vec<crate::StorySegment>,
+        seeded: Option<&UnitIndex<'_>>,
+    ) -> Self {
+        let seed = seeded
+            .and_then(|seeded| projection.key.as_deref().and_then(|key| seeded.get(key)))
+            .map(|(_, unit)| *unit);
+        let segments = if seed.is_some_and(|seed| {
+            projection.digest == seed.digest && projection.content_digest == seed.content_digest
+        }) {
+            None
+        } else {
+            Some(segments)
+        };
+        let projection = match seed {
+            Some(seed) if projection.same_projection(&seed.projection) => Arc::clone(&seed.projection),
+            _ => {
+                #[cfg(test)]
+                UNIT_PROJECTIONS.with(|count| count.set(count.get() + 1));
+                Arc::new(projection)
+            }
+        };
+        Self {
+            projection,
+            segments,
+        }
     }
 
     fn has_blocks(&self) -> bool {
@@ -1024,12 +1053,39 @@ impl UnitState {
     }
 }
 
-fn story_states(doc: &EditingDoc) -> HashMap<String, Arc<StoryState>> {
-    let txn = doc.yrs_doc().transact();
-    story_states_in(doc, &txn)
+impl UnitProjection {
+    fn same_projection(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.digest == other.digest
+            && self.blocks == other.blocks
+            && self.content_digest == other.content_digest
+            && self.section_digest == other.section_digest
+            && self.inline == other.inline
+    }
 }
 
-fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, Arc<StoryState>> {
+#[derive(Clone, Copy)]
+struct SaveSeeds<'a> {
+    stories: &'a HashMap<String, Arc<StoryState>>,
+    units: &'a UnitIndex<'a>,
+}
+
+#[cfg(test)]
+fn story_states(doc: &EditingDoc) -> HashMap<String, Arc<StoryState>> {
+    let txn = doc.yrs_doc().transact();
+    story_states_in(doc, &txn, None)
+}
+
+fn story_states_in(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
+    seeded: Option<SaveSeeds<'_>>,
+) -> HashMap<String, Arc<StoryState>> {
+    #[cfg(test)]
+    if doc.save_story_cache_disabled.load(Ordering::Relaxed) {
+        return story_states_within(doc, txn, None).unwrap_or_default();
+    }
+    let compacted = seeded.is_some_and(|seeded| seeded.units.unique);
     let scan = doc.committed_scan(txn);
     let revisions: Vec<_> = {
         let revisions = doc.story_revisions.lock().unwrap();
@@ -1071,17 +1127,28 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, A
     };
     let mut computed = Vec::new();
     for (story, revision, comments) in missing {
-        let Some((fingerprint, units)) =
-            story_fingerprint_within(doc, txn, story, &comments, &mut None)
+        let Some((fingerprint, units, same_seed)) =
+            story_fingerprint_for_save(doc, txn, story, &comments, &mut None, seeded)
         else {
             continue;
         };
-        let state = Arc::new(StoryState {
-            root: scan.root(story).to_owned(),
-            fingerprint,
-            units,
-            comments,
-        });
+        let seed = seeded.and_then(|seeded| seeded.stories.get(story));
+        let state = match seed {
+            Some(seed)
+                if same_seed
+                    && fingerprint == seed.fingerprint
+                    && seed.root == scan.root(story)
+                    && seed.comments == comments =>
+            {
+                Arc::clone(seed)
+            }
+            _ => Arc::new(StoryState {
+                root: scan.root(story).to_owned(),
+                fingerprint,
+                units,
+                comments,
+            }),
+        };
         if let Some(revision) = revision {
             computed.push((story, revision));
         }
@@ -1132,7 +1199,7 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, A
                 CachedStoryState {
                     revision,
                     state: Arc::clone(state),
-                    pending_trim: true,
+                    pending_trim: !compacted,
                 },
             );
         }
@@ -1454,6 +1521,9 @@ thread_local! {
     pub(crate) static STORY_FINGERPRINTS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static UNIT_PROJECTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     pub(crate) static RUN_SIZE_FINGERPRINTS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -1550,6 +1620,18 @@ fn story_fingerprint_within(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
     budget: &mut Option<usize>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
+    story_fingerprint_for_save(doc, txn, story, comments, budget, None)
+        .map(|(fingerprint, units, _)| (fingerprint, units))
+}
+
+fn story_fingerprint_for_save(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
+    story: &str,
+    comments: &BTreeMap<String, Vec<(u32, u32)>>,
+    budget: &mut Option<usize>,
+    seeded: Option<SaveSeeds<'_>>,
+) -> Option<([u8; 32], Vec<UnitState>, bool)> {
     use sha2::{Digest, Sha256};
     #[cfg(test)]
     STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
@@ -1592,6 +1674,7 @@ fn story_fingerprint_within(
     let mut position = 0u32;
     let mut bytes = Vec::new();
     let mut section_bytes = Vec::new();
+    let seeded_units = seeded.map(|seeded| seeded.units).filter(|units| units.unique);
     for segment in segments {
         if let Some(budget) = budget.as_mut() {
             let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
@@ -1631,8 +1714,8 @@ fn story_fingerprint_within(
                 }
                 start = position;
                 block_positions.clear();
-                units.push(UnitState {
-                    projection: Arc::new(UnitProjection {
+                units.push(UnitState::from_projection(
+                    UnitProjection {
                         key: Some(properties.para_id.clone()),
                         digest: std::mem::take(&mut unit).finish(),
                         blocks: std::mem::take(&mut blocks).finalize().into(),
@@ -1641,9 +1724,10 @@ fn story_fingerprint_within(
                         section_digest: std::mem::take(&mut section_content).finalize().into(),
                         inline: std::mem::take(&mut inline),
                         markers: std::mem::take(&mut markers),
-                    }),
-                    segments: Some(std::mem::take(&mut unit_segments)),
-                });
+                    },
+                    std::mem::take(&mut unit_segments),
+                    seeded_units,
+                ));
             }
             crate::SegmentContent::OtherEmbed { kind, .. }
                 if matches!(kind.as_str(), "table" | "blockSdt") =>
@@ -1666,8 +1750,8 @@ fn story_fingerprint_within(
     let trailing = unit.finish();
     let empty: [u8; 32] = Sha256::new().finalize().into();
     if trailing != empty {
-        units.push(UnitState {
-            projection: Arc::new(UnitProjection {
+        units.push(UnitState::from_projection(
+            UnitProjection {
                 key: None,
                 digest: trailing,
                 blocks: blocks.finalize().into(),
@@ -1676,15 +1760,22 @@ fn story_fingerprint_within(
                 section_digest: section_content.finalize().into(),
                 inline,
                 markers,
-            }),
-            segments: Some(unit_segments),
-        });
+            },
+            unit_segments,
+            seeded_units,
+        ));
     }
     let mut hasher = Sha256::new();
-    for unit in &units {
+    let seed = seeded.and_then(|seeded| seeded.stories.get(story));
+    let mut same_seed = seed.is_some_and(|seed| seed.units.len() == units.len());
+    for (index, unit) in units.iter().enumerate() {
         hasher.update(unit.digest);
+        same_seed = same_seed
+            && seed.is_some_and(|seed| {
+                Arc::ptr_eq(&unit.projection, &seed.units[index].projection)
+            });
     }
-    Some((hasher.finalize().into(), units))
+    Some((hasher.finalize().into(), units, same_seed))
 }
 
 #[cfg(all(test, feature = "wasm"))]
@@ -3442,8 +3533,21 @@ impl EditingDoc {
             .iter()
             .map(|pilcrow| (pilcrow.key.as_str(), pilcrow))
             .collect();
+        let unchanged = self.unchanged_since_seeded() && source.opened_under_own_digest();
+        let ready = if unchanged {
+            source.seed_states.get().map(|seeded| &seeded.stories)
+        } else {
+            Some(source.seed_states())
+        };
+        let ready_units = ready.map(units_by_key);
         let live = if by_key.len() == scan.pilcrows.len() {
-            story_states_in(self, &txn)
+            story_states_in(
+                self,
+                &txn,
+                ready
+                    .zip(ready_units.as_ref())
+                    .map(|(stories, units)| SaveSeeds { stories, units }),
+            )
         } else {
             self.save_story_states.lock().unwrap().clear();
             story_states_within(self, &txn, None).unwrap_or_default()
@@ -3462,12 +3566,12 @@ impl EditingDoc {
             section_spliced_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
-        let seeded = if self.unchanged_since_seeded() && source.opened_under_own_digest() {
-            source.seed_states_or(|| self.live_save_seed_states(live.clone()))
+        let seeded = if let Some(ready) = ready {
+            ready
         } else {
-            source.seed_states()
+            source.seed_states_or(|| self.live_save_seed_states(live.clone()))
         };
-        let seeded_units = units_by_key(seeded);
+        let seeded_units = ready_units.unwrap_or_else(|| units_by_key(seeded));
         let live_units = units_by_key(&live);
         let stories_of = |states: &HashMap<String, Arc<StoryState>>, part: &SourcePart| {
             part_stories(states, part)
@@ -3551,15 +3655,32 @@ impl EditingDoc {
     }
 }
 
-fn units_by_key(states: &HashMap<String, Arc<StoryState>>) -> HashMap<&str, (&str, &UnitState)> {
-    states
-        .iter()
-        .flat_map(|(story, state)| {
-            state.units.iter().filter_map(move |unit| {
-                unit.key.as_deref().map(|key| (key, (story.as_str(), unit)))
-            })
-        })
-        .collect()
+struct UnitIndex<'a> {
+    by_key: HashMap<&'a str, (&'a str, &'a UnitState)>,
+    unique: bool,
+}
+
+impl<'a> std::ops::Deref for UnitIndex<'a> {
+    type Target = HashMap<&'a str, (&'a str, &'a UnitState)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.by_key
+    }
+}
+
+fn units_by_key(states: &HashMap<String, Arc<StoryState>>) -> UnitIndex<'_> {
+    let mut by_key = HashMap::new();
+    let mut unique = true;
+    for (story, state) in states {
+        for unit in &state.units {
+            if let Some(key) = unit.key.as_deref()
+                && by_key.insert(key, (story.as_str(), unit)).is_some()
+            {
+                unique = false;
+            }
+        }
+    }
+    UnitIndex { by_key, unique }
 }
 
 /// The stories seeded from `part`, cells and content controls nested in them included.
@@ -4237,6 +4358,10 @@ mod tests {
         assert_eq!(plan, doc.paragraph_save_plan());
         let states = story_states(doc);
         doc.save_story_states.lock().unwrap().clear();
+        doc.save_story_cache_disabled.store(true, Ordering::Relaxed);
+        let fresh_plan = doc.paragraph_save_plan();
+        doc.save_story_cache_disabled.store(false, Ordering::Relaxed);
+        assert_eq!(plan, fresh_plan);
         assert_eq!(plan, doc.paragraph_save_plan());
         let txn = doc.yrs_doc().transact();
         let mut fresh = story_states_within(doc, &txn, None).unwrap();
@@ -4467,7 +4592,11 @@ mod tests {
             .unwrap();
         let mut previous = None;
         for _ in 0..2 {
+            UNIT_PROJECTIONS.with(|count| count.set(0));
             let plan = doc.paragraph_save_plan();
+            UNIT_PROJECTIONS.with(|count| {
+                assert_eq!(count.get(), usize::from(previous.is_none()));
+            });
             if let Some(previous) = &previous {
                 assert_eq!(previous, &plan);
             }
@@ -4498,6 +4627,137 @@ mod tests {
                 }
             }
         }
+        save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn uncached_save_plans_bypass_story_states() {
+        let doc = save_plan_doc();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let plan = doc.paragraph_save_plan();
+        let stories = doc.save_story_states.lock().unwrap().entries.len();
+        doc.save_story_states.lock().unwrap().clear();
+        doc.save_story_cache_disabled.store(true, Ordering::Relaxed);
+        STORY_FINGERPRINTS.with(|count| count.set(0));
+        for _ in 0..2 {
+            assert_eq!(plan, doc.paragraph_save_plan());
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        }
+        STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 2 * stories));
+        doc.save_story_cache_disabled.store(false, Ordering::Relaxed);
+        save_plans_agree(&doc);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore]
+    fn save_plan_cache_bench() {
+        fn prepared(bytes: &[u8], bypass: bool) -> EditingDoc {
+            let doc = EditingDoc::new(41);
+            crate::seed_from_docx(&doc, bytes).unwrap();
+            let paragraphs: Vec<_> = doc
+                .paragraphs("body")
+                .unwrap()
+                .into_iter()
+                .filter(|paragraph| !paragraph.text.is_empty())
+                .collect();
+            let paragraph = &paragraphs[paragraphs.len() / 2];
+            let position = doc.paragraph_mark_position(&paragraph.para_id).unwrap();
+            doc.insert_text(&ctx(), position, "x", FormatPolicy::Plain)
+                .unwrap();
+            doc.save_story_cache_disabled.store(bypass, Ordering::Relaxed);
+            doc
+        }
+
+        let Some(path) = std::env::var_os("BO_BENCH_DOCX") else {
+            return;
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let mut samples: [Vec<f64>; 4] = std::array::from_fn(|_| Vec::with_capacity(15));
+        for round in 0..15 {
+            let modes = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for bypass in modes {
+                let doc = prepared(&bytes, bypass);
+                let started = std::time::Instant::now();
+                let first = doc.paragraph_save_plan();
+                let first_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let started = std::time::Instant::now();
+                let repeat = doc.paragraph_save_plan();
+                let repeat_ms = started.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(first, repeat);
+                samples[usize::from(bypass)].push(first_ms);
+                samples[2 + usize::from(bypass)].push(repeat_ms);
+            }
+        }
+        let medians = samples.map(|mut samples| {
+            samples.sort_by(f64::total_cmp);
+            samples[7]
+        });
+        println!(
+            "PLANBENCH first_cache_ms={:.3} first_nocache_ms={:.3} repeat_cache_ms={:.3} repeat_nocache_ms={:.3}",
+            medians[0], medians[1], medians[2], medians[3]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn progress_hooks_can_reenter_before_save_seed_states_are_initialized() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        thread_local! {
+            static TARGET: RefCell<Option<Rc<EditingDoc>>> = const { RefCell::new(None) };
+            static RESULT: RefCell<Option<ParagraphSavePlan>> = const { RefCell::new(None) };
+        }
+
+        fn reenter() {
+            ooxml_opc::progress::set_hook(None);
+            let doc = TARGET.with(|target| Rc::clone(target.borrow().as_ref().unwrap()));
+            let plan = doc.paragraph_save_plan();
+            RESULT.with(|result| *result.borrow_mut() = Some(plan));
+        }
+
+        struct ResetHook;
+
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                ooxml_opc::progress::set_hook(None);
+                TARGET.with(|target| *target.borrow_mut() = None);
+                RESULT.with(|result| *result.borrow_mut() = None);
+            }
+        }
+
+        let _reset = ResetHook;
+        let body: String = (1..=ooxml_opc::progress::EVERY)
+            .map(|id| {
+                crate::engine::preview_fixture::paragraph(
+                    id,
+                    &crate::engine::preview_fixture::run("Seed"),
+                )
+            })
+            .collect();
+        let bytes = crate::engine::preview_fixture::document(&body);
+        let doc = Rc::new(EditingDoc::new(41));
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let source = doc.source_index().unwrap();
+        assert!(!source.seed_states_initialized());
+        {
+            let txn = doc.yrs_doc().transact();
+            doc.committed_scan(&txn);
+        }
+        TARGET.with(|target| *target.borrow_mut() = Some(Rc::clone(&doc)));
+        ooxml_opc::progress::set_hook(Some(reenter));
+        let plan = doc.paragraph_save_plan();
+        ooxml_opc::progress::set_hook(None);
+        let nested = RESULT.with(|result| result.borrow_mut().take().unwrap());
+        assert_eq!(plan, nested);
         save_plans_agree(&doc);
     }
 
