@@ -6,6 +6,7 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { requireWebWorker } from '../../../../shared/office-session/webWorker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
@@ -253,6 +254,7 @@ export async function openWorkbookSession(
   bytes: Uint8Array | ArrayBuffer,
   options: OpenWorkbookSessionOptions = {}
 ): Promise<WorkbookSession> {
+  if (!options.worker) requireWebWorker('openWorkbook');
   const transport = createWorkerTransport(
     options.worker ? options.worker() :
       new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
