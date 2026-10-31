@@ -263,6 +263,32 @@ describe('worker wasm initialization', () => {
 });
 
 describe('worker wasm compilation', () => {
+  it('compiles file assets from disk without fetching or instantiating', async () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'getBuiltinModule');
+    const url = new URL('file:///worker%20assets/module.wasm');
+    const readFileSync = mock(() => WASM_BYTES);
+    const fileURLToPath = mock(() => '/worker assets/module.wasm');
+    const fetch = spyOn(globalThis, 'fetch');
+    const instantiate = spyOn(WebAssembly, 'instantiate');
+    Object.defineProperty(process, 'getBuiltinModule', { configurable: true, value: (name: string) => {
+      if (name === 'node:fs') return { readFileSync };
+      if (name === 'node:url') return { fileURLToPath };
+      throw new Error(`Unexpected builtin ${name}`);
+    } });
+    try {
+      expect(await compileWasm(url)).toBeInstanceOf(WebAssembly.Module);
+      expect(fileURLToPath).toHaveBeenCalledWith(url.href);
+      expect(readFileSync).toHaveBeenCalledWith('/worker assets/module.wasm');
+      expect(fetch).not.toHaveBeenCalled();
+      expect(instantiate).not.toHaveBeenCalled();
+    } finally {
+      if (original) Object.defineProperty(process, 'getBuiltinModule', original);
+      else Reflect.deleteProperty(process, 'getBuiltinModule');
+      fetch.mockRestore();
+      instantiate.mockRestore();
+    }
+  });
+
   it.each(['application/wasm', 'text/plain'])(
     'compiles a %s response without instantiating it', async (mime) => {
       const module = new WebAssembly.Module(WASM_BYTES);

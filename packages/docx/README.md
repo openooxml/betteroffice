@@ -50,6 +50,10 @@ Core sessions expose synchronous editing and read methods after asynchronous cre
 editor runs its engine in a Web Worker by default and exposes promise-returning document reads,
 edits, and exports. Release a direct session with `session.destroy()` when finished.
 
+## Worker sessions
+
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed.
+
 ## Undo grouping
 
 A story is one text flow: the body, a header or footer, a footnote, or a comment.

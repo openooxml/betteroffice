@@ -541,6 +541,9 @@ jobs:
           export BETTEROFFICE_EXPORT_KEYS="$RUNNER_TEMP/native-export-keys.json"
           bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"
           node scripts/native-bindings-smoke.mjs
+          (cd packages/docx && bun scripts/copy-assets.ts)
+          node scripts/node-worker-sessions-smoke.mjs
+          node scripts/node-worker-sessions-smoke.mjs --keep-alive
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "$smoke_dir"' EXIT

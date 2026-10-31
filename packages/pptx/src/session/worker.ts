@@ -5,9 +5,17 @@ import { engineKind } from '../wasm/engine';
 import { initWasm } from '../wasm/loader';
 import { createPresentationSessionHost, initializePresentationEditorWasm } from './host';
 
-const transport = createScopeTransport(self as unknown as SessionScope);
-const host = createPresentationSessionHost(transport, {
-  initWasm: engineKind === 'native' ? initWasm : createWorkerWasmInitializer(transport, wasmAssetUrl(), initWasm),
-  initEditorWasm: initializePresentationEditorWasm,
-});
-Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });
+function startWorker(scope: SessionScope): void {
+  const transport = createScopeTransport(scope);
+  const host = createPresentationSessionHost(transport, {
+    initWasm: engineKind === 'native' ? initWasm : createWorkerWasmInitializer(transport, wasmAssetUrl(), initWasm),
+    initEditorWasm: initializePresentationEditorWasm,
+  });
+  Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });
+}
+
+if (typeof self === 'undefined') {
+  void import('../../../../shared/office-session/nodeWorker').then(({ sessionWorkerScope }) => startWorker(sessionWorkerScope()));
+} else {
+  startWorker(self as unknown as SessionScope);
+}

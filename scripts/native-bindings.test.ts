@@ -454,6 +454,11 @@ describe('native package release wiring', () => {
     expect(smoke.run).toContain('bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"');
     expect(smoke.run).toContain('if [ -d "$package/dist" ]; then cp -R "$package/dist" "$package_dir/"; fi');
     expect(smoke.run).toContain('node scripts/native-bindings-smoke.mjs');
+    expect(smoke.run).toContain('(cd packages/docx && bun scripts/copy-assets.ts)');
+    expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs\n');
+    expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs --keep-alive');
+    expect(smoke.run).not.toContain('bun scripts/node-worker-sessions-smoke.mjs');
+    expect(smoke.run).not.toContain('deno run scripts/node-worker-sessions-smoke.mjs');
     expect(smoke.run).toContain('bun scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(smoke.run).toContain('$smoke_dir/node_modules/@betteroffice/$format');

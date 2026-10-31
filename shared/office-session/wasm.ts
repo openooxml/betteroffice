@@ -1,7 +1,10 @@
 import { isClientMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
+import { readWasmSync } from './readWasmAsset';
 
 export async function compileWasm(url: URL): Promise<WebAssembly.Module> {
+  const bytes = readWasmSync(url);
+  if (bytes) return WebAssembly.compile(bytes as BufferSource);
   const response = await fetch(url);
   if (typeof WebAssembly.compileStreaming === 'function') {
     try {
