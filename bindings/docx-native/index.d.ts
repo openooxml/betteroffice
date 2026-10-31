@@ -45,6 +45,194 @@ export declare class Document {
 }
 export type DocxDocument = Document
 
+export declare class EditSession {
+  free(): void
+  accept_change(targetJson: string): string
+  add_comment(rangesJson: string, author: string, date: string, bodyJson: string): string
+  add_undo_boundary(): void
+  apply_edits_json(request: string): string
+  apply_host_update(update: Uint8Array): void
+  apply_local_update(update: Uint8Array): void
+  apply_paragraph_style(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, styleId: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
+  apply_raw_ops(story: string, opsJson: string): void
+  apply_seed_raw_ops(story: string, opsJson: string): void
+  apply_update_chunks(updates: Array<any>): void
+  apply_update(update: Uint8Array): void
+  apply_update_with_inference(update: Uint8Array): string
+  begin_opening(generation?: string | undefined | null): void
+  begin_shared_reads(): void
+  bootstrap_peer(state: Uint8Array, metadata: Uint8Array, source?: Uint8Array | undefined | null): void
+  can_redo(): boolean
+  can_undo(): boolean
+  cell_selection(): string
+  clear_cell_selection(): string | undefined
+  clear_content_control_value(embedId: string): void
+  clear_formatting(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number): void
+  clear_undo_input_time(): void
+  clear_update_event_observation(): void
+  client_id(): number
+  comment_text_target_json(targetJson: string, commentJson: string): string
+  compare_docx_json(original: Uint8Array, revised: Uint8Array, options: string): string
+  content_control_targets_json(): string
+  create_story(storyId: string, initialText: string, pStyle: string, alignment: string): string
+  delete_column(rangeJson: string): string
+  delete_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  delete_row(rangeJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  delete_story(storyId: string): void
+  delete_table(tableJson: string): string
+  document_properties_json(): string
+  drain_update_event(): Uint8Array
+  edit_text_resident(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, text?: string | undefined | null): string
+  encode_diff_chunks(remoteStateVector: Uint8Array, maxChunkBytes: number): Array<any>
+  encode_diff(remoteStateVector: Uint8Array): Uint8Array
+  encode_peer_metadata(): Uint8Array
+  encode_state(): Uint8Array
+  encode_state_vector(): Uint8Array
+  encode_sticky_position(story: string, paraId: string, offset: number): Uint8Array
+  encoded_selection(): string
+  end_shared_reads(): void
+  export_markdown_json(options: string): string
+  export_snapshot_with_private_fonts_json(fonts: Uint8Array, fontLengths: Uint32Array, request: string, options: string): string
+  export_structured_json(options: string): string
+  export_structured_with_pages_json(options: string, currentRequest?: string | undefined | null): string
+  fail_compared_docx_json(message: string): string
+  find_content_controls_json(query: string, options: string): string
+  find_text_json(request: string): string
+  finish_compared_docx_json(bytes: Uint8Array): string
+  format_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, deltaJson: string): void
+  format_text_target_json(targetJson: string, deltaJson: string): string
+  geometry_position_outline_json(root: string): string
+  has_pending_update(): boolean
+  has_story(story: string): boolean
+  header_footer_aliases_json(): string
+  headings_json(story: string): string
+  history_stories(): string[]
+  insert_column(atJson: string, after: boolean): string
+  insert_image(story: string, paraId: string, offset: number, payloadJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  insert_line_break(story: string, paraId: string, offset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  insert_page_break(story: string, paraId: string, offset: number): void
+  insert_row(atJson: string, after: boolean, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  insert_section_break(story: string, paraId: string, offset: number, breakType: string): void
+  insert_table(story: string, paraId: string, offset: number, rows: number, columns: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  insert_table_fragment(story: string, paraId: string, offset: number, fragmentJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  insert_text(story: string, paraId: string, offset: number, text: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  insert_watermark(story: string, paraId: string, offset: number, watermarkJson: string): void
+  list_comments(): string
+  list_content_controls_json(options: string): string
+  list_revisions(): string
+  list_sections_json(): string
+  list_stories_json(): string
+  load(update: Uint8Array): void
+  load_json(storiesJson: string): string
+  load_media_sources(json: string): void
+  load_note_separators(state: Uint8Array): void
+  locate_paragraph(story: string, paraId: string): string
+  materialize_docx(): string | undefined
+  media_bytes(token: string): Uint8Array | undefined
+  media_data_url(token: string): string | undefined
+  media_sources_json(): string
+  media_type(token: string): string | undefined
+  merge_cells(rangeJson: string): string
+  merge_paragraphs(story: string, paraId: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  move_embed(story: string, paraId: string, offset: number, toStory: string, toParaId: string, toOffset: number): string
+  constructor(clientId: number)
+  next_paragraph_style(story: string, paraId: string, offset: number): string | undefined
+  note_separators_state(): Uint8Array
+  open_docx(bytes: Uint8Array, seedStories: boolean, generation?: string | undefined | null, digest?: string | undefined | null): string
+  open_docx_preview(bytes: Uint8Array, blocks: number): string | undefined
+  open_docx_preview_with_budget(bytes: Uint8Array, blocks: number, paragraphBudget?: number | undefined | null): string | undefined
+  paragraph_id_count(story: string, paraId: string): number
+  paragraph_identities(): string
+  prime_save_seed_states(paragraphs: number, inflated: number): boolean
+  paragraph_save_plan(): string
+  paragraph_spans(story: string): string
+  paragraph_unit(story: string, paraId: string): number
+  paragraphs(story: string): string
+  part_metadata_json(): string
+  persist_paragraph_ids(): string
+  proposal_revision_ranges_json(idsJson: string): string
+  read_paragraphs_json(request: string): string
+  read_stories_json(request: string): string
+  record_saved_paragraph_ids(savedJson: string): string
+  redo(): boolean
+  reject_change(targetJson: string): string
+  repeat_content_control_at(story: string, index: number, remove: boolean): boolean
+  replace_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, text: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  resident_geometry_json(root: string, request: string): string
+  resident_section_revision(): string
+  resolve_comment(commentId: string): string
+  resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string
+  resolve_paragraph_anchor(anchorJson: string): string
+  resolve_sticky_position(story: string, position: Uint8Array): string
+  revision_ids_at(story: string, paraId: string, offset: number): string
+  revision_stamps_json(idsJson: string): string
+  run_inheritance(stylesJson: string): RunInheritance
+  search_text(query: string, caseSensitive: boolean, limit?: number | undefined | null): string
+  section_margins_json(): string
+  seed_comment_metadata_json(commentId: string, patchJson: string): void
+  seed_from_docx(bytes: Uint8Array, generation?: string | undefined | null): string
+  seed_opaque_sequences(namesJson: string): void
+  select_story(story: string): void
+  selection_context(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number): string
+  selection(): string
+  selection_text_json(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number): string
+  set_cell_borders(rangeJson: string, bordersJson: string): string
+  set_cell_selection(rangeJson: string): void
+  set_cell_shading(rangeJson: string, color?: string | undefined | null): string
+  set_cell_text_format(rangeJson: string, patchJson: string): string
+  set_column_width(atJson: string, widthTwips: number): string
+  set_comment_ranges(commentId: string, rangesJson: string): void
+  set_content_control_value_at(story: string, paraId: string, offset: number, valueJson: string): void
+  set_content_control_value(embedId: string, valueJson: string): void
+  set_content_control_value_index(story: string, index: number, json: string): void
+  set_document_property(key: string, json: string): boolean
+  set_header_footer_aliases(json: string): void
+  set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string): void
+  set_image_geometry_at(story: string, paraId: string, offset: number, geometryJson: string): void
+  set_image_geometry(embedId: string, geometryJson: string): void
+  set_media_tokens(enabled: boolean): void
+  set_paragraph_attr(paraId: string, key: string, valueJson: string): void
+  set_paragraph_attrs(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, attrsJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
+  set_part_metadata(json: string, removeJson: string): boolean
+  set_partial_document(partial: boolean): void
+  set_section_margins(section: string, json: string): boolean
+  set_selection(story: string, anchorPara: string, anchorOffset: number, headPara: string, headOffset: number): void
+  set_table_properties(tableJson: string, patchJson: string): string
+  set_table_width(tableJson: string, widthTwips: number): string
+  set_undo_capture_mode(mode: string): void
+  set_undo_input_time(first: number, last: number): void
+  settle_revisions_json(request: string): string
+  split_cell(atJson: string, rows?: number | undefined | null, columns?: number | undefined | null): string
+  split_paragraph(story: string, paraId: string, offset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
+  start_update_event_observation(): void
+  stories_changed_since(since: number): string
+  story_checksum(story: string): string
+  story_ids(): string[]
+  story_len(story: string): number
+  story_paragraph_ids(story: string): string
+  story_segment_unit_digests(story: string): string
+  story_segment_units(story: string, units: Uint32Array): string
+  story_segments(story: string): string
+  table_payload(story: string, tableIndex: number): string | undefined
+  toggle_mark(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, markJson: string): void
+  track_undo(): void
+  undo_capture_mode(): string
+  undo(): boolean
+  update_comment_metadata_json(commentId: string, patchJson: string): void
+  validate_edits_json(request: string): string
+  validate_table_fragment(fragmentJson: string): void
+  version(): string
+  written_paragraph_ids(bytes: Uint8Array): string
+  yrs_blocks_for_story(story: string, envJson: string): string
+}
+
+export declare class RunInheritance {
+  free(): void
+  attributes(paragraphStyle?: string | undefined | null, runStyle?: string | undefined | null, tableRunJson?: string | undefined | null): string
+  paragraph_formatting(paragraph_style: string | null | undefined, table_formatting_json: string): string
+  table_attributes(tableJson: string): string
+}
+
 export interface DecodedFontFace {
   font: Uint8Array
   payload?: Uint8Array

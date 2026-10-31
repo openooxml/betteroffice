@@ -200,6 +200,11 @@ impl FontChainDependencies {
 }
 
 impl FontChains<'_> {
+    pub(super) fn coverage_only(&self, chain: &[FontId]) -> bool {
+        self.get("@betteroffice/fonts/coverage")
+            .is_some_and(|ids| chain.last().is_some_and(|id| ids.contains(&id.to_u32())))
+    }
+
     fn get(&self, key: &str) -> Option<&[u32]> {
         let ids = self.lookup(key);
         FONT_CHAIN_READS.with(|reads| {

@@ -121,6 +121,7 @@ export declare class PptxRenderer {
   hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string
   /** Enables browser metrics for uncovered characters. Off by default. */
   setBrowserCoverageFallback(enabled: boolean): void
+  /** Requested faces with optional script coverage buckets, before layout. */
   requestedFontFacesJson(document: PptxDocument, slideId?: string | undefined | null): string
   layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
   layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
