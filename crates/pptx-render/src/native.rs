@@ -5,6 +5,9 @@ impl SlideRenderer {
     pub fn remove_fallback_face(&mut self, id: u32) {
         self.coverage_faces
             .retain(|(_, _, face)| face.id.to_u32() != id);
+        for faces in self.family_coverage_faces.values_mut() {
+            faces.retain(|(_, _, face)| face.id.to_u32() != id);
+        }
         if let Ok(cache) = self.text_layouts.get_mut() {
             cache.clear();
         }
@@ -23,24 +26,29 @@ impl SlideRenderer {
         self.fonts
             .metrics(id)
             .map_err(|error| RenderError::Font(error.to_string()))?;
-        if let Some(index) =
-            self.coverage_faces
-                .iter()
-                .position(|(face_bold, face_italic, face)| {
-                    (*face_bold, *face_italic, face.id) == (bold, italic, id)
-                })
-        {
-            self.coverage_faces.remove(index);
+        let requested_family = normalize_family(family);
+        let faces = self
+            .family_coverage_faces
+            .entry(requested_family.clone())
+            .or_default();
+        let current = faces.iter().position(|(face_bold, face_italic, face)| {
+            (*face_bold, *face_italic, face.id) == (bold, italic, id)
+        });
+        if current == Some(index.min(faces.len().saturating_sub(1))) {
+            return Ok(());
         }
-        self.coverage_faces.insert(
-            index.min(self.coverage_faces.len()),
+        if let Some(current) = current {
+            faces.remove(current);
+        }
+        faces.insert(
+            index.min(faces.len()),
             (
                 bold,
                 italic,
                 FontFace {
                     id,
                     family: family.to_owned(),
-                    requested_family: normalize_family(family),
+                    requested_family,
                     widths: None,
                     line: None,
                     line_id: id,

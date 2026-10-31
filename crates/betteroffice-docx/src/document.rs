@@ -366,11 +366,14 @@ impl Document {
                 .measured
                 .iter()
                 .zip(&widths)
-                .any(|(measured, width)| has_floating_zones(&measured.block, *width, &config));
+                .any(|(measured, (width, _))| has_floating_zones(&measured.block, *width, &config));
             if has_floats {
                 return;
             }
-            for (measured, width) in input.measured.iter_mut().zip(widths) {
+            for (measured, (width, remeasure)) in input.measured.iter_mut().zip(widths) {
+                if !remeasure {
+                    continue;
+                }
                 let mut block = measured.block.clone();
                 if let Ok(measure) =
                     docx_layout::measure_blocks::measure_block(&mut block, width, &config)

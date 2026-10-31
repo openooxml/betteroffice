@@ -63,6 +63,11 @@ fn glyphs(presentation: &Presentation) -> Vec<Vec<(u32, f32)>> {
 
 #[cfg(feature = "fonts-latin")]
 fn private_use_font() -> Vec<u8> {
+    private_use_font_with_glyph(2)
+}
+
+#[cfg(feature = "fonts-latin")]
+fn private_use_font_with_glyph(glyph: u32) -> Vec<u8> {
     let mut bytes =
         include_bytes!("../../betteroffice-fonts/tests/fixtures/Synthetic-Regular.ttf").to_vec();
     let tables = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
@@ -71,7 +76,7 @@ fn private_use_font() -> Vec<u8> {
         .find(|offset| &bytes[*offset..*offset + 4] == b"cmap")
         .unwrap();
     let mut cmap = vec![0, 0, 0, 1, 0, 3, 0, 10, 0, 0, 0, 12, 0, 12, 0, 0];
-    for value in [40_u32, 0, 2, 0x44, 0x44, 3, 0xe000, 0xe000, 2] {
+    for value in [40_u32, 0, 2, 0x44, 0x44, 3, 0xe000, 0xe000, glyph] {
         cmap.extend_from_slice(&value.to_be_bytes());
     }
     bytes.resize(bytes.len().next_multiple_of(4), 0);
@@ -115,6 +120,58 @@ fn private_use_fixture(embedded: Option<&[u8]>) -> Vec<u8> {
         }
     }
     ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[cfg(feature = "fonts-latin")]
+fn two_family_fixture() -> Vec<u8> {
+    let slide = |family: &str| {
+        format!(r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="3000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400" b="1"><a:latin typeface="{family}"/></a:rPr><a:t>&#xE000;</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#).into_bytes()
+    };
+    let parts = vec![
+        ("[Content_Types].xml".into(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#.to_vec()),
+        ("_rels/.rels".into(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#.to_vec()),
+        ("ppt/presentation.xml".into(), br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="first"/><p:sldId id="257" r:id="second"/></p:sldIdLst><p:sldSz cx="9144000" cy="5143500"/></p:presentation>"#.to_vec()),
+        ("ppt/_rels/presentation.xml.rels".into(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="first" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="second" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#.to_vec()),
+        ("ppt/slides/slide1.xml".into(), slide("Calibri")),
+        ("ppt/slides/slide2.xml".into(), slide("Arial")),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[cfg(feature = "fonts-latin")]
+fn slide_glyphs(presentation: &Presentation, index: usize) -> Vec<u32> {
+    presentation
+        .render_slide(index)
+        .unwrap()
+        .display_list
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::TextBox { lines, .. } => Some(lines),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|line| &line.runs)
+        .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.glyph_id))
+        .collect()
+}
+
+#[cfg(feature = "fonts-latin")]
+#[test]
+fn another_family_keeps_each_family_coverage_order() {
+    let mut presentation = Presentation::open(&two_family_fixture()).unwrap();
+    for (family, glyph) in [("Calibri", 2), ("Arial", 3)] {
+        presentation
+            .register_font(family, false, false, &private_use_font_with_glyph(glyph))
+            .unwrap();
+        presentation
+            .register_font(family, true, false, APP_FONT)
+            .unwrap();
+    }
+    let first = slide_glyphs(&presentation, 0);
+    assert_eq!(first, [2]);
+    assert_eq!(slide_glyphs(&presentation, 1), [3]);
+    assert_eq!(slide_glyphs(&presentation, 0), first);
 }
 
 #[cfg(feature = "fonts-latin")]

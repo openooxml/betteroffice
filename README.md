@@ -86,20 +86,15 @@ then a last resort fallback.
 **Node.js, Bun and Deno.** `@betteroffice/docx` and `@betteroffice/pptx` depend on the font
 manager [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), which installs
 `fonts-latin`. Add `fonts-intl` or `fonts-cjk` to cover those scripts. DOCX reads each face from the
-installed package files the first time a document needs it; nothing is downloaded. For headless PPTX
-(`openPresentation`), pass the faces in `fonts` and `fallbackFonts`; `loadBundledFontBytes` from
-`@betteroffice/fonts` returns a bundled face's bytes. Reading package files needs Node.js 20.16 or
-22.3 and later, Bun or Deno.
+installed package files the first time a document needs it; nothing is downloaded. Reading package
+files needs Node.js 20.16 or 22.3 and later, Bun or Deno.
 
-**Native bindings, Rust and Python.** The Rust crates `betteroffice-docx`, `betteroffice-pptx`,
-`betteroffice-xlsx` and `betteroffice-vsdx` embed the Latin (4.6 MB), international (2.2 MB) and CJK
-(26.7 MB) packs through the default features `fonts-latin`, `fonts-intl` and `fonts-cjk`, and resolve
-faces in the same order: embedded in the document, registered with `register_font`, then the packs.
-Turn a feature off to leave its pack out, or pass `OpenOptions` to `open_with_options` to read packs
-from a local directory or your own provider; nothing is fetched. `@betteroffice/pptx-native` installs
-all three npm packs and reads each face from disk on first use; `@betteroffice/docx-native` uses the
-same font manager as `@betteroffice/docx` on Node.js. For Python, register the faces a document needs
-with `register_font` before rendering.
+**Native bindings, Rust and Python.** The Rust format crates bundle all three packs by default and
+resolve faces in the same order, with nothing fetched; see the
+[Rust guide](https://docs.betteroffice.dev/docs/rust) to leave packs out or load them from your own
+location. `@betteroffice/pptx-native` installs the npm packs and reads each face from disk;
+`@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`. For Python, register
+the faces a document needs before rendering.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks

@@ -119,7 +119,7 @@ fn chain_key(family: &str, bold: bool, italic: bool) -> String {
 }
 
 #[cfg(feature = "fonts")]
-pub(crate) fn measurement_widths(input: &docx_layout::types::Input) -> Result<Vec<f64>> {
+pub(crate) fn measurement_widths(input: &docx_layout::types::Input) -> Result<Vec<(f64, bool)>> {
     use docx_layout::prescan::{SectionLayoutConfig, collect_section_configs, default_columns};
     let options = &input.options;
     let body = SectionLayoutConfig {
@@ -148,14 +148,20 @@ pub(crate) fn measurement_widths(input: &docx_layout::types::Input) -> Result<Ve
     let widths = sections
         .into_iter()
         .map(|section| {
-            docx_layout::page_flow::Paginator::new(
+            let columns = section.columns.unwrap_or_else(default_columns);
+            let count =
+                (columns.count.max(1.0) as usize).max(columns.columns.as_ref().map_or(0, Vec::len));
+            let paginator = docx_layout::page_flow::Paginator::new(
                 section.page_size,
                 section.margins,
-                section.columns.unwrap_or_else(default_columns),
+                columns,
                 None,
-            )
-            .map(|paginator| paginator.column_width())
-            .map_err(Error::from)
+            )?;
+            let width = paginator.get_column_width(0);
+            Ok((
+                width,
+                (1..count).all(|index| (paginator.get_column_width(index) - width).abs() < 0.01),
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((0..input.measured.len())

@@ -229,6 +229,62 @@ fn floating_image_in_table_cell_preserves_supplied_measurement() {
 
 #[cfg(feature = "fonts")]
 #[test]
+fn unequal_columns_keep_lines_measured_for_their_column() {
+    let text = "A paragraph that wraps across several lines with real font metrics. ".repeat(3);
+    let paragraph = |id: u64| {
+        json!({"kind": "paragraph", "id": id, "pmStart": 0, "pmEnd": text.len() + 2,
+               "runs": [{"kind": "text", "text": text, "fontFamily": "Calibri", "fontSize": 11,
+                         "pmStart": 1, "pmEnd": text.len() + 1}]})
+    };
+    let mut input: LayoutInput = serde_json::from_value(json!({
+        "measured": [
+            {"block": paragraph(1), "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0}},
+            {"block": {"kind": "columnBreak", "id": 2}, "measure": {"kind": "columnBreak"}},
+            {"block": paragraph(3), "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0}}
+        ],
+        "options": {"pageSize": {"w": 816, "h": 1056},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                    "columns": {"count": 2, "gap": 74, "equalWidth": false,
+                                "columns": [{"width": 400, "space": 74}, {"width": 150}]}}
+    }))
+    .unwrap();
+    let mut store = ooxml_text::FontStore::new();
+    let id = store.register_slice(APP_FONT).unwrap();
+    let config = docx_layout::measure_blocks::MeasurementConfig {
+        font_chains: [("calibri|0|0".into(), vec![id.to_u32()])].into(),
+        defaults: json!({"fontFamily": "Calibri", "fontSize": 11}),
+        authoritative_shaping: true,
+        ..Default::default()
+    };
+    let lines = |measure: &docx_layout::types::BlockExtent| match measure {
+        docx_layout::types::BlockExtent::Paragraph(paragraph) => paragraph.lines.len(),
+        _ => 0,
+    };
+    docx_layout::with_measure_font_store(&mut store, || {
+        for (index, width) in [(0, 400.0), (2, 150.0)] {
+            let measured = &mut input.measured[index];
+            measured.measure =
+                docx_layout::measure_blocks::measure_block(&mut measured.block, width, &config)
+                    .unwrap();
+        }
+        let mut wide = input.measured[2].block.clone();
+        let wide = docx_layout::measure_blocks::measure_block(&mut wide, 400.0, &config).unwrap();
+        assert!(lines(&input.measured[2].measure) > lines(&wide));
+    });
+    let expected = docx_layout::compute_layout_input(&mut input.clone()).unwrap();
+    let mut document = Document::open_with_options(&common::sample_docx(), &options()).unwrap();
+    document
+        .register_font("Calibri", false, false, APP_FONT)
+        .unwrap();
+    let result = document.layout(input).unwrap();
+    assert_eq!(
+        serde_json::to_value(&result.layout).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+}
+
+#[cfg(feature = "fonts")]
+#[test]
 fn failed_native_measurement_preserves_supplied_wrapping() {
     let mut input = measure_wrapping_input(APP_FONT);
     let expected = docx_layout::compute_layout_input(&mut input).unwrap();
