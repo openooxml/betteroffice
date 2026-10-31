@@ -41,6 +41,7 @@ export declare class PptxDocument {
   anchorCaretJson(args: string): string
   resolveCaretAnchorJson(args: string): string
   mediaBytes(partPath: string): Uint8Array
+  metafileSvg(partPath: string): Uint8Array | undefined
   saveBytes(): Uint8Array
   encodeStateVector(): Uint8Array
   encodeStateAsUpdate(): Uint8Array

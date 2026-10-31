@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use napi::bindgen_prelude::{ArrayBuffer, JsObjectValue, Uint8Array, Uint8ArraySlice};
+use napi::bindgen_prelude::{
+    ArrayBuffer, Either, JsObjectValue, Uint8Array, Uint8ArraySlice, Undefined,
+};
 use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 use pptx_engine::{Document, EngineError, ErrorKind, Host, Renderer};
@@ -387,6 +389,18 @@ impl PptxDocument {
             .media_bytes(&part_path)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi]
+    pub fn metafile_svg(
+        &self,
+        env: Env,
+        part_path: String,
+    ) -> Result<Either<Uint8Array, Undefined>> {
+        match self.document()?.session().metafile_svg(&part_path) {
+            Some(svg) => byte_result(env, svg.to_vec()).map(Either::A),
+            None => Ok(Either::B(())),
+        }
     }
 
     #[napi]

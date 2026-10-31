@@ -454,6 +454,24 @@ describe('pptx native engine parity', () => {
     }
   });
 
+  test('metafile SVG display copies match wasm, including a missing part', () => {
+    const deck = readFileSync(new URL('../../crates/pptx-render/tests/fixtures/metafile-svg-pictures.pptx', import.meta.url));
+    const docs = [wasm.PptxDocument.openCollaborative(new Uint8Array(deck), 7), native.PptxDocument.openCollaborative(new Uint8Array(deck), 7)];
+    try {
+      const metadata = JSON.parse(native.parsePptxJsonWithoutMedia(new Uint8Array(deck))) as {
+        media: { partPath: string }[];
+      };
+      const parts = [...metadata.media.map((part) => part.partPath), 'missing'];
+      const [expected, actual] = docs.map((doc) => parts.map((part) => doc.metafileSvg(part)));
+      expect(expected.filter((svg) => svg !== undefined).length).toBeGreaterThan(0);
+      expect(actual).toEqual(expected);
+      expect(actual.at(-1)).toBeUndefined();
+      for (const svg of actual) if (svg) expectPlainBytes(svg);
+    } finally {
+      for (const doc of docs) doc.free();
+    }
+  });
+
   test('native byte results have transferable ArrayBuffers and independent copies', () => {
     const doc = native.PptxDocument.openCollaborative(bytes(), 7);
     const renderer = new native.PptxRenderer();
