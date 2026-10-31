@@ -261,7 +261,7 @@ describe("leader handoff and explicit save", () => {
 
 describe("last leave, disconnect and hold", () => {
   test("stale connection generations cannot disconnect or heartbeat the current connection", async () => {
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     const a = await joinEditor(h, "tok-a");
@@ -319,7 +319,7 @@ describe("last leave, disconnect and hold", () => {
 
   for (const save of ["autosave", "explicit save"] as const) {
     test(`${save} after a failed exit save unlocks and closes the held session`, async () => {
-      const h = makeHarness();
+      const h = makeHarness({ reconnectGraceMs: 0 });
       addToken(h, "tok-a", "user-a");
       const fetch = h.host.fetch.bind(h.host);
       let failed = false;
@@ -368,7 +368,7 @@ describe("last leave, disconnect and hold", () => {
   }
 
   test("expired leaver token falls back to another valid token", async () => {
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     const a = await joinEditor(h, "tok-a");
@@ -895,6 +895,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
     });
     let gated = true;
     const h = makeHarness({
+      reconnectGraceMs: 0,
       beforePut: async () => {
         if (!gated) return;
         gated = false;
@@ -1001,7 +1002,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
   });
 
   test("disconnected users do not consume editor slots", async () => {
-    const h = makeHarness({ maxEditorsPerFile: 2 });
+    const h = makeHarness({ reconnectGraceMs: 0, maxEditorsPerFile: 2 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     addToken(h, "tok-c", "user-c");
@@ -1092,6 +1093,7 @@ describe("review round 2: serialized transitions", () => {
     });
     let gated = true;
     const h = makeHarness({
+      reconnectGraceMs: 0,
       beforeUnlock: async () => {
         if (!gated) return;
         gated = false;
@@ -1272,7 +1274,7 @@ describe("session safety regressions", () => {
       const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
       let enteredUnlock: () => void = () => {};
       const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-      const h = makeHarness();
+      const h = makeHarness({ reconnectGraceMs: 0 });
       addToken(h, "tok-a", "user-a");
       addToken(h, "tok-external", "external-app");
       const a = await joinEditor(h, "tok-a");
@@ -1347,7 +1349,7 @@ describe("session safety regressions", () => {
       h.host.tokens.set("tok-a", { userId: "user-a", canWrite: true, expiresAt: h.clock.t });
       expect((await session.requestSave(a.user.id)).saved).toBe(false);
       await h.clock.flush();
-      expect(a.user.connected).toBe(true);
+      expect(a.user.connected).toBe(false);
       expect(a.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(session.awaitingFlushToken).toBe(true);
       expect(session.dirty).toBe(true);
@@ -1420,7 +1422,7 @@ describe("session safety regressions", () => {
       await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
       expect(relaunchChecks).toBe(2);
       expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
-      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(viewer.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
     } finally {
       await session.close();
@@ -1444,7 +1446,7 @@ describe("session safety regressions", () => {
       await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
       expect(h.calls.some((call) => call.override === "GET_LOCK")).toBe(true);
       expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
-      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(viewer.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(session.viewOnlyReason).not.toBe("lockedElsewhere");
     } finally {
       await session.close();
@@ -1456,7 +1458,7 @@ describe("session safety regressions", () => {
     const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
     let enteredUnlock: () => void = () => {};
     const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-    const h = makeHarness({ refreshStatus: () => 500 });
+    const h = makeHarness({ refreshStatus: () => 500, reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     const a = await joinEditor(h, "tok-a");
     const session = a.session;
@@ -1501,7 +1503,7 @@ describe("session safety regressions", () => {
     const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
     let releaseCheck: () => void = () => {};
     const checkGate = new Promise<void>((resolve) => { releaseCheck = resolve; });
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-external", "external-app");
     const a = await joinEditor(h, "tok-a");
@@ -1571,7 +1573,7 @@ describe("session safety regressions", () => {
       const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
       let enteredUnlock: () => void = () => {};
       const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-      const h = makeHarness({ beforeUnlock: async () => { enteredUnlock(); await unlockGate; } });
+      const h = makeHarness({ reconnectGraceMs: 0, beforeUnlock: async () => { enteredUnlock(); await unlockGate; } });
       addToken(h, "tok-a", "user-a");
       const a = await joinEditor(h, "tok-a");
       const session = a.session;
@@ -1798,6 +1800,7 @@ describe("session safety regressions", () => {
         };
         const writer = await joinEditor(h, "tok-a");
         expect(changedUnderLock).toBe(true);
+        expect(session.baselineGeneration).toBe(baselineGeneration + 1);
         expect(events).toEqual([{ reason: "sourceChanged" }]);
         expect(generations).toEqual([baselineGeneration + 1]);
         client = await clientFor(session, writer.joinPayload, bytes);

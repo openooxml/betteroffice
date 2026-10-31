@@ -50,6 +50,7 @@ export interface ReferenceHostOptions {
   verifyProof?: VerifyProofInput;
   now?: () => number;
   quirks?: ReferenceHostQuirks;
+  checkFileInfoExtras?: (file: ReferenceFile) => Record<string, unknown>;
 }
 
 export interface ReferenceHost {
@@ -350,6 +351,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         PostMessageOrigin: url.origin,
         CloseUrl: "",
         LastModifiedTime: file.lastModifiedTime,
+        ...options.checkFileInfoExtras?.(file),
       });
     }
 

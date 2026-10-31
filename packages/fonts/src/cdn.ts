@@ -4,7 +4,7 @@ import { version as fontsLatinVersion } from '../../fonts-latin/package.json';
 import { version as fontsIntlVersion } from '../../fonts-intl/package.json';
 import { loadFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
-import { loadPackedFontBytes, isLatinFont } from './packed';
+import { loadPackedFontBytes, isLatinFont, isCjkFont } from './packed';
 import { fontProvider, type BundledFontSource } from './provider';
 
 export interface CdnFontOptions {
@@ -40,10 +40,13 @@ export function createFontProvider(
     ? new URL(DECODER_URL)
     : new URL('decoder/fontpack.wasm', base);
   return fontProvider((face) => {
-    if (face.file.endsWith('.ttf.zst')) {
+    if (face.file.endsWith('.ttf.zst') || face.file.endsWith('.otf.zst')) {
       return loadPackedFontBytes(
         face,
-        async (dependency) => new URL(dependency.file, isLatinFont(face.file) ? base : intlBase),
+        async (dependency) => new URL(
+          dependency.file,
+          isLatinFont(face.file) ? base : isCjkFont(face.file) ? cjkBase : intlBase,
+        ),
         30_000,
         decoderUrl,
         undefined,

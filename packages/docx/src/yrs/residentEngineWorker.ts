@@ -1288,10 +1288,13 @@ const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
 const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
 const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
+const SAVE_SEED_MAX_PARAGRAPHS = 4096;
+const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
+let saveSeedStatesPrimed = false;
 class SaveUnavailableError extends Error {}
 class SourceCutKeptError extends Error {}
 let openedVersion: string | null | undefined;
@@ -1552,6 +1555,7 @@ async function runRequest(request: ScheduledRequest): Promise<void> {
       request.type !== 'decodeFontFace') {
       await commandHost.withFrameWork(() => handle(request));
     } else await handle(request);
+    primeSaveSeedStatesOnce();
   } catch (error) {
     replyFailure(request.id, error);
   } finally {
@@ -1813,6 +1817,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     if (session) destroySession(true);
     openedSource = null;
     editorSaves = { full: false };
+    saveSeedStatesPrimed = false;
     const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
@@ -3228,7 +3233,9 @@ function scheduleCompletion(completion: SlicedCompletion): void {
       const owner = completion.commandOwner;
       if (owner) await owner.withFrameWork(() => completionSlice(completion, budgetMs));
       else await completionSlice(completion, budgetMs);
-      return slicedCompletion === completion ? 'yield' : 'done';
+      if (slicedCompletion === completion) return 'yield';
+      primeSaveSeedStatesOnce();
+      return 'done';
     },
   });
 }
@@ -3424,6 +3431,7 @@ function destroySession(keepSurfaces = false): void {
   openedParsedToolbar = null;
   sourcePreviewing = false;
   editorSaves = { full: false };
+  saveSeedStatesPrimed = false;
   openedVersion = undefined;
   previewing = false;
   cutPartial = false;
@@ -3589,6 +3597,7 @@ function adoptResidentSource(
   openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
+  saveSeedStatesPrimed = false;
   return { document, hostJson, embeddedFontFaces };
 }
 
@@ -3904,6 +3913,23 @@ function preloadSaveWasm(): Promise<void> {
 function canPreloadSaveWasm(): boolean {
   return !!session && !previewing && !sourcePreviewing && commandInit?.readOnly !== true &&
     (!!openedSource || openedParsed) && !trap && !projectionFailure;
+}
+
+/**
+ * Records save seed states once per editable command document, as soon as its
+ * layout is complete: one bounded wasm call after a request or completion
+ * step, so the first save after an edit need not reseed.
+ */
+function primeSaveSeedStatesOnce(): void {
+  if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
+    incompleteLayout || commandLayout?.certifiedPages() != null) return;
+  saveSeedStatesPrimed = true;
+  if (!saveWarmupHasHeadroom()) return;
+  try {
+    session.primeSaveSeedStates(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+  }
 }
 
 function scheduleSaveWasmPreload(): void {

@@ -9,10 +9,12 @@ import {
   loadOrCreateKeyPairFile,
   type ProofKeyPair,
 } from "./proof";
+import { existsSync, statSync } from "node:fs";
+import { extname, resolve, sep } from "node:path";
 import { CollabRelay, findByHandle, isSessionUserAuthorized } from "./relay/relay";
 import { SessionError } from "./session/fileSession";
 import { SessionRegistry } from "./session/registry";
-import { encodeJoinPayload, sourceContentType } from "./sessionApi";
+import { decodeSaveBarrier, encodeJoinPayload, requestOrderedSave, SaveSyncError, sourceContentType } from "./sessionApi";
 import { BASELINE_GENERATION_HEADER, BASELINE_GENERATION_PROTOCOL, parseBaselineGeneration } from "./baseline";
 
 export interface WopiServerDeps {
@@ -23,6 +25,61 @@ export interface WopiServerDeps {
   registry?: SessionRegistry;
   hostClient?: HostClient;
   relay?: CollabRelay;
+  webRoot?: string;
+  fontRoots?: string[];
+  autosave?: boolean;
+  saveSyncTimeoutMs?: number;
+}
+
+const STATIC_CONTENT_TYPES: Record<string, string> = {
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".map": "application/json; charset=utf-8",
+};
+
+const IMMUTABLE_CACHE = "public, max-age=31536000, immutable";
+
+/** Resolves a request path inside a root, or null when it escapes. */
+export function resolveStaticPath(root: string, requestPath: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(requestPath);
+  } catch {
+    return null;
+  }
+  if (decoded.includes("\\") || decoded.includes("\0")) return null;
+  const segments = decoded.split("/").filter((segment) => segment.length > 0);
+  if (segments.some((segment) => segment === ".." || segment === ".")) return null;
+  const rootResolved = resolve(root);
+  const candidate = resolve(rootResolved, ...segments);
+  if (candidate !== rootResolved && !candidate.startsWith(rootResolved + sep)) return null;
+  return candidate;
+}
+
+function staticFileResponse(filePath: string, cacheControl: string, method: string): Response | null {
+  if (!existsSync(filePath) || !statSync(filePath).isFile()) return null;
+  const contentType = STATIC_CONTENT_TYPES[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+  const file = Bun.file(filePath);
+  return new Response(method === "HEAD" ? null : file, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      "Content-Length": String(file.size),
+      "Cache-Control": cacheControl,
+      ...SECURITY_HEADERS,
+    },
+  });
 }
 
 /** Minimal upgrade surface of a Bun server. */
@@ -43,6 +100,7 @@ const SECURITY_HEADERS = {
 
 export const MAX_FORM_BODY_BYTES = 64 * 1024;
 export const MAX_JSON_BODY_BYTES = 64 * 1024;
+const CLOSED_HANDLE_TTL_MS = 10 * 60 * 1000;
 
 function respond(body: string, contentType: string, status = 200): Response {
   return new Response(body, {
@@ -139,7 +197,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
           signer: createProofSigner(deps.currentKey, deps.oldKey),
           maxFileBytes: deps.config.maxFileBytes,
         });
-      registry = new SessionRegistry({ config: deps.config, hostClient });
+      registry = new SessionRegistry({ config: deps.config, hostClient, autosave: deps.autosave });
     }
     if (!relay) relay = new CollabRelay(registry);
     return { registry, relay };
@@ -207,15 +265,21 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       viewOnlyReason: joined.viewOnlyReason ?? session.viewOnlyReason ?? null,
       postMessageOrigin: joined.user.postMessageOrigin,
       closeUrl: joined.user.closeUrl,
+      closePostMessage: joined.user.closePostMessage,
       locale: url.searchParams.get("ui"),
       userFriendlyName: joined.user.friendlyName,
       tokenExpiresAt: joined.user.expiresAt,
     });
     const ancestors = host.frameOrigins.length > 0 ? host.frameOrigins.join(" ") : "'none'";
+    let collabOrigin = "";
+    try {
+      const publicUrl = new URL(deps.config.publicUrl);
+      collabOrigin = `${publicUrl.protocol === "https:" ? "wss:" : "ws:"}//${publicUrl.host}`;
+    } catch {}
     const csp = [
       `frame-ancestors ${ancestors}`,
       "default-src 'self'",
-      "connect-src 'self'",
+      collabOrigin ? `connect-src 'self' ${collabOrigin}` : "connect-src 'self'",
       "img-src 'self' blob: data:",
       "font-src 'self' data:",
       "style-src 'self' 'unsafe-inline'",
@@ -225,8 +289,9 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
     const html = [
       "<!doctype html>",
       '<html lang="en">',
-      `<head><meta charset="utf-8"><title>${escapeHtml(session.fileName || "BetterOffice")}</title></head>`,
+      `<head><meta charset="utf-8"><title>${escapeHtml(session.fileName || "BetterOffice")}</title><link rel="stylesheet" href="/app/main.css"></head>`,
       "<body>",
+      '<div id="root"></div>',
       `<script type="application/json" id="wopi-config">${configJson}</script>`,
       '<script type="module" src="/app/main.js"></script>',
       "</body>",
@@ -250,7 +315,18 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
     return findByHandle(ensure().registry, handle);
   };
 
+  const closedHandles = new Map<string, number>();
+  const rememberClosed = (handle: string): void => {
+    const now = Date.now();
+    for (const [key, expiresAt] of closedHandles) if (expiresAt <= now) closedHandles.delete(key);
+    closedHandles.set(handle, now + CLOSED_HANDLE_TTL_MS);
+  };
   const handleApi = async (request: Request, url: URL): Promise<Response> => {
+    const handle = bearerHandle(request);
+    const closedUntil = handle ? closedHandles.get(handle) : undefined;
+    if (url.pathname === "/api/session/close" && request.method === "POST" && closedUntil !== undefined && closedUntil > Date.now()) {
+      return json({ closed: true }, 200, { "Cache-Control": "no-store" });
+    }
     const resolved = authenticate(request);
     if (!resolved) return typedError("unauthorized", 401);
     const { session, user } = resolved;
@@ -274,7 +350,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       if (request.method !== "GET") return typedError("methodNotAllowed", 405);
       const replica = session.replica;
       if (!replica) return typedError("closed", 409);
-      return json({ ...encodeJoinPayload(replica.joinPayload()), baselineGeneration: session.baselineGeneration }, 200, { "Cache-Control": "no-store" });
+      return json({ ...encodeJoinPayload(replica.joinPayload()), baselineGeneration: session.baselineGeneration, canWrite: user.canWrite && !session.viewOnly }, 200, { "Cache-Control": "no-store" });
     }
     if (path === "/api/session/save") {
       if (request.method !== "POST") return typedError("methodNotAllowed", 405);
@@ -282,14 +358,31 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       if (body === null) return typedError("tooLarge", 413);
       if (!isSessionUserAuthorized(session, user)) return typedError("unauthorized", 401);
       try {
-        const result = await session.requestSave(user.id);
+        const barrier = decodeSaveBarrier(body);
+        const result = await requestOrderedSave(session, user.id, barrier, {
+          timeoutMs: deps.saveSyncTimeoutMs, signal: request.signal, relay: ensure().relay,
+        });
         if (!result.saved && session.dirty) return typedError("saveFailed", 502);
         return json({ itemVersion: result.itemVersion }, 200, { "Cache-Control": "no-store" });
       } catch (err) {
+        if (err instanceof SaveSyncError) return typedError(err.kind, err.kind === "notSynced" ? 409 : 400);
         if (err instanceof SessionError) {
           return typedError(err.kind, err.kind === "closed" ? 409 : err.kind === "unknownUser" ? 401 : 502);
         }
         return typedError("saveFailed", 502);
+      }
+    }
+    if (path === "/api/session/recovery") {
+      if (request.method !== "POST") return typedError("methodNotAllowed", 405);
+      if (!isSessionUserAuthorized(session, user)) return typedError("unauthorized", 401);
+      const body = await readLimited(request, deps.config.maxFileBytes);
+      if (body === null) return typedError("tooLarge", 413);
+      try {
+        const result = await session.recoverCopy(user.id, body);
+        return json(result, 200, { "Cache-Control": "no-store" });
+      } catch (err) {
+        const kind = err instanceof SessionError ? err.kind : "saveFailed";
+        return typedError(kind, kind === "unknownUser" ? 401 : kind === "notAllowed" ? 403 : 502);
       }
     }
     if (path === "/api/session/close") {
@@ -297,6 +390,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       const body = await readLimited(request, MAX_JSON_BODY_BYTES);
       if (body === null) return typedError("tooLarge", 413);
       if (!isSessionUserAuthorized(session, user)) return typedError("unauthorized", 401);
+      rememberClosed(user.id);
       try {
         await session.leave(user.id);
       } catch (err) {
@@ -326,6 +420,29 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
     }
     if (url.pathname === "/wopi/edit") return handlePage(request, url, "edit");
     if (url.pathname === "/wopi/view") return handlePage(request, url, "view");
+    if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/app" || url.pathname.startsWith("/app/"))) {
+      const webRoot = deps.webRoot ?? resolve(import.meta.dir, "../web/dist");
+      const relative = url.pathname.slice("/app".length) || "/main.js";
+      const filePath = resolveStaticPath(webRoot, relative);
+      if (filePath === null) return respond("Not Found", "text/plain; charset=utf-8", 404);
+      const base = filePath.split(sep).pop() ?? "";
+      const cache = base === "main.js" || base === "main.css" || base.endsWith(".html") ? "no-cache" : IMMUTABLE_CACHE;
+      return staticFileResponse(filePath, cache, request.method) ?? respond("Not Found", "text/plain; charset=utf-8", 404);
+    }
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname.startsWith("/fonts/")) {
+      const fontRoots = deps.fontRoots ?? [
+        resolve(import.meta.dir, "../../../packages/fonts/assets"),
+        resolve(import.meta.dir, "../../../packages/fonts-cjk/assets"),
+      ];
+      const relative = url.pathname.slice("/fonts".length);
+      for (const root of fontRoots) {
+        const filePath = resolveStaticPath(root, relative);
+        if (filePath === null) return respond("Not Found", "text/plain; charset=utf-8", 404);
+        const found = staticFileResponse(filePath, IMMUTABLE_CACHE, request.method);
+        if (found) return found;
+      }
+      return respond("Not Found", "text/plain; charset=utf-8", 404);
+    }
     if (url.pathname.startsWith("/api/session/")) return handleApi(request, url);
     if (url.pathname === "/collab") {
       if (request.method !== "GET") return typedError("methodNotAllowed", 405);
@@ -376,6 +493,12 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
       controller?.close();
     } catch {}
   };
+  const notifyClosed = (): void => {
+    if (!cleaned) {
+      try { controller?.enqueue(encoder.encode("event: closed\ndata: {}\n\n")); } catch {}
+    }
+    end();
+  };
   const authorized = (): boolean => {
     const user = session.getUser(userId);
     if (user && isSessionUserAuthorized(session, user)) return true;
@@ -396,9 +519,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
         end();
         return;
       }
-      try {
-        ctrl.enqueue(encoder.encode(": connected\n\n"));
-      } catch {}
+      send("snapshot", { canWrite: session.getUser(userId)?.canWrite === true && !session.viewOnly, viewOnlyReason: session.viewOnlyReason });
       heartbeat = setInterval(() => {
         if (cleaned || !authorized()) return;
         try {
@@ -411,6 +532,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
         session.on("saveFailed", (p) => send("saveFailed", { kind: p.kind })),
         session.on("conflict", (p) => send("conflict", { name: p.name, copyName: p.copyName })),
         session.on("viewOnly", (p) => send("viewOnly", { reason: p.reason })),
+        session.on("writable", () => send("writable", { canWrite: session.getUser(userId)?.canWrite === true && !session.viewOnly })),
         session.on("rejoinRequired", (p) => {
           send("rejoinRequired", { reason: p.reason });
           end();
@@ -419,7 +541,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
           if (p.userId === userId) send("tokenExpiring", { expiresAt: p.expiresAt });
         }),
         session.on("userInvalidated", (p) => {
-          if (p.userId === userId) end();
+          if (p.userId === userId) notifyClosed();
         }),
         session.on("leaderChanged", (p) =>
           send("leaderChanged", {
@@ -427,10 +549,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
             previousLeaderId: p.previousLeaderId === userId ? p.previousLeaderId : null,
           }),
         ),
-        session.on("closed", () => {
-          send("closed", {});
-          end();
-        }),
+        session.on("closed", notifyClosed),
       );
     },
     cancel() {
