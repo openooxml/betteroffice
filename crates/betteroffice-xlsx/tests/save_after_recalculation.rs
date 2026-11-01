@@ -3,6 +3,7 @@ use betteroffice_xlsx::{CalculationOptions, Workbook};
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PACKAGE_RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+const DECLARATION: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
 
 fn book(cells: &[(&str, &str, Option<&str>)], calc_pr: &str) -> Vec<u8> {
     let row: String = cells
@@ -14,6 +15,10 @@ fn book(cells: &[(&str, &str, Option<&str>)], calc_pr: &str) -> Vec<u8> {
             format!(r#"<c r="{address}"><f>{formula}</f>{cache}</c>"#)
         })
         .collect();
+    package(&format!(r#"<row r="1">{row}</row>"#), calc_pr)
+}
+
+fn package(sheet_data: &str, calc_pr: &str) -> Vec<u8> {
     let parts = vec![
         (
             "[Content_Types].xml".to_owned(),
@@ -35,9 +40,13 @@ fn book(cells: &[(&str, &str, Option<&str>)], calc_pr: &str) -> Vec<u8> {
         ),
         (
             "xl/worksheets/sheet1.xml".to_owned(),
-            format!(r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1">{row}</row></sheetData></worksheet>"#).into_bytes(),
+            format!(r#"<worksheet xmlns="{MAIN}"><sheetData>{sheet_data}</sheetData></worksheet>"#).into_bytes(),
         ),
     ];
+    let parts: Vec<(String, Vec<u8>)> = parts
+        .into_iter()
+        .map(|(name, xml)| (name, [DECLARATION.as_bytes(), &xml].concat()))
+        .collect();
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -137,4 +146,33 @@ fn recalculated_values_survive_a_recovery_checkpoint() {
         saved_caches(&restored.save().unwrap()),
         vec![Some("5".into()), Some("999".into()), Some("2".into())]
     );
+}
+
+#[test]
+fn a_flagged_array_formula_saves_its_calculated_range_and_keeps_every_other_part() {
+    let source = package(
+        r#"<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row>"#,
+        r#"<calcPr fullCalcOnLoad="1"/>"#,
+    );
+    let saved = Workbook::open_recalculated(&source, options())
+        .unwrap()
+        .save()
+        .unwrap();
+    assert_eq!(
+        saved_caches(&saved),
+        vec![Some("1".into()), Some("1".into())]
+    );
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(
+        before.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        after.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    let rewritten: Vec<&str> = before
+        .iter()
+        .zip(&after)
+        .filter(|((_, before), (_, after))| before != after)
+        .map(|((name, _), _)| name.as_str())
+        .collect();
+    assert_eq!(rewritten, vec!["xl/worksheets/sheet1.xml"]);
 }

@@ -33,7 +33,7 @@ describe('saving recalculated values', () => {
     const source = await book('');
     const handle = openWorkbook(source, { calculation: CALCULATION });
     try {
-      expect(new Uint8Array(handle.save())).toEqual(source);
+      expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
     } finally {
       handle.dispose();
     }

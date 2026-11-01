@@ -340,6 +340,38 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('a flagged workbook with a stale array-formula cache saves the same calculated values on both engines', async () => {
+    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><calcPr fullCalcOnLoad="1"/></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row></sheetData></worksheet>`);
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const opens: Array<[string, (engine: typeof WasmDocument) => EngineDocument]> = [
+      ['open', engine => engine.open(source) as EngineDocument],
+      ['openWithCalculationJson', engine => engine.openWithCalculationJson(source, context) as EngineDocument],
+    ];
+    for (const [name, open] of opens) {
+      const wasmDoc = open(WasmDocument);
+      const nativeDoc = open(native.XlsxDocument);
+      try {
+        const wasmSaved = new Uint8Array(wasmDoc.saveBytes());
+        const nativeSaved = new Uint8Array(nativeDoc.saveBytes());
+        expect(nativeSaved, name).toEqual(wasmSaved);
+        for (const saved of [wasmSaved, nativeSaved]) {
+          const sheet = await (await JSZip.loadAsync(saved)).file('xl/worksheets/sheet1.xml')!.async('string');
+          expect(sheet.match(/<c r="C3"[^>]*>.*?<\/c>/)?.[0], name).toContain('<v>1</v>');
+        }
+      } finally {
+        wasmDoc.free();
+        nativeDoc.free();
+      }
+    }
+  });
+
   test('collaborative documents with the same client id encode identical updates', () => {
     const wasmDoc = WasmDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;
     const nativeDoc = native.XlsxDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;
