@@ -5,6 +5,7 @@ mod axis;
 mod chart;
 mod facts_codec;
 mod formula;
+mod future_functions;
 mod header_footer;
 #[cfg(test)]
 mod header_footer_tests;

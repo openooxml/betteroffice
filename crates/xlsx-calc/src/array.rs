@@ -311,6 +311,24 @@ fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
     }
 }
 
+/// a block of numbers a builtin outside this module computes: paid for as
+/// `reserve` pays and charged `steps` inner-loop steps before `fill` runs; a
+/// non-finite cell is `#NUM!`.
+pub(crate) fn number_block(
+    ctx: &EvalContext<'_>,
+    rows: usize,
+    cols: usize,
+    steps: u64,
+    fill: impl FnOnce() -> Result<Vec<f64>, ErrorValue>,
+) -> Value {
+    result((|| {
+        reserve(ctx, rows, cols)?;
+        charge_steps(ctx, steps)?;
+        let cells = fill()?.into_iter().map(crate::functions::finite).collect();
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
 /// an output block being filled: its cells are paid for before any is
 /// computed, and each cell's text before the block keeps it.
 struct Cells<'c, 'a> {
@@ -816,22 +834,38 @@ fn lifts(name: &str) -> bool {
         name,
         "ABS"
             | "ACOS"
+            | "ACOSH"
+            | "ACOT"
+            | "ACOTH"
+            | "ARABIC"
             | "ASC"
             | "ASIN"
+            | "ASINH"
             | "ATAN"
             | "ATAN2"
+            | "ATANH"
             | "BAHTTEXT"
+            | "BASE"
             | "CEILING"
+            | "CEILING.MATH"
+            | "CEILING.PRECISE"
             | "CHAR"
             | "CLEAN"
             | "CODE"
             | "COMBIN"
+            | "COMBINA"
             | "COS"
             | "COSH"
+            | "COT"
+            | "COTH"
+            | "CSC"
+            | "CSCH"
             | "DATE"
             | "DATEDIF"
             | "DAY"
+            | "DAYS360"
             | "DBCS"
+            | "DECIMAL"
             | "DEGREES"
             | "DOLLAR"
             | "EDATE"
@@ -842,10 +876,13 @@ fn lifts(name: &str) -> bool {
             | "EXACT"
             | "EXP"
             | "FACT"
+            | "FACTDOUBLE"
             | "FIND"
             | "FINDB"
             | "FIXED"
             | "FLOOR"
+            | "FLOOR.MATH"
+            | "FLOOR.PRECISE"
             | "HOUR"
             | "INFO"
             | "INT"
@@ -857,6 +894,7 @@ fn lifts(name: &str) -> bool {
             | "ISNA"
             | "ISNONTEXT"
             | "ISNUMBER"
+            | "ISO.CEILING"
             | "ISODD"
             | "ISOWEEKNUM"
             | "ISTEXT"
@@ -889,16 +927,20 @@ fn lifts(name: &str) -> bool {
             | "REPT"
             | "RIGHT"
             | "RIGHTB"
+            | "ROMAN"
             | "ROUND"
             | "ROUNDDOWN"
             | "ROUNDUP"
             | "SEARCH"
             | "SEARCHB"
+            | "SEC"
+            | "SECH"
             | "SECOND"
             | "SIGN"
             | "SIN"
             | "SINH"
             | "SQRT"
+            | "SQRTPI"
             | "SUBSTITUTE"
             | "T"
             | "TAN"
@@ -988,6 +1030,9 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "TREND" => trend,
         "FREQUENCY" => frequency,
         "MMULT" => mmult,
+        "MINVERSE" => crate::functions::math_extra::minverse,
+        "MUNIT" => crate::functions::math_extra::munit,
+        "RANDARRAY" => crate::functions::math_extra::randarray,
         "MAX" => max,
         "MIN" => min,
         "PRODUCT" => product,

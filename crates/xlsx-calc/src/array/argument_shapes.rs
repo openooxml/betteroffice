@@ -7,8 +7,8 @@
 use super::{lifted_positions, lifts, lookup_array};
 
 /// builtins evaluated once with their arguments as written: no arguments,
-/// ranges or arrays read whole (aggregates, regressions, lookups, holiday
-/// lists, ARRAYTOTEXT, TYPE), references (OFFSET, INDIRECT, AREAS,
+/// ranges or arrays read whole (aggregates, regressions, matrices, lookups,
+/// holiday lists, ARRAYTOTEXT, TYPE), references (OFFSET, INDIRECT, AREAS,
 /// FORMULATEXT, ISREF, SHEET), omitted LAMBDA parameters (ISOMITTED),
 /// branches only evaluated when chosen (CHOOSE, SWITCH), and the parser's
 /// union.
@@ -41,10 +41,12 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "LCM",
     "LOOKUP",
     "MAXA",
+    "MDETERM",
     "MEDIAN",
     "MINA",
     "MODE",
     "MODE.SNGL",
+    "MULTINOMIAL",
     "NA",
     "NETWORKDAYS",
     "NETWORKDAYS.INTL",
@@ -52,6 +54,7 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "NPV",
     "OFFSET",
     "OR",
+    "PERCENTOF",
     "PHONETIC",
     "PI",
     "RAND",
@@ -68,6 +71,9 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "STDEVP",
     "SUBTOTAL",
     "SUMSQ",
+    "SUMX2MY2",
+    "SUMX2PY2",
+    "SUMXMY2",
     "SWITCH",
     "TODAY",
     "TRIMMEAN",

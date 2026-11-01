@@ -29,7 +29,7 @@ function assetBase(value: string | URL): URL {
 /** Loads pinned CDN fonts without bundling font assets or add-ons. */
 export function createFontProvider(
   options: CdnFontOptions = {},
-  runtime?: { decoder?: FontDecoder },
+  runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): BundledFontSource {
   const base = assetBase(options.baseUrl ?? BASE_URL);
   const cjkBase = assetBase(
