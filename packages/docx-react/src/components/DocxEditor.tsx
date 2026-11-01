@@ -9,7 +9,7 @@
  * - Loading states
  */
 
-import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef } from 'react';
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef, lazy, Suspense } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Document, SectionProperties, Theme } from '@betteroffice/docx/types/document';
 import type {
@@ -44,6 +44,7 @@ import {
   createYrsSidebarProjection,
   extractTrackedChangesFromYrs,
   loadRustDisplayListQueryEngine,
+  resolveDisplayPageClientRect,
   yrsIdToNumericId,
   type TrackedChangesResult,
 } from '@betteroffice/docx/layout/render';
@@ -128,6 +129,15 @@ import {
   type SelectionStateDelta,
 } from './DocxEditor/hooks/useSelectionTracker';
 import { useFloatingCommentBtn } from './DocxEditor/hooks/useFloatingCommentBtn';
+import {
+  resolveSelectionToolbarItems,
+  useSelectionMiniToolbar,
+} from './DocxEditor/hooks/useSelectionMiniToolbar';
+import type { SelectionToolbarAnchorRect } from './SelectionMiniToolbar';
+
+const LazySelectionMiniToolbar = lazy(() =>
+  import('./SelectionMiniToolbarHost').then((m) => ({ default: m.SelectionMiniToolbarHost }))
+);
 import { useActiveEditor } from './DocxEditor/hooks/useActiveEditor';
 import { useScrollPageInfo } from './DocxEditor/hooks/useScrollPageInfo';
 import { DocxEditorOverlays } from './DocxEditor/DocxEditorOverlays';
@@ -212,6 +222,18 @@ export interface DocxDocumentChange {
   version: string;
 }
 
+/**
+ * Items the floating selection mini toolbar can show. Each item runs the
+ * command the main toolbar or context menu already uses for it.
+ */
+export type DocxSelectionToolbarItem =
+  | 'clearFormatting'
+  | 'pastePlainText'
+  | 'bold'
+  | 'italic'
+  | 'underline'
+  | 'strikethrough';
+
 export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEditor/types';
 
 export interface DocxErrorInfo {
@@ -287,6 +309,14 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   theme?: Theme | null;
   /** Whether to show toolbar (default: true) */
   showToolbar?: boolean;
+  /**
+   * Floating mini toolbar shown above a settled non-empty text selection.
+   * `true` (the default) shows Clear formatting and Paste as plain text;
+   * pass `{ items }` to choose the buttons and their order, or `false`
+   * to hide it entirely. While it is shown, Alt+F10 moves keyboard focus
+   * into it and Escape returns focus to the editor.
+   */
+  selectionToolbar?: boolean | { items?: readonly DocxSelectionToolbarItem[] };
   /**
    * Whether to show `File > Open` and enable Cmd/Ctrl+O (default: true).
    * Set false when you provide your own open action elsewhere.
@@ -920,6 +950,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     colorMode = 'light',
     theme,
     showToolbar = true,
+    selectionToolbar = true,
     showFileOpen = true,
     showHelpMenu = true,
     showZoomControl = true,
@@ -1028,6 +1059,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
+  const [miniSelectionKey, setMiniSelectionKey] = useState<string | null>(null);
   const fontScope = useFontLoadScope(fonts);
 
   const {
@@ -2456,6 +2488,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor selection callback: resolve sticky comment/revision coverage
   // from Yrs so the matching sidebar card opens as the caret moves.
   const handlePagedSelectionChange = useCallback((_from: number, _to: number, initializing = false) => {
+    setMiniSelectionKey(_from !== _to ? `${_from}:${_to}` : null);
     // Body selection transitions arrive here even when the derived toolbar
     // context is unchanged. Notify the canvas live region from the authoritative
     // selection event so range/caret announcements are never lost to toolbar
@@ -2545,6 +2578,69 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // A document whose worker found tracked changes asks for the sidebar, as a loaded one does; a
   // host that keeps the sidebar closed keeps the replica unloaded.
   workerRevisionsRef.current = () => setShowCommentsSidebar(true);
+
+  const miniToolbarItems = resolveSelectionToolbarItems(selectionToolbar);
+  const getMiniToolbarAnchorRect = useCallback((): SelectionToolbarAnchorRect | null => {
+    const queries = canvasRenderer.queries;
+    const host = canvasRenderer.canvasHostRef.current;
+    const selection = pagedEditorRef.current?.getSelectionRange();
+    if (queries && host && selection && selection.from !== selection.to) {
+      let union: SelectionToolbarAnchorRect | null = null;
+      for (const rect of queries.rangeRects(selection.from, selection.to)) {
+        const pageRect = resolveDisplayPageClientRect(host, queries, rect.pageIndex);
+        const size = queries.pageSize(rect.pageIndex);
+        if (!pageRect || !size) continue;
+        const scaleX = size.width > 0 ? pageRect.width / size.width : 1;
+        const scaleY = size.height > 0 ? pageRect.height / size.height : 1;
+        const left = pageRect.left + rect.x * scaleX;
+        const top = pageRect.top + rect.y * scaleY;
+        const right = left + rect.width * scaleX;
+        const bottom = top + rect.height * scaleY;
+        union = union
+          ? {
+              left: Math.min(union.left, left),
+              top: Math.min(union.top, top),
+              right: Math.max(union.right, right),
+              bottom: Math.max(union.bottom, bottom),
+              width: 0,
+              height: 0,
+            }
+          : { left, top, right, bottom, width: 0, height: 0 };
+      }
+      if (union) return { ...union, width: union.right - union.left, height: union.bottom - union.top };
+    }
+    const rendered = editorContentRef.current?.querySelectorAll('[data-testid^="selection-rect-"]');
+    let union: SelectionToolbarAnchorRect | null = null;
+    for (const element of Array.from(rendered ?? [])) {
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      union = union
+        ? {
+            left: Math.min(union.left, rect.left),
+            top: Math.min(union.top, rect.top),
+            right: Math.max(union.right, rect.right),
+            bottom: Math.max(union.bottom, rect.bottom),
+            width: 0,
+            height: 0,
+          }
+        : { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: 0, height: 0 };
+    }
+    return union ? { ...union, width: union.right - union.left, height: union.bottom - union.top } : null;
+  }, [canvasRenderer.queries, canvasRenderer.canvasHostRef]);
+  const isMiniToolbarEditorTarget = useCallback(
+    (target: EventTarget | null) =>
+      target instanceof Element && target.matches('.paged-editor__yrs-input'),
+    []
+  );
+  const miniToolbar = useSelectionMiniToolbar({
+    enabled: miniToolbarItems !== null && !readOnly && partEditTarget === null,
+    rootRef: containerRef,
+    scrollRef: scrollContainerRef,
+    selectionKey: miniSelectionKey,
+    getAnchorRect: getMiniToolbarAnchorRect,
+    documentKey: history.state,
+    isEditorTarget: isMiniToolbarEditorTarget,
+  });
 
   const editorContainerStyle: CSSProperties = {
     flex: 1,
@@ -2884,17 +2980,31 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
           canvasRenderer.status === 'loading' && (loadingIndicator || <DefaultLoadingIndicator />)
         }
         overlays={
-          <DocxEditorOverlays
-            contextMenu={contextMenu}
-            contextMenuItems={contextMenuItems}
-            onContextMenuAction={handleContextMenuAction}
-            onContextMenuClose={handleContextMenuClose}
-            imageContextMenu={imageContextMenu}
-            onImageWrapApply={handleImageWrapApply}
-            imageContextMenuTextActions={imageContextMenuTextActions}
-            onOpenImageProperties={() => void commandController.store.execute('imageProperties', null)}
-            readOnly={readOnly}
-          />
+          <>
+            <DocxEditorOverlays
+              contextMenu={contextMenu}
+              contextMenuItems={contextMenuItems}
+              onContextMenuAction={handleContextMenuAction}
+              onContextMenuClose={handleContextMenuClose}
+              imageContextMenu={imageContextMenu}
+              onImageWrapApply={handleImageWrapApply}
+              imageContextMenuTextActions={imageContextMenuTextActions}
+              onOpenImageProperties={() => void commandController.store.execute('imageProperties', null)}
+              readOnly={readOnly}
+            />
+            {miniToolbar.visible && miniToolbar.anchorRect && miniToolbarItems ? (
+              <Suspense fallback={null}>
+                <LazySelectionMiniToolbar
+                  ref={miniToolbar.toolbarRef}
+                  anchorRect={miniToolbar.anchorRect}
+                  items={miniToolbarItems}
+                  pasteEnabled={!readOnly}
+                  onPastePlainText={() => void handleContextMenuAction('pasteAsPlainText')}
+                  onDismiss={miniToolbar.dismiss}
+                />
+              </Suspense>
+            ) : null}
+          </>
         }
         dialogs={
           <DocxEditorDialogs

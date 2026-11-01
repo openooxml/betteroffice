@@ -63,6 +63,12 @@ import { openReportIssue } from '../../reportIssue';
 import { decodeCommandFrameDeltas } from './frameDeltas';
 import { decodeSvgMedia, type SvgMediaDecode } from './svgMedia';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
+import {
+  resolveSelectionToolbarItems,
+  useSelectionMiniToolbar,
+} from '../hooks/useSelectionMiniToolbar';
+import type { SelectionToolbarAnchorRect } from '../../SelectionMiniToolbar';
+import { SelectionMiniToolbarHost } from '../../SelectionMiniToolbarHost';
 import { useWorkerComments, WorkerCommentButton } from './useWorkerComments';
 import { useControllableBoolean } from '../hooks/useControllableBoolean';
 import { useWorkerNavigation } from './useWorkerNavigation';
@@ -1181,6 +1187,36 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       !item.hidden && !item.isTemporary && item.fixedY != null ? [[item.id, item.fixedY] as const] : []));
   }, [commentPlacement, review, positionedComments]);
   const selected = shellState.view?.workerSelection;
+  const miniToolbarItems = resolveSelectionToolbarItems(props.selectionToolbar);
+  const miniSelectionKey = selected && (selected.anchor.story !== selected.focus.story ||
+    selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset)
+    ? JSON.stringify(selected) : null;
+  const getMiniToolbarAnchorRect = useCallback((): SelectionToolbarAnchorRect | null => {
+    const view = controller.getSnapshot().view;
+    const geometry = view?.geometry;
+    const pagesHost = host.current?.querySelector('[data-docx-pages-host]');
+    if (!view || !geometry || !pagesHost || !geometryMatchesDocument(view)) return null;
+    const hostRect = pagesHost.getBoundingClientRect();
+    let union: SelectionToolbarAnchorRect | null = null;
+    for (const rect of geometry.selectionRects) {
+      const left = hostRect.left + rect.x * zoom;
+      const top = hostRect.top + rect.y * zoom;
+      const right = left + rect.width * zoom;
+      const bottom = top + rect.height * zoom;
+      union = union
+        ? { left: Math.min(union.left, left), top: Math.min(union.top, top), right: Math.max(union.right, right), bottom: Math.max(union.bottom, bottom), width: 0, height: 0 }
+        : { left, top, right, bottom, width: 0, height: 0 };
+    }
+    return union ? { ...union, width: union.right - union.left, height: union.bottom - union.top } : null;
+  }, [controller, zoom]);
+  const miniToolbar = useSelectionMiniToolbar({
+    enabled: miniToolbarItems !== null && !effectiveReadOnly,
+    rootRef: container,
+    scrollRef: scroller,
+    selectionKey: miniSelectionKey,
+    getAnchorRect: getMiniToolbarAnchorRect,
+    documentKey: shellState.view?.version,
+  });
   const floating = documentReady && !effectiveReadOnly && !workerComments.adding && !dragSelecting && !!selected &&
     (selected.focus.story === 'body' || selected.focus.story.startsWith('body:')) && selected.anchor.story === selected.focus.story &&
     (selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset) &&
@@ -1287,7 +1323,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         pageLayout: { ...propertyDialogs.pageLayout, unit: props.rulerUnit ?? 'inch' } }}>{chrome}</EditorChromeContext.Provider>}
       renderDock={(placement, available) => <PluginDock host={pluginHost} placement={placement}
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
-      overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}
+      overlays={<>{contextMenu.element}{miniToolbar.visible && miniToolbar.anchorRect && miniToolbarItems ? (
+        <SelectionMiniToolbarHost ref={miniToolbar.toolbarRef} anchorRect={miniToolbar.anchorRect} items={miniToolbarItems}
+          pasteEnabled={!effectiveReadOnly} onPastePlainText={() => void contextMenu.pastePlainText()} onDismiss={miniToolbar.dismiss} />
+      ) : null}<PluginOverlays host={pluginHost} activations={activations} target={host.current}
         layerRef={setPluginLayer} heldGeometry={documentReady ? pluginGeometry.geometry() : null} /><Toaster position="bottom-right" /></>} dialogs={<>{propertyDialogs.element}<FindReplaceDialog isOpen={searchState.isOpen} replaceMode={searchState.replaceMode}
         onClose={(text, options) => { search.close(text, options); focus(); }} currentResult={searchState.result}
         onFind={(text, options) => { void search.find(text, options).catch((error) => reportRecoverableError(error)); return null; }}

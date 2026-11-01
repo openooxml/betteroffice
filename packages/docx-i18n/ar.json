@@ -560,6 +560,10 @@
     "moveImage": "نقل الصورة",
     "columnWidth": "عرض العمود"
   },
+  "selectionToolbar": {
+    "label": "شريط أدوات التحديد",
+    "focusHint": "اضغط على Alt+F10 لنقل التركيز إلى شريط أدوات التحديد"
+  },
   "documentOutline": {
     "ariaLabel": "مخطط المستند التفصيلي",
     "closeAriaLabel": "إغلاق المخطط التفصيلي",

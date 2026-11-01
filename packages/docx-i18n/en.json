@@ -560,6 +560,10 @@
     "moveImage": "Move image",
     "columnWidth": "Column width"
   },
+  "selectionToolbar": {
+    "label": "Selection toolbar",
+    "focusHint": "Press Alt+F10 to move focus to the selection toolbar"
+  },
   "documentOutline": {
     "ariaLabel": "Document outline",
     "closeAriaLabel": "Close outline",

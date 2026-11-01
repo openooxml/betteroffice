@@ -560,6 +560,10 @@
     "moveImage": "Resmi taşı",
     "columnWidth": "Sütun genişliği"
   },
+  "selectionToolbar": {
+    "label": "Seçim araç çubuğu",
+    "focusHint": "Odağı seçim araç çubuğuna taşımak için Alt+F10 tuşlarına basın"
+  },
   "documentOutline": {
     "ariaLabel": "Belge ana hattı",
     "closeAriaLabel": "Ana hattı kapat",

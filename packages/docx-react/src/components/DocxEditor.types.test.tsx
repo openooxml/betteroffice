@@ -29,6 +29,19 @@ test('Document callbacks require a literal sync opt-in', () => {
   expect(check).toBeFunction();
 });
 
+test('selectionToolbar accepts a boolean or an item list on every props variant', () => {
+  const onChange: NonNullable<DocxEditorBaseProps['onChange']> = () => {};
+  const check = () => [
+    <DocxEditor selectionToolbar={false} />,
+    <DocxEditor selectionToolbar={{ items: ['bold', 'pastePlainText'] }} onDocumentChange={() => {}} />,
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} selectionToolbar onChange={onChange} />,
+    <DocxEditor experimentalWorkerOpen={false} selectionToolbar={{}} onChange={onChange} />,
+    // @ts-expect-error
+    <DocxEditor selectionToolbar={{ items: ['copy'] }} />,
+  ];
+  expect(check).toBeFunction();
+});
+
 test('experimentalWorkerOpen accepts a computed boolean', () => {
   const check = (flag: boolean) => (
     <DocxEditor experimentalWorkerOpen={flag} documentBuffer={null} onDocumentChange={() => {}} onSave={() => {}} />

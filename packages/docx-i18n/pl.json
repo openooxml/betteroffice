@@ -560,6 +560,10 @@
     "moveImage": "Przenieś obraz",
     "columnWidth": "Szerokość kolumny"
   },
+  "selectionToolbar": {
+    "label": "Pasek narzędzi zaznaczenia",
+    "focusHint": "Naciśnij Alt+F10, aby przenieść fokus na pasek narzędzi zaznaczenia"
+  },
   "documentOutline": {
     "ariaLabel": "Konspekt dokumentu",
     "closeAriaLabel": "Zamknij konspekt",

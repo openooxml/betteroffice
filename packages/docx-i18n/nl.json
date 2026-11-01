@@ -560,6 +560,10 @@
     "moveImage": "Afbeelding verplaatsen",
     "columnWidth": "Kolombreedte"
   },
+  "selectionToolbar": {
+    "label": "Werkbalk voor selectie",
+    "focusHint": "Druk op Alt+F10 om de focus naar de werkbalk voor selectie te verplaatsen"
+  },
   "documentOutline": {
     "ariaLabel": "Documentoverzicht",
     "closeAriaLabel": "Overzicht sluiten",

@@ -560,6 +560,10 @@
     "moveImage": "이미지 이동",
     "columnWidth": "열 너비"
   },
+  "selectionToolbar": {
+    "label": "선택 도구 모음",
+    "focusHint": "Alt+F10을 눌러 선택 도구 모음으로 포커스를 이동합니다"
+  },
   "documentOutline": {
     "ariaLabel": "문서 개요",
     "closeAriaLabel": "개요 닫기",

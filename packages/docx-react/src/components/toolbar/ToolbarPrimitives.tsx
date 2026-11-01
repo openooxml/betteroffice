@@ -21,6 +21,7 @@ export interface ToolbarButtonProps {
   onFocus?: () => void;
   children: ReactNode;
   className?: string;
+  tabIndex?: number;
   ariaLabel?: string;
   /** Label of the overflow-menu entry; defaults to `ariaLabel` or `title`. */
   overflowLabel?: string;
@@ -62,6 +63,7 @@ export function ToolbarButton({
   onFocus,
   children,
   className,
+  tabIndex,
   ariaLabel,
   overflowLabel,
 }: ToolbarButtonProps) {
@@ -108,6 +110,7 @@ export function ToolbarButton({
       aria-disabled={described ? true : undefined}
       aria-pressed={active === undefined ? undefined : active}
       aria-label={ariaLabel || title}
+      tabIndex={tabIndex}
       aria-describedby={described ? descriptionId : undefined}
       data-testid={testIdFor(ariaLabel, title)}
     >

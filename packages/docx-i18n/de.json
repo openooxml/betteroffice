@@ -560,6 +560,10 @@
     "moveImage": "Bild verschieben",
     "columnWidth": "Spaltenbreite"
   },
+  "selectionToolbar": {
+    "label": "Auswahl-Symbolleiste",
+    "focusHint": "Drücken Sie Alt+F10, um den Fokus auf die Auswahl-Symbolleiste zu setzen"
+  },
   "documentOutline": {
     "ariaLabel": "Dokumentgliederung",
     "closeAriaLabel": "Gliederung schließen",
