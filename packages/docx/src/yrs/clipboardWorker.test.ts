@@ -316,11 +316,8 @@ test('replacePasteFragment over a replaced selection restores the replaced text 
 }, TIMEOUT);
 
 test('replacePasteFragment without a preceding paste is refused and changes nothing', async () => {
-  const worker = startWorker(8403);
-  const client = new ResidentEngineWorkerClient(worker);
+  const { client, engine } = await openTableWorker();
   try {
-    await client.open(seedDoc(), { generation: 'tclip-no-history' });
-    const engine = worker.sessions[0]!;
     const paragraphs = engine.paragraphs('body');
     const atPara = paragraphs[paragraphs.length - 1]!;
     const atSpan = engine.geometryReader.locateParagraph('body', atPara.paraId);

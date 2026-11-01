@@ -628,7 +628,7 @@ export interface DocxWorkerCommandState {
   /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
   remoteMerges?: { from: number; to: number };
   /** The range the latest paste replaced and the document version right after it; any later edit makes it stale. */
-  lastPaste?: { range: YrsStoryRange; version: number } | null;
+  lastPaste?: { range: YrsStoryRange; version: string } | null;
 }
 
 export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession,
