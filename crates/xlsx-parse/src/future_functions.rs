@@ -2,14 +2,16 @@
 //! that writes formula text the way Excel does: `_xlfn.` before every function
 //! newer than Excel 2007, `_xlfn._xlws.` before the worksheet ones, `_xlpm.`
 //! before the names a `LET` or `LAMBDA` binds, and `_xleta.` before a function
-//! passed by name to a lambda helper. [`display_formula`] is the reverse, for
-//! formula text shown to people.
+//! passed by name to a lambda helper unless a defined name in scope shares
+//! its name. [`display_formula`] is the reverse, for formula text shown to
+//! people.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
+use xlsx_model::DefinedName;
+use xlsx_model::addr::{MAX_COLS, MAX_ROWS, SheetId};
 
 use crate::formula::{MAX_FORMULA_BYTES, skip_brackets, skip_quoted};
 
@@ -582,16 +584,65 @@ const LAMBDA_HELPERS: &[(&str, Callback)] = &[
     ("SCAN", Callback::At(2)),
 ];
 
-/// `formula` as Excel stores it. Text already in that form comes back
-/// borrowed, so the pass is idempotent, and so does text the prefixes would
-/// push past the formula length limit, which this crate could not read back,
-/// or that is already past it.
-pub fn excel_formula(formula: &str) -> Cow<'_, str> {
+/// A workbook's defined names that share a worksheet function's name, with
+/// their scopes. Built once per workbook read or save; every formula then
+/// takes the [`FormulaNames`] of its scope from it.
+#[derive(Debug, Default)]
+pub struct DefinedFunctionNames(HashSet<(Option<SheetId>, &'static str)>);
+
+impl DefinedFunctionNames {
+    /// The names among `defined` that match a worksheet function, ignoring
+    /// ASCII case as Excel does.
+    pub fn new(defined: &[DefinedName]) -> Self {
+        Self(
+            defined
+                .iter()
+                .filter_map(|name| Some((name.local_sheet, canonical(&name.name)?)))
+                .collect(),
+        )
+    }
+
+    /// The names a formula on `sheet` resolves, or a workbook-scoped name's
+    /// formula when `sheet` is `None`: the workbook-scoped names and those
+    /// scoped to that sheet.
+    pub fn visible_from(&self, sheet: Option<SheetId>) -> FormulaNames<'_> {
+        FormulaNames {
+            names: (!self.0.is_empty()).then_some(self),
+            sheet,
+        }
+    }
+}
+
+/// The defined names one formula resolves that share a worksheet function's
+/// name. A bare function name passed to a lambda helper names such a defined
+/// name, so it keeps its text. The default resolves none.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FormulaNames<'a> {
+    names: Option<&'a DefinedFunctionNames>,
+    sheet: Option<SheetId>,
+}
+
+impl FormulaNames<'_> {
+    fn contains(self, function: &'static str) -> bool {
+        self.names.is_some_and(|names| {
+            names.0.contains(&(None, function))
+                || self
+                    .sheet
+                    .is_some_and(|sheet| names.0.contains(&(Some(sheet), function)))
+        })
+    }
+}
+
+/// `formula` as Excel stores it, resolving bare names against `names`. Text
+/// already in that form comes back borrowed, so the pass is idempotent, and
+/// so does text the prefixes would push past the formula length limit, which
+/// this crate could not read back, or that is already past it.
+pub fn excel_formula<'a>(formula: &'a str, names: FormulaNames<'_>) -> Cow<'a, str> {
     if formula.len() > MAX_FORMULA_BYTES || !formula.contains('(') {
         return Cow::Borrowed(formula);
     }
     let tokens = tokenize(formula);
-    let mut pass = Pass::new(formula, &tokens);
+    let mut pass = Pass::new(formula, &tokens, names);
     pass.run();
     let grown = pass
         .edits
@@ -607,12 +658,12 @@ pub fn excel_formula(formula: &str) -> Cow<'_, str> {
 /// `formula` as people read and type it: the storage prefixes `_xlfn.`,
 /// `_xlws.`, `_xlpm.` and `_xleta.` dropped from function names and `LET` or
 /// `LAMBDA` names, never from string literals, sheet names or structured
-/// references. A stripped text is shown only when it [`saves_as`] `formula`,
-/// otherwise a text keeping `_xleta.`, otherwise `formula` itself, so the
-/// result is idempotent. Text past the formula length limit comes back as it
-/// is; below it the work is linear: one tokenizing pass and at most two
-/// rewrites.
-pub fn display_formula(formula: &str) -> Cow<'_, str> {
+/// references. A stripped text is shown only when it [`saves_as`] `formula`
+/// with the same `names`, otherwise a text keeping `_xleta.`, otherwise
+/// `formula` itself, so the result is idempotent. Text past the formula
+/// length limit comes back as it is; below it the work is linear: one
+/// tokenizing pass and at most two rewrites.
+pub fn display_formula<'a>(formula: &'a str, names: FormulaNames<'_>) -> Cow<'a, str> {
     if formula.len() > MAX_FORMULA_BYTES
         || !formula
             .as_bytes()
@@ -622,10 +673,10 @@ pub fn display_formula(formula: &str) -> Cow<'_, str> {
         return Cow::Borrowed(formula);
     }
     let tokens = tokenize(formula);
-    let pass = Pass::new(formula, &tokens);
+    let pass = Pass::new(formula, &tokens, names);
     for keep_eta in [false, true] {
         let shown = splice(formula, &pass.unprefixed(keep_eta));
-        if matches!(shown, Cow::Borrowed(_)) || saves_as(&shown, formula) {
+        if matches!(shown, Cow::Borrowed(_)) || saves_as(&shown, formula, names) {
             return shown;
         }
     }
@@ -633,10 +684,11 @@ pub fn display_formula(formula: &str) -> Cow<'_, str> {
 }
 
 /// Whether formula text people typed or were shown saves as exactly `stored`,
-/// byte for byte. The one test for showing a text in place of the stored one
-/// and for keeping the stored text when that text is committed.
-pub fn saves_as(typed: &str, stored: &str) -> bool {
-    excel_formula(typed) == stored
+/// byte for byte, resolving bare names against `names`. The one test for
+/// showing a text in place of the stored one and for keeping the stored text
+/// when that text is committed.
+pub fn saves_as(typed: &str, stored: &str, names: FormulaNames<'_>) -> bool {
+    excel_formula(typed, names) == stored
 }
 
 /// `formula` with the source-ordered `edits` applied.
@@ -891,11 +943,13 @@ struct Pass<'a> {
     bound: HashMap<String, usize>,
     /// the name tokens that are the whole callback argument of a lambda helper.
     eta: Vec<bool>,
+    /// the defined names a bare callback name may stand for.
+    names: FormulaNames<'a>,
     edits: Vec<Edit>,
 }
 
 impl<'a> Pass<'a> {
-    fn new(source: &'a str, tokens: &'a [Token]) -> Self {
+    fn new(source: &'a str, tokens: &'a [Token], names: FormulaNames<'a>) -> Self {
         let mut partners = vec![None; tokens.len()];
         let mut open = Vec::new();
         for (index, token) in tokens.iter().enumerate() {
@@ -925,6 +979,7 @@ impl<'a> Pass<'a> {
             scopes: Vec::new(),
             bound: HashMap::new(),
             eta: vec![false; tokens.len()],
+            names,
             edits: Vec::new(),
         }
     }
@@ -998,6 +1053,7 @@ impl<'a> Pass<'a> {
         if !call {
             if self.eta[index]
                 && let Some(name) = eta_function(text)
+                && !self.names.contains(name)
             {
                 self.insert(token.start, ETA_PREFIX);
                 self.edits.push(Edit {
@@ -1238,32 +1294,37 @@ impl<'a> Pass<'a> {
 mod tests {
     use super::*;
 
+    const NONE: FormulaNames<'static> = FormulaNames {
+        names: None,
+        sheet: None,
+    };
+
     #[track_caller]
     fn written(source: &str, expected: &str) {
-        let once = excel_formula(source);
+        let once = excel_formula(source, NONE);
         assert_eq!(once, expected, "{source}");
         assert!(
-            matches!(excel_formula(&once), Cow::Borrowed(_)),
+            matches!(excel_formula(&once, NONE), Cow::Borrowed(_)),
             "not idempotent: {once}"
         );
-        let shown = display_formula(&once);
-        assert_eq!(excel_formula(&shown), once, "round trip of {once}");
+        let shown = display_formula(&once, NONE);
+        assert_eq!(excel_formula(&shown, NONE), once, "round trip of {once}");
         assert!(
-            matches!(display_formula(&shown), Cow::Borrowed(_)),
+            matches!(display_formula(&shown, NONE), Cow::Borrowed(_)),
             "display not idempotent: {shown}"
         );
     }
 
     #[track_caller]
     fn shown(stored: &str, expected: &str) {
-        let display = display_formula(stored);
+        let display = display_formula(stored, NONE);
         assert_eq!(display, expected, "{stored}");
         assert!(
-            matches!(display_formula(&display), Cow::Borrowed(_)),
+            matches!(display_formula(&display, NONE), Cow::Borrowed(_)),
             "display not idempotent: {display}"
         );
         assert_eq!(
-            excel_formula(&display),
+            excel_formula(&display, NONE),
             stored,
             "{display} does not store as {stored}"
         );
@@ -1401,7 +1462,7 @@ mod tests {
             "_xlfn.GROUPBY(A2:A9,B2:B9,_xleta.SUM)",
         ] {
             assert!(
-                matches!(excel_formula(source), Cow::Borrowed(_)),
+                matches!(excel_formula(source, NONE), Cow::Borrowed(_)),
                 "{source}"
             );
         }
@@ -1661,9 +1722,12 @@ mod tests {
             written(&source, if fits { &expected } else { &source });
         }
         let unbalanced = "LET(x,(".repeat(2_000);
-        assert_eq!(excel_formula(&unbalanced), "_xlfn.LET(x,(".repeat(2_000));
+        assert_eq!(
+            excel_formula(&unbalanced, NONE),
+            "_xlfn.LET(x,(".repeat(2_000)
+        );
         let unbalanced = "LET(x,(".repeat(200_000);
-        assert!(matches!(excel_formula(&unbalanced), Cow::Borrowed(_)));
+        assert!(matches!(excel_formula(&unbalanced, NONE), Cow::Borrowed(_)));
     }
 
     #[test]
@@ -1709,10 +1773,10 @@ mod tests {
             "{}0",
             call.repeat((MAX_FORMULA_BYTES - 1) / (call.len() + 6))
         );
-        assert!(matches!(excel_formula(&fits), Cow::Owned(_)));
+        assert!(matches!(excel_formula(&fits, NONE), Cow::Owned(_)));
         let over = format!("{}0", call.repeat((MAX_FORMULA_BYTES - 1) / call.len()));
         assert!(over.len() <= MAX_FORMULA_BYTES);
-        assert!(matches!(excel_formula(&over), Cow::Borrowed(_)));
+        assert!(matches!(excel_formula(&over, NONE), Cow::Borrowed(_)));
     }
 
     #[test]
@@ -1790,7 +1854,7 @@ mod tests {
             "",
         ] {
             assert!(
-                matches!(display_formula(stored), Cow::Borrowed(_)),
+                matches!(display_formula(stored, NONE), Cow::Borrowed(_)),
                 "{stored}"
             );
         }
@@ -1814,19 +1878,19 @@ mod tests {
             );
             let shown = format!("{}x{}", "LET(x,1,".repeat(depth), ")".repeat(depth));
             if stored.len() <= MAX_FORMULA_BYTES {
-                assert_eq!(display_formula(&stored), shown);
+                assert_eq!(display_formula(&stored, NONE), shown);
             } else {
-                assert!(matches!(display_formula(&stored), Cow::Borrowed(_)));
+                assert!(matches!(display_formula(&stored, NONE), Cow::Borrowed(_)));
             }
         }
         let calls = "_xlfn.SEQUENCE(1)+".repeat(MAX_FORMULA_BYTES / 20);
         let stored = format!("{calls}0");
         assert_eq!(
-            display_formula(&stored),
+            display_formula(&stored, NONE),
             format!("{}0", "SEQUENCE(1)+".repeat(MAX_FORMULA_BYTES / 20))
         );
         let prefixes = format!("{}SUM(1)", "_xlfn.".repeat(MAX_FORMULA_BYTES / 8));
-        assert!(matches!(display_formula(&prefixes), Cow::Borrowed(_)));
+        assert!(matches!(display_formula(&prefixes, NONE), Cow::Borrowed(_)));
     }
 
     #[test]
@@ -1882,13 +1946,13 @@ mod tests {
             "_xlfn.LET(_xlpm.x,1,SEQUENCE(_xlpm.x))",
             "_xlfn.REDUCE(0,value,_xlfn.LAMBDA(_xlpm.a,_xlpm.v,_xlpm.a+_xlpm.v))",
         ] {
-            let display = display_formula(stored);
+            let display = display_formula(stored, NONE);
             assert!(
-                display == stored || excel_formula(&display) == stored,
+                display == stored || excel_formula(&display, NONE) == stored,
                 "{stored} shown as {display}"
             );
             assert!(
-                matches!(display_formula(&display), Cow::Borrowed(_)),
+                matches!(display_formula(&display, NONE), Cow::Borrowed(_)),
                 "display not idempotent: {display}"
             );
         }
@@ -1897,7 +1961,7 @@ mod tests {
             "_XLFN.SEQUENCE(2,2)",
             "_xlfn.MAP(A1:A3,SUM)",
         ] {
-            assert_eq!(display_formula(stored), stored);
+            assert_eq!(display_formula(stored, NONE), stored);
         }
         shown("_xlfn.BYROW(A1:B2,_xleta.sum)", "BYROW(A1:B2,_xleta.sum)");
         shown(
@@ -1921,7 +1985,7 @@ mod tests {
         );
         assert!(source.len() <= MAX_FORMULA_BYTES);
         let tokens = tokenize(&source);
-        let pass = Pass::new(&source, &tokens);
+        let pass = Pass::new(&source, &tokens, NONE);
         let mut opener = vec![None; tokens.len()];
         for (open, close) in pass.partners.iter().enumerate() {
             if let Some(close) = *close {
@@ -1947,9 +2011,9 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
-        let stored = excel_formula(&source).into_owned();
+        let stored = excel_formula(&source, NONE).into_owned();
         assert_eq!(stored, source.replace("MAP(", "_xlfn.MAP("));
-        assert_eq!(display_formula(&stored), source);
+        assert_eq!(display_formula(&stored, NONE), source);
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
@@ -1958,12 +2022,93 @@ mod tests {
         let calls = MAX_FORMULA_BYTES / "_xlfn.SEQUENCE(1)+".len() + 1;
         let stored = format!("{}0", "_xlfn.SEQUENCE(1)+".repeat(calls));
         assert!(stored.len() > MAX_FORMULA_BYTES);
-        assert!(matches!(display_formula(&stored), Cow::Borrowed(_)));
+        assert!(matches!(display_formula(&stored, NONE), Cow::Borrowed(_)));
         let typed = format!("{}0", "SEQUENCE(1)+".repeat(MAX_FORMULA_BYTES / 12 + 1));
         assert!(typed.len() > MAX_FORMULA_BYTES);
-        assert!(matches!(excel_formula(&typed), Cow::Borrowed(_)));
+        assert!(matches!(excel_formula(&typed, NONE), Cow::Borrowed(_)));
         let huge = "_xlfn.SEQUENCE(1)+".repeat(200_000);
-        assert!(matches!(display_formula(&huge), Cow::Borrowed(_)));
-        assert!(matches!(excel_formula(&huge), Cow::Borrowed(_)));
+        assert!(matches!(display_formula(&huge, NONE), Cow::Borrowed(_)));
+        assert!(matches!(excel_formula(&huge, NONE), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_defined_name_in_scope_keeps_its_text_in_a_lambda_helper() {
+        let defined = |name: &str, local_sheet: Option<u32>| DefinedName {
+            name: name.to_owned(),
+            formula: "LAMBDA(x,MAX(x))".to_owned(),
+            local_sheet: local_sheet.map(SheetId),
+            hidden: false,
+        };
+        let names = DefinedFunctionNames::new(&[
+            defined("Sum", None),
+            defined("MAX", Some(1)),
+            defined("XLOOKUP", None),
+            defined("Total", None),
+        ]);
+        let first = names.visible_from(Some(SheetId(0)));
+        let second = names.visible_from(Some(SheetId(1)));
+        let workbook = names.visible_from(None);
+        for (source, names, expected) in [
+            ("BYROW(A1:B2,SUM)", first, "_xlfn.BYROW(A1:B2,SUM)"),
+            ("BYROW(A1:B2, sum)", workbook, "_xlfn.BYROW(A1:B2, sum)"),
+            ("BYROW(A1:B2,MAX)", first, "_xlfn.BYROW(A1:B2,_xleta.MAX)"),
+            ("BYROW(A1:B2,MAX)", second, "_xlfn.BYROW(A1:B2,MAX)"),
+            (
+                "BYROW(A1:B2,MAX)",
+                workbook,
+                "_xlfn.BYROW(A1:B2,_xleta.MAX)",
+            ),
+            ("BYROW(A1:B2,MAX)", NONE, "_xlfn.BYROW(A1:B2,_xleta.MAX)"),
+            (
+                "GROUPBY(A2:A9,B2:B9,SUM)",
+                second,
+                "_xlfn.GROUPBY(A2:A9,B2:B9,SUM)",
+            ),
+            (
+                "SUM(A1)+XLOOKUP(1,A1:A3,B1:B3)",
+                first,
+                "SUM(A1)+_xlfn.XLOOKUP(1,A1:A3,B1:B3)",
+            ),
+            (
+                "LET(sum,LAMBDA(x,x),MAP(A1:A3,sum))",
+                first,
+                "_xlfn.LET(_xlpm.sum,_xlfn.LAMBDA(_xlpm.x,_xlpm.x),_xlfn.MAP(A1:A3,_xlpm.sum))",
+            ),
+        ] {
+            let stored = excel_formula(source, names);
+            assert_eq!(stored, expected, "{source}");
+            assert!(matches!(excel_formula(&stored, names), Cow::Borrowed(_)));
+            let display = display_formula(&stored, names);
+            assert!(
+                saves_as(&display, &stored, names),
+                "{stored} shown as {display}"
+            );
+        }
+        assert_eq!(
+            display_formula("_xlfn.BYROW(A1:B2,SUM)", first),
+            "BYROW(A1:B2,SUM)"
+        );
+        assert_eq!(
+            display_formula("_xlfn.BYROW(A1:B2,SUM)", NONE),
+            "_xlfn.BYROW(A1:B2,SUM)"
+        );
+        assert_eq!(
+            display_formula("_xlfn.BYROW(A1:B2,_xleta.SUM)", first),
+            "BYROW(A1:B2,_xleta.SUM)"
+        );
+        assert_eq!(
+            display_formula("_xlfn.BYROW(A1:B2,_xleta.SUM)", NONE),
+            "BYROW(A1:B2,SUM)"
+        );
+        assert!(saves_as(
+            "BYROW(A1:B2,SUM)",
+            "_xlfn.BYROW(A1:B2,SUM)",
+            first
+        ));
+        assert!(!saves_as(
+            "BYROW(A1:B2,SUM)",
+            "_xlfn.BYROW(A1:B2,SUM)",
+            NONE
+        ));
     }
 }

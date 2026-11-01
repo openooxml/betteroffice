@@ -692,7 +692,8 @@ fn shown_uncanonical_formulas_recommit_without_a_change() {
             let input = opened.cell(SheetId(0), cell(address)).unwrap().input;
             let shown = input.strip_prefix('=').unwrap();
             assert!(
-                shown == *stored || xlsx_parse::excel_formula(shown) == *stored,
+                shown == *stored
+                    || xlsx_parse::saves_as(shown, stored, xlsx_parse::FormulaNames::default()),
                 "{address} shown as {input}"
             );
             CellInput {
@@ -815,6 +816,200 @@ fn shown_defined_names_and_cells_recommitted_as_ops_keep_the_stored_text() {
     }
     workbook
         .apply_ops(ops, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(workbook.version(), version);
+    assert_eq!(workbook.save().unwrap(), source);
+}
+
+fn scoped_name(name: &str, refers_to: &str, scope: Option<SheetId>) -> Op {
+    Op::SetDefinedName {
+        name: name.into(),
+        refers_to: refers_to.into(),
+        scope,
+        hidden: None,
+    }
+}
+
+fn defined_formula(workbook_xml: &str, name: &str) -> String {
+    element_text(
+        workbook_xml,
+        &format!("<definedName name=\"{name}\""),
+        "</definedName>",
+    )
+}
+
+#[test]
+fn defined_names_in_lambda_helper_arguments_keep_their_text_on_save() {
+    let mut workbook = Workbook::open(&source()).unwrap();
+    workbook
+        .apply_ops(
+            vec![
+                scoped_name("SUM", "LAMBDA(x,MAX(x))", None),
+                scoped_name("MIN", "LAMBDA(x,MAX(x))", Some(SheetId(1))),
+                scoped_name("Rows", "BYROW(Data!$A$1:$B$2,SUM)", None),
+                scoped_name("Lows", "BYROW(Data!$A$1:$B$2,MIN)", None),
+                scoped_name("Mins", "BYROW(Data!$A$1:$B$2,MIN)", Some(SheetId(1))),
+                expression_rule("A1:A3", "SUM(BYROW($A$1:$B$2,SUM))>0"),
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[
+                CellInput {
+                    cell: cell("D1"),
+                    input: "=BYROW(A1:B2,SUM)".into(),
+                },
+                CellInput {
+                    cell: cell("E1"),
+                    input: "=BYROW(A1:B2,MIN)".into(),
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cell(
+            SheetId(1),
+            cell("C1"),
+            "=BYROW(A1:A2,min)",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let calculated = workbook
+        .sheet(SheetId(0))
+        .unwrap()
+        .cell(cell("D1"))
+        .unwrap()
+        .value
+        .clone();
+    let saved = workbook.save().unwrap();
+
+    let data = part(&saved, "xl/worksheets/sheet1.xml");
+    assert_eq!(formula_text(&data, "D1"), "_xlfn.BYROW(A1:B2,SUM)");
+    assert_eq!(formula_text(&data, "E1"), "_xlfn.BYROW(A1:B2,_xleta.MIN)");
+    assert_eq!(
+        element_text(&data, "<formula", "</formula>"),
+        "SUM(_xlfn.BYROW($A$1:$B$2,SUM))>0"
+    );
+    let other = part(&saved, "xl/worksheets/sheet2.xml");
+    assert_eq!(formula_text(&other, "C1"), "_xlfn.BYROW(A1:A2,min)");
+    let book = part(&saved, "xl/workbook.xml");
+    assert_eq!(
+        defined_formula(&book, "SUM"),
+        "_xlfn.LAMBDA(_xlpm.x,MAX(_xlpm.x))"
+    );
+    assert_eq!(
+        defined_formula(&book, "Rows"),
+        "_xlfn.BYROW(Data!$A$1:$B$2,SUM)"
+    );
+    assert_eq!(
+        defined_formula(&book, "Lows"),
+        "_xlfn.BYROW(Data!$A$1:$B$2,_xleta.MIN)"
+    );
+    assert_eq!(
+        defined_formula(&book, "Mins"),
+        "_xlfn.BYROW(Data!$A$1:$B$2,MIN)"
+    );
+
+    let mut reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("D1"))
+            .unwrap()
+            .value,
+        calculated
+    );
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("D1")).unwrap().input,
+        "=BYROW(A1:B2,SUM)"
+    );
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("E1")).unwrap().input,
+        "=BYROW(A1:B2,MIN)"
+    );
+    assert_eq!(
+        reopened.cell(SheetId(1), cell("C1")).unwrap().input,
+        "=BYROW(A1:A2,min)"
+    );
+    assert_eq!(read_formulas(&reopened, "D1"), [json!("BYROW(A1:B2,SUM)")]);
+    let shown = reopened
+        .list_defined_names(&DefinedNamesRequest::default())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|name| (name.name, name.refers_to))
+        .collect::<Vec<_>>();
+    for (name, refers_to) in [
+        ("Rows", "BYROW(Data!$A$1:$B$2,SUM)"),
+        ("Lows", "BYROW(Data!$A$1:$B$2,MIN)"),
+        ("Mins", "BYROW(Data!$A$1:$B$2,MIN)"),
+    ] {
+        assert!(
+            shown.contains(&(name.to_owned(), refers_to.to_owned())),
+            "{name} in {shown:?}"
+        );
+    }
+
+    let version = reopened.version();
+    for (sheet, address) in [(0, "D1"), (0, "E1"), (1, "C1")] {
+        let input = reopened.cell(SheetId(sheet), cell(address)).unwrap().input;
+        reopened
+            .edit_cell(
+                SheetId(sheet),
+                cell(address),
+                &input,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+    assert_eq!(reopened.version(), version);
+    reopened
+        .edit_cell(SheetId(0), cell("Z100"), "1", CalculationOptions::default())
+        .unwrap();
+    let edited = reopened.save().unwrap();
+    let data = part(&edited, "xl/worksheets/sheet1.xml");
+    assert_eq!(formula_text(&data, "D1"), "_xlfn.BYROW(A1:B2,SUM)");
+    assert_eq!(formula_text(&data, "E1"), "_xlfn.BYROW(A1:B2,_xleta.MIN)");
+    assert_eq!(part(&edited, "xl/workbook.xml"), book);
+}
+
+#[test]
+fn a_stored_eta_prefix_beside_a_defined_name_is_shown_and_kept() {
+    let mut parts = ooxml_opc::unzip_parts(&excel_saved_formulas(&[
+        ("C2", "_xlfn.BYROW(A1:B2,_xleta.SUM)"),
+        ("D2", "_xlfn.BYROW(A1:B2,SUM)"),
+    ]))
+    .unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "xl/workbook.xml" {
+            *bytes = String::from_utf8(bytes.clone())
+                .unwrap()
+                .replace(
+                    "</workbook>",
+                    r#"<definedNames><definedName name="SUM">_xlfn.LAMBDA(_xlpm.x,MAX(_xlpm.x))</definedName></definedNames></workbook>"#,
+                )
+                .into_bytes();
+        }
+    }
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    let inputs = ["C2", "D2"]
+        .into_iter()
+        .map(|address| CellInput {
+            cell: cell(address),
+            input: workbook.cell(SheetId(0), cell(address)).unwrap().input,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inputs[0].input, "=BYROW(A1:B2,_xleta.SUM)");
+    assert_eq!(inputs[1].input, "=BYROW(A1:B2,SUM)");
+    let version = workbook.version();
+    workbook
+        .edit_cells(SheetId(0), &inputs, CalculationOptions::default())
         .unwrap();
     assert_eq!(workbook.version(), version);
     assert_eq!(workbook.save().unwrap(), source);

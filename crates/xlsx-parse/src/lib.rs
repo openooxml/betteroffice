@@ -34,7 +34,9 @@ pub use chart::{
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use formula::translate_formula;
-pub use future_functions::{display_formula, excel_formula, saves_as};
+pub use future_functions::{
+    DefinedFunctionNames, FormulaNames, display_formula, excel_formula, saves_as,
+};
 pub use header_footer::{
     HeaderFooterPair, HeaderFooterText, SheetHeaderFooter, parse_header_footer,
     parse_header_footer_text,

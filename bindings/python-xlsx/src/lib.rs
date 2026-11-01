@@ -520,11 +520,14 @@ impl PyWorkbook {
     fn formula(&self, sheet: &Bound<'_, PyAny>, address: &str) -> PyResult<Option<String>> {
         let sheet = self.resolve_sheet(sheet)?;
         let cell = parse_cell(address)?;
-        let sheet = self.inner.sheet(sheet).map_err(map_error)?;
-        Ok(sheet
-            .cell(cell)
-            .and_then(|found| found.formula.as_deref())
-            .map(|formula| betteroffice_xlsx::display_formula(formula).into_owned()))
+        let shown = self.inner.cell(sheet, cell).map_err(map_error)?;
+        Ok(shown.is_formula.then(|| {
+            shown
+                .input
+                .strip_prefix('=')
+                .unwrap_or(&shown.input)
+                .to_owned()
+        }))
     }
 
     /// Takes what a user would type; returns whether anything changed.

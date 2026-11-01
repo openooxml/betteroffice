@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use xlsx_model::workbook::ColumnDefaults;
 use xlsx_model::{CellRange, CellRef, CellValue, MAX_COLS, MAX_ROWS, Sheet, SheetId};
+use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
 use xlsx_render::display_text;
 
 use super::Workbook;
@@ -10,7 +11,7 @@ use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
     MAX_DIAGNOSTIC_CELLS, failure, refusal,
 };
-use crate::{CellAddress, Result, XlsxSheetVisibility, display_formula};
+use crate::{CellAddress, Result, XlsxSheetVisibility};
 
 /// Most cells one read may return.
 const MAX_READ_CELLS: u64 = 100_000;
@@ -427,13 +428,15 @@ impl Workbook {
         }
         let mut text_bytes = 0_usize;
         let mut ranges = Vec::with_capacity(resolved.len());
+        let defined = DefinedFunctionNames::new(&self.model.defined_names);
         for range in resolved {
             let sheet = &self.model.sheets[range.sheet.0 as usize];
+            let names = defined.visible_from(Some(range.sheet));
             let mut rows = Vec::with_capacity(range.rows());
             for row in range.range.start.row..=range.range.end.row {
                 let mut read_row = Vec::with_capacity(range.cols());
                 for col in range.range.start.col..=range.range.end.col {
-                    let read = self.read_cell(sheet, CellRef::new(row, col));
+                    let read = self.read_cell(sheet, CellRef::new(row, col), names);
                     text_bytes += read.display_text.len()
                         + read.formula.as_ref().map_or(0, String::len)
                         + match &read.value {
@@ -502,7 +505,7 @@ impl Workbook {
         }))
     }
 
-    fn read_cell(&self, sheet: &Sheet, at: CellRef) -> CellRead {
+    fn read_cell(&self, sheet: &Sheet, at: CellRef, names: FormulaNames<'_>) -> CellRead {
         match sheet.cell(at) {
             Some(cell) => CellRead {
                 a1: at.to_a1(),
@@ -510,7 +513,7 @@ impl Workbook {
                 formula: cell
                     .formula
                     .as_deref()
-                    .map(|formula| display_formula(formula).into_owned()),
+                    .map(|formula| display_formula(formula, names).into_owned()),
                 display_text: display_text(&self.model.styles, self.model.date_system, cell),
             },
             None => CellRead {

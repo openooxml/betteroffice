@@ -15,6 +15,7 @@ use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, parse_formula, recalc_after_with_seed};
 use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId};
 use xlsx_ops::{CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty};
+use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
 use xlsx_render::display_text;
 
 use super::staging::CommitHistory;
@@ -25,7 +26,7 @@ use super::{
     validate_model_sheets, validate_op, written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
-use crate::{CalculationOptions, Error, Result, display_formula};
+use crate::{CalculationOptions, Error, Result};
 
 const MAX_STEPS: usize = 128;
 /// Most target and guard cells one batch may address.
@@ -561,6 +562,7 @@ impl Workbook {
         sheet: SheetId,
         at: CellRef,
         guard: &CellGuard,
+        names: FormulaNames<'_>,
     ) -> Option<&'static str> {
         let stored = self.model.sheet(sheet).and_then(|sheet| sheet.cell(at));
         if let Some(value) = &guard.value
@@ -571,8 +573,10 @@ impl Workbook {
         if let Some(formula) = &guard.formula
             && stored
                 .and_then(|cell| cell.formula.as_deref())
-                .map(display_formula)
-                != formula.as_deref().map(display_formula)
+                .map(|formula| display_formula(formula, names))
+                != formula
+                    .as_deref()
+                    .map(|formula| display_formula(formula, names))
         {
             return Some("formula");
         }
@@ -603,6 +607,8 @@ impl Workbook {
         let at = |code, message: String| failure(code, message, Some(requested.clone()));
         let resolved = self.resolve_target(keys, requested)?;
         let target = resolved.target(keys);
+        let defined = DefinedFunctionNames::new(&self.model.defined_names);
+        let names = defined.visible_from(Some(resolved.sheet));
         let mut addressed = resolved.cells();
         if step.expect.is_some() {
             addressed *= 2;
@@ -742,7 +748,7 @@ impl Workbook {
         }
         if let Some(guard) = &step.expect {
             for (cell, guard) in resolved.iter().zip(guard.cells.iter().flatten()) {
-                if let Some(field) = self.guard_mismatch(resolved.sheet, cell, guard) {
+                if let Some(field) = self.guard_mismatch(resolved.sheet, cell, guard, names) {
                     return Err(at(
                         EditFailureCode::ContentMismatch,
                         format!("the {field} of {} does not match its guard", cell.to_a1()),
@@ -754,8 +760,14 @@ impl Workbook {
             EditOperation::SetCellInputs { inputs, .. } => {
                 let mut states = Vec::new();
                 for (cell, input) in resolved.iter().zip(inputs.iter().flatten()) {
-                    let (state, format) =
-                        edit_cell_state(&self.model, resolved.sheet, cell, input, now_serial);
+                    let (state, format) = edit_cell_state(
+                        &self.model,
+                        &defined,
+                        resolved.sheet,
+                        cell,
+                        input,
+                        now_serial,
+                    );
                     validate_cell_state(&state).map_err(|error| {
                         at(
                             EditFailureCode::InvalidStep,
@@ -808,6 +820,7 @@ impl Workbook {
                         formula: Some(committed_formula(
                             source.clone(),
                             current.formula.as_deref(),
+                            names,
                         )),
                         style: written_cell_style(&self.model, resolved.sheet, cell, false),
                     };
