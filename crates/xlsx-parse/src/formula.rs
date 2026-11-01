@@ -186,7 +186,7 @@ fn separator(character: char) -> bool {
         )
 }
 
-fn skip_quoted(source: &str, start: usize, quote: u8) -> usize {
+pub(crate) fn skip_quoted(source: &str, start: usize, quote: u8) -> usize {
     let bytes = source.as_bytes();
     let mut index = start + 1;
     while index < bytes.len() {
@@ -201,7 +201,7 @@ fn skip_quoted(source: &str, start: usize, quote: u8) -> usize {
     bytes.len()
 }
 
-fn skip_brackets(source: &str, start: usize) -> usize {
+pub(crate) fn skip_brackets(source: &str, start: usize) -> usize {
     let bytes = source.as_bytes();
     let mut depth = 1;
     let mut index = start + 1;
