@@ -56,16 +56,18 @@ function source(
 function connection() {
   const pair = createInProcessPair();
   const messages: unknown[] = [];
+  const posts: Array<{ message: unknown; transfer: Transferable[] }> = [];
   let openId: number | undefined;
   let acknowledged = false;
   const requested = deferred<void>();
   const host = { ...pair.host, post(message: unknown, transfer?: Transferable[]) {
     if (isHostMessage(message) && message.kind === 'reply' && message.id === openId && message.ok) acknowledged = true;
     messages.push(message);
+    posts.push({ message, transfer: transfer ?? [] });
     pair.host.post(message, transfer);
   } };
   createPresentationSessionHost(host, { initWasm: async () => {} });
-  return { messages, requested: requested.promise, get acknowledged() { return acknowledged; }, transport: {
+  return { messages, posts, requested: requested.promise, get acknowledged() { return acknowledged; }, transport: {
     ...pair.client, post(message: unknown, transfer?: Transferable[]) {
       if (isClientMessage(message) && message.kind === 'call') {
         if (message.method === 'openCommandEditor') openId = message.id;
@@ -126,6 +128,17 @@ test('the initial ack waits for active fonts and main installation; background f
   expect(faces.map((face) => face.family)).toEqual(['Calibri', 'Cambria']);
   expect(wire.messages.some((message) => isHostMessage(message) && message.kind === 'event' && message.name === 'defaultFonts')).toBe(true);
   expect(font.byteLength).toBeGreaterThan(0);
+  const landings = wire.posts.filter(({ message }) => isHostMessage(message) && (message.kind === 'event'
+    ? message.name === 'defaultFonts' : message.kind === 'reply' && message.ok &&
+      (message.value as DefaultFontPayload | null)?.defaultFonts !== undefined));
+  const landed = landings.flatMap(({ message }) => ((isHostMessage(message) && message.kind === 'event'
+    ? message.payload : isHostMessage(message) && message.kind === 'reply' && message.ok ? message.value : null) as
+    DefaultFontPayload | null)?.defaultFonts ?? []);
+  expect(landed.map((face) => face.family)).toEqual(['Calibri', 'Cambria']);
+  for (const face of landed) expect('bytes' in face).toBe(false);
+  for (const { transfer } of landings) {
+    expect(transfer.some((buffer) => buffer instanceof ArrayBuffer && buffer.byteLength === font.byteLength)).toBe(false);
+  }
 });
 
 for (const shared of [false, true]) test(`navigation waits only for target pending fonts (${shared ? 'shared' : 'direct'})`, async () => {

@@ -11,6 +11,7 @@ pub mod cash_flow;
 pub mod cell_info;
 pub mod criteria;
 pub(crate) mod criteria_index;
+pub mod database;
 pub mod datetime;
 pub mod engineering;
 pub mod financial;
@@ -286,6 +287,18 @@ pub enum Func {
     BesselJ,
     BesselK,
     BesselY,
+    DAverage,
+    DCount,
+    DCountA,
+    DGet,
+    DMax,
+    DMin,
+    DProduct,
+    DStdev,
+    DStdevP,
+    DSum,
+    DVar,
+    DVarP,
     /// the `(a,b)` reference union the parser builds under [`UNION_NAME`].
     Union,
 }
@@ -586,6 +599,18 @@ pub fn resolve(name: &str) -> Option<Func> {
         "ISODD" => Func::IsOdd,
         "NA" => Func::Na,
         "N" => Func::N,
+        "DAVERAGE" => Func::DAverage,
+        "DCOUNT" => Func::DCount,
+        "DCOUNTA" => Func::DCountA,
+        "DGET" => Func::DGet,
+        "DMAX" => Func::DMax,
+        "DMIN" => Func::DMin,
+        "DPRODUCT" => Func::DProduct,
+        "DSTDEV" => Func::DStdev,
+        "DSTDEVP" => Func::DStdevP,
+        "DSUM" => Func::DSum,
+        "DVAR" => Func::DVar,
+        "DVARP" => Func::DVarP,
         "(UNION)" => Func::Union,
         _ => return None,
     })
@@ -856,6 +881,18 @@ impl Func {
             Func::IsOdd => info::isodd(args, ctx),
             Func::Na => info::na(args, ctx),
             Func::N => info::n(args, ctx),
+            Func::DAverage => database::daverage(args, ctx),
+            Func::DCount => database::dcount(args, ctx),
+            Func::DCountA => database::dcounta(args, ctx),
+            Func::DGet => database::dget(args, ctx),
+            Func::DMax => database::dmax(args, ctx),
+            Func::DMin => database::dmin(args, ctx),
+            Func::DProduct => database::dproduct(args, ctx),
+            Func::DStdev => database::dstdev(args, ctx),
+            Func::DStdevP => database::dstdevp(args, ctx),
+            Func::DSum => database::dsum(args, ctx),
+            Func::DVar => database::dvar(args, ctx),
+            Func::DVarP => database::dvarp(args, ctx),
             Func::Union => err(ErrorValue::Value),
         }
     }
@@ -1314,6 +1351,18 @@ mod tests {
             (Func::IsOdd, "ISODD"),
             (Func::Na, "NA"),
             (Func::N, "N"),
+            (Func::DAverage, "DAVERAGE"),
+            (Func::DCount, "DCOUNT"),
+            (Func::DCountA, "DCOUNTA"),
+            (Func::DGet, "DGET"),
+            (Func::DMax, "DMAX"),
+            (Func::DMin, "DMIN"),
+            (Func::DProduct, "DPRODUCT"),
+            (Func::DStdev, "DSTDEV"),
+            (Func::DStdevP, "DSTDEVP"),
+            (Func::DSum, "DSUM"),
+            (Func::DVar, "DVAR"),
+            (Func::DVarP, "DVARP"),
             (Func::Union, UNION_NAME),
         ];
         for &(func, name) in canonical {
