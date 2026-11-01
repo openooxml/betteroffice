@@ -53,7 +53,7 @@ const FALLBACK_SCRIPT_TEXT = /[\u0590-\u06ff\u0750-\u077f\u0870-\u08ff\u1100-\u1
  * Commands that can bring back or reveal text, or change the fonts runs use, without naming
  * either. A remote merge can also integrate updates held back for a missing dependency.
  */
-const FONT_RESHAPING_COMMANDS = new Set(['pasteFragment', 'undo', 'redo', 'toggleMark', 'formatSelection', 'formatRange',
+const FONT_RESHAPING_COMMANDS = new Set(['pasteFragment', 'replacePasteFragment', 'undo', 'redo', 'toggleMark', 'formatSelection', 'formatRange',
   'clearFormatting', 'applyParagraphStyle', 'acceptRevision', 'rejectRevision', 'setProposalStates', 'applyRemoteUpdate',
   'applyRemoteUpdateChunks', 'collabPipe']);
 

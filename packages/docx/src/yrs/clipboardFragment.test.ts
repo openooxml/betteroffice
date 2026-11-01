@@ -310,6 +310,31 @@ describe('vertically merged rows on copy', () => {
   });
 });
 
+describe('validClipboardFragment runs', () => {
+  test('accepts runs that join to the paragraph text and rejects mismatches', () => {
+    expect(validClipboardFragment({
+      paragraphs: [{
+        text: 'Bold link',
+        pStyle: 'Heading1',
+        list: 'numbered',
+        runs: [
+          { text: 'Bold ', format: { bold: true, fontSize: 20, fontFamily: { ascii: 'Georgia' }, color: { rgb: 'FF0000' } } },
+          { text: 'link', href: 'https://example.com' },
+        ],
+      }],
+    })).toBe(true);
+    expect(validClipboardFragment({
+      paragraphs: [{ text: 'Bold', runs: [{ text: 'Other' }] }],
+    })).toBe(false);
+    expect(validClipboardFragment({
+      paragraphs: [{ text: 'x', runs: [{ text: 'x', href: 'not a url' }] }],
+    })).toBe(false);
+    expect(validClipboardFragment({
+      paragraphs: [{ text: 'x', list: 'roman' as never }],
+    })).toBe(false);
+  });
+});
+
 describe('validClipboardFragment spans', () => {
   function fragmentWithSpan(tcPr: Record<string, unknown>): unknown {
     return {
@@ -503,6 +528,43 @@ describe('applyClipboardFragment', () => {
     );
     expect(calls).toEqual(['delete', 'table', 'text:a', 'split', 'text:b']);
     expect(caret).toEqual({ story: 'body', paraId: 'p0n', offset: 1 });
+  });
+
+  test('applies run formatting, hyperlinks and paragraph style from runs', () => {
+    const calls: string[] = [];
+    const base = fakeEngine(calls);
+    const engine = {
+      ...base,
+      formatRange: (range: { start: { offset: number }; end: { offset: number } }, delta: unknown) => {
+        calls.push(`format:${range.start.offset}-${range.end.offset}:${JSON.stringify(delta)}`);
+      },
+      setHyperlink: (range: { start: { offset: number }; end: { offset: number } }, link: { href: string }) => {
+        calls.push(`link:${range.start.offset}-${range.end.offset}:${link.href}`);
+      },
+      applyParagraphStyle: (_range: unknown, styleId: string) => { calls.push(`style:${styleId}`); },
+    } as unknown as ClipboardPasteEngine;
+    const caret = applyClipboardFragment(
+      engine,
+      { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } },
+      {
+        paragraphs: [{
+          text: 'Bold link',
+          pStyle: 'Heading1',
+          runs: [
+            { text: 'Bold ', format: { bold: true } },
+            { text: 'link', href: 'https://example.com' },
+          ],
+        }],
+      },
+    );
+    expect(calls).toEqual([
+      'text:Bold ',
+      'format:0-5:{"bold":true}',
+      'text:link',
+      'link:5-9:https://example.com',
+      'style:Heading1',
+    ]);
+    expect(caret).toEqual({ story: 'body', paraId: 'p0', offset: 9 });
   });
 
   test('leaves a collapsed range alone and skips empty text', () => {

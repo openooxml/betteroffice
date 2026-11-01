@@ -1,7 +1,9 @@
 /** Text and IME input surface backed by sticky session positions. */
 
 import React, {
+  Suspense,
   forwardRef,
+  lazy,
   memo,
   useCallback,
   useEffect,
@@ -14,8 +16,13 @@ import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
   applyClipboardFragment,
+  clipboardFragmentHasFormatting,
+  mergeFormattingFragment,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
+  textOnlyFragment,
+  type DocxClipboardFragment,
+  type PasteFormattingOption,
   type YrsAuthor,
   type YrsInputPositionMap,
   type YrsInlineFormatDelta,
@@ -55,6 +62,9 @@ import {
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
 import { useTranslation } from '../../i18n';
+import { usePasteOptions } from './pasteOptions/usePasteOptions';
+
+const LazyPasteOptionsControl = lazy(() => import('./pasteOptions/PasteOptionsControl'));
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
 
@@ -127,6 +137,7 @@ export interface YrsInputProps {
   /** Whether a missing selection starts as a caret at the story start; input always starts one. */
   seedSelection?: boolean;
   session: YrsSession | null;
+  pasteOptions?: boolean;
   story?: string;
   isSuggesting?: boolean;
   author?: string;
@@ -299,6 +310,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     applyPendingSelection,
     seedSelection = true,
     session,
+    pasteOptions: pasteOptionsEnabled = true,
     story = 'body',
     isSuggesting = false,
     author = 'User',
@@ -681,6 +693,50 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal]
   );
 
+  const pasteRecordRef = useRef<{
+    fragment: DocxClipboardFragment;
+    range: YrsStoryRange;
+    end: YrsLoc;
+    version: string;
+  } | null>(null);
+  const pasteReplacingRef = useRef(false);
+  const pastePendingAnchorRef = useRef(false);
+  const choosePasteOption = useCallback((option: PasteFormattingOption): void => {
+    const record = pasteRecordRef.current;
+    if (!record || !session || readOnly) return;
+    const variant = option === 'merge'
+      ? mergeFormattingFragment(record.fragment)
+      : option === 'text-only'
+        ? textOnlyFragment(record.fragment)
+        : structuredClone(record.fragment);
+    enqueueInputOperation(() => {
+      if (!isCurrentInput(session)) return;
+      pasteReplacingRef.current = true;
+      session.addUndoBoundary();
+      try {
+        const undone = session.undo();
+        const range = undone
+          ? { story: record.range.story, start: record.range.start, end: record.range.start }
+          : record.range;
+        const caret = applyClipboardFragment(session, range, variant, suggestingAuthor());
+        session.setSelection(caret);
+        pasteRecordRef.current = { ...record, end: caret, version: session.version() };
+        pastePendingAnchorRef.current = true;
+        finishMutation();
+      } finally {
+        if (isCurrentInput(session)) session.addUndoBoundary();
+        pasteReplacingRef.current = false;
+      }
+    }, 'mutation');
+  }, [enqueueInputOperation, finishMutation, isCurrentInput, readOnly, session, suggestingAuthor]);
+  const pasteOptions = usePasteOptions({
+    enabled: pasteOptionsEnabled && !readOnly,
+    onChoose: choosePasteOption,
+    focusEditor: () => { textareaRef.current?.focus(); },
+  });
+  const pasteOptionsRef = useRef(pasteOptions);
+  pasteOptionsRef.current = pasteOptions;
+
   const finishResidentMutation = useCallback(
     (result: ResidentFrameApplyResult): void => {
       if (result.frameEpoch !== null) {
@@ -785,6 +841,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const insertText = useCallback(
     (text: string, inputTime?: number, composition = false): void => {
+      pasteRecordRef.current = null;
+      pastePendingAnchorRef.current = false;
+      pasteOptionsRef.current.dismiss();
       verticalCaretGoalRef.current.reset();
       if (!session || readOnly || text.length === 0) return;
       if (holdOperation({ kind: composition ? 'composition' : 'text', text, inputTime })) return;
@@ -1046,6 +1105,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Deletes queued behind busy input join one batch, applied with one layout.
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
+      pasteRecordRef.current = null;
+      pastePendingAnchorRef.current = false;
+      pasteOptionsRef.current.dismiss();
       if (holdOperation({ kind: 'delete', direction })) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
@@ -1069,6 +1131,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const splitParagraph = useCallback((): void => {
+    pasteRecordRef.current = null;
+    pastePendingAnchorRef.current = false;
+    pasteOptionsRef.current.dismiss();
     if (holdOperation({ kind: 'split' })) return;
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
@@ -1597,6 +1662,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         discardedCompositionRef.current = false;
       }
       if (event.nativeEvent.isComposing || composingRef.current) return;
+      pasteOptionsRef.current.handleKeyDown(event);
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
       if (mod && key === 'a') {
@@ -1772,6 +1838,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           try {
             const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
             session.setSelection(caret);
+            if (pasteOptionsEnabled && clipboardFragmentHasFormatting(fragment)) {
+              pasteRecordRef.current = {
+                fragment: structuredClone(fragment),
+                range,
+                end: caret,
+                version: session.version(),
+              };
+              pastePendingAnchorRef.current = true;
+            } else {
+              pasteRecordRef.current = null;
+              pasteOptionsRef.current.dismiss();
+            }
             finishMutation();
           } finally {
             if (isCurrentInput(session)) session.addUndoBoundary();
@@ -1781,7 +1859,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       insertText(plain);
     },
-    [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
+    [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, pasteOptionsEnabled, readOnly, session, suggestingAuthor]
   );
 
   const handleCut = useCallback(
@@ -2130,6 +2208,26 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         ? current
         : style
     );
+    const pasteRecord = pasteRecordRef.current;
+    if (pasteRecord && session) {
+      const endPosition = locToDisplayPosition(pasteRecord.end);
+      if (!pasteReplacingRef.current && session.version() !== pasteRecord.version) {
+        pasteRecordRef.current = null;
+        pastePendingAnchorRef.current = false;
+        pasteOptionsRef.current.dismiss();
+      } else if (endPosition !== null && selection.anchor === endPosition && selection.head === endPosition) {
+        const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
+        if (pastePendingAnchorRef.current) {
+          pastePendingAnchorRef.current = false;
+          pasteOptionsRef.current.show(anchor);
+        } else if (pasteOptionsRef.current.visible) {
+          pasteOptionsRef.current.setAnchor(anchor);
+        }
+      } else if (!pasteReplacingRef.current && !pastePendingAnchorRef.current) {
+        pasteRecordRef.current = null;
+        pasteOptionsRef.current.dismiss();
+      }
+    }
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
     lastCaretScrollSelectionRef.current = stickySelection;
@@ -2168,6 +2266,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     layoutCommit,
     layoutCommitVersion,
     layoutUpdateOrigin,
+    locToDisplayPosition,
     onStateChange,
     readOnly,
     residentCaret,
@@ -2196,6 +2295,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onBeforeInput={handleBeforeInput}
       onInput={handleInput}
       onKeyDown={handleKeyDown}
+      onKeyUp={(event) => { pasteOptions.handleKeyUp(event); }}
       onCompositionStart={handleCompositionStart}
       onCompositionUpdate={handleCompositionUpdate}
       onCompositionEnd={handleCompositionEnd}
@@ -2212,9 +2312,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }}
     />
   );
-  return typeof document !== 'undefined' && document.body
-    ? createPortal(textarea, document.body)
-    : textarea;
+  const pasteControl = pasteOptions.visible && pasteOptions.anchor
+    ? (
+      <Suspense fallback={null}>
+        <LazyPasteOptionsControl
+          anchor={pasteOptions.anchor}
+          menuOpen={pasteOptions.menuOpen}
+          selected={pasteOptions.selected}
+          onMenuOpenChange={pasteOptions.setMenuOpen}
+          onChoose={pasteOptions.choose}
+          onCloseMenu={pasteOptions.closeMenu}
+        />
+      </Suspense>
+    )
+    : null;
+  const body = typeof document !== 'undefined' ? document.body : null;
+  return (
+    <>
+      {body ? createPortal(textarea, body) : textarea}
+      {pasteControl && body ? createPortal(pasteControl, body) : pasteControl}
+    </>
+  );
 });
 
 export const YrsInput = memo(YrsInputComponent);

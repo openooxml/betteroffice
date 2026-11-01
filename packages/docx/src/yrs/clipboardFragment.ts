@@ -51,11 +51,21 @@ export interface DocxTableFragment {
 
 export type DocxClipboardInline = { text: string } | { image: Record<string, unknown> };
 
+/** @internal One formatted run of a clipboard paragraph; the runs of a paragraph join to its `text`. */
+export interface DocxClipboardRun {
+  text: string;
+  format?: YrsInlineFormatDelta;
+  href?: string;
+}
+
 /** @internal A paragraph's leading tables and ordered inline content. */
 export interface DocxClipboardParagraph {
   tables?: DocxTableFragment[];
   text: string;
   inlines?: DocxClipboardInline[];
+  runs?: DocxClipboardRun[];
+  pStyle?: string;
+  list?: 'bullet' | 'numbered';
 }
 
 /** @internal Copied or pasted content in document order; consecutive paragraphs are separate paragraphs. */
@@ -224,6 +234,20 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
   return value.paragraphs.every(paragraph => {
     if (!plainObject(paragraph) || !text(paragraph.text, true) ||
       !(paragraph.tables === undefined || (Array.isArray(paragraph.tables) && paragraph.tables.every(entry => table(entry, 1))))) return false;
+    if (paragraph.pStyle !== undefined &&
+      (typeof paragraph.pStyle !== 'string' || paragraph.pStyle === '' || paragraph.pStyle.length > 255)) return false;
+    if (paragraph.list !== undefined && paragraph.list !== 'bullet' && paragraph.list !== 'numbered') return false;
+    if (paragraph.runs !== undefined) {
+      if (!Array.isArray(paragraph.runs)) return false;
+      let joined = '';
+      for (const run of paragraph.runs) {
+        if (!plainObject(run) || !text(run.text, false) || !formatOk(run.format)) return false;
+        if (run.href !== undefined &&
+          (typeof run.href !== 'string' || run.href === '' || run.href.length > 8192 || /[\s\u0000-\u0020]/u.test(run.href))) return false;
+        joined += run.text as string;
+      }
+      if (paragraph.inlines === undefined && joined !== paragraph.text) return false;
+    }
     if (paragraph.inlines === undefined) return true;
     if (!Array.isArray(paragraph.inlines) || paragraph.inlines.length > MAX_FRAGMENT_TEXT) return false;
     let plain = '';
@@ -248,7 +272,7 @@ export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegme
 /** @internal Engine surface a fragment paste needs. */
 export type ClipboardPasteEngine = Pick<
   YrsSession,
-  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage'
+  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' | 'formatRange' | 'setHyperlink' | 'applyParagraphStyle'
 >;
 
 /** @internal Inclusive grid bounds for {@link readTableFragment}. */
@@ -660,15 +684,36 @@ export function applyClipboardFragment(
       const split = engine.splitParagraph(caret, suggesting);
       caret = { story: caret.story, paraId: split.secondParaId, offset: 0 };
     }
+    const paragraphStart = { ...caret };
     for (const table of paragraph.tables ?? []) {
       caret = engine.insertTableFragment(caret, table, suggesting).after;
     }
-    for (const inline of paragraph.inlines ?? (paragraph.text === '' ? [] : [{ text: paragraph.text }])) {
-      const inserted = 'image' in inline
-        ? engine.insertImage(caret, independentImage(inline.image), suggesting)
-        : engine.insertText(caret, inline.text, suggesting);
-      if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
-      caret = { story: inserted.range.story, ...inserted.range.end };
+    const hasImage = (paragraph.inlines ?? []).some(inline => 'image' in inline);
+    if (paragraph.runs && !hasImage) {
+      for (const run of paragraph.runs) {
+        if (run.text === '') continue;
+        const inserted = engine.insertText(caret, run.text, suggesting);
+        if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
+        const range = inserted.range;
+        caret = { story: range.story, ...range.end };
+        if (run.format && Object.keys(run.format).length > 0) engine.formatRange(range, run.format);
+        if (run.href) engine.setHyperlink(range, { href: run.href });
+      }
+    } else {
+      for (const inline of paragraph.inlines ?? (paragraph.text === '' ? [] : [{ text: paragraph.text }])) {
+        const inserted = 'image' in inline
+          ? engine.insertImage(caret, independentImage(inline.image), suggesting)
+          : engine.insertText(caret, inline.text, suggesting);
+        if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
+        caret = { story: inserted.range.story, ...inserted.range.end };
+      }
+    }
+    if (paragraph.pStyle) {
+      engine.applyParagraphStyle(
+        { story: caret.story, start: { paraId: paragraphStart.paraId, offset: paragraphStart.offset }, end: { paraId: caret.paraId, offset: caret.offset } },
+        paragraph.pStyle,
+        suggesting
+      );
     }
   });
   return caret;

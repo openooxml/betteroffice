@@ -87,6 +87,7 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  pasteOptions,
   holdInput,
   inputScope,
   inputQueries,
@@ -182,6 +183,7 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  pasteOptions?: boolean;
   holdInput?: boolean;
   inputScope?: number;
   inputQueries?: DisplayListQueries | null;
@@ -486,6 +488,7 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        pasteOptions={pasteOptions}
         holdInput={holdInput}
         inputScope={inputScope}
         inputQueries={inputQueries}

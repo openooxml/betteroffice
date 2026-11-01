@@ -8,7 +8,7 @@ import {
   type DocxTableFragment,
   type DocxTableFragmentCell,
 } from '@betteroffice/docx/yrs';
-import type { YrsInlineFormatDelta } from '@betteroffice/docx/yrs';
+import type { DocxClipboardRun, YrsInlineFormatDelta } from '@betteroffice/docx/yrs';
 
 const NBSP = '\u00a0';
 const LINE_SEP = '\u2028';
@@ -214,7 +214,15 @@ export function clipboardFragmentHtml(fragment: DocxClipboardFragment): string {
   for (const paragraph of fragment.paragraphs) {
     for (const table of paragraph.tables ?? []) html += serializeTable(table);
     if (paragraph.inlines || paragraph.text !== '' || (paragraph.tables ?? []).length === 0) {
-      const content = paragraph.inlines?.map(inline => {
+      const runContent = !paragraph.inlines && paragraph.runs
+        ? paragraph.runs.map(run => {
+            const style = spanStyleForText(undefined, run.format);
+            const text = escapeHtml(run.text);
+            const styled = style ? `<span style="${escapeHtml(style)}">${text}</span>` : text;
+            return run.href ? `<a href="${escapeHtml(run.href)}">${styled}</a>` : styled;
+          }).join('')
+        : null;
+      const content = runContent ?? paragraph.inlines?.map(inline => {
         if ('text' in inline) return escapeHtml(inline.text);
         const image = inline.image;
         const dimensions = ['width', 'height'].map(key => typeof image[key] === 'number' && Number.isFinite(image[key]) && image[key] > 0
@@ -377,41 +385,8 @@ function normalizeTextPart(part: string): string {
   return part.replace(/[ \n\r\f\v\u00a0\u2028\u2029]+/g, ' ');
 }
 
-function normalizeParagraphText(raw: string): string {
-  const withSpaces = raw.split(NBSP).join(' ');
-  const parts = withSpaces.split('\t').map(normalizeTextPart);
-  const joined = parts.join('\t');
-  const trimmed = joined.replace(/^ +| +$/g, '');
-  if (trimmed === '') return '';
-  return trimmed;
-}
-
 function textNodeText(node: Text): string {
   return node.data.split(NBSP).join(' ');
-}
-
-function blockLines(block: Element): string[] {
-  const lines: string[] = [];
-  let current = '';
-  const visit = (node: Node) => {
-    if (node.nodeType === 8) return;
-    if (node.nodeType === 3) {
-      current += textNodeText(node as Text);
-      return;
-    }
-    if (node.nodeType !== 1) return;
-    const element = node as Element;
-    if (element.tagName.toUpperCase() === 'BR') {
-      lines.push(current);
-      current = '';
-      return;
-    }
-    if (element.tagName.toUpperCase() === 'TABLE') return;
-    for (const child of Array.from(element.childNodes)) visit(child);
-  };
-  for (const child of Array.from(block.childNodes)) visit(child);
-  lines.push(current);
-  return lines.map(normalizeParagraphText);
 }
 
 function containsTable(element: Element): boolean {
@@ -644,6 +619,86 @@ function parseTableElement(table: HTMLTableElement): DocxTableFragment {
   };
 }
 
+function finishRuns(runs: DocxClipboardRun[]): DocxClipboardRun[] {
+  const finished = runs.filter(run => run.text !== '');
+  if (finished.length > 0) {
+    finished[0] = { ...finished[0]!, text: finished[0]!.text.replace(/^ +/, '') };
+    const last = finished[finished.length - 1]!;
+    finished[finished.length - 1] = { ...last, text: last.text.replace(/ +$/, '') };
+  }
+  return finished.filter(run => run.text !== '');
+}
+
+function runsHaveFormatting(runs: DocxClipboardRun[]): boolean {
+  return runs.some(run => run.href !== undefined || (run.format !== undefined && Object.keys(run.format).length > 0));
+}
+
+function inlineParagraphs(
+  nodes: Node[],
+  ancestors: Element[],
+  extra: { pStyle?: string; list?: 'bullet' | 'numbered' } = {}
+): DocxClipboardParagraph[] {
+  const paragraphs: DocxClipboardParagraph[] = [];
+  let runs: DocxClipboardRun[] = [];
+  const flush = () => {
+    const finished = finishRuns(runs);
+    runs = [];
+    const text = finished.map(run => run.text).join('');
+    if (text === '') return;
+    paragraphs.push({
+      text,
+      ...(runsHaveFormatting(finished) ? { runs: finished } : {}),
+      ...extra,
+    });
+  };
+  const pushText = (raw: string, chain: Element[]) => {
+    const parts = raw.split('\t').map(normalizeTextPart);
+    const text = parts.join('\t');
+    if (text === '' || (/^[ ]+$/.test(text) && runs.length === 0)) return;
+    const state = blankInlineFormat();
+    for (const ancestor of chain) applyInlineElement(state, ancestor, false);
+    const format = formatDelta(state);
+    const link = [...chain].reverse().find(element => element.tagName.toUpperCase() === 'A');
+    const href = link?.getAttribute('href') ?? undefined;
+    const last = runs[runs.length - 1];
+    if (last && JSON.stringify(last.format) === JSON.stringify(format) && last.href === href) {
+      last.text += text;
+    } else {
+      runs.push({ text, ...(format ? { format } : {}), ...(href ? { href } : {}) });
+    }
+  };
+  const walk = (node: Node, chain: Element[]) => {
+    if (node.nodeType === 8) return;
+    if (node.nodeType === 3) {
+      pushText(textNodeText(node as Text), chain);
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const element = node as Element;
+    const tag = element.tagName.toUpperCase();
+    if (tag === 'BR') {
+      flush();
+      return;
+    }
+    if (tag === 'TABLE' || SKIP_TAGS.has(tag)) return;
+    for (const child of Array.from(element.childNodes)) walk(child, [...chain, element]);
+  };
+  for (const node of nodes) walk(node, ancestors);
+  flush();
+  return paragraphs;
+}
+
+function blockExtra(element: Element): { pStyle?: string; list?: 'bullet' | 'numbered' } {
+  const tag = element.tagName.toUpperCase();
+  const heading = /^H([1-6])$/.exec(tag);
+  if (heading) return { pStyle: `Heading${heading[1]}` };
+  if (tag === 'LI') {
+    const parent = element.parentElement?.tagName.toUpperCase();
+    return { list: parent === 'OL' ? 'numbered' : 'bullet' };
+  }
+  return {};
+}
+
 /** Parsed table fragment from HTML, or null when the HTML holds no table. */
 export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   const parser = new DOMParser();
@@ -665,13 +720,16 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   if (!body) return null;
   const paragraphs: DocxClipboardParagraph[] = [];
   let activeTablePara: DocxClipboardParagraph | null = null;
-  const pushTextLines = (lines: string[]) => {
-    for (const line of lines) {
+  const pushParagraphs = (parsed: DocxClipboardParagraph[]) => {
+    for (const paragraph of parsed) {
       if (activeTablePara && activeTablePara.text === '') {
-        activeTablePara.text = line;
+        activeTablePara.text = paragraph.text;
+        if (paragraph.runs) activeTablePara.runs = paragraph.runs;
+        if (paragraph.pStyle) activeTablePara.pStyle = paragraph.pStyle;
+        if (paragraph.list) activeTablePara.list = paragraph.list;
         activeTablePara = null;
       } else {
-        paragraphs.push({ text: line });
+        paragraphs.push(paragraph);
       }
     }
   };
@@ -701,20 +759,19 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
     for (const child of Array.from(element.childNodes)) collectInlineRaw(child, out);
   };
   const walkTop = (nodes: Node[]) => {
-    let pendingInline: string[] = [];
+    let pendingInline: Node[] = [];
     const flushPendingInline = () => {
       if (pendingInline.length === 0) return;
-      const raw = pendingInline.join('');
+      const pending = pendingInline;
       pendingInline = [];
-      const lines = raw.split(LINE_SEP).map(normalizeParagraphText).filter((line) => line !== '');
-      pushTextLines(lines);
+      pushParagraphs(inlineParagraphs(pending, []));
     };
     for (const node of nodes) {
       if (node.nodeType === 8) continue;
       if (node.nodeType === 3) {
         const raw = textNodeText(node as Text);
         if (raw.trim() === '' && !raw.includes('\t')) continue;
-        pendingInline.push(raw);
+        pendingInline.push(node);
         continue;
       }
       if (node.nodeType !== 1) continue;
@@ -722,12 +779,17 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
       const tag = element.tagName.toUpperCase();
       if (SKIP_TAGS.has(tag)) continue;
       if (tag === 'BR') {
-        pendingInline.push(LINE_SEP);
+        pendingInline.push(node);
         continue;
       }
       if (tag === 'TABLE') {
         flushPendingInline();
         pushTable(parseTableElement(element as HTMLTableElement));
+        continue;
+      }
+      if (tag === 'UL' || tag === 'OL') {
+        flushPendingInline();
+        walkTop(Array.from(element.childNodes));
         continue;
       }
       if (BLOCK_TAGS.has(tag)) {
@@ -737,8 +799,7 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
           continue;
         }
         flushPendingInline();
-        const lines = blockLines(element);
-        pushTextLines(lines.filter((line) => line !== ''));
+        pushParagraphs(inlineParagraphs(Array.from(element.childNodes), [element], blockExtra(element)));
         continue;
       }
       if (containsTable(element)) {
@@ -750,13 +811,16 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
       collectInlineRaw(element, parts);
       const raw = parts.join('');
       if (raw.trim() === '' && !raw.includes('\t') && !raw.includes(LINE_SEP)) continue;
-      pendingInline.push(raw);
+      pendingInline.push(node);
     }
     flushPendingInline();
   };
   walkTop(Array.from(body.childNodes));
   const cleaned = paragraphs.filter((paragraph) => (paragraph.tables ?? []).length > 0 || paragraph.text !== '');
-  if (!cleaned.some((paragraph) => (paragraph.tables ?? []).length > 0)) return null;
+  const hasRichContent = cleaned.some((paragraph) =>
+    (paragraph.tables ?? []).length > 0 || paragraph.runs !== undefined ||
+    paragraph.pStyle !== undefined || paragraph.list !== undefined);
+  if (!hasRichContent) return null;
   const fragment: DocxClipboardFragment = { paragraphs: cleaned };
   return validClipboardFragment(fragment) ? fragment : null;
 }

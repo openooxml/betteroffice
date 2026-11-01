@@ -236,6 +236,43 @@ test('paste creates an identical table and one undo removes it', async () => {
   }
 }, TIMEOUT);
 
+test('replacePasteFragment swaps the paste variant in a single undo step', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    let version = 0;
+    let seq = 0;
+    const paragraphs = engine.paragraphs('body');
+    const atPara = paragraphs[paragraphs.length - 1]!;
+    const atSpan = engine.geometryReader.locateParagraph('body', atPara.paraId);
+    const at = { story: 'body', paraId: atPara.paraId, offset: atSpan.end - atSpan.start };
+    const before = engine.paragraphs('body').map((paragraph) => paragraph.text);
+    const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
+      selection: { anchor: at, focus: at },
+      fragment: { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { bold: true } }] }] },
+    }));
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    version = pasted.version;
+    const pastedEnd = pasted.selection!.focus;
+    const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+      selection: { anchor: at, focus: pastedEnd },
+      fragment: { paragraphs: [{ text: 'Plain' }] },
+    }));
+    expect(replaced.outcomes[0]?.status).toBe('applied');
+    version = replaced.version;
+    expect(engine.paragraphs('body').map((paragraph) => paragraph.text)).not.toContain('SeedRich');
+    expect(engine.paragraphs('body').map((paragraph) => paragraph.text)).toContain('SeedPlain');
+    const undone = await client.edit(intent(++seq, version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    version = undone.version;
+    expect(engine.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(before);
+    const redone = await client.edit(intent(++seq, version, 'redo', {}));
+    expect(redone.outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body').map((paragraph) => paragraph.text)).toContain('SeedPlain');
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test('paste replays text, tables and splits across paragraphs', async () => {
   const { client, engine } = await openTableWorker();
   try {

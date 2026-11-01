@@ -539,6 +539,12 @@
     "tableInserted": "डाली गई तालिका",
     "tableDeleted": "हटाई गई तालिका"
   },
+  "pasteOptions": {
+    "button": "पेस्ट विकल्प (Ctrl)",
+    "keepSource": "स्रोत स्वरूपण रखें",
+    "merge": "स्वरूपण मर्ज करें",
+    "textOnly": "केवल टेक्स्ट रखें"
+  },
   "contextMenu": {
     "ariaLabel": "AI क्रियाएँ मेनू",
     "textMenuAriaLabel": "टेक्स्ट संपादन मेनू",

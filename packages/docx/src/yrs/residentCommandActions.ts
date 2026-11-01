@@ -214,6 +214,7 @@ const DOCX_COMMAND_POLICIES = {
   formatSelection: { keys: ['delta'] }, toggleStrike: { keys: [] }, toggleList: { keys: ['kind'] },
   changeIndent: { keys: ['direction', 'preserveNumbering'] },
   insertImage: { keys: ['image'] }, insertTable: { keys: ['rows', 'columns'] }, pasteFragment: { keys: ['fragment'] },
+  replacePasteFragment: { keys: ['fragment'] },
   insertPageBreak: { keys: [] }, insertSectionBreak: { keys: ['type'] },
   insertTableRow: { keys: ['side'] }, insertTableColumn: { keys: ['side'] },
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
@@ -382,6 +383,9 @@ function validCommandIntent(
       if (![payload.rows, payload.columns].every(entry => typeof entry === 'number' && Number.isSafeInteger(entry) && entry > 0 && entry <= 1000) || Number(payload.rows) * Number(payload.columns) > 10_000) return refuse('invalid-table-size');
       break;
     case 'pasteFragment':
+      if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
+      break;
+    case 'replacePasteFragment':
       if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
       break;
     case 'insertTableRow':
@@ -1152,7 +1156,7 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'moveEmbed', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
+  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'moveEmbed', 'insertTable', 'pasteFragment', 'replacePasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
     isTableCommandKind(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
@@ -1278,6 +1282,16 @@ function applyPreparedDocxCommand(
     case 'pasteFragment': {
       state.storedMarks = null;
       caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
+      break;
+    }
+    case 'replacePasteFragment': {
+      state.storedMarks = null;
+      if (engine.undo()) {
+        const start = { story: range.story, start: range.start, end: range.start };
+        caret(applyClipboardFragment(engine, start, command.payload.fragment, command.payload.suggesting));
+      } else {
+        caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
+      }
       break;
     }
     case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;

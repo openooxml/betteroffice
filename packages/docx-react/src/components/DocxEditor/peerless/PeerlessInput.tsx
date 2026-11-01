@@ -1,7 +1,14 @@
-import { useCallback, useLayoutEffect, useRef, useSyncExternalStore, type ReactElement, type Ref, type RefObject } from 'react';
+import { Suspense, lazy, useCallback, useLayoutEffect, useRef, useSyncExternalStore, type ReactElement, type Ref, type RefObject } from 'react';
 import { effectiveZoom } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import {
+  clipboardFragmentHasFormatting,
+  mergeFormattingFragment,
+  textOnlyFragment,
+  type DocxClipboardFragment,
+  type DocxCommandSelection,
+  type PasteFormattingOption,
+} from '@betteroffice/docx/yrs';
 import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
 import { parseClipboardHtml } from '../internals/clipboardHtml';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
@@ -9,6 +16,9 @@ import { admitInputIntents, admitIntent, submitFormattingIntent, type PeerlessIn
 import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 import { useTranslation } from '../../../i18n';
+import { usePasteOptions } from '../pasteOptions/usePasteOptions';
+
+const LazyPasteOptionsControl = lazy(() => import('../pasteOptions/PasteOptionsControl'));
 
 /** @internal */
 export interface PeerlessInputProps {
@@ -23,6 +33,8 @@ export interface PeerlessInputProps {
   /** Fills `data` synchronously when the selection's clipboard payload is ready. */
   onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
+  pasteOptions?: boolean;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection): boolean;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
   onNavigateCell?(direction: 'forward' | 'backward'): void;
@@ -41,6 +53,36 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const getReadOnly = useCallback(() => admission.getSnapshot().readOnly, [admission]);
   const readOnly = useSyncExternalStore(admission.subscribeReadOnly, getReadOnly, getReadOnly);
   const snapshot = useSyncExternalStore(viewStore.subscribe, viewStore.getSnapshot, viewStore.getServerSnapshot);
+  const pasteRecordRef = useRef<{
+    fragment: DocxClipboardFragment;
+    start: DocxCommandSelection;
+    end: DocxCommandSelection['focus'] | null;
+    version: number;
+  } | null>(null);
+  const pastePendingRef = useRef(false);
+  const pasteReplacingRef = useRef(false);
+  const choosePasteOption = useCallback((option: PasteFormattingOption): void => {
+    const record = pasteRecordRef.current;
+    if (!record?.end) return;
+    const variant = option === 'merge'
+      ? mergeFormattingFragment(record.fragment)
+      : option === 'text-only'
+        ? textOnlyFragment(record.fragment)
+        : structuredClone(record.fragment);
+    pasteReplacingRef.current = true;
+    const submitted = callbacks.current.onReplacePasteFragment?.(variant, {
+      anchor: record.start.anchor,
+      focus: record.end,
+    });
+    if (!submitted) pasteReplacingRef.current = false;
+  }, []);
+  const pasteOptions = usePasteOptions({
+    enabled: props.pasteOptions !== false && !readOnly,
+    onChoose: choosePasteOption,
+    focusEditor: () => { textarea.current?.focus(); },
+  });
+  const pasteOptionsRef = useRef(pasteOptions);
+  pasteOptionsRef.current = pasteOptions;
   const attach = useCallback((element: HTMLTextAreaElement | null) => {
     textarea.current = element;
     if (typeof textareaRef === 'function') textareaRef(element);
@@ -65,6 +107,31 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       element.style.left = `${((bounds?.left ?? 0) + focus.x * zoom) / scale}px`;
       element.style.top = `${top / scale}px`;
       element.style.height = `${height / scale}px`;
+      const pasteRecord = pasteRecordRef.current;
+      const workerSelection = state.workerSelection;
+      if (pasteRecord && workerSelection &&
+        workerSelection.anchor.story === workerSelection.focus.story &&
+        workerSelection.anchor.paraId === workerSelection.focus.paraId &&
+        workerSelection.anchor.offset === workerSelection.focus.offset) {
+        const anchorPos = { left: (bounds?.left ?? 0) + focus.x * zoom + 6, top: top + height + 4 };
+        if (pastePendingRef.current) {
+          pasteRecord.end = { ...workerSelection.focus };
+          pasteRecord.version = state.version;
+          pastePendingRef.current = false;
+          pasteOptionsRef.current.show(anchorPos);
+        } else if (pasteReplacingRef.current) {
+          pasteRecord.end = { ...workerSelection.focus };
+          pasteRecord.version = state.version;
+          pasteReplacingRef.current = false;
+          pasteOptionsRef.current.setAnchor(anchorPos);
+        } else if (pasteRecord.end &&
+          workerSelection.focus.story === pasteRecord.end.story &&
+          workerSelection.focus.paraId === pasteRecord.end.paraId &&
+          workerSelection.focus.offset === pasteRecord.end.offset &&
+          pasteOptionsRef.current.visible) {
+          pasteOptionsRef.current.setAnchor(anchorPos);
+        }
+      }
       const selection = state.workerSelection;
       const key = selection ? JSON.stringify([selection.anchor.story, selection.anchor.paraId, selection.anchor.offset,
         selection.focus.story, selection.focus.paraId, selection.focus.offset, cellFocus]) : '';
@@ -85,6 +152,23 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   }, [snapshot.geometry, snapshot.throughSeq, props.caretHostRef, props.zoom, viewStore]);
 
   useLayoutEffect(() => {
+    const record = pasteRecordRef.current;
+    if (!record?.end || pastePendingRef.current || pasteReplacingRef.current) return;
+    const selection = snapshot.workerSelection;
+    const atEnd = !!selection &&
+      selection.anchor.story === selection.focus.story &&
+      selection.anchor.paraId === selection.focus.paraId &&
+      selection.anchor.offset === selection.focus.offset &&
+      selection.focus.story === record.end.story &&
+      selection.focus.paraId === record.end.paraId &&
+      selection.focus.offset === record.end.offset;
+    if (!atEnd || snapshot.version !== record.version) {
+      pasteRecordRef.current = null;
+      pasteOptionsRef.current.dismiss();
+    }
+  }, [snapshot.workerSelection, snapshot.version]);
+
+  useLayoutEffect(() => {
     const element = textarea.current;
     if (!element) return;
     let nextEventId = 0;
@@ -100,6 +184,11 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const dispatch = (event: PeerlessInputEvent, native: Event) => {
       const normalized = normalizeInputEvent(event, state);
       state = normalized.state;
+      if (normalized.intents.length > 0 && event.source !== 'paste') {
+        pasteRecordRef.current = null;
+        pastePendingRef.current = false;
+        pasteOptionsRef.current.dismiss();
+      }
       if (normalized.preventDefault) native.preventDefault();
       admitInputIntents(admission, normalized.intents, {
         inputTime: event.inputTime, fence: normalized.fence,
@@ -118,6 +207,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const exit = escapeArmed && event.key === 'Tab';
       if (event.key !== 'Shift') clearEscape();
       if (event.defaultPrevented || state.composing || event.isComposing || event.keyCode === 229) return;
+      pasteOptionsRef.current.handleKeyDown(event);
       if (event.key === 'Escape') { escapeArmed = true; active = null; return; }
       if (exit || (event.key === 'Tab' && isReadOnly())) { active = null; return; }
       state = { ...state, trailingCompositionText: null };
@@ -174,7 +264,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         event.preventDefault();
       }
     };
-    const keyup = () => { if (active?.keyboard) active = null; };
+    const keyup = (event: KeyboardEvent) => {
+      pasteOptionsRef.current.handleKeyUp(event);
+      if (active?.keyboard) active = null;
+    };
     const compatible = (inputType: string) => active !== null &&
       (!inputType || active.inputType === null || active.inputType === inputType ||
         (active.inputType === 'insertParagraph' && inputType === 'insertLineBreak') ||
@@ -220,6 +313,9 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     };
     const paste = (event: ClipboardEvent) => {
       clearEscape();
+      pasteRecordRef.current = null;
+      pastePendingRef.current = false;
+      pasteOptionsRef.current.dismiss();
       if (state.composing) return;
       event.preventDefault();
       active = { id: ++nextEventId, phase: 'start', inputType: 'insertFromPaste', keyboard: false };
@@ -227,6 +323,22 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       if (html) {
         const fragment = parseClipboardHtml(html);
         if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
+          if (callbacks.current.pasteOptions !== false && clipboardFragmentHasFormatting(fragment)) {
+            const selection = viewStore.getSnapshot().workerSelection;
+            if (selection) {
+              pasteRecordRef.current = {
+                fragment: structuredClone(fragment),
+                start: structuredClone(selection),
+                end: null,
+                version: -1,
+              };
+              pastePendingRef.current = true;
+            }
+          } else {
+            pasteRecordRef.current = null;
+            pastePendingRef.current = false;
+            pasteOptionsRef.current.dismiss();
+          }
           element.value = '';
           return;
         }
@@ -329,7 +441,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     };
   }, [admission, viewStore]);
 
-  return <textarea
+  return <>
+  <textarea
     ref={attach}
     className={className ?? 'paged-editor__input'}
     aria-label={ariaLabel ?? t('editor.documentInput')}
@@ -341,5 +454,18 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     autoCorrect="on"
     style={{ position: 'fixed', left: 0, top: 0, width: 1, height: 1, opacity: 0,
       padding: 0, border: 0, resize: 'none', overflow: 'hidden', caretColor: 'transparent' }}
-  />;
+  />
+  {pasteOptions.visible && pasteOptions.anchor && (
+    <Suspense fallback={null}>
+      <LazyPasteOptionsControl
+        anchor={pasteOptions.anchor}
+        menuOpen={pasteOptions.menuOpen}
+        selected={pasteOptions.selected}
+        onMenuOpenChange={pasteOptions.setMenuOpen}
+        onChoose={pasteOptions.choose}
+        onCloseMenu={pasteOptions.closeMenu}
+      />
+    </Suspense>
+  )}
+  </>;
 }

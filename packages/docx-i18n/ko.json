@@ -539,6 +539,12 @@
     "tableInserted": "표 삽입됨",
     "tableDeleted": "표 삭제됨"
   },
+  "pasteOptions": {
+    "button": "붙여넣기 옵션 (Ctrl)",
+    "keepSource": "원본 서식 유지",
+    "merge": "서식 병합",
+    "textOnly": "텍스트만 유지"
+  },
   "contextMenu": {
     "ariaLabel": "AI 작업 메뉴",
     "textMenuAriaLabel": "텍스트 편집 메뉴",

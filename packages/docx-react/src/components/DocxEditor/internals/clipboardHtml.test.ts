@@ -144,8 +144,32 @@ test('huge colspan is clamped to a bounded table', () => {
 });
 
 test('text only html returns null', () => {
-  expect(parseClipboardHtml(`<body><p>Hello <b>world</b></p></body>`)).toBeNull();
   expect(parseClipboardHtml(`<body><div>Just text</div></body>`)).toBeNull();
+  expect(parseClipboardHtml(`<body><p>Plain paragraph</p></body>`)).toBeNull();
+});
+
+test('rich html parses formatted runs with font, size, colour and link', () => {
+  const parsed = parseClipboardHtml(
+    `<body><p><span style="font-family:Georgia;font-size:20pt;color:#FF0000;font-weight:bold">Rich</span> ` +
+    `<a href="https://example.com">link</a></p><h2>Head</h2></body>`
+  );
+  expect(parsed).not.toBeNull();
+  expect(parsed!.paragraphs[0]).toEqual({
+    text: 'Rich link',
+    runs: [
+      { text: 'Rich', format: { bold: true, color: { rgb: 'FF0000' }, fontSize: 20, fontFamily: { ascii: 'Georgia' } } },
+      { text: ' ' },
+      { text: 'link', href: 'https://example.com' },
+    ],
+  });
+  expect(parsed!.paragraphs[1]).toEqual({ text: 'Head', pStyle: 'Heading2' });
+});
+
+test('list html keeps bullet and numbered kinds', () => {
+  const parsed = parseClipboardHtml(`<body><ul><li>One</li></ul><ol><li>Two</li></ol></body>`);
+  expect(parsed).not.toBeNull();
+  expect(parsed!.paragraphs[0]).toEqual({ text: 'One', list: 'bullet' });
+  expect(parsed!.paragraphs[1]).toEqual({ text: 'Two', list: 'numbered' });
 });
 
 test('unknown payload version or invalid shape falls back to the html table', () => {

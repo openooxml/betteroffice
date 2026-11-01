@@ -539,6 +539,12 @@
     "tableInserted": "已插入表格",
     "tableDeleted": "已刪除表格"
   },
+  "pasteOptions": {
+    "button": "貼上選項 (Ctrl)",
+    "keepSource": "保留來源格式",
+    "merge": "合併格式",
+    "textOnly": "只保留文字"
+  },
   "contextMenu": {
     "ariaLabel": "AI 動作功能表",
     "textMenuAriaLabel": "文字編輯功能表",

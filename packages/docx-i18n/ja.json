@@ -539,6 +539,12 @@
     "tableInserted": "表が挿入されました",
     "tableDeleted": "表が削除されました"
   },
+  "pasteOptions": {
+    "button": "貼り付けオプション (Ctrl)",
+    "keepSource": "元の書式を保持",
+    "merge": "書式を結合",
+    "textOnly": "テキストのみ保持"
+  },
   "contextMenu": {
     "ariaLabel": "AI 操作メニュー",
     "textMenuAriaLabel": "テキスト編集メニュー",

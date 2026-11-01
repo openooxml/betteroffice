@@ -232,6 +232,7 @@ export interface PagedEditorProps {
   firstPageFooterContent?: HeaderFooter | null;
   /** Whether the editor is read-only. */
   readOnly?: boolean;
+  pasteOptions?: boolean;
   holdInput?: boolean;
   inputScope?: number;
   inputQueries?: DisplayListQueries | null;
@@ -554,6 +555,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       readOnly = false,
+      pasteOptions = true,
       holdInput = false,
       inputScope,
       inputQueries,
@@ -2252,6 +2254,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             applyPendingSelection={applyPendingSelection}
             seedSelection={viewerDocumentRead === undefined && !holdInput}
             session={yrsCore.session}
+            pasteOptions={pasteOptions}
             story={activeYrsRootStory}
             isSuggesting={isSuggesting}
             author={author}

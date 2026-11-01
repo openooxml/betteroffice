@@ -539,6 +539,12 @@
     "tableInserted": "Tabelle eingefügt",
     "tableDeleted": "Tabelle gelöscht"
   },
+  "pasteOptions": {
+    "button": "Einfügeoptionen (Strg)",
+    "keepSource": "Ursprüngliche Formatierung beibehalten",
+    "merge": "Formatierung zusammenführen",
+    "textOnly": "Nur Text übernehmen"
+  },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",
     "textMenuAriaLabel": "Textbearbeitungsmenü",
