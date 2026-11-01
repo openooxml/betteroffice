@@ -1433,15 +1433,10 @@ fn decide_language<'a>(
     end_language: Option<&'a str>,
     style_language: Option<&'a str>,
 ) -> Option<&'a str> {
-    for tag in [language, end_language, style_language]
+    [language, end_language, style_language]
         .into_iter()
         .flatten()
-    {
-        if han_script_for_language(tag).is_some() {
-            return Some(tag);
-        }
-    }
-    None
+        .find(|tag| han_script_for_language(tag).is_some())
 }
 
 /// Appends a run's text pieces with the language deciding their Han glyphs.
@@ -1466,8 +1461,8 @@ fn push_language_pieces<'a>(
 }
 
 /// One language per CJK bucket, or one undecided entry when no language decides Han glyphs.
-fn east_asian_languages<'a>(
-    languages: &mut dyn Iterator<Item = Option<&'a String>>,
+fn east_asian_languages(
+    languages: &mut dyn Iterator<Item = Option<&String>>,
 ) -> Vec<Option<String>> {
     let mut buckets: [Option<&String>; 4] = [None; 4];
     for tag in languages.flatten() {
