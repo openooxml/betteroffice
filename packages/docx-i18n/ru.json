@@ -755,7 +755,11 @@
     "leftIndent": "Отступ слева",
     "rightIndent": "Отступ справа",
     "topMargin": "Верхнее поле",
-    "bottomMargin": "Нижнее поле"
+    "bottomMargin": "Нижнее поле",
+    "leftMargin": "Левое поле",
+    "rightMargin": "Правое поле",
+    "hangingIndent": "Выступ",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Печать",

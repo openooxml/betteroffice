@@ -755,7 +755,11 @@
     "leftIndent": "左方縮排",
     "rightIndent": "右方縮排",
     "topMargin": "上邊界",
-    "bottomMargin": "下邊界"
+    "bottomMargin": "下邊界",
+    "leftMargin": "左邊界",
+    "rightMargin": "右邊界",
+    "hangingIndent": "首行凸排",
+    "markerValue": "{name}：{value}"
   },
   "print": {
     "label": "列印",

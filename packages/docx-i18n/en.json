@@ -755,7 +755,11 @@
     "leftIndent": "Left indent",
     "rightIndent": "Right indent",
     "topMargin": "Top margin",
-    "bottomMargin": "Bottom margin"
+    "bottomMargin": "Bottom margin",
+    "leftMargin": "Left margin",
+    "rightMargin": "Right margin",
+    "hangingIndent": "Hanging indent",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Print",

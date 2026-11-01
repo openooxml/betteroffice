@@ -755,7 +755,11 @@
     "leftIndent": "Sangría izquierda",
     "rightIndent": "Sangría derecha",
     "topMargin": "Margen superior",
-    "bottomMargin": "Margen inferior"
+    "bottomMargin": "Margen inferior",
+    "leftMargin": "Margen izquierdo",
+    "rightMargin": "Margen derecho",
+    "hangingIndent": "Sangría francesa",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Imprimir",
