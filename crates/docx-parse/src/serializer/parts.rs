@@ -360,8 +360,14 @@ fn strip_bookmark_blocks(blocks: &mut Vec<BlockContent>) {
             }
             BlockContent::Table(table) => {
                 let table = std::sync::Arc::make_mut(table);
-                for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
-                    strip_bookmark_blocks(&mut cell.content);
+                table.trailing_bookmarks = None;
+                for row in &mut table.rows {
+                    row.leading_bookmarks = None;
+                    row.trailing_bookmarks = None;
+                    for cell in &mut row.cells {
+                        cell.leading_bookmarks = None;
+                        strip_bookmark_blocks(&mut cell.content);
+                    }
                 }
             }
             _ => {}
@@ -1090,6 +1096,18 @@ mod tests {
             note.verbatim_xml = Some(hostile.to_owned());
             assert!(serialize_endnotes_part(&[note], &mut context()).is_err());
         }
+    }
+
+    #[test]
+    fn table_level_bookmarks_count_as_nested_comment_bookmarks() {
+        let mut table = crate::table::Table::empty();
+        table.trailing_bookmarks = Some(vec![r#"<w:bookmarkEnd w:id="1"/>"#.to_owned()]);
+        let mut with_table = comment(1.0, None, "first");
+        with_table.block_content = vec![paragraph("first"), BlockContent::Table(Arc::new(table))];
+        assert!(has_nested_bookmarks(&with_table));
+        assert!(try_serialize_comments_with_info(&[with_table.clone()], &mut context()).is_err());
+        let (xml, _) = serialize_comments_with_info(&[with_table], &mut context());
+        assert!(!xml.contains("w:bookmark"), "{xml}");
     }
 
     #[test]
