@@ -65,6 +65,7 @@ export function createWorkbookSessionHost(
 ): SessionHost<Events> {
   let handle: WorkbookHandle | undefined;
   let disposed = false;
+  let enginePng: boolean | undefined;
   let version = 0;
   let dirty = false;
   let epoch = 0;
@@ -374,7 +375,7 @@ export function createWorkbookSessionHost(
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
     async decodeFontFace(_, bytes, input, wasm) {
       if (disposed) throw new Error('Workbook session is disposed');
-      await (options.initWasm ?? initWasm)(wasm);
+      await (options.initWasm ?? initWasm)(wasm, enginePng === undefined ? undefined : { png: enginePng });
       if (disposed) throw new Error('Workbook session is disposed');
       const face = await decodeFontFace(bytes, input);
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
@@ -386,6 +387,7 @@ export function createWorkbookSessionHost(
       if (checkpoint.epoch !== recovery.epoch || checkpoint.version !== recovery.revision ||
         checkpoint.throughSeq !== recovery.throughSeq) throw new TypeError('Workbook recovery envelope mismatch');
       if (isCollaborativeWorkbookRecovery(recovery.engine)) throw new Error('Recovery is unavailable for collaborative workbooks');
+      enginePng = input.png;
       await (options.initWasm ?? initWasm)(input.wasm, { png: input.png });
       if (disposed) throw new Error('Workbook session is disposed');
       const opened = openWorkbookRecoveryCheckpoint(recovery.engine, recovery.throughSeq);
@@ -424,6 +426,7 @@ export function createWorkbookSessionHost(
       retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
+      enginePng = input.png;
       await (options.initWasm ?? initWasm)(wasm, { png: input.png });
       wasm ??= options.wasmModule?.();
       if (disposed) throw new Error('Workbook session is disposed');
