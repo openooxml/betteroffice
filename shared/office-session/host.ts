@@ -22,7 +22,7 @@ export interface SessionHostOptions<M extends SessionMethods, C> {
 export interface SessionHost<E extends SessionEvents> {
   readonly scheduler: SessionScheduler;
   emit<K extends keyof E & string>(name: K, payload: E[K], transfer?: Transferable[]): void;
-  /** Tells the client the running call, or else a pending deferred reply, is still working; safe to call from a long synchronous engine call. */
+  /** Tells the client the running call is still working; safe to call from a long synchronous engine call. */
   progress(): void;
 }
 

@@ -42,7 +42,8 @@ import type {
   WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState,
   WorkbookSharedAck, WorkbookSharedWireAck,
 } from './commandProtocol';
-import { createWorkbookEditSession, runAfterEditsUntilPosted, type WorkbookEditSession } from './editSession';
+import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
+import { runAfterEditsUntilPosted } from './postedReads';
 import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';

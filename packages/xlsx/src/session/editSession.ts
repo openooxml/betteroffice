@@ -10,6 +10,7 @@ import {
   type WorkbookEditState, type WorkbookSharedAck, type WorkbookSharedCommand,
   type WorkbookCommandTicket, type WorkbookSubmitOptions,
 } from './commandProtocol';
+import { registerPostedReads } from './postedReads';
 
 type SessionOptions<X> = WorkerEditSessionOptions<unknown, WorkbookEditPayload,
   WorkbookCommandSelection, Partial<WorkbookEditState>, WorkbookCommandFrame, X>;
@@ -28,17 +29,6 @@ export interface WorkbookEditSession<X = unknown> extends EditSession<WorkbookEd
   present(frame: FrameEnvelope<WorkbookCommandFrame>): void;
   markPresented(frame: Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'> &
     Partial<WorkbookCommandFrame>): boolean;
-}
-
-const postedReads = new WeakMap<object, <T>(call: () => Promise<T>) => Promise<T>>();
-
-/**
- * Like runAfterEdits, but later edits wait only until the read is posted, not until it replies.
- * For reads the worker captures when it runs them and orders before later edits (non-reorderable).
- */
-export function runAfterEditsUntilPosted<T>(session: WorkbookEditSession, call: () => Promise<T>): Promise<T> {
-  const run = postedReads.get(session);
-  return run ? run(call) : session.runAfterEdits(call);
 }
 
 export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOptions<X>,
@@ -389,6 +379,6 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
       return shared.dispose();
     },
   };
-  postedReads.set(session, (call) => runAfter(call, true));
+  registerPostedReads(session, (call) => runAfter(call, true));
   return session;
 }
