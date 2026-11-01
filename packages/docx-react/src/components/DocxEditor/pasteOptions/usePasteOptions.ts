@@ -13,7 +13,7 @@ export function usePasteOptions(options: {
   onChoose(option: PasteFormattingOption): void;
   focusEditor(): void;
 }) {
-  const { enabled, onChoose, focusEditor } = options;
+  const { enabled } = options;
   const callbacks = useRef(options);
   callbacks.current = options;
   const [visible, setVisible] = useState(false);
