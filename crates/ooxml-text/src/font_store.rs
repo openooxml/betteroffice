@@ -303,7 +303,7 @@ pub struct FontStore {
     faces: HashMap<u64, Vec<usize>>,
     face_count: usize,
     shape_cache: RefCell<ShapeCache>,
-    missing_base_latin: RefCell<HashSet<(Vec<FontId>, String, bool, bool, char)>>,
+    missing_base_latin: RefCell<HashSet<u64>>,
     new_base_latin_miss: Cell<bool>,
     #[cfg(feature = "base-latin")]
     base_latin_char_cache: [RefCell<HashMap<char, CharEntry>>; 4],
@@ -366,9 +366,18 @@ pub fn base_latin_character_index(ch: char) -> Option<usize> {
 }
 
 pub fn symbol_family(family: &str) -> bool {
-    ["Symbol", "Wingdings", "Wingdings 2", "Wingdings 3"]
-        .iter()
-        .any(|name| family.trim().eq_ignore_ascii_case(name))
+    let family = family.trim();
+    family.eq_ignore_ascii_case("Symbol")
+        || family
+            .get(..9)
+            .is_some_and(|name| name.eq_ignore_ascii_case("Wingdings"))
+            && matches!(&family[9..], "" | " 2" | " 3")
+}
+
+fn miss_key(chain: &[FontId], family: &str, bold: bool, italic: bool, ch: char) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    (chain, family, bold, italic, ch).hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Default for FontStore {
@@ -888,21 +897,31 @@ impl FontStore {
         });
         #[cfg(not(feature = "base-latin"))]
         let _ = (bold, italic);
-        if track
-            && resolved.is_none()
-            && base_latin_character_index(ch).is_some()
+        if track && resolved.is_none() {
+            self.record_base_latin_miss(chain, ch, bold, italic, family);
+        }
+        resolved.or_else(|| chain.last().copied())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_base_latin_miss(
+        &self,
+        chain: &[FontId],
+        ch: char,
+        bold: bool,
+        italic: bool,
+        family: &str,
+    ) {
+        if base_latin_character_index(ch).is_some()
             && crate::measure::needs_glyph(ch)
-            && self.missing_base_latin.borrow_mut().insert((
-                chain.to_vec(),
-                family.to_owned(),
-                bold,
-                italic,
-                ch,
-            ))
+            && self
+                .missing_base_latin
+                .borrow_mut()
+                .insert(miss_key(chain, family, bold, italic, ch))
         {
             self.new_base_latin_miss.set(true);
         }
-        resolved.or_else(|| chain.last().copied())
     }
 
     fn entry(&self, id: FontId) -> Result<&FontEntry, FontError> {

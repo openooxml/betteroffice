@@ -576,51 +576,52 @@ fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
     }
 }
 
-type FontResolver = fn(&FontStore, &[FontId], char, &str, bool) -> Option<FontId>;
+#[derive(Clone, Copy)]
+struct FontResolver {
+    coverage_only: bool,
+    bold: bool,
+    italic: bool,
+}
 
-fn font_resolver(coverage_only: bool) -> FontResolver {
-    if coverage_only {
-        resolve_covered::<false, false>
-    } else {
-        resolve_with_fallback::<false, false>
+impl FontResolver {
+    fn resolve(
+        self,
+        store: &FontStore,
+        chain: &[FontId],
+        ch: char,
+        family: &str,
+        track: bool,
+    ) -> Option<FontId> {
+        if !self.coverage_only {
+            return store.resolve_with_family_tracking(
+                chain,
+                ch,
+                self.bold,
+                self.italic,
+                family,
+                track,
+            );
+        }
+        if !needs_glyph(ch) {
+            return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
+        }
+        store
+            .resolve_with_family_tracking(chain, ch, self.bold, self.italic, family, track)
+            .filter(|&id| covered_character(store, id, ch).ok().flatten().is_some())
     }
+}
+
+#[cfg(test)]
+fn font_resolver(coverage_only: bool) -> FontResolver {
+    styled_font_resolver(coverage_only, false, false)
 }
 
 fn styled_font_resolver(coverage_only: bool, bold: bool, italic: bool) -> FontResolver {
-    match (coverage_only, bold, italic) {
-        (_, false, false) => font_resolver(coverage_only),
-        (false, true, false) => resolve_with_fallback::<true, false>,
-        (false, false, true) => resolve_with_fallback::<false, true>,
-        (false, true, true) => resolve_with_fallback::<true, true>,
-        (true, true, false) => resolve_covered::<true, false>,
-        (true, false, true) => resolve_covered::<false, true>,
-        (true, true, true) => resolve_covered::<true, true>,
+    FontResolver {
+        coverage_only,
+        bold,
+        italic,
     }
-}
-
-fn resolve_with_fallback<const BOLD: bool, const ITALIC: bool>(
-    store: &FontStore,
-    chain: &[FontId],
-    ch: char,
-    family: &str,
-    track: bool,
-) -> Option<FontId> {
-    store.resolve_with_family_tracking(chain, ch, BOLD, ITALIC, family, track)
-}
-
-fn resolve_covered<const BOLD: bool, const ITALIC: bool>(
-    store: &FontStore,
-    chain: &[FontId],
-    ch: char,
-    family: &str,
-    track: bool,
-) -> Option<FontId> {
-    if !needs_glyph(ch) {
-        return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
-    }
-    store
-        .resolve_with_family_tracking(chain, ch, BOLD, ITALIC, family, track)
-        .filter(|&id| covered_character(store, id, ch).ok().flatten().is_some())
 }
 
 /// Width of `text` shaped plainly through `chain` — no caps, letter spacing
@@ -652,7 +653,7 @@ pub(super) fn measure_plain_text(
     let mut plan: Vec<(char, FontId, u8)> = Vec::new();
     let resolve = styled_font_resolver(font_chains.coverage_only(chain), style.0, style.1);
     for (i, ch) in text.chars().enumerate() {
-        let Some(font) = resolve(store, chain, ch, style.2, true) else {
+        let Some(font) = resolve.resolve(store, chain, ch, style.2, true) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         let shaped = if ch == '\u{2011}' {
@@ -960,7 +961,7 @@ fn prepare_text_run(
         let chain = slot_chains[index].as_deref().unwrap_or(&oversized);
         let resolve = slot_resolvers[index].expect("slot resolver");
         let first = shaped[0];
-        let Some(mut font) = resolve(store, chain, first, family, true) else {
+        let Some(mut font) = resolve.resolve(store, chain, first, family, true) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         let mut features = kern_features(run.kerning_min_pt.is_some_and(|threshold| {
@@ -973,7 +974,7 @@ fn prepare_text_run(
             && run.small_caps
             && !run.all_caps
             && ch.is_lowercase()
-            && let Some(original_font) = resolve(store, chain, ch, family, false)
+            && let Some(original_font) = resolve.resolve(store, chain, ch, family, false)
             && supports_smcp(
                 store,
                 original_font,
@@ -1282,16 +1283,14 @@ mod tests {
             assert_eq!(store.resolve(&chain, ch), store.resolve(&[fallback], ch));
             for chains in [&configured, &unrelated] {
                 assert_eq!(
-                    font_resolver(FontChains::Hash(chains).coverage_only(&chain))(
-                        &store, &chain, ch, "", false
-                    ),
+                    font_resolver(FontChains::Hash(chains).coverage_only(&chain))
+                        .resolve(&store, &chain, ch, "", false),
                     Some(fallback)
                 );
             }
             assert_eq!(
-                font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
-                    &store, &chain, ch, "", false
-                ),
+                font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))
+                    .resolve(&store, &chain, ch, "", false),
                 Some(font)
             );
         }
@@ -1299,9 +1298,8 @@ mod tests {
         assert!(store.covers(fallback, '€').unwrap());
         assert!(needs_glyph('\u{0939}'));
         assert_eq!(
-            font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
-                &store, &chain, '\u{0939}', "", false
-            ),
+            font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))
+                .resolve(&store, &chain, '\u{0939}', "", false),
             None
         );
         let unknown = FontId::from_u32(u32::MAX);

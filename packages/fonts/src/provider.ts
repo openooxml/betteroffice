@@ -10,11 +10,14 @@ import {
   type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
+import { knownCoverage } from './coverage';
 
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   /** Word measurement family; defaults to the requested family. */
   measureAs?: string;
   onlyIfPrimaryFails?: boolean;
+  /** @internal Base Latin characters the face is known to cover, as coverage bits. */
+  coverage?: string;
 };
 
 /** Structural provider contract keeps this package independent of the engine. */
@@ -69,7 +72,8 @@ export function fontProvider(
     const key = `${face.file}|${options?.measureAs ?? ''}|${options?.onlyIfPrimaryFails ?? false}`;
     let loader = loaders.get(key);
     if (loader === undefined) {
-      loader = Object.assign(() => loadBytes(face), options);
+      const coverage = knownCoverage(face.file);
+      loader = Object.assign(() => loadBytes(face), options, coverage === undefined ? undefined : { coverage });
       loaders.set(key, loader);
     }
     return loader;

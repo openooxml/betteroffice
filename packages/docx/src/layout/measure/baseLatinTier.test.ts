@@ -4,7 +4,10 @@ import * as fontManager from '@betteroffice/fonts';
 import { TextMeasureFontRegistry, type BundledFontProvider } from './fontRegistry';
 import { createRustMeasureSource } from './rustMeasureSource';
 import { configureDefaultFonts } from './defaultFontProvider';
-import { charactersFromBits, coverageBits, fontCoverage } from './fontCoverage';
+import { charactersFromBits, coverageFromBits, wordsCoverage } from './fontCoverage';
+import { coverageBits, coverageWords, fontCoverage } from './cmapCoverage';
+
+const baseLatinCoverage = (covers: (character: string) => boolean) => wordsCoverage(coverageWords(covers));
 
 function face(path: string): ArrayBuffer {
   return Uint8Array.from(readFileSync(new URL(`../../../../../${path}`, import.meta.url))).buffer;
@@ -305,4 +308,27 @@ test('uncompressed collections inspect the first face without decoding', () => {
   expect(covers?.('A')).toBe(true);
   expect(covers?.('Ω')).toBe(true);
   expect(covers?.('日')).toBe(false);
+});
+
+test('the stored base Latin coverage answers exactly as the font cmap', () => {
+  for (const bytes of [primary, regular, hebrew]) {
+    const covers = fontCoverage(new Uint8Array(bytes))!;
+    const stored = baseLatinCoverage(covers);
+    const characters = charactersFromBits('f'.repeat(512));
+    expect(characters.length).toBe(2046);
+    expect(characters.filter((character) => stored(character) !== covers(character))).toEqual([]);
+    expect(stored('\u2011')).toBe(covers('\u2011'));
+    expect(stored('\u4e00')).toBe(false);
+    expect(stored('')).toBe(false);
+    const fromBits = coverageFromBits(coverageBits(covers));
+    expect(characters.filter((character) => fromBits(character) !== covers(character))).toEqual([]);
+  }
+});
+
+test('the character table round-trips through the requirement bits', () => {
+  const characters = charactersFromBits('f'.repeat(512));
+  expect(characters.slice(0, 2)).toEqual([' ', '!']);
+  expect(characters.at(-1)).toBe('\uf0fc');
+  expect(charactersFromBits(coverageBits((character) => character === '\u27bf' || character === '\uf06f'))).toEqual(['\u27bf', '\uf06f']);
+  expect(charactersFromBits(coverageBits(() => true))).toEqual(characters);
 });

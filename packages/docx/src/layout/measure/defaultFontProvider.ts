@@ -191,18 +191,11 @@ export function resolveDefaultFontProvider(
   return pending;
 }
 
-export function resolveBaseLatinProvider(
-  runtime: { decoder?: FontDecoder } = engineRuntime,
-): Promise<BundledFontProvider> {
-  let pending = baseLatinResolved.get(runtime);
-  if (!pending) {
-    const baseUrl = options.baseUrl;
-    const cache = baseLatinResolved;
-    pending = import('@betteroffice/fonts').then(manager =>
-      manager.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, runtime));
-    const current = pending;
-    pending.catch(() => { if (cache.get(runtime) === current) cache.delete(runtime); });
-    cache.set(runtime, pending);
-  }
-  return pending;
+/** @internal State the lazily loaded backstop provider resolves against. */
+export function baseLatinFontState(): {
+  baseUrl: string | URL | undefined;
+  cache: WeakMap<object, Promise<BundledFontProvider>>;
+  runtime: { decoder?: FontDecoder };
+} {
+  return { baseUrl: options.baseUrl, cache: baseLatinResolved, runtime: engineRuntime };
 }

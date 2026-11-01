@@ -1,5 +1,13 @@
-import { baseLatinAlias, baseLatinCandidate, fontCoverage, symbolFamily, type FontCoverage } from './fontCoverage';
-import { installBaseLatinFace } from '../../wasm/baseLatinFonts';
+import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
+
+async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
+  try {
+    const words = (await import('./cmapCoverage')).fontCoverageWords(data);
+    return words && wordsCoverage(words);
+  } catch {
+    return undefined;
+  }
+}
 
 /** A lazy face loader with measurement and fallback options. */
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
@@ -7,6 +15,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   measureAs?: string;
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
+  /** @internal Precomputed base Latin coverage bits of the face. */
+  coverage?: string;
 };
 
 /** Byte sink of the wasm text engine (`crates/docx-text` FontStore). */
@@ -172,9 +182,11 @@ function evictFailedPromise<K, V>(
 
 export class TextMeasureFontRegistry {
   private coverage = new Map<number, FontCoverage>();
+  /** Ids whose coverage is a known lower bound, with the loader that yields their exact coverage. */
+  private inexact = new Map<number, () => Promise<FontCoverage | undefined>>();
   private baseLatinResults = new Map<string, { ids: number[]; characters: Set<string>; earlier: string }>();
   private readonly baseLatinSource: BundledFontProviderSource | undefined;
-  private baseLatinLoaders = new WeakMap<() => Promise<ArrayBuffer>, () => Promise<ArrayBuffer>>();
+  private baseLatinLoaders = new WeakMap<BundledFontLoader, BundledFontLoader>();
   private readonly sink: TextEngineFontSink;
   private readonly bundledSource: BundledFontProviderSource | undefined;
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
@@ -345,39 +357,31 @@ export class TextMeasureFontRegistry {
   ): Promise<boolean> {
     const generation = this.generation;
     const aliases = symbolFamily(family);
-    let missing = earlier.length === 0 || earlier.some(id => !this.coverage.has(id)) ? [] : characters.filter((character) =>
+    const uncovered = () => earlier.length === 0 || earlier.some(id => !this.coverage.has(id)) ? [] : characters.filter((character) =>
       baseLatinCandidate(character, false) && (!baseLatinAlias(character) || aliases) &&
       !earlier.some((id) => this.coverage.get(id)?.(character)));
+    let missing = uncovered();
+    if (missing.length > 0 && earlier.some((id) => this.inexact.has(id))) {
+      await Promise.all(earlier.map((id) => this.exactCoverage(id)));
+      missing = uncovered();
+    }
     const ids: number[] = [];
     if (missing.length > 0) {
       try {
-        let provider = await this.bundled();
-        if (!provider?.resolveBaseLatin) {
-          const source = this.baseLatinSource;
-          provider = typeof source === 'function' ? await source() : source;
-        }
-        const styles: Array<[boolean, boolean]> = bold || italic ? [[bold, italic], [false, false]] : [[false, false]];
-        for (const [faceBold, faceItalic] of styles) {
-          if (!missing.some((character) => baseLatinCandidate(character, faceBold || faceItalic))) continue;
-          const loader = provider?.resolveBaseLatin?.(faceBold, faceItalic);
-          if (!loader) continue;
-          let registered = this.baseLatinLoaders.get(loader);
-          if (!registered) {
-            registered = async () => {
-              const bytes = await loader();
-              await installBaseLatinFace(bytes, faceBold, faceItalic);
-              return bytes;
-            };
-            this.baseLatinLoaders.set(loader, registered);
-          }
-          const id = await this.registerLoader(registered, { family: 'BetterOffice Base Latin', bold: faceBold, italic: faceItalic });
-          const covers = this.coverage.get(id);
-          if (missing.some((character) => covers?.(character))) {
-            ids.push(id);
-            missing = missing.filter((character) => !covers?.(character));
-          }
-          if (missing.length === 0) break;
-        }
+        const { loadBaseLatinFaces } = await import('./baseLatinFaces');
+        await loadBaseLatinFaces({
+          bold, italic, missing, ids,
+          provider: async () => {
+            const provider = await this.bundled();
+            if (provider?.resolveBaseLatin) return provider;
+            const source = this.baseLatinSource;
+            return typeof source === 'function' ? source() : source;
+          },
+          wrapped: this.baseLatinLoaders,
+          register: (loader, face) => this.registerLoader(loader, face),
+          coverage: (id) => this.coverage.get(id),
+          candidate: baseLatinCandidate,
+        });
       } catch {
         this.warnFailure(`[fontRegistry] base Latin face for "${family}" failed to load; falling back`);
       }
@@ -434,6 +438,7 @@ export class TextMeasureFontRegistry {
    */
   clear(): void {
     this.coverage.clear();
+    this.inexact.clear();
     this.baseLatinResults.clear();
     this.baseLatinLoaders = new WeakMap();
     this.generation++;
@@ -595,6 +600,8 @@ export class TextMeasureFontRegistry {
       const id = substitute.call(this.sink, base, family);
       const coverage = this.coverage.get(base);
       if (coverage) this.coverage.set(id, coverage);
+      const exact = this.inexact.get(base);
+      if (exact) this.inexact.set(id, exact);
       return id;
     } catch (error) {
       this.warnFailure(
@@ -607,15 +614,26 @@ export class TextMeasureFontRegistry {
   }
 
   /** Register raw bytes exactly once per buffer identity (see `bufferIds`). */
-  private registerBuffer(bytes: ArrayBuffer, face?: { family: string; bold: boolean; italic: boolean }): Promise<number> {
+  private registerBuffer(
+    bytes: ArrayBuffer,
+    face?: { family: string; bold: boolean; italic: boolean },
+    known?: BundledFontLoader,
+  ): Promise<number> {
     let pending = this.bufferIds.get(bytes);
     if (!pending) {
       const ids = this.bufferIds;
-      pending = Promise.resolve().then(() => {
+      pending = Promise.resolve().then(async () => {
         const data = new Uint8Array(bytes);
-        const coverage = fontCoverage(data);
         const id = face ? this.sink.registerFont(data, face) : this.sink.registerFont(data);
-        if (coverage) this.coverage.set(id, coverage);
+        const bits = known?.coverage;
+        const coverage = bits === undefined ? await parsedCoverage(data) : coverageFromBits(bits);
+        if (coverage) {
+          this.coverage.set(id, coverage);
+          if (bits !== undefined) {
+            let exact: Promise<FontCoverage | undefined> | undefined;
+            this.inexact.set(id, () => (exact ??= known!().then((bytes) => parsedCoverage(new Uint8Array(bytes)))));
+          }
+        }
         return id;
       });
       evictFailedPromise(ids, bytes, pending, () => false);
@@ -624,11 +642,22 @@ export class TextMeasureFontRegistry {
     return pending;
   }
 
-  private registerLoader(loader: () => Promise<ArrayBuffer>, face?: { family: string; bold: boolean; italic: boolean }): Promise<number> {
+  /** Replaces a known lower bound by the face's exact coverage. */
+  private async exactCoverage(id: number): Promise<void> {
+    const exact = this.inexact.get(id);
+    if (!exact) return;
+    let coverage: FontCoverage | undefined;
+    try { coverage = await exact(); } catch {}
+    if (this.inexact.get(id) !== exact) return;
+    this.inexact.delete(id);
+    if (coverage) this.coverage.set(id, coverage);
+  }
+
+  private registerLoader(loader: BundledFontLoader, face?: { family: string; bold: boolean; italic: boolean }): Promise<number> {
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
-      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes, face));
+      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes, face, loader));
       evictFailedPromise(ids, loader, pending, () => false);
       ids.set(loader, pending);
     }

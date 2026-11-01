@@ -3741,15 +3741,23 @@ fn row_parent_revision_id(row: &TableRowIn) -> Option<i64> {
 
 /// Returns CSS font shorthand for a run.
 fn css_font(fmt: &RunFormattingIn) -> String {
+    styled_css_font(
+        fmt,
+        fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY),
+        fmt.bold == Some(true),
+        fmt.italic == Some(true),
+    )
+}
+
+fn styled_css_font(fmt: &RunFormattingIn, family: &str, bold: bool, italic: bool) -> String {
     let size = px(effective_font_px_of(fmt));
-    let weight = if fmt.bold == Some(true) { 700 } else { 400 };
-    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let weight = if bold { 700 } else { 400 };
     let variant = if fmt.small_caps == Some(true) {
         "small-caps "
     } else {
         ""
     };
-    if fmt.italic == Some(true) {
+    if italic {
         format!("italic {variant}{weight} {size}px {family}, sans-serif")
     } else {
         format!("{variant}{weight} {size}px {family}, sans-serif")
@@ -3789,11 +3797,7 @@ fn resolved_css_font(shape: Option<&ShapeFonts<'_>>, text: &str, fmt: &RunFormat
         && !text.chars().any(ooxml_text::font_store::base_latin_alias)
         && let Some((bold, italic)) = shape.store.backstop_style(font)
     {
-        let mut backstop = fmt.clone();
-        backstop.font_family = Some(ooxml_text::BASE_LATIN_FAMILY.to_owned());
-        backstop.bold = Some(bold);
-        backstop.italic = Some(italic);
-        return css_font(&backstop);
+        return styled_css_font(fmt, ooxml_text::BASE_LATIN_FAMILY, bold, italic);
     }
     let css = css_font(fmt);
     if fonts
@@ -8394,11 +8398,7 @@ fn try_emit_glyph_runs(
         // carry, so the fallback keeps family/weight/style
         sub_attrs.fallback_font = Some(match shape_fonts.store.backstop_style(font) {
             Some((bold, italic)) => {
-                let mut backstop = fmt.clone();
-                backstop.font_family = Some(ooxml_text::BASE_LATIN_FAMILY.to_owned());
-                backstop.bold = Some(bold);
-                backstop.italic = Some(italic);
-                css_font(&backstop)
+                styled_css_font(fmt, ooxml_text::BASE_LATIN_FAMILY, bold, italic)
             }
             None => css_font(fmt),
         });

@@ -7,7 +7,7 @@ import {
   IMPLICIT_FONT_COVERAGE,
   isImplicitFontProvider,
   resolveDefaultFontProvider,
-  resolveBaseLatinProvider,
+  baseLatinFontState,
 } from './defaultFontProvider';
 import {
   TextMeasureFontRegistry,
@@ -115,7 +115,7 @@ export function createRustMeasureSource(options: {
           engine.registerSubstituteFont!(id, family),
       }),
     },
-    { baseLatin: () => resolveBaseLatinProvider(options.runtime), bundled: (hosted ? undefined : options.bundled) ?? (async () => {
+    { baseLatin: () => import('./baseLatinFaces').then(tier => tier.resolveBaseLatinProvider(baseLatinFontState(), options.runtime)), bundled: (hosted ? undefined : options.bundled) ?? (async () => {
       const current = generation;
       const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
