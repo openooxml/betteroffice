@@ -42,7 +42,7 @@ async function readPart(bytes: Uint8Array, entries: Map<string, ZipEntry>, name:
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (entry.offset + 30 > bytes.byteLength || view.getUint32(entry.offset, true) !== 0x04034b50) return undefined;
   const start = entry.offset + 30 + view.getUint16(entry.offset + 26, true) + view.getUint16(entry.offset + 28, true);
-  const data = bytes.subarray(start, start + entry.compressedSize);
+  const data = bytes.slice(start, start + entry.compressedSize);
   if (entry.method === 0) return new TextDecoder().decode(data);
   if (entry.method !== 8 || typeof DecompressionStream === 'undefined') return undefined;
   const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
