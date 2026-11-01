@@ -2604,11 +2604,51 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     .map((cell) => (asString(cell.tcPr?._sourceCellStory) ?? asString(cell.story))?.match(/^(.*:t\d+):r\d+c\d+(?:~\d+)?$/)?.[1])
     .find((prefix) => prefix !== undefined);
   restoreTableBookmarks(context, table, cellStories, prefixHint);
+  projectedTableCells.set(table, cellStories);
   return table;
 }
 
 /** A projected cell's source: its own story, or the anchor story and row offset of the vertical merge it continues. */
 type TableCellSource = string | { covering: string; rowOffset: number } | undefined;
+
+/** The cell sources of each projected table, so a later save that takes this projection as its base maps cells by story rather than position. */
+const projectedTableCells = new WeakMap<Table, ReadonlyArray<ReadonlyArray<TableCellSource>>>();
+
+function tableCellKey(entry: TableCellSource): string | undefined {
+  return typeof entry === 'string' ? entry : entry ? `${entry.covering}#${entry.rowOffset}` : undefined;
+}
+
+/** Where each cell story (or continuation `anchor#offset`) of a base table sits in it. */
+function baseTableCells(table: Table, prefix: string): Map<string, { row: number; cell: number }> {
+  const cells = new Map<string, { row: number; cell: number }>();
+  const recorded = projectedTableCells.get(table);
+  if (recorded) {
+    recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+      const key = tableCellKey(entry);
+      if (key !== undefined && !cells.has(key)) cells.set(key, { row: rowIndex, cell: cellIndex });
+    }));
+    return cells;
+  }
+  const seeded = seededCellIndices(table);
+  const spans = new Map<number, { story: string; row: number }>();
+  table.rows.forEach((row, rowIndex) => {
+    const starts = gridStarts(row);
+    row.cells.forEach((cell, cellIndex) => {
+      const ordinal = seeded[rowIndex]!.indexOf(cellIndex);
+      const column = starts[cellIndex]!;
+      if (ordinal >= 0) {
+        const story = `${prefix}:r${rowIndex}c${ordinal}`;
+        cells.set(story, { row: rowIndex, cell: cellIndex });
+        if (cell.formatting?.vMerge === 'restart') spans.set(column, { story, row: rowIndex });
+        else spans.delete(column);
+        return;
+      }
+      const anchor = spans.get(column);
+      if (anchor) cells.set(`${anchor.story}#${rowIndex - anchor.row}`, { row: rowIndex, cell: cellIndex });
+    });
+  });
+  return cells;
+}
 
 function gridStarts(row: TableRow): number[] {
   let column = row.formatting?.gridBefore ?? 0;
@@ -2668,18 +2708,19 @@ function restoreTableBookmarks(
     .find((candidate) => candidate !== undefined);
   const source = prefix === undefined ? undefined : context.sourceTable(prefix);
   if (!source || !tableHasBookmarks(source)) return;
-  const seeded = seededCellIndices(source);
+  const located = baseTableCells(source, prefix!);
   const starts = source.rows.map(gridStarts);
   const continues = (row: number, cell: number) => source.rows[row]?.cells[cell]?.formatting?.vMerge === 'continue';
   const resolved = cellStories.map((row) => row.map((entry) => {
-    const story = typeof entry === 'string' ? entry : entry?.covering;
-    const cell = story === undefined ? undefined : parse(story);
-    if (!cell || cell.prefix !== prefix) return undefined;
-    const index = seeded[cell.row]?.[cell.ordinal];
-    if (index === undefined) return undefined;
-    return typeof entry === 'string'
-      ? { direct: true as const, row: cell.row, cell: index }
-      : { direct: false as const, row: cell.row + entry!.rowOffset, column: starts[cell.row]![index]! };
+    if (entry === undefined) return undefined;
+    if (typeof entry === 'string') {
+      const at = located.get(entry);
+      return at ? { direct: true as const, row: at.row, cell: at.cell } : undefined;
+    }
+    const anchor = located.get(entry.covering);
+    return anchor
+      ? { direct: false as const, row: anchor.row + entry.rowOffset, column: starts[anchor.row]![anchor.cell]! }
+      : undefined;
   }));
   const seen = new Set<number>();
   const rowKeys: Array<number | undefined> = resolved.map((row) => {
@@ -2864,6 +2905,13 @@ function collectBaseStories(
       }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
+      const recorded = projectedTableCells.get(block);
+      if (recorded) {
+        recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+          if (typeof entry === 'string') visit(entry, block.rows[rowIndex]!.cells[cellIndex]!.content);
+        }));
+        continue;
+      }
       seededCellIndices(block).forEach((cells, rowIndex) => {
         cells.forEach((cellIndex, ordinal) => {
           visit(`${storyId}:t${currentTableIndex}:r${rowIndex}c${ordinal}`, block.rows[rowIndex]!.cells[cellIndex]!.content);
@@ -3568,11 +3616,22 @@ class SaveContext {
       }
       this.payloadBaselines.set(payload, baseline);
       const prefix = source.prefix;
-      baseline.rows.forEach((row, rowIndex) => {
-        row.forEach((cell, cellIndex) => {
-          this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+      const recorded = projectedBlocks.get(source.table)?.tableBaseline
+        ? undefined
+        : projectedTableCells.get(source.table);
+      if (recorded) {
+        const seeded = seededCellIndices(source.table);
+        recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+          const cell = baseline!.rows[rowIndex]?.[seeded[rowIndex]?.indexOf(cellIndex) ?? -1];
+          if (typeof entry === 'string' && cell) this.sourceCells.set(entry, cell);
+        }));
+      } else {
+        baseline.rows.forEach((row, rowIndex) => {
+          row.forEach((cell, cellIndex) => {
+            this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+          });
         });
-      });
+      }
     }
     for (const cell of cells) {
       if (typeof cell.story !== 'string') continue;

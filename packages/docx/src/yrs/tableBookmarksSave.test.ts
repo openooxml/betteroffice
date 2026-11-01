@@ -271,3 +271,33 @@ for (const seeder of ['native', 'projected'] as const) {
     });
   }
 }
+
+const threeRows = `<w:tbl>${grid(1)}<w:tr>${cell('000000f1', 'RowA')}</w:tr>`
+  + `<w:tr>${cell('000000f2', 'RowB')}</w:tr>${start(16)}`
+  + `<w:tr>${start(17)}<w:tc>${start(18)}${paragraph('000000f3', 'RowC')}${end(18)}</w:tc>${end(17)}</w:tr>${end(16)}</w:tbl>`;
+
+for (const seeder of ['native', 'projected'] as const) {
+  for (const first of ['delete', 'insert'] as const) {
+    it(`${seeder} keeps row C's bookmarks on row C across two saves after a row ${first}`, async () => {
+      const source = fixture(threeRows);
+      const base = await parseDocx(source.slice().buffer, { preloadFonts: false });
+      const session = await createYrsSession();
+      try {
+        if (seeder === 'native') session.openDocx(source, true);
+        else documentToYrs(session, base);
+        const loc = (row: number) => ({ story: 'body', tableIndex: 0, row, column: 0 });
+        if (first === 'delete') session.deleteRow({ anchor: loc(0), head: loc(0) });
+        else session.insertRow(loc(0), 'below');
+        const saved = yrsToDocument(session, base);
+        const story = session.storyIds().find(id => session.paragraphs(id).some(entry => entry.text === 'RowB'))!;
+        const target = session.paragraphs(story).find(entry => entry.text === 'RowB')!;
+        session.insertText({ story, paraId: target.paraId, offset: 0 }, 'x ');
+        const bytes = new Uint8Array(await repackDocx(yrsToDocument(session, saved)));
+        const xml = documentXml(bytes);
+        for (const id of [16, 17, 18]) pairsOf(xml, id);
+        assertOrder(xml, ['RowB<', start(16), start(17), start(18), '>RowC<', end(18), end(17), end(16)]);
+        expect(xml.indexOf(start(16))).toBeGreaterThan(xml.indexOf('RowB<'));
+      } finally { session.destroy(); }
+    });
+  }
+}
