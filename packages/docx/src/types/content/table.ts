@@ -27,6 +27,8 @@ export interface TableCell {
   structuralChange?: TableStructuralChangeInfo;
   /** Cell content (paragraphs, tables, etc.) */
   content: BlockContent[];
+  /** Bookmark boundaries between the previous cell (or the row start) and this cell, as source XML */
+  leadingBookmarks?: string[];
 }
 
 /**
@@ -45,6 +47,10 @@ export interface TableRow {
   structuralChange?: TableStructuralChangeInfo;
   /** Cells in this row */
   cells: TableCell[];
+  /** Bookmark boundaries between the previous row (or the table start) and this row, as source XML */
+  leadingBookmarks?: string[];
+  /** Bookmark boundaries after the last cell, as source XML */
+  trailingBookmarks?: string[];
 }
 
 /**
@@ -65,4 +71,6 @@ export interface Table {
   columnWidths?: number[];
   /** Table rows */
   rows: TableRow[];
+  /** Bookmark boundaries after the last row, as source XML */
+  trailingBookmarks?: string[];
 }

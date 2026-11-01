@@ -804,6 +804,8 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "MIRR" => &[1, 2],
         "XNPV" | "FVSCHEDULE" | "CELL" => &[0],
         "T.TEST" | "TTEST" => &[2, 3],
+        "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DGET" | "DMAX" | "DMIN" | "DPRODUCT" | "DSTDEV"
+        | "DSTDEVP" | "DSUM" | "DVAR" | "DVARP" => &[1],
         _ => return None,
     })
 }

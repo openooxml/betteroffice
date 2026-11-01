@@ -25,6 +25,9 @@ pub struct Table {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_widths: Option<Vec<f64>>,
     pub rows: Vec<TableRow>,
+    /// Bookmark boundaries after the last row, as source XML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_bookmarks: Option<Vec<String>>,
 }
 
 impl Table {
@@ -35,6 +38,7 @@ impl Table {
             property_changes: None,
             column_widths: None,
             rows: Vec::new(),
+            trailing_bookmarks: None,
         }
     }
 }
@@ -53,6 +57,12 @@ pub struct TableRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structural_change: Option<TableStructuralChangeInfo>,
     pub cells: Vec<TableCell>,
+    /// Bookmark boundaries between the previous row (or the table start) and this row, as source XML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leading_bookmarks: Option<Vec<String>>,
+    /// Bookmark boundaries after the last cell, as source XML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_bookmarks: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,6 +77,9 @@ pub struct TableCell {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structural_change: Option<TableStructuralChangeInfo>,
     pub content: Vec<BlockContent>,
+    /// Bookmark boundaries between the previous cell (or the row start) and this cell, as source XML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leading_bookmarks: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
