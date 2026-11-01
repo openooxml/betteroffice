@@ -253,8 +253,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const report = useCallback((error: unknown) => {
     if (error instanceof PeerlessWorkerCommandRefusal && error.status.reason === 'read-only') {
       setRefusal({ code: 'read-only' });
-    } else if (error instanceof WorkerInputRefusal) setRefusal({ code: error.code, detail: error.message });
-    else if (error instanceof XlsxCommandAdmissionError) setRefusal({ code: error.code });
+    } else if (error instanceof WorkerInputRefusal) {
+      setRefusal({ code: error.code, detail: error.code === 'sheet-protected' ? undefined : error.message });
+    } else if (error instanceof XlsxCommandAdmissionError) setRefusal({ code: error.code });
     else setRefusal({ code: 'input-failed', detail: error instanceof Error ? error.message : String(error) });
   }, []);
   const rangeTarget = (sheet: number, selected: Selection): WorkbookCommandSelection => {

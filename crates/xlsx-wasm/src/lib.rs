@@ -203,6 +203,7 @@ impl Default for XlsxSnapshotBuilder {
 
 #[wasm_bindgen]
 impl XlsxDocument {
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = recoveryCheckpoint)]
     pub fn recovery_checkpoint(
         &self,
@@ -214,6 +215,7 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = openRecoveryCheckpoint)]
     pub fn open_recovery_checkpoint(
         bytes: &[u8],
@@ -396,6 +398,20 @@ impl XlsxDocument {
     #[wasm_bindgen(js_name = moveChartJson)]
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.inner.move_chart_json(args).map_err(map_engine_error)
+    }
+
+    #[wasm_bindgen(js_name = pngDisplayListJson)]
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {
+        self.inner
+            .png_display_list_json(viewport_json)
+            .map_err(map_engine_error)
+    }
+
+    #[wasm_bindgen(js_name = rangePngDisplayListJson)]
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner
+            .range_png_display_list_json(args)
+            .map_err(map_engine_error)
     }
 
     /// render the current sheet viewport to png bytes (raster feature only).

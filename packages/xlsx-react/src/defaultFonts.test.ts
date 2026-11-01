@@ -94,7 +94,7 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
     { family: 'Calibri', weight: '400', style: 'normal' },
     { family: 'Calibri', weight: '700', style: 'normal' },
   ]);
-  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode });
+  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode, retain: false });
   expect(decode).toHaveBeenCalledTimes(2);
   expect(repaint).toHaveBeenCalledTimes(1);
   await fonts.load(list);

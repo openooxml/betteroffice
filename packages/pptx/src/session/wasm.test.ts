@@ -289,6 +289,23 @@ describe.skipIf(engineKind === 'native')('presentation session wasm reuse', () =
     }
   });
 
+  test('session workers fetch and cache the editor-core asset', async () => {
+    const h = factory();
+    const spies = mainThreadWasmSpies();
+    try {
+      const first = await h.client.openPresentationSession(new Uint8Array());
+      expect(h.workers[0].urls).toEqual(['https://example.test/session_editor.wasm']);
+      await first.dispose();
+      const second = await h.client.openPresentationSession(new Uint8Array());
+      expect(h.workers[1].urls).toEqual([]);
+      expect(input(h.workers[1]).wasm).toBe(h.workers[0].modules[0]);
+      await second.dispose();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
   test('keys compiled modules by asset URL', async () => {
     const h = factory();
     const spies = mainThreadWasmSpies();

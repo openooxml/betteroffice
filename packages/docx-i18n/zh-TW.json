@@ -32,6 +32,7 @@
     "ariaLabel": "格式化工具列",
     "file": "檔案",
     "format": "格式",
+    "layout": "版面配置",
     "insert": "插入",
     "open": "開啟",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "目前"
     }
+  },
+  "layout": {
+    "margins": "邊界",
+    "normal": "標準",
+    "narrow": "窄",
+    "moderate": "適中",
+    "wide": "寬",
+    "customMargins": "自訂邊界...",
+    "morePaperSizes": "其他紙張大小...",
+    "indent": "縮排"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "單行",
     "double": "雙行",
     "lineSpacingTitle": "行距：{label}",
-    "paragraphSpacing": "段落間距"
+    "paragraphSpacing": "段落間距",
+    "addBefore": "新增段落前間距",
+    "removeBefore": "移除段落前間距",
+    "addAfter": "新增段落後間距",
+    "removeAfter": "移除段落後間距",
+    "options": "行距選項..."
   },
   "styles": {
     "selectAriaLabel": "選取段落樣式",
@@ -480,6 +496,11 @@
       "top": "上 (px)",
       "width": "寬度 (px)",
       "height": "高度 (px)"
+    },
+    "paragraphSpacing": {
+      "before": "段落前間距",
+      "after": "段落後間距",
+      "multiple": "多倍行高"
     }
   },
   "comments": {
@@ -755,7 +776,11 @@
     "leftIndent": "左方縮排",
     "rightIndent": "右方縮排",
     "topMargin": "上邊界",
-    "bottomMargin": "下邊界"
+    "bottomMargin": "下邊界",
+    "leftMargin": "左邊界",
+    "rightMargin": "右邊界",
+    "hangingIndent": "首行凸排",
+    "markerValue": "{name}：{value}"
   },
   "print": {
     "label": "列印",

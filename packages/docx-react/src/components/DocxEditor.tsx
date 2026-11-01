@@ -11,7 +11,7 @@
 
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import type { Document, Theme } from '@betteroffice/docx/types/document';
+import type { Document, SectionProperties, Theme } from '@betteroffice/docx/types/document';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -98,6 +98,7 @@ import {
   type DocxMemoryPressure,
   type DocxMemoryStats,
 } from './DocxEditor/memoryStats';
+import type { ParagraphSpacingData } from './dialogs/ParagraphSpacingDialog';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
@@ -1497,6 +1498,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     setState((prev) => ({ ...prev, zoom }));
   }, []);
 
+  const [paragraphSpacingDialog, setParagraphSpacingDialog] = useState<ParagraphSpacingData | null>(null);
   const commands = useDocxCommandBinding({
     experimentalWorkerOpen: workerOpen,
     pagedEditorRef,
@@ -1542,6 +1544,11 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
         imageDialogTarget(image, commandBridgeRef.current?.imageHandle(image.pos) ?? null)
       );
       setImagePropsOpen(true);
+    },
+    openParagraphSpacing: () => {
+      const spacing = commandController.store.getState('paragraphSpacing').value;
+      setParagraphSpacingDialog({ before: spacing?.before ?? 0, after: spacing?.after ?? 0,
+        lineSpacing: commandController.store.getState('lineSpacing').value ?? 240 });
     },
     openPageSetup: () => handleOpenPageSetup(),
     openWatermark: () => handleOpenWatermark(),
@@ -1940,6 +1947,12 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   });
   const dialogApply = useRef({ pageSetup: handlePageSetupApply, watermark: handleWatermarkApply });
   dialogApply.current = { pageSetup: handlePageSetupApply, watermark: handleWatermarkApply };
+  const applyPageSetup = useCallback((properties: Partial<SectionProperties>) => {
+    void commands.complete('pageSetup', () => {
+      dialogApply.current.pageSetup(properties);
+      return commandOutcome(true);
+    });
+  }, [commands]);
 
   const { scrollPageInfo, setScrollPageInfo, readCurrentPage } = useScrollPageInfo({
     scrollContainerRef,
@@ -2543,8 +2556,19 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   };
 
   const chromeContext = useMemo<EditorChrome>(
-    () => ({ showZoomControl, toolbarExtra }),
-    [showZoomControl, toolbarExtra]
+    () => ({
+      showZoomControl,
+      toolbarExtra,
+      pageLayout: {
+        currentProps: history.state?.package.document?.finalSectionProperties,
+        unit: rulerUnit,
+        onApply: (properties) => {
+          commands.open('pageSetup');
+          applyPageSetup(properties);
+        },
+      },
+    }),
+    [showZoomControl, toolbarExtra, history.state, rulerUnit, commands, applyPageSetup]
   );
   const chrome = !showToolbar ? null : toolbar !== undefined ? (
     toolbar !== null && (
@@ -2898,14 +2922,16 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
             onImagePropsClose={() => setImagePropsOpen(false)}
             onApplyImageProperties={handleApplyImageProperties}
             pmImageContext={imageTarget}
-            showPageSetup={showPageSetup}
-            onPageSetupClose={() => setShowPageSetup(false)}
-            onPageSetupApply={(properties) => {
-              void commands.complete('pageSetup', () => {
-                dialogApply.current.pageSetup(properties);
-                return commandOutcome(true);
-              });
+            paragraphSpacing={paragraphSpacingDialog}
+            onParagraphSpacingClose={() => setParagraphSpacingDialog(null)}
+            onParagraphSpacingApply={(spacing) => {
+              void commands.complete('paragraphSpacingDialog', () =>
+                commandOutcome(commandBridgeRef.current?.format({ type: 'paragraphSpacing', ...spacing }) ?? false));
             }}
+            showPageSetup={showPageSetup}
+            pageSetupUnit={rulerUnit}
+            onPageSetupClose={() => setShowPageSetup(false)}
+            onPageSetupApply={applyPageSetup}
             showWatermark={showWatermark}
             onWatermarkClose={() => setShowWatermark(false)}
             onWatermarkApply={(watermark) => {

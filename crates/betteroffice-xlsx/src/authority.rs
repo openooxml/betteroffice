@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
@@ -709,15 +709,13 @@ pub(crate) struct HistoryUpdate {
     pub(crate) update: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SheetOrderEntry {
     before: Vec<String>,
     after: Vec<String>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Default)]
 pub(crate) struct SheetOrderHistory {
     undo: Vec<SheetOrderEntry>,
     redo: Vec<SheetOrderEntry>,

@@ -232,7 +232,9 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: None,
             rand_seed: None,
-            date_system: DateSystem::V1900,
+            date_system: provider
+                .workbook()
+                .map_or(DateSystem::V1900, |workbook| workbook.date_system),
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
@@ -274,7 +276,9 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: Some(now_serial),
             rand_seed: None,
-            date_system: DateSystem::V1900,
+            date_system: provider
+                .workbook()
+                .map_or(DateSystem::V1900, |workbook| workbook.date_system),
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
@@ -309,7 +313,9 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: None,
             rand_seed: None,
-            date_system: DateSystem::V1900,
+            date_system: provider
+                .workbook()
+                .map_or(DateSystem::V1900, |workbook| workbook.date_system),
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
@@ -330,7 +336,7 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn for_sheet(&self, sheet: SheetId) -> Self {
+    pub(crate) fn for_sheet(&self, sheet: SheetId) -> Self {
         Self {
             provider: self.provider,
             sheet,

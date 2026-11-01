@@ -415,6 +415,9 @@ pub struct XmlElement {
     /// [`crate::paragraph_identity::word_para_id_name`].
     pub para_id_attribute: Option<String>,
     pub bookmark_xml: Option<String>,
+    /// For a block-level bookmark, its source slice plus the namespace
+    /// bindings it needs when replayed outside its source ancestors.
+    pub bookmark_replay_xml: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -600,7 +603,13 @@ impl XmlElement {
 
     pub fn to_raw_inline_xml(&self) -> String {
         let mut output = String::new();
-        self.write_raw_inline_xml(&mut output);
+        self.write_raw_inline_xml(&mut output, false);
+        output
+    }
+
+    pub(crate) fn to_bookmarked_raw_inline_xml(&self) -> String {
+        let mut output = String::new();
+        self.write_raw_inline_xml(&mut output, true);
         output
     }
 
@@ -636,7 +645,11 @@ impl XmlElement {
         output.push('>');
     }
 
-    fn write_raw_inline_xml(&self, output: &mut String) {
+    fn write_raw_inline_xml(&self, output: &mut String, retain_bookmarks: bool) {
+        if retain_bookmarks && let Some(xml) = &self.bookmark_xml {
+            output.push_str(xml);
+            return;
+        }
         output.push('<');
         output.push_str(&self.name);
         for (name, value) in &self.attributes {
@@ -661,7 +674,7 @@ impl XmlElement {
         output.push('>');
         for child in &self.children {
             match child {
-                XmlNode::Element(element) => element.write_raw_inline_xml(output),
+                XmlNode::Element(element) => element.write_raw_inline_xml(output, retain_bookmarks),
                 XmlNode::Text(text) => escape_text(text, output),
                 XmlNode::CData(text) => {
                     output.push_str("<![CDATA[");
@@ -1435,6 +1448,16 @@ fn retain_replayed_namespace_aliases(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
+    if ancestors
+        .iter()
+        .rev()
+        .find(|ancestor| {
+            !ancestor.matches_name("w", "customXml") && !ancestor.matches_name("w", "smartTag")
+        })
+        .is_some_and(|parent| crate::block::is_block_bookmark(parent, element))
+    {
+        return retain_bookmark_bindings(element, ancestors, part, budget);
+    }
     let row = element.name == "w:tr" && !element.attributes.is_empty();
     let smart_art =
         element.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(element);
@@ -1442,7 +1465,14 @@ fn retain_replayed_namespace_aliases(
         && element.child_elements().any(|child| {
             child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
         });
-    if !row && !smart_art && !smart_art_run && !matches!(element.local_name(), "pict" | "object") {
+    let bookmarked_drawing = matches!(element.local_name(), "drawing" | "AlternateContent")
+        && crate::text_box::has_bookmarked_text_box(element);
+    if !row
+        && !smart_art
+        && !smart_art_run
+        && !bookmarked_drawing
+        && !matches!(element.local_name(), "pict" | "object")
+    {
         return Ok(());
     }
     let mut bindings = IndexMap::new();
@@ -1536,6 +1566,88 @@ fn retain_replayed_namespace_aliases(
     Ok(())
 }
 
+/// Records, beside the exact source slice, the bindings a block bookmark needs
+/// when it is replayed on its own: every prefix it uses whose in-scope binding
+/// is not that prefix's standard namespace.
+fn retain_bookmark_bindings(
+    element: &mut XmlElement,
+    ancestors: &[XmlElement],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), ParseError> {
+    let Some(source) = &element.bookmark_xml else {
+        return Ok(());
+    };
+    let mut prefixes = Vec::new();
+    for name in
+        std::iter::once(element.name.as_str()).chain(element.attributes.keys().map(String::as_str))
+    {
+        if let Some((prefix, _)) = name.split_once(':')
+            && !matches!(prefix, "xml" | "xmlns")
+            && !element.attributes.contains_key(&format!("xmlns:{prefix}"))
+            && !prefixes.contains(&prefix)
+        {
+            prefixes.push(prefix);
+        }
+    }
+    let story_root = ancestors
+        .first()
+        .filter(|root| matches!(root.name.as_str(), "w:document" | "w:hdr" | "w:ftr"));
+    let mut bindings = String::new();
+    for prefix in prefixes {
+        let declaration = format!("xmlns:{prefix}");
+        let Some((depth, namespace)) =
+            ancestors
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(depth, ancestor)| {
+                    ancestor
+                        .attributes
+                        .get(&declaration)
+                        .map(|value| (depth, value))
+                })
+        else {
+            continue;
+        };
+        let identity = element.attributes.keys().any(|name| {
+            name.split_once(':')
+                .is_some_and(|(used, local)| used == prefix && matches!(local, "id" | "name"))
+        });
+        if canonical_namespace(prefix) == Some(namespace.as_str())
+            || (depth == 0
+                && story_root.is_some()
+                && !identity
+                && !crate::serializer::parts::is_story_root_prefix(prefix))
+        {
+            continue;
+        }
+        budget.charge_text(declaration.len() + namespace.len(), part)?;
+        bindings.push(' ');
+        bindings.push_str(&declaration);
+        bindings.push_str("=\"");
+        escape_attribute(namespace, &mut bindings);
+        bindings.push('"');
+    }
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    if element.attributes.len() >= budget.limits.max_attributes_per_element {
+        return Err(ParseError::ResourceLimit {
+            kind: "bookmarkNamespaceAliases",
+            part: part.to_owned(),
+        });
+    }
+    let tag = crate::serializer::splice::root_tag(source)
+        .ok_or_else(|| ParseError::Canonical("invalid block bookmark".to_owned()))?;
+    let mut replay = source.clone();
+    let close = tag.range.end - if tag.empty { 2 } else { 1 };
+    let at = replay[..close].trim_end().len();
+    replay.insert_str(at, &bindings);
+    element.bookmark_replay_xml = Some(replay);
+    Ok(())
+}
+
 fn retain_bookmark_xml(element: &mut XmlElement, xml: &[u8], start: usize, end: usize) {
     if matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd") {
         element.bookmark_xml = std::str::from_utf8(&xml[start..end])
@@ -1614,6 +1726,7 @@ fn decode_element(
         paragraph_ordinal: None,
         para_id_attribute: None,
         bookmark_xml: None,
+        bookmark_replay_xml: None,
     })
 }
 

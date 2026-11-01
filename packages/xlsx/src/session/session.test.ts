@@ -49,6 +49,37 @@ test('font decoder RPC initializes without a workbook and propagates errors', as
   } finally { await client.dispose(); }
 });
 
+test('every engine-initializing handler of a lean session asks for the lean core', async () => {
+  const seen: (boolean | undefined)[] = [];
+  const host = () => {
+    const pair = createInProcessPair();
+    createWorkbookSessionHost(pair.host, { initWasm: async (source, options) => {
+      seen.push(options?.png);
+      await initWasm(source ?? wasmBytes.buffer);
+    } });
+    return createSessionClient<WorkbookSessionMethods, {}>(pair.client, { methods: WORKBOOK_SESSION_METHODS });
+  };
+  const original = host();
+  const replacement = host();
+  const font = () => new Uint8Array([0, 1, 0, 0, 10]).buffer;
+  try {
+    await original.call.open(fixture.slice().buffer, { includeEditState: true, png: false,
+      calculation: { nowSerial: 45000, randSeed: 19 } });
+    await original.call.decodeFontFace(font(), { codec: 'zstd' });
+    await original.call.frame(viewport);
+    await original.call.exportStructured();
+    await original.call.exportMarkdown();
+    await original.call.save();
+    const checkpoint = await original.call.checkpoint();
+    await replacement.call.openRecovery(checkpoint, { png: false });
+    await replacement.call.decodeFontFace(font(), { codec: 'zstd' });
+    expect(seen).toEqual([false, false, false, false]);
+  } finally {
+    await original.dispose();
+    await replacement.dispose();
+  }
+});
+
 function read(result: XlsxReadResult): Extract<XlsxReadResult, { ok: true }> {
   if (!result.ok) throw new Error(result.failure.message);
   return result;

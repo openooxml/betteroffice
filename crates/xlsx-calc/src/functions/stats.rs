@@ -534,7 +534,7 @@ fn variance_of(nums: &[f64], sample: bool) -> Result<f64, ErrorValue> {
 
 /// the numeric aggregates (codes 1, 4-13) over an already-collected list,
 /// with the same empty-input answers the delegated functions gave.
-fn numbers_value(code: i64, nums: &[f64]) -> CellValue {
+pub(crate) fn numbers_value(code: i64, nums: &[f64]) -> CellValue {
     match code {
         1 => mean_of(nums),
         4 => max_of(nums),

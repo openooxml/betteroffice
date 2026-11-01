@@ -110,7 +110,7 @@ pub(crate) const FRAME_FIELDS: &[&str] = &[
     "relativeHeight",
 ];
 
-fn wire_model(value: serde_json::Value) -> serde_json::Value {
+pub(crate) fn wire_model(value: serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
     match value {
         Value::Number(number) => number.as_f64().map_or(Value::Null, |number| {

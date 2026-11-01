@@ -91,6 +91,7 @@ impl Document {
         self.host
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: f64,
@@ -104,6 +105,7 @@ impl Document {
             .map_err(error_kind)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn open_recovery_checkpoint(
         bytes: &[u8],
         through_seq: f64,
@@ -313,6 +315,18 @@ impl Document {
         let now_serial = (self.host.now_serial)()?;
         self.session
             .move_chart_json(args, now_serial)
+            .map_err(message)
+    }
+
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, EngineError> {
+        self.session
+            .png_display_list_json(viewport_json)
+            .map_err(message)
+    }
+
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, EngineError> {
+        self.session
+            .range_png_display_list_json(args)
             .map_err(message)
     }
 

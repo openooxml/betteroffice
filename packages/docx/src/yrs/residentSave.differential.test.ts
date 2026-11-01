@@ -885,9 +885,19 @@ function staleMainPartExempt(workerXml: string, mainXml: string, liveIds: Readon
     mergedTextRuns(withoutStaleCommentMarkers(mainXml, ids)) === mergedTextRuns(workerXml);
 }
 
+// Main-thread saves keep text runs split where a deleted comment's markers stood.
+function deletedCommentRunSplitExempt(
+  workerXml: string, mainXml: string, liveIds: ReadonlySet<string>, deletedIds: ReadonlySet<string>
+): boolean {
+  return deletedIds.size > 0 && [workerXml, mainXml].every((xml) =>
+    danglingRangeMarkers(xml, liveIds).length === 0 && !commentReferenceIds(xml).some((id) => deletedIds.has(id))
+  ) && mergedTextRuns(mainXml) === mergedTextRuns(workerXml);
+}
+
 // Deferred: main-thread saves can retain deleted comment range markers.
 function staleMainCommentMarkers(
-  worker: Uint8Array, main: Uint8Array, parts: readonly string[], saveCommentIds: readonly string[], log: string[]
+  worker: Uint8Array, main: Uint8Array, parts: readonly string[], saveCommentIds: readonly string[], log: string[],
+  deletedIds: ReadonlySet<string> = new Set()
 ): boolean {
   const actual = unzipContainer(worker);
   const expected = unzipContainer(main);
@@ -897,7 +907,8 @@ function staleMainCommentMarkers(
       actual[part] === undefined || expected[part] === undefined) return false;
     const workerXml = new TextDecoder().decode(actual[part]);
     const mainXml = new TextDecoder().decode(expected[part]);
-    return staleMainPartExempt(workerXml, mainXml, liveIds);
+    return staleMainPartExempt(workerXml, mainXml, liveIds) ||
+      deletedCommentRunSplitExempt(workerXml, mainXml, liveIds, deletedIds);
   });
   if (matches) {
     for (const part of parts) {
@@ -907,7 +918,7 @@ function staleMainCommentMarkers(
       const strippedMain = withoutStaleCommentMarkers(xml, ids);
       const merged = mergedTextRuns(strippedMain) !== strippedMain || mergedTextRuns(workerXml) !== workerXml;
       log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...ids])} ` +
-        `comments=${JSON.stringify(saveCommentIds)} merged runs=${merged}`);
+        `comments=${JSON.stringify(saveCommentIds)} deleted=${JSON.stringify([...deletedIds])} merged runs=${merged}`);
     }
   }
   return matches;
@@ -997,6 +1008,30 @@ test('the stale comment marker exemption merges cached text runs without hiding 
   expect(staleMainPartExempt(worker, main, liveSaveCommentIds(commentsXmlIds, ['5']))).toBe(false);
 });
 
+test('the deleted comment run split exemption needs a deleted comment and no markers left for it', () => {
+  const worker = '<w:p><w:r><w:t>Alpa betaY gamma.</w:t></w:r></w:p>';
+  const main = '<w:p><w:r><w:t>Alpa beta</w:t></w:r><w:r><w:t>Y</w:t></w:r>' +
+    '<w:r><w:t xml:space="preserve"> gamma.</w:t></w:r></w:p>';
+  const liveIds = new Set<string>();
+  const deletedIds = new Set(['5']);
+  expect(deletedCommentRunSplitExempt(worker, main, liveIds, deletedIds)).toBe(true);
+  expect(deletedCommentRunSplitExempt(worker, main, liveIds, new Set())).toBe(false);
+  expect(deletedCommentRunSplitExempt(worker, main.replace('gamma', 'gamma!'), liveIds, deletedIds)).toBe(false);
+  expect(deletedCommentRunSplitExempt(worker,
+    main.replace('<w:r><w:t>Y', '<w:r><w:rPr><w:b/></w:rPr><w:t>Y'), liveIds, deletedIds)).toBe(false);
+  const range = '<w:commentRangeStart w:id="5"/><w:commentRangeEnd w:id="5"/>';
+  expect(deletedCommentRunSplitExempt(worker, main.replace('</w:p>', `${range}</w:p>`), liveIds, deletedIds))
+    .toBe(false);
+  const reference = '<w:r><w:commentReference w:id="5"/></w:r>';
+  expect(deletedCommentRunSplitExempt(worker.replace('</w:p>', `${reference}</w:p>`), main, liveIds, deletedIds))
+    .toBe(false);
+  expect(deletedCommentRunSplitExempt(worker, main.replace('</w:p>', `${reference}</w:p>`), liveIds, deletedIds))
+    .toBe(false);
+  const liveRange = range.replaceAll('"5"', '"1"');
+  expect(deletedCommentRunSplitExempt(worker.replace('</w:p>', `${liveRange}</w:p>`),
+    main.replace('</w:p>', `${liveRange}</w:p>`), new Set(['1']), deletedIds)).toBe(true);
+});
+
 test('text run merging preserves formatting, whitespace and other children', () => {
   const first = '<w:r><w:t>one</w:t></w:r>';
   const second = '<w:r><w:t>two</w:t></w:r>';
@@ -1052,6 +1087,7 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   let otherRemoteUpdates = 0;
   let editorSeeds = 0;
   const hydrationSeeds: Record<HydrationMode, number> = { viewer: 0, unloaded: 0, loading: 0 };
+  const sourceCommentIds = liveCommentIds(unzipContainer(fixture()));
   for (let seed = 1; seed <= SEEDS; seed += 1) {
     const random = new Random(seed);
     const topology: Topology = seed % 3 === 0 ? 'C/hydrate'
@@ -1061,6 +1097,7 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       : undefined;
     const log: string[] = [`open seed=${seed} topology=${topology}`];
     let arms: Arms | undefined;
+    const seenCommentIds = new Set(sourceCommentIds);
     seedsRun += 1;
     if (topology === 'A/editor') editorSeeds += 1;
     if (hydrationMode) {
@@ -1075,11 +1112,13 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         { actual, expected }: Awaited<ReturnType<typeof saveWorkerArm>>, saveCommentIds: readonly string[]
       ) => {
         savesCompared += 1;
+        const deletedIds = new Set([...seenCommentIds].filter((id) => !saveCommentIds.includes(id)));
+        for (const id of saveCommentIds) seenCommentIds.add(id);
         const differences = partDifferences(new Uint8Array(actual.bytes), expected);
         if (differences.length > 0) {
           const parts = differences.map(({ part }) => part);
           const exemptions: string[] = [];
-          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts, saveCommentIds, exemptions)) {
+          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts, saveCommentIds, exemptions, deletedIds)) {
             staleMainSeeds.add(seed);
             staleMainSaves += 1;
             log.push(...exemptions);

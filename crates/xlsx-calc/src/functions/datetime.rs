@@ -1,7 +1,9 @@
 //! date and time functions on excel 1900-system serials, including the
-//! deliberate 1900 leap-year bug (serial 60 = phantom 1900-02-29).
+//! deliberate 1900 leap-year bug (serial 60 = phantom 1900-02-29). a 1904
+//! workbook's serials are moved onto 1900 serials on the way in and back on
+//! the way out; the injected clock is always a 1900 serial.
 
-use xlsx_model::{CellValue, ErrorValue};
+use xlsx_model::{CellValue, DateSystem, ErrorValue};
 
 use crate::eval::{EvalContext, err, evaluate, num, to_text};
 use crate::parser::Expr;
@@ -15,8 +17,51 @@ const SERIAL_OFFSET: i64 = 25_568;
 /// 9999-12-31, the last date excel can hold.
 const MAX_SERIAL: i64 = 2_958_465;
 
+/// the 1900 serial of 1904-01-01, serial 0 of the 1904 system.
+const EPOCH_1904: i64 = 1_462;
+
 fn in_date_range(serial: i64) -> bool {
     (0..=MAX_SERIAL).contains(&serial)
+}
+
+/// a workbook serial as the 1900 serial of the same day. a negative 1904
+/// serial has no date and stays out of range.
+pub(super) fn to_1900(serial: i64, system: DateSystem) -> i64 {
+    match system {
+        DateSystem::V1904 if serial >= 0 => serial.saturating_add(EPOCH_1904),
+        _ => serial,
+    }
+}
+
+/// a 1900 serial as a workbook serial; a day before 1904-01-01 has none in
+/// the 1904 system.
+fn from_1900(serial: i64, system: DateSystem) -> Option<i64> {
+    match system {
+        DateSystem::V1900 => Some(serial),
+        DateSystem::V1904 => serial.checked_sub(EPOCH_1904).filter(|s| *s >= 0),
+    }
+}
+
+/// the last serial the workbook's date system holds (9999-12-31).
+fn max_serial(system: DateSystem) -> i64 {
+    match system {
+        DateSystem::V1900 => MAX_SERIAL,
+        DateSystem::V1904 => MAX_SERIAL - EPOCH_1904,
+    }
+}
+
+/// a date argument as the 1900 serial of its day.
+fn day_arg(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<i64, ErrorValue> {
+    serial_arg(args, ctx, index).map(|n| to_1900(n.floor() as i64, ctx.date_system))
+}
+
+/// a computed 1900 serial as the cell's number, `#NUM!` when the workbook's
+/// date system cannot hold it.
+fn serial_value(serial: i64, ctx: &EvalContext<'_>) -> CellValue {
+    match from_1900(serial, ctx.date_system) {
+        Some(serial) => num(serial as f64),
+        None => err(ErrorValue::Num),
+    }
 }
 
 // howard hinnant's civil-date algorithms
@@ -56,7 +101,7 @@ fn unix_to_serial(unix: i64) -> Option<i64> {
 
 /// (year, month, day) for a serial. serial 60 is the phantom 1900-02-29;
 /// a serial outside excel's date range has no calendar date (returns None).
-fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
+pub(super) fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
     if !in_date_range(serial) {
         return None;
     }
@@ -118,7 +163,7 @@ pub(crate) fn date(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Num);
     }
     match date_to_serial(y, m, d) {
-        Some(serial) => num(serial as f64),
+        Some(serial) => serial_value(serial, ctx),
         None => err(ErrorValue::Num),
     }
 }
@@ -144,8 +189,8 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() || args.len() > 2 {
         return err(ErrorValue::Value);
     }
-    let serial = match serial_arg(args, ctx, 0) {
-        Ok(n) => n.floor() as i64,
+    let serial = match day_arg(args, ctx, 0) {
+        Ok(n) => n,
         Err(e) => return err(e),
     };
     let kind = if args.len() == 2 {
@@ -190,8 +235,8 @@ pub(crate) fn isoweeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
-    match serial_arg(args, ctx, 0) {
-        Ok(n) => iso_week(n.floor() as i64),
+    match day_arg(args, ctx, 0) {
+        Ok(n) => iso_week(n),
         Err(e) => err(e),
     }
 }
@@ -217,8 +262,8 @@ pub(crate) fn weekday(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() || args.len() > 2 {
         return err(ErrorValue::Value);
     }
-    let serial = match serial_arg(args, ctx, 0) {
-        Ok(n) => n.floor() as i64,
+    let serial = match day_arg(args, ctx, 0) {
+        Ok(n) => n,
         Err(e) => return err(e),
     };
     let kind = if args.len() == 2 {
@@ -270,7 +315,7 @@ pub(crate) fn today(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     match ctx.now_serial {
-        Some(s) => num(s.floor()),
+        Some(s) => clock_value(s.floor(), ctx),
         None => {
             ctx.record_unsupported_function();
             err(ErrorValue::Value)
@@ -284,11 +329,20 @@ pub(crate) fn now(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     match ctx.now_serial {
-        Some(s) => num(s),
+        Some(s) => clock_value(s, ctx),
         None => {
             ctx.record_unsupported_function();
             err(ErrorValue::Value)
         }
+    }
+}
+
+/// the injected 1900-serial clock in the workbook's date system.
+fn clock_value(serial: f64, ctx: &EvalContext<'_>) -> CellValue {
+    match ctx.date_system {
+        DateSystem::V1900 => num(serial),
+        DateSystem::V1904 if serial >= EPOCH_1904 as f64 => num(serial - EPOCH_1904 as f64),
+        DateSystem::V1904 => err(ErrorValue::Num),
     }
 }
 
@@ -328,11 +382,11 @@ pub(crate) fn datedif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let s1 = match nth_number(args, ctx, 0) {
-        Ok(n) => n.floor() as i64,
+        Ok(n) => to_1900(n.floor() as i64, ctx.date_system),
         Err(e) => return err(e),
     };
     let s2 = match nth_number(args, ctx, 1) {
-        Ok(n) => n.floor() as i64,
+        Ok(n) => to_1900(n.floor() as i64, ctx.date_system),
         Err(e) => return err(e),
     };
     let unit = match to_text(&evaluate(&args[2], ctx)) {
@@ -406,14 +460,10 @@ fn ymd_part(args: &[Expr], ctx: &EvalContext<'_>, pick: fn((i64, i64, i64)) -> i
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
-    let serial = match serial_arg(args, ctx, 0) {
-        Ok(n) => n.floor() as i64,
+    let serial = match day_arg(args, ctx, 0) {
+        Ok(n) => n,
         Err(e) => return err(e),
     };
-    // serial 0 is excel's 1900-01-00: day 0, month 1, year 1900
-    if serial == 0 {
-        return num(pick((1900, 1, 0)) as f64);
-    }
     match serial_to_ymd(serial) {
         Some(ymd) => num(pick(ymd) as f64),
         None => err(ErrorValue::Num),
@@ -424,8 +474,8 @@ fn shifted_month(args: &[Expr], ctx: &EvalContext<'_>, end_of_month: bool) -> Ce
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
-    let serial = match serial_arg(args, ctx, 0) {
-        Ok(n) => n.floor() as i64,
+    let serial = match day_arg(args, ctx, 0) {
+        Ok(n) => n,
         Err(e) => return err(e),
     };
     let months = match nth_int(args, ctx, 1) {
@@ -447,7 +497,7 @@ fn shifted_month(args: &[Expr], ctx: &EvalContext<'_>, end_of_month: bool) -> Ce
         d.min(days_in_month(ty, tm))
     };
     match date_to_serial(ty, tm, target_day) {
-        Some(serial) => num(serial as f64),
+        Some(serial) => serial_value(serial, ctx),
         None => err(ErrorValue::Num),
     }
 }
@@ -503,7 +553,7 @@ fn serial_argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result
         CellValue::Text { value } => parse_date_text(&value, ctx).ok_or(ErrorValue::Value),
         other => {
             let serial = crate::eval::to_number(&other)?.trunc();
-            if !(0.0..=MAX_SERIAL as f64).contains(&serial) {
+            if !(0.0..=max_serial(ctx.date_system) as f64).contains(&serial) {
                 return Err(ErrorValue::Num);
             }
             Ok(serial as i64)
@@ -511,8 +561,9 @@ fn serial_argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result
     }
 }
 
-/// parse the date part of a textual timestamp to a serial, `None` when it is
-/// not a date this locale (US order) recognises.
+/// parse the date part of a textual timestamp to a workbook serial, `None`
+/// when it is not a date this locale (US order) recognises or the workbook's
+/// date system cannot hold it.
 pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
     let fields = date_fields(raw)?;
     let (y, m, d) = match fields.as_slice() {
@@ -529,12 +580,12 @@ pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
     }
     // excel's phantom 1900-02-29 parses even though 1900 was not a leap year
     if (y, m, d) == (1900, 2, 29) {
-        return Some(PHANTOM);
+        return from_1900(PHANTOM, ctx.date_system);
     }
     if d < 1 || d > days_in_month(y, m) {
         return None;
     }
-    date_to_serial(y, m, d)
+    from_1900(date_to_serial(y, m, d)?, ctx.date_system)
 }
 
 /// Parse a cell-entry date using the workbook epoch and injected clock.
@@ -563,12 +614,7 @@ pub fn parse_entry_date(
         None => {
             let now = now_serial
                 .filter(|value| value.is_finite() && (0.0..=MAX_SERIAL as f64).contains(value))?;
-            match date_system {
-                xlsx_model::DateSystem::V1900 => serial_to_ymd(now.floor() as i64)?.0,
-                xlsx_model::DateSystem::V1904 => {
-                    civil_from_days(date_system.serial_to_unix_days(now)?).0
-                }
-            }
+            serial_to_ymd(now.floor() as i64)?.0
         }
     };
     if !(1900..=9999).contains(&year) || !(1..=12).contains(&month) || day < 1 {
@@ -579,15 +625,7 @@ pub fn parse_entry_date(
         return None;
     }
     let serial = date_to_serial(year, month, day)?;
-    match date_system {
-        xlsx_model::DateSystem::V1900 => Some(serial as f64),
-        xlsx_model::DateSystem::V1904 if phantom => None,
-        xlsx_model::DateSystem::V1904 => {
-            let unix = xlsx_model::DateSystem::V1900.serial_to_unix_days(serial as f64)?;
-            let epoch = date_system.serial_to_unix_days(0.0)?;
-            (unix >= epoch).then_some((unix - epoch) as f64)
-        }
-    }
+    from_1900(serial, date_system).map(|serial| serial as f64)
 }
 
 /// a date written year first (`2017-04-27`, `2017/4/27`), optionally followed
@@ -819,7 +857,10 @@ pub(crate) fn yearfrac(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let (start, end) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
-        (Ok(a), Ok(b)) => (a.floor() as i64, b.floor() as i64),
+        (Ok(a), Ok(b)) => (
+            to_1900(a.floor() as i64, ctx.date_system),
+            to_1900(b.floor() as i64, ctx.date_system),
+        ),
         (Err(e), _) | (_, Err(e)) => return err(e),
     };
     let basis = if args.len() == 3 && !omitted(&args[2]) {
@@ -969,10 +1010,10 @@ fn holidays_arg(
     let mut out = Vec::new();
     for value in crate::array::evaluate_array(arg, ctx).into_array().cells() {
         match value {
-            CellValue::Number { value } => out.push(value.floor() as i64),
+            CellValue::Number { value } => out.push(to_1900(value.floor() as i64, ctx.date_system)),
             CellValue::Error { value } => return Err(*value),
             CellValue::Text { value } => match ctx.parse_number(value) {
-                Some(number) => out.push(number.floor() as i64),
+                Some(number) => out.push(to_1900(number.floor() as i64, ctx.date_system)),
                 None => return Err(ErrorValue::Value),
             },
             _ => {}
@@ -1013,7 +1054,10 @@ fn networkdays_core(
     holidays_index: usize,
 ) -> CellValue {
     let (start, end) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
-        (Ok(a), Ok(b)) => (a.floor() as i64, b.floor() as i64),
+        (Ok(a), Ok(b)) => (
+            to_1900(a.floor() as i64, ctx.date_system),
+            to_1900(b.floor() as i64, ctx.date_system),
+        ),
         (Err(e), _) | (_, Err(e)) => return err(e),
     };
     let holidays = match holidays_arg(args, ctx, holidays_index) {
@@ -1093,7 +1137,7 @@ fn workday_core(
     holidays_index: usize,
 ) -> CellValue {
     let (start, days) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
-        (Ok(a), Ok(b)) => (a.floor() as i64, b.trunc() as i64),
+        (Ok(a), Ok(b)) => (to_1900(a.floor() as i64, ctx.date_system), b.trunc() as i64),
         (Err(e), _) | (_, Err(e)) => return err(e),
     };
     let holidays = match holidays_arg(args, ctx, holidays_index) {
@@ -1134,5 +1178,5 @@ fn workday_core(
             remaining -= 1;
         }
     }
-    num(current as f64)
+    serial_value(current, ctx)
 }

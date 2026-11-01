@@ -13,6 +13,7 @@ import * as display from '@betteroffice/docx/layout/render';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PeerlessPagedEditor, type PeerlessPagedEditorProps } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
+import { fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -149,6 +150,238 @@ async function mount(selection = false, accessible = false, table = false,
     present(candidate: DocxCommandFrame) { act(() => { receive?.(candidate); }); },
   };
 }
+
+async function warmupEditor({ primitiveCounts = [0, 0, 0], timers = false } = {}) {
+  const scheduler = fakeIdleScheduler();
+  restorers.push(() => scheduler.restore());
+  const loaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue({} as display.RustDisplayListQueryEngine);
+  const hitTestRegions = mock((_pageIndex: number, _x: number, _y: number) => null);
+  const queries = spyOn(display, 'createDisplayListQueries').mockImplementation(() => ({
+    hitTestRegions, caretRect: () => null, dispose() {},
+  }) as unknown as display.DisplayListQueries);
+  restorers.push(() => loaded.mockRestore(), () => queries.mockRestore());
+  const displayPages: DisplayPage[] = primitiveCounts.map((count, pageIndex) => ({ pageIndex, width: 200, height: 40,
+    primitives: Array.from({ length: count }, () => ({ kind: 'rect' as const, x: 0, y: 0, w: 1, h: 1, fill: '#000' })),
+  }));
+  const editor = await mount(false, false, false, candidate => ({
+    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision, layoutRevision: 1,
+    documentVersion: 'v1',
+    pages: displayPages.map((displayPage, pageIndex) => ({ page: { pageId: String(pageIndex + 1), pageIndex },
+      bounds: { x: 0, y: pageIndex * 64, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0], displayPage })),
+    caret: null, selectionRects: [],
+  }));
+  if (timers) {
+    let id = 0;
+    const clock = spyOn(performance, 'now').mockImplementation(() => scheduler.now);
+    const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay = 0) => {
+      scheduler.timers.set(++id, { at: scheduler.now + delay, run });
+      return id;
+    }) as unknown as typeof setTimeout);
+    const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((timer) => { scheduler.timers.delete(timer as unknown as number); });
+    restorers.push(() => clock.mockRestore(), () => timeout.mockRestore(), () => clear.mockRestore());
+  }
+  return { ...editor, scheduler, hitTestRegions, queries,
+    changeDocument(change: 'edit' | 'layout' = 'edit') {
+      const before = editor.binding.viewStore.getSnapshot().geometry!;
+      act(() => editor.binding.viewStore.installFrameGeometry({ ...before, frameEpoch: before.frameEpoch + 1,
+        ...(change === 'edit'
+          ? { documentVersion: `v${Number(before.documentVersion!.slice(1)) + 1}` }
+          : { layoutRevision: before.layoutRevision + 1 }),
+        pages: before.pages.map(entry => ({ ...entry, displayPage: { ...entry.displayPage! } })),
+      }));
+    },
+  };
+}
+
+test('hit-test warm-up yields when the idle budget ends and skips unchanged query objects', async () => {
+  const editor = await warmupEditor();
+  let clock = 0;
+  const now = spyOn(performance, 'now').mockImplementation(() => clock);
+  restorers.push(() => now.mockRestore());
+  const timeouts = () => [...editor.scheduler.idleWork.values()].map(({ timeout }) => timeout);
+  let remaining = 8;
+  editor.hitTestRegions.mockImplementation(() => { remaining = 0; return null; });
+  act(() => editor.scheduler.flushIdle({ didTimeout: false, timeRemaining: () => remaining }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+  expect(timeouts()).toEqual([1000]);
+  clock = 400;
+  act(() => editor.scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+  expect(timeouts()).toEqual([600]);
+  clock = 1000;
+  act(() => editor.scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(2);
+  editor.hitTestRegions.mockImplementation(() => null);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+  const store = editor.binding.viewStore;
+  let before = store.getSnapshot().geometry!;
+  act(() => {
+    store.installFrameGeometry({ ...before, frameEpoch: before.frameEpoch + 1,
+      pages: before.pages.map(entry => ({ ...entry, bounds: { ...entry.bounds, x: 10 } })) });
+  });
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+  expect(editor.queries).toHaveBeenCalledTimes(1);
+  before = store.getSnapshot().geometry!;
+  act(() => {
+    store.installFrameGeometry({ ...before, frameEpoch: before.frameEpoch + 1,
+      pages: before.pages.map(entry => ({ ...entry, displayPage: { ...entry.displayPage! } })) });
+  });
+  for (let flush = 0; flush < 3; flush++) act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(6);
+  expect(editor.queries).toHaveBeenCalledTimes(2);
+});
+
+test('hit-test warm-up waits until 500 ms after the last keystroke', async () => {
+  const editor = await warmupEditor();
+  let now = 1000;
+  let id = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay = 0) => {
+    timers.set(++id, { at: now + delay, run });
+    return id;
+  }) as unknown as typeof setTimeout);
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((timer) => { timers.delete(timer as unknown as number); });
+  restorers.push(() => clock.mockRestore(), () => timeout.mockRestore(), () => clear.mockRestore());
+  const advance = (ms: number) => act(() => {
+    now += ms;
+    for (const [timer, work] of [...timers]) if (work.at <= now && timers.delete(timer)) work.run();
+  });
+  act(() => fireEvent.keyDown(document, { key: 'a' }));
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(300);
+  act(() => fireEvent.keyDown(document, { key: 'b' }));
+  advance(499);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(1);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+});
+
+for (const [focusTarget, change] of [['input', 'edit'], ['root', 'edit'], ['input', 'layout']] as const) {
+  test(`hit-test warm-up waits for 2 s after a document ${change} with the ${focusTarget} focused`, async () => {
+    const editor = await warmupEditor({ timers: true });
+    const { scheduler } = editor;
+    const root = editor.container.querySelector<HTMLElement>('[data-docx-worker-editor]')!;
+    root.tabIndex = 0;
+    await act(async () => { (focusTarget === 'input' ? editor.textarea : root).focus(); });
+    editor.changeDocument(change);
+    act(() => scheduler.flushIdle());
+    expect(editor.hitTestRegions).not.toHaveBeenCalled();
+    expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([2000]);
+    for (const at of [1001, 1999]) {
+      scheduler.now = at;
+      act(() => {
+        scheduler.flushDueTimers();
+        scheduler.flushIdle({ didTimeout: true, timeRemaining: () => 40 });
+      });
+      expect(editor.hitTestRegions).not.toHaveBeenCalled();
+      expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([2000]);
+    }
+    scheduler.now = 2000;
+    act(() => scheduler.flushDueTimers());
+    expect(scheduler.timers.size).toBe(0);
+    expect([...scheduler.idleWork.values()].map(({ timeout }) => timeout)).toEqual([1000]);
+    act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+    expect(editor.hitTestRegions).not.toHaveBeenCalled();
+    for (let flush = 0; flush < 3; flush++) act(() => scheduler.flushIdle());
+    expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+    expect(scheduler.idleWork.size).toBe(0);
+  });
+}
+
+test('hit-test warm-up resumes on blur and does not guard blurred document changes', async () => {
+  const editor = await warmupEditor({ timers: true });
+  const { scheduler } = editor;
+  await act(async () => { editor.textarea.focus(); });
+  editor.changeDocument();
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([2000]);
+  scheduler.now = 250;
+  await act(async () => { editor.textarea.blur(); });
+  expect(scheduler.timers.size).toBe(0);
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+  editor.changeDocument();
+  expect(scheduler.timers.size).toBe(0);
+  for (let flush = 0; flush < 3; flush++) act(() => scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(4);
+});
+
+test('hit-test warm-up restarts the document quiet window and cancels its timer on scroll and cleanup', async () => {
+  const editor = await warmupEditor({ timers: true });
+  const { scheduler } = editor;
+  await act(async () => { editor.textarea.focus(); });
+  editor.changeDocument();
+  scheduler.now = 1000;
+  editor.changeDocument();
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([3000]);
+  act(() => fireEvent.scroll(window));
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([1150]);
+  scheduler.now = 1150;
+  act(() => scheduler.flushDueTimers());
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([3000]);
+  editor.unmount();
+  expect(scheduler.timers.size).toBe(0);
+  expect(scheduler.idleWork.size).toBe(0);
+  scheduler.now = 3000;
+  act(() => { scheduler.flushDueTimers(); scheduler.flushIdle(); });
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+});
+
+test('hit-test warm-up waits for a larger idle slice before a large page unless overdue', async () => {
+  const editor = await warmupEditor({ primitiveCounts: [2001, 2000, 2001], timers: true });
+  const { scheduler } = editor;
+  editor.changeDocument();
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  expect(editor.queries).not.toHaveBeenCalled();
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 15 }));
+  expect(editor.hitTestRegions.mock.calls.map(([pageIndex]) => pageIndex)).toEqual([0]);
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions.mock.calls.map(([pageIndex]) => pageIndex)).toEqual([0, 1]);
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(2);
+  scheduler.now = 1000;
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+  expect(editor.hitTestRegions.mock.calls.map(([pageIndex]) => pageIndex)).toEqual([0, 1, 2]);
+  expect(scheduler.idleWork.size).toBe(0);
+});
+
+test('hit-test warm-up pauses until 150 ms after the last scroll', async () => {
+  const editor = await warmupEditor();
+  let now = 0;
+  let id = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay = 0) => {
+    timers.set(++id, { at: now + delay, run });
+    return id;
+  }) as unknown as typeof setTimeout);
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((timer) => { timers.delete(timer as unknown as number); });
+  restorers.push(() => timeout.mockRestore(), () => clear.mockRestore());
+  const advance = (ms: number) => act(() => {
+    now += ms;
+    for (const [timer, work] of [...timers]) if (work.at <= now && timers.delete(timer)) work.run();
+  });
+  act(() => fireEvent.scroll(window));
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(149);
+  act(() => fireEvent.scroll(window));
+  advance(149);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(1);
+  for (let flush = 0; flush < 3; flush++) act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+  editor.unmount();
+  advance(150);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+});
 
 test('peerless accessibility exposes retained offscreen pages without allocating their canvases', async () => {
   const editor = await mount(false, true);
