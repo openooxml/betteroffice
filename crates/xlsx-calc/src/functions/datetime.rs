@@ -20,13 +20,13 @@ const MAX_SERIAL: i64 = 2_958_465;
 /// the 1900 serial of 1904-01-01, serial 0 of the 1904 system.
 const EPOCH_1904: i64 = 1_462;
 
-fn in_date_range(serial: i64) -> bool {
+pub(super) fn in_date_range(serial: i64) -> bool {
     (0..=MAX_SERIAL).contains(&serial)
 }
 
 /// a workbook serial as the 1900 serial of the same day. a negative 1904
 /// serial has no date and stays out of range.
-fn to_1900(serial: i64, system: DateSystem) -> i64 {
+pub(super) fn to_1900(serial: i64, system: DateSystem) -> i64 {
     match system {
         DateSystem::V1904 if serial >= 0 => serial.saturating_add(EPOCH_1904),
         _ => serial,
@@ -35,7 +35,7 @@ fn to_1900(serial: i64, system: DateSystem) -> i64 {
 
 /// a 1900 serial as a workbook serial; a day before 1904-01-01 has none in
 /// the 1904 system.
-fn from_1900(serial: i64, system: DateSystem) -> Option<i64> {
+pub(super) fn from_1900(serial: i64, system: DateSystem) -> Option<i64> {
     match system {
         DateSystem::V1900 => Some(serial),
         DateSystem::V1904 => serial.checked_sub(EPOCH_1904).filter(|s| *s >= 0),
@@ -101,7 +101,7 @@ fn unix_to_serial(unix: i64) -> Option<i64> {
 
 /// (year, month, day) for a serial. serial 60 is the phantom 1900-02-29;
 /// a serial outside excel's date range has no calendar date (returns None).
-fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
+pub(super) fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
     if !in_date_range(serial) {
         return None;
     }
@@ -120,7 +120,7 @@ fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
 /// serial for a (year, month, day) under excel's DATE rules: months and day
 /// overflow roll over, phantom 1900-02-29 maps to serial 60. `None` for a
 /// date outside excel's range.
-fn date_to_serial(year: i64, month: i64, day: i64) -> Option<i64> {
+pub(super) fn date_to_serial(year: i64, month: i64, day: i64) -> Option<i64> {
     if year == 1900 && month == 2 && day == 29 {
         return Some(PHANTOM);
     }
@@ -131,7 +131,7 @@ fn date_to_serial(year: i64, month: i64, day: i64) -> Option<i64> {
     unix_to_serial(unix).filter(|serial| in_date_range(*serial))
 }
 
-fn days_in_month(year: i64, month: i64) -> i64 {
+pub(super) fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -885,7 +885,7 @@ pub(crate) fn yearfrac(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-fn year_fraction(lo: i64, hi: i64, basis: i64) -> Option<f64> {
+pub(super) fn year_fraction(lo: i64, hi: i64, basis: i64) -> Option<f64> {
     let actual = (hi - lo) as f64;
     match basis {
         0 => Some(days_30_360(lo, hi, false)? / 360.0),
@@ -899,7 +899,7 @@ fn year_fraction(lo: i64, hi: i64, basis: i64) -> Option<f64> {
 
 /// day count on a 30/360 calendar; `european` clamps both days to 30, the US
 /// rule instead folds the 31st and the end of february onto the 30th.
-fn days_30_360(lo: i64, hi: i64, european: bool) -> Option<f64> {
+pub(super) fn days_30_360(lo: i64, hi: i64, european: bool) -> Option<f64> {
     let (y1, m1, mut d1) = serial_to_ymd(lo.max(1))?;
     let (y2, m2, mut d2) = serial_to_ymd(hi.max(1))?;
     if european {
