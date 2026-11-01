@@ -152,7 +152,7 @@ if (import.meta.main) {
         '--manifest-path',
         path.join(ROOT, 'bindings', `python-${binding}`, 'Cargo.toml'),
       ],
-      { VIRTUAL_ENV: dir, CARGO_TARGET_DIR: target }
+      { VIRTUAL_ENV: dir, CARGO_TARGET_DIR: target, UV_FIND_LINKS: packs }
     );
   }
   fs.writeFileSync(
