@@ -2,7 +2,6 @@ import { expect, test, type Page, type TestInfo } from 'playwright/test';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 
-const PARAGRAPH = 'Alpha BoldWord omega text for the selection toolbar.';
 const SECOND = 'Second paragraph stays.';
 
 async function fixture() {
