@@ -1215,7 +1215,7 @@ fn edits_beside_untagged_runs_keep_the_untagged_fallback() {
         .unwrap();
     assert_eq!(
         faces(&Renderer::new(), &session, None),
-        json!([{"family":"Year Edit","bold":false,"italic":false,"scripts":["cjk-jp","cjk-sc"]}])
+        json!([{"family":"Year Edit","bold":false,"italic":false,"scripts":["cjk-sc","cjk-jp"]}])
     );
 }
 
