@@ -2,6 +2,8 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { useState } from 'react';
 import type { SectionProperties } from '@betteroffice/docx/types/document';
+import { ja, type Translations } from '@betteroffice/docx-i18n';
+import { LocaleProvider } from '../i18n';
 import { createDocxCommandController } from '../commands/createDocxCommandStore';
 import { DocxCommandProvider } from '../commands/DocxCommandProvider';
 import { testBinding } from '../commands/testing';
@@ -23,7 +25,8 @@ function mount(
   initial: SectionProperties = {},
   unit: 'inch' | 'cm' = 'inch',
   environment: Partial<DocxCommandEnvironment> = {},
-  readCurrent?: () => Promise<void>
+  readCurrent?: () => Promise<void>,
+  i18n?: Translations
 ) {
   const harness = testBinding(environment);
   const controller = createDocxCommandController();
@@ -38,7 +41,9 @@ function mount(
         readCurrent,
         onApply: patch => { applied.push(patch); setProperties(current => ({ ...current, ...patch })); },
       } }}>
-        <MenuBar />
+        <LocaleProvider i18n={i18n}>
+          <MenuBar />
+        </LocaleProvider>
       </EditorChromeContext.Provider>
     </DocxCommandProvider>;
   }
@@ -119,6 +124,20 @@ describe('Layout menubar menu', () => {
     expect(view.applied).toEqual([{ pageWidth: 16838, pageHeight: 11906, orientation: 'landscape' }]);
     view.open('Size');
     expect(view.getByRole('menuitemradio', { name: 'A4' }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  test('paper sizes drop the translated inch dimensions in fullwidth parentheses', () => {
+    const view = mount({ pageWidth: 15840, pageHeight: 12240, orientation: 'landscape' }, 'cm', {}, undefined, ja);
+    const layout = view.getByRole('menuitem', { name: ja.toolbar!.layout! });
+    act(() => layout.focus());
+    fireEvent.keyDown(layout, { key: 'Enter' });
+    fireEvent.keyDown(view.getByRole('menuitem', { name: ja.dialogs!.pageSetup!.sizeLabel! }), { key: 'ArrowRight' });
+    const letter = view.getByRole('menuitemradio', { name: 'レター' });
+    expect(letter.getAttribute('aria-checked')).toBe('true');
+    expect(letter.textContent).toContain('27.94 cm × 21.59 cm');
+    expect(letter.textContent).not.toContain('"');
+    expect(letter.textContent).not.toContain('（');
+    expect(view.getByRole('menuitemradio', { name: 'A4' }).textContent).not.toContain('8.27');
   });
 
   test('custom margins use the existing page setup command', async () => {
