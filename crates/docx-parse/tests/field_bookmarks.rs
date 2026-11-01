@@ -202,3 +202,29 @@ fn an_edited_field_code_drops_its_old_nested_fields_and_keeps_its_bookmarks() {
         ],
     );
 }
+
+#[test]
+fn a_nested_field_after_an_instruction_in_the_begin_run_survives_a_save() {
+    let nested = format!(
+        r#"{BEGIN}{}{SEPARATE}<w:r><w:t>4</w:t></w:r>{END}"#,
+        instruction("PAGE")
+    );
+    let body = format!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> = </w:instrText></w:r>{nested}{SEPARATE}<w:r><w:t>4</w:t></w:r>{END}</w:p>"#
+    );
+    let xml = saved_document(&fixture(&body));
+    assert_order(
+        &xml,
+        &[
+            "\"begin\"",
+            " = ",
+            "\"begin\"",
+            " PAGE ",
+            "\"separate\"",
+            "\"end\"",
+            "\"separate\"",
+            "\"end\"",
+        ],
+    );
+    assert_eq!(xml.matches("w:fldCharType=\"begin\"").count(), 2, "{xml}");
+}
