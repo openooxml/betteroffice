@@ -16,6 +16,22 @@ pub(crate) struct Props {
     pub(crate) rtl: Option<bool>,
     pub(crate) hidden: Option<bool>,
     pub(crate) style: Option<Rc<str>>,
+    pub(crate) east_asia_language: Option<Rc<str>>,
+}
+
+fn language_tag(value: &str) -> Option<Rc<str>> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.chars().count() > 63
+        || value.split('-').any(|part| {
+            part.is_empty()
+                || part.len() > 8
+                || !part.as_bytes().iter().all(u8::is_ascii_alphanumeric)
+        })
+    {
+        return None;
+    }
+    Some(Rc::from(value))
 }
 
 pub(crate) fn on_off(value: &str) -> Option<bool> {
@@ -83,6 +99,10 @@ impl Props {
         props.rtl = flag("w:rtl");
         props.hidden = flag("w:vanish");
         props.style = node.val("w:rStyle").map(Rc::from);
+        props.east_asia_language = node
+            .child("w:lang")
+            .and_then(|language| language.attr("eastAsia"))
+            .and_then(language_tag);
         props
     }
 
@@ -118,6 +138,10 @@ impl Props {
         }
         if source.style.is_some() {
             self.style.clone_from(&source.style);
+        }
+        if source.east_asia_language.is_some() {
+            self.east_asia_language
+                .clone_from(&source.east_asia_language);
         }
     }
 

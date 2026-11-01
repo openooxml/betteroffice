@@ -311,6 +311,24 @@ fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
     }
 }
 
+/// a block of numbers a builtin outside this module computes: paid for as
+/// `reserve` pays and charged `steps` inner-loop steps before `fill` runs; a
+/// non-finite cell is `#NUM!`.
+pub(crate) fn number_block(
+    ctx: &EvalContext<'_>,
+    rows: usize,
+    cols: usize,
+    steps: u64,
+    fill: impl FnOnce() -> Result<Vec<f64>, ErrorValue>,
+) -> Value {
+    result((|| {
+        reserve(ctx, rows, cols)?;
+        charge_steps(ctx, steps)?;
+        let cells = fill()?.into_iter().map(crate::functions::finite).collect();
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
 /// an output block being filled: its cells are paid for before any is
 /// computed, and each cell's text before the block keeps it.
 struct Cells<'c, 'a> {
@@ -808,6 +826,8 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "PERCENTRANK" | "PERCENTRANK.EXC" | "PERCENTRANK.INC" => &[1, 2],
         "PROB" => &[2, 3],
         "Z.TEST" | "ZTEST" => &[1, 2],
+        "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DGET" | "DMAX" | "DMIN" | "DPRODUCT" | "DSTDEV"
+        | "DSTDEVP" | "DSUM" | "DVAR" | "DVARP" => &[1],
         _ => return None,
     })
 }
@@ -819,18 +839,39 @@ fn lifts(name: &str) -> bool {
         name,
         "ABS"
             | "ACOS"
+            | "ACOSH"
+            | "ACOT"
+            | "ACOTH"
+            | "ARABIC"
             | "ASIN"
+            | "ASINH"
             | "ATAN"
             | "ATAN2"
+            | "ATANH"
+            | "BASE"
+            | "BESSELI"
+            | "BESSELJ"
+            | "BESSELK"
+            | "BESSELY"
             | "BETA.DIST"
             | "BETA.INV"
             | "BETADIST"
             | "BETAINV"
+            | "BIN2DEC"
+            | "BIN2HEX"
+            | "BIN2OCT"
             | "BINOM.DIST"
             | "BINOM.DIST.RANGE"
             | "BINOM.INV"
             | "BINOMDIST"
+            | "BITAND"
+            | "BITLSHIFT"
+            | "BITOR"
+            | "BITRSHIFT"
+            | "BITXOR"
             | "CEILING"
+            | "CEILING.MATH"
+            | "CEILING.PRECISE"
             | "CHAR"
             | "CHIDIST"
             | "CHIINV"
@@ -841,16 +882,28 @@ fn lifts(name: &str) -> bool {
             | "CLEAN"
             | "CODE"
             | "COMBIN"
+            | "COMBINA"
+            | "COMPLEX"
             | "CONFIDENCE"
             | "CONFIDENCE.NORM"
             | "CONFIDENCE.T"
             | "COS"
             | "COSH"
+            | "COT"
+            | "COTH"
             | "CRITBINOM"
+            | "CSC"
+            | "CSCH"
             | "DATE"
             | "DATEDIF"
             | "DAY"
+            | "DAYS360"
+            | "DEC2BIN"
+            | "DEC2HEX"
+            | "DEC2OCT"
+            | "DECIMAL"
             | "DEGREES"
+            | "DELTA"
             | "EDATE"
             | "EOMONTH"
             | "ERF"
@@ -867,6 +920,7 @@ fn lifts(name: &str) -> bool {
             | "F.INV"
             | "F.INV.RT"
             | "FACT"
+            | "FACTDOUBLE"
             | "FDIST"
             | "FIND"
             | "FINV"
@@ -874,6 +928,8 @@ fn lifts(name: &str) -> bool {
             | "FISHERINV"
             | "FIXED"
             | "FLOOR"
+            | "FLOOR.MATH"
+            | "FLOOR.PRECISE"
             | "GAMMA"
             | "GAMMA.DIST"
             | "GAMMA.INV"
@@ -882,9 +938,36 @@ fn lifts(name: &str) -> bool {
             | "GAMMALN"
             | "GAMMALN.PRECISE"
             | "GAUSS"
+            | "GESTEP"
+            | "HEX2BIN"
+            | "HEX2DEC"
+            | "HEX2OCT"
             | "HOUR"
             | "HYPGEOM.DIST"
             | "HYPGEOMDIST"
+            | "IMABS"
+            | "IMAGINARY"
+            | "IMARGUMENT"
+            | "IMCONJUGATE"
+            | "IMCOS"
+            | "IMCOSH"
+            | "IMCOT"
+            | "IMCSC"
+            | "IMCSCH"
+            | "IMDIV"
+            | "IMEXP"
+            | "IMLN"
+            | "IMLOG10"
+            | "IMLOG2"
+            | "IMPOWER"
+            | "IMREAL"
+            | "IMSEC"
+            | "IMSECH"
+            | "IMSIN"
+            | "IMSINH"
+            | "IMSQRT"
+            | "IMSUB"
+            | "IMTAN"
             | "INT"
             | "ISBLANK"
             | "ISERR"
@@ -893,6 +976,7 @@ fn lifts(name: &str) -> bool {
             | "ISLOGICAL"
             | "ISNA"
             | "ISNUMBER"
+            | "ISO.CEILING"
             | "ISODD"
             | "ISOWEEKNUM"
             | "ISTEXT"
@@ -923,6 +1007,9 @@ fn lifts(name: &str) -> bool {
             | "NORMSINV"
             | "NOT"
             | "NUMBERVALUE"
+            | "OCT2BIN"
+            | "OCT2DEC"
+            | "OCT2HEX"
             | "ODD"
             | "PERMUT"
             | "PERMUTATIONA"
@@ -936,15 +1023,19 @@ fn lifts(name: &str) -> bool {
             | "REPLACE"
             | "REPT"
             | "RIGHT"
+            | "ROMAN"
             | "ROUND"
             | "ROUNDDOWN"
             | "ROUNDUP"
             | "SEARCH"
+            | "SEC"
+            | "SECH"
             | "SECOND"
             | "SIGN"
             | "SIN"
             | "SINH"
             | "SQRT"
+            | "SQRTPI"
             | "STANDARDIZE"
             | "SUBSTITUTE"
             | "T"
@@ -1043,6 +1134,9 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "MODE.MULT" => mode_mult,
         "FREQUENCY" => frequency,
         "MMULT" => mmult,
+        "MINVERSE" => crate::functions::math_extra::minverse,
+        "MUNIT" => crate::functions::math_extra::munit,
+        "RANDARRAY" => crate::functions::math_extra::randarray,
         "MAX" => max,
         "MIN" => min,
         "PRODUCT" => product,

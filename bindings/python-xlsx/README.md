@@ -47,7 +47,9 @@ print(png.width, png.height)
 ```
 
 Rendering is the same grid layout and display list the browser editor uses, so
-server-side output matches what the web canvas paints.
+server-side output matches what the web canvas paints. Cell text uses the
+bundled fonts, which the package installs as the `betteroffice-fonts-latin`,
+`-intl` and `-cjk` wheels and reads from disk.
 
 Opening, recalculating, rendering, and saving release the GIL, so they run in
 parallel across threads instead of serializing your workers.

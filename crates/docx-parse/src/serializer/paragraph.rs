@@ -422,6 +422,23 @@ fn serialize_simple_field(
     Ok(output)
 }
 
+/// The runs a field-code node contributes to `field_code`, as the parser flattens them.
+fn code_runs(node: &InlineNode) -> Vec<&Run> {
+    match node {
+        InlineNode::Run(run) => vec![run],
+        InlineNode::Hyperlink(hyperlink) => hyperlink
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                InlineNode::Run(run) => Some(run),
+                _ => None,
+            })
+            .collect(),
+        InlineNode::SimpleField(field) => field.content.iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
@@ -440,7 +457,30 @@ fn serialize_complex_field(
         output.push_str(" w:fldLock=\"true\"");
     }
     output.push_str("/></w:r>");
-    if field.field_code.is_empty() {
+    let code_nodes = field
+        .structured_code
+        .as_ref()
+        .filter(|content| content.blocks.is_none())
+        .and_then(|content| content.inline.as_deref())
+        .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
+    let in_place = code_nodes.filter(|nodes| {
+        !field.field_code.is_empty() && nodes.iter().flat_map(code_runs).eq(field.field_code.iter())
+    });
+    if let Some(nodes) = in_place {
+        for node in nodes {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    } else if let Some(nodes) = code_nodes {
+        for node in nodes.iter().filter(|node| {
+            matches!(
+                node,
+                InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
+            )
+        }) {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    }
+    if in_place.is_none() && field.field_code.is_empty() {
         output.push_str("<w:r>");
         output.push_str(&properties);
         output.push_str("<w:instrText");
@@ -450,7 +490,7 @@ fn serialize_complex_field(
         output.push('>');
         output.push_str(&super::xml_writer::escape_xml(&field.instruction));
         output.push_str("</w:instrText></w:r>");
-    } else {
+    } else if in_place.is_none() {
         for run in &field.field_code {
             output.push_str(&serialize_context_run(run, context)?);
         }

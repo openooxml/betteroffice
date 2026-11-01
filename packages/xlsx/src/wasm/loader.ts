@@ -29,6 +29,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
+import { pngDisplayListReaders } from './pngDisplayList';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -522,6 +523,12 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
+  /**
+   * Recalculate every formula with the handle's calculation context (or the host clock).
+   * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+   * keeps the result the file stored.
+   */
+  recalculate(): CalculationStatus;
   /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
@@ -1095,6 +1102,10 @@ function wrapWorkbookDocument(
       }
       return parseJson(() => doc.sheetInfoForJson(sheet));
     },
+    recalculate(): CalculationStatus {
+      assertAlive();
+      return parseJson<CalculationStatus>(() => doc.recalculateJson(), true);
+    },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
         const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
@@ -1386,6 +1397,10 @@ function wrapWorkbookDocument(
       reportDisplayLimit(JSON.parse(json) as DisplayList);
     }
     return json;
+  });
+  pngDisplayListReaders.set(handle, {
+    viewport: (viewport) => wasmCall(() => doc.pngDisplayListJson(JSON.stringify(viewport))),
+    range: (options) => wasmCall(() => doc.rangePngDisplayListJson(JSON.stringify(options ?? {}))),
   });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));

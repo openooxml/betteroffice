@@ -7,9 +7,9 @@
 use super::{lifted_positions, lifts, lookup_array};
 
 /// builtins evaluated once with their arguments as written: no arguments,
-/// ranges or arrays read whole (aggregates, regressions, lookups, holiday
-/// lists), references (OFFSET, INDIRECT, AREAS, FORMULATEXT), branches only
-/// evaluated when chosen (CHOOSE, SWITCH), and the parser's union.
+/// ranges or arrays read whole (aggregates, regressions, matrices, lookups,
+/// holiday lists), references (OFFSET, INDIRECT, AREAS, FORMULATEXT), branches
+/// only evaluated when chosen (CHOOSE, SWITCH), and the parser's union.
 const WHOLE_ARGUMENTS: &[&str] = &[
     "(UNION)",
     "AGGREGATE",
@@ -33,16 +33,20 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "GCD",
     "GEOMEAN",
     "HARMEAN",
+    "IMPRODUCT",
+    "IMSUM",
     "INDIRECT",
     "INTERCEPT",
     "KURT",
     "LCM",
     "LOOKUP",
     "MAXA",
+    "MDETERM",
     "MEDIAN",
     "MINA",
     "MODE",
     "MODE.SNGL",
+    "MULTINOMIAL",
     "NA",
     "NETWORKDAYS",
     "NETWORKDAYS.INTL",
@@ -51,6 +55,7 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "OFFSET",
     "OR",
     "PEARSON",
+    "PERCENTOF",
     "PI",
     "RAND",
     "RSQ",
@@ -67,6 +72,9 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "STEYX",
     "SUBTOTAL",
     "SUMSQ",
+    "SUMX2MY2",
+    "SUMX2PY2",
+    "SUMXMY2",
     "SWITCH",
     "TODAY",
     "TRIMMEAN",

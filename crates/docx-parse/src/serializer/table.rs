@@ -39,10 +39,39 @@ pub fn serialize_table(
     }
     append_generated(&mut writer, &grid);
     for row in &table.rows {
+        append_generated(&mut writer, &bookmarks(row.leading_bookmarks.as_deref())?);
         append_generated(&mut writer, &serialize_table_row(row, context)?);
     }
+    append_generated(
+        &mut writer,
+        &bookmarks(table.trailing_bookmarks.as_deref())?,
+    );
     writer.end_element();
     Ok(writer.finish())
+}
+
+/// Replays table-level bookmark boundaries, rejecting anything that is not one.
+fn bookmarks(fragments: Option<&[String]>) -> Result<String, ParseError> {
+    let mut output = String::new();
+    for xml in fragments.unwrap_or_default() {
+        let name = xml
+            .trim_start()
+            .strip_prefix('<')
+            .unwrap_or_default()
+            .split(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, '/' | '>')
+            })
+            .next()
+            .unwrap_or_default();
+        if !matches!(name, "w:bookmarkStart" | "w:bookmarkEnd") {
+            return Err(ParseError::Canonical(
+                "table bookmark fragment is not a bookmark boundary".to_owned(),
+            ));
+        }
+        super::raw::validate_replayed_fragment(xml)?;
+        output.push_str(xml);
+    }
+    Ok(output)
 }
 
 pub fn serialize_table_formatting(
@@ -182,8 +211,10 @@ pub fn serialize_table_row(
     );
     let mut content = properties;
     for cell in &row.cells {
+        content.push_str(&bookmarks(cell.leading_bookmarks.as_deref())?);
         content.push_str(&serialize_table_cell(cell, context)?);
     }
+    content.push_str(&bookmarks(row.trailing_bookmarks.as_deref())?);
     let attributes = row_attributes(
         row.extra_attributes.as_deref().unwrap_or_default(),
         &[&content, context.document_root().unwrap_or_default()],
@@ -634,8 +665,12 @@ mod tests {
                     property_changes: None,
                     structural_change: None,
                     content: Vec::new(),
+                    leading_bookmarks: None,
                 }],
+                leading_bookmarks: None,
+                trailing_bookmarks: None,
             }],
+            trailing_bookmarks: None,
         };
         assert_eq!(
             serialize_table(&table, &mut context()).unwrap(),

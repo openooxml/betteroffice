@@ -3310,6 +3310,7 @@ export class XlsxDocument {
     static open(bytes: Uint8Array): XlsxDocument;
     patchRangeStyleJson(args: string): string;
     peerHydrationJson(): string;
+    pngDisplayListJson(viewport_json: string): string;
     printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
@@ -3319,7 +3320,12 @@ export class XlsxDocument {
      * a rectangular block of cells for clipboard copy.
      */
     rangeCellsJson(args: string): string;
+    rangePngDisplayListJson(args: string): string;
     readCellsJson(request: string): string;
+    /**
+     * Recalculate every formula; the next save writes the recalculated values.
+     */
+    recalculateJson(): string;
     /**
      * Checkpoints are only restorable by the same engine version and codec.
      */
@@ -3483,10 +3489,13 @@ export interface InitOutput {
     readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_peerHydrationJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_pngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_rangePngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_recalculateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3933,6 +3942,12 @@ export interface WorkbookHandle extends CollaborationReplica {
     /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
     sheetInfoFor(sheet: number): SheetInfo;
     calculationStatus(): CalculationStatus;
+    /**
+     * Recalculate every formula with the handle's calculation context (or the host clock).
+     * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+     * keeps the result the file stored.
+     */
+    recalculate(): CalculationStatus;
     /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
     displayList(viewport: Viewport): DisplayList;
     /** `displayList` with build and encode time measured inside the core. */
