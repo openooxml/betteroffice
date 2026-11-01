@@ -1213,9 +1213,85 @@ fn row_edits<'a>(
         edits
             .removed
             .extend(row.paragraphs.iter().map(|at| *at as u32));
-        edits.edits.push((row.span.clone(), 2, ""));
+        let mut start = row.span.start;
+        for kept in row_bookmark_spans(source, &row.span)? {
+            if start < kept.start {
+                edits.edits.push((start..kept.start, 2, ""));
+            }
+            start = kept.end;
+        }
+        edits.edits.push((start..row.span.end, 2, ""));
     }
     Some(edits)
+}
+
+/// The bookmark boundaries that are direct children of the row spanning `row` in `source`; a
+/// removed row leaves them in place between its neighbours. A boundary whose partner sits inside
+/// one of the row's cells goes with the row. `None` when the row declares namespaces or wraps its
+/// children, so the part is written whole.
+fn row_bookmark_spans(source: &str, row: &Range<usize>) -> Option<Vec<Range<usize>>> {
+    let xml = &source[row.clone()];
+    let tags = tags(xml)?;
+    if tags
+        .first()?
+        .attributes
+        .iter()
+        .any(|(name, _)| *name == "xmlns" || name.starts_with("xmlns:"))
+    {
+        return None;
+    }
+    let boundary = |name: &str| {
+        let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
+        match local {
+            "bookmarkStart" => Some(true),
+            "bookmarkEnd" => Some(false),
+            _ => None,
+        }
+    };
+    let mut direct = Vec::new();
+    let mut nested = HashSet::new();
+    let mut depth = 0usize;
+    let mut open: Option<(usize, bool, Option<String>)> = None;
+    for tag in &tags {
+        if tag.end {
+            depth = depth.checked_sub(1)?;
+            if depth == 1
+                && let Some((start, kind, id)) = open.take()
+            {
+                direct.push((start..tag.range.end, kind, id));
+            }
+            continue;
+        }
+        let local = tag
+            .name
+            .rsplit_once(':')
+            .map_or(tag.name, |(_, local)| local);
+        if depth == 1 && matches!(local, "customXml" | "smartTag" | "sdt") {
+            return None;
+        }
+        if let Some(kind) = boundary(tag.name) {
+            let id = bookmark_id(&xml[tag.range.clone()]);
+            if depth == 1 {
+                if tag.empty {
+                    direct.push((tag.range.clone(), kind, id));
+                } else {
+                    open = Some((tag.range.start, kind, id));
+                }
+            } else if depth > 1 {
+                nested.insert((id, kind));
+            }
+        }
+        if !tag.empty {
+            depth += 1;
+        }
+    }
+    Some(
+        direct
+            .into_iter()
+            .filter(|(_, kind, id)| !nested.contains(&(id.clone(), !*kind)))
+            .map(|(span, _, _)| row.start + span.start..row.start + span.end)
+            .collect(),
+    )
 }
 
 struct SpliceOptions<'a> {
