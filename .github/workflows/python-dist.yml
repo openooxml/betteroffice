@@ -19,6 +19,7 @@ on:
 jobs:
   wheels:
     name: Wheel (${{ matrix.platform.os }} ${{ matrix.platform.target }})
+    if: ${{ !startsWith(inputs.binding, 'fonts-') }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 45
     strategy:
@@ -62,6 +63,7 @@ jobs:
 
   sdist:
     name: Source distribution
+    if: ${{ !startsWith(inputs.binding, 'fonts-') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -81,12 +83,38 @@ jobs:
           path: bindings/python-${{ inputs.binding }}/dist
           if-no-files-found: error
 
+  font-pack:
+    name: Font pack wheel
+    if: ${{ startsWith(inputs.binding, 'fonts-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build the wheel
+        env:
+          BINDING: ${{ inputs.binding }}
+        run: python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-${{ inputs.binding }}.wheel
+          path: dist
+          if-no-files-found: error
+
   # `needs` inside a called workflow scopes to this binding alone, so this
   # receipt exists only when every one of its own artifacts does. The publish
   # matrix demands it per binding instead of depending on the whole build.
   built:
     name: Complete
-    needs: [wheels, sdist]
+    needs: [wheels, sdist, font-pack]
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (needs.font-pack.result == 'success' || needs.wheels.result == 'success' && needs.sdist.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
