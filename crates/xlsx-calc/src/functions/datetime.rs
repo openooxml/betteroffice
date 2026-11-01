@@ -101,7 +101,7 @@ fn unix_to_serial(unix: i64) -> Option<i64> {
 
 /// (year, month, day) for a serial. serial 60 is the phantom 1900-02-29;
 /// a serial outside excel's date range has no calendar date (returns None).
-pub(super) fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
+fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
     if !in_date_range(serial) {
         return None;
     }
@@ -117,10 +117,33 @@ pub(super) fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
     Some(civil_from_days(adjusted - SERIAL_OFFSET))
 }
 
+/// (year, month, day) for any 1900 serial, outside excel's date range too,
+/// so date arithmetic can step past either end on its way to a date inside;
+/// `None` past i64.
+pub(super) fn serial_to_civil(serial: i64) -> Option<(i64, i64, i64)> {
+    if serial == PHANTOM {
+        return Some((1900, 2, 29));
+    }
+    let adjusted = if serial > PHANTOM { serial - 1 } else { serial };
+    adjusted
+        .checked_sub(SERIAL_OFFSET)
+        .filter(|days| days.unsigned_abs() < 1 << 40)
+        .map(civil_from_days)
+}
+
+/// the 1900 serial of any proleptic gregorian date, outside excel's range
+/// too; `None` past i64.
+pub(super) fn civil_to_serial(year: i64, month: i64, day: i64) -> Option<i64> {
+    if (year, month, day) == (1900, 2, 29) {
+        return Some(PHANTOM);
+    }
+    unix_to_serial(days_from_civil(year, month, day)?)
+}
+
 /// serial for a (year, month, day) under excel's DATE rules: months and day
 /// overflow roll over, phantom 1900-02-29 maps to serial 60. `None` for a
 /// date outside excel's range.
-pub(super) fn date_to_serial(year: i64, month: i64, day: i64) -> Option<i64> {
+fn date_to_serial(year: i64, month: i64, day: i64) -> Option<i64> {
     if year == 1900 && month == 2 && day == 29 {
         return Some(PHANTOM);
     }
@@ -899,7 +922,7 @@ pub(super) fn year_fraction(lo: i64, hi: i64, basis: i64) -> Option<f64> {
 
 /// day count on a 30/360 calendar; `european` clamps both days to 30, the US
 /// rule instead folds the 31st and the end of february onto the 30th.
-pub(super) fn days_30_360(lo: i64, hi: i64, european: bool) -> Option<f64> {
+fn days_30_360(lo: i64, hi: i64, european: bool) -> Option<f64> {
     let (y1, m1, mut d1) = serial_to_ymd(lo.max(1))?;
     let (y2, m2, mut d2) = serial_to_ymd(hi.max(1))?;
     if european {

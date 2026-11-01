@@ -1224,3 +1224,226 @@ fn accrint_calc_method_only_matters_after_first_interest() {
         1e-12,
     );
 }
+
+/// a zero-coupon bond priced at its redemption yields exactly zero; newton
+/// steps from the default start crawl toward it, so the search has to fall
+/// back on bisection rather than run out of steps.
+#[test]
+fn yield_of_a_zero_coupon_bond_at_par_is_zero() {
+    let got = value("YIELD(DATE(2000,1,1),DATE(2500,1,1),0,100,100,1,0)");
+    assert!(got.abs() <= 1e-12, "{got:e}");
+    let got = value("YIELD(DATE(2000,1,1),DATE(2500,1,1),0,100,100,4,0)");
+    assert!(got.abs() <= 1e-12, "{got:e}");
+}
+
+/// a yield search answers with a true root, even for prices that put the
+/// root far from the start, and a root out of reach is `#NUM!` rather than
+/// the search's last step.
+#[test]
+fn yield_searches_answer_true_roots_or_num_errors() {
+    let bond = "DATE(2008,2,15),DATE(2016,11,15),0.0575";
+    // mpmath 30 digits, anderson root of the price sum on a bracket
+    for (pr, want) in [
+        ("1E-200", 9.656_854_249_538_062),
+        ("0.5", 5.897_240_046_766_096),
+        ("250", -0.066_237_648_057_008_14),
+        ("10000", -0.452_314_217_829_023_6),
+    ] {
+        close(&format!("YIELD({bond},{pr},100,2,0)"), want, 1e-9);
+    }
+    fails(
+        "YIELD(DATE(2008,5,15),DATE(2016,11,15),0.0575,1E-300,100,2,0)",
+        ErrorValue::Num,
+    );
+}
+
+/// a bill settled in year 9999 runs inside the date range even though its
+/// anniversary does not.
+#[test]
+fn treasury_bills_settle_in_the_last_year() {
+    close(
+        "TBILLPRICE(DATE(9999,1,1),DATE(9999,2,1),0.05)",
+        100.0 * (1.0 - 0.05 * 31.0 / 360.0),
+        1e-12,
+    );
+    close(
+        "TBILLYIELD(DATE(9999,1,1),DATE(9999,2,1),99)",
+        1.0 / 99.0 * 360.0 / 31.0,
+        1e-12,
+    );
+    close(
+        "TBILLEQ(DATE(9999,1,1),DATE(9999,2,1),0.05)",
+        365.0 * 0.05 / (360.0 - 0.05 * 31.0),
+        1e-12,
+    );
+    fails(
+        "TBILLPRICE(DATE(9998,6,1),DATE(9999,6,2),0.05)",
+        ErrorValue::Num,
+    );
+}
+
+/// quasi-coupon dates may fall outside the date range while the dates asked
+/// about stay inside it: a 30/360 odd last period ending in 9999 prices like
+/// the same bond 8000 years earlier, and a bond settled in january 1900 still
+/// counts its coupons. a coupon date before 1900 cannot be shown.
+#[test]
+fn coupon_schedules_reach_past_the_date_range() {
+    let late = eval("ODDLPRICE(DATE(9999,8,1),DATE(9999,11,30),DATE(9999,6,30),0.05,0.06,100,1,0)");
+    assert!(matches!(late, CellValue::Number { .. }), "{late:?}");
+    assert_eq!(
+        late,
+        eval("ODDLPRICE(DATE(1999,8,1),DATE(1999,11,30),DATE(1999,6,30),0.05,0.06,100,1,0)")
+    );
+    exact("COUPNUM(DATE(1900,1,5),DATE(1900,6,30),1)", 1.0);
+    exact("COUPDAYBS(DATE(1900,1,5),DATE(1900,6,30),1,0)", 185.0);
+    exact("COUPNCD(DATE(1900,1,5),DATE(1900,6,30),1)", 182.0);
+    fails("COUPPCD(DATE(1900,1,5),DATE(1900,6,30),1)", ErrorValue::Num);
+}
+
+/// a 1904 workbook's serial 0 is 1904-01-01, a valid date.
+#[test]
+fn securities_read_1904_serials_from_zero() {
+    assert_eq!(
+        eval_in(DateSystem::V1904, "DISC(0,30,97,100)"),
+        eval("DISC(1462,1492,97,100)")
+    );
+    assert!(matches!(
+        eval_in(DateSystem::V1904, "DISC(0,30,97,100)"),
+        CellValue::Number { .. }
+    ));
+    assert_eq!(
+        eval_in(DateSystem::V1904, "COUPNCD(0,1000,2)"),
+        CellValue::Number {
+            value: value("COUPNCD(1462,2462,2)") - 1462.0
+        }
+    );
+}
+
+/// a negative basis is `#NUM!` before truncation could make it zero.
+#[test]
+fn a_negative_fractional_basis_is_a_num_error() {
+    fails(
+        "COUPDAYS(DATE(2011,1,25),DATE(2011,11,15),2,-0.5)",
+        ErrorValue::Num,
+    );
+    fails(
+        "PRICE(DATE(2008,2,15),DATE(2017,11,15),0.0575,0.065,100,2,-0.5)",
+        ErrorValue::Num,
+    );
+    fails(
+        "DISC(DATE(2007,1,25),DATE(2007,6,15),97.975,100,-0.5)",
+        ErrorValue::Num,
+    );
+}
+
+/// every payment priced is charged to the recalculation budget, so pricing
+/// a 32,000-coupon bond once per element of a block runs out of budget.
+#[test]
+fn bond_cash_flows_are_charged_to_the_budget() {
+    let one = "PRICE(DATE(1900,3,1),DATE(9999,12,31),0.05,0.06,100,4)";
+    assert!(matches!(eval(one), CellValue::Number { .. }));
+    let (_, _, values) =
+        arrayed("PRICE(DATE(1900,3,1),DATE(9999,12,31),0.05,0.06+SEQUENCE(1,60)/1000,100,4)");
+    assert!(
+        values.contains(&CellValue::Error {
+            value: ErrorValue::Num
+        }),
+        "{values:?}"
+    );
+    let (_, _, values) =
+        arrayed("DURATION(DATE(1900,3,1),DATE(9999,12,31),0.05,0.06+SEQUENCE(1,60)/1000,4)");
+    assert!(
+        values.contains(&CellValue::Error {
+            value: ErrorValue::Num
+        }),
+        "{values:?}"
+    );
+    let (_, _, values) = arrayed(
+        "ACCRINT(DATE(1900,3,1),DATE(9999,12,31),DATE(9999,12,30),0.05+SEQUENCE(1,60)/1000,1000,4)",
+    );
+    assert!(
+        values.contains(&CellValue::Error {
+            value: ErrorValue::Num
+        }),
+        "{values:?}"
+    );
+}
+
+/// extreme operands never hang, panic or leak a non-finite number: each
+/// answer is a finite number or an error.
+#[test]
+fn extreme_operands_give_a_number_or_an_error() {
+    let extremes = [
+        "1E+200",
+        "1E-200",
+        "1E+308",
+        "1E-308",
+        "-1E+200",
+        "0",
+        "1E15+0.75",
+        "2^53+1",
+        "1E19",
+    ];
+    let templates = [
+        "PRICE(DATE(2008,2,15),DATE(2017,11,15),{x},0.065,100,2)",
+        "PRICE(DATE(2008,2,15),DATE(2017,11,15),0.0575,{x},100,2)",
+        "PRICE(DATE(2008,2,15),DATE(2017,11,15),0.0575,0.065,{x},2)",
+        "YIELD(DATE(2008,2,15),DATE(2016,11,15),{x},95,100,2)",
+        "YIELD(DATE(2008,2,15),DATE(2016,11,15),0.0575,{x},100,2)",
+        "YIELD(DATE(2008,2,15),DATE(2016,11,15),0.0575,95,{x},2)",
+        "DURATION(DATE(2018,7,1),DATE(2048,1,1),{x},0.09,2,1)",
+        "MDURATION(DATE(2018,7,1),DATE(2048,1,1),0.08,{x},2,1)",
+        "ACCRINT(DATE(2008,3,1),DATE(2008,8,31),DATE(2008,5,1),{x},1000,2)",
+        "ACCRINT(DATE(2008,3,1),DATE(2008,8,31),DATE(2008,5,1),0.1,{x},2)",
+        "ACCRINTM(DATE(2008,4,1),DATE(2008,6,15),{x},1000,3)",
+        "PRICEDISC(DATE(2008,2,16),DATE(2008,3,1),{x},100,2)",
+        "DISC(DATE(2007,1,25),DATE(2007,6,15),{x},100,1)",
+        "INTRATE(DATE(2008,2,15),DATE(2008,5,15),{x},1014420,2)",
+        "RECEIVED(DATE(2008,2,15),DATE(2008,5,15),1000000,{x},2)",
+        "YIELDDISC(DATE(2008,2,16),DATE(2008,3,1),{x},100,2)",
+        "PRICEMAT(DATE(2008,2,15),DATE(2008,4,13),DATE(2007,11,11),{x},0.061)",
+        "YIELDMAT(DATE(2008,3,15),DATE(2008,11,3),DATE(2007,11,8),0.0625,{x})",
+        "TBILLPRICE(DATE(2008,3,31),DATE(2008,6,1),{x})",
+        "TBILLYIELD(DATE(2008,3,31),DATE(2008,6,1),{x})",
+        "TBILLEQ(DATE(2008,3,31),DATE(2008,6,1),{x})",
+        "ODDFPRICE(DATE(2008,11,11),DATE(2021,3,1),DATE(2008,10,15),DATE(2009,3,1),0.0785,{x},100,2,1)",
+        "ODDFYIELD(DATE(2008,11,11),DATE(2021,3,1),DATE(2008,10,15),DATE(2009,3,1),0.0575,{x},100,2,0)",
+        "ODDLPRICE(DATE(2008,2,7),DATE(2008,6,15),DATE(2007,10,15),0.0375,{x},100,2,0)",
+        "ODDLYIELD(DATE(2008,4,20),DATE(2008,6,15),DATE(2007,12,24),0.0375,{x},100,2,0)",
+        "AMORLINC({x},DATE(2008,8,19),DATE(2008,12,31),300,1,0.15,1)",
+        "AMORLINC(2400,DATE(2008,8,19),DATE(2008,12,31),300,{x},0.15,1)",
+        "AMORDEGRC({x},DATE(2008,8,19),DATE(2008,12,31),0,3,0.15,1)",
+        "AMORDEGRC(2400,DATE(2008,8,19),DATE(2008,12,31),300,{x},0.15,1)",
+        "AMORDEGRC(2400,DATE(2008,8,19),DATE(2008,12,31),0,3,{x},1)",
+        "COUPDAYS({x},DATE(9999,12,31),2,1)",
+        "COUPNUM(1,{x},4)",
+        "COUPDAYBS(DATE(2011,1,25),DATE(2011,11,15),{x},1)",
+    ];
+    for template in templates {
+        for x in extremes {
+            let formula = template.replace("{x}", x);
+            match eval(&formula) {
+                CellValue::Number { value } => assert!(value.is_finite(), "{formula}"),
+                CellValue::Error { .. } => {}
+                other => panic!("{formula}: {other:?}"),
+            }
+        }
+    }
+}
+
+/// dates at both ends of the range: serial 1 and 9999-12-31 in the 1900
+/// system, serial 0 in the 1904 system.
+#[test]
+fn coupon_functions_at_the_ends_of_the_date_range() {
+    exact("COUPNCD(DATE(9999,7,1),DATE(9999,12,31),2)", 2_958_465.0);
+    exact("COUPDAYS(DATE(9999,7,1),DATE(9999,12,31),2,1)", 184.0);
+    exact("COUPNUM(1,DATE(9999,12,31),1)", 8100.0);
+    assert!(matches!(
+        eval("PRICE(1,DATE(9999,12,31),0.05,0.05,100,1)"),
+        CellValue::Number { .. }
+    ));
+    assert!(matches!(
+        eval_in(DateSystem::V1904, "COUPNUM(0,2957003,1)"),
+        CellValue::Number { .. }
+    ));
+}

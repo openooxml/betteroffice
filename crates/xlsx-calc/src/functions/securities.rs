@@ -16,7 +16,7 @@ use crate::fmath;
 use crate::parser::Expr;
 
 use super::datetime::{
-    date_to_serial, days_30_360, days_in_month, from_1900, in_date_range, serial_to_ymd, to_1900,
+    civil_to_serial, days_in_month, from_1900, in_date_range, serial_to_civil, to_1900,
     year_fraction,
 };
 use super::{coerce_number, finite, nth_number, omitted};
@@ -119,6 +119,7 @@ pub(crate) fn accrint(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             if lo >= settlement {
                 break;
             }
+            charge(ctx, 1)?;
             coupons += quasi.share(lo.max(start), hi.min(settlement), lo, hi, basis)?;
             k -= 1;
         }
@@ -153,7 +154,7 @@ pub(crate) fn price(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if rate < 0.0 || yld < 0.0 || redemption <= 0.0 {
             return Err(ErrorValue::Num);
         }
-        Ok(Flows::regular(&bond.coupon).price(rate, yld, redemption, bond.freq))
+        Flows::regular(&bond.coupon).price(rate, yld, redemption, bond.freq, ctx)
     })
 }
 
@@ -175,7 +176,7 @@ pub(crate) fn yield_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             return Ok((returned - paid) / paid * f * c.length / c.to_next);
         }
         let flows = Flows::regular(c);
-        solve_yield(|y| flows.price(rate, y, redemption, bond.freq), pr, f)
+        solve_yield(|y| flows.price(rate, y, redemption, bond.freq, ctx), pr, f)
     })
 }
 
@@ -185,7 +186,7 @@ pub(crate) fn yield_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn duration(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     compute(|| {
         let (bond, coupon, yld) = duration_args(args, ctx)?;
-        Ok(macaulay(&bond, coupon, yld))
+        macaulay(&bond, coupon, yld, ctx)
     })
 }
 
@@ -194,7 +195,7 @@ pub(crate) fn duration(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn mduration(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     compute(|| {
         let (bond, coupon, yld) = duration_args(args, ctx)?;
-        Ok(macaulay(&bond, coupon, yld) / (1.0 + yld / bond.freq as f64))
+        Ok(macaulay(&bond, coupon, yld, ctx)? / (1.0 + yld / bond.freq as f64))
     })
 }
 
@@ -329,7 +330,7 @@ pub(crate) fn oddfprice(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if rate < 0.0 || yld < 0.0 || redemption <= 0.0 {
             return Err(ErrorValue::Num);
         }
-        Ok(odd.price(rate, yld, redemption, freq))
+        odd.price(rate, yld, redemption, freq, ctx)
     })
 }
 
@@ -342,7 +343,11 @@ pub(crate) fn oddfyield(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if rate < 0.0 || pr <= 0.0 || redemption <= 0.0 {
             return Err(ErrorValue::Num);
         }
-        solve_yield(|y| odd.price(rate, y, redemption, freq), pr, freq as f64)
+        solve_yield(
+            |y| odd.price(rate, y, redemption, freq, ctx),
+            pr,
+            freq as f64,
+        )
     })
 }
 
@@ -432,21 +437,19 @@ pub(crate) fn amordegrc(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         };
         let rate = asset.rate * coefficient;
         let depreciable = asset.cost - asset.salvage;
-        let mut charge = (asset.first_share * rate * asset.cost).round();
-        if charge >= depreciable {
+        let mut amount = (asset.first_share * rate * asset.cost).round();
+        if amount >= depreciable {
             return Ok(if asset.period == 0 { depreciable } else { 0.0 });
         }
-        let mut value = asset.cost - charge;
+        let mut value = asset.cost - amount;
         let mut rest = value - asset.salvage;
         for n in 0..asset.period {
-            if !ctx.consume_cells(1) {
-                return Err(ErrorValue::Num);
-            }
-            charge = (rate * value).round();
-            if charge == 0.0 {
+            charge(ctx, 1)?;
+            amount = (rate * value).round();
+            if amount == 0.0 {
                 return Ok(0.0);
             }
-            rest -= charge;
+            rest -= amount;
             if rest < 0.0 {
                 return Ok(if asset.period - n <= 1 {
                     (value * 0.5).round()
@@ -454,9 +457,9 @@ pub(crate) fn amordegrc(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                     0.0
                 });
             }
-            value -= charge;
+            value -= amount;
         }
-        Ok(charge)
+        Ok(amount)
     })
 }
 
@@ -582,18 +585,31 @@ impl Flows {
         }
     }
 
-    fn price(&self, rate: f64, yld: f64, redemption: f64, freq: i64) -> f64 {
+    /// the clean price at `yld`, each payment discounted charged to the
+    /// recalculation budget. a zero coupon adds nothing, not the `0 / 0` of
+    /// a discount factor that underflows.
+    fn price(
+        &self,
+        rate: f64,
+        yld: f64,
+        redemption: f64,
+        freq: i64,
+        ctx: &EvalContext<'_>,
+    ) -> Result<f64, ErrorValue> {
+        let regular = self.regular as u64;
+        charge(ctx, regular.saturating_add(1))?;
         let f = freq as f64;
         let cash = 100.0 * rate / f;
         let base = 1.0 + yld / f;
-        let mut total = redemption / fmath::pow(base, self.lead + self.regular)
-            + cash * self.first / fmath::pow(base, self.lead);
-        let mut j = 1.0;
-        while j <= self.regular {
-            total += cash / fmath::pow(base, self.lead + j);
-            j += 1.0;
+        let mut total = redemption / fmath::pow(base, self.lead + self.regular);
+        if cash != 0.0 {
+            total += cash * self.first / fmath::pow(base, self.lead);
+            for j in 1..=regular {
+                total += cash / fmath::pow(base, self.lead + j as f64);
+            }
+            total -= cash * self.accrued;
         }
-        total - cash * self.accrued
+        Ok(total)
     }
 }
 
@@ -645,34 +661,43 @@ fn settle(
     })
 }
 
-fn macaulay(bond: &Bond, coupon: f64, yld: f64) -> f64 {
+/// the macaulay duration in years, each payment charged to the
+/// recalculation budget.
+fn macaulay(bond: &Bond, coupon: f64, yld: f64, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
     let c = &bond.coupon;
+    let payments = c.remaining as u64;
+    charge(ctx, payments)?;
     let f = bond.freq as f64;
     let cash = 100.0 * coupon / f;
     let base = 1.0 + yld / f;
     let lead = c.to_next / c.length - 1.0;
     let (mut weighted, mut total) = (0.0, 0.0);
-    let mut k = 1.0;
-    while k <= c.remaining {
-        let t = k + lead;
-        let flow = if k == c.remaining { cash + 100.0 } else { cash };
+    for k in 1..=payments {
+        let t = k as f64 + lead;
+        let flow = if k == payments { cash + 100.0 } else { cash };
         let present = flow / fmath::pow(base, t);
         weighted += t * present;
         total += present;
-        k += 1.0;
     }
-    weighted / total / f
+    Ok(weighted / total / f)
 }
 
 /// the yield at which `price` comes to `target`. prices fall as yields rise,
-/// so newton steps run inside a bracket that bisection falls back on when a
-/// step would leave it; no convergence within excel's 100 steps is `#NUM!`.
-fn solve_yield(price: impl Fn(f64) -> f64, target: f64, freq: f64) -> Result<f64, ErrorValue> {
-    let gap = |y: f64| price(y) - target;
+/// so newton steps run inside a bracket, and bisection takes over whenever a
+/// newton step would leave the bracket or fails to halve the step before it,
+/// so a slow crawl cannot stall the search. it ends on a step too small to
+/// matter; no convergence within excel's 100 steps is `#NUM!`, never the last
+/// iterate.
+fn solve_yield(
+    price: impl Fn(f64) -> Result<f64, ErrorValue>,
+    target: f64,
+    freq: f64,
+) -> Result<f64, ErrorValue> {
+    let gap = |y: f64| price(y).map(|p| p - target);
     let mut lo = -freq;
     let mut hi = 1.0;
     let mut widenings = 0;
-    while gap(hi) > 0.0 {
+    while gap(hi)? > 0.0 {
         lo = hi;
         hi *= 2.0;
         widenings += 1;
@@ -685,9 +710,11 @@ fn solve_yield(price: impl Fn(f64) -> f64, target: f64, freq: f64) -> Result<f64
     } else {
         0.5 * (lo + hi)
     };
+    let mut step = hi - lo;
+    let mut step_before = step;
     for _ in 0..YIELD_STEPS {
-        let g = gap(y);
-        if !g.is_finite() {
+        let g = gap(y)?;
+        if g.is_nan() {
             return Err(ErrorValue::Num);
         }
         if g == 0.0 {
@@ -699,12 +726,13 @@ fn solve_yield(price: impl Fn(f64) -> f64, target: f64, freq: f64) -> Result<f64
             hi = y;
         }
         let h = 1e-7 * (1.0 + y.abs());
-        let slope = (gap(y + h) - g) / h;
-        let mut next = y - g / slope;
-        if !(next > lo && next < hi) {
-            next = 0.5 * (lo + hi);
-        }
-        if (next - y).abs() <= YIELD_TOLERANCE * (1.0 + y.abs()) {
+        let slope = (gap(y + h)? - g) / h;
+        let newton = y - g / slope;
+        let fast = newton > lo && newton < hi && (2.0 * g).abs() <= (step_before * slope).abs();
+        let next = if fast { newton } else { 0.5 * (lo + hi) };
+        step_before = step;
+        step = next - y;
+        if step.abs() <= YIELD_TOLERANCE * (1.0 + next.abs()) {
             return Ok(next);
         }
         y = next;
@@ -807,6 +835,7 @@ fn odd_last_args(
         if lo >= maturity {
             break;
         }
+        charge(ctx, 1)?;
         let hi = quasi.at(k - 1)?;
         odd.counted += quasi.share(lo, hi.min(maturity), lo, hi, basis)?;
         odd.accrued += quasi.share(lo, hi.min(settlement), lo, hi, basis)?;
@@ -863,6 +892,7 @@ fn odd_first_args(
         if hi <= issue {
             break;
         }
+        charge(ctx, 1)?;
         let lo = quasi.at(k + 1)?;
         counted += quasi.share(lo.max(issue), hi, lo, hi, basis)?;
         accrued += quasi.share(lo.max(issue), hi.min(settlement), lo, hi, basis)?;
@@ -939,10 +969,37 @@ fn coupon_args(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(i64, i64, i64, i
 /// otherwise.
 fn days_between(start: i64, end: i64, basis: i64) -> Result<f64, ErrorValue> {
     match basis {
-        0 => days_30_360(start, end, false).ok_or(ErrorValue::Num),
-        4 => days_30_360(start, end, true).ok_or(ErrorValue::Num),
+        0 => days_360(start, end, false),
+        4 => days_360(start, end, true),
         _ => Ok((end - start) as f64),
     }
+}
+
+/// days on a 30/360 calendar, for dates past either end of the range too.
+/// `european` clamps both days to 30; the us rule folds the end of february
+/// and the 31st onto the 30th the way YEARFRAC does.
+fn days_360(start: i64, end: i64, european: bool) -> Result<f64, ErrorValue> {
+    let (y1, m1, mut d1) = ymd(start)?;
+    let (y2, m2, mut d2) = ymd(end)?;
+    if european {
+        d1 = d1.min(30);
+        d2 = d2.min(30);
+    } else {
+        let february_end = |y: i64, m: i64, d: i64| m == 2 && d == days_in_month(y, 2);
+        if february_end(y1, m1, d1) {
+            if february_end(y2, m2, d2) {
+                d2 = 30;
+            }
+            d1 = 30;
+        }
+        if d1 == 31 {
+            d1 = 30;
+        }
+        if d2 == 31 && d1 == 30 {
+            d2 = 30;
+        }
+    }
+    Ok(((y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)) as f64)
 }
 
 /// the length of the coupon period `[previous, next)`: actual days for
@@ -963,13 +1020,15 @@ fn fraction(lo: i64, hi: i64, basis: i64) -> Result<f64, ErrorValue> {
 
 /// `serial` moved by whole months: onto the month's last day when
 /// `month_end`, otherwise onto the same day clamped to the month's length.
+/// the result may lie outside the date range; only dates a function returns
+/// or reads as arguments have to be inside it.
 fn add_months(serial: i64, months: i64, month_end: bool) -> Result<i64, ErrorValue> {
     let (y, m, d) = ymd(serial)?;
     let total = y * 12 + (m - 1) + months;
     let (year, month) = (total.div_euclid(12), total.rem_euclid(12) + 1);
     let last = days_in_month(year, month);
     let day = if month_end { last } else { d.min(last) };
-    date_to_serial(year, month, day).ok_or(ErrorValue::Num)
+    civil_to_serial(year, month, day).ok_or(ErrorValue::Num)
 }
 
 /// whether `serial` is the last day of its month.
@@ -979,7 +1038,7 @@ fn is_month_end(serial: i64) -> Result<bool, ErrorValue> {
 }
 
 fn ymd(serial: i64) -> Result<(i64, i64, i64), ErrorValue> {
-    serial_to_ymd(serial).ok_or(ErrorValue::Num)
+    serial_to_civil(serial).ok_or(ErrorValue::Num)
 }
 
 /// a date argument as the 1900 serial of its day; a time of day is dropped
@@ -1005,10 +1064,11 @@ fn frequency(value: f64) -> Result<i64, ErrorValue> {
     }
 }
 
-/// a day-count basis 0..=4 after truncation.
+/// a day-count basis 0..=4 after truncation; a negative one is `#NUM!`
+/// before truncation could make it zero.
 fn day_basis(value: f64) -> Result<i64, ErrorValue> {
     let basis = value.trunc();
-    if (0.0..=4.0).contains(&basis) {
+    if value >= 0.0 && basis <= 4.0 {
         Ok(basis as i64)
     } else {
         Err(ErrorValue::Num)
@@ -1022,11 +1082,27 @@ fn compute(body: impl FnOnce() -> Result<f64, ErrorValue>) -> CellValue {
     }
 }
 
-/// a computed 1900 serial as the workbook's date serial.
+/// a computed 1900 serial as the workbook's date serial; a date outside the
+/// range is `#NUM!`.
 fn date_result(ctx: &EvalContext<'_>, body: impl FnOnce() -> Result<i64, ErrorValue>) -> CellValue {
-    match body().and_then(|serial| from_1900(serial, ctx.date_system).ok_or(ErrorValue::Num)) {
+    let shown = |serial: i64| {
+        (serial >= 1 && in_date_range(serial))
+            .then(|| from_1900(serial, ctx.date_system))
+            .flatten()
+            .ok_or(ErrorValue::Num)
+    };
+    match body().and_then(shown) {
         Ok(serial) => num(serial as f64),
         Err(error) => err(error),
+    }
+}
+
+/// spend the recalculation budget on `steps` units of work.
+fn charge(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
+    if ctx.consume_cells(steps) {
+        Ok(())
+    } else {
+        Err(ErrorValue::Num)
     }
 }
 
