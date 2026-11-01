@@ -336,6 +336,11 @@ function validArgs<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K] | un
       return isRecord(value) && typeof value.value === 'string' && PARAGRAPH_ALIGNMENTS.has(value.value);
     case 'lineSpacing':
       return isRecord(value) && finite(value.value) && value.value > 0 && value.value <= 31680;
+    case 'paragraphSpacing':
+      return isRecord(value) && ['before', 'after'].every((key) => {
+        const spacing = value[key];
+        return spacing === undefined || (finite(spacing) && spacing >= 0 && spacing <= 31680);
+      });
     case 'insertTable':
       return (
         isRecord(value) &&
@@ -551,6 +556,18 @@ function evaluate<K extends DocxCommandId>(
         active: spacingArgs ? spacing === spacingArgs.value : undefined,
       });
     }
+    case 'paragraphSpacing': {
+      const properties = context?.paragraphProperties;
+      return result<'paragraphSpacing'>({
+        gate: textGate(env),
+        value: {
+          before: finite(properties?.spaceBefore) ? properties.spaceBefore : 0,
+          after: finite(properties?.spaceAfter) ? properties.spaceAfter : 0,
+        },
+      });
+    }
+    case 'paragraphSpacingDialog':
+      return { gate: textGate(env) };
     case 'bulletList':
       return { gate: textGate(env), active: numberingOf(env)?.numId === 1 };
     case 'numberedList': {

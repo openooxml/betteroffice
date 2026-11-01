@@ -91,6 +91,7 @@ impl Document {
         self.host
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: f64,
@@ -104,6 +105,7 @@ impl Document {
             .map_err(error_kind)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn open_recovery_checkpoint(
         bytes: &[u8],
         through_seq: f64,

@@ -1,4 +1,5 @@
 use crate::authority::SheetOrderHistory;
+use crate::authority::snapshot::Codec;
 use crate::snapshot::preserved::{PreservedSnapshotBuilder, PreservedSnapshotEncoder};
 use crate::snapshot::wire::{Reader, Writer};
 use crate::snapshot::{SnapshotBudget, SnapshotResult};
@@ -7,16 +8,10 @@ use xlsx_model::progress::pulse;
 
 use super::*;
 
+mod binary;
+
 const MAGIC: &[u8; 8] = b"XLSXRECV";
-const CODEC_VERSION: u8 = 7;
-/// Checkpoints before the preserved state table, whose history entries carry
-/// their preserved states inline. Authority states end with row defaults from
-/// this codec on.
-const ROW_DEFAULTS_CODEC_VERSION: u8 = 6;
-const PATTERN_CODEC_VERSION: u8 = 5;
-/// Checkpoints before patterned fills, whose styles hold only the fills and
-/// border styles those releases read.
-const RELEASED_CODEC_VERSION: u8 = 3;
+const CODEC_VERSION: u8 = 8;
 /// Bytes one capture may encode. wasm32 caps a `Vec` at 2 GiB and the heap at
 /// 4 GiB, and a capture holds its encoded parts and the framed output at once.
 const CAPTURE_BUDGET: usize = 1 << 30;
@@ -43,23 +38,18 @@ fn capture_budget() -> usize {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryCheckpoint {
     engine: String,
     through_seq: u64,
     header: RecoveryHeader,
     calculation: RecoveryCalculation,
     collaborative: bool,
-    proposals: Vec<RecoveryProposal>,
+    proposals: Vec<Proposal>,
     proposal_id_counter: u64,
     axes: Vec<Option<RecoveryAxes>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     history: Option<RecoveryHistory>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryHistory {
     undo: UndoStack,
     sheet_order: SheetOrderHistory,
@@ -67,22 +57,13 @@ struct RecoveryHistory {
     preserved_redo: Vec<RecoveryPreservedHistory>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryPreservedHistory {
     before: RecoveryPreserved,
     after: RecoveryPreserved,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryPreserved {
-    /// The state inline, as codecs before the preserved state table wrote it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    chunks: Vec<Vec<u8>>,
-    /// Index into the checkpoint's preserved state table.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    state: Option<usize>,
+    state: usize,
     axes: Vec<Option<RecoveryAxes>>,
 }
 
@@ -92,21 +73,16 @@ impl RecoveryPreserved {
         states: &mut PreservedStates<'a>,
     ) -> Result<Self> {
         Ok(Self {
-            chunks: Vec::new(),
-            state: Some(states.index(state)),
+            state: states.index(state),
             axes: capture_axes(&state.axes)?,
         })
     }
 
-    fn restore(self, states: Option<&[PreservedSheetState]>) -> Result<PreservedSheetState> {
-        let mut state = match (states, self.state) {
-            (Some(states), Some(index)) if self.chunks.is_empty() => states
-                .get(index)
-                .cloned()
-                .ok_or_else(|| invalid("Recovery history state is out of range"))?,
-            (None, None) => decode_preserved(self.chunks.iter().map(Vec::as_slice))?,
-            _ => return Err(invalid("Recovery history state does not match its codec")),
-        };
+    fn restore(self, states: &[PreservedSheetState]) -> Result<PreservedSheetState> {
+        let mut state = states
+            .get(self.state)
+            .cloned()
+            .ok_or_else(|| invalid("Recovery history state is out of range"))?;
         if self.axes.len() != state.axes.len()
             || self
                 .axes
@@ -145,7 +121,7 @@ impl RecoveryPreservedHistory {
         Ok(history)
     }
 
-    fn restore(self, states: Option<&[PreservedSheetState]>) -> Result<PreservedStateHistory> {
+    fn restore(self, states: &[PreservedSheetState]) -> Result<PreservedStateHistory> {
         let history = PreservedStateHistory {
             before: self.before.restore(states)?,
             after: self.after.restore(states)?,
@@ -242,26 +218,6 @@ impl CaptureLimit {
     }
 }
 
-/// A JSON sink that fails at `max` bytes instead of growing past the budget.
-struct BoundedJson {
-    bytes: Vec<u8>,
-    max: usize,
-}
-
-impl std::io::Write for BoundedJson {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if data.len() > self.max - self.bytes.len() {
-            return Err(std::io::ErrorKind::OutOfMemory.into());
-        }
-        self.bytes.extend_from_slice(data);
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn capture_axes(axes: &[Option<xlsx_parse::SheetAxes>]) -> Result<Vec<Option<RecoveryAxes>>> {
     axes.iter()
         .map(|axes| axes.as_ref().map(RecoveryAxes::capture).transpose())
@@ -283,8 +239,6 @@ fn decode_preserved<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Result<Pr
     builder.finish().map_err(invalid)
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryHeader {
     edited_since_open: bool,
     recalculated_since_open: bool,
@@ -299,17 +253,12 @@ struct RecoveryHeader {
     next_sheet_id: u64,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryDiagnostics {
     cycle_cells: Vec<CellAddress>,
     limited_cells: Vec<CellAddress>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     budget_exhausted: bool,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryAxes {
     rows: Vec<(u32, u32, u32)>,
     cols: Vec<(u32, u32, u32)>,
@@ -402,20 +351,15 @@ impl RecoveryAxes {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryCalculation {
     cells: Vec<Vec<(CellRef, CellState)>>,
     deleted_cells: Vec<Vec<CellRef>>,
     arrays: Vec<Vec<(CellRef, CellRange)>>,
     styles: Option<Stylesheet>,
     /// Sizes hidden rows and columns return to; a standalone authority omits them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     hidden_sizes: Vec<RecoveryHiddenSizes>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecoveryHiddenSizes {
     cols: BTreeMap<u32, f64>,
     rows: BTreeMap<u32, f64>,
@@ -529,74 +473,6 @@ impl RecoveryCalculation {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryProposal {
-    proposal: Proposal,
-    edits: Vec<(String, CellState, Option<NumberFormatMutation>)>,
-    ghosts: Vec<(u32, u32, u32, String, String, CellValue)>,
-}
-
-impl RecoveryProposal {
-    fn capture(proposal: &Proposal) -> Self {
-        Self {
-            proposal: proposal.clone(),
-            edits: proposal
-                .edits
-                .iter()
-                .map(|edit| {
-                    (
-                        edit.input.clone(),
-                        edit.old_state.clone(),
-                        edit.number_format.clone(),
-                    )
-                })
-                .collect(),
-            ghosts: proposal
-                .ghosts
-                .iter()
-                .map(|ghost| {
-                    (
-                        ghost.sheet,
-                        ghost.row,
-                        ghost.col,
-                        ghost.old_text.clone(),
-                        ghost.new_text.clone(),
-                        ghost.alignment_value.clone(),
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    fn restore(self) -> Result<Proposal> {
-        let mut proposal = self.proposal;
-        if self.edits.len() != proposal.edits.len() {
-            return Err(invalid("Recovery proposal edit count mismatch"));
-        }
-        for (edit, (input, old_state, number_format)) in proposal.edits.iter_mut().zip(self.edits) {
-            edit.input = input;
-            edit.old_state = old_state;
-            edit.number_format = number_format;
-        }
-        proposal.ghosts = self
-            .ghosts
-            .into_iter()
-            .map(
-                |(sheet, row, col, old_text, new_text, alignment_value)| ProposalGhost {
-                    sheet,
-                    row,
-                    col,
-                    old_text,
-                    new_text,
-                    alignment_value,
-                },
-            )
-            .collect();
-        Ok(proposal)
-    }
-}
-
 fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
     let workbook = [
         ("sheet count", left.sheets.len() != right.sheets.len()),
@@ -690,7 +566,39 @@ fn read_sections<'a>(reader: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
         .collect()
 }
 
+#[cfg(feature = "fuzzing")]
+pub fn decode(data: &[u8]) {
+    let Some((&selector, payload)) = data.split_first() else {
+        return;
+    };
+    if payload.len() > 64 * 1024 {
+        return;
+    }
+    match selector % 4 {
+        0 => {
+            let _ = Workbook::restore_recovery_checkpoint(data);
+        }
+        1 => {
+            let mut writer = Writer::with_capacity(payload.len() + 41);
+            writer.raw(MAGIC);
+            writer.u8(CODEC_VERSION);
+            writer.raw(&digest(payload));
+            writer.raw(payload);
+            let _ = Workbook::restore_recovery_checkpoint(&writer.into_bytes());
+        }
+        2 => {
+            let mut reader = Reader::new(payload);
+            let _ = RecoveryCheckpoint::read(&mut reader).and_then(|_| reader.finish());
+        }
+        _ => {
+            let mut reader = Reader::new(payload);
+            let _ = Op::read(&mut reader).and_then(|_| reader.finish());
+        }
+    }
+}
+
 impl Workbook {
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: u64,
@@ -699,6 +607,7 @@ impl Workbook {
         self.recovery_checkpoint_with_history(through_seq, calculation_context, false)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint_with_history(
         &self,
         through_seq: u64,
@@ -740,7 +649,7 @@ impl Workbook {
                 .iter()
                 .map(|update| update.len() + SECTION_PREFIX_BYTES)
                 .fold(
-                    41 + 5 * SECTION_PREFIX_BYTES
+                    42 + 5 * SECTION_PREFIX_BYTES
                         + source.map_or(0, |source| source.len() + SECTION_PREFIX_BYTES),
                     usize::saturating_add,
                 ),
@@ -774,12 +683,7 @@ impl Workbook {
             header,
             calculation,
             collaborative: self.is_collaborative(),
-            proposals: self
-                .proposals
-                .list()
-                .iter()
-                .map(RecoveryProposal::capture)
-                .collect(),
+            proposals: self.proposals.list().to_vec(),
             proposal_id_counter: self.proposals.id_counter(),
             axes: capture_axes(&self.preserved.axes)?,
             history: history.map(|(preserved_undo, preserved_redo)| RecoveryHistory {
@@ -789,19 +693,12 @@ impl Workbook {
                 preserved_redo,
             }),
         };
-        let mut json = BoundedJson {
-            bytes: Vec::new(),
-            max: limit.max - limit.used,
-        };
-        if let Err(error) = serde_json::to_writer(&mut json, &checkpoint) {
-            if error.is_io() {
-                limit.take(json.max.saturating_add(1))?;
-            }
-            return Err(invalid(error));
-        }
+        let mut metadata = Writer::bounded(limit.max - limit.used);
+        checkpoint.write(&mut metadata);
+        limit.take(metadata.len())?;
+        let metadata = metadata.into_bytes();
         drop(checkpoint);
         pulse();
-        limit.take(json.bytes.len())?;
         let authority = self.authority.recovery_state_parts().map_err(invalid)?;
         pulse();
         let authority_len = authority.iter().map(Vec::len).sum();
@@ -811,8 +708,9 @@ impl Workbook {
         writer.raw(MAGIC);
         writer.u8(CODEC_VERSION);
         writer.raw(&[0; 32]);
-        writer.bytes(&json.bytes);
-        drop(json);
+        writer.bool(self.is_collaborative());
+        writer.bytes(&metadata);
+        drop(metadata);
         writer.var_usize(authority_len);
         for part in authority {
             writer.raw(&part);
@@ -835,19 +733,11 @@ impl Workbook {
         Ok(bytes)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn restore_recovery_checkpoint(
         bytes: &[u8],
     ) -> Result<(Self, u64, Option<CalculationOptions>, bool)> {
-        if bytes.len() < 41
-            || &bytes[..8] != MAGIC
-            || !matches!(
-                bytes[8],
-                RELEASED_CODEC_VERSION
-                    | PATTERN_CODEC_VERSION
-                    | ROW_DEFAULTS_CODEC_VERSION
-                    | CODEC_VERSION
-            )
-        {
+        if bytes.len() < 41 || &bytes[..8] != MAGIC || bytes[8] != CODEC_VERSION {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
         let payload = &bytes[41..];
@@ -855,19 +745,17 @@ impl Workbook {
             return Err(invalid("Corrupt workbook recovery checkpoint"));
         }
         let mut reader = Reader::new(payload);
-        let checkpoint: RecoveryCheckpoint =
-            serde_json::from_str(reader.str().map_err(invalid)?).map_err(invalid)?;
+        let collaborative = reader.bool().map_err(invalid)?;
+        let mut metadata = Reader::new(reader.bytes().map_err(invalid)?);
+        let mut checkpoint = RecoveryCheckpoint::read(&mut metadata).map_err(invalid)?;
+        metadata.finish().map_err(invalid)?;
+        checkpoint.collaborative = collaborative;
         pulse();
         if checkpoint.engine != env!("CARGO_PKG_VERSION") {
             return Err(invalid("Workbook recovery engine version mismatch"));
         }
-        let codec = bytes[8];
         let authority_bytes = reader.bytes().map_err(invalid)?;
-        let preserved_states = if codec == CODEC_VERSION {
-            read_state_table(&mut reader)?
-        } else {
-            vec![read_sections(&mut reader)?]
-        };
+        let preserved_states = read_state_table(&mut reader)?;
         let source = reader.option(|reader| reader.bytes()).map_err(invalid)?;
         let pending_remote_updates = read_sections(&mut reader)?;
         reader.finish().map_err(invalid)?;
@@ -877,7 +765,7 @@ impl Workbook {
             authority_bytes,
             header.client_id,
             header.next_sheet_id,
-            codec >= ROW_DEFAULTS_CODEC_VERSION,
+            true,
         )
         .map_err(invalid)?;
         if let Some(styles) = &source_markers {
@@ -892,10 +780,6 @@ impl Workbook {
         }
         let projection = authority.materialize().map_err(authority_error)?;
         pulse();
-        if codec == RELEASED_CODEC_VERSION && !crate::authority::released_styles(&projection.styles)
-        {
-            return Err(invalid("Unsupported workbook recovery codec"));
-        }
         let mut model = checkpoint.calculation.apply(projection)?;
         if let Some(styles) = &source_markers {
             model.styles.inherit_xf_xml_markers(styles);
@@ -975,7 +859,7 @@ impl Workbook {
         };
         workbook.proposals = ProposalSet::with_id_counter(checkpoint.proposal_id_counter);
         for proposal in checkpoint.proposals {
-            workbook.proposals.add(proposal.restore()?);
+            workbook.proposals.add(proposal);
         }
         let history_reset = checkpoint.history.is_none();
         if let Some(history) = checkpoint.history {
@@ -994,7 +878,7 @@ impl Workbook {
                 )
                 .map_err(invalid)?;
             workbook.undo = history.undo;
-            let states = (codec == CODEC_VERSION).then_some(states.as_slice());
+            let states = states.as_slice();
             workbook.preserved_undo = history
                 .preserved_undo
                 .into_iter()
@@ -1018,6 +902,12 @@ impl Workbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encoded(value: &impl Codec) -> Vec<u8> {
+        let mut writer = Writer::new();
+        value.write(&mut writer);
+        writer.into_bytes()
+    }
 
     fn model() -> WorkbookModel {
         WorkbookModel {
@@ -1258,11 +1148,10 @@ mod tests {
         let bytes = workbook.recovery_checkpoint(1, None).unwrap();
         assert_eq!(workbook.last_calculation, before);
         let mut reader = Reader::new(&bytes[41..]);
-        let metadata: serde_json::Value = serde_json::from_slice(reader.bytes().unwrap()).unwrap();
-        assert!(
-            metadata["header"]["last_calculation"]
-                .get("changed")
-                .is_none()
+        let metadata = read_metadata(&mut reader);
+        assert_eq!(
+            metadata.header.last_calculation.cycle_cells,
+            before.cycle_cells
         );
         let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
         assert!(restored.last_calculation.changed.is_empty());
@@ -1346,10 +1235,7 @@ mod tests {
                 live.authority.structure().unwrap().sheet_keys
             );
             assert_eq!(restored.history_state(), live.history_state());
-            assert_eq!(
-                serde_json::to_value(&restored.undo).unwrap(),
-                serde_json::to_value(&live.undo).unwrap()
-            );
+            assert_eq!(encoded(&restored.undo), encoded(&live.undo));
         };
         let mut live = Workbook::from_model(model()).unwrap();
         let initial_model = live.model.clone();
@@ -1373,7 +1259,7 @@ mod tests {
         }
         let final_model = live.model.clone();
         let final_ids = live.sheet_info().unwrap().sheet_ids;
-        let final_undo = serde_json::to_value(&live.undo).unwrap();
+        let final_undo = encoded(&live.undo);
         let bytes = live
             .recovery_checkpoint_with_history(64, None, true)
             .unwrap();
@@ -1435,7 +1321,7 @@ mod tests {
         }
         assert_eq!(restored.model, final_model);
         assert_eq!(restored.sheet_info().unwrap().sheet_ids, final_ids);
-        assert_eq!(serde_json::to_value(&restored.undo).unwrap(), final_undo);
+        assert_eq!(encoded(&restored.undo), final_undo);
     }
 
     #[test]
@@ -1700,6 +1586,8 @@ mod tests {
     #[test]
     fn recovery_checkpoint_round_trips_chart_workbook() {
         let parts = vec![
+            ("[Content_Types].xml".into(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".into(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec()),
             ("xl/workbook.xml".into(), br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec()),
             ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
             ("xl/worksheets/sheet1.xml".into(), br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><drawing r:id="rIdDrawing"/></worksheet>"#.to_vec()),
@@ -1720,7 +1608,7 @@ mod tests {
             )
             .unwrap();
         let bytes = workbook.recovery_checkpoint(1, None).unwrap();
-        let (restored, through_seq, _, history_reset) =
+        let (mut restored, through_seq, _, history_reset) =
             Workbook::restore_recovery_checkpoint(&bytes).unwrap();
         assert_eq!(through_seq, 1);
         assert!(history_reset);
@@ -1734,6 +1622,129 @@ mod tests {
         assert_eq!(restored.save().unwrap(), workbook.save().unwrap());
         assert!(!restored.history_state().can_undo);
         assert!(!restored.history_state().can_redo);
+        for book in [&mut workbook, &mut restored] {
+            assert_eq!(
+                book.source_package
+                    .as_ref()
+                    .unwrap()
+                    .facts()
+                    .unpatchable_reference_part(),
+                None
+            );
+        }
+        for book in [&mut workbook, &mut restored] {
+            book.edit_charts(
+                vec![crate::ChartMutation {
+                    sheet: SheetId(0),
+                    chart: 0,
+                    edit: crate::ChartEdit::SetChartTitle {
+                        title: Some("Recovery".into()),
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+            assert!(book.model.sheets[0].charts[0].raw_xml.is_some());
+        }
+        for _ in 0..2 {
+            let ops = vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }];
+            workbook
+                .apply_ops(ops.clone(), CalculationOptions::default())
+                .unwrap();
+            restored
+                .apply_ops(ops, CalculationOptions::default())
+                .unwrap();
+            assert_eq!(restored.model, workbook.model);
+            assert_eq!(restored.preserved.axes, workbook.preserved.axes);
+            assert_eq!(
+                restored.moved_references_since_open,
+                workbook.moved_references_since_open
+            );
+            assert_eq!(restored.save().unwrap(), workbook.save().unwrap());
+        }
+        workbook.undo(CalculationOptions::default()).unwrap();
+        let (undo, redo) = workbook.undo.recovery_stacks();
+        for stack in [undo, redo] {
+            assert!(stack.iter().flatten().any(|op| matches!(op,
+                Op::SetCharts { charts, .. } if charts.iter().any(|chart| chart.raw_xml.is_some()))));
+        }
+        let chart_xml = |undo: &UndoStack| {
+            let (undo, redo) = undo.recovery_stacks();
+            [undo, redo]
+                .into_iter()
+                .map(|stack| {
+                    stack
+                        .iter()
+                        .flatten()
+                        .filter_map(|op| match op {
+                            Op::SetCharts { charts, .. } => Some(
+                                charts
+                                    .iter()
+                                    .map(|chart| chart.raw_xml.clone())
+                                    .collect::<Vec<_>>(),
+                            ),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let original_chart_xml = chart_xml(&workbook.undo);
+        let bytes = workbook
+            .recovery_checkpoint_with_history(4, None, true)
+            .unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(encoded(&restored.undo), encoded(&workbook.undo));
+        assert_eq!(chart_xml(&restored.undo), original_chart_xml);
+        assert_eq!(restored.save().unwrap(), workbook.save().unwrap());
+        restored.redo(CalculationOptions::default()).unwrap();
+        workbook.redo(CalculationOptions::default()).unwrap();
+        for _ in 0..4 {
+            restored.undo(CalculationOptions::default()).unwrap();
+            workbook.undo(CalculationOptions::default()).unwrap();
+            assert_eq!(restored.model, workbook.model);
+            assert_eq!(restored.history_state(), workbook.history_state());
+            assert_eq!(restored.save().unwrap(), workbook.save().unwrap());
+        }
+
+        let parts = parts
+            .into_iter()
+            .filter(|(path, _)| path != "[Content_Types].xml" && path != "_rels/.rels")
+            .collect::<Vec<_>>();
+        let malformed = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut workbook = Workbook::open(&malformed).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        let saved = workbook.save().unwrap();
+        for book in [&mut workbook, &mut restored] {
+            assert_eq!(
+                book.source_package
+                    .as_ref()
+                    .unwrap()
+                    .facts()
+                    .unpatchable_reference_part(),
+                Some("xl/workbook.xml")
+            );
+            let failure = book
+                .apply_ops(
+                    vec![Op::InsertRows {
+                        sheet: SheetId(0),
+                        at: 0,
+                        count: 1,
+                    }],
+                    CalculationOptions::default(),
+                )
+                .unwrap_err();
+            assert_eq!(
+                failure.to_string(),
+                "xl/workbook.xml references cells this edit would move, and it cannot be rewritten"
+            );
+            assert_eq!(book.save().unwrap(), saved);
+        }
     }
 
     #[test]
@@ -1750,13 +1761,8 @@ mod tests {
             .unwrap();
         let bytes = workbook.recovery_checkpoint(1, None).unwrap();
         let mut reader = Reader::new(&bytes[41..]);
-        let metadata: serde_json::Value = serde_json::from_slice(reader.bytes().unwrap()).unwrap();
-        assert!(metadata.get("source").is_none());
-        assert!(metadata.get("authority").is_none());
-        assert!(metadata.get("preserved").is_none());
-        assert!(metadata.get("pending_remote_updates").is_none());
-        assert!(metadata["header"].get("state_vector").is_none());
-        assert!(metadata["header"].get("guid").is_none());
+        let metadata = read_metadata(&mut reader);
+        assert!(!metadata.collaborative);
         assert_eq!(
             reader.bytes().unwrap(),
             workbook.authority.encode_recovery_state().unwrap()
@@ -1783,18 +1789,157 @@ mod tests {
         assert!(Workbook::restore_recovery_checkpoint(&corrupt).is_err());
         assert!(Workbook::restore_recovery_checkpoint(&bytes[..bytes.len() - 1]).is_err());
         assert!(Workbook::restore_recovery_checkpoint(&[]).is_err());
-        let mut reader = Reader::new(&bytes[41..]);
-        let mut checkpoint: RecoveryCheckpoint =
-            serde_json::from_slice(reader.bytes().unwrap()).unwrap();
-        checkpoint.engine = "unsupported".into();
-        let mut writer = Writer::new();
-        writer.bytes(&serde_json::to_vec(&checkpoint).unwrap());
-        writer.raw(reader.rest());
-        let payload = writer.into_bytes();
-        let mut wrong_engine = bytes[..9].to_vec();
-        wrong_engine.extend_from_slice(&Sha256::digest(&payload));
-        wrong_engine.extend_from_slice(&payload);
+        let wrong_engine = rewrite_metadata(&bytes, |checkpoint| {
+            checkpoint.engine = "unsupported".into();
+        });
         assert!(Workbook::restore_recovery_checkpoint(&wrong_engine).is_err());
+    }
+
+    #[test]
+    fn recovery_rejects_malformed_binary_payloads_before_adopting_state() {
+        let workbook = Workbook::from_model(model()).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        let payload = &bytes[41..];
+        for end in 0..payload.len() {
+            assert!(
+                Workbook::restore_recovery_checkpoint(&framed(CODEC_VERSION, &payload[..end]))
+                    .is_err()
+            );
+        }
+        let mut flags = payload.to_vec();
+        flags[0] = 2;
+        assert!(Workbook::restore_recovery_checkpoint(&framed(CODEC_VERSION, &flags)).is_err());
+        let mut reader = Reader::new(payload);
+        reader.bool().unwrap();
+        let metadata = reader.bytes().unwrap();
+        let mut bad_metadata = metadata.to_vec();
+        bad_metadata[0] = 1;
+        let mut malformed = Writer::new();
+        malformed.bool(false);
+        malformed.bytes(&bad_metadata);
+        malformed.raw(reader.clone().rest());
+        assert!(
+            Workbook::restore_recovery_checkpoint(&framed(CODEC_VERSION, &malformed.into_bytes()))
+                .is_err()
+        );
+        let mut trailing = metadata.to_vec();
+        trailing.push(0);
+        let mut malformed = Writer::new();
+        malformed.bool(false);
+        malformed.bytes(&trailing);
+        malformed.raw(reader.clone().rest());
+        assert!(
+            Workbook::restore_recovery_checkpoint(&framed(CODEC_VERSION, &malformed.into_bytes()))
+                .is_err()
+        );
+        let authority = reader.bytes().unwrap();
+        for count in [0, u64::MAX] {
+            let mut malformed = Writer::new();
+            malformed.bool(false);
+            malformed.bytes(metadata);
+            malformed.bytes(authority);
+            malformed.var_u64(count);
+            assert!(
+                Workbook::restore_recovery_checkpoint(&framed(
+                    CODEC_VERSION,
+                    &malformed.into_bytes()
+                ))
+                .is_err()
+            );
+        }
+        let mut bad_digest = bytes.clone();
+        bad_digest[41] ^= 1;
+        assert!(matches!(Workbook::restore_recovery_checkpoint(&bad_digest),
+            Err(Error::InvalidRequest(message)) if message == "Corrupt workbook recovery checkpoint"));
+        assert_eq!(workbook.recovery_checkpoint(0, None).unwrap(), bytes);
+    }
+
+    #[test]
+    fn recovery_refuses_non_finite_proposal_and_history_cells_without_mutation() {
+        let mut workbook = Workbook::from_model(model()).unwrap();
+        let options = CalculationOptions::default();
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 0), "7", options)
+            .unwrap();
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 1), "8", options)
+            .unwrap();
+        workbook.undo(options).unwrap();
+        let proposal = workbook
+            .propose(
+                ProposalRequest {
+                    agent_id: "agent".into(),
+                    note: None,
+                    edits: vec![crate::ProposalEditInput {
+                        sheet: SheetId(0),
+                        cell: CellRef::new(0, 0),
+                        input: "9".into(),
+                        number_format: None,
+                    }],
+                },
+                options,
+            )
+            .unwrap();
+        let original = workbook
+            .recovery_checkpoint_with_history(2, None, true)
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let version = workbook.version();
+        let before_model = workbook.model.clone();
+        let before_history = encoded(&workbook.undo);
+        let before_proposals = workbook.proposals().to_vec();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for target in 0..4 {
+                let forged = rewrite_metadata(&original, |checkpoint| {
+                    let value = CellValue::Number { value };
+                    match target {
+                        0 => checkpoint.proposals[0].edits[0].old_state.value = value,
+                        1 | 2 => {
+                            let (undo, redo) =
+                                checkpoint.history.as_ref().unwrap().undo.recovery_stacks();
+                            let (mut undo, mut redo) = (undo.to_vec(), redo.to_vec());
+                            let stack = if target == 1 { &mut undo } else { &mut redo };
+                            let cell = stack
+                                .iter_mut()
+                                .flatten()
+                                .find_map(|op| match op {
+                                    Op::SetCell { cell, .. } => Some(cell),
+                                    _ => None,
+                                })
+                                .unwrap();
+                            cell.value = value;
+                            checkpoint.history.as_mut().unwrap().undo =
+                                UndoStack::from_recovery_stacks(undo, redo);
+                        }
+                        _ => checkpoint.proposals[0].ghosts.push(ProposalGhost {
+                            sheet: 0,
+                            row: 0,
+                            col: 0,
+                            old_text: "7".into(),
+                            new_text: "9".into(),
+                            alignment_value: value,
+                        }),
+                    }
+                });
+                assert_eq!(digest(&forged[41..])[..], forged[9..41]);
+                assert!(matches!(Workbook::restore_recovery_checkpoint(&forged),
+                    Err(Error::InvalidRequest(message)) if message == "non-finite recovery number"));
+                assert_eq!(workbook.version(), version);
+                assert_eq!(workbook.model, before_model);
+                assert_eq!(encoded(&workbook.undo), before_history);
+                assert_eq!(workbook.proposals(), before_proposals.as_slice());
+                assert_eq!(workbook.save().unwrap(), saved);
+            }
+        }
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&original).unwrap();
+        restored
+            .accept_proposal(&proposal.id, false, options)
+            .unwrap();
+        workbook
+            .accept_proposal(&proposal.id, false, options)
+            .unwrap();
+        assert_eq!(restored.model, workbook.model);
+        assert_eq!(restored.save().unwrap(), workbook.save().unwrap());
     }
 
     fn framed(version: u8, payload: &[u8]) -> Vec<u8> {
@@ -1805,111 +1950,98 @@ mod tests {
         framed
     }
 
-    /// `bytes` in the layout of codecs before the preserved state table, at
-    /// `version`, with `state` as the authority state when given.
-    fn legacy_layout(bytes: &[u8], version: u8, state: Option<&[u8]>) -> Vec<u8> {
+    fn read_metadata(reader: &mut Reader<'_>) -> RecoveryCheckpoint {
+        let collaborative = reader.bool().unwrap();
+        let mut metadata = Reader::new(reader.bytes().unwrap());
+        let mut checkpoint = RecoveryCheckpoint::read(&mut metadata).unwrap();
+        metadata.finish().unwrap();
+        checkpoint.collaborative = collaborative;
+        checkpoint
+    }
+
+    fn rewrite_metadata(bytes: &[u8], edit: impl FnOnce(&mut RecoveryCheckpoint)) -> Vec<u8> {
         let mut reader = Reader::new(&bytes[41..]);
-        let mut checkpoint: RecoveryCheckpoint =
-            serde_json::from_slice(reader.bytes().unwrap()).unwrap();
-        let authority = reader.bytes().unwrap();
-        let states = read_state_table(&mut reader).unwrap();
-        if let Some(history) = &mut checkpoint.history {
-            for entry in history
-                .preserved_undo
-                .iter_mut()
-                .chain(&mut history.preserved_redo)
-            {
-                for side in [&mut entry.before, &mut entry.after] {
-                    side.chunks = states[side.state.take().unwrap()]
-                        .iter()
-                        .map(|chunk| chunk.to_vec())
-                        .collect();
-                }
+        let mut checkpoint = read_metadata(&mut reader);
+        edit(&mut checkpoint);
+        let mut metadata = Writer::new();
+        checkpoint.write(&mut metadata);
+        let mut payload = Writer::new();
+        payload.bool(checkpoint.collaborative);
+        payload.bytes(&metadata.into_bytes());
+        payload.raw(reader.rest());
+        framed(CODEC_VERSION, &payload.into_bytes())
+    }
+
+    #[test]
+    fn recovery_refuses_every_old_json_codec_without_mutation() {
+        let mut workbook = Workbook::from_model(model()).unwrap();
+        workbook
+            .edit_cell(
+                SheetId(0),
+                CellRef::new(0, 0),
+                "7",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let version = workbook.version();
+        let current = workbook
+            .recovery_checkpoint_with_history(1, None, true)
+            .unwrap();
+        let mut states = PreservedStates::default();
+        states.index(&workbook.preserved);
+        let mut limit = CaptureLimit {
+            used: 0,
+            max: CAPTURE_BUDGET,
+        };
+        let states = states.encode(&mut limit).unwrap();
+        let metadata = serde_json::json!({
+            "engine": env!("CARGO_PKG_VERSION"), "through_seq": 1,
+            "header": {
+                "edited_since_open": true, "recalculated_since_open": false,
+                "moved_references_since_open": false, "active_sheet": 0, "rand_seed": null,
+                "version_nonce": "old", "committed_changes": 1,
+                "last_calculation": { "cycle_cells": [], "limited_cells": [] },
+                "calculation_context": null, "client_id": 1, "next_sheet_id": 1
+            },
+            "calculation": { "cells": [[]], "deleted_cells": [[]], "arrays": [[]], "styles": null },
+            "collaborative": false, "proposals": [], "proposal_id_counter": 0, "axes": [null]
+        });
+        for codec in 0..CODEC_VERSION {
+            let mut payload = Writer::new();
+            payload.bytes(&serde_json::to_vec(&metadata).unwrap());
+            let authority = if codec < 6 {
+                workbook.authority.encode_released_recovery_state()
+            } else {
+                workbook.authority.encode_recovery_state().unwrap()
+            };
+            payload.bytes(&authority);
+            if codec == 7 {
+                payload.var_usize(states.len());
             }
-        }
-        let mut writer = Writer::new();
-        writer.bytes(&serde_json::to_vec(&checkpoint).unwrap());
-        writer.bytes(state.unwrap_or(authority));
-        writer.var_usize(states[0].len());
-        for chunk in &states[0] {
-            writer.bytes(chunk);
-        }
-        writer.raw(reader.rest());
-        framed(version, &writer.into_bytes())
-    }
-
-    fn with_authority_state(bytes: &[u8], version: u8, state: &[u8]) -> Vec<u8> {
-        legacy_layout(bytes, version, Some(state))
-    }
-
-    #[test]
-    fn recovery_checkpoints_version_row_defaults_and_restore_the_released_layout() {
-        let mut styled = model();
-        styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
-        styled.sheets[0].row_styles = BTreeMap::from([(3, 1)]);
-        let workbook = Workbook::from_model(styled.clone()).unwrap();
-        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
-        assert_ne!(
-            bytes[8], 3,
-            "a checkpoint whose authority state holds row defaults needs its own codec version"
-        );
-        let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
-        assert_eq!(
-            restored.model.sheets[0].row_styles,
-            styled.sheets[0].row_styles
-        );
-
-        let plain = Workbook::from_model(model()).unwrap();
-        let bytes = plain.recovery_checkpoint(0, None).unwrap();
-        let released =
-            with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
-        let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
-        assert_eq!(restored.model, plain.model);
-        assert!(restored.model.sheets[0].row_styles.is_empty());
-        let current_state =
-            with_authority_state(&bytes, 3, &plain.authority.encode_recovery_state().unwrap());
-        assert!(Workbook::restore_recovery_checkpoint(&current_state).is_err());
-    }
-
-    #[test]
-    fn recovery_checkpoints_version_pattern_fills_and_refuse_them_in_the_released_codec() {
-        use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
-        let mut patterned = model();
-        patterned.styles.fills.push(Fill::Pattern {
-            pattern: PatternType::LightUp,
-            fg: Some(Color::Rgb("#123456".into())),
-            bg: None,
-        });
-        let mut dashed = model();
-        dashed.styles.borders.push(Border {
-            top: Some(BorderEdge {
-                style: BorderStyle::MediumDashDot,
-                color: None,
-            }),
-            ..Border::default()
-        });
-        for styled in [patterned, dashed] {
-            let workbook = Workbook::from_model(styled).unwrap();
-            let bytes = workbook.recovery_checkpoint(0, None).unwrap();
-            assert_ne!(
-                bytes[8], 3,
-                "patterned fills and extended borders need their own codec version"
+            payload.var_usize(states[0].len());
+            for chunk in &states[0] {
+                payload.bytes(chunk);
+            }
+            payload.option(None::<&[u8]>, |w, source| w.bytes(source));
+            payload.var_usize(0);
+            assert!(matches!(
+                Workbook::restore_recovery_checkpoint(&framed(codec, &payload.into_bytes())),
+                Err(Error::InvalidRequest(message)) if message == "Unsupported workbook recovery codec"
+            ));
+            assert_eq!(workbook.version(), version);
+            assert_eq!(workbook.save().unwrap(), saved);
+            assert_eq!(
+                workbook
+                    .recovery_checkpoint_with_history(1, None, true)
+                    .unwrap(),
+                current
             );
-            let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
-            assert_eq!(restored.model, workbook.model);
-            let released = legacy_layout(&bytes, 3, None);
-            assert!(Workbook::restore_recovery_checkpoint(&released).is_err());
         }
-
-        let plain = Workbook::from_model(model()).unwrap();
-        let bytes = plain.recovery_checkpoint(0, None).unwrap();
-        let released =
-            with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
-        let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
-        assert_eq!(restored.model, plain.model);
     }
+
     #[test]
-    fn cascade_composition_recovery_writer_uses_codec_seven() {
+    fn cascade_composition_recovery_writer_uses_codec_eight() {
         let mut styled = model();
         styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
         styled.styles.cell_xfs[1].xf_id = Some(2);
@@ -1921,53 +2053,9 @@ mod tests {
         styled.sheets[0].row_styles.insert(3, 1);
         let workbook = Workbook::from_model(styled).unwrap();
         let bytes = workbook.recovery_checkpoint(0, None).unwrap();
-        assert_eq!(bytes[8], 7);
+        assert_eq!(bytes[8], CODEC_VERSION);
         let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
         assert_eq!(restored.model, workbook.model);
-    }
-
-    #[test]
-    fn cascade_composition_recovery_reads_codec_five_without_row_suffix() {
-        let mut styled = model();
-        styled.styles.fills.push(xlsx_model::Fill::Pattern {
-            pattern: xlsx_model::PatternType::LightUp,
-            fg: None,
-            bg: None,
-        });
-        styled.styles.cell_xfs.push(xlsx_model::Xf {
-            xf_id: Some(2),
-            ..xlsx_model::Xf::default()
-        });
-        let workbook = Workbook::from_model(styled).unwrap();
-        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
-        let old = with_authority_state(
-            &bytes,
-            5,
-            &workbook.authority.encode_released_recovery_state(),
-        );
-        let (restored, ..) = Workbook::restore_recovery_checkpoint(&old).unwrap();
-        assert_eq!(restored.model, workbook.model);
-        let new = restored.recovery_checkpoint(0, None).unwrap();
-        assert_eq!(new[8], 7);
-        assert_eq!(
-            Workbook::restore_recovery_checkpoint(&new).unwrap().0.model,
-            restored.model
-        );
-    }
-
-    #[test]
-    fn cascade_composition_recovery_reads_codec_three_and_rejects_four() {
-        let workbook = Workbook::from_model(model()).unwrap();
-        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
-        let state = workbook.authority.encode_released_recovery_state();
-        let old = with_authority_state(&bytes, 3, &state);
-        let (restored, ..) = Workbook::restore_recovery_checkpoint(&old).unwrap();
-        assert_eq!(restored.model, workbook.model);
-        assert_eq!(restored.recovery_checkpoint(0, None).unwrap()[8], 7);
-        assert!(
-            Workbook::restore_recovery_checkpoint(&with_authority_state(&bytes, 4, &state))
-                .is_err()
-        );
     }
 
     fn with_capture_budget<T>(max: usize, f: impl FnOnce() -> T) -> T {
@@ -2023,6 +2111,17 @@ mod tests {
         assert_eq!(left.shared_string_cells, right.shared_string_cells);
         assert_eq!(left.axes, right.axes);
         assert_eq!(left.created, right.created);
+    }
+
+    #[test]
+    fn recovery_binary_metadata_refuses_at_the_capture_budget() {
+        let mut workbook = Workbook::from_model(model()).unwrap();
+        workbook.version_nonce = "x".repeat(4096);
+        assert!(
+            matches!(with_capture_budget(512, || workbook.recovery_checkpoint(0, None)),
+            Err(Error::RecoveryCheckpointTooLarge { bytes, max: 512 }) if bytes > 512)
+        );
+        assert!(workbook.recovery_checkpoint(0, None).is_ok());
     }
 
     #[test]
@@ -2131,7 +2230,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_reads_codec_six_history_with_inline_preserved_states() {
+    fn recovery_history_uses_and_validates_preserved_state_indices() {
         let options = CalculationOptions::default();
         let mut workbook = Workbook::open(&shared_string_source(64)).unwrap();
         workbook
@@ -2154,14 +2253,13 @@ mod tests {
         let bytes = workbook
             .recovery_checkpoint_with_history(1, None, true)
             .unwrap();
-        assert_eq!(bytes[8], 7);
+        assert_eq!(bytes[8], CODEC_VERSION);
         let mut reader = Reader::new(&bytes[41..]);
-        reader.bytes().unwrap();
+        read_metadata(&mut reader);
         reader.bytes().unwrap();
         assert_eq!(read_state_table(&mut reader).unwrap().len(), 2);
 
-        let old = legacy_layout(&bytes, 6, None);
-        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&old).unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
         assert_eq!(restored.model, workbook.model);
         assert_same_preservation(&restored.preserved, &workbook.preserved);
         restored.redo(options).unwrap();
@@ -2172,26 +2270,22 @@ mod tests {
             assert_eq!(restored.model, workbook.model);
             assert_same_preservation(&restored.preserved, &workbook.preserved);
         }
-
-        let tampered = |edit: &dyn Fn(&mut serde_json::Value)| {
-            let mut reader = Reader::new(&bytes[41..]);
-            let mut checkpoint: serde_json::Value =
-                serde_json::from_slice(reader.bytes().unwrap()).unwrap();
-            edit(&mut checkpoint["history"]["preserved_undo"][0]["before"]);
-            let mut writer = Writer::new();
-            writer.bytes(&serde_json::to_vec(&checkpoint).unwrap());
-            writer.raw(reader.rest());
-            Workbook::restore_recovery_checkpoint(&framed(7, &writer.into_bytes()))
-        };
-        assert!(tampered(&|_| {}).is_ok());
-        assert!(tampered(&|side| side["state"] = 2.into()).is_err());
-        assert!(
-            tampered(&|side| {
-                side["state"] = serde_json::Value::Null;
-                side["chunks"] = serde_json::json!([[0]]);
-            })
-            .is_err()
-        );
+        assert_eq!(restored.save().unwrap(), workbook.save().unwrap());
+        for state in [2, usize::MAX] {
+            let tampered = rewrite_metadata(&bytes, |checkpoint| {
+                checkpoint.history.as_mut().unwrap().preserved_undo[0]
+                    .before
+                    .state = state;
+            });
+            assert!(Workbook::restore_recovery_checkpoint(&tampered).is_err());
+        }
+        let tampered = rewrite_metadata(&bytes, |checkpoint| {
+            checkpoint.history.as_mut().unwrap().preserved_undo[0]
+                .before
+                .axes
+                .clear();
+        });
+        assert!(Workbook::restore_recovery_checkpoint(&tampered).is_err());
     }
 
     #[test]

@@ -32,6 +32,7 @@
     "ariaLabel": "Barra degli strumenti di formattazione",
     "file": "File",
     "format": "Formato",
+    "layout": "Layout",
     "insert": "Inserisci",
     "open": "Apri",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Corrente"
     }
+  },
+  "layout": {
+    "margins": "Margini",
+    "normal": "Normale",
+    "narrow": "Stretto",
+    "moderate": "Moderato",
+    "wide": "Largo",
+    "customMargins": "Margini personalizzati...",
+    "morePaperSizes": "Altri formati di carta...",
+    "indent": "Rientro"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Singola",
     "double": "Doppia",
     "lineSpacingTitle": "Interlinea: {label}",
-    "paragraphSpacing": "Spaziatura paragrafo"
+    "paragraphSpacing": "Spaziatura paragrafo",
+    "addBefore": "Aggiungi spazio prima del paragrafo",
+    "removeBefore": "Rimuovi spazio prima del paragrafo",
+    "addAfter": "Aggiungi spazio dopo il paragrafo",
+    "removeAfter": "Rimuovi spazio dopo il paragrafo",
+    "options": "Opzioni interlinea..."
   },
   "styles": {
     "selectAriaLabel": "Seleziona stile paragrafo",
@@ -480,6 +496,11 @@
       "top": "In alto (px)",
       "width": "Larghezza (px)",
       "height": "Altezza (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Spaziatura prima",
+      "after": "Spaziatura dopo",
+      "multiple": "Multipla"
     }
   },
   "comments": {
@@ -755,7 +776,11 @@
     "leftIndent": "Rientro sinistro",
     "rightIndent": "Rientro destro",
     "topMargin": "Margine superiore",
-    "bottomMargin": "Margine inferiore"
+    "bottomMargin": "Margine inferiore",
+    "leftMargin": "Margine sinistro",
+    "rightMargin": "Margine destro",
+    "hangingIndent": "Rientro sporgente",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Stampa",
