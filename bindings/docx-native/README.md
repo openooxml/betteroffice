@@ -3,6 +3,8 @@
 The `@betteroffice/docx` API backed by native Rust in Node.js, Bun and Deno.
 Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
 
+Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`openDocx` / `EditSession`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
+
 ```sh
 npm install @betteroffice/docx-native
 ```

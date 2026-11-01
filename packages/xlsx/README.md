@@ -97,6 +97,8 @@ bytes synchronously; check `isPngExportAvailable()` before calling them.
 
 ## Worker sessions
 
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed.
+
 The low-level `openWorkbookSession` API (also exported from `@betteroffice/xlsx/worker`) can
 change in minor releases. It returns a `WorkbookSession` with
 promise-returning operations through `session.call`, plus asynchronous `session.save()` and
