@@ -52,7 +52,10 @@ pub(crate) fn cell(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         "address" => address(ctx, sheet, at),
         "col" => num(f64::from(at.col) + 1.0),
         "row" => num(f64::from(at.row) + 1.0),
-        "contents" => contents(ctx, sheet, at),
+        "contents" => match contents(ctx, sheet, at) {
+            CellValue::Empty => num(0.0),
+            value => value,
+        },
         "type" => {
             let kind = match contents(ctx, sheet, at) {
                 CellValue::Empty => "b",

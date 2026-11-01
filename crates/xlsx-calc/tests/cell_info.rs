@@ -115,6 +115,11 @@ fn position_and_contents() {
             ("CELL(\"type\",A2)", text("l")),
             ("CELL(\"type\",A3)", text("v")),
             ("CELL(\"type\",H40)", text("b")),
+            (
+                "ISNUMBER(CELL(\"contents\",H40))",
+                CellValue::Bool { value: true },
+            ),
+            ("CELL(\"contents\",H40)&\"\"", text("0")),
         ],
     );
 }
