@@ -680,6 +680,7 @@ export function applyClipboardFragment(
       offset: removed.range.start.offset,
     };
   }
+  const paragraphProperties: Array<{ range: YrsStoryRange; pStyle?: string; list?: 'bullet' | 'numbered' }> = [];
   fragment.paragraphs.forEach((paragraph, index) => {
     if (index > 0) {
       const split = engine.splitParagraph(caret, suggesting);
@@ -709,21 +710,24 @@ export function applyClipboardFragment(
         caret = { story: inserted.range.story, ...inserted.range.end };
       }
     }
-    if (paragraph.pStyle) {
-      engine.applyParagraphStyle(
-        { story: caret.story, start: { paraId: paragraphStart.paraId, offset: paragraphStart.offset }, end: { paraId: caret.paraId, offset: caret.offset } },
-        paragraph.pStyle,
-        suggesting
-      );
+    if (paragraph.pStyle || paragraph.list) {
+      paragraphProperties.push({
+        range: { story: caret.story, start: { paraId: paragraphStart.paraId, offset: 0 }, end: { paraId: caret.paraId, offset: 0 } },
+        pStyle: paragraph.pStyle,
+        list: paragraph.list,
+      });
     }
-    if (paragraph.list) {
-      const bullet = paragraph.list === 'bullet';
+  });
+  for (const { range: target, pStyle, list } of paragraphProperties) {
+    if (pStyle) engine.applyParagraphStyle(target, pStyle, suggesting);
+    if (list) {
+      const bullet = list === 'bullet';
       engine.setParagraphAttrs(
-        { story: caret.story, start: { paraId: caret.paraId, offset: 0 }, end: { paraId: caret.paraId, offset: 0 } },
+        { story: target.story, start: target.end, end: target.end },
         { numPr: { numId: bullet ? 1 : 2, ilvl: 0 }, listIsBullet: bullet, listNumFmt: bullet ? null : 'decimal', listMarker: null },
         suggesting
       );
     }
-  });
+  }
   return caret;
 }

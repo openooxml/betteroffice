@@ -580,7 +580,21 @@ describe('applyClipboardFragment', () => {
       { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } },
       { paragraphs: [{ text: 'a', list: 'bullet' }, { text: 'b', list: 'numbered' }] },
     );
-    expect(calls).toEqual(['text:a', 'list:p0:1:true', 'split', 'text:b', 'list:p0n:2:false']);
+    expect(calls).toEqual(['text:a', 'split', 'text:b', 'list:p0:1:true', 'list:p0n:2:false']);
+  });
+
+  test('paragraph styles are applied after splitting so later paragraphs do not inherit them', () => {
+    const calls: string[] = [];
+    const engine = {
+      ...fakeEngine(calls),
+      applyParagraphStyle: (range: { start: { paraId: string } }, styleId: string) => { calls.push(`style:${range.start.paraId}:${styleId}`); },
+    } as unknown as ClipboardPasteEngine;
+    applyClipboardFragment(
+      engine,
+      { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } },
+      { paragraphs: [{ text: 'Heading', pStyle: 'Heading2' }, { text: 'Body' }] },
+    );
+    expect(calls).toEqual(['text:Heading', 'split', 'text:Body', 'style:p0:Heading2']);
   });
 
   test('a fragment link must use http, https, mailto or an anchor', () => {

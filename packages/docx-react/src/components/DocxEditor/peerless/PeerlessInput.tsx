@@ -2,14 +2,13 @@ import { Suspense, lazy, useCallback, useLayoutEffect, useRef, useSyncExternalSt
 import { effectiveZoom } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
-  clipboardFragmentHasFormatting,
   mergeFormattingFragment,
   type DocxClipboardFragment,
   type DocxCommandSelection,
   type PasteFormattingOption,
 } from '@betteroffice/docx/yrs';
 import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
-import { clipboardFragmentPlainText, parseClipboardHtml, plainTextClipboardFragment } from '../internals/clipboardHtml';
+import { clipboardFragmentPlainText, parseClipboardHtml, pasteOptionsApply, plainTextClipboardFragment } from '../internals/clipboardHtml';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import { admitInputIntents, admitIntent, submitFormattingIntent, type PeerlessInputAdmission } from './inputAdmission';
 import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
@@ -63,6 +62,12 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const choosePasteOption = useCallback((option: PasteFormattingOption): void => {
     const record = pasteRecordRef.current;
     if (!record?.end) return;
+    const admitted = admission.getSnapshot();
+    if (viewStore.getSnapshot().version !== record.version || admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
+      pasteRecordRef.current = null;
+      pasteOptionsRef.current.dismiss();
+      return;
+    }
     const variant = option === 'merge'
       ? mergeFormattingFragment(record.fragment)
       : option === 'text-only'
@@ -74,7 +79,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       focus: { ...record.end },
     });
     if (!submitted) pasteReplacingRef.current = false;
-  }, []);
+  }, [admission, viewStore]);
   const pasteOptions = usePasteOptions({
     enabled: props.pasteOptions !== false && !readOnly,
     onChoose: choosePasteOption,
@@ -165,7 +170,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       selection.focus.paraId === record.end.paraId &&
       selection.focus.offset === record.end.offset;
     if (!atEnd || snapshot.version !== record.version) {
-      if (typeof document !== 'undefined' && document.activeElement?.closest?.('[data-paste-options]')) return;
+      if (snapshot.version === record.version && typeof document !== 'undefined' &&
+        document.activeElement?.closest?.('[data-paste-options]')) return;
       pasteRecordRef.current = null;
       pasteOptionsRef.current.dismiss();
     }
@@ -324,11 +330,12 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       if (html) {
         const fragment = parseClipboardHtml(html);
         if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
-          if (callbacks.current.pasteOptions !== false && clipboardFragmentHasFormatting(fragment)) {
-            const plain = event.clipboardData?.getData('text/plain') ?? '';
+          const plain = event.clipboardData?.getData('text/plain') ?? '';
+          const plainText = plain !== '' ? plain : clipboardFragmentPlainText(fragment);
+          if (callbacks.current.pasteOptions !== false && pasteOptionsApply(fragment, plainText)) {
             pasteRecordRef.current = {
               fragment: structuredClone(fragment),
-              plainText: plain !== '' ? plain : clipboardFragmentPlainText(fragment),
+              plainText,
               end: null,
               version: -1,
             };

@@ -1,5 +1,6 @@
 import {
   DOCX_CLIPBOARD_FRAGMENT_VERSION,
+  clipboardFragmentHasFormatting,
   clipboardFragmentHasPictures,
   validClipboardFragment,
   type DocxClipboardFragment,
@@ -336,6 +337,11 @@ function sanitizeHref(raw: string | null | undefined): string | undefined {
   const name = scheme[1]!.toLowerCase();
   if (name !== 'http' && name !== 'https' && name !== 'mailto') return undefined;
   return cleaned;
+}
+
+/** @internal Whether a paste offers Paste Options: it has formatting to choose about, text to keep and no pictures. */
+export function pasteOptionsApply(fragment: DocxClipboardFragment, plainText: string): boolean {
+  return plainText.trim() !== '' && !clipboardFragmentHasPictures(fragment) && clipboardFragmentHasFormatting(fragment);
 }
 
 /** @internal Fragment for a plain-text string, one paragraph per line. */

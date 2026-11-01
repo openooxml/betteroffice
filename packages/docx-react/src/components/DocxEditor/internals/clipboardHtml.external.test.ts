@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { clipboardFragmentPlainText, parseClipboardHtml, plainTextClipboardFragment } from './clipboardHtml';
+import { clipboardFragmentPlainText, parseClipboardHtml, pasteOptionsApply, plainTextClipboardFragment } from './clipboardHtml';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -194,4 +194,12 @@ test('plain text of a table-only fragment keeps the cell text', () => {
   expect(clipboardFragmentPlainText({
     paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [cell('a'), cell('b')] }, { trPr: {}, cells: [cell('c'), cell('d')] }] }] }],
   })).toBe('a\tb\nc\td');
+});
+
+test('paste options are offered only for formatted text without pictures', () => {
+  const bold = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { bold: true } }] }] };
+  expect(pasteOptionsApply(bold, 'Bold')).toBe(true);
+  expect(pasteOptionsApply(bold, '  ')).toBe(false);
+  expect(pasteOptionsApply({ paragraphs: [{ text: 'Plain' }] }, 'Plain')).toBe(false);
+  expect(pasteOptionsApply({ paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==' } }] }] }, 'x')).toBe(false);
 });

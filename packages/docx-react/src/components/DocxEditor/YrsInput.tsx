@@ -16,7 +16,6 @@ import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
   applyClipboardFragment,
-  clipboardFragmentHasFormatting,
   mergeFormattingFragment,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
@@ -48,7 +47,7 @@ import {
   yrsSelectionPlainText,
   yrsTableSelectionRange,
 } from './yrsCommands';
-import { clipboardFragmentHtml, clipboardFragmentPlainText, parseClipboardHtml } from './internals/clipboardHtml';
+import { clipboardFragmentHtml, clipboardFragmentPlainText, parseClipboardHtml, pasteOptionsApply, plainTextClipboardFragment } from './internals/clipboardHtml';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
@@ -65,9 +64,6 @@ import { usePasteOptions } from './pasteOptions/usePasteOptions';
 
 const LazyPasteOptionsControl = lazy(() => import('./pasteOptions/PasteOptionsControl'));
 
-function storyText(session: YrsSession, story: string): string {
-  return session.paragraphs(story).map((paragraph) => paragraph.text).join('\n');
-}
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
 
@@ -701,7 +697,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     plainText: string;
     range: YrsStoryRange;
     end: YrsLoc;
-    before: string;
+    version: string;
   } | null>(null);
   const pasteReplacingRef = useRef(false);
   const pastePendingAnchorRef = useRef(false);
@@ -715,7 +711,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         : null;
     enqueueInputOperation(() => {
       if (!isCurrentInput(session)) return;
-      if (pasteRecordRef.current !== record || session.canRedo()) {
+      if (pasteRecordRef.current !== record || session.canRedo() || session.version() !== record.version) {
         if (pasteRecordRef.current === record) pasteRecordRef.current = null;
         pastePendingAnchorRef.current = false;
         pasteOptionsRef.current.dismiss();
@@ -730,18 +726,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           pasteOptionsRef.current.dismiss();
           return;
         }
-        if (storyText(session, record.range.story) !== record.before) {
-          session.redo();
-          pasteRecordRef.current = null;
-          pastePendingAnchorRef.current = false;
-          pasteOptionsRef.current.dismiss();
-          return;
-        }
         let caret: YrsLoc;
         if (option === 'text-only') {
           const range = record.range;
           const hasSelection = range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset;
-          const pieces = record.plainText.replace(/\r\n?/g, '\n').split('\n');
+          const pieces = plainTextClipboardFragment(record.plainText).paragraphs.map((paragraph) => paragraph.text);
           caret = { story: range.story, ...range.start };
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i]!;
@@ -764,7 +753,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           caret = applyClipboardFragment(session, record.range, variant!, suggestingAuthor());
         }
         session.setSelection(caret);
-        pasteRecordRef.current = { ...record, end: caret };
+        pasteRecordRef.current = { ...record, end: caret, version: session.version() };
         pastePendingAnchorRef.current = true;
         finishMutation();
       } finally {
@@ -1903,16 +1892,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           }
           session.addUndoBoundary();
           try {
-            const before = pasteOptionsEnabled ? storyText(session, range.story) : '';
             const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
             session.setSelection(caret);
-            if (pasteOptionsEnabled && clipboardFragmentHasFormatting(fragment)) {
+            const plainText = plain !== '' ? plain : clipboardFragmentPlainText(fragment);
+            if (pasteOptionsEnabled && pasteOptionsApply(fragment, plainText)) {
               pasteRecordRef.current = {
                 fragment: structuredClone(fragment),
-                plainText: plain !== '' ? plain : clipboardFragmentPlainText(fragment),
+                plainText,
                 range,
                 end: caret,
-                before,
+                version: session.version(),
               };
               pastePendingAnchorRef.current = true;
             } else {
@@ -2288,8 +2277,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (focusInControl) {
       } else if (atEnd && pastePendingAnchorRef.current) {
         pastePendingAnchorRef.current = false;
+        pasteRecord.version = session.version();
         pasteOptionsRef.current.show(anchor);
-      } else if (!pasteReplacingRef.current && !pastePendingAnchorRef.current && session.canRedo()) {
+      } else if (!pasteReplacingRef.current && !pastePendingAnchorRef.current &&
+        (session.canRedo() || session.version() !== pasteRecord.version)) {
         pasteRecordRef.current = null;
         pasteOptionsRef.current.dismiss();
       } else if (atEnd) {
