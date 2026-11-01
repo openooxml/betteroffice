@@ -56,7 +56,7 @@ function isTypingKey(event: KeyboardEvent): boolean {
  * Decides when the selection mini toolbar is shown: only once a selection
  * has settled (after pointer up, never between the clicks of a double or
  * triple click, and after keyboard selection stops changing), and hidden
- * by typing, scrolling, Escape, focus loss, a collapsed selection or a
+ * by typing, scrolling, resizing the window, Escape, focus loss, a collapsed selection or a
  * document change.
  */
 export function useSelectionMiniToolbar({
@@ -167,6 +167,9 @@ export function useSelectionMiniToolbar({
       pointerDown.current = false;
       scheduleShow();
     };
+    const onPointerCancel = () => {
+      pointerDown.current = false;
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (inToolbar(event.target)) return;
       if (event.altKey && event.key === 'F10') {
@@ -195,6 +198,11 @@ export function useSelectionMiniToolbar({
       suppressedKey.current = selectionKeyRef.current;
       hide();
     };
+    const onResize = () => {
+      if (!visible) return;
+      suppressedKey.current = selectionKeyRef.current;
+      hide();
+    };
     const onFocusOut = (event: FocusEvent) => {
       if (!inRoot(event.target) && !inToolbar(event.target)) return;
       const next = event.relatedTarget as Node | null;
@@ -206,19 +214,23 @@ export function useSelectionMiniToolbar({
     document.addEventListener('mousedown', onPointerDown, true);
     document.addEventListener('pointerup', onPointerUp, true);
     document.addEventListener('mouseup', onPointerUp, true);
+    document.addEventListener('pointercancel', onPointerCancel, true);
     document.addEventListener('keydown', onKeyDown, true);
     document.addEventListener('focusout', onFocusOut);
     document.addEventListener('scroll', onScroll, { capture: true, passive: true });
     window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('mousedown', onPointerDown, true);
       document.removeEventListener('pointerup', onPointerUp, true);
       document.removeEventListener('mouseup', onPointerUp, true);
+      document.removeEventListener('pointercancel', onPointerCancel, true);
       document.removeEventListener('keydown', onKeyDown, true);
       document.removeEventListener('focusout', onFocusOut);
       document.removeEventListener('scroll', onScroll, { capture: true });
       window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onResize);
     };
   }, [enabled, rootRef, scrollRef, visible, hide, scheduleShow, dismiss, focusToolbar]);
 

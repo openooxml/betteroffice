@@ -2629,7 +2629,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   }, [canvasRenderer.queries, canvasRenderer.canvasHostRef]);
   const isMiniToolbarEditorTarget = useCallback(
     (target: EventTarget | null) =>
-      target instanceof Element && target.matches('.paged-editor__yrs-input'),
+      target instanceof Element && target === pagedEditorRef.current?.getInputElement?.(),
     []
   );
   const miniToolbar = useSelectionMiniToolbar({

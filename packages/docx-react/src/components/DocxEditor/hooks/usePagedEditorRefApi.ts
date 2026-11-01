@@ -197,6 +197,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       setIsFocused(false);
     },
     isFocused: () => yrsInputRef.current?.isFocused() ?? false,
+    getInputElement: () => yrsInputRef.current?.inputElement?.() ?? null,
     undo: () => {
       bumpInputEpochRef.current?.();
       const session = yrsSessionRef.current;

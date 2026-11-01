@@ -269,6 +269,30 @@ test('hides on typing, scroll, Escape, collapse and document change', async () =
   expect(view.queryByTestId('mini')).toBeNull();
 });
 
+test('a cancelled touch scroll does not block a later keyboard selection', async () => {
+  const view = render(<HookHarness selectionKey="1:5" />);
+  const editor = view.getByTestId('editor');
+  fireEvent.pointerDown(editor);
+  fireEvent(editor, new Event('pointercancel', { bubbles: true }));
+  await settle();
+  expect(view.queryByTestId('mini')).toBeNull();
+  view.rerender(<HookHarness selectionKey="1:6" />);
+  await settle();
+  expect(view.queryByTestId('mini')).not.toBeNull();
+});
+
+test('resizing the window hides the toolbar until the selection changes', async () => {
+  const view = render(<HookHarness selectionKey="1:5" />);
+  await settle();
+  expect(view.queryByTestId('mini')).not.toBeNull();
+  fireEvent(window, new Event('resize'));
+  await settle();
+  expect(view.queryByTestId('mini')).toBeNull();
+  view.rerender(<HookHarness selectionKey="1:6" />);
+  await settle();
+  expect(view.queryByTestId('mini')).not.toBeNull();
+});
+
 test('typing in an editor input outside the root hides the toolbar when the editor claims it', async () => {
   const view = render(<HookHarness selectionKey="1:5" />);
   await settle();
