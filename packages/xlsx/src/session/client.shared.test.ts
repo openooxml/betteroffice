@@ -240,7 +240,8 @@ test('exports capture sheet, viewport, scope and print metrics before the comman
 
 for (const entry of ['compatibility', 'native'] as const) {
   for (const read of reads) {
-    test(`${read.name} fences 65 ${entry} edits before any ack and holds later dispatch`, async () => {
+    const posted = read.method === 'renderPng' || read.method === 'renderRangePng';
+    test(`${read.name} fences 65 ${entry} edits before any ack and holds later dispatch until it is ${posted ? 'posted' : 'answered'}`, async () => {
       const port = controlled(read.value);
       const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
       const submit = (seq: number) => entry === 'compatibility' ? session.submit(command(seq)) :
@@ -257,12 +258,12 @@ for (const entry of ['compatibility', 'native'] as const) {
         port.ack(64);
         await Promise.all(earlier);
         await drain();
-        expect(port.events).toEqual([...Array.from({ length: 65 }, (_, index) => `send:${index + 1}`), `${read.method}:65`]);
+        const fenced = [...Array.from({ length: 65 }, (_, index) => `send:${index + 1}`), `${read.method}:65`];
+        expect(port.events).toEqual(posted ? [...fenced, 'send:66'] : fenced);
         port.reply(65);
         expect(await result).toEqual(read.expected(65));
         await drain();
-        expect(port.events).toEqual([...Array.from({ length: 65 }, (_, index) => `send:${index + 1}`),
-          `${read.method}:65`, 'send:66']);
+        expect(port.events).toEqual([...fenced, 'send:66']);
         port.ack(66);
         await later;
       } finally { await session.dispose(); }

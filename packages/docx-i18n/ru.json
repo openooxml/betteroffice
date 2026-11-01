@@ -32,6 +32,7 @@
     "ariaLabel": "Панель инструментов форматирования",
     "file": "Файл",
     "format": "Формат",
+    "layout": "Макет",
     "insert": "Вставка",
     "open": "Открыть",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Текущий"
     }
+  },
+  "layout": {
+    "margins": "Поля",
+    "normal": "Обычные",
+    "narrow": "Узкие",
+    "moderate": "Умеренные",
+    "wide": "Широкие",
+    "customMargins": "Настраиваемые поля...",
+    "morePaperSizes": "Другие размеры бумаги...",
+    "indent": "Отступ"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Одинарный",
     "double": "Двойной",
     "lineSpacingTitle": "Междустрочный интервал: {label}",
-    "paragraphSpacing": "Интервал между абзацами"
+    "paragraphSpacing": "Интервал между абзацами",
+    "addBefore": "Добавить интервал перед абзацем",
+    "removeBefore": "Удалить интервал перед абзацем",
+    "addAfter": "Добавить интервал после абзаца",
+    "removeAfter": "Удалить интервал после абзаца",
+    "options": "Параметры межстрочного интервала..."
   },
   "styles": {
     "selectAriaLabel": "Выбор стиля абзаца",
@@ -480,6 +496,11 @@
       "top": "Сверху (px)",
       "width": "Ширина (px)",
       "height": "Высота (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Интервал перед",
+      "after": "Интервал после",
+      "multiple": "Множитель"
     }
   },
   "comments": {
@@ -755,7 +776,11 @@
     "leftIndent": "Отступ слева",
     "rightIndent": "Отступ справа",
     "topMargin": "Верхнее поле",
-    "bottomMargin": "Нижнее поле"
+    "bottomMargin": "Нижнее поле",
+    "leftMargin": "Левое поле",
+    "rightMargin": "Правое поле",
+    "hangingIndent": "Выступ",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Печать",

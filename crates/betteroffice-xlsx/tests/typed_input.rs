@@ -119,7 +119,7 @@ fn general_entry_applies_date_and_percent_formats_in_one_history_step() {
 fn batch_entry_uses_clock_and_workbook_epoch_and_undoes_format() {
     let mut workbook = Workbook::open(&fixture(0, DateSystem::V1904)).unwrap();
     let options = CalculationOptions {
-        now_serial: Some(43844.0),
+        now_serial: Some(45306.0),
     };
     workbook
         .edit_cells(

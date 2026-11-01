@@ -421,8 +421,10 @@ jobs:
       - name: Build and install the extensions
         run: |
           python -m pip install --upgrade pip pytest
+          python -I scripts/python_font_packs.py --out "$RUNNER_TEMP/font-packs"
+          python -m pip install "$RUNNER_TEMP"/font-packs/*.whl
           for binding in $(node scripts/python-bindings.mjs --paths); do
-            python -m pip install -e "$binding"
+            python -m pip install --find-links "$RUNNER_TEMP/font-packs" -e "$binding"
           done
 
       - name: Test

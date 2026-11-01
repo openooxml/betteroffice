@@ -32,6 +32,7 @@
     "ariaLabel": "Pasek narzędzi formatowania",
     "file": "Plik",
     "format": "Formatowanie",
+    "layout": "Układ",
     "insert": "Wstawianie",
     "open": "Otwórz",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Bieżący"
     }
+  },
+  "layout": {
+    "margins": "Marginesy",
+    "normal": "Normalne",
+    "narrow": "Wąskie",
+    "moderate": "Umiarkowane",
+    "wide": "Szerokie",
+    "customMargins": "Marginesy niestandardowe...",
+    "morePaperSizes": "Więcej rozmiarów papieru...",
+    "indent": "Wcięcie"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Pojedyncza",
     "double": "Podwójna",
     "lineSpacingTitle": "Interlinia: {label}",
-    "paragraphSpacing": "Odstępy między akapitami"
+    "paragraphSpacing": "Odstępy między akapitami",
+    "addBefore": "Dodaj odstęp przed akapitem",
+    "removeBefore": "Usuń odstęp przed akapitem",
+    "addAfter": "Dodaj odstęp po akapicie",
+    "removeAfter": "Usuń odstęp po akapicie",
+    "options": "Opcje interlinii..."
   },
   "styles": {
     "selectAriaLabel": "Wybierz styl akapitu",
@@ -480,6 +496,11 @@
       "top": "Od góry (px)",
       "width": "Szerokość (px)",
       "height": "Wysokość (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Odstęp przed",
+      "after": "Odstęp po",
+      "multiple": "Wielokrotna"
     }
   },
   "comments": {
@@ -755,7 +776,11 @@
     "leftIndent": "Wcięcie z lewej",
     "rightIndent": "Wcięcie z prawej",
     "topMargin": "Margines górny",
-    "bottomMargin": "Margines dolny"
+    "bottomMargin": "Margines dolny",
+    "leftMargin": "Lewy margines",
+    "rightMargin": "Prawy margines",
+    "hangingIndent": "Wcięcie wysunięte",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Drukuj",

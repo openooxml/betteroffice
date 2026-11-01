@@ -92,7 +92,7 @@ test('resolves requested traits through manager mappings and skips unknown famil
     expect(faces).toHaveLength(1);
     expect(faces[0]).toMatchObject({ family: 'Calibri', bold: true, italic: true });
     expect(faces[0].ownWeight).toBeUndefined();
-    structuredClone(faces, { transfer: faces.map((face) => face.bytes) });
+    expect(faces.every((face) => !('bytes' in face))).toBe(true);
     expect(bytes.byteLength).toBe(3);
   } finally { fonts.dispose(); }
 });
