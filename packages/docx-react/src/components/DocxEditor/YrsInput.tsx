@@ -20,7 +20,6 @@ import {
   mergeFormattingFragment,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
-  textOnlyFragment,
   type DocxClipboardFragment,
   type PasteFormattingOption,
   type YrsAuthor,
@@ -49,7 +48,7 @@ import {
   yrsSelectionPlainText,
   yrsTableSelectionRange,
 } from './yrsCommands';
-import { clipboardFragmentHtml, parseClipboardHtml } from './internals/clipboardHtml';
+import { clipboardFragmentHtml, clipboardFragmentPlainText, parseClipboardHtml } from './internals/clipboardHtml';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
@@ -695,6 +694,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const pasteRecordRef = useRef<{
     fragment: DocxClipboardFragment;
+    plainText: string;
     range: YrsStoryRange;
     end: YrsLoc;
     version: string;
@@ -706,9 +706,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (!record || !session || readOnly) return;
     const variant = option === 'merge'
       ? mergeFormattingFragment(record.fragment)
-      : option === 'text-only'
-        ? textOnlyFragment(record.fragment)
-        : structuredClone(record.fragment);
+      : option === 'keep-source'
+        ? structuredClone(record.fragment)
+        : null;
     enqueueInputOperation(() => {
       if (!isCurrentInput(session)) return;
       pasteReplacingRef.current = true;
@@ -720,7 +720,32 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           pasteOptionsRef.current.dismiss();
           return;
         }
-        const caret = applyClipboardFragment(session, record.range, variant, suggestingAuthor());
+        let caret: YrsLoc;
+        if (option === 'text-only') {
+          const range = record.range;
+          const hasSelection = range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset;
+          const pieces = record.plainText.replace(/\r\n?/g, '\n').split('\n');
+          caret = { story: range.story, ...range.start };
+          for (let i = 0; i < pieces.length; i += 1) {
+            const piece = pieces[i]!;
+            if (piece || (i === 0 && hasSelection)) {
+              if (i === 0 && hasSelection) {
+                const receipt = session.replaceRange(range, piece, suggestingAuthor());
+                if (receipt.range) caret = { story: receipt.range.story, ...receipt.range.end };
+                else caret = { ...caret, offset: caret.offset + piece.length };
+              } else {
+                const landed = session.insertText(caret, piece, suggestingAuthor()).range;
+                caret = landed ? { story: landed.story, ...landed.end } : { ...caret, offset: caret.offset + piece.length };
+              }
+            }
+            if (i < pieces.length - 1) {
+              const receipt = session.splitParagraph(caret, suggestingAuthor());
+              caret = { story: caret.story, paraId: receipt.secondParaId, offset: 0 };
+            }
+          }
+        } else {
+          caret = applyClipboardFragment(session, record.range, variant!, suggestingAuthor());
+        }
         session.setSelection(caret);
         pasteRecordRef.current = { ...record, end: caret, version: session.version() };
         pastePendingAnchorRef.current = true;
@@ -1664,7 +1689,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         discardedCompositionRef.current = false;
       }
       if (event.nativeEvent.isComposing || composingRef.current) return;
-      pasteOptionsRef.current.handleKeyDown(event);
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
       if (mod && key === 'a') {
@@ -1843,6 +1867,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             if (pasteOptionsEnabled && clipboardFragmentHasFormatting(fragment)) {
               pasteRecordRef.current = {
                 fragment: structuredClone(fragment),
+                plainText: plain !== '' ? plain : clipboardFragmentPlainText(fragment),
                 range,
                 end: caret,
                 version: session.version(),
@@ -2213,7 +2238,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const pasteRecord = pasteRecordRef.current;
     if (pasteRecord && session) {
       const endPosition = locToDisplayPosition(pasteRecord.end);
-      if (!pasteReplacingRef.current && session.version() !== pasteRecord.version) {
+      const focusInControl = typeof document !== 'undefined' && !!document.activeElement?.closest?.('[data-paste-options]');
+      if (focusInControl) {
+      } else if (!pasteReplacingRef.current && session.version() !== pasteRecord.version) {
         pasteRecordRef.current = null;
         pastePendingAnchorRef.current = false;
         pasteOptionsRef.current.dismiss();
@@ -2297,7 +2324,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onBeforeInput={handleBeforeInput}
       onInput={handleInput}
       onKeyDown={handleKeyDown}
-      onKeyUp={(event) => { pasteOptions.handleKeyUp(event); }}
       onCompositionStart={handleCompositionStart}
       onCompositionUpdate={handleCompositionUpdate}
       onCompositionEnd={handleCompositionEnd}

@@ -3,4 +3,4 @@
 '@betteroffice/docx-i18n': patch
 ---
 
-Adds `pasteOptions` to the Word editor: after a formatted paste, a control lets you keep source formatting, merge formatting, or keep text only. It is on by default and part of one undo step.
+Adds `pasteOptions`: pasting HTML from other apps now keeps its formatting by default; Paste Options can switch a paste to merged formatting or text only.

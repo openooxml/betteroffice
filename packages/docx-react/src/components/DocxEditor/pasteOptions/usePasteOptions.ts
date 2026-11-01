@@ -72,6 +72,26 @@ export function usePasteOptions(options: {
 
   useEffect(() => {
     if (!visible) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Control') { ctrlAlone.current = true; return; }
+      ctrlAlone.current = false;
+    };
+    const keyup = (event: KeyboardEvent) => {
+      if (event.key !== 'Control') return;
+      const alone = ctrlAlone.current;
+      ctrlAlone.current = false;
+      if (alone && callbacks.current.enabled) setMenuOpen(true);
+    };
+    document.addEventListener('keydown', keydown, true);
+    document.addEventListener('keyup', keyup, true);
+    return () => {
+      document.removeEventListener('keydown', keydown, true);
+      document.removeEventListener('keyup', keyup, true);
+    };
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
     const hide = () => dismiss();
     const pointer = (event: PointerEvent) => {
       const target = event.target as Element | null;

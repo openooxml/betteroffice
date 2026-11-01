@@ -4,13 +4,12 @@ import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVer
 import {
   clipboardFragmentHasFormatting,
   mergeFormattingFragment,
-  textOnlyFragment,
   type DocxClipboardFragment,
   type DocxCommandSelection,
   type PasteFormattingOption,
 } from '@betteroffice/docx/yrs';
 import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
-import { parseClipboardHtml } from '../internals/clipboardHtml';
+import { clipboardFragmentPlainText, parseClipboardHtml, plainTextClipboardFragment } from '../internals/clipboardHtml';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import { admitInputIntents, admitIntent, submitFormattingIntent, type PeerlessInputAdmission } from './inputAdmission';
 import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
@@ -55,6 +54,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const snapshot = useSyncExternalStore(viewStore.subscribe, viewStore.getSnapshot, viewStore.getServerSnapshot);
   const pasteRecordRef = useRef<{
     fragment: DocxClipboardFragment;
+    plainText: string;
     start: DocxCommandSelection;
     end: DocxCommandSelection['focus'] | null;
     version: number;
@@ -67,7 +67,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const variant = option === 'merge'
       ? mergeFormattingFragment(record.fragment)
       : option === 'text-only'
-        ? textOnlyFragment(record.fragment)
+        ? plainTextClipboardFragment(record.plainText)
         : structuredClone(record.fragment);
     pasteReplacingRef.current = true;
     const submitted = callbacks.current.onReplacePasteFragment?.(variant, {
@@ -163,6 +163,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       selection.focus.paraId === record.end.paraId &&
       selection.focus.offset === record.end.offset;
     if (!atEnd || snapshot.version !== record.version) {
+      if (typeof document !== 'undefined' && document.activeElement?.closest?.('[data-paste-options]')) return;
       pasteRecordRef.current = null;
       pasteOptionsRef.current.dismiss();
     }
@@ -207,7 +208,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const exit = escapeArmed && event.key === 'Tab';
       if (event.key !== 'Shift') clearEscape();
       if (event.defaultPrevented || state.composing || event.isComposing || event.keyCode === 229) return;
-      pasteOptionsRef.current.handleKeyDown(event);
       if (event.key === 'Escape') { escapeArmed = true; active = null; return; }
       if (exit || (event.key === 'Tab' && isReadOnly())) { active = null; return; }
       state = { ...state, trailingCompositionText: null };
@@ -265,7 +265,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       }
     };
     const keyup = (event: KeyboardEvent) => {
-      pasteOptionsRef.current.handleKeyUp(event);
       if (active?.keyboard) active = null;
     };
     const compatible = (inputType: string) => active !== null &&
@@ -326,8 +325,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
           if (callbacks.current.pasteOptions !== false && clipboardFragmentHasFormatting(fragment)) {
             const selection = viewStore.getSnapshot().workerSelection;
             if (selection) {
+              const plain = event.clipboardData?.getData('text/plain') ?? '';
               pasteRecordRef.current = {
                 fragment: structuredClone(fragment),
+                plainText: plain !== '' ? plain : clipboardFragmentPlainText(fragment),
                 start: structuredClone(selection),
                 end: null,
                 version: -1,
