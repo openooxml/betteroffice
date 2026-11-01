@@ -1371,21 +1371,29 @@ impl FontRequests {
                 .default_run
                 .as_ref()
                 .and_then(|properties| properties.language.as_deref());
-            let pieces: Vec<Vec<(&str, Option<&str>)>> = source
-                .paragraph
-                .runs
-                .iter()
-                .map(|run| run_language_pieces(run, end_language, style_language))
-                .collect();
-            let paragraph_scripts =
-                paragraph_scripts_with_languages(pieces.iter().flatten().copied(), false);
+            let mut pieces: Vec<(&str, Option<&str>)> = Vec::new();
+            let mut spans = Vec::with_capacity(source.paragraph.runs.len());
+            for run in &source.paragraph.runs {
+                let start = pieces.len();
+                push_language_pieces(&mut pieces, run, end_language, style_language);
+                spans.push(start..pieces.len());
+            }
+            let paragraph_scripts = paragraph_scripts_with_languages(pieces.iter().copied(), false);
             self.record(first.clone(), &[]);
-            for (run, run_pieces) in source.paragraph.runs.iter().zip(&pieces) {
-                let (decided, undecided): (Vec<_>, Vec<_>) = run_pieces
-                    .iter()
-                    .copied()
-                    .partition(|(_, language)| language.is_some());
-                let mut scripts = paragraph_scripts_with_languages(undecided, false);
+            let mut decided: Vec<(&str, Option<&str>)> = Vec::new();
+            let mut undecided: Vec<(&str, Option<&str>)> = Vec::new();
+            for (run, span) in source.paragraph.runs.iter().zip(spans) {
+                decided.clear();
+                undecided.clear();
+                for &piece in &pieces[span] {
+                    if piece.1.is_some() {
+                        decided.push(piece);
+                    } else {
+                        undecided.push(piece);
+                    }
+                }
+                let mut scripts =
+                    paragraph_scripts_with_languages(undecided.iter().copied(), false);
                 if scripts.iter().any(|script| script == "cjk-sc") {
                     let contextual: Vec<_> = paragraph_scripts
                         .iter()
@@ -1401,7 +1409,7 @@ impl FontRequests {
                         }
                     }
                 }
-                for script in paragraph_scripts_with_languages(decided, false) {
+                for script in paragraph_scripts_with_languages(decided.iter().copied(), false) {
                     if !scripts.contains(&script) {
                         scripts.push(script);
                     }
@@ -1418,46 +1426,66 @@ impl FontRequests {
     }
 }
 
-/// A run's text pieces, each with the language deciding its Han glyphs: the first East Asian
-/// one of the source text, the paragraph mark and the paragraph's style default.
-fn run_language_pieces<'a>(
+/// The language deciding Han glyphs: the first East Asian one of the source text, the
+/// paragraph mark and the paragraph's style default.
+fn decide_language<'a>(
+    language: Option<&'a str>,
+    end_language: Option<&'a str>,
+    style_language: Option<&'a str>,
+) -> Option<&'a str> {
+    for tag in [language, end_language, style_language]
+        .into_iter()
+        .flatten()
+    {
+        if han_script_for_language(tag).is_some() {
+            return Some(tag);
+        }
+    }
+    None
+}
+
+/// Appends a run's text pieces with the language deciding their Han glyphs.
+fn push_language_pieces<'a>(
+    out: &mut Vec<(&'a str, Option<&'a str>)>,
     run: &'a ContentRun,
     end_language: Option<&'a str>,
     style_language: Option<&'a str>,
-) -> Vec<(&'a str, Option<&'a str>)> {
-    let decide = |language: Option<&'a str>| {
-        [language, end_language, style_language]
-            .into_iter()
-            .flatten()
-            .find(|tag| han_script_for_language(tag).is_some())
-    };
+) {
     if run.languages.is_empty() {
-        return vec![(run.text.as_str(), decide(None))];
+        out.push((
+            run.text.as_str(),
+            decide_language(None, end_language, style_language),
+        ));
     }
-    run.languages
-        .iter()
-        .map(|(range, language)| {
-            (
-                run.text.get(range.clone()).unwrap_or(""),
-                decide(language.as_deref()),
-            )
-        })
-        .collect()
+    for (range, language) in &run.languages {
+        out.push((
+            run.text.get(range.clone()).unwrap_or(""),
+            decide_language(language.as_deref(), end_language, style_language),
+        ));
+    }
 }
 
-/// The distinct languages that decide Han glyphs, or one undecided entry when none does.
+/// One language per CJK bucket, or one undecided entry when no language decides Han glyphs.
 fn east_asian_languages<'a>(
-    languages: impl IntoIterator<Item = Option<&'a String>>,
+    languages: &mut dyn Iterator<Item = Option<&'a String>>,
 ) -> Vec<Option<String>> {
-    let decided: std::collections::BTreeSet<&String> = languages
-        .into_iter()
-        .flatten()
-        .filter(|tag| han_script_for_language(tag).is_some())
-        .collect();
-    if decided.is_empty() {
-        return vec![None];
+    let mut buckets: [Option<&String>; 4] = [None; 4];
+    for tag in languages.flatten() {
+        let slot = match han_script_for_language(tag) {
+            Some("cjk-jp") => 0,
+            Some("cjk-kr") => 1,
+            Some("cjk-tc") => 2,
+            Some(_) => 3,
+            None => continue,
+        };
+        buckets[slot].get_or_insert(tag);
     }
-    decided.into_iter().map(|tag| Some(tag.clone())).collect()
+    let found: Vec<Option<String>> = buckets
+        .iter()
+        .flatten()
+        .map(|tag| Some((*tag).clone()))
+        .collect();
+    if found.is_empty() { vec![None] } else { found }
 }
 
 /// Every live run carries each East Asian language its source paragraphs use.
@@ -1466,19 +1494,48 @@ fn union_languages(
     live: &[&str],
 ) -> Vec<Vec<(std::ops::Range<usize>, Option<String>)>> {
     let languages = east_asian_languages(
-        sources
+        &mut sources
             .iter()
             .flat_map(|source| &source.runs)
             .map(|run| run.properties.language.as_ref()),
     );
-    live.iter()
-        .map(|text| {
-            languages
-                .iter()
-                .map(|language| (0..text.len(), language.clone()))
-                .collect()
-        })
-        .collect()
+    let mut out = Vec::with_capacity(live.len());
+    for text in live {
+        let mut spans = Vec::with_capacity(languages.len());
+        for language in &languages {
+            spans.push((0..text.len(), language.clone()));
+        }
+        out.push(spans);
+    }
+    out
+}
+
+/// Whether the live run texts concatenate to exactly the source run texts.
+fn same_text(live: &[&str], runs: &[pptx_parse::TextRun]) -> bool {
+    let mut next = 0;
+    let mut pending: &[u8] = &[];
+    for text in live {
+        let mut rest = text.as_bytes();
+        while !rest.is_empty() {
+            while pending.is_empty() {
+                let Some(run) = runs.get(next) else {
+                    return false;
+                };
+                pending = run.text.as_bytes();
+                next += 1;
+            }
+            let shared = pending.len().min(rest.len());
+            if pending[..shared] != rest[..shared] {
+                return false;
+            }
+            pending = &pending[shared..];
+            rest = &rest[shared..];
+        }
+    }
+    pending.is_empty()
+        && runs[next.min(runs.len())..]
+            .iter()
+            .all(|run| run.text.is_empty())
 }
 
 /// Source languages for each live run of a story paragraph: where the live text still equals
@@ -1491,25 +1548,17 @@ fn live_run_languages(
     let [source] = sources else {
         return union_languages(sources, live);
     };
-    let unchanged = live
-        .iter()
-        .flat_map(|text| text.bytes())
-        .eq(source.runs.iter().flat_map(|run| run.text.bytes()));
-    if !unchanged {
+    if !same_text(live, &source.runs) {
         return union_languages(sources, live);
     }
-    let mut source_runs = source
-        .runs
-        .iter()
-        .filter(|run| !run.text.is_empty())
-        .peekable();
+    let mut index = 0;
     let mut source_start = 0;
     let mut start = 0;
     let mut out = Vec::with_capacity(live.len());
     for text in live {
         let end = start + text.len();
         let mut spans = Vec::new();
-        while let Some(run) = source_runs.peek() {
+        while let Some(run) = source.runs.get(index) {
             let source_end = source_start + run.text.len();
             let from = source_start.max(start);
             let to = source_end.min(end);
@@ -1518,7 +1567,7 @@ fn live_run_languages(
             }
             if source_end <= end {
                 source_start = source_end;
-                source_runs.next();
+                index += 1;
             } else {
                 break;
             }
@@ -3800,7 +3849,7 @@ fn content_from_story(
                         .and_then(|value| value.clone());
                     let languages = match &replaced {
                         Some(text) => {
-                            east_asian_languages(languages.iter().map(|(_, tag)| tag.as_ref()))
+                            east_asian_languages(&mut languages.iter().map(|(_, tag)| tag.as_ref()))
                                 .into_iter()
                                 .map(|tag| (0..text.len(), tag))
                                 .collect()

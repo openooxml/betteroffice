@@ -46,6 +46,13 @@ pub fn paragraph_scripts_with_languages<'a>(
     texts: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
     include_han_fallback: bool,
 ) -> Vec<String> {
+    scripts_of(&mut texts.into_iter(), include_han_fallback)
+}
+
+fn scripts_of<'a>(
+    texts: &mut dyn Iterator<Item = (&'a str, Option<&'a str>)>,
+    include_han_fallback: bool,
+) -> Vec<String> {
     let mut han_unknown = false;
     let mut han_buckets = [false; 4];
     let mut kana = false;
