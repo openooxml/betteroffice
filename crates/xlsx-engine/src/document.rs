@@ -360,6 +360,11 @@ impl Document {
         self.session.cell_rect_json(args).map_err(message)
     }
 
+    pub fn recalculate_json(&mut self) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session.recalculate_json(now_serial).map_err(message)
+    }
+
     pub fn calculation_status_json(&self) -> Result<String, EngineError> {
         self.session.calculation_status_json().map_err(message)
     }
