@@ -264,7 +264,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         event.preventDefault();
       }
     };
-    const keyup = (event: KeyboardEvent) => {
+    const keyup = () => {
       if (active?.keyboard) active = null;
     };
     const compatible = (inputType: string) => active !== null &&
