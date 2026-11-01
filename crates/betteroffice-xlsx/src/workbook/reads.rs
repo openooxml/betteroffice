@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use xlsx_parse::{DefinedFunctionNames, display_formula};
 
 use crate::{
     CellEdit, CellRange, CellRef, DifferentialFormat, Error, Result, SheetId, SheetInfo, Viewport,
@@ -292,13 +293,15 @@ impl Workbook {
                 .is_none_or(|scope| scope == name.local_sheet.map(|sheet| sheet.0))
         });
         let total = names.clone().count();
+        let defined = DefinedFunctionNames::new(&self.model().defined_names);
         let items = names
             .skip(offset)
             .take(limit)
             .map(|name| DefinedNameInfo {
                 hidden: name.hidden,
                 name: name.name.clone(),
-                refers_to: name.formula.clone(),
+                refers_to: display_formula(&name.formula, defined.visible_from(name.local_sheet))
+                    .into_owned(),
                 scope: name.local_sheet.map(|sheet| sheet.0),
             })
             .collect::<Vec<_>>();
@@ -327,6 +330,8 @@ impl Workbook {
             .model()
             .sheet(sheet)
             .ok_or_else(|| Error::InvalidOperation(format!("sheet {} not found", sheet.0)))?;
+        let defined = DefinedFunctionNames::new(&self.model().defined_names);
+        let names = defined.visible_from(Some(sheet));
         Ok(sheet_ref
             .conditional_formats
             .iter()
@@ -335,7 +340,11 @@ impl Workbook {
                     dxf_id: rule.dxf_id,
                     editable: rule.editable(),
                     format: rule.format.clone(),
-                    formulas: rule.formulas.clone(),
+                    formulas: rule
+                        .formulas
+                        .iter()
+                        .map(|formula| display_formula(formula, names).into_owned())
+                        .collect(),
                     id: rule.id.clone(),
                     operator: rule.operator.clone(),
                     priority: rule.priority,
