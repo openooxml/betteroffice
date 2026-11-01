@@ -14,12 +14,13 @@ import {
 } from './parse';
 import { routingDocxEntries } from './__fixtures__/routingDocx';
 import { queryWasmState } from './query';
+import { engineKind } from './engineEdit';
 
 const lightLabels = () => wasmModuleMemories().filter(
   ({ label }) => label === 'ooxml-opc' || label === 'docx-parse' || label === 'docx-query'
 );
 
-test('layout, OPC and parser calls reuse the initialized resident engine', async () => {
+test.skipIf(engineKind === 'native')('layout, OPC and parser calls reuse the initialized resident engine', async () => {
   expect(editWasmState.status()).toBe('idle');
   const compiling = editWasmModule();
   expect(editWasmState.status()).toBe('loading');

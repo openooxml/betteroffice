@@ -415,7 +415,7 @@ describe('native package release wiring', () => {
     const job = ci.jobs.native;
     expect(job.name).toBe('Native gate');
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(60);
     expect(job.strategy).toBeUndefined();
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
@@ -436,7 +436,8 @@ describe('native package release wiring', () => {
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('for package in'));
-    expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
+    expect(build.run).toContain('bunx napi build --cwd "$package" --platform --release -- --locked');
+    expect(build.run).not.toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
     expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
     expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeGreaterThan(-1);
@@ -467,6 +468,13 @@ describe('native package release wiring', () => {
     );
     expect(xlsx.run).toContain('bun run build:docx-wasm');
     expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
+    const docx = job.steps.find(
+      (step: any) => step.name === 'Test the docx packages on the native engine'
+    );
+    expect(docx.run).toBe(
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/'
+    );
+    expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(docx));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
