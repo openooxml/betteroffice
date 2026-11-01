@@ -804,6 +804,10 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "MIRR" => &[1, 2],
         "XNPV" | "FVSCHEDULE" | "CELL" => &[0],
         "T.TEST" | "TTEST" => &[2, 3],
+        "PERCENTILE.EXC" | "QUARTILE.EXC" => &[1],
+        "PERCENTRANK" | "PERCENTRANK.EXC" | "PERCENTRANK.INC" => &[1, 2],
+        "PROB" => &[2, 3],
+        "Z.TEST" | "ZTEST" => &[1, 2],
         _ => return None,
     })
 }
@@ -822,6 +826,10 @@ fn lifts(name: &str) -> bool {
             | "BETA.INV"
             | "BETADIST"
             | "BETAINV"
+            | "BINOM.DIST"
+            | "BINOM.DIST.RANGE"
+            | "BINOM.INV"
+            | "BINOMDIST"
             | "CEILING"
             | "CHAR"
             | "CHIDIST"
@@ -838,6 +846,7 @@ fn lifts(name: &str) -> bool {
             | "CONFIDENCE.T"
             | "COS"
             | "COSH"
+            | "CRITBINOM"
             | "DATE"
             | "DATEDIF"
             | "DAY"
@@ -851,6 +860,8 @@ fn lifts(name: &str) -> bool {
             | "EVEN"
             | "EXACT"
             | "EXP"
+            | "EXPON.DIST"
+            | "EXPONDIST"
             | "F.DIST"
             | "F.DIST.RT"
             | "F.INV"
@@ -859,6 +870,8 @@ fn lifts(name: &str) -> bool {
             | "FDIST"
             | "FIND"
             | "FINV"
+            | "FISHER"
+            | "FISHERINV"
             | "FIXED"
             | "FLOOR"
             | "GAMMA"
@@ -870,6 +883,8 @@ fn lifts(name: &str) -> bool {
             | "GAMMALN.PRECISE"
             | "GAUSS"
             | "HOUR"
+            | "HYPGEOM.DIST"
+            | "HYPGEOMDIST"
             | "INT"
             | "ISBLANK"
             | "ISERR"
@@ -898,6 +913,8 @@ fn lifts(name: &str) -> bool {
             | "MONTH"
             | "MROUND"
             | "N"
+            | "NEGBINOM.DIST"
+            | "NEGBINOMDIST"
             | "NORM.INV"
             | "NORM.S.DIST"
             | "NORM.S.INV"
@@ -907,7 +924,11 @@ fn lifts(name: &str) -> bool {
             | "NOT"
             | "NUMBERVALUE"
             | "ODD"
+            | "PERMUT"
+            | "PERMUTATIONA"
             | "PHI"
+            | "POISSON"
+            | "POISSON.DIST"
             | "POWER"
             | "PROPER"
             | "QUOTIENT"
@@ -924,6 +945,7 @@ fn lifts(name: &str) -> bool {
             | "SIN"
             | "SINH"
             | "SQRT"
+            | "STANDARDIZE"
             | "SUBSTITUTE"
             | "T"
             | "T.DIST"
@@ -945,6 +967,8 @@ fn lifts(name: &str) -> bool {
             | "VALUE"
             | "WEEKDAY"
             | "WEEKNUM"
+            | "WEIBULL"
+            | "WEIBULL.DIST"
             | "YEAR"
             | "RATE"
             | "IPMT"
@@ -1014,6 +1038,9 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "XMATCH" => xmatch,
         "LINEST" => linest,
         "TREND" => trend,
+        "GROWTH" => growth,
+        "LOGEST" => logest,
+        "MODE.MULT" => mode_mult,
         "FREQUENCY" => frequency,
         "MMULT" => mmult,
         "MAX" => max,
@@ -2324,18 +2351,44 @@ fn indices(args: &[Expr], ctx: &EvalContext<'_>, name: &str, by_row: bool) -> Va
 /// more predictors. coefficients come back in reverse column order with the
 /// intercept last, which is excel's layout; `stats` adds four more rows.
 fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    fit_array(args, ctx, false)
+}
+
+/// LOGEST(known_y, [known_x], [const], [stats]): LINEST over ln y, the
+/// coefficients raised back to the m and b of y = b * m1^x1 * ...; the
+/// statistics stay those of the logarithmic fit, as excel reports them.
+fn logest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    fit_array(args, ctx, true)
+}
+
+/// the known y values of a regression, as logarithms for the exponential
+/// fits, where a value that is not positive is `#NUM!`.
+fn regression_ys(
+    block: &Array,
+    ctx: &EvalContext<'_>,
+    exponential: bool,
+) -> Result<Vec<f64>, ErrorValue> {
+    let mut ys = Vec::with_capacity(output_cells(block.rows, block.cols)?);
+    for row in 0..block.rows {
+        for col in 0..block.cols {
+            let y = ctx.number(&block.at(row, col))?;
+            ys.push(match exponential {
+                false => y,
+                true if y > 0.0 => crate::fmath::ln(y),
+                true => return Err(ErrorValue::Num),
+            });
+        }
+    }
+    Ok(ys)
+}
+
+fn fit_array(args: &[Expr], ctx: &EvalContext<'_>, exponential: bool) -> Value {
     result((|| {
         if args.is_empty() || args.len() > 4 {
             return Err(ErrorValue::Value);
         }
         let ys_block = argument(args, ctx, 0)?;
-        let n = output_cells(ys_block.rows, ys_block.cols)?;
-        let mut ys = Vec::with_capacity(n);
-        for row in 0..ys_block.rows {
-            for col in 0..ys_block.cols {
-                ys.push(ctx.number(&ys_block.at(row, col))?);
-            }
-        }
+        let ys = regression_ys(&ys_block, ctx, exponential)?;
         // predictors as columns; a y vector laid out in rows means x is too
         let down = ys_block.cols == 1 && ys_block.rows > 1;
         let xs: Vec<Vec<f64>> = match args.get(1) {
@@ -2374,9 +2427,16 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let height = if stats { 5 } else { 1 };
         reserve(ctx, height, vars + 1)?;
         let fit = regress(ctx, &ys, &xs, intercept)?;
+        let coefficient = |value: f64| {
+            num(if exponential {
+                crate::fmath::exp(value)
+            } else {
+                value
+            })
+        };
         // excel emits the coefficients right to left, intercept last
-        let mut first: Vec<CellValue> = (0..vars).rev().map(|i| num(fit.beta[i])).collect();
-        first.push(num(fit.intercept));
+        let mut first: Vec<CellValue> = (0..vars).rev().map(|i| coefficient(fit.beta[i])).collect();
+        first.push(coefficient(fit.intercept));
         if !stats {
             return Ok(reserved(height, vars + 1, first));
         }
@@ -2412,25 +2472,47 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// TREND(known_y, [known_x], [new_x], [const]): the least-squares line LINEST
 /// fits, evaluated at `new_x` (at the known predictors when it is omitted).
 fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    project(args, ctx, false)
+}
+
+/// GROWTH(known_y, [known_x], [new_x], [const]): the exponential curve LOGEST
+/// fits, evaluated at `new_x` (at the known predictors when it is omitted).
+fn growth(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    project(args, ctx, true)
+}
+
+/// MODE.MULT(number, ...): every most frequent value, as a column.
+fn mode_mult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        let modes = crate::functions::statistics_extra::modes(args, ctx)?;
+        reserve(ctx, modes.len(), 1)?;
+        Ok(reserved(
+            modes.len(),
+            1,
+            modes.into_iter().map(num).collect(),
+        ))
+    })())
+}
+
+fn project(args: &[Expr], ctx: &EvalContext<'_>, exponential: bool) -> Value {
     result((|| {
         if args.is_empty() || args.len() > 4 {
             return Err(ErrorValue::Value);
         }
         let ys_block = argument(args, ctx, 0)?;
-        let n = output_cells(ys_block.rows, ys_block.cols)?;
-        let mut ys = Vec::with_capacity(n);
-        for row in 0..ys_block.rows {
-            for col in 0..ys_block.cols {
-                ys.push(ctx.number(&ys_block.at(row, col))?);
-            }
-        }
+        let ys = regression_ys(&ys_block, ctx, exponential)?;
         // predictors as columns; a y vector laid out in rows means x is too
         let down = ys_block.cols == 1 && ys_block.rows > 1;
         let xs = known_x(args, ctx, ys.len(), down)?;
         let intercept = optional_bool(args, ctx, 3, true)?;
         let fit = regress(ctx, &ys, &xs, intercept)?;
         let predict = |point: &[f64]| -> f64 {
-            fit.intercept + point.iter().zip(&fit.beta).map(|(x, b)| x * b).sum::<f64>()
+            let line = fit.intercept + point.iter().zip(&fit.beta).map(|(x, b)| x * b).sum::<f64>();
+            if exponential {
+                crate::fmath::exp(line)
+            } else {
+                line
+            }
         };
         let Some(new_block) = optional_block(args, ctx, 2)? else {
             reserve(ctx, ys_block.rows, ys_block.cols)?;
