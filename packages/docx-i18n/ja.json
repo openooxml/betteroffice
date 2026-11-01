@@ -32,6 +32,7 @@
     "ariaLabel": "書式設定ツールバー",
     "file": "ファイル",
     "format": "書式",
+    "layout": "レイアウト",
     "insert": "挿入",
     "open": "開く",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "現在"
     }
+  },
+  "layout": {
+    "margins": "余白",
+    "normal": "標準",
+    "narrow": "狭い",
+    "moderate": "やや狭い",
+    "wide": "広い",
+    "customMargins": "ユーザー設定の余白...",
+    "morePaperSizes": "その他の用紙サイズ...",
+    "indent": "インデント"
   },
   "formattingBar": {
     "groups": {

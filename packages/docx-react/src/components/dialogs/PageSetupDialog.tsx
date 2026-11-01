@@ -12,17 +12,9 @@ import type { CSSProperties } from 'react';
 import type { SectionProperties } from '@betteroffice/docx/types/document';
 import { TWIPS_PER_INCH } from '@betteroffice/docx/utils';
 import { useTranslation } from '../../i18n';
+import { PAGE_SIZES } from '../pageLayout';
 
-/** Common page sizes in twips (width x height in portrait orientation) */
-const PAGE_SIZES = [
-  { labelKey: 'dialogs.pageSetup.pageSizes.letter' as const, width: 12240, height: 15840 },
-  { labelKey: 'dialogs.pageSetup.pageSizes.a4' as const, width: 11906, height: 16838 },
-  { labelKey: 'dialogs.pageSetup.pageSizes.legal' as const, width: 12240, height: 20160 },
-  { labelKey: 'dialogs.pageSetup.pageSizes.a3' as const, width: 16838, height: 23811 },
-  { labelKey: 'dialogs.pageSetup.pageSizes.a5' as const, width: 8391, height: 11906 },
-  { labelKey: 'dialogs.pageSetup.pageSizes.b5' as const, width: 9979, height: 14175 },
-  { labelKey: 'dialogs.pageSetup.pageSizes.executive' as const, width: 10440, height: 15120 },
-] as const;
+export { PAGE_SIZES } from '../pageLayout';
 
 // ============================================================================
 // TYPES

@@ -43,6 +43,7 @@ interface MenuDropdownProps {
   disabled?: boolean;
   tabIndex?: number;
   onFocus?: () => void;
+  onOpen?: () => void;
   /** Renders a down-arrow next to the trigger. */
   showChevron?: boolean;
   trigger?: ReactNode;
@@ -142,6 +143,7 @@ export function MenuDropdown({
   disabled,
   tabIndex = 0,
   onFocus,
+  onOpen,
   showChevron = false,
   trigger,
   triggerClassName,
@@ -170,7 +172,7 @@ export function MenuDropdown({
 
   const focusSubmenu = () => {
     submenuRef.current
-      ?.querySelector<HTMLElement>('[role="gridcell"][tabindex="0"], [role="menuitem"]')
+      ?.querySelector<HTMLElement>('[role="gridcell"][tabindex="0"], [role="menuitem"], [role="menuitemradio"]')
       ?.focus();
   };
 
@@ -179,6 +181,7 @@ export function MenuDropdown({
       focusMenuItem(dropdownRef.current, key);
     } else {
       pendingFocus.current = key;
+      onOpen?.();
       setIsOpen(true);
     }
   };
@@ -352,7 +355,10 @@ export function MenuDropdown({
         onClick={() => {
           if (disabled) return;
           if (isOpen) closeMenu();
-          else setIsOpen(true);
+          else {
+            onOpen?.();
+            setIsOpen(true);
+          }
         }}
         onMouseDown={(e) => e.preventDefault()}
         aria-disabled={disabled || undefined}
