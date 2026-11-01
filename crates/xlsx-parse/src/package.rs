@@ -220,6 +220,17 @@ impl PreservedPackage {
         self.sheets.len()
     }
 
+    /// Whether the source asks spreadsheet applications to recalculate every formula on
+    /// open (`calcPr` `fullCalcOnLoad` or `forceFullCalc`), so its cached results are not
+    /// meant to be kept.
+    #[doc(hidden)]
+    pub fn requests_full_calculation(&self) -> bool {
+        self.calc_pr_attributes.iter().flatten().any(|attribute| {
+            matches!(attribute.local_name(), "fullCalcOnLoad" | "forceFullCalc")
+                && matches!(attribute.value.trim(), "1" | "true")
+        })
+    }
+
     /// Every preserved part whose references cannot be patched, with the cells
     /// each one names.
     #[doc(hidden)]
