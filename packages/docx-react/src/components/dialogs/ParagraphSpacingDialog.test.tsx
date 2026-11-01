@@ -42,10 +42,10 @@ test('accepts a custom line multiple and preserves unchanged line spacing', () =
   const multiple = view.getByLabelText('Multiple') as HTMLInputElement;
   expect(multiple.value).toBe('1.25');
   fireEvent.click(view.getByRole('button', { name: 'Apply' }));
-  expect(onApply).toHaveBeenLastCalledWith({ before: 0, after: 0 });
+  expect(onApply).not.toHaveBeenCalled();
   fireEvent.change(multiple, { target: { value: '1.75' } });
   fireEvent.submit(view.getByRole('dialog'));
-  expect(onApply).toHaveBeenLastCalledWith({ before: 0, after: 0, lineSpacing: 420 });
+  expect(onApply).toHaveBeenLastCalledWith({ lineSpacing: 420 });
 });
 
 test('rejects empty, negative and excessive spacing', () => {
@@ -60,5 +60,24 @@ test('rejects empty, negative and excessive spacing', () => {
   expect(onApply).not.toHaveBeenCalled();
   fireEvent.change(before, { target: { value: '1584' } });
   fireEvent.submit(view.getByRole('dialog'));
-  expect(onApply).toHaveBeenCalledWith({ before: 31680, after: 0 });
+  expect(onApply).toHaveBeenCalledWith({ before: 31680 });
+});
+
+test('applies only the spacing the user changed', () => {
+  const onApply = mock(() => {});
+  const onClose = mock(() => {});
+  const view = render(<ParagraphSpacingDialog isOpen currentProps={{ before: 240, after: 160, lineSpacing: 240 }}
+    onApply={onApply} onClose={onClose} />);
+  fireEvent.change(view.getByLabelText('Line spacing'), { target: { value: '2' } });
+  fireEvent.submit(view.getByRole('dialog'));
+  expect(onApply).toHaveBeenLastCalledWith({ lineSpacing: 480 });
+  view.rerender(<ParagraphSpacingDialog isOpen={false} currentProps={{ before: 240, after: 160, lineSpacing: 480 }}
+    onApply={onApply} onClose={onClose} />);
+  view.rerender(<ParagraphSpacingDialog isOpen currentProps={{ before: 240, after: 160, lineSpacing: 480 }}
+    onApply={onApply} onClose={onClose} />);
+  fireEvent.change(view.getByLabelText('Spacing After'), { target: { value: '0' } });
+  fireEvent.submit(view.getByRole('dialog'));
+  expect(onApply).toHaveBeenLastCalledWith({ after: 0 });
+  expect(onApply).toHaveBeenCalledTimes(2);
+  expect(onClose).toHaveBeenCalledTimes(2);
 });
