@@ -24,6 +24,13 @@ def deck(sample_bytes, font_bytes):
     return presentation
 
 
+def test_render_png_uses_the_bundled_fonts_without_registration(sample_bytes):
+    png = bo.Presentation.open(sample_bytes).render_png(0)
+    assert png.bytes[:8] == PNG_MAGIC
+    assert (png.width, png.height) == (1280, 720)
+
+
+@pytest.mark.without_font_packs
 def test_render_png_needs_a_registered_font(sample_bytes):
     presentation = bo.Presentation.open(sample_bytes)
     with pytest.raises(bo.RenderError, match="font"):

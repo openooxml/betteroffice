@@ -249,6 +249,7 @@ impl XlsxDocument {
         Ok(self.document(env)?.client_id())
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[napi]
     pub fn recovery_checkpoint(
         &self,
@@ -395,6 +396,22 @@ impl XlsxDocument {
         let _call = EngineCall::new(env);
         self.document(env)?
             .display_list_for_json(sheet, &viewport_json)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
+    pub fn png_display_list_json(&self, env: Env, viewport_json: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .png_display_list_json(&viewport_json)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
+    pub fn range_png_display_list_json(&self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .range_png_display_list_json(&args)
             .map_err(|error| map_error(env, error))
     }
 
@@ -817,6 +834,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[napi(factory, js_name = "openRecoveryCheckpoint")]
     pub fn open_recovery_checkpoint(env: Env, bytes: Uint8Array, through_seq: f64) -> Result<Self> {
         let bytes = bytes.to_vec();

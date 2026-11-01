@@ -29,6 +29,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
+import { pngDisplayListReaders } from './pngDisplayList';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -343,6 +344,7 @@ export type WorkbookUpdateListener = (
 ) => void;
 
 export interface WorkbookCalculationContext {
+  /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
   nowSerial: number;
   randSeed: number;
 }
@@ -792,12 +794,14 @@ export function openWorkbook(
 const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
 const recoveryReaders = new WeakMap<WorkbookHandle, (throughSeq: number, preserveHistory: boolean) => Uint8Array>();
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory = false): Uint8Array {
   const capture = recoveryReaders.get(handle);
   if (!capture) throw new TypeError('Workbook does not support recovery checkpoints');
   return capture(throughSeq, preserveHistory);
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number,
   options: OpenWorkbookOptions = {}): WorkbookHandle {
   requireInitialized();
@@ -1383,6 +1387,10 @@ function wrapWorkbookDocument(
       reportDisplayLimit(JSON.parse(json) as DisplayList);
     }
     return json;
+  });
+  pngDisplayListReaders.set(handle, {
+    viewport: (viewport) => wasmCall(() => doc.pngDisplayListJson(JSON.stringify(viewport))),
+    range: (options) => wasmCall(() => doc.rangePngDisplayListJson(JSON.stringify(options ?? {}))),
   });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));

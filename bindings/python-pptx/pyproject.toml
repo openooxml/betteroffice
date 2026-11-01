@@ -10,6 +10,11 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md", "licenses/BSD-3-Clause-Zstandard.txt", "licenses/MIT-wuff.txt"]
 requires-python = ">=3.9"
+dependencies = [
+  "betteroffice-fonts-latin==0.4.2",
+  "betteroffice-fonts-intl==0.4.2",
+  "betteroffice-fonts-cjk==0.4.2",
+]
 authors = [{ name = "OpenOOXML" }]
 keywords = [
   "pptx",

@@ -202,6 +202,42 @@ To launch `betteroffice-<format>`:
 
 No step needs a `PYPI_API_TOKEN`.
 
+### Font pack wheels
+
+`betteroffice-fonts-latin`, `betteroffice-fonts-intl` and `betteroffice-fonts-cjk`
+are pure `py3-none-any` wheels of data: each holds one font pack under
+`betteroffice_fonts_packs/<pack>/<version>/`, the directory layout the Rust font
+manager reads from a local base directory. Every format binding requires all
+three at the exact versions it pins in `pyproject.toml`, and its module points
+the default font source at the installed directory on import, so no format wheel
+embeds a font and nothing is fetched at run time.
+
+`scripts/python_font_packs.py` builds them from `packages/fonts-<pack>/assets`,
+and a pack's version is its `manifest.json` version, which the Rust catalog reads
+too. `FONT_PACK_NAMES` in `scripts/python-binding-names.mjs` lists them apart
+from the binding registry: they have no crate and no Changesets entry. A pack is
+pending whenever PyPI does not serve its manifest version, so regenerating a pack
+at a new version publishes it with the next release. `scripts/python-bindings.test.ts`
+fails when a binding's pins drift from the manifests.
+
+`python-dist.yml` builds a `fonts-<pack>` binding as a single wheel with no Rust
+and no sdist. The release dispatches the font packs first and waits for them;
+when one fails it dispatches no format binding and fails, because every format
+wheel would be uninstallable without it. Launching them is the same pending
+publisher setup as a binding, once per pack:
+
+1. Create the GitHub environments `pypi-fonts-latin`, `pypi-fonts-intl` and
+   `pypi-fonts-cjk`.
+2. Add a pending publisher per project (`betteroffice-fonts-latin`,
+   `betteroffice-fonts-intl`, `betteroffice-fonts-cjk`) with owner `openooxml`,
+   repository `betteroffice`, workflow `publish-python-binding.yml`, and the
+   matching environment.
+
+Until all three exist, the Python release train stops at the first font pack
+with an error naming this section, and no format binding is uploaded. A
+**Publish a Python binding** dispatch with `binding=fonts-<pack>` publishes one
+pack by hand.
+
 ### No API token path
 
 Neither workflow can upload with a token. The release train fails at `Refuse a
@@ -226,7 +262,8 @@ empty — so `environment: pypi-<binding>` cannot block a publish by itself. The
 `publish` flag and that guard are what block it.
 
 Each binding builds and publishes independently. A broken wheel in one
-distribution fails only that distribution's upload.
+distribution fails only that distribution's upload; a font pack that fails stops
+the format bindings, which require it.
 
 [pending]: https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/
 [reusable]: https://docs.pypi.org/trusted-publishers/troubleshooting/#reusable-workflows-on-github
