@@ -109,7 +109,7 @@ deck.accept_proposal(proposal.id)
 deck.undo()
 ```
 
-Register fonts before `render_proposal`, just as for `render_slide`.
+`render_proposal` uses the same fonts as `render_slide`.
 `proposals()` returns `Proposal` values with agent attribution, notes,
 `ProposalChange` values, and current `stale_targets`. `preview_proposal` returns
 a `ProposalPreview` containing fresh changes and the proposed deck snapshot.
@@ -205,15 +205,10 @@ bytes with the camelCase wire options and return the content alone,
 
 ## Lay a slide out
 
-Register a face before laying out slide text; until then, `render_slide` raises:
-
-```python
-deck.render_slide(0)
-# RenderError: no font has been registered for slide text
-```
-
-Register the faces the deck uses (one call per family, weight, and slant), and
-it lays out:
+Slide text lays out with the bundled fonts, which the package installs as the
+`betteroffice-fonts-latin`, `-intl` and `-cjk` wheels and reads from disk.
+`register_font` adds a family or replaces a bundled one (one call per family,
+weight, and slant):
 
 ```python
 from pathlib import Path
@@ -233,8 +228,7 @@ family. Known requested families supply their measured metrics.
 
 `render_slide` returns the display list (the same drawing contract the browser
 editor paints, as JSON) for hosts that paint it themselves. `render_png`
-rasterizes a slide instead, resolving pictures out of the package so only fonts
-need registering:
+rasterizes a slide instead, resolving pictures out of the package:
 
 ```python
 png = deck.render_png(0, scale=2.0)

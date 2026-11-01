@@ -54,6 +54,7 @@ def test_hit_test_shape_text_and_empty_points(deck):
         assert deck.hit_test(0, *point) is None
 
 
+@pytest.mark.without_font_packs
 def test_hit_test_lays_out_without_fonts_and_tracks_edits(sample_bytes):
     deck = bo.Presentation.open(sample_bytes)
     rail = next(shape for shape in deck[0].shapes if shape.name == "Cobalt rail")
@@ -65,6 +66,7 @@ def test_hit_test_lays_out_without_fonts_and_tracks_edits(sample_bytes):
         deck.render_slide(0)
 
 
+@pytest.mark.without_font_packs
 def test_fallback_registration_changes_missing_glyph_layout(deck, font_bytes):
     root = Path(__file__).resolve().parents[3]
     fallback = (root / "packages/fonts/assets/NotoSansArabic-Regular.ttf").read_bytes()
