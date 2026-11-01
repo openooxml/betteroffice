@@ -340,13 +340,24 @@ function sanitizeHref(raw: string | null | undefined): string | undefined {
 
 /** @internal Fragment for a plain-text string, one paragraph per line. */
 export function plainTextClipboardFragment(plain: string): DocxClipboardFragment {
-  const lines = plain.replace(/\r\n?/g, '\n').split('\n');
+  const lines = plain.split(/\r\n|[\r\n\u000B\u2028\u2029]/u);
   return { paragraphs: lines.map((text) => ({ text })) };
 }
 
-/** @internal Plain text a fragment was pasted from, joining paragraphs with newlines. */
+function tableFragmentText(table: DocxTableFragment): string {
+  return table.rows.map((row) => row.cells.map((cell) => cell.content.map((segment) =>
+    segment.kind === 'text' ? segment.text
+      : segment.kind === 'tab' ? '\t'
+        : segment.kind === 'table' ? tableFragmentText(segment.table)
+          : ' '
+  ).join('').trim()).join('\t')).join('\n');
+}
+
+/** @internal Plain text a fragment was pasted from: tables row by row with tab-separated cells, then the paragraph text. */
 export function clipboardFragmentPlainText(fragment: DocxClipboardFragment): string {
-  return fragment.paragraphs.map((paragraph) => paragraph.text).join('\n');
+  return fragment.paragraphs.map((paragraph) =>
+    [...(paragraph.tables ?? []).map(tableFragmentText), ...(paragraph.text !== '' || !paragraph.tables?.length ? [paragraph.text] : [])].join('\n')
+  ).join('\n');
 }
 
 function fontWeightBold(value: string | null | undefined): boolean | undefined {
@@ -692,6 +703,7 @@ function inlineParagraphs(
 ): DocxClipboardParagraph[] {
   const paragraphs: DocxClipboardParagraph[] = [];
   let runs: DocxClipboardRun[] = [];
+  let blockProperties = extra;
   const flush = () => {
     const finished = finishRuns(runs);
     runs = [];
@@ -700,7 +712,7 @@ function inlineParagraphs(
     paragraphs.push({
       text,
       ...(runsHaveFormatting(finished) ? { runs: finished } : {}),
-      ...extra,
+      ...blockProperties,
     });
   };
   const pushText = (raw: string, chain: Element[]) => {
@@ -735,8 +747,11 @@ function inlineParagraphs(
     if (tag === 'TABLE' || SKIP_TAGS.has(tag) || tag === 'IMG') return;
     if (BLOCK_TAGS.has(tag)) {
       flush();
+      const outer = blockProperties;
+      blockProperties = { ...outer, ...blockExtra(element) };
       for (const child of Array.from(element.childNodes)) walk(child, [...chain, element]);
       flush();
+      blockProperties = outer;
       return;
     }
     for (const child of Array.from(element.childNodes)) walk(child, [...chain, element]);

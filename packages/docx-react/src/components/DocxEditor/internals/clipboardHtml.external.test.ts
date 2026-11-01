@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parseClipboardHtml, plainTextClipboardFragment } from './clipboardHtml';
+import { clipboardFragmentPlainText, parseClipboardHtml, plainTextClipboardFragment } from './clipboardHtml';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -163,4 +163,35 @@ test('keep text only fragment equals the plain result for fixtures', () => {
     });
     expect(plainTextClipboardFragment(plain).paragraphs.map((p) => p.text)).toEqual(parsed!.paragraphs.map((p) => p.text));
   }
+});
+
+test('headings and list items inside an inline wrapper keep their paragraph kind', () => {
+  const html = '<b id="docs-internal-guid-1" style="font-weight:normal"><h2>Heading</h2><ul><li>One</li></ul><ol><li>Two</li></ol></b>';
+  expect(parseClipboardHtml(html)).toEqual({
+    paragraphs: [
+      { text: 'Heading', pStyle: 'Heading2' },
+      { text: 'One', list: 'bullet' },
+      { text: 'Two', list: 'numbered' },
+    ],
+  });
+});
+
+test('an editor payload carrying a script link is not trusted', () => {
+  const payload = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'Click', runs: [{ text: 'Click', href: 'javascript:alert(1)' }] }] } });
+  const html = `<div data-betteroffice-docx="${payload.replace(/"/g, '&quot;')}"><a href="javascript:alert(1)">Click</a></div>`;
+  const parsed = parseClipboardHtml(html);
+  expect(JSON.stringify(parsed ?? null)).not.toContain('javascript:');
+});
+
+test('keep text only splits on the same line separators as a plain paste', () => {
+  expect(plainTextClipboardFragment('a\u000Bb\u2028c\u2029d\r\ne\rf')).toEqual({
+    paragraphs: ['a', 'b', 'c', 'd', 'e', 'f'].map((text) => ({ text })),
+  });
+});
+
+test('plain text of a table-only fragment keeps the cell text', () => {
+  const cell = (text: string) => ({ tcPr: {}, content: [{ kind: 'text' as const, text }, { kind: 'pilcrow' as const }] });
+  expect(clipboardFragmentPlainText({
+    paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [cell('a'), cell('b')] }, { trPr: {}, cells: [cell('c'), cell('d')] }] }] }],
+  })).toBe('a\tb\nc\td');
 });

@@ -58,19 +58,18 @@ for (const arm of ['&peerless=0', '']) {
     await expect(control).toBeVisible();
 
     await control.click();
+    await page.getByRole('menuitemradio', { name: 'Keep Text Only' }).click();
+    await expect(control).toBeVisible();
+    await control.click();
     await page.getByRole('menuitemradio', { name: 'Merge Formatting' }).click();
+    await expect(control).toBeVisible();
     const merged = await savedXml(page, info, 'merge.docx');
     expect(merged).toContain('Rich paste');
     expect(merged).toContain('<w:b/>');
     expect(merged).not.toContain('Georgia');
     expect(merged).not.toMatch(/w:sz w:val="40"/);
     expect(merged).not.toContain('FF0000');
-
-    await control.click();
-    await page.getByRole('menuitemradio', { name: 'Keep Text Only' }).click();
-    const textOnly = await savedXml(page, info, 'text-only.docx');
-    expect(textOnly).toContain('Rich paste');
-    expect(textOnly).not.toContain('<w:b/>');
+    await expect(control).toBeHidden();
 
     await input.focus();
     await input.press('ControlOrMeta+z');
@@ -109,6 +108,7 @@ for (const arm of ['&peerless=0', '']) {
     const textOnly = await savedXml(page, info, 'text-only-over-selection.docx');
     expect(xmlText(textOnly)).toContain('BAR paragraph');
     expect(xmlText(textOnly)).not.toContain('Target');
+    expect(textOnly).not.toContain('<w:b/>');
 
     await input.focus();
     await input.press('ControlOrMeta+z');

@@ -7,7 +7,6 @@ import { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange, YrsStorySegment } from './index';
 import {
   commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
-  validCommandSelection,
 } from './residentCommandAnchors';
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
@@ -215,7 +214,7 @@ const DOCX_COMMAND_POLICIES = {
   formatSelection: { keys: ['delta'] }, toggleStrike: { keys: [] }, toggleList: { keys: ['kind'] },
   changeIndent: { keys: ['direction', 'preserveNumbering'] },
   insertImage: { keys: ['image'] }, insertTable: { keys: ['rows', 'columns'] }, pasteFragment: { keys: ['fragment'] },
-  replacePasteFragment: { keys: ['fragment', 'original'] },
+  replacePasteFragment: { keys: ['fragment'] },
   insertPageBreak: { keys: [] }, insertSectionBreak: { keys: ['type'] },
   insertTableRow: { keys: ['side'] }, insertTableColumn: { keys: ['side'] },
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
@@ -387,7 +386,7 @@ function validCommandIntent(
       if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
       break;
     case 'replacePasteFragment':
-      if (!validClipboardFragment(payload.fragment) || !validCommandSelection(payload.original)) return refuse('invalid-payload');
+      if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
       break;
     case 'insertTableRow':
       if (!oneOf('above', 'below')(payload.side)) return refuse('invalid-payload');
@@ -1162,6 +1161,7 @@ function applyPreparedDocxCommand(
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
   let replacePasteRefused: 'nothing-to-undo' | 'paste-changed' | null = null;
+  let pastedOver: YrsStoryRange | null = null;
   switch (command.kind) {
     case 'setTabStops':
       engine.setParagraphAttrs(range, { tabs: command.payload.tabs });
@@ -1283,15 +1283,23 @@ function applyPreparedDocxCommand(
     case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
     case 'pasteFragment': {
       state.storedMarks = null;
+      pastedOver = structuredClone(range);
       caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
       break;
     }
     case 'replacePasteFragment': {
       state.storedMarks = null;
+      const last = state.lastPaste;
+      if (!last || last.version !== version) { replacePasteRefused = 'paste-changed'; break; }
       if (!engine.undo()) { replacePasteRefused = 'nothing-to-undo'; break; }
-      const originalRange = commandSelectionRange(engine, command.payload.original);
-      if (!originalRange) { engine.redo(); replacePasteRefused = 'paste-changed'; break; }
-      caret(applyClipboardFragment(engine, originalRange, command.payload.fragment, command.payload.suggesting));
+      const { story, start, end } = last.range;
+      if (!commandSelectionRange(engine, { anchor: { story, ...start }, focus: { story, ...end } })) {
+        engine.redo();
+        replacePasteRefused = 'paste-changed';
+        break;
+      }
+      pastedOver = structuredClone(last.range);
+      caret(applyClipboardFragment(engine, last.range, command.payload.fragment, command.payload.suggesting));
       break;
     }
     case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
@@ -1302,7 +1310,11 @@ function applyPreparedDocxCommand(
   }
   resetCellSelectionForEdit(engine, state, command.kind);
   if (discrete) engine.addUndoBoundary();
-  if (replacePasteRefused) return { ...result('noop'), status: 'refused', reason: replacePasteRefused };
+  if (pastedOver) state.lastPaste = { range: pastedOver, version: engine.proposalEngine.version() };
+  if (replacePasteRefused) {
+    state.lastPaste = null;
+    return { ...result('noop'), status: 'refused', reason: replacePasteRefused };
+  }
   return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
 }
 

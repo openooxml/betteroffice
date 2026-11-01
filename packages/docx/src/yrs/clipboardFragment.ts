@@ -243,7 +243,8 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
       for (const run of paragraph.runs) {
         if (!plainObject(run) || !text(run.text, false) || !formatOk(run.format)) return false;
         if (run.href !== undefined &&
-          (typeof run.href !== 'string' || run.href === '' || run.href.length > 8192 || /[\s\u0000-\u0020]/u.test(run.href))) return false;
+          (typeof run.href !== 'string' || run.href === '' || run.href.length > 8192 || /[\s\u0000-\u0020]/u.test(run.href) ||
+            !/^(?:https?:|mailto:|#)/iu.test(run.href))) return false;
         joined += run.text as string;
       }
       if (paragraph.inlines === undefined && joined !== paragraph.text) return false;
@@ -272,7 +273,7 @@ export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegme
 /** @internal Engine surface a fragment paste needs. */
 export type ClipboardPasteEngine = Pick<
   YrsSession,
-  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' | 'formatRange' | 'setHyperlink' | 'applyParagraphStyle'
+  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' | 'formatRange' | 'setHyperlink' | 'applyParagraphStyle' | 'setParagraphAttrs'
 >;
 
 /** @internal Inclusive grid bounds for {@link readTableFragment}. */
@@ -712,6 +713,14 @@ export function applyClipboardFragment(
       engine.applyParagraphStyle(
         { story: caret.story, start: { paraId: paragraphStart.paraId, offset: paragraphStart.offset }, end: { paraId: caret.paraId, offset: caret.offset } },
         paragraph.pStyle,
+        suggesting
+      );
+    }
+    if (paragraph.list) {
+      const bullet = paragraph.list === 'bullet';
+      engine.setParagraphAttrs(
+        { story: caret.story, start: { paraId: caret.paraId, offset: 0 }, end: { paraId: caret.paraId, offset: 0 } },
+        { numPr: { numId: bullet ? 1 : 2, ilvl: 0 }, listIsBullet: bullet, listNumFmt: bullet ? null : 'decimal', listMarker: null },
         suggesting
       );
     }

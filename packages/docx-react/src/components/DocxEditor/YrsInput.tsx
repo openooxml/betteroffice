@@ -711,6 +711,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         : null;
     enqueueInputOperation(() => {
       if (!isCurrentInput(session)) return;
+      if (pasteRecordRef.current !== record || session.version() !== record.version) {
+        if (pasteRecordRef.current === record) pasteRecordRef.current = null;
+        pastePendingAnchorRef.current = false;
+        pasteOptionsRef.current.dismiss();
+        return;
+      }
       pasteReplacingRef.current = true;
       session.addUndoBoundary();
       try {
@@ -2239,16 +2245,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (pasteRecord && session) {
       const endPosition = locToDisplayPosition(pasteRecord.end);
       const focusInControl = typeof document !== 'undefined' && !!document.activeElement?.closest?.('[data-paste-options]');
+      const atEnd = endPosition !== null && selection.anchor === endPosition && selection.head === endPosition;
+      const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
       if (focusInControl) {
-      } else if (endPosition !== null && selection.anchor === endPosition && selection.head === endPosition) {
-        const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
-        if (pastePendingAnchorRef.current) {
-          pastePendingAnchorRef.current = false;
-          pasteRecord.version = session.version();
-          pasteOptionsRef.current.show(anchor);
-        } else if (pasteOptionsRef.current.visible) {
-          pasteOptionsRef.current.setAnchor(anchor);
-        }
+      } else if (atEnd && pastePendingAnchorRef.current) {
+        pastePendingAnchorRef.current = false;
+        pasteRecord.version = session.version();
+        pasteOptionsRef.current.show(anchor);
+      } else if (!pasteReplacingRef.current && !pastePendingAnchorRef.current && session.version() !== pasteRecord.version) {
+        pasteRecordRef.current = null;
+        pasteOptionsRef.current.dismiss();
+      } else if (atEnd) {
+        if (pasteOptionsRef.current.visible) pasteOptionsRef.current.setAnchor(anchor);
       } else if (!pasteReplacingRef.current && !pastePendingAnchorRef.current) {
         pasteRecordRef.current = null;
         pasteOptionsRef.current.dismiss();

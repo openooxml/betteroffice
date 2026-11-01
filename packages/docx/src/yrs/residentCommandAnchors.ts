@@ -39,13 +39,6 @@ function position(value: unknown): value is DocxCommandPosition {
     (at.sticky === undefined || (at.sticky instanceof Uint8Array && at.sticky.length > 0));
 }
 
-export function validCommandSelection(value: unknown): value is DocxCommandSelection {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-    Object.keys(value).some((key) => !['anchor', 'focus'].includes(key))) return false;
-  const selected = value as DocxCommandSelection;
-  return position(selected.anchor) && position(selected.focus);
-}
-
 export function commandSelectionRange(
   engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>,
   selected: DocxCommandSelection

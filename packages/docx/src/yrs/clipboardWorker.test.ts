@@ -255,7 +255,6 @@ test('replacePasteFragment swaps the paste variant in a single undo step', async
     const pastedEnd = pasted.selection!.focus;
     const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
       selection: { anchor: at, focus: pastedEnd },
-      original: { anchor: at, focus: at },
       fragment: { paragraphs: [{ text: 'Plain' }] },
     }));
     expect(replaced.outcomes[0]?.status).toBe('applied');
@@ -303,7 +302,6 @@ test('replacePasteFragment over a replaced selection restores the replaced text 
     expect(paragraphText()).toBe('a BAR b');
     const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
       selection: { anchor: fooStart, focus: pasted.selection!.focus },
-      original: { anchor: fooStart, focus: fooEnd },
       fragment: { paragraphs: [{ text: 'BAR' }] },
     }));
     expect(replaced.outcomes[0]?.status).toBe('applied');
@@ -317,7 +315,7 @@ test('replacePasteFragment over a replaced selection restores the replaced text 
   }
 }, TIMEOUT);
 
-test('replacePasteFragment without a paste to undo is refused and changes nothing', async () => {
+test('replacePasteFragment without a preceding paste is refused and changes nothing', async () => {
   const worker = startWorker(8403);
   const client = new ResidentEngineWorkerClient(worker);
   try {
@@ -330,11 +328,46 @@ test('replacePasteFragment without a paste to undo is refused and changes nothin
     const before = engine.paragraphs('body').map((paragraph) => paragraph.text);
     const replaced = await client.edit(intent(1, 0, 'replacePasteFragment', {
       selection: { anchor: at, focus: at },
-      original: { anchor: at, focus: at },
       fragment: { paragraphs: [{ text: 'Plain' }] },
     }));
-    expect(replaced.outcomes[0]).toMatchObject({ status: 'refused', reason: 'nothing-to-undo' });
+    expect(replaced.outcomes[0]).toMatchObject({ status: 'refused', reason: 'paste-changed' });
     expect(engine.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(before);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('replacePasteFragment after a later edit is refused and keeps both edits', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    let version = 0;
+    let seq = 0;
+    const paragraphs = engine.paragraphs('body');
+    const last = paragraphs[paragraphs.length - 1]!;
+    const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+    const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+    const base = { story: 'body', paraId: split.secondParaId, offset: 0 };
+    const paragraphText = () => engine.paragraphs('body').find((paragraph) => paragraph.paraId === split.secondParaId)?.text;
+    const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
+      selection: { anchor: base, focus: base },
+      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { bold: true } }] }] },
+    }));
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    version = pasted.version;
+    const end = pasted.selection!.focus;
+    const typed = await client.edit(intent(++seq, version, 'insertText', {
+      selection: { anchor: end, focus: end },
+      text: '!',
+    }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    version = typed.version;
+    expect(paragraphText()).toBe('BAR!');
+    const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+      selection: { anchor: base, focus: { ...base, offset: 3 } },
+      fragment: { paragraphs: [{ text: 'BAR' }] },
+    }));
+    expect(replaced.outcomes[0]).toMatchObject({ status: 'refused', reason: 'paste-changed' });
+    expect(paragraphText()).toBe('BAR!');
   } finally {
     client.destroy();
   }

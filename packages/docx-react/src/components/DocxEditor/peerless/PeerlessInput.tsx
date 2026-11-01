@@ -33,7 +33,7 @@ export interface PeerlessInputProps {
   onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
-  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, original: DocxCommandSelection): boolean;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection): boolean;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
   onNavigateCell?(direction: 'forward' | 'backward'): void;
@@ -55,7 +55,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const pasteRecordRef = useRef<{
     fragment: DocxClipboardFragment;
     plainText: string;
-    start: DocxCommandSelection;
     end: DocxCommandSelection['focus'] | null;
     version: number;
   } | null>(null);
@@ -71,9 +70,9 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         : structuredClone(record.fragment);
     pasteReplacingRef.current = true;
     const submitted = callbacks.current.onReplacePasteFragment?.(variant, {
-      anchor: record.start.anchor,
-      focus: record.end,
-    }, structuredClone(record.start));
+      anchor: { ...record.end },
+      focus: { ...record.end },
+    });
     if (!submitted) pasteReplacingRef.current = false;
   }, []);
   const pasteOptions = usePasteOptions({
@@ -114,7 +113,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         workerSelection.anchor.paraId === workerSelection.focus.paraId &&
         workerSelection.anchor.offset === workerSelection.focus.offset) {
         const anchorPos = { left: (bounds?.left ?? 0) + focus.x * zoom + 6, top: top + height + 4 };
-        if (pastePendingRef.current) {
+        const admitted = admission.getSnapshot();
+        const settled = admitted.originalUnackedIntents === 0 && admitted.pendingInputs === 0;
+        if (!settled && (pastePendingRef.current || pasteReplacingRef.current)) {
+        } else if (pastePendingRef.current) {
           pasteRecord.end = { ...workerSelection.focus };
           pasteRecord.version = state.version;
           pastePendingRef.current = false;
@@ -162,7 +164,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       selection.focus.story === record.end.story &&
       selection.focus.paraId === record.end.paraId &&
       selection.focus.offset === record.end.offset;
-    if (!atEnd) {
+    if (!atEnd || snapshot.version !== record.version) {
       if (typeof document !== 'undefined' && document.activeElement?.closest?.('[data-paste-options]')) return;
       pasteRecordRef.current = null;
       pasteOptionsRef.current.dismiss();
@@ -323,18 +325,14 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         const fragment = parseClipboardHtml(html);
         if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
           if (callbacks.current.pasteOptions !== false && clipboardFragmentHasFormatting(fragment)) {
-            const selection = viewStore.getSnapshot().workerSelection;
-            if (selection) {
-              const plain = event.clipboardData?.getData('text/plain') ?? '';
-              pasteRecordRef.current = {
-                fragment: structuredClone(fragment),
-                plainText: plain !== '' ? plain : clipboardFragmentPlainText(fragment),
-                start: structuredClone(selection),
-                end: null,
-                version: -1,
-              };
-              pastePendingRef.current = true;
-            }
+            const plain = event.clipboardData?.getData('text/plain') ?? '';
+            pasteRecordRef.current = {
+              fragment: structuredClone(fragment),
+              plainText: plain !== '' ? plain : clipboardFragmentPlainText(fragment),
+              end: null,
+              version: -1,
+            };
+            pastePendingRef.current = true;
           } else {
             pasteRecordRef.current = null;
             pastePendingRef.current = false;

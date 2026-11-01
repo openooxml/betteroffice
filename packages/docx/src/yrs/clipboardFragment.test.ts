@@ -567,6 +567,32 @@ describe('applyClipboardFragment', () => {
     expect(caret).toEqual({ story: 'body', paraId: 'p0', offset: 9 });
   });
 
+  test('applies pasted list kinds to their paragraphs', () => {
+    const calls: string[] = [];
+    const engine = {
+      ...fakeEngine(calls),
+      setParagraphAttrs: (range: { start: { paraId: string } }, attrs: { numPr: { numId: number }; listIsBullet: boolean }) => {
+        calls.push(`list:${range.start.paraId}:${attrs.numPr.numId}:${attrs.listIsBullet}`);
+      },
+    } as unknown as ClipboardPasteEngine;
+    applyClipboardFragment(
+      engine,
+      { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } },
+      { paragraphs: [{ text: 'a', list: 'bullet' }, { text: 'b', list: 'numbered' }] },
+    );
+    expect(calls).toEqual(['text:a', 'list:p0:1:true', 'split', 'text:b', 'list:p0n:2:false']);
+  });
+
+  test('a fragment link must use http, https, mailto or an anchor', () => {
+    const fragment = (href: string) => ({ paragraphs: [{ text: 'x', runs: [{ text: 'x', href }] }] });
+    for (const href of ['https://example.com', 'HTTP://example.com', 'mailto:a@example.com', '#_Toc1']) {
+      expect(validClipboardFragment(fragment(href))).toBe(true);
+    }
+    for (const href of ['javascript:alert(1)', 'JavaScript:alert(1)', 'data:text/html,x', 'vbscript:x', 'file:///etc/passwd', 'relative/path']) {
+      expect(validClipboardFragment(fragment(href))).toBe(false);
+    }
+  });
+
   test('leaves a collapsed range alone and skips empty text', () => {
     const calls: string[] = [];
     const caret = applyClipboardFragment(
