@@ -19,7 +19,7 @@ import {
 } from '../wasm/loader';
 import { buildCommandFrame } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
-import type { createCommandDefaultFonts } from './commandDefaultFonts';
+import type { createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
 import type { DefaultFontFace, DefaultFontLanding, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
@@ -127,6 +127,8 @@ export function registerPresentationCommandHandlers(
   let cancelDefaultFontImport: (() => void) | undefined;
   let gatingFonts = false;
   const gatedDefaultFonts: DefaultFontLanding[] = [];
+  let prefetchedFonts: ReturnType<typeof prefetchCoverageFaces>;
+  let coveragePrefetch: Promise<void> = Promise.resolve();
   let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
@@ -202,7 +204,7 @@ export function registerPresentationCommandHandlers(
       };
       const timer = setTimeout(() => finish(), 5000);
       cancelDefaultFontImport = () => finish();
-      void commandDefaultFontModule.load().then(({ createCommandDefaultFonts }) => {
+      void Promise.all([commandDefaultFontModule.load(), coveragePrefetch]).then(([{ createCommandDefaultFonts }]) => {
         if (finished || disposed || !requestedFonts) { finish(); return; }
         defaultFonts = createCommandDefaultFonts(suppliedFonts, requestedFonts,
           (face) => {
@@ -220,7 +222,7 @@ export function registerPresentationCommandHandlers(
               const result = ack([], [...revisions.keys()]);
               options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces }, result.transfer));
             }
-          }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()));
+          }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()), prefetchedFonts);
         finish(defaultFonts);
       }).catch(() => finish());
     });
@@ -1529,9 +1531,9 @@ export function registerPresentationCommandHandlers(
       try {
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
         if (input.defaultFonts !== false) {
-          void import('./coverageScan').then(async (scan) => {
+          coveragePrefetch = import('./coverageScan').then(async (scan) => {
             const scripts = await scan.activeSlideCoverageScripts(bytes, input.activeSlideIndex ?? 0);
-            if (scripts.length) (await commandDefaultFontModule.load()).prefetchCoverageFaces(scripts, wasmReady);
+            if (scripts.length) prefetchedFonts = (await commandDefaultFontModule.load()).prefetchCoverageFaces(scripts, wasmReady);
           }).catch(() => {});
         }
         await wasmReady;

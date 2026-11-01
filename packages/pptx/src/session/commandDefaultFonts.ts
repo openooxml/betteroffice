@@ -19,12 +19,16 @@ export const commandFontProvider = {
 };
 
 /** Starts loading coverage faces before the deck is parsed; decoding waits for `wasmReady`. */
-export function prefetchCoverageFaces(scripts: readonly string[], wasmReady: Promise<unknown>): void {
+export function prefetchCoverageFaces(
+  scripts: readonly string[], wasmReady: Promise<unknown>,
+): ReturnType<typeof commandFontProvider.load> | undefined {
   decoderReady = wasmReady;
-  if (!scripts.length) return;
-  void commandFontProvider.load().then((source) => {
+  if (!scripts.length) return undefined;
+  const provider = commandFontProvider.load();
+  void provider.then((source) => {
     for (const script of scripts) void source.resolveScriptFallback(script as BundledFontScript, false, false)?.().catch(() => {});
   }).catch(() => {});
+  return provider;
 }
 
 export function createCommandDefaultFonts(
@@ -34,6 +38,7 @@ export function createCommandDefaultFonts(
   settled: (faces: DefaultFontLanding[]) => void,
   install?: (faces: readonly DefaultFontFace[]) => Promise<readonly DefaultFontFace[]>,
   beforeRegister?: () => void,
+  prefetched?: ReturnType<typeof commandFontProvider.load>,
 ) {
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
   const attempted = new Set<string>();
@@ -66,7 +71,7 @@ export function createCommandDefaultFonts(
       const cancel = () => finish();
       const timer = setTimeout(cancel, 5000);
       cancellations.add(cancel);
-      provider ??= commandFontProvider.load();
+      provider ??= prefetched ?? commandFontProvider.load();
       void provider.then(async (source) => {
         if (disposed || finished) return undefined;
         let bold = face.bold;

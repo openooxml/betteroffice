@@ -62,6 +62,18 @@ test('coverage prefetch loads each face once and decodes only after the session 
   expect((await decoding).font.byteLength).toBeGreaterThan(0);
 });
 
+test('a prefetched coverage face and the later request share one decode', async () => {
+  const original = fonts.createFontProvider;
+  const decode = mock(decodeFontFace);
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation((options) => original(options, { decoder: decode }));
+  restorers.push(() => create.mockRestore());
+  prefetchCoverageFaces(['cjk-jp'], Promise.resolve());
+  const source = await commandFontProvider.load();
+  const japanese = await source.resolveScriptFallback('cjk-jp', false, false)!();
+  expect(japanese.byteLength).toBe((await notoSansJP()).byteLength);
+  expect(decode).toHaveBeenCalledTimes(1);
+});
+
 test('coverage prefetch without scripts loads nothing', async () => {
   const { imported } = provider(() => undefined);
   prefetchCoverageFaces([], Promise.resolve());

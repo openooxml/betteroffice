@@ -330,7 +330,7 @@ for (const supplied of [false, true]) test(`script defaults install in the cover
     [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
   }), wire.transport);
   clients.push(client);
-  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false], ['cjk-jp', false, false]]);
   expect(installed).toMatchObject([{ family: 'Noto Sans JP', kind: 'coverage' }]);
   expect(fallback).toHaveBeenCalledTimes(1);
   expect(primary).toHaveBeenCalledTimes(supplied ? 1 : 0);
@@ -376,7 +376,7 @@ test('Japanese coverage loads once for an unmapped family and mixed Latin text w
     expect(covered.every((run) => run.fontFamily === 'Noto Sans JP' && run.fontId !== 0xffffffff)).toBe(true);
     expect(covered.flatMap((run) => run.glyphs).every((glyph) => glyph.glyphId > 0)).toBe(true);
   }
-  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', true, true]]);
+  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false], ['cjk-jp', true, true]]);
   expect(fallback).toHaveBeenCalledTimes(1);
 });
 
@@ -397,7 +397,7 @@ test('four Japanese styles acknowledge one coverage installation and registratio
   clients.push(client);
   expect(wire.acknowledged).toBe(true);
   expect(manager.resolveScriptFallback.mock.calls).toEqual([
-    ['cjk-jp', false, false], ['cjk-jp', true, false], ['cjk-jp', false, true], ['cjk-jp', true, true],
+    ['cjk-jp', false, false], ['cjk-jp', false, false], ['cjk-jp', true, false], ['cjk-jp', false, true], ['cjk-jp', true, true],
   ]);
   expect(install).toHaveBeenCalledTimes(1);
   expect(install.mock.calls[0][0]).toMatchObject([
