@@ -32,6 +32,7 @@
     "ariaLabel": "書式設定ツールバー",
     "file": "ファイル",
     "format": "書式",
+    "layout": "レイアウト",
     "insert": "挿入",
     "open": "開く",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "現在"
     }
+  },
+  "layout": {
+    "margins": "余白",
+    "normal": "標準",
+    "narrow": "狭い",
+    "moderate": "やや狭い",
+    "wide": "広い",
+    "customMargins": "ユーザー設定の余白...",
+    "morePaperSizes": "その他の用紙サイズ...",
+    "indent": "インデント"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "1 行",
     "double": "2 行",
     "lineSpacingTitle": "行間：{label}",
-    "paragraphSpacing": "段落の間隔"
+    "paragraphSpacing": "段落の間隔",
+    "addBefore": "段落前に間隔を追加",
+    "removeBefore": "段落前の間隔を削除",
+    "addAfter": "段落後に間隔を追加",
+    "removeAfter": "段落後の間隔を削除",
+    "options": "行間のオプション..."
   },
   "styles": {
     "selectAriaLabel": "段落スタイルを選択",
@@ -480,6 +496,11 @@
       "top": "上（px）",
       "width": "幅（px）",
       "height": "高さ（px）"
+    },
+    "paragraphSpacing": {
+      "before": "段落前の間隔",
+      "after": "段落後の間隔",
+      "multiple": "倍数"
     }
   },
   "comments": {
@@ -755,7 +776,11 @@
     "leftIndent": "左インデント",
     "rightIndent": "右インデント",
     "topMargin": "上余白",
-    "bottomMargin": "下余白"
+    "bottomMargin": "下余白",
+    "leftMargin": "左余白",
+    "rightMargin": "右余白",
+    "hangingIndent": "ぶら下げインデント",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "印刷",

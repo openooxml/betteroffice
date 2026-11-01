@@ -15,6 +15,7 @@ import type { CSSProperties } from 'react';
 import type { SectionProperties } from '@betteroffice/docx/types/document';
 import { twipsToPixels, pixelsToTwips, formatPx } from '@betteroffice/docx/utils';
 import { useTranslation } from '../../i18n';
+import { getMarginInUnits } from './HorizontalRuler';
 
 // ============================================================================
 // TYPES
@@ -78,9 +79,11 @@ export function VerticalRuler({
   className = '',
   style,
 }: VerticalRulerProps): React.ReactElement {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const [dragging, setDragging] = useState<MarkerType | null>(null);
   const [hoveredMarker, setHoveredMarker] = useState<MarkerType | null>(null);
+  const [focusedMarker, setFocusedMarker] = useState<MarkerType | null>(null);
+  const [dragValue, setDragValue] = useState<number | null>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
 
   // Get page dimensions
@@ -116,13 +119,15 @@ export function VerticalRuler({
 
       if (dragging === 'topMargin') {
         const maxMargin = pageHeightTwips - bottomMarginTwips - 720;
-        const newMargin = Math.max(0, Math.min(positionTwips, maxMargin));
-        onTopMarginChange?.(Math.round(newMargin));
+        const newMargin = Math.round(Math.max(0, Math.min(positionTwips, maxMargin)));
+        setDragValue(newMargin);
+        onTopMarginChange?.(newMargin);
       } else if (dragging === 'bottomMargin') {
         const fromBottom = pageHeightTwips - positionTwips;
         const maxMargin = pageHeightTwips - topMarginTwips - 720;
-        const newMargin = Math.max(0, Math.min(fromBottom, maxMargin));
-        onBottomMarginChange?.(Math.round(newMargin));
+        const newMargin = Math.round(Math.max(0, Math.min(fromBottom, maxMargin)));
+        setDragValue(newMargin);
+        onBottomMarginChange?.(newMargin);
       }
     },
     [
@@ -140,6 +145,7 @@ export function VerticalRuler({
   const handleDragEnd = useCallback(() => {
     onDragEnd?.();
     setDragging(null);
+    setDragValue(null);
   }, [onDragEnd]);
 
   // Add/remove document event listeners
@@ -156,6 +162,16 @@ export function VerticalRuler({
 
   // Generate tick marks
   const ticks = generateVerticalTicks(pageHeightTwips, zoom, unit);
+  const markerTip = (marker: MarkerType) => {
+    const twips = (dragging === marker ? dragValue : null) ?? (marker === 'topMargin' ? topMarginTwips : bottomMarginTwips);
+    const name = t(marker === 'topMargin' ? 'ruler.topMargin' : 'ruler.bottomMargin');
+    return {
+      text: t('ruler.markerValue', { name, value: getMarginInUnits(twips, unit, lang, t) }),
+      positionPx: marker === 'topMargin' ? topMarginPx : pageHeightPx - bottomMarginPx,
+    };
+  };
+  const activeMarker = dragging ?? hoveredMarker ?? focusedMarker;
+  const activeTip = activeMarker ? markerTip(activeMarker) : null;
 
   const rulerStyle: CSSProperties = {
     position: 'relative',
@@ -202,7 +218,10 @@ export function VerticalRuler({
         isHovered={hoveredMarker === 'topMargin'}
         onMouseEnter={() => setHoveredMarker('topMargin')}
         onMouseLeave={() => setHoveredMarker(null)}
+        onFocus={() => setFocusedMarker('topMargin')}
+        onBlur={() => setFocusedMarker(null)}
         onMouseDown={(e) => handleDragStart(e, 'topMargin')}
+        valueText={markerTip('topMargin').text}
       />
 
       {/* Bottom margin marker */}
@@ -214,8 +233,35 @@ export function VerticalRuler({
         isHovered={hoveredMarker === 'bottomMargin'}
         onMouseEnter={() => setHoveredMarker('bottomMargin')}
         onMouseLeave={() => setHoveredMarker(null)}
+        onFocus={() => setFocusedMarker('bottomMargin')}
+        onBlur={() => setFocusedMarker(null)}
         onMouseDown={(e) => handleDragStart(e, 'bottomMargin')}
+        valueText={markerTip('bottomMargin').text}
       />
+
+      {activeTip && (
+        <div
+          role="tooltip"
+          className="docx-ruler-tooltip"
+          style={{
+            position: 'absolute',
+            top: formatPx(activeTip.positionPx),
+            left: RULER_WIDTH + 4,
+            transform: 'translateY(-50%)',
+            backgroundColor: 'var(--doc-text)',
+            color: 'var(--doc-on-primary)',
+            fontSize: '10px',
+            fontFamily: 'sans-serif',
+            padding: '2px 6px',
+            borderRadius: 3,
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            zIndex: 20,
+          }}
+        >
+          {activeTip.text}
+        </div>
+      )}
     </div>
   );
 }
@@ -267,7 +313,10 @@ interface VerticalMarginMarkerProps {
   isHovered: boolean;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
+  onFocus: () => void;
+  onBlur: () => void;
   onMouseDown: (e: React.MouseEvent) => void;
+  valueText: string;
 }
 
 function VerticalMarginMarker({
@@ -278,7 +327,10 @@ function VerticalMarginMarker({
   isHovered,
   onMouseEnter,
   onMouseLeave,
+  onFocus,
+  onBlur,
   onMouseDown,
+  valueText,
 }: VerticalMarginMarkerProps): React.ReactElement {
   const { t } = useTranslation();
   const color = isDragging ? MARKER_ACTIVE_COLOR : isHovered ? MARKER_HOVER_COLOR : MARKER_COLOR;
@@ -312,9 +364,12 @@ function VerticalMarginMarker({
       style={markerStyle}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
+      onFocus={onFocus}
+      onBlur={onBlur}
       onMouseDown={onMouseDown}
       role="slider"
       aria-label={type === 'topMargin' ? t('ruler.topMargin') : t('ruler.bottomMargin')}
+      aria-valuetext={valueText}
       aria-orientation="vertical"
       tabIndex={editable ? 0 : -1}
     >

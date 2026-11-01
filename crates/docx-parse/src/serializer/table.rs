@@ -270,7 +270,7 @@ pub fn serialize_table_cell(
     for block in &cell.content {
         append_generated(&mut writer, &serialize_block_content(block, context)?);
     }
-    if cell.content.is_empty() {
+    if cell.content.iter().all(crate::block::is_bookmark_block) {
         context.record_placeholder();
         writer.start_element("w:p").end_element();
     }

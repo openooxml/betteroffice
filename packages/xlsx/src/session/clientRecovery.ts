@@ -46,6 +46,7 @@ interface RecoveryEntry {
 export const workbookSessionRecovery = new WeakMap<WorkbookSession, WorkbookSessionRecovery>();
 
 export const workbookRecoveryBackend = {
+  /** Checkpoints are only restorable by the same engine version and codec. */
   open(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession> {
     if (options.collaborative) return Promise.reject(new Error('Recovery is unavailable for collaborative workbooks'));
     if (!options.worker && typeof Worker !== 'function') return Promise.reject(missingWebWorker('openWorkbook'));
@@ -55,6 +56,7 @@ export const workbookRecoveryBackend = {
   },
 };
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export async function createWorkbookRecoverySession(
   bytes: Uint8Array, options: OpenWorkbookSessionOptions, transport: SessionTransport, checkpoint?: Checkpoint, version?: string
 ): Promise<RecoverySession> {

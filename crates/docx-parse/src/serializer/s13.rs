@@ -40,8 +40,8 @@ use super::paragraph_ids::{
 };
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
-    serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
-    serialize_endnotes_part, serialize_footnotes_part, serialize_header_footer_part,
+    serialize_comments_ids_part, serialize_document_part, serialize_endnotes_part,
+    serialize_footnotes_part, serialize_header_footer_part,
 };
 use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::s10::SerializerDeterminism;
@@ -536,7 +536,7 @@ fn write_docx_s13_parts_with_warnings(
             &mut context,
             &request.determinism.seed,
             !patched.contains_key(COMMENTS_PART) && !assignments.contains_key(COMMENTS_PART),
-        );
+        )?;
     }
 
     let document_rels = package
@@ -1557,19 +1557,43 @@ fn serialize_comment_parts(
     context: &mut SerializerContext,
     seed: &str,
     allow_source_splice: bool,
-) {
+) -> Result<(), ParseError> {
     let Some(comments) = document.comments.as_ref() else {
-        return;
+        return Ok(());
     };
     if comments.is_empty() && !package.contains(COMMENTS_PART) {
-        return;
+        return Ok(());
     }
+    let mut restored;
+    let comments = if comments
+        .iter()
+        .any(|comment| comment.block_content.is_empty())
+    {
+        restored = comments.clone();
+        let original = super::comment_splice::source_comments(package.original, seed)?;
+        for comment in &mut restored {
+            if comment.block_content.is_empty()
+                && let Some(source) = original.iter().find(|source| source.id == comment.id)
+                && source
+                    .block_content
+                    .iter()
+                    .any(crate::block::contains_bookmark_block)
+            {
+                comment.block_content.clone_from(&source.block_content);
+            }
+        }
+        &restored
+    } else {
+        comments
+    };
     let source_context = allow_source_splice
         .then(|| package.original_bytes(COMMENTS_PART))
         .flatten()
         .map(|source| (source, context.clone()));
-    let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
+    let (mut comments_xml, mut infos) =
+        super::parts::serialize_comments_projection(comments, context)?;
     let mut spliced_companions = None;
+    let mut spliced_source = false;
     if let Some((source, source_context)) = source_context {
         let original_infos = infos.clone();
         match super::comment_splice::splice_comments(
@@ -1584,9 +1608,13 @@ fn serialize_comment_parts(
             Ok(spliced) => {
                 comments_xml = spliced.xml;
                 spliced_companions = spliced.companions;
+                spliced_source = true;
             }
             Err(_) => infos = original_infos,
         }
+    }
+    if !spliced_source && comments.iter().any(super::parts::has_nested_bookmarks) {
+        return Err(super::parts::nested_comment_bookmarks());
     }
     package.set_text("word/comments.xml", comments_xml);
 
@@ -1612,6 +1640,7 @@ fn serialize_comment_parts(
         }
     }
     ensure_comment_parts(package);
+    Ok(())
 }
 
 fn ensure_comment_parts(package: &mut Package) {

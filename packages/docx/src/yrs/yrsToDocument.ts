@@ -2311,7 +2311,10 @@ function paragraphFromStory(
   );
   restoreLineBreaks(content, baseParagraph);
   content = restoreRawInlines(content, baseParagraph);
-  if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
+  if (baseParagraph) {
+    restoreNestedOrdinals(content, baseParagraph.content);
+    restoreTextBoxBookmarks(content, baseParagraph.content);
+  }
   content = insertBoundaries(content, commentBoundaries);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
@@ -2790,22 +2793,54 @@ function paragraphChartRuns(content: readonly ParagraphContent[]): Run[] {
 }
 
 function isBlockBookmark(block: BlockContent): boolean {
-  return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>])/.test(block.xml);
+  return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>]|$)/.test(block.xml.trimStart());
+}
+
+function containsBookmark(blocks: readonly BlockContent[]): boolean {
+  return blocks.some(block => {
+    if (isBlockBookmark(block)) return true;
+    if (block.type === 'blockSdt') return containsBookmark(block.content);
+    if (block.type === 'table') return block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)));
+    return false;
+  });
+}
+
+export function assertCommentBookmarkReplacement(blocks: readonly BlockContent[]): void {
+  if (blocks.some(block =>
+    block.type === 'blockSdt' ? containsBookmark(block.content)
+      : block.type === 'table' && block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)))
+  )) throw new Error('Cannot replace comment body with bookmarks in nested blocks');
 }
 
 type BookmarkKind = 'start' | 'end';
+const WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
 function rawBlockBookmark(xml: string): { kind: BookmarkKind; id?: string } | undefined {
-  const kind = /^<w:bookmark(Start|End)(?=[\s/>])/.exec(xml)?.[1];
+  xml = xml.trimStart();
+  const kind = /^<w:bookmark(Start|End)(?=[\s/>]|$)/.exec(xml)?.[1];
   if (!kind) return undefined;
+  const decoded = (value: string): string => value.replace(/&#(?:x([0-9a-fA-F]+)|([0-9]+));|&(amp|lt|gt|quot|apos);/g, (entity, hex, decimal, named) => {
+    if (named) return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[named] ?? entity;
+    const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
+    return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+  });
+  const tag = /^<[^<>"']*(?:"[^"]*"[^<>"']*|'[^']*'[^<>"']*)*>/.exec(xml)?.[0];
+  if (!tag) throw new Error('Invalid block bookmark');
+  const attributes = [...tag.matchAll(/([^\s=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)]
+    .map(attribute => [attribute[1]!, decoded(attribute[2] ?? attribute[3]!)] as const);
+  const namespaces = new Map([['w', WORD_NAMESPACE], ['xml', 'http://www.w3.org/XML/1998/namespace']]);
+  for (const [name, value] of attributes) {
+    if (name.startsWith('xmlns:')) namespaces.set(name.slice(6), value);
+  }
   let value: string | undefined;
-  for (const attribute of xml.matchAll(/([^\s=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
-    if (attribute[1] !== 'w:id') continue;
-    value = (attribute[2] ?? attribute[3]!).replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, (entity, hex, decimal) => {
-      const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
-      return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
-    });
-    break;
+  for (const [name, attribute] of attributes) {
+    const [prefix, local] = name.split(':');
+    if (prefix === 'xmlns' || (local !== 'id' && local !== 'name')) continue;
+    const namespace = namespaces.get(prefix!);
+    if (namespace === undefined) throw new Error(`Unbound block bookmark attribute ${name}`);
+    if (namespace !== WORD_NAMESPACE || local !== 'id') continue;
+    if (value !== undefined) throw new Error('Duplicate block bookmark id');
+    value = attribute;
   }
   const id = value === undefined ? undefined
     : Number.isSafeInteger(Number(value)) ? String(Number(value)) : value;
@@ -2873,7 +2908,7 @@ interface BlockBookmarkPlacement {
   following?: BlockContent;
 }
 
-function restoreBlockBookmarks(
+export function restoreBlockBookmarks(
   projected: BlockContent[],
   base: readonly BlockContent[],
   storyId: string
@@ -2903,15 +2938,14 @@ function restoreBlockBookmarks(
       const id = marker.id ?? `\0${index}`;
       let pair = pairs.get(id);
       if (!pair) pairs.set(id, pair = {});
-      if (!pair[marker.kind]) {
-        const boundary = {
-          block, index,
-          position: nextPositions[index] ?? (previous === undefined ? 0 : previous + 1),
-          omit: present.get(id)?.[marker.kind] !== undefined,
-        };
-        pair[marker.kind] = boundary;
-        boundaries.push(boundary);
-      }
+      if (pair[marker.kind]) throw new Error(`Duplicate block bookmark ${marker.kind} for id ${id}`);
+      const boundary = {
+        block, index,
+        position: nextPositions[index] ?? (previous === undefined ? 0 : previous + 1),
+        omit: present.get(id)?.[marker.kind] !== undefined,
+      };
+      pair[marker.kind] = boundary;
+      boundaries.push(boundary);
     }
     const key = keys[index];
     const position = key === undefined ? undefined : live.get(key);
@@ -2947,6 +2981,36 @@ function restoreBlockBookmarks(
     if (index < projected.length) restored.push(projected[index]!);
   }
   return restored;
+}
+
+function restoreTextBoxBookmarks(content: ParagraphContent[], base: readonly ParagraphContent[]): void {
+  const bodies = (value: unknown): Map<string, Array<{ content: BlockContent[] }>> => {
+    const found = new Map<string, Array<{ content: BlockContent[] }>>();
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child);
+      } else if (value !== null && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const body = asObject(record.textBody);
+        if (body && Array.isArray(body.content)) {
+          const id = typeof record.id === 'string' ? record.id : String(found.size);
+          const copies = found.get(id) ?? [];
+          copies.push(body as { content: BlockContent[] });
+          found.set(id, copies);
+        }
+        for (const [key, child] of Object.entries(record)) if (key !== 'drawingModel') visit(child);
+      }
+    };
+    visit(value);
+    return found;
+  };
+  const sources = bodies(base);
+  for (const [id, copies] of bodies(content)) {
+    copies.forEach((body, index) => {
+      const source = sources.get(id)?.[index];
+      if (source) body.content = restoreBlockBookmarks(body.content, source.content, `txbx:${id}`);
+    });
+  }
 }
 
 function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[], storyId: string): BlockContent[] {
@@ -4023,6 +4087,22 @@ function projectStories(
   };
   const footnotes = projectNotes(base.package.footnotes, 'fn:');
   const endnotes = projectNotes(base.package.endnotes, 'en:');
+  const commentBodies = base.package.document.comments?.some(comment => containsBookmark(comment.blockContent ?? []))
+    ? new Map(session.listComments().map(comment => [comment.id, comment.body])) : undefined;
+  const comments = commentBodies && base.package.document.comments?.map(comment => {
+    if (!containsBookmark(comment.blockContent ?? [])) return comment;
+    const body = commentBodies.get(String(comment.id));
+    if (!Array.isArray(body) || !body.every(block =>
+      block && ['paragraph', 'table', 'blockSdt', 'rawXml'].includes(block.type)
+    ) || sameJson(body, comment.blockContent ?? comment.content)) return comment;
+    assertCommentBookmarkReplacement(comment.blockContent ?? comment.content);
+    const blockContent = restoreBlockBookmarks(body, comment.blockContent ?? comment.content, `comment:${comment.id}`);
+    return {
+      ...comment,
+      content: blockContent.filter((block): block is Paragraph => block.type === 'paragraph'),
+      blockContent,
+    };
+  });
 
   const sourcePackage = sessionSourcePackage(session);
   const liveSections = sourcePackage && shouldProject('body') ? session.listSections?.() ?? [] : [];
@@ -4051,6 +4131,7 @@ function projectStories(
       document: {
         ...base.package.document,
         content: bodyContent,
+        ...(comments ? { comments } : {}),
         ...(sectionChanges ? { sections: projectedSections } : {}),
         ...(finalSectionChanges ? { finalSectionProperties: withHostSectionChanges(liveSections.at(-1)!.authored, sourceFinal ?? {}, base.package.document.finalSectionProperties ?? {}) } : {}),
       },

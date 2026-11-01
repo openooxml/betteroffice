@@ -2,18 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::block::BlockContent;
 use crate::comments::Comment;
 use crate::document::DocumentBody;
 use crate::header_footer::HeaderFooter;
 use crate::inline::{InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::paragraph::{Paragraph, ParagraphContent};
-use crate::paragraph_identity::parse_paragraph_id;
+use crate::paragraph_identity::{parse_paragraph_id, tags};
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::paragraph::is_safe_attribute_name;
-use super::raw::validate_raw_subtree;
+use super::raw::{validate_raw_subtree, validate_replayed_fragment};
 use super::sdt::serialize_block_content;
 use super::section::serialize_section_properties;
 use super::splice::{required_prefixes, root_binds, root_tag, root_with_prefixes};
@@ -117,6 +118,14 @@ const STORY_ROOT_PREFIXES: [&str; 20] = [
 /// True when the document, header, and footer writers declare this prefix.
 pub(crate) fn is_story_root_prefix(prefix: &str) -> bool {
     prefix == "xml" || STORY_ROOT_PREFIXES.contains(&prefix)
+}
+
+pub(crate) fn note_root_declares(name: &str, namespace: &str) -> bool {
+    FULL_NAMESPACES.split_whitespace().any(|binding| {
+        binding
+            .split_once("=\"")
+            .is_some_and(|(key, value)| key == name && value.strip_suffix('"') == Some(namespace))
+    })
 }
 
 const MC_IGNORABLE: &str =
@@ -316,16 +325,88 @@ fn serialize_notes_part(
     ))
 }
 
+/// Writes the comments part, dropping comment bookmarks it cannot write; [`try_serialize_comments_part`] reports them instead.
 pub fn serialize_comments_part(comments: &[Comment], context: &mut SerializerContext) -> String {
     serialize_comments_with_info(comments, context).0
 }
 
+/// Writes the comments part, dropping comment bookmarks it cannot write; [`try_serialize_comments_with_info`] reports them instead.
 pub fn serialize_comments_with_info(
     comments: &[Comment],
     context: &mut SerializerContext,
 ) -> (String, Vec<CommentParaInfo>) {
+    let mut attempt = context.clone();
+    if let Ok(written) = try_serialize_comments_with_info(comments, &mut attempt) {
+        *context = attempt;
+        return written;
+    }
+    let stripped: Vec<Comment> = comments
+        .iter()
+        .map(|comment| {
+            let mut comment = comment.clone();
+            strip_bookmark_blocks(&mut comment.block_content);
+            comment
+        })
+        .collect();
+    try_serialize_comments_with_info(&stripped, context).unwrap_or_default()
+}
+
+fn strip_bookmark_blocks(blocks: &mut Vec<BlockContent>) {
+    blocks.retain(|block| !crate::block::is_bookmark_block(block));
+    for block in blocks {
+        match block {
+            BlockContent::BlockSdt(control) => {
+                strip_bookmark_blocks(&mut std::sync::Arc::make_mut(control).content);
+            }
+            BlockContent::Table(table) => {
+                let table = std::sync::Arc::make_mut(table);
+                for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                    strip_bookmark_blocks(&mut cell.content);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Writes the comments part, or reports a comment bookmark it cannot write.
+pub fn try_serialize_comments_part(
+    comments: &[Comment],
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
+    Ok(try_serialize_comments_with_info(comments, context)?.0)
+}
+
+/// Writes the comments part and its paragraph records, or reports a comment bookmark it cannot write.
+pub fn try_serialize_comments_with_info(
+    comments: &[Comment],
+    context: &mut SerializerContext,
+) -> Result<(String, Vec<CommentParaInfo>), ParseError> {
+    if comments.iter().any(has_nested_bookmarks) {
+        return Err(nested_comment_bookmarks());
+    }
+    serialize_comments_projection(comments, context)
+}
+
+/// Whether a comment holds bookmark boundaries inside a table or block control, which the comment writer cannot emit.
+pub(crate) fn has_nested_bookmarks(comment: &Comment) -> bool {
+    comment.block_content.iter().any(|block| {
+        matches!(block, BlockContent::BlockSdt(_) | BlockContent::Table(_))
+            && crate::block::contains_bookmark_block(block)
+    })
+}
+
+pub(crate) fn nested_comment_bookmarks() -> ParseError {
+    ParseError::Canonical("comment bookmarks in nested blocks cannot be serialized".to_owned())
+}
+
+/// The comments part as the writer emits it, without nested blocks; callers that write it check [`has_nested_bookmarks`].
+pub(crate) fn serialize_comments_projection(
+    comments: &[Comment],
+    context: &mut SerializerContext,
+) -> Result<(String, Vec<CommentParaInfo>), ParseError> {
     if comments.is_empty() {
-        return (String::new(), Vec::new());
+        return Ok((String::new(), Vec::new()));
     }
 
     let mut top_level = Vec::new();
@@ -351,15 +432,15 @@ pub fn serialize_comments_with_info(
             &mut para_infos,
             &mut durable_ids,
             context,
-        ));
+        )?);
     }
 
-    (
+    Ok((
         format!(
             "{XML_DECLARATION}<w:comments {FULL_NAMESPACES} {MC_IGNORABLE}>{content}</w:comments>"
         ),
         para_infos,
-    )
+    ))
 }
 
 pub fn serialize_comments_extended_part(para_infos: &[CommentParaInfo]) -> String {
@@ -447,7 +528,7 @@ fn serialize_comment(
     para_infos: &mut Vec<CommentParaInfo>,
     durable_ids: &mut std::collections::HashSet<String>,
     context: &mut SerializerContext,
-) -> String {
+) -> Result<String, ParseError> {
     let valid = |id: Option<&str>| {
         id.filter(|id| parse_paragraph_id(id).is_some())
             .map(str::to_owned)
@@ -492,17 +573,28 @@ fn serialize_comment(
         output.push_str("\"><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r></w:p>");
     }
     let last = comment.content.len().saturating_sub(1);
+    let mut paragraphs = Vec::new();
     for (index, paragraph) in comment.content.iter().enumerate() {
         let para_id = if index == last {
             Some(comment_para_id.clone())
         } else {
             valid(paragraph.para_id.as_deref())
         };
-        output.push_str(&serialize_comment_paragraph(
+        paragraphs.push(serialize_comment_paragraph(
             paragraph,
             para_id.as_deref(),
             index == 0,
         ));
+    }
+    let bookmarks = comment_bookmarks(comment, &paragraphs)?;
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        for xml in &bookmarks[index] {
+            output.push_str(xml);
+        }
+        output.push_str(paragraph);
+    }
+    for xml in &bookmarks[paragraphs.len()] {
+        output.push_str(xml);
     }
     output.push_str("</w:comment>");
     para_infos.push(CommentParaInfo {
@@ -519,7 +611,143 @@ fn serialize_comment(
         parent_id: comment.parent_id,
         done: comment.done,
     });
-    output
+    Ok(output)
+}
+
+fn comment_bookmarks<'a>(
+    comment: &'a Comment,
+    paragraphs: &[String],
+) -> Result<Vec<Vec<&'a str>>, ParseError> {
+    use std::collections::HashMap;
+
+    let mut restored = vec![Vec::new(); paragraphs.len() + 1];
+    if !comment
+        .block_content
+        .iter()
+        .any(crate::block::is_bookmark_block)
+    {
+        return Ok(restored);
+    }
+    let marker = |xml: &str| {
+        let parsed = tags(xml)?;
+        let tag = parsed.first()?;
+        let start = match tag.name {
+            "w:bookmarkStart" => true,
+            "w:bookmarkEnd" => false,
+            _ => return None,
+        };
+        let id = super::splice::bookmark_id(xml)
+            .map(|id| id.parse::<i64>().map_or(id.clone(), |id| id.to_string()));
+        Some((id, start))
+    };
+    let key = |paragraph: &Paragraph, index: usize| {
+        paragraph
+            .para_id
+            .as_ref()
+            .filter(|_| paragraph.repeated_para_id != Some(true))
+            .map(|id| format!("P{}", id.to_ascii_uppercase()))
+            .unwrap_or_else(|| {
+                paragraph
+                    .source_ordinal
+                    .map_or_else(|| format!("I{index}"), |ordinal| format!("O{ordinal}"))
+            })
+    };
+    let live: HashMap<_, _> = comment
+        .content
+        .iter()
+        .enumerate()
+        .map(|(index, paragraph)| (key(paragraph, index), index))
+        .collect();
+    let mut present = HashMap::new();
+    for (index, xml) in paragraphs.iter().enumerate() {
+        for tag in tags(xml)
+            .ok_or_else(|| ParseError::Canonical("invalid comment paragraph".to_owned()))?
+        {
+            if !tag.end
+                && let Some((Some(id), start)) = marker(&xml[tag.range])
+            {
+                present.entry((id, start)).or_insert(index * 2 + 1);
+            }
+        }
+    }
+    let mut paragraph = 0;
+    let anchors: Vec<_> = comment
+        .block_content
+        .iter()
+        .map(|block| {
+            if let BlockContent::Paragraph(block) = block {
+                let position = live.get(&key(block, paragraph)).copied();
+                paragraph += 1;
+                position
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut boundaries = Vec::new();
+    let mut pairs: HashMap<String, [Option<usize>; 2]> = HashMap::new();
+    for (index, block) in comment.block_content.iter().enumerate() {
+        let BlockContent::RawXml(raw) = block else {
+            continue;
+        };
+        if !crate::block::is_bookmark_block(block) {
+            continue;
+        }
+        validate_replayed_fragment(&raw.xml)?;
+        let (id, start) = marker(&raw.xml)
+            .ok_or_else(|| ParseError::Canonical("invalid block bookmark".to_owned()))?;
+        let id = id.unwrap_or_else(|| format!("\0{index}"));
+        let pair = pairs.entry(id.clone()).or_default();
+        let kind = usize::from(!start);
+        if pair[kind].is_some() {
+            return Err(ParseError::Canonical(format!(
+                "duplicate block bookmark boundary for id {id}"
+            )));
+        }
+        let mut position = anchors[index + 1..]
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .unwrap_or_else(|| {
+                anchors[..index]
+                    .iter()
+                    .rev()
+                    .flatten()
+                    .next()
+                    .map_or(0, |position| position + 1)
+            });
+        if let Some(counterpart) = present.get(&(id.clone(), !start)) {
+            position = if start {
+                position.min(counterpart / 2)
+            } else {
+                position.max(counterpart.div_ceil(2))
+            };
+        }
+        pair[kind] = Some(boundaries.len());
+        boundaries.push((
+            raw.xml.as_str(),
+            position,
+            present.get(&(id, start)).copied(),
+        ));
+    }
+    for pair in pairs.values() {
+        let [Some(start), Some(end)] = *pair else {
+            continue;
+        };
+        if boundaries[start].2.is_none()
+            && boundaries[end].2.is_none()
+            && boundaries[start].1 > boundaries[end].1
+        {
+            boundaries[end].1 = boundaries[start].1;
+        }
+    }
+    for (xml, position, present) in boundaries {
+        if present.is_none() {
+            restored[position.min(paragraphs.len())].push(xml);
+        }
+    }
+    Ok(restored)
 }
 
 fn serialize_comment_paragraph(
@@ -541,10 +769,17 @@ fn serialize_comment_paragraph(
     }
     // Re-emitting the authored reference run would add an empty run.
     for item in &paragraph.content {
-        if let ParagraphContent::Inline(InlineNode::Run(run)) = item
-            && comment_run_has_content(run)
-        {
-            output.push_str(&serialize_comment_run(run));
+        match item {
+            ParagraphContent::Inline(InlineNode::Run(run)) if comment_run_has_content(run) => {
+                output.push_str(&serialize_comment_run(run));
+            }
+            ParagraphContent::Inline(InlineNode::BookmarkStart(bookmark)) => {
+                output.push_str(&super::paragraph::serialize_bookmark_start(bookmark));
+            }
+            ParagraphContent::Inline(InlineNode::BookmarkEnd(bookmark)) => {
+                output.push_str(&super::paragraph::serialize_bookmark_end(bookmark));
+            }
+            _ => {}
         }
     }
     output.push_str("</w:p>");
@@ -689,7 +924,7 @@ mod tests {
             palette_index: 0.0,
             block_content: Vec::new(),
         };
-        let (xml, infos) = serialize_comments_with_info(&[comment], &mut context());
+        let (xml, infos) = try_serialize_comments_with_info(&[comment], &mut context()).unwrap();
         assert!(xml.contains(r#"w14:paraId="1CB626C9""#));
         assert_eq!(infos[0].last_para_id, "1CB626C9");
         assert_eq!(infos[0].durable_id, "2ECC71AA");
@@ -876,7 +1111,7 @@ mod tests {
             comment(2.0, Some(1.0), " reply "),
             comment(1.0, None, "top"),
         ];
-        let (xml, infos) = serialize_comments_with_info(&comments, &mut context());
+        let (xml, infos) = try_serialize_comments_with_info(&comments, &mut context()).unwrap();
         assert!(xml.find("w:id=\"1\"").unwrap() < xml.find("w:id=\"2\"").unwrap());
         assert!(xml.contains("w:author=\"Alice &lt;&amp;&gt;\" w:initials=\"\""));
         assert!(xml.contains("w:date=\"2024-01-01T12:30:45Z\""));
@@ -902,7 +1137,7 @@ mod tests {
         }
         assert!(!extensible.contains(".123"));
 
-        let repeated = serialize_comments_with_info(&comments, &mut context());
+        let repeated = try_serialize_comments_with_info(&comments, &mut context()).unwrap();
         assert_eq!((xml, infos), repeated);
     }
 
@@ -911,7 +1146,9 @@ mod tests {
         let mut context = context();
         assert_eq!(context.now(), "2000-01-01T00:00:00.000Z");
         assert_eq!(
-            serialize_comments_with_info(&[], &mut context).0,
+            try_serialize_comments_with_info(&[], &mut context)
+                .unwrap()
+                .0,
             String::new()
         );
         assert!(serialize_comments_extended_part(&[]).is_empty());

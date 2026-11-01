@@ -131,27 +131,69 @@ fn marks(xml: &str) -> Option<Marks> {
     Some(marks)
 }
 
+fn word_attribute(
+    reader: &quick_xml::NsReader<&[u8]>,
+    element: &quick_xml::events::BytesStart<'_>,
+    local: &str,
+) -> Option<String> {
+    let qualified = format!("w:{local}");
+    for attribute in element.attributes() {
+        let attribute = attribute.ok()?;
+        let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+        if attribute.key.as_ref() == qualified.as_bytes()
+            || (name.as_ref() == local.as_bytes()
+                && namespace
+                    == quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                        W_NAMESPACE.as_bytes(),
+                    )))
+        {
+            #[allow(deprecated)]
+            let value = attribute.decode_and_unescape_value(reader.decoder());
+            return value.ok().map(Cow::into_owned);
+        }
+    }
+    None
+}
+
+pub(crate) fn bookmark_id(xml: &str) -> Option<String> {
+    let mut reader = quick_xml::NsReader::from_reader(xml.as_bytes());
+    loop {
+        match reader.read_resolved_event().ok()?.1 {
+            quick_xml::events::Event::Start(element) | quick_xml::events::Event::Empty(element) => {
+                return word_attribute(&reader, &element, "id");
+            }
+            quick_xml::events::Event::Eof => return None,
+            _ => {}
+        }
+    }
+}
+
 /// Counts bookmark and comment markers by kind and ID.
 fn marker_counts(xml: &str) -> Option<BTreeMap<(String, String), isize>> {
     let mut counts = BTreeMap::new();
-    for tag in tags(xml)? {
-        if !tag.end
-            && matches!(
-                tag.name,
-                "w:bookmarkStart"
-                    | "w:bookmarkEnd"
-                    | "w:commentRangeStart"
-                    | "w:commentRangeEnd"
-                    | "w:commentReference"
-            )
-        {
-            let id = attribute(&tag, "w:id")
-                .and_then(|range| unescaped(xml, range))
-                .unwrap_or_default();
-            *counts.entry((tag.name.to_owned(), id)).or_insert(0) += 1;
+    let mut reader = quick_xml::NsReader::from_reader(xml.as_bytes());
+    loop {
+        match reader.read_resolved_event().ok()?.1 {
+            quick_xml::events::Event::Start(element) | quick_xml::events::Event::Empty(element) => {
+                if matches!(
+                    element.name().as_ref(),
+                    b"w:bookmarkStart"
+                        | b"w:bookmarkEnd"
+                        | b"w:commentRangeStart"
+                        | b"w:commentRangeEnd"
+                        | b"w:commentReference"
+                ) {
+                    let name = std::str::from_utf8(element.name().as_ref())
+                        .ok()?
+                        .to_owned();
+                    let id = word_attribute(&reader, &element, "id").unwrap_or_default();
+                    *counts.entry((name, id)).or_insert(0) += 1;
+                }
+            }
+            quick_xml::events::Event::Eof => return Some(counts),
+            _ => {}
         }
     }
-    Some(counts)
 }
 
 fn subtract(
@@ -2065,6 +2107,31 @@ mod tests {
     use crate::serializer::{S13SaveRequest, write_docx_s13, write_docx_s13_with_warnings};
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn marker_ids_resolve_namespace_aliases_in_their_scope() {
+        let xml = r#"<w:tc xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:b="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:bookmarkStart b:id="&#55;" b:name="B"/><w:p xmlns:b="urn:foreign"><w:bookmarkStart b:id="other" w:id="8"/></w:p><w:bookmarkEnd b:id="7"/></w:tc>"#;
+        let counts = super::marker_counts(xml).unwrap();
+        assert_eq!(
+            counts.get(&("w:bookmarkStart".to_owned(), "7".to_owned())),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&("w:bookmarkEnd".to_owned(), "7".to_owned())),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&("w:bookmarkStart".to_owned(), "8".to_owned())),
+            Some(&1)
+        );
+        assert_eq!(counts.len(), 3);
+        assert_eq!(
+            super::bookmark_id(
+                r#"<w:bookmarkStart xmlns:b="http://schemas.openxmlformats.org/wordprocessingml/2006/main" b:id="&#55;"/>"#
+            ),
+            Some("7".to_owned())
+        );
+    }
 
     const ROOT: &str = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\">";
     const W_ONLY_ROOT: &str =

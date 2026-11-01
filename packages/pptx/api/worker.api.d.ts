@@ -1110,7 +1110,7 @@ import { type PresentationHandle, type PresentationPeerHandle } from '../wasm/lo
 import { PptxWorkerEditorFailedError } from './peerHydrationError';
 import { type PptxWorkerEditorOperation, type PptxWorkerEditorReply } from './replay';
 import type { PresentationSessionState } from './methods';
-declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
+declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "metafileSvg", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
 export interface PptxWorkerEditorInteractionAccess {
     snapshot(): {
         snapshot: DeckSnapshot;
@@ -3628,6 +3628,7 @@ export class PptxDocument {
     insertTextProfiledJson(args: string): string;
     listProposalsJson(): string;
     mediaBytes(part_path: string): Uint8Array;
+    metafileSvg(part_path: string): Uint8Array | undefined;
     moveShapeJson(args: string): string;
     moveShapeProfiledJson(args: string): string;
     moveSlideJson(args: string): string;
@@ -3837,6 +3838,7 @@ export interface InitOutput {
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveShapeProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -4057,6 +4059,7 @@ export interface PresentationHandle extends CollaborationReplica {
     layoutSlideProfiled(slideIndex: number): ProfiledLayout;
     hitTest(x: number, y: number): HitTestResult | null;
     mediaBytes(partPath: string): Uint8Array;
+    metafileSvg(partPath: string): Uint8Array | undefined;
     /**
      * serialize the presentation back to .pptx bytes, edits included. Normal
      * autofit text the edits changed is fitted with the registered faces, or
@@ -4189,7 +4192,7 @@ export interface PresentationReplayReply {
     outcome: PresentationReplayOutcome;
 }
 /** @internal */
-export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
+export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
 /** @internal */
 export declare function openPresentationReplayBaseline(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationPeerHandle;
 /** @internal */
