@@ -101,7 +101,7 @@ fn unix_to_serial(unix: i64) -> Option<i64> {
 
 /// (year, month, day) for a serial. serial 60 is the phantom 1900-02-29;
 /// a serial outside excel's date range has no calendar date (returns None).
-fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
+pub(super) fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
     if !in_date_range(serial) {
         return None;
     }

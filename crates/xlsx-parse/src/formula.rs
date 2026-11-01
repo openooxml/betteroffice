@@ -10,7 +10,7 @@ use xlsx_model::{CellRange, CellRef, Sheet};
 use crate::ParseError;
 use crate::xml::attr;
 
-const MAX_FORMULA_BYTES: usize = 32_768;
+pub(crate) const MAX_FORMULA_BYTES: usize = 32_768;
 const MAX_SHARED_FORMULA_BYTES: usize = 32 * 1024 * 1024;
 
 struct Master {
@@ -186,7 +186,7 @@ fn separator(character: char) -> bool {
         )
 }
 
-fn skip_quoted(source: &str, start: usize, quote: u8) -> usize {
+pub(crate) fn skip_quoted(source: &str, start: usize, quote: u8) -> usize {
     let bytes = source.as_bytes();
     let mut index = start + 1;
     while index < bytes.len() {
@@ -201,7 +201,7 @@ fn skip_quoted(source: &str, start: usize, quote: u8) -> usize {
     bytes.len()
 }
 
-fn skip_brackets(source: &str, start: usize) -> usize {
+pub(crate) fn skip_brackets(source: &str, start: usize) -> usize {
     let bytes = source.as_bytes();
     let mut depth = 1;
     let mut index = start + 1;

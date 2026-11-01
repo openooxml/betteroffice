@@ -311,6 +311,24 @@ fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
     }
 }
 
+/// a block of numbers a builtin outside this module computes: paid for as
+/// `reserve` pays and charged `steps` inner-loop steps before `fill` runs; a
+/// non-finite cell is `#NUM!`.
+pub(crate) fn number_block(
+    ctx: &EvalContext<'_>,
+    rows: usize,
+    cols: usize,
+    steps: u64,
+    fill: impl FnOnce() -> Result<Vec<f64>, ErrorValue>,
+) -> Value {
+    result((|| {
+        reserve(ctx, rows, cols)?;
+        charge_steps(ctx, steps)?;
+        let cells = fill()?.into_iter().map(crate::functions::finite).collect();
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
 /// an output block being filled: its cells are paid for before any is
 /// computed, and each cell's text before the block keeps it.
 struct Cells<'c, 'a> {
@@ -803,6 +821,8 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "XIRR" => &[2],
         "MIRR" => &[1, 2],
         "XNPV" | "FVSCHEDULE" | "CELL" => &[0],
+        "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DGET" | "DMAX" | "DMIN" | "DPRODUCT" | "DSTDEV"
+        | "DSTDEVP" | "DSUM" | "DVAR" | "DVARP" => &[1],
         _ => return None,
     })
 }
@@ -816,27 +836,43 @@ fn lifts(name: &str) -> bool {
             | "ACCRINT"
             | "ACCRINTM"
             | "ACOS"
+            | "ACOSH"
+            | "ACOT"
+            | "ACOTH"
             | "AMORDEGRC"
             | "AMORLINC"
+            | "ARABIC"
             | "ASIN"
+            | "ASINH"
             | "ATAN"
             | "ATAN2"
+            | "ATANH"
+            | "BASE"
             | "CEILING"
+            | "CEILING.MATH"
+            | "CEILING.PRECISE"
             | "CHAR"
             | "CLEAN"
             | "CODE"
             | "COMBIN"
+            | "COMBINA"
             | "COS"
             | "COSH"
+            | "COT"
+            | "COTH"
             | "COUPDAYBS"
             | "COUPDAYS"
             | "COUPDAYSNC"
             | "COUPNCD"
             | "COUPNUM"
             | "COUPPCD"
+            | "CSC"
+            | "CSCH"
             | "DATE"
             | "DATEDIF"
             | "DAY"
+            | "DAYS360"
+            | "DECIMAL"
             | "DEGREES"
             | "DISC"
             | "DURATION"
@@ -846,9 +882,12 @@ fn lifts(name: &str) -> bool {
             | "EXACT"
             | "EXP"
             | "FACT"
+            | "FACTDOUBLE"
             | "FIND"
             | "FIXED"
             | "FLOOR"
+            | "FLOOR.MATH"
+            | "FLOOR.PRECISE"
             | "HOUR"
             | "INT"
             | "INTRATE"
@@ -859,6 +898,7 @@ fn lifts(name: &str) -> bool {
             | "ISLOGICAL"
             | "ISNA"
             | "ISNUMBER"
+            | "ISO.CEILING"
             | "ISODD"
             | "ISOWEEKNUM"
             | "ISTEXT"
@@ -894,15 +934,19 @@ fn lifts(name: &str) -> bool {
             | "REPLACE"
             | "REPT"
             | "RIGHT"
+            | "ROMAN"
             | "ROUND"
             | "ROUNDDOWN"
             | "ROUNDUP"
             | "SEARCH"
+            | "SEC"
+            | "SECH"
             | "SECOND"
             | "SIGN"
             | "SIN"
             | "SINH"
             | "SQRT"
+            | "SQRTPI"
             | "SUBSTITUTE"
             | "T"
             | "TAN"
@@ -994,6 +1038,9 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "TREND" => trend,
         "FREQUENCY" => frequency,
         "MMULT" => mmult,
+        "MINVERSE" => crate::functions::math_extra::minverse,
+        "MUNIT" => crate::functions::math_extra::munit,
+        "RANDARRAY" => crate::functions::math_extra::randarray,
         "MAX" => max,
         "MIN" => min,
         "PRODUCT" => product,
