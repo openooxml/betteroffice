@@ -21,6 +21,7 @@ wasm-opt = ["-Oz"]
 [dependencies]
 quick-xml.workspace = true
 miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-alloc"] }
+ooxml-text.workspace = true
 wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]

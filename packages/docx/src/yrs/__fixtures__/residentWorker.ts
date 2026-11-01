@@ -77,7 +77,7 @@ class Canvas {
  * `terminate` stops the worker like a real one: no more messages either way, its timers and
  * channels close and its sessions are freed.
  */
-export async function residentWorkerFactory(options: { transferBuffers?: boolean } = {}): Promise<(clientId?: number) => InProcessResidentWorker> {
+export async function residentWorkerFactory(options: { transferBuffers?: boolean; offscreenCanvas?: unknown } = {}): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
     target: 'bun',
@@ -204,7 +204,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
     };
     start(
       scope,
-      Canvas,
+      'offscreenCanvas' in options ? options.offscreenCanvas : Canvas,
       class extends MessageChannel {
         constructor() {
           super();

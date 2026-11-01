@@ -1,4 +1,5 @@
 import { writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsup';
 import { nativeEnginePlugin } from '../../../scripts/native-engine';
 
@@ -34,6 +35,8 @@ export default defineConfig([
       'yrs/index': '../../../packages/docx/src/yrs/index.ts',
       'collaboration/index': '../../../packages/docx/src/collaboration/index.ts',
       'yrs/docxWorker': '../../../packages/docx/src/yrs/residentEngineWorker.ts',
+      'sessionWorker.browser': '../../../packages/docx/src/yrs/sessionWorker.browser.ts',
+      'sessionWorker.node': '../../../packages/docx/src/yrs/sessionWorker.node.ts',
       'wasm-opc': '../../../packages/docx/src/wasm/opc.ts',
       'wasm-layout': '../../../packages/docx/src/wasm/layout.ts',
       'wasm-edit': '../../../packages/docx/src/wasm/edit.ts',
@@ -45,14 +48,18 @@ export default defineConfig([
     tsconfig: '../../../packages/docx/tsconfig.json',
     format: ['esm'],
     shims: true,
-    dts: true,
+    dts: {
+      compilerOptions: {
+        paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/docx/src/yrs/sessionWorker.node.ts', import.meta.url))] },
+      },
+    },
     splitting: true,
     sourcemap: false,
     clean: true,
     treeshake: true,
     minify: true,
     injectStyle: false,
-    external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin'],
+    external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'],
     esbuildPlugins: [nativeEnginePlugin('docx')],
     esbuildOptions(options) {
       options.chunkNames = 'chunk-[hash]';
