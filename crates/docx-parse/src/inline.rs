@@ -2148,6 +2148,14 @@ fn parse_hyperlink_inline_sdt(
     })
 }
 
+/// The field-code part of a run that also carries a field character, as a run of its own.
+pub(crate) fn instruction_run(run: &Run) -> Run {
+    let mut code = run.clone();
+    code.content
+        .retain(|content| matches!(content, RunContent::InstrText { .. }));
+    code
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct OpenComplexField {
     instruction: String,
@@ -2155,6 +2163,7 @@ pub(crate) struct OpenComplexField {
     result_runs: Vec<Run>,
     structured_code: Vec<InlineNode>,
     structured_result: Vec<InlineNode>,
+    instruction_runs: Vec<Run>,
     children: Vec<StructuredFieldTree>,
     mode: FieldMode,
     fld_lock: bool,
@@ -2179,6 +2188,7 @@ impl OpenComplexField {
             result_runs: Vec::new(),
             structured_code: Vec::new(),
             structured_result: Vec::new(),
+            instruction_runs: Vec::new(),
             children: Vec::new(),
             mode: FieldMode::Code,
             fld_lock: flags.is_some_and(|flags| flags.0),
@@ -2217,6 +2227,14 @@ impl OpenComplexField {
         }
     }
 
+    /// The instruction text of a run that also carries a field character; kept as a code run
+    /// only when the field code holds more than runs, so its position among them survives.
+    pub(crate) fn absorb_instruction(&mut self, run: &Run) {
+        let code = instruction_run(run);
+        self.instruction_runs.push(code.clone());
+        self.absorb(InlineNode::Run(code.clone()), vec![code]);
+    }
+
     pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
         if let Some(tree) = &field.field_tree {
             self.children.push(StructuredFieldTree {
@@ -2230,7 +2248,26 @@ impl OpenComplexField {
         self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
     }
 
-    pub(crate) fn finish(self) -> ComplexField {
+    pub(crate) fn finish(mut self) -> ComplexField {
+        if !self.instruction_runs.is_empty()
+            && self
+                .structured_code
+                .iter()
+                .all(|node| matches!(node, InlineNode::Run(_)))
+        {
+            for code in std::mem::take(&mut self.instruction_runs) {
+                if let Some(at) = self.code_runs.iter().position(|run| *run == code) {
+                    self.code_runs.remove(at);
+                }
+                if let Some(at) = self
+                    .structured_code
+                    .iter()
+                    .position(|node| matches!(node, InlineNode::Run(run) if *run == code))
+                {
+                    self.structured_code.remove(at);
+                }
+            }
+        }
         let structured_code = (!self.structured_code.is_empty()).then(|| StructuredFieldContent {
             inline: Some(self.structured_code),
             blocks: None,
@@ -2409,6 +2446,9 @@ fn parse_inline_container_at_depth(
                 if let Some(active) = fields.last_mut() {
                     active.append_instruction(&instruction);
                     active.adopt_formatting(&run);
+                    if (has_begin || has_separate) && !instruction.is_empty() {
+                        active.absorb_instruction(&run);
+                    }
                     if has_separate {
                         active.switch_to_result();
                     }

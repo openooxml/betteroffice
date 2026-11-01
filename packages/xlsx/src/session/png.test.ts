@@ -97,6 +97,17 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export', () => {
     }
   }, 30_000);
 
+  test('a lean session decodes font faces without loading the full core', async () => {
+    const lean = await opened(false);
+    try {
+      const face = await lean.session.call.decodeFontFace(new Uint8Array([0, 1, 0, 0, 10]).buffer, { codec: 'zstd' });
+      expect(new Uint8Array(face.font)).toEqual(new Uint8Array([0, 1, 0, 0, 10]));
+      expect(lean.requests.some((url) => url.endsWith('/xlsx_wasm_lean_bg.wasm'))).toBe(true);
+      expect(lean.requests.some((url) => url.endsWith('/xlsx_wasm_bg.wasm'))).toBe(false);
+      expect(lean.session.failure).toBeUndefined();
+    } finally { await lean.session.dispose(); }
+  }, 30_000);
+
   test('preserves chart PNG bytes across the module boundary', async () => {
     const lean = await opened(false, charts);
     const full = await opened(true, charts);

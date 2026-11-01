@@ -523,6 +523,12 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
+  /**
+   * Recalculate every formula with the handle's calculation context (or the host clock).
+   * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+   * keeps the result the file stored.
+   */
+  recalculate(): CalculationStatus;
   /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
@@ -1095,6 +1101,10 @@ function wrapWorkbookDocument(
         throw new RangeError('Sheet index is out of range');
       }
       return parseJson(() => doc.sheetInfoForJson(sheet));
+    },
+    recalculate(): CalculationStatus {
+      assertAlive();
+      return parseJson<CalculationStatus>(() => doc.recalculateJson(), true);
     },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {

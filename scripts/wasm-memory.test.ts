@@ -50,6 +50,7 @@ const ENGINES = [
   { name: 'docx preflight', wasm: 'packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm' },
   { name: 'docx query', wasm: 'packages/docx/src/wasm/generated/query/docx_query_bg.wasm' },
   { name: 'pptx', wasm: 'packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', glue: 'packages/pptx/src/wasm/generated/pptx_wasm.js' },
+  { name: 'pptx editor core', wasm: 'packages/pptx/src/wasm/generated/pptx_wasm_lean_bg.wasm' },
   { name: 'xlsx', wasm: 'packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', glue: 'packages/xlsx/src/wasm/generated/xlsx_wasm.js' },
   { name: 'xlsx lean', wasm: 'packages/xlsx/src/wasm/generated/xlsx_wasm_lean_bg.wasm' },
   { name: 'vsdx', wasm: 'packages/vsdx/src/wasm/generated/vsdx_wasm_bg.wasm', glue: 'packages/vsdx/src/wasm/generated/vsdx_wasm.js' },

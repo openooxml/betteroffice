@@ -311,6 +311,24 @@ fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
     }
 }
 
+/// a block of numbers a builtin outside this module computes: paid for as
+/// `reserve` pays and charged `steps` inner-loop steps before `fill` runs; a
+/// non-finite cell is `#NUM!`.
+pub(crate) fn number_block(
+    ctx: &EvalContext<'_>,
+    rows: usize,
+    cols: usize,
+    steps: u64,
+    fill: impl FnOnce() -> Result<Vec<f64>, ErrorValue>,
+) -> Value {
+    result((|| {
+        reserve(ctx, rows, cols)?;
+        charge_steps(ctx, steps)?;
+        let cells = fill()?.into_iter().map(crate::functions::finite).collect();
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
 /// an output block being filled: its cells are paid for before any is
 /// computed, and each cell's text before the block keeps it.
 struct Cells<'c, 'a> {
@@ -803,6 +821,8 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "XIRR" => &[2],
         "MIRR" => &[1, 2],
         "XNPV" | "FVSCHEDULE" | "CELL" => &[0],
+        "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DGET" | "DMAX" | "DMIN" | "DPRODUCT" | "DSTDEV"
+        | "DSTDEVP" | "DSUM" | "DVAR" | "DVARP" => &[1],
         _ => return None,
     })
 }
@@ -814,30 +834,93 @@ fn lifts(name: &str) -> bool {
         name,
         "ABS"
             | "ACOS"
+            | "ACOSH"
+            | "ACOT"
+            | "ACOTH"
+            | "ARABIC"
             | "ASIN"
+            | "ASINH"
             | "ATAN"
             | "ATAN2"
+            | "ATANH"
+            | "BASE"
+            | "BESSELI"
+            | "BESSELJ"
+            | "BESSELK"
+            | "BESSELY"
+            | "BIN2DEC"
+            | "BIN2HEX"
+            | "BIN2OCT"
+            | "BITAND"
+            | "BITLSHIFT"
+            | "BITOR"
+            | "BITRSHIFT"
+            | "BITXOR"
             | "CEILING"
+            | "CEILING.MATH"
+            | "CEILING.PRECISE"
             | "CHAR"
             | "CLEAN"
             | "CODE"
             | "COMBIN"
+            | "COMBINA"
+            | "COMPLEX"
             | "COS"
             | "COSH"
+            | "COT"
+            | "COTH"
+            | "CSC"
+            | "CSCH"
             | "DATE"
             | "DATEDIF"
             | "DAY"
+            | "DAYS360"
+            | "DEC2BIN"
+            | "DEC2HEX"
+            | "DEC2OCT"
+            | "DECIMAL"
             | "DEGREES"
+            | "DELTA"
             | "EDATE"
             | "EOMONTH"
             | "EVEN"
             | "EXACT"
             | "EXP"
             | "FACT"
+            | "FACTDOUBLE"
             | "FIND"
             | "FIXED"
             | "FLOOR"
+            | "FLOOR.MATH"
+            | "FLOOR.PRECISE"
+            | "GESTEP"
+            | "HEX2BIN"
+            | "HEX2DEC"
+            | "HEX2OCT"
             | "HOUR"
+            | "IMABS"
+            | "IMAGINARY"
+            | "IMARGUMENT"
+            | "IMCONJUGATE"
+            | "IMCOS"
+            | "IMCOSH"
+            | "IMCOT"
+            | "IMCSC"
+            | "IMCSCH"
+            | "IMDIV"
+            | "IMEXP"
+            | "IMLN"
+            | "IMLOG10"
+            | "IMLOG2"
+            | "IMPOWER"
+            | "IMREAL"
+            | "IMSEC"
+            | "IMSECH"
+            | "IMSIN"
+            | "IMSINH"
+            | "IMSQRT"
+            | "IMSUB"
+            | "IMTAN"
             | "INT"
             | "ISBLANK"
             | "ISERR"
@@ -846,6 +929,7 @@ fn lifts(name: &str) -> bool {
             | "ISLOGICAL"
             | "ISNA"
             | "ISNUMBER"
+            | "ISO.CEILING"
             | "ISODD"
             | "ISOWEEKNUM"
             | "ISTEXT"
@@ -864,6 +948,9 @@ fn lifts(name: &str) -> bool {
             | "N"
             | "NOT"
             | "NUMBERVALUE"
+            | "OCT2BIN"
+            | "OCT2DEC"
+            | "OCT2HEX"
             | "ODD"
             | "POWER"
             | "PROPER"
@@ -872,15 +959,19 @@ fn lifts(name: &str) -> bool {
             | "REPLACE"
             | "REPT"
             | "RIGHT"
+            | "ROMAN"
             | "ROUND"
             | "ROUNDDOWN"
             | "ROUNDUP"
             | "SEARCH"
+            | "SEC"
+            | "SECH"
             | "SECOND"
             | "SIGN"
             | "SIN"
             | "SINH"
             | "SQRT"
+            | "SQRTPI"
             | "SUBSTITUTE"
             | "T"
             | "TAN"
@@ -966,6 +1057,9 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "TREND" => trend,
         "FREQUENCY" => frequency,
         "MMULT" => mmult,
+        "MINVERSE" => crate::functions::math_extra::minverse,
+        "MUNIT" => crate::functions::math_extra::munit,
+        "RANDARRAY" => crate::functions::math_extra::randarray,
         "MAX" => max,
         "MIN" => min,
         "PRODUCT" => product,
