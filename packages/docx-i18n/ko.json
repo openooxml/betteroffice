@@ -32,6 +32,7 @@
     "ariaLabel": "서식 도구 모음",
     "file": "파일",
     "format": "서식",
+    "layout": "레이아웃",
     "insert": "삽입",
     "open": "열기",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "현재"
     }
+  },
+  "layout": {
+    "margins": "여백",
+    "normal": "기본",
+    "narrow": "좁게",
+    "moderate": "보통",
+    "wide": "넓게",
+    "customMargins": "사용자 지정 여백...",
+    "morePaperSizes": "기타 용지 크기...",
+    "indent": "들여쓰기"
   },
   "formattingBar": {
     "groups": {

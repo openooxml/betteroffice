@@ -32,6 +32,7 @@
     "ariaLabel": "شريط أدوات التنسيق",
     "file": "ملف",
     "format": "تنسيق",
+    "layout": "تخطيط",
     "insert": "إدراج",
     "open": "فتح",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "الحالي"
     }
+  },
+  "layout": {
+    "margins": "هوامش",
+    "normal": "عادي",
+    "narrow": "ضيق",
+    "moderate": "متوسط",
+    "wide": "عريض",
+    "customMargins": "هوامش مخصصة...",
+    "morePaperSizes": "المزيد من أحجام الورق...",
+    "indent": "مسافة بادئة"
   },
   "formattingBar": {
     "groups": {

@@ -32,6 +32,7 @@
     "ariaLabel": "Pasek narzędzi formatowania",
     "file": "Plik",
     "format": "Formatowanie",
+    "layout": "Układ",
     "insert": "Wstawianie",
     "open": "Otwórz",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Bieżący"
     }
+  },
+  "layout": {
+    "margins": "Marginesy",
+    "normal": "Normalne",
+    "narrow": "Wąskie",
+    "moderate": "Umiarkowane",
+    "wide": "Szerokie",
+    "customMargins": "Marginesy niestandardowe...",
+    "morePaperSizes": "Więcej rozmiarów papieru...",
+    "indent": "Wcięcie"
   },
   "formattingBar": {
     "groups": {
