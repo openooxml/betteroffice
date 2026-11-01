@@ -212,11 +212,7 @@ fn erf_family() {
     // mpmath 30 digits
     approx("ERFC(2.5)", 0.0004069520174449589);
     approx("ERF(-0.745)", -0.7079289200957377);
-    check(&[
-        ("ERFC(-1)", e(ErrorValue::Num)),
-        ("ERFC.PRECISE(-1)", e(ErrorValue::Num)),
-        ("ERF(\"x\")", e(ErrorValue::Value)),
-    ]);
+    check(&[("ERF(\"x\")", e(ErrorValue::Value))]);
 }
 
 #[test]
@@ -604,7 +600,7 @@ fn scalar_functions_lift_over_arrays() {
         "ERFC.PRECISE({1,-1})",
         1,
         2,
-        &[n(0.15729920705028513), e(ErrorValue::Num)],
+        &[n(0.15729920705028513), n(1.8427007929497148)],
         1e-12,
     );
 }
@@ -758,4 +754,124 @@ fn confidence_t_with_one_observation_divides_by_zero() {
 fn gamma_dist_accepts_a_text_cumulative_flag() {
     // mpmath 30 digits
     approx("GAMMA.DIST(10.00001131,9,2,\"TRUE\")", 0.06809400386978733);
+}
+
+#[test]
+fn erfc_accepts_negative_arguments() {
+    // mpmath 30 digits; Microsoft's current ERFC and ERFC.PRECISE pages
+    // place no sign restriction on x
+    approx("ERFC(-1)", 1.8427007929497148);
+    approx("ERFC.PRECISE(-1)", 1.8427007929497148);
+    approx("ERFC(-0.3)", 1.3286267594591274);
+    approx("ERFC(-1E200)", 2.0);
+}
+
+#[test]
+fn unconverged_beta_fraction_is_an_error() {
+    check(&[("BETA.DIST(0.5,5E11,5E11,TRUE)", e(ErrorValue::Num))]);
+}
+
+#[test]
+fn inverses_at_huge_quantiles() {
+    // mpmath 30 digits
+    rel("F.INV.RT(1E-120,1,1)", 4.052847345693511e239, 1e-9);
+    rel("T.INV(1E-300,1)", -3.183098861837907e299, 1e-9);
+    check(&[
+        ("F.INV.RT(1E-300,1,1)", e(ErrorValue::Num)),
+        ("T.INV(5E-324,1)", e(ErrorValue::Num)),
+    ]);
+}
+
+#[test]
+fn huge_arguments_saturate() {
+    check(&[
+        ("ERF(1E200)", n(1.0)),
+        ("ERF(-1E200)", n(-1.0)),
+        ("ERFC(1E200)", n(0.0)),
+        ("NORM.S.DIST(1E200,TRUE)", n(1.0)),
+        ("NORM.S.DIST(-1E200,TRUE)", n(0.0)),
+        ("GAMMA.DIST(1E308,1,1E-10,TRUE)", n(1.0)),
+        ("GAMMA.DIST(1E308,1E308,1E-10,TRUE)", n(1.0)),
+        ("T.DIST(1E200,5,TRUE)", n(1.0)),
+        ("T.DIST.RT(1E200,5)", n(0.0)),
+        ("F.DIST.RT(5E-324,2,2)", n(1.0)),
+        ("CHISQ.TEST({1E200,1},{1,1})", n(0.0)),
+    ]);
+}
+
+#[test]
+fn chisq_test_zero_expectation_divides_by_zero() {
+    check(&[
+        ("CHISQ.TEST({1,2},{0,2})", e(ErrorValue::Div0)),
+        ("CHISQ.TEST({-1,2},{1,2})", e(ErrorValue::Num)),
+        ("CHISQ.TEST({1,2},{-1,2})", e(ErrorValue::Num)),
+    ]);
+}
+
+#[test]
+fn tiny_arguments_keep_their_digits() {
+    // mpmath 30 digits
+    rel("ERF(1E-200)", 1.1283791670955125e-200, 1e-12);
+    rel("ERF.PRECISE(1E-200)", 1.1283791670955125e-200, 1e-12);
+    rel("GAUSS(1E-200)", 3.9894228040143265e-201, 1e-12);
+    rel("GAMMALN(5E-324)", 744.4400719213812, 1e-12);
+    rel("GAMMALN(1E-200)", 460.51701859880916, 1e-12);
+    rel("GAMMA.DIST(5E-324,1,1,FALSE)", 1.0, 1e-12);
+    rel("F.DIST(1E-200,2,2,TRUE)", 1e-200, 1e-12);
+    approx("BETA.DIST(0.2,5E-324,1,TRUE)", 1.0);
+    check(&[
+        ("ERF(0)", n(0.0)),
+        ("GAMMA.DIST(5E-324,2,1,FALSE)", n(5e-324)),
+    ]);
+}
+
+#[test]
+fn beta_bounds_spanning_the_whole_range() {
+    approx("BETA.DIST(0,2,2,TRUE,-1E308,1E308)", 0.5);
+    // mpmath 30 digits
+    rel(
+        "BETA.INV(0.25,2,2,-1E308,1E308)",
+        -3.472963553338607e307,
+        1e-9,
+    );
+}
+
+#[test]
+fn samples_at_extreme_magnitudes() {
+    // mpmath 30 digits; the statistics are scale free
+    approx(
+        "T.TEST({1E200,2E200,3E200},{4E200,6E200,9E200},2,2)",
+        0.05024811780069481,
+    );
+    approx(
+        "T.TEST({1E-200,2E-200,3E-200},{4E-200,6E-200,9E-200},2,2)",
+        0.050248117800694825,
+    );
+    approx(
+        "F.TEST({1E200,2E200,4E200},{1E200,5E200,9E200})",
+        0.2545454545454546,
+    );
+    approx(
+        "T.TEST({1E308,-1E308,5E307},{-1E308,1E308,0},2,1)",
+        0.8994962184740788,
+    );
+}
+
+#[test]
+fn documented_degrees_of_freedom_limits() {
+    approx("CHISQ.DIST.RT(1,1E10)", 1.0);
+    // mpmath 30 digits
+    approx("T.DIST(1,1E300,TRUE)", 0.8413447460685429);
+    check(&[
+        ("CHISQ.DIST(1,1E10+1,TRUE)", e(ErrorValue::Num)),
+        ("CHISQ.DIST.RT(1,2E10)", e(ErrorValue::Num)),
+        ("CHIDIST(1,2E10)", e(ErrorValue::Num)),
+        ("CHISQ.INV(0.5,2E10)", e(ErrorValue::Num)),
+        ("CHISQ.INV.RT(0.5,2E10)", e(ErrorValue::Num)),
+        ("CHIINV(0.5,2E10)", e(ErrorValue::Num)),
+        ("F.DIST.RT(1,1E10,1)", e(ErrorValue::Num)),
+        ("FDIST(1,1,1E10)", e(ErrorValue::Num)),
+        ("F.INV.RT(0.5,1E10,2)", e(ErrorValue::Num)),
+        ("FINV(0.5,2,1E10)", e(ErrorValue::Num)),
+    ]);
 }
