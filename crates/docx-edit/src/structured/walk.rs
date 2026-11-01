@@ -1167,7 +1167,9 @@ impl<'a> Exporter<'a> {
                         );
                         let merged = &mut stories[index].1.uses;
                         merged.extend(story_uses);
-                        merged.sort_by_key(|used| (used.section_index, used.variant as u8));
+                        crate::sort::sort_by_key(merged, &|used| {
+                            (used.section_index, used.variant as u8)
+                        });
                         merged.dedup();
                         continue;
                     }
@@ -1234,7 +1236,7 @@ impl<'a> Exporter<'a> {
             (*category, id.parse::<i64>().ok(), id)
         });
         stories.extend(extra);
-        stories.sort_by_key(|(category, _)| *category);
+        crate::sort::sort_by_key(&mut stories, &|(category, _)| *category);
         for (category, story) in stories {
             *members.entry(category).or_default() += 1;
             if selected.contains(&category) {
@@ -1353,7 +1355,7 @@ impl<'a> Exporter<'a> {
             .filter(|id| !sources.contains_key(*id))
             .cloned()
             .collect();
-        rest.sort_by_key(|id| (id.parse::<i64>().ok(), id.clone()));
+        crate::sort::sort_by_key(&mut rest, &|id| (id.parse::<i64>().ok(), id.clone()));
         order.extend(rest);
         let view = match self.view() {
             RevisionView::Original => EditTextView::Original,
@@ -2954,7 +2956,7 @@ impl<'a> Exporter<'a> {
             .inline
             .remove(&paragraph.para_id)
             .unwrap_or_default();
-        records.sort_by_key(|(raw, record)| (*raw, record.in_control()));
+        crate::sort::sort_by_key(&mut records, &|(raw, record)| (*raw, record.in_control()));
         let mut records = records.into_iter().peekable();
         let mut inlines = Vec::new();
         let mut controls = 0usize;
@@ -3673,7 +3675,7 @@ impl<'a> Exporter<'a> {
             .into_iter()
             .partition(|record| record.control_offset().is_some());
         let mut positioned = positioned;
-        positioned.sort_by_key(|record| record.control_offset());
+        crate::sort::sort_by_key(&mut positioned, &|record| record.control_offset());
         let mut positioned = positioned.into_iter().peekable();
         let mut offset = 0u32;
         for item in items {
