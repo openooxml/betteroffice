@@ -2240,14 +2240,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const endPosition = locToDisplayPosition(pasteRecord.end);
       const focusInControl = typeof document !== 'undefined' && !!document.activeElement?.closest?.('[data-paste-options]');
       if (focusInControl) {
-      } else if (!pasteReplacingRef.current && session.version() !== pasteRecord.version) {
-        pasteRecordRef.current = null;
-        pastePendingAnchorRef.current = false;
-        pasteOptionsRef.current.dismiss();
       } else if (endPosition !== null && selection.anchor === endPosition && selection.head === endPosition) {
         const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
         if (pastePendingAnchorRef.current) {
           pastePendingAnchorRef.current = false;
+          pasteRecord.version = session.version();
           pasteOptionsRef.current.show(anchor);
         } else if (pasteOptionsRef.current.visible) {
           pasteOptionsRef.current.setAnchor(anchor);

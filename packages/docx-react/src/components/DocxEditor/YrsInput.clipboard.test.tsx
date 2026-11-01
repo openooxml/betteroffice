@@ -241,6 +241,11 @@ test('paste options text-only over a selection replaces it and one undo restores
     expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a BAR b']);
     const control = view.getByRole('button', { name: 'Paste Options (Ctrl)' });
     fireEvent.click(control);
+    fireEvent.keyDown(view.getByRole('menu'), { key: 'Escape' });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(view.queryByRole('menu')).toBeNull();
+    expect(view.getByRole('button', { name: 'Paste Options (Ctrl)' })).toBe(control);
+    fireEvent.click(control);
     fireEvent.click(view.getByRole('menuitemradio', { name: 'Keep Text Only' }));
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a BAR b']);

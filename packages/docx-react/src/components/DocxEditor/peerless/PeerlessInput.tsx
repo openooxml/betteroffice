@@ -162,7 +162,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       selection.focus.story === record.end.story &&
       selection.focus.paraId === record.end.paraId &&
       selection.focus.offset === record.end.offset;
-    if (!atEnd || snapshot.version !== record.version) {
+    if (!atEnd) {
       if (typeof document !== 'undefined' && document.activeElement?.closest?.('[data-paste-options]')) return;
       pasteRecordRef.current = null;
       pasteOptionsRef.current.dismiss();
