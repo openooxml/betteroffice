@@ -290,7 +290,7 @@ globalThis.fetch = async (url) => {
     const packs = steps.indexOf('python -m pip install "$RUNNER_TEMP"/font-packs/*.whl');
     expect(steps.indexOf('scripts/python_font_packs.py --out "$RUNNER_TEMP/font-packs"')).toBeGreaterThan(-1);
     expect(packs).toBeGreaterThan(steps.indexOf('scripts/python_font_packs.py'));
-    expect(packs).toBeLessThan(steps.indexOf('python -m pip install -e "$binding"'));
+    expect(packs).toBeLessThan(steps.indexOf('python -m pip install --find-links "$RUNNER_TEMP/font-packs" -e "$binding"'));
   });
 
   test('font packs publish first, and a failed pack dispatches no format binding', () => {

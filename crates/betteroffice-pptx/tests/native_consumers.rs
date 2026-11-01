@@ -6,11 +6,7 @@ fn standalone_consumers_keep_facade_defaults_disabled() {
             include_str!("../../../apps/native-viewer/Cargo.toml"),
             false,
         ),
-        (
-            "fuzz",
-            include_str!("../../../fuzz/Cargo.toml"),
-            false,
-        ),
+        ("fuzz", include_str!("../../../fuzz/Cargo.toml"), false),
         (
             "native document binding",
             include_str!("../../../bindings/docx-native/Cargo.toml"),
