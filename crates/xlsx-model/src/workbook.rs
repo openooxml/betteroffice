@@ -536,13 +536,16 @@ impl Sheet {
         })
     }
 
+    /// writes a computed value, keeping the cell's formula and style; returns
+    /// the value it replaced.
     #[doc(hidden)]
-    pub fn set_calculated_value(&mut self, at: CellRef, value: CellValue) {
+    pub fn set_calculated_value(&mut self, at: CellRef, value: CellValue) -> CellValue {
         if let Some(cell) = self.cells.get_mut(&(at.row, at.col)) {
-            cell.value = value;
+            let replaced = std::mem::replace(&mut cell.value, value);
             if *cell == Cell::default() {
                 self.cells.remove(&(at.row, at.col));
             }
+            replaced
         } else {
             self.set_cell(
                 at,
@@ -551,6 +554,7 @@ impl Sheet {
                     ..Cell::default()
                 },
             );
+            CellValue::Empty
         }
     }
 

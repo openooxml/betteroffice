@@ -139,6 +139,20 @@ export interface CalculationStatus {
   limitedCells: string[];
   /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
   budgetExhausted?: boolean;
+  /** Formula cells the engine could not compute, at most 10,000; omitted by cores built before the list. */
+  unevaluatedCells?: UnevaluatedCellStatus[];
+}
+
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value,
+ * or stays blank when the file saved none, unless only an engine gap was
+ * involved, which shows its error.
+ */
+export interface UnevaluatedCellStatus {
+  /** The cell, qualified by its sheet when that is not the active one. */
+  address: string;
+  /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+  functions: string[];
 }
 
 export type NumberFormat =
@@ -1099,7 +1113,7 @@ function wrapWorkbookDocument(
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
         const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
-        if (typeof fn !== 'function') return { limitedCells: [] };
+        if (typeof fn !== 'function') return { limitedCells: [], unevaluatedCells: [] };
         return JSON.parse(fn.call(doc)) as CalculationStatus;
       });
     },

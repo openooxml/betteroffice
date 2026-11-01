@@ -258,6 +258,7 @@ impl WorkbookSnapshotEncoder {
             cycle_cells,
             limited_cells,
             budget_exhausted: _,
+            unevaluated_cells: _,
         } = &workbook.last_calculation;
         let calculation_counts = [changed.len(), cycle_cells.len(), limited_cells.len()];
         let header_count = calculation_counts.iter().try_fold(1u64, |total, count| {
@@ -436,6 +437,7 @@ impl WorkbookSnapshotEncoder {
                         cycle_cells,
                         limited_cells,
                         budget_exhausted: _,
+                        unevaluated_cells: _,
                     } = &workbook.last_calculation;
                     let lists = [changed, cycle_cells, limited_cells];
                     while let Some(list) = lists.get(self.calculation_list) {
@@ -1349,6 +1351,7 @@ impl WorkbookSnapshotBuilder {
             cycle_cells,
             limited_cells,
             budget_exhausted: _,
+            unevaluated_cells: _,
         } = &mut state.header.last_calculation;
         match state.calculation_list {
             0 => changed.push(address),
@@ -1376,6 +1379,7 @@ impl WorkbookSnapshotBuilder {
             cycle_cells,
             limited_cells,
             budget_exhausted: _,
+            unevaluated_cells: _,
         } = &mut state.header.last_calculation;
         let list = match state.calculation_list {
             0 => changed,
@@ -1826,6 +1830,7 @@ impl WorkbookSnapshotBuilder {
                 .ok_or_else(|| error("completed graph builder is missing"))?
                 .finish();
         }
+        workbook.derive_unevaluated(self.calculation_context);
         self.ready = Some(HydratedWorkbook {
             workbook: self
                 .restored

@@ -106,14 +106,31 @@ pub struct RangeRead {
     pub cells: Vec<Vec<CellRead>>,
 }
 
-/// Cells the last calculation settled by cycle or left at an evaluation limit.
+/// Cells the last calculation settled by cycle, left at an evaluation limit,
+/// or could not compute.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadCalculation {
     pub cycle_cells: Vec<CellTarget>,
     pub limited_cells: Vec<CellTarget>,
+    /// Formula cells the engine could not compute: they keep Excel's saved
+    /// value, or stay blank when the file saved none, unless only an engine
+    /// gap was involved, which shows its error.
+    #[serde(default)]
+    pub unevaluated_cells: Vec<UnevaluatedTarget>,
     /// Whether a list stopped at 10,000 cells.
     pub truncated: bool,
+}
+
+/// A formula cell the engine could not compute.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnevaluatedTarget {
+    #[serde(flatten)]
+    pub cell: CellTarget,
+    /// The uncomputable functions involved, sorted; empty when only gaps of
+    /// the engine were.
+    pub functions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -489,10 +506,21 @@ impl Workbook {
             capped_cell_targets(&keys, &self.last_calculation.cycle_cells);
         let (limited_cells, limited_cut) =
             capped_cell_targets(&keys, &self.last_calculation.limited_cells);
+        let unevaluated = &self.last_calculation.unevaluated_cells;
+        let unevaluated_cells = unevaluated
+            .iter()
+            .filter(|cell| (cell.address.sheet.0 as usize) < keys.len())
+            .take(MAX_DIAGNOSTIC_CELLS)
+            .map(|cell| UnevaluatedTarget {
+                cell: cell_target(&keys, cell.address.sheet, cell.address.cell),
+                functions: cell.functions.clone(),
+            })
+            .collect();
         let calculation = ReadCalculation {
             cycle_cells,
             limited_cells,
-            truncated: cycles_cut || limited_cut,
+            unevaluated_cells,
+            truncated: cycles_cut || limited_cut || unevaluated.len() > MAX_DIAGNOSTIC_CELLS,
         };
         Ok(Ok(CellsRead {
             version,

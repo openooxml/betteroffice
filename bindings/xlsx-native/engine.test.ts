@@ -32,6 +32,7 @@ type EngineDocument = {
   drainUpdateEvent(): Uint8Array;
   undoJson(): string;
   readCellsJson(request: string): string;
+  calculationStatusJson(): string;
   exportStructuredJson(options: string): string;
   saveBytes(): Uint8Array;
   free(): void;
@@ -414,6 +415,34 @@ describe('xlsx native engine parity', () => {
       const wasmCells = read(wasmDoc);
       expect(wasmCells).toContain('"value"');
       expect(withoutVersion(read(nativeDoc))).toBe(withoutVersion(wasmCells));
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
+  test('both engines keep and report a formula no offline engine can compute', async () => {
+    const zip = await JSZip.loadAsync(fixture);
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+      + '<c r="A1" t="str"><f>IFERROR(_xlfn.WEBSERVICE("http://x"),"fallback")</f><v>live</v></c>'
+      + '<c r="B1"><f>LEN(A1)*2</f><v>9</v></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const read = (doc: EngineDocument) => [
+      doc.calculationStatusJson(),
+      withoutVersion(doc.readCellsJson(JSON.stringify({
+        ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B1' } }],
+      }))),
+    ];
+    const wasmDoc = WasmDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    try {
+      const [status, cells] = read(wasmDoc);
+      expect(JSON.parse(status).unevaluatedCells).toEqual([
+        { address: 'A1', functions: ['WEBSERVICE'] },
+        { address: 'B1', functions: ['WEBSERVICE'] },
+      ]);
+      expect(cells).toContain('"live"');
+      expect(read(nativeDoc)).toEqual([status, cells]);
     } finally {
       wasmDoc.free();
       nativeDoc.free();

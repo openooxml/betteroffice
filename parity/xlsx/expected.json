@@ -17,7 +17,8 @@
       "calculation": {
         "cycleCells": [],
         "limitedCells": [],
-        "truncated": false
+        "truncated": false,
+        "unevaluatedCells": []
       },
       "ok": true,
       "ranges": [
@@ -585,7 +586,8 @@
       "calculation": {
         "cycleCells": [],
         "limitedCells": [],
-        "truncated": false
+        "truncated": false,
+        "unevaluatedCells": []
       },
       "ok": true,
       "ranges": [
@@ -673,7 +675,8 @@
       "calculation": {
         "cycleCells": [],
         "limitedCells": [],
-        "truncated": false
+        "truncated": false,
+        "unevaluatedCells": []
       },
       "ok": true,
       "ranges": [
@@ -769,7 +772,8 @@
       "calculation": {
         "cycleCells": [],
         "limitedCells": [],
-        "truncated": false
+        "truncated": false,
+        "unevaluatedCells": []
       },
       "ok": true,
       "ranges": [
@@ -865,7 +869,8 @@
       "calculation": {
         "cycleCells": [],
         "limitedCells": [],
-        "truncated": false
+        "truncated": false,
+        "unevaluatedCells": []
       },
       "ok": true,
       "ranges": [
@@ -1784,7 +1789,8 @@
   {
     "op": "calculationStatus",
     "result": {
-      "limitedCells": []
+      "limitedCells": [],
+      "unevaluatedCells": []
     }
   },
   {
@@ -2022,7 +2028,8 @@
   {
     "op": "calculationStatus",
     "result": {
-      "limitedCells": []
+      "limitedCells": [],
+      "unevaluatedCells": []
     }
   },
   {

@@ -176,6 +176,9 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
+    /// names of the uncomputable functions this evaluation called, in call
+    /// order; no handler answers for them.
+    uncomputable: Rc<RefCell<Vec<String>>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<DefinedNameValues>>,
     array_depth: Rc<Cell<u32>>,
@@ -241,6 +244,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -285,6 +289,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -322,6 +327,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -350,6 +356,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
+            uncomputable: Rc::clone(&self.uncomputable),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             array_depth: Rc::clone(&self.array_depth),
@@ -370,6 +377,7 @@ impl<'a> EvalContext<'a> {
         let exhausted = self.exhausted.get();
         let errors = self.unhandled_budget_errors.get();
         let unsupported = self.unsupported_functions.get();
+        let uncomputable = self.uncomputable_checkpoint();
         let random = self.random_state.get();
         let names = self.defined_name_values.borrow().insertions.len();
         let cache = self.criteria_cache.borrow().checkpoint();
@@ -387,6 +395,7 @@ impl<'a> EvalContext<'a> {
             self.exhausted.set(exhausted);
             self.unhandled_budget_errors.set(errors);
             self.unsupported_functions.set(unsupported);
+            self.discard_uncomputable_since(uncomputable);
             self.random_state.set(random);
             self.defined_name_values.borrow_mut().restore(names);
             self.criteria_cache.borrow_mut().restore(cache);
@@ -518,9 +527,35 @@ impl<'a> EvalContext<'a> {
     }
 
     /// whether a function the engine does not implement reached this
-    /// evaluation's result, rather than being answered by a handler.
+    /// evaluation's result, rather than being answered by a handler, or an
+    /// uncomputable one was called at all.
     pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
-        self.unsupported_functions.get() != 0
+        self.unsupported_functions.get() != 0 || !self.uncomputable.borrow().is_empty()
+    }
+
+    /// notes a call no offline engine can compute. unlike other gaps it
+    /// survives `IFERROR` and every other handler: what excel returned for the
+    /// call is unknown, so no handler's answer is known either.
+    pub(crate) fn record_uncomputable(&self, name: String) {
+        self.uncomputable.borrow_mut().push(name);
+    }
+
+    pub(crate) fn uncomputable_checkpoint(&self) -> usize {
+        self.uncomputable.borrow().len()
+    }
+
+    /// forgets the uncomputable calls since `checkpoint`, for an evaluation
+    /// whose value never reaches the result.
+    pub(crate) fn discard_uncomputable_since(&self, checkpoint: usize) {
+        self.uncomputable.borrow_mut().truncate(checkpoint);
+    }
+
+    /// the distinct uncomputable functions called, sorted.
+    pub(crate) fn uncomputable_functions(&self) -> Vec<String> {
+        let mut names = self.uncomputable.borrow().clone();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     pub(crate) fn record_unsupported_function(&self) {
@@ -715,11 +750,25 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             }
             Some(f) => f.call(args, ctx),
             None if crate::array::is_array_builtin(name) => evaluate_array(expr, ctx).into_scalar(),
-            None => {
-                ctx.record_unsupported_function();
-                err(ErrorValue::Name)
-            }
+            None => err(unimplemented_call(name, ctx)),
         },
+    }
+}
+
+/// a call to a function the engine has no implementation for. one no
+/// offline engine can compute is `#VALUE!`, what excel shows without the
+/// service it needs; any other name is excel's own `#NAME?`, an engine gap a
+/// handler may answer.
+pub(crate) fn unimplemented_call(name: &str, ctx: &EvalContext<'_>) -> ErrorValue {
+    match crate::functions::uncomputable(name) {
+        Some(name) => {
+            ctx.record_uncomputable(name);
+            ErrorValue::Value
+        }
+        None => {
+            ctx.record_unsupported_function();
+            ErrorValue::Name
+        }
     }
 }
 
@@ -745,11 +794,11 @@ fn intersect(area: Area, ctx: &EvalContext<'_>) -> CellValue {
 /// a defined name identified by the sheet its lookup resolved against.
 type DefinedNameKey = (SheetId, String);
 
-/// each name's value and whether it reached an engine gap, per intersection
-/// mode.
+/// each name's value, whether it reached an engine gap, and the uncomputable
+/// functions it called, per intersection mode.
 #[derive(Default)]
 struct DefinedNameValues {
-    values: HashMap<(DefinedNameKey, bool), (CellValue, bool)>,
+    values: HashMap<(DefinedNameKey, bool), (CellValue, bool, Vec<String>)>,
     insertions: Vec<(DefinedNameKey, bool)>,
 }
 
@@ -781,9 +830,12 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let memo = (key, ctx.intersects());
-    if let Some((cached, gap)) = ctx.defined_name_values.borrow().values.get(&memo) {
+    if let Some((cached, gap, uncomputable)) = ctx.defined_name_values.borrow().values.get(&memo) {
         if *gap {
             ctx.record_unsupported_function();
+        }
+        for name in uncomputable {
+            ctx.record_uncomputable(name.clone());
         }
         return cached.clone();
     }
@@ -793,12 +845,21 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let checkpoint = ctx.unsupported_checkpoint();
+    let called = ctx.uncomputable_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
+    let uncomputable = ctx
+        .uncomputable
+        .borrow()
+        .get(called..)
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
     let mut names = ctx.defined_name_values.borrow_mut();
     let memo = (binding.key, intersects);
     names.insertions.push(memo.clone());
-    names.values.insert(memo, (value.clone(), gap));
+    names
+        .values
+        .insert(memo, (value.clone(), gap, uncomputable));
     value
 }
 

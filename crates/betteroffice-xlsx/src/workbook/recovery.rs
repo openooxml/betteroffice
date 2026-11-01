@@ -818,8 +818,8 @@ impl Workbook {
             return Err(invalid("Recovery preservation sheet count mismatch"));
         }
         let mut workbook = match source {
-            Some(source) => Self::open_for_read(source)?,
-            None => Self::from_model(model.clone())?,
+            Some(source) => Self::open_internal(source, false, None)?,
+            None => Self::from_parts(model.clone(), None, SheetId(0), false, None)?,
         };
         pulse();
         validate_chart_source(&model, workbook.source_package.is_some())?;
@@ -856,7 +856,9 @@ impl Workbook {
             cycle_cells: header.last_calculation.cycle_cells,
             limited_cells: header.last_calculation.limited_cells,
             budget_exhausted: header.last_calculation.budget_exhausted,
+            unevaluated_cells: Vec::new(),
         };
+        workbook.derive_unevaluated(header.calculation_context);
         workbook.proposals = ProposalSet::with_id_counter(checkpoint.proposal_id_counter);
         for proposal in checkpoint.proposals {
             workbook.proposals.add(proposal);

@@ -152,6 +152,21 @@ pub struct CalculationStatus {
     /// Whether recalculation exhausted its shared budget, omitted when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub budget_exhausted: bool,
+    /// Formula cells the engine could not compute, at most 10,000.
+    pub unevaluated_cells: Vec<UnevaluatedStatus>,
+}
+
+/// A formula cell the engine could not compute: it keeps Excel's saved value,
+/// or stays blank when the file saved none, unless only an engine gap was
+/// involved, which shows its error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnevaluatedStatus {
+    /// The cell formatted relative to the active sheet.
+    pub address: String,
+    /// The uncomputable functions involved, sorted; empty when only gaps of
+    /// the engine were.
+    pub functions: Vec<String>,
 }
 
 impl Workbook {
@@ -364,6 +379,15 @@ impl Workbook {
                 .map(|address| self.format_address(*address))
                 .collect(),
             budget_exhausted: calculation.budget_exhausted,
+            unevaluated_cells: calculation
+                .unevaluated_cells
+                .iter()
+                .take(super::batch::MAX_DIAGNOSTIC_CELLS)
+                .map(|cell| UnevaluatedStatus {
+                    address: self.format_address(cell.address),
+                    functions: cell.functions.clone(),
+                })
+                .collect(),
         }
     }
 }

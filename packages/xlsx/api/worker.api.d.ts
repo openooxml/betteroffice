@@ -649,9 +649,20 @@ export interface XlsxRangeRead {
     /** Row-major. */
     cells: XlsxCellRead[][];
 }
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value,
+ * or stays blank when the file saved none, unless only an engine gap was
+ * involved, which shows its error.
+ */
+export interface XlsxUnevaluatedCell extends XlsxCellAddress {
+    /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+    functions: string[];
+}
 export interface XlsxReadCalculation {
     cycleCells: XlsxCellAddress[];
     limitedCells: XlsxCellAddress[];
+    /** Formula cells the engine could not compute; omitted by cores built before the list. */
+    unevaluatedCells?: XlsxUnevaluatedCell[];
     /** Whether a list stopped at 10,000 cells. */
     truncated: boolean;
 }
@@ -3290,6 +3301,19 @@ export interface CalculationStatus {
     limitedCells: string[];
     /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
     budgetExhausted?: boolean;
+    /** Formula cells the engine could not compute, at most 10,000; omitted by cores built before the list. */
+    unevaluatedCells?: UnevaluatedCellStatus[];
+}
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value,
+ * or stays blank when the file saved none, unless only an engine gap was
+ * involved, which shows its error.
+ */
+export interface UnevaluatedCellStatus {
+    /** The cell, qualified by its sheet when that is not the active one. */
+    address: string;
+    /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+    functions: string[];
 }
 export type NumberFormat = 'automatic' | 'plainText' | 'number' | 'percent' | 'scientific' | 'currency' | 'date' | 'time' | 'custom';
 export type BorderPreset = 'all' | 'inner' | 'horizontal' | 'vertical' | 'outer' | 'left' | 'top' | 'right' | 'bottom' | 'none';

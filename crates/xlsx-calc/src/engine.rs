@@ -21,7 +21,7 @@ use xlsx_model::{
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
-use crate::graph::{DepGraph, ReaderIndex};
+use crate::graph::{DepGraph, ReaderIndex, UnevaluatedCell};
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -52,12 +52,26 @@ pub struct RecalcResult {
     /// the recalculation's shared budget ran out, so formulas it refused kept
     /// their cached values or show `#NUM!` without one.
     pub budget_exhausted: bool,
+    /// every formula cell the graph holds as unevaluated after this recalc,
+    /// not only those it evaluated, in address order.
+    pub unevaluated_cells: Vec<UnevaluatedCell>,
 }
 
 #[derive(Clone, Copy)]
 struct RecalcContext {
     now_serial: Option<f64>,
     rand_seed: Option<u32>,
+}
+
+/// what every evaluation of one recalc or derivation shares besides its
+/// budget.
+#[derive(Clone, Copy)]
+struct Scope<'g> {
+    graph: &'g DepGraph,
+    /// the graph again when its names are the workbook's, so evaluation looks
+    /// names up there rather than scanning the workbook's table.
+    name_index: Option<&'g DepGraph>,
+    context: RecalcContext,
 }
 
 /// registers a function that parsing, building a workbook's authority and
@@ -162,6 +176,124 @@ pub fn rebuild_and_recalc_all_with_seed(
     (graph, result)
 }
 
+/// marks what a recalculation would leave unevaluated on a graph built over
+/// values no recalculation over it produced, writing nothing: each formula
+/// whose evaluation over the current values reaches an uncomputable function,
+/// and every formula reading one or a cell its array result would fill,
+/// through formulas the file stored no value for too. other gaps of the
+/// engine show only when a recalculation meets them. without a clock, a
+/// volatile formula counts every uncomputable call it holds, since what it
+/// reaches may depend on the date.
+pub fn derive_unevaluated(
+    wb: &Workbook,
+    graph: &DepGraph,
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) {
+    let scope = Scope {
+        graph,
+        name_index: graph.names_match(&wb.defined_names).then_some(graph),
+        context: RecalcContext {
+            now_serial,
+            rand_seed,
+        },
+    };
+    let mut budget = EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS);
+    budget.currency_coercion = crate::coercion::CurrencyCoercion::from_workbook(wb);
+    graph.assume_unevaluated(unevaluated_over(wb, scope, &Rc::new(budget)));
+}
+
+/// the formula cells [`derive_unevaluated`] marks, in no particular order. a
+/// formula the budget stops short in counts every uncomputable call it holds.
+/// each cell passes its functions to its readers once, and again only while
+/// the budget pays for it, so readers always learn that they are unevaluated
+/// but may miss functions a long walk finds late. an array formula evaluates
+/// once more for the rectangle its result would fill, as a recalculation
+/// does; the readers of a rectangle the budget leaves unknown are missed.
+fn unevaluated_over(
+    wb: &Workbook,
+    scope: Scope<'_>,
+    budget: &Rc<EvaluationBudget>,
+) -> Vec<UnevaluatedCell> {
+    let graph = scope.graph;
+    let mut found: HashMap<Key, Vec<String>> = HashMap::new();
+    let mut reaches: HashMap<Key, Option<CellRange>> = HashMap::new();
+    let mut worklist = Vec::new();
+    for (sheet, cell) in graph.uncomputable_formulas() {
+        let at = key(sheet, cell);
+        let evaluated = eval_node(wb, at, scope, Rc::clone(budget));
+        if let Some(functions) = evaluated.gap.filter(|functions| !functions.is_empty()) {
+            reaches.insert(at, evaluated.reach);
+            found.insert(at, functions);
+            worklist.push(at);
+        }
+    }
+    let mut expanded = HashSet::new();
+    let mut readers = Readers::new(graph);
+    let mut spill_readers: HashMap<Key, Vec<(SheetId, CellRef)>> = HashMap::new();
+    let mut dependents = Vec::new();
+    while let Some(at) = worklist.pop() {
+        if !expanded.insert(at) && !budget.consume(1) {
+            continue;
+        }
+        progress();
+        let functions = found.get(&at).cloned().unwrap_or_default();
+        readers.dependents_of(at, &mut dependents);
+        let filled = spill_readers.entry(at).or_insert_with(|| {
+            reaches
+                .remove(&at)
+                .unwrap_or_else(|| would_fill(wb, at, scope, budget))
+                .filter(|range| {
+                    range.start != range.end && graph.spill_of(at.0, cell_of(at)) != Some(*range)
+                })
+                .map(|range| {
+                    graph
+                        .readers_of_range(at.0, range)
+                        .filter(|&(sheet, cell)| key(sheet, cell) != at)
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        dependents.extend(filled.iter().copied());
+        for (sheet, cell) in dependents.drain(..) {
+            let reader = key(sheet, cell);
+            let inherited = found.entry(reader).or_default();
+            let known = inherited.len();
+            inherited.extend(functions.iter().cloned());
+            inherited.sort_unstable();
+            inherited.dedup();
+            if inherited.len() != known {
+                worklist.push(reader);
+            }
+        }
+    }
+    found
+        .into_iter()
+        .filter(|&(at, _)| graph.is_formula(at.0, cell_of(at)))
+        .map(|(at, functions)| UnevaluatedCell {
+            sheet: at.0,
+            cell: cell_of(at),
+            functions,
+        })
+        .collect()
+}
+
+/// the rectangle an array formula's result would fill over the current
+/// values, when `at` anchors one and the budget pays for finding out.
+fn would_fill(
+    wb: &Workbook,
+    at: Key,
+    scope: Scope<'_>,
+    budget: &Rc<EvaluationBudget>,
+) -> Option<CellRange> {
+    wb.sheet(at.0)?.array_formula(cell_of(at))?;
+    let evaluated = eval_node(wb, at, scope, Rc::clone(budget));
+    match evaluated.value {
+        Some(NodeValue::Spill(spill)) => Some(spill.range),
+        _ => evaluated.reach,
+    }
+}
+
 /// formula cells to re-evaluate: transitive dependents of the seeds, plus
 /// volatile cells and their dependents.
 fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<Key> {
@@ -246,7 +378,9 @@ const MAX_SPILL_ROUNDS: usize = 4;
 
 /// topologically order `recompute` and evaluate it, writing changed values into
 /// `wb`. cells caught in a cycle are settled and reported separately. every
-/// cell a round takes up joins `recomputed`.
+/// cell a round takes up joins `recomputed`. an array formula an uncomputable
+/// call left unevaluated runs again, so the formulas reading the cells its
+/// result would newly fill learn of the call.
 fn run_recalc(
     wb: &mut Workbook,
     graph: &DepGraph,
@@ -292,8 +426,28 @@ fn run_recalc_with_budget(
         cycle_cells: Vec::new(),
         limited_cells: Vec::new(),
         spilled: Vec::new(),
+        readers: Readers::new(graph),
+        inherited: HashMap::new(),
+        replaced: HashMap::new(),
+        rerun: Vec::new(),
     };
     let mut pending = recompute;
+    let mut anchors = Vec::new();
+    for cell in graph.unevaluated_cells() {
+        let at = key(cell.sheet, cell.cell);
+        if pending.contains(&at) || cell.functions.is_empty() {
+            continue;
+        }
+        let anchor = wb
+            .sheet(cell.sheet)
+            .is_some_and(|sheet| sheet.array_formula(cell.cell).is_some());
+        if anchor {
+            anchors.push(at);
+        } else {
+            pass.taint_readers(at, &cell.functions);
+        }
+    }
+    pending.extend(anchors);
 
     for round in 0..MAX_SPILL_ROUNDS {
         if round > 0 {
@@ -324,10 +478,14 @@ fn run_recalc_with_budget(
                 }
             }
         }
-        if pass.spilled.is_empty() {
+        if pass.spilled.is_empty() && pass.rerun.is_empty() {
             break;
         }
-        pending = dependents_closure(graph, &std::mem::take(&mut pass.spilled));
+        let rerun = std::mem::take(&mut pass.rerun);
+        let mut seeds = std::mem::take(&mut pass.spilled);
+        seeds.extend(rerun.iter().map(|&u| (u.0, cell_of(u))));
+        pending = dependents_closure(graph, &seeds);
+        pending.extend(rerun);
         if pending.is_empty() {
             break;
         }
@@ -349,6 +507,7 @@ fn run_recalc_with_budget(
         cycle_cells,
         limited_cells,
         budget_exhausted,
+        unevaluated_cells: graph.unevaluated_cells(),
     }
 }
 
@@ -414,23 +573,150 @@ struct Pass<'g> {
     limited_cells: Vec<(SheetId, CellRef)>,
     /// spilled cells whose value moved; the next round runs their readers.
     spilled: Vec<(SheetId, CellRef)>,
+    readers: Readers<'g>,
+    /// formulas reading a cell an uncomputable function left unevaluated,
+    /// with those functions.
+    inherited: HashMap<Key, Vec<String>>,
+    /// what writes no gap reached replaced, by formula, as it was before this
+    /// recalc: a later round that finds a gap reaching the formula puts it
+    /// back. one entry per cell written, whatever the rounds.
+    replaced: HashMap<Key, Replaced>,
+    /// formulas reading cells an array result an uncomputable call kept from
+    /// being written would newly fill; the next round runs them again, so
+    /// they learn of it.
+    rerun: Vec<Key>,
 }
 
-impl Pass<'_> {
+/// what one formula's writes replaced: each cell's previous value, and the
+/// rectangle an array formula recorded before.
+struct Replaced {
+    cells: HashMap<Key, CellValue>,
+    range: Option<CellRange>,
+}
+
+/// what evaluating one formula node produced.
+struct Evaluated {
+    /// `None` keeps the cached value.
+    value: Option<NodeValue>,
+    /// the shared budget ran out during the evaluation.
+    limited: bool,
+    /// the uncomputable functions called, when an engine gap reached the
+    /// result.
+    gap: Option<Vec<String>>,
+    /// the rectangle an array result would fill, when an uncomputable call
+    /// kept it from being written.
+    reach: Option<CellRange>,
+}
+
+impl<'g> Pass<'g> {
     /// evaluate a formula no cycle of the range graph passes through.
     fn evaluate(&mut self, wb: &mut Workbook, u: Key) {
         #[cfg(test)]
         FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
         progress();
-        let (value, limited) = eval_node(
-            wb,
-            u,
-            self.context,
-            Rc::clone(&self.budget),
-            self.graph,
-            self.name_index,
-        );
-        self.write(wb, u, value, limited);
+        let authored = self.authored(wb, u);
+        let evaluated = eval_node_with(wb, wb, u, authored, self.scope(), Rc::clone(&self.budget));
+        self.write(wb, u, evaluated);
+    }
+
+    fn scope(&self) -> Scope<'g> {
+        Scope {
+            graph: self.graph,
+            name_index: self.name_index,
+            context: self.context,
+        }
+    }
+
+    /// the rectangle an array formula at `u` recorded before this recalc,
+    /// whatever an earlier round wrote since.
+    fn authored(&self, wb: &Workbook, u: Key) -> Option<CellRange> {
+        match self.replaced.get(&u) {
+            Some(replaced) => replaced.range,
+            None => wb.sheet(u.0)?.array_formula(cell_of(u)),
+        }
+    }
+
+    /// passes a cell's uncomputable functions on to the formulas that read it.
+    /// a gap of this engine alone passes nothing: what excel saved for the
+    /// cell is its value, so its readers recalculate from that.
+    fn taint_readers(&mut self, u: Key, functions: &[String]) {
+        if functions.is_empty() {
+            return;
+        }
+        let mut readers = Vec::new();
+        self.readers.dependents_of(u, &mut readers);
+        for (sheet, cell) in readers {
+            let inherited = self.inherited.entry(key(sheet, cell)).or_default();
+            inherited.extend(functions.iter().cloned());
+            inherited.sort_unstable();
+            inherited.dedup();
+        }
+    }
+
+    /// passes an anchor's uncomputable functions on to the formulas reading
+    /// the cells its result would fill, when the graph does not know that
+    /// rectangle, and runs them again in the next round.
+    fn taint_spill_readers(&mut self, u: Key, range: CellRange, functions: &[String]) {
+        let graph = self.graph;
+        if functions.is_empty()
+            || range.start == range.end
+            || graph.spill_of(u.0, cell_of(u)) == Some(range)
+        {
+            return;
+        }
+        for (sheet, cell) in graph.readers_of_range(u.0, range) {
+            let reader = key(sheet, cell);
+            if reader == u {
+                continue;
+            }
+            let inherited = self.inherited.entry(reader).or_default();
+            inherited.extend(functions.iter().cloned());
+            inherited.sort_unstable();
+            inherited.dedup();
+            self.rerun.push(reader);
+        }
+        if !self.rerun.is_empty() {
+            self.budget.schedule_spill_round();
+        }
+    }
+
+    /// show an array formula the budget refused: an uncached anchor shows
+    /// `#NUM!`, and a cached one, like the rest of its rectangle, keeps what
+    /// it had.
+    fn refuse(&mut self, wb: &mut Workbook, u: Key, log: Option<&mut Vec<(Key, CellValue)>>) {
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        if matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty)
+            && write_if_changed(wb, u, refused, &self.budget)
+        {
+            self.changed.push((u.0, cell_of(u)));
+            if let Some(log) = log {
+                log.push((u, CellValue::Empty));
+            }
+        }
+    }
+
+    /// puts back what an earlier evaluation of `u` replaced, as it was.
+    fn restore(&mut self, wb: &mut Workbook, u: Key, replaced: Replaced) {
+        let Some(sheet) = wb.sheet_mut(u.0) else {
+            return;
+        };
+        for (at, value) in replaced.cells {
+            self.budget.invalidate_criteria_cell(at.0, cell_of(at));
+            sheet.set_calculated_value(cell_of(at), value);
+            self.changed.push((at.0, cell_of(at)));
+            if at != u {
+                self.spilled.push((at.0, cell_of(at)));
+            }
+        }
+        match replaced.range {
+            Some(range) => sheet.set_array_formula(cell_of(u), range),
+            None => sheet.clear_array_formula(cell_of(u)),
+        }
+        if !self.spilled.is_empty() {
+            self.budget.schedule_spill_round();
+        }
     }
 
     /// settle the members of one component of the range graph by what they
@@ -465,17 +751,16 @@ impl Pass<'_> {
                 #[cfg(test)]
                 FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
                 progress();
-                let (value, limited) = eval_node_with(
+                let evaluated = eval_node_with(
                     &log,
                     wb,
                     u,
-                    self.context,
+                    self.authored(wb, u),
+                    self.scope(),
                     Rc::clone(&self.budget),
-                    self.graph,
-                    self.name_index,
                 );
                 let Some(target) = log.first.get() else {
-                    self.write(wb, u, value, limited);
+                    self.write(wb, u, evaluated);
                     settled[id] = true;
                     on_chain[id] = None;
                     chain.pop();
@@ -495,6 +780,7 @@ impl Pass<'_> {
                     if write_if_changed(wb, u, circular_value(wb, u), &self.budget) {
                         self.changed.push((u.0, cell_of(u)));
                     }
+                    self.graph.set_unevaluated(u.0, cell_of(u), None);
                     self.cycle_cells.push((u.0, cell_of(u)));
                     settled[member] = true;
                     on_chain[member] = None;
@@ -504,19 +790,58 @@ impl Pass<'_> {
         self.budget.set_settling(false);
     }
 
-    fn write(&mut self, wb: &mut Workbook, u: Key, value: Option<NodeValue>, limited: bool) {
+    /// a formula an uncomputable call reaches, through its own evaluation or
+    /// a cell it reads, is never written: it keeps what it holds, excel's
+    /// value or a blank, and its readers learn of the call. once a gap keeps a
+    /// formula's value, what an earlier round of this recalc wrote for it is
+    /// put back as it was before the recalc.
+    fn write(&mut self, wb: &mut Workbook, u: Key, evaluated: Evaluated) {
+        let Evaluated {
+            mut value,
+            limited,
+            mut gap,
+            mut reach,
+        } = evaluated;
+        if let Some(inherited) = self.inherited.get(&u) {
+            let functions = gap.get_or_insert_with(Vec::new);
+            functions.extend(inherited.iter().cloned());
+            functions.sort_unstable();
+            functions.dedup();
+        }
+        if gap.as_ref().is_some_and(|functions| !functions.is_empty())
+            && let Some(NodeValue::Spill(spill)) = value.take()
+        {
+            reach = Some(spill.range);
+        }
+        if gap.is_some()
+            && value.is_none()
+            && let Some(replaced) = self.replaced.remove(&u)
+        {
+            self.restore(wb, u, replaced);
+        }
+        if let Some(functions) = &gap {
+            self.taint_readers(u, functions);
+            if let Some(range) = reach {
+                self.taint_spill_readers(u, range, functions);
+            }
+        }
         let at = (u.0, cell_of(u));
+        let mut log = (gap.is_none() && value.is_some()).then(Vec::new);
         if limited {
             self.limited_cells.push(at);
         }
+        let range = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(at.1));
         match value {
             Some(NodeValue::Scalar(value)) => {
-                if write_if_changed(wb, u, value, &self.budget) {
+                if let Some(previous) = replace_if_changed(wb, u, value, &self.budget) {
                     self.changed.push(at);
+                    if let Some(log) = &mut log {
+                        log.push((u, previous));
+                    }
                 }
             }
             Some(NodeValue::Spill(spill)) => {
-                match write_spill(wb, u, spill, &self.budget, &mut self.changed) {
+                match write_spill(wb, u, spill, &self.budget, &mut self.changed, log.as_mut()) {
                     Some(moved) => {
                         if !moved.is_empty() {
                             self.budget.schedule_spill_round();
@@ -527,12 +852,33 @@ impl Pass<'_> {
                         if !limited {
                             self.limited_cells.push(at);
                         }
-                        refuse(wb, u, &self.budget, &mut self.changed);
+                        if let Some(held) = held_gap(self.graph, u, true, false) {
+                            let kept = Evaluated {
+                                value: None,
+                                limited: false,
+                                gap: Some(held),
+                                reach: None,
+                            };
+                            self.write(wb, u, kept);
+                            return;
+                        }
+                        self.refuse(wb, u, log.as_mut());
                     }
                 }
             }
-            Some(NodeValue::Refused) => refuse(wb, u, &self.budget, &mut self.changed),
+            Some(NodeValue::Refused) => self.refuse(wb, u, log.as_mut()),
             None => {}
+        }
+        self.graph.set_unevaluated(u.0, at.1, gap);
+        let reshaped = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(at.1)) != range;
+        if let Some(log) = log.filter(|log| !log.is_empty() || reshaped) {
+            let replaced = self.replaced.entry(u).or_insert_with(|| Replaced {
+                cells: HashMap::new(),
+                range,
+            });
+            for (at, previous) in log {
+                replaced.cells.entry(at).or_insert(previous);
+            }
         }
     }
 }
@@ -714,30 +1060,35 @@ fn cell_random_seed(seed: u32, cell: Key) -> u64 {
 
 /// evaluate one formula node; `None` keeps the cached value, because the cell
 /// has no formula, it no longer parses, or an engine gap reached the result.
-fn eval_node(
-    wb: &Workbook,
-    u: Key,
-    context: RecalcContext,
-    budget: Rc<EvaluationBudget>,
-    graph: &DepGraph,
-    name_index: Option<&DepGraph>,
-) -> (Option<NodeValue>, bool) {
-    eval_node_with(wb, wb, u, context, budget, graph, name_index)
+fn eval_node(wb: &Workbook, u: Key, scope: Scope<'_>, budget: Rc<EvaluationBudget>) -> Evaluated {
+    let authored = wb
+        .sheet(u.0)
+        .and_then(|sheet| sheet.array_formula(cell_of(u)));
+    eval_node_with(wb, wb, u, authored, scope, budget)
 }
 
 /// evaluate one node, reading cells through `provider` while `wb` supplies the
-/// formula's own shape.
+/// formula's own shape; `authored` is the rectangle an array formula recorded.
 fn eval_node_with(
     provider: &dyn CellProvider,
     wb: &Workbook,
     u: Key,
-    context: RecalcContext,
+    authored: Option<CellRange>,
+    scope: Scope<'_>,
     budget: Rc<EvaluationBudget>,
-    graph: &DepGraph,
-    name_index: Option<&DepGraph>,
-) -> (Option<NodeValue>, bool) {
+) -> Evaluated {
+    let Scope {
+        graph,
+        name_index,
+        context,
+    } = scope;
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
-        return (None, false);
+        return Evaluated {
+            value: None,
+            limited: false,
+            gap: None,
+            reach: None,
+        };
     };
     #[cfg(feature = "test-counters")]
     EVALUATED_FORMULAS.with(|cells| {
@@ -746,7 +1097,6 @@ fn eval_node_with(
         }
     });
     let cell = cell_of(u);
-    let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
     ctx.cell = Some(cell);
     ctx.now_serial = context.now_serial;
@@ -761,8 +1111,34 @@ fn eval_node_with(
     };
     let unsupported = ctx.has_unhandled_unsupported_function();
     let refused = ctx.has_unhandled_budget_error();
+    let mut gap = unsupported.then(|| ctx.uncomputable_functions());
+    let undated = context.now_serial.is_none() && graph.is_volatile_cell(u.0, cell);
+    let held = held_gap(graph, u, refused, undated);
+    if held.is_some() || gap.as_ref().is_some_and(|functions| !functions.is_empty()) {
+        if let Some(held) = held {
+            let functions = gap.get_or_insert_with(Vec::new);
+            functions.extend(held);
+            functions.sort_unstable();
+            functions.dedup();
+        }
+        let reach = match value {
+            NodeValue::Spill(spill) => Some(spill.range),
+            NodeValue::Scalar(_) | NodeValue::Refused => None,
+        };
+        return Evaluated {
+            value: None,
+            limited: ctx.exhausted(),
+            gap,
+            reach,
+        };
+    }
     if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
-        return (None, ctx.exhausted());
+        return Evaluated {
+            value: None,
+            limited: ctx.exhausted(),
+            gap,
+            reach: None,
+        };
     }
     // a refusal is no error value a wrapper may answer, so what `IFERROR` or
     // `ISERROR` made of it never stands in for the result
@@ -773,7 +1149,12 @@ fn eval_node_with(
                 value: ErrorValue::Num,
             }),
         };
-        return (Some(refused), ctx.exhausted());
+        return Evaluated {
+            value: Some(refused),
+            limited: ctx.exhausted(),
+            gap,
+            reach: None,
+        };
     }
     // a rectangle an engine gap reshaped would retire cells the real result
     // still covers, so report the gap over the recorded rectangle instead.
@@ -789,7 +1170,31 @@ fn eval_node_with(
         }
         value => value,
     };
-    (Some(value), ctx.exhausted())
+    Evaluated {
+        value: Some(value),
+        limited: ctx.exhausted(),
+        gap,
+        reach: None,
+    }
+}
+
+/// what keeps a formula whose evaluation may not have reached its
+/// uncomputable calls: when the budget stopped it, every call it holds and
+/// what it was already held for; when it is volatile and there is no clock,
+/// every call it holds, since what it reaches may depend on the date. `None`
+/// when nothing does.
+fn held_gap(graph: &DepGraph, u: Key, refused: bool, undated: bool) -> Option<Vec<String>> {
+    if !refused && !undated {
+        return None;
+    }
+    let mut held = graph.uncomputable_calls_at(u.0, cell_of(u));
+    if refused && let Some(listed) = graph.unevaluated_functions(u.0, cell_of(u)) {
+        held.extend(listed);
+        held.sort_unstable();
+        held.dedup();
+        return Some(held);
+    }
+    (!held.is_empty()).then_some(held)
 }
 
 /// a formula never leaves its cell blank: excel reads an empty cell as the
@@ -816,24 +1221,6 @@ fn circular_value(wb: &Workbook, u: Key) -> CellValue {
     }
 }
 
-/// show an array formula the budget refused: an uncached anchor shows `#NUM!`,
-/// and a cached one, like the rest of its rectangle, keeps what it had.
-fn refuse(
-    wb: &mut Workbook,
-    u: Key,
-    budget: &EvaluationBudget,
-    changed: &mut Vec<(SheetId, CellRef)>,
-) {
-    let refused = CellValue::Error {
-        value: ErrorValue::Num,
-    };
-    if matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty)
-        && write_if_changed(wb, u, refused, budget)
-    {
-        changed.push((u.0, cell_of(u)));
-    }
-}
-
 /// lay a spilled result out from its anchor: retire the cells the previous
 /// result reached and no longer fills, then write the new ones. returns the
 /// spilled cells whose value moved, so their readers can be rescheduled, or
@@ -844,6 +1231,7 @@ fn write_spill(
     spill: Spill,
     budget: &EvaluationBudget,
     changed: &mut Vec<(SheetId, CellRef)>,
+    mut log: Option<&mut Vec<(Key, CellValue)>>,
 ) -> Option<Vec<(SheetId, CellRef)>> {
     let anchor = cell_of(u);
     let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
@@ -870,16 +1258,28 @@ fn write_spill(
             budget,
             changed,
             &mut moved,
+            log.as_deref_mut(),
         );
     }
     for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
-            if write_if_changed(wb, (u.0, row, col), value, budget) {
+            if let Some(previous) = replace_if_changed(wb, u, value, budget) {
                 changed.push((u.0, anchor));
+                if let Some(log) = log.as_deref_mut() {
+                    log.push((u, previous));
+                }
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, budget, changed, &mut moved);
+        write_spilled_cell(
+            wb,
+            (u.0, row, col),
+            value,
+            budget,
+            changed,
+            &mut moved,
+            log.as_deref_mut(),
+        );
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
@@ -963,13 +1363,17 @@ fn write_spilled_cell(
     budget: &EvaluationBudget,
     changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
+    log: Option<&mut Vec<(Key, CellValue)>>,
 ) {
     if owns_formula(wb, u.0, cell_of(u)) {
         return;
     }
-    if write_if_changed(wb, u, value, budget) {
+    if let Some(previous) = replace_if_changed(wb, u, value, budget) {
         changed.push((u.0, cell_of(u)));
         moved.push((u.0, cell_of(u)));
+        if let Some(log) = log {
+            log.push((u, previous));
+        }
     }
 }
 
@@ -986,20 +1390,28 @@ fn write_if_changed(
     value: CellValue,
     budget: &EvaluationBudget,
 ) -> bool {
+    replace_if_changed(wb, u, value, budget).is_some()
+}
+
+/// [`write_if_changed`], returning the value it replaced.
+fn replace_if_changed(
+    wb: &mut Workbook,
+    u: Key,
+    value: CellValue,
+    budget: &EvaluationBudget,
+) -> Option<CellValue> {
     let value = precision_as_displayed(wb, u, value);
     let previous = wb.value_cow(u.0, cell_of(u));
     let negative_zero = !wb.full_precision
         && matches!(previous.as_ref(), CellValue::Number { value } if *value == 0.0 && value.is_sign_negative())
         && matches!(&value, CellValue::Number { value } if *value == 0.0 && value.is_sign_positive());
     if *previous == value && !negative_zero {
-        return false;
+        return None;
     }
     budget.invalidate_criteria_cell(u.0, cell_of(u));
-    if let Some(sheet) = wb.sheet_mut(u.0) {
-        let at = cell_of(u);
-        sheet.set_calculated_value(at, value);
-    }
-    true
+    Some(wb.sheet_mut(u.0).map_or(CellValue::Empty, |sheet| {
+        sheet.set_calculated_value(cell_of(u), value)
+    }))
 }
 
 fn precision_as_displayed(wb: &Workbook, u: Key, value: CellValue) -> CellValue {
@@ -1194,7 +1606,7 @@ mod tests {
         let refused = CellValue::Error {
             value: xlsx_model::ErrorValue::Num,
         };
-        for formula in ["1", "WEBSERVICE(1)"] {
+        for formula in ["1", "REPRO_UNKNOWN_FUNCTION(1)"] {
             let (mut wb, s) = one_sheet();
             spend_the_budget(&mut wb, s);
             put_array(&mut wb, s, formula);
@@ -1244,7 +1656,13 @@ mod tests {
                 "ROWS(_xlfn.SEQUENCE(990000))",
             );
         }
-        put_recorded(&mut wb, s, "C20", "{1;2}+WEBSERVICE(1)", "C20:C262163");
+        put_recorded(
+            &mut wb,
+            s,
+            "C20",
+            "{1;2}+REPRO_UNKNOWN_FUNCTION(1)",
+            "C20:C262163",
+        );
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
         assert!(result.limited_cells.contains(&(s, a1("C20"))));
         assert_eq!(
@@ -1336,8 +1754,8 @@ mod tests {
         }
     }
 
-    /// `WEBSERVICE` stands in for any function the engine does not implement,
-    /// and is one it never will.
+    /// `WEBSERVICE` is a function no offline engine computes, so neither the
+    /// formula calling it nor one reading that formula is written.
     #[test]
     fn an_unimplemented_function_keeps_the_cached_value() {
         let (mut wb, s) = one_sheet();
@@ -1346,14 +1764,14 @@ mod tests {
         put_formula(&mut wb, s, "C1", "B1*2");
         let r = rebuild_and_recalc_all(&mut wb, None).1;
         assert_eq!(value(&wb, s, "B1"), num(4.9));
-        assert_eq!(value(&wb, s, "C1"), num(9.8));
+        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
         assert!(!changed_a1(&r).contains(&"B1".to_string()));
     }
 
     #[test]
-    fn an_unimplemented_function_without_a_cached_value_reports_name() {
+    fn an_unknown_function_without_a_cached_value_reports_name() {
         let (mut wb, s) = one_sheet();
-        put_formula(&mut wb, s, "A1", "WEBSERVICE(1)");
+        put_formula(&mut wb, s, "A1", "REPRO_UNKNOWN_FUNCTION(1)");
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(
             value(&wb, s, "A1"),
@@ -1798,14 +2216,709 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(5.0));
     }
 
-    /// IFERROR answers for the call it wraps, so the gap never reaches the
-    /// result and the computed value must replace the cache.
+    /// IFERROR answers for the unknown name it wraps, as excel's `#NAME?`
+    /// does, so the gap never reaches the result and the computed value must
+    /// replace the cache.
     #[test]
-    fn a_handler_that_answers_an_unimplemented_call_writes_its_result() {
+    fn a_handler_that_answers_an_unknown_call_writes_its_result() {
         let (mut wb, s) = one_sheet();
-        put_cached_formula(&mut wb, s, "B1", "IFERROR(WEBSERVICE(1),0)", num(99.0));
-        rebuild_and_recalc_all(&mut wb, None);
+        put_cached_formula(
+            &mut wb,
+            s,
+            "B1",
+            "IFERROR(REPRO_UNKNOWN_FUNCTION(1),0)",
+            num(99.0),
+        );
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(0.0));
+        assert!(result.unevaluated_cells.is_empty());
+    }
+
+    fn unevaluated(result: &RecalcResult) -> Vec<(String, Vec<String>)> {
+        result
+            .unevaluated_cells
+            .iter()
+            .map(|cell| (cell.cell.to_a1(), cell.functions.clone()))
+            .collect()
+    }
+
+    fn reported(cells: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        cells
+            .iter()
+            .map(|(at, functions)| {
+                (
+                    (*at).to_string(),
+                    functions.iter().map(|name| (*name).to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn text(value: &str) -> CellValue {
+        CellValue::Text {
+            value: value.to_string(),
+        }
+    }
+
+    /// no handler knows what an uncomputable call returned in excel, so the
+    /// cache survives every wrapper and the cell is reported.
+    #[test]
+    fn a_handler_around_an_uncomputable_call_keeps_the_cache() {
+        for formula in [
+            "IFERROR(WEBSERVICE(\"http://x\"),\"fallback\")",
+            "IFNA(_xlfn.WEBSERVICE(\"http://x\"),\"fallback\")",
+            "IF(ISERROR(WEBSERVICE(\"http://x\")),\"fallback\",\"ok\")",
+        ] {
+            let (mut wb, s) = one_sheet();
+            put_cached_formula(&mut wb, s, "B1", formula, text("live"));
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "B1"), text("live"), "{formula}");
+            assert_eq!(
+                unevaluated(&result),
+                reported(&[("B1", &["WEBSERVICE"])]),
+                "{formula}"
+            );
+        }
+    }
+
+    /// without a saved value there is nothing to keep, so an uncomputable
+    /// call, a handler around one and a formula reading one stay blank.
+    #[test]
+    fn an_uncached_uncomputable_call_stays_blank_and_is_reported() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "WEBSERVICE(\"http://x\")");
+        put_formula(
+            &mut wb,
+            s,
+            "A2",
+            "IFERROR(WEBSERVICE(\"http://x\"),\"fallback\")",
+        );
+        put_formula(&mut wb, s, "A3", "LEN(A1)");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        for at in ["A1", "A2", "A3"] {
+            assert_eq!(value(&wb, s, at), CellValue::Empty, "{at}");
+        }
+        assert!(result.changed.is_empty());
+        assert_eq!(
+            unevaluated(&result),
+            reported(&[
+                ("A1", &["WEBSERVICE"]),
+                ("A2", &["WEBSERVICE"]),
+                ("A3", &["WEBSERVICE"]),
+            ])
+        );
+    }
+
+    /// a formula reading an unevaluated cell keeps its own cache, even after
+    /// an edit recomputes it without recomputing the cell it reads.
+    #[test]
+    fn dependents_of_an_uncomputable_call_keep_their_caches() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "A1", "WEBSERVICE(\"http://x\")", num(5.0));
+        put_cached_formula(&mut wb, s, "B1", "A1*2", num(11.0));
+        put_num(&mut wb, s, "D1", 1.0);
+        put_cached_formula(&mut wb, s, "C1", "B1+D1", num(12.0));
+        put_formula(&mut wb, s, "E1", "A1*2");
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(11.0));
+        assert_eq!(value(&wb, s, "C1"), num(12.0));
+        assert_eq!(value(&wb, s, "E1"), CellValue::Empty);
+        let all = reported(&[
+            ("A1", &["WEBSERVICE"]),
+            ("B1", &["WEBSERVICE"]),
+            ("C1", &["WEBSERVICE"]),
+            ("E1", &["WEBSERVICE"]),
+        ]);
+        assert_eq!(unevaluated(&result), all);
+
+        put_num(&mut wb, s, "D1", 2.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "C1"), num(12.0));
+        assert_eq!(unevaluated(&result), all);
+
+        put_num(&mut wb, s, "A1", 3.0);
+        graph.set_formula(s, a1("A1"), None);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(6.0));
+        assert_eq!(value(&wb, s, "C1"), num(8.0));
+        assert!(result.unevaluated_cells.is_empty());
+    }
+
+    /// an unknown name is excel's own `#NAME?`: unhandled, the file's cache
+    /// is the only value known for it, so it stays and is reported.
+    #[test]
+    fn an_unknown_function_keeps_its_cache_and_is_reported() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "A1", "REPRO_UNKNOWN_FUNCTION(1)", num(7.0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), num(7.0));
+        assert_eq!(unevaluated(&result), reported(&[("A1", &[])]));
+    }
+
+    /// add-in and user-defined functions run code the file does not carry.
+    #[test]
+    fn add_in_functions_are_uncomputable() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "A1", "IFERROR(_xll.Quote(\"x\"),0)", num(3.0));
+        put_cached_formula(&mut wb, s, "A2", "IFERROR(_xludf.Mine(1),0)", num(4.0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), num(3.0));
+        assert_eq!(value(&wb, s, "A2"), num(4.0));
+        assert_eq!(
+            unevaluated(&result),
+            reported(&[("A1", &["_xll.Quote"]), ("A2", &["_xludf.Mine"])])
+        );
+    }
+
+    #[test]
+    fn a_memoized_name_replays_its_uncomputable_call() {
+        let (mut wb, s) = one_sheet();
+        wb.defined_names.push(xlsx_model::DefinedName {
+            name: "Live".to_string(),
+            formula: "STOCKHISTORY(\"X\",1)".to_string(),
+            local_sheet: None,
+            hidden: false,
+        });
+        put_cached_formula(
+            &mut wb,
+            s,
+            "B1",
+            "IFERROR(Live,0)+IFERROR(Live,0)",
+            num(99.0),
+        );
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+        assert_eq!(unevaluated(&result), reported(&[("B1", &["STOCKHISTORY"])]));
+    }
+
+    /// a graph built without evaluating learns the uncomputable calls its
+    /// formulas reach and their readers, and a later edit keeps to them.
+    #[test]
+    fn unevaluated_cells_derive_without_writing() {
+        let (mut wb, s) = one_sheet();
+        wb.defined_names.push(DefinedName {
+            name: "Live".to_string(),
+            formula: "RTD(\"x\",,\"y\")".to_string(),
+            local_sheet: None,
+            hidden: false,
+        });
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A1",
+            "IFERROR(_xlfn.WEBSERVICE(\"http://x\"),0)",
+            num(5.0),
+        );
+        put_cached_formula(&mut wb, s, "B1", "A1*2", num(11.0));
+        put_cached_formula(&mut wb, s, "C1", "Live+1", num(3.0));
+        put_formula(&mut wb, s, "D1", "B1+1");
+        put_cached_formula(&mut wb, s, "E1", "SUM(1,2)", num(3.0));
+        put_cached_formula(&mut wb, s, "F1", "REPRO_UNKNOWN_FUNCTION(1)", num(1.0));
+        put_num(&mut wb, s, "H1", 1.0);
+        put_cached_formula(&mut wb, s, "G1", "B1+H1", num(12.0));
+        put_cached_formula(
+            &mut wb,
+            s,
+            "I1",
+            "IF(H1>0,10,WEBSERVICE(\"http://x\"))",
+            num(10.0),
+        );
+        put_cached_formula(&mut wb, s, "J1", "I1+H1", num(11.0));
+        let mut graph = DepGraph::build(&wb);
+        derive_unevaluated(&wb, &graph, None, None);
+        let all = reported(&[
+            ("A1", &["WEBSERVICE"]),
+            ("B1", &["WEBSERVICE"]),
+            ("C1", &["RTD"]),
+            ("D1", &["WEBSERVICE"]),
+            ("G1", &["WEBSERVICE"]),
+        ]);
+        let derived: Vec<_> = graph
+            .unevaluated_cells()
+            .iter()
+            .map(|cell| (cell.cell.to_a1(), cell.functions.clone()))
+            .collect();
+        assert_eq!(derived, all);
+
+        put_num(&mut wb, s, "H1", 2.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("H1"))], None);
+        assert_eq!(value(&wb, s, "G1"), num(12.0));
+        assert_eq!(value(&wb, s, "J1"), num(12.0));
+        assert_eq!(unevaluated(&result), all);
+    }
+
+    /// a fallback the file stored no value for stays blank as its inputs
+    /// change, and so does the formula reading it.
+    #[test]
+    fn an_uncached_fallback_stays_blank_as_its_inputs_change() {
+        let (mut wb, s) = one_sheet();
+        put_text(&mut wb, s, "C1", "v1");
+        put_formula(&mut wb, s, "A1", "IFERROR(_xlfn.WEBSERVICE(C1),C1)");
+        put_formula(&mut wb, s, "B1", "A1&\"!\"");
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "B1"), CellValue::Empty);
+        let both = reported(&[("A1", &["WEBSERVICE"]), ("B1", &["WEBSERVICE"])]);
+        assert_eq!(unevaluated(&result), both);
+
+        put_text(&mut wb, s, "C1", "v2");
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("C1"))], None);
+        assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "B1"), CellValue::Empty);
+        assert_eq!(unevaluated(&result), both);
+    }
+
+    /// an array condition evaluates only the branches its elements pick, so
+    /// a gap in a branch none picks reaches nothing; the values are those
+    /// both branches evaluated would give.
+    #[test]
+    fn an_array_if_evaluates_only_picked_branches() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A1",
+            "SUM(IF({TRUE,TRUE},{1,2},WEBSERVICE(\"x\")))",
+            num(999.0),
+        );
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A2",
+            "SUM(IF({FALSE,FALSE},REPRO_UNKNOWN_FUNCTION(1),{3,4}))",
+            num(999.0),
+        );
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A3",
+            "SUM(IF({TRUE,FALSE},{1,2},WEBSERVICE(\"x\")))",
+            num(999.0),
+        );
+        put_formula(
+            &mut wb,
+            s,
+            "A4",
+            "SUM(IF({TRUE,FALSE;FALSE,TRUE},{1,2;3,4},{10,20;30,40}))",
+        );
+        put_formula(&mut wb, s, "A5", "SUM(IF({1,0,\"x\"},{1,2,3},{10,20,30}))");
+        put_formula(&mut wb, s, "A6", "SUM(IFERROR(IF({TRUE,FALSE},{1,2}),0))");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), num(3.0));
+        assert_eq!(value(&wb, s, "A2"), num(7.0));
+        assert_eq!(value(&wb, s, "A3"), num(999.0));
+        assert_eq!(value(&wb, s, "A4"), num(55.0));
+        assert_eq!(
+            value(&wb, s, "A5"),
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        );
+        assert_eq!(value(&wb, s, "A6"), num(1.0));
+        assert_eq!(unevaluated(&result), reported(&[("A3", &["WEBSERVICE"])]));
+    }
+
+    /// a cell that learns a function after it passed its others on passes it
+    /// on again, through every formula of a long chain.
+    #[test]
+    fn derivation_carries_every_function_down_a_long_chain() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "A1", "WEBSERVICE(\"x\")", num(1.0));
+        put_cached_formula(&mut wb, s, "B1", "RTD(\"x\",,\"y\")", num(1.0));
+        put_cached_formula(&mut wb, s, "A2", "A1+B1", num(2.0));
+        for row in 3..=5000 {
+            let formula = format!("A{}+1", row - 1);
+            put_cached_formula(&mut wb, s, &format!("A{row}"), &formula, num(row as f64));
+        }
+        let graph = DepGraph::build(&wb);
+        derive_unevaluated(&wb, &graph, None, None);
+        let cells = graph.unevaluated_cells();
+        assert_eq!(cells.len(), 5001);
+        let last = cells
+            .iter()
+            .find(|cell| cell.cell == a1("A5000"))
+            .expect("chain end reported");
+        assert_eq!(last.functions, ["RTD", "WEBSERVICE"]);
+    }
+
+    /// a formula computes again once no gap reaches it, and keeps what it
+    /// then holds when one reaches it again.
+    #[test]
+    fn a_formula_no_gap_reaches_computes_again() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "D1", 1.0);
+        put_formula(
+            &mut wb,
+            s,
+            "A1",
+            "IF(D1=1,IFERROR(_xlfn.WEBSERVICE(\"x\"),\"fb\"),\"plain\")",
+        );
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+        assert_eq!(unevaluated(&result), reported(&[("A1", &["WEBSERVICE"])]));
+        put_num(&mut wb, s, "D1", 0.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "A1"), text("plain"));
+        assert!(result.unevaluated_cells.is_empty());
+        put_num(&mut wb, s, "D1", 1.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "A1"), text("plain"));
+        assert_eq!(unevaluated(&result), reported(&[("A1", &["WEBSERVICE"])]));
+    }
+
+    /// E1 is kept, so the uncached array A1 reading it is never written, nor
+    /// the cells it would newly fill past the one it recorded, A2 among them.
+    /// B1 and F1 read A2 and run before A1, B2 reads it and runs after: each
+    /// keeps what it held, and C1 reading B1 keeps its cache too.
+    #[test]
+    fn a_tainted_spill_taints_readers_of_the_cells_it_would_newly_fill() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "E1", "_xlfn.WEBSERVICE(\"x\")", text("x"));
+        put_formula(&mut wb, s, "A1", "IF(E1=\"x\",{10;20},0)");
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("A1"), xlsx_model::CellRange::parse_a1("A1").unwrap());
+        put_num(&mut wb, s, "D1", 1.0);
+        put_cached_formula(&mut wb, s, "B1", "A2+D1", num(99.0));
+        put_formula(&mut wb, s, "F1", "A2*D1");
+        put_formula(&mut wb, s, "G1", "D1*1");
+        put_formula(&mut wb, s, "H1", "G1*1");
+        put_cached_formula(&mut wb, s, "B2", "A2*H1", num(77.0));
+        put_cached_formula(&mut wb, s, "C1", "B1+1", num(100.0));
+        let graph = DepGraph::build(&wb);
+        let all = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
+        let order: Vec<_> = topo_order(&graph, &all)
+            .into_iter()
+            .map(|step| match step {
+                Step::Cell(u) => cell_of(u).to_a1(),
+                Step::Component(_) => unreachable!("no cycle"),
+            })
+            .collect();
+        let position = |at: &str| order.iter().position(|cell| cell == at).unwrap();
+        assert!(position("B1") < position("A1"));
+        assert!(position("F1") < position("A1"));
+        assert!(position("A1") < position("B2"));
+
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "A2"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+        assert_eq!(value(&wb, s, "F1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "B2"), num(77.0));
+        assert_eq!(value(&wb, s, "C1"), num(100.0));
+        let all = reported(&[
+            ("A1", &["WEBSERVICE"]),
+            ("B1", &["WEBSERVICE"]),
+            ("C1", &["WEBSERVICE"]),
+            ("E1", &["WEBSERVICE"]),
+            ("F1", &["WEBSERVICE"]),
+            ("B2", &["WEBSERVICE"]),
+        ]);
+        assert_eq!(unevaluated(&result), all);
+
+        put_num(&mut wb, s, "D1", 2.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+        assert_eq!(value(&wb, s, "F1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "B2"), num(77.0));
+        assert_eq!(value(&wb, s, "H1"), num(2.0));
+        assert_eq!(unevaluated(&result), all);
+    }
+
+    /// A1 runs before the array B1 spills into B2, so its first evaluation
+    /// takes the plain branch and writes 99 over excel's 77. once B2 holds 20
+    /// the next round reaches the uncomputable call, and 77 comes back.
+    #[test]
+    fn a_later_round_reaching_a_call_puts_back_the_value_before_the_recalc() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A1",
+            "IF(B2=20,_xlfn.WEBSERVICE(\"http://x\"),99)",
+            num(77.0),
+        );
+        put_formula(&mut wb, s, "B1", "_xlfn.SEQUENCE(2)*10");
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("B1"), xlsx_model::CellRange::parse_a1("B1").unwrap());
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B2"), num(20.0));
+        assert_eq!(value(&wb, s, "A1"), num(77.0));
+        assert_eq!(unevaluated(&result), reported(&[("A1", &["WEBSERVICE"])]));
+    }
+
+    /// the same race for a formula the file stored no value for: the round
+    /// that reaches the call puts the blank back, and once B2 moves away from
+    /// 20 the formula computes again, so nothing froze.
+    #[test]
+    fn a_later_round_reaching_a_call_puts_back_a_blank() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "D1", 1.0);
+        put_formula(
+            &mut wb,
+            s,
+            "A1",
+            "IF(B2=20,IFERROR(_xlfn.WEBSERVICE(\"x\"),42),99)",
+        );
+        put_formula(&mut wb, s, "B1", "IF(D1=1,{10;20},{10;30})");
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("B1"), xlsx_model::CellRange::parse_a1("B1").unwrap());
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B2"), num(20.0));
+        assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+        assert_eq!(unevaluated(&result), reported(&[("A1", &["WEBSERVICE"])]));
+
+        put_num(&mut wb, s, "D1", 2.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "B2"), num(30.0));
+        assert_eq!(value(&wb, s, "A1"), num(99.0));
+        assert!(result.unevaluated_cells.is_empty());
+    }
+
+    /// without the clock a dated formula counts every uncomputable call it
+    /// holds, and the formulas reading it are found too.
+    #[test]
+    fn derivation_without_a_clock_counts_a_dated_formulas_calls() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "D1", 1.0);
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A1",
+            "IF(TODAY()>0,D1,_xlfn.WEBSERVICE(\"x\"))",
+            num(5.0),
+        );
+        put_cached_formula(&mut wb, s, "B1", "A1+D1", num(6.0));
+        let graph = DepGraph::build(&wb);
+        derive_unevaluated(&wb, &graph, None, None);
+        let derived: Vec<_> = graph
+            .unevaluated_cells()
+            .iter()
+            .map(|cell| cell.cell.to_a1())
+            .collect();
+        assert_eq!(derived, ["A1", "B1"]);
+        let graph = DepGraph::build(&wb);
+        derive_unevaluated(&wb, &graph, Some(46000.0), None);
+        assert!(graph.unevaluated_cells().is_empty());
+    }
+
+    fn derived(wb: &Workbook) -> Vec<(String, Vec<String>)> {
+        let graph = DepGraph::build(wb);
+        derive_unevaluated(wb, &graph, None, None);
+        graph
+            .unevaluated_cells()
+            .iter()
+            .map(|cell| (cell.cell.to_a1(), cell.functions.clone()))
+            .collect()
+    }
+
+    /// derivation evaluates an array formula a kept cell taints for the
+    /// rectangle its result would fill, as a recalculation does, so the
+    /// formulas reading the cells it would newly fill are found at open too,
+    /// over a large spill as well.
+    #[test]
+    fn derivation_follows_a_tainted_spill_to_the_readers_of_the_cells_it_would_fill() {
+        let (mut inherited, s) = one_sheet();
+        put_cached_formula(
+            &mut inherited,
+            s,
+            "E1",
+            "_xlfn.WEBSERVICE(\"x\")",
+            text("x"),
+        );
+        put_recorded(&mut inherited, s, "A1", "IF(E1=\"x\",{10;20},0)", "A1");
+        put_num(&mut inherited, s, "D1", 1.0);
+        put_cached_formula(&mut inherited, s, "B1", "A2+D1", num(99.0));
+        put_formula(&mut inherited, s, "F1", "A2*D1");
+        put_cached_formula(&mut inherited, s, "B2", "A2*D1", num(77.0));
+        put_cached_formula(&mut inherited, s, "C1", "B1+1", num(100.0));
+        let ws = &["WEBSERVICE"][..];
+        let expected = reported(&[
+            ("A1", ws),
+            ("B1", ws),
+            ("C1", ws),
+            ("E1", ws),
+            ("F1", ws),
+            ("B2", ws),
+        ]);
+        assert_eq!(derived(&inherited), expected);
+
+        let (mut own, s) = one_sheet();
+        let handled = "IFERROR(_xlfn.WEBSERVICE(\"x\"),{10;20})";
+        put_recorded(&mut own, s, "A1", handled, "A1");
+        put_cached_formula(&mut own, s, "B1", "A2+1", num(99.0));
+        put_cached_formula(&mut own, s, "C1", "B1+1", num(100.0));
+        let expected = reported(&[("A1", ws), ("B1", ws), ("C1", ws)]);
+        assert_eq!(derived(&own), expected);
+
+        let (mut large, s) = one_sheet();
+        put_cached_formula(&mut large, s, "E1", "_xlfn.WEBSERVICE(\"x\")", text("x"));
+        let spill = "IF(E1=\"x\",_xlfn.SEQUENCE(200000),0)";
+        put_recorded(&mut large, s, "A1", spill, "A1");
+        put_cached_formula(&mut large, s, "K1", "SUM(A150000:A200000)", num(7.0));
+        let expected = reported(&[("A1", ws), ("E1", ws), ("K1", ws)]);
+        assert_eq!(derived(&large), expected);
+
+        for mut wb in [inherited, own, large] {
+            let before = derived(&wb);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(unevaluated(&result), before);
+        }
+    }
+
+    /// without a clock a volatile formula holding an uncomputable call keeps
+    /// what it holds, under a handler too, its readers keep theirs, and an
+    /// uncached one stays blank; with a clock it computes.
+    #[test]
+    fn a_volatile_formula_without_a_clock_keeps_its_uncomputable_calls() {
+        let workbook = || {
+            let (mut wb, s) = one_sheet();
+            put_num(&mut wb, s, "D1", 1.0);
+            let dated = "IF(TODAY()>0,D1,_xlfn.WEBSERVICE(\"x\"))";
+            put_cached_formula(&mut wb, s, "A1", dated, num(5.0));
+            put_cached_formula(&mut wb, s, "B1", "A1+D1", num(99.0));
+            put_formula(&mut wb, s, "A2", dated);
+            put_formula(&mut wb, s, "B2", "A2+D1");
+            let handled = "IFERROR(IF(TODAY()<0,\"old\",_xlfn.WEBSERVICE(\"x\")),\"fallback\")";
+            put_cached_formula(&mut wb, s, "A3", handled, text("live"));
+            put_cached_formula(&mut wb, s, "B3", "LEN(A3)*2", num(9.0));
+            (wb, s)
+        };
+        let (mut wb, s) = workbook();
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        let kept = [
+            ("A1", num(5.0)),
+            ("B1", num(99.0)),
+            ("A2", CellValue::Empty),
+            ("B2", CellValue::Empty),
+            ("A3", text("live")),
+            ("B3", num(9.0)),
+        ];
+        let ws = &["WEBSERVICE"][..];
+        let all = reported(&[
+            ("A1", ws),
+            ("B1", ws),
+            ("A2", ws),
+            ("B2", ws),
+            ("A3", ws),
+            ("B3", ws),
+        ]);
+        for (at, expected) in &kept {
+            assert_eq!(value(&wb, s, at), *expected, "{at}");
+        }
+        assert_eq!(unevaluated(&result), all);
+        put_num(&mut wb, s, "D1", 2.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        for (at, expected) in &kept {
+            assert_eq!(value(&wb, s, at), *expected, "{at}");
+        }
+        assert_eq!(unevaluated(&result), all);
+
+        let (mut wb, s) = workbook();
+        let (_, result) = rebuild_and_recalc_all(&mut wb, Some(46000.0));
+        assert_eq!(value(&wb, s, "A1"), num(1.0));
+        assert_eq!(value(&wb, s, "B1"), num(2.0));
+        assert_eq!(value(&wb, s, "A2"), num(1.0));
+        assert_eq!(value(&wb, s, "B2"), num(2.0));
+        assert_eq!(value(&wb, s, "A3"), text("live"));
+        assert_eq!(unevaluated(&result), reported(&[("A3", ws), ("B3", ws)]));
+    }
+
+    /// a formula holding an uncomputable call that the formula's own cap or
+    /// the recalculation's spent budget stops before the call keeps what it
+    /// holds, blank without a saved value, never `#NUM!`, and its readers keep
+    /// theirs.
+    #[test]
+    fn a_budget_stop_before_an_uncomputable_call_keeps_the_formula() {
+        let ws = &["WEBSERVICE"][..];
+        let mut wb = over_the_formula_cap();
+        let s = SheetId(1);
+        let capped = "IF(SUM(Data!A1:XFD1048576)>0,_xlfn.WEBSERVICE(\"http://x\"),1)";
+        put_cached_formula(&mut wb, s, "A1", capped, num(10.0));
+        put_cached_formula(&mut wb, s, "B1", "A1+1", num(99.0));
+        put_formula(&mut wb, s, "A2", capped);
+        put_formula(&mut wb, s, "B2", "A2+1");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), num(10.0));
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+        assert_eq!(value(&wb, s, "A2"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "B2"), CellValue::Empty);
+        assert!(result.limited_cells.contains(&(s, a1("A1"))));
+        assert!(result.limited_cells.contains(&(s, a1("A2"))));
+        let all = reported(&[("A1", ws), ("B1", ws), ("A2", ws), ("B2", ws)]);
+        assert_eq!(unevaluated(&result), all);
+
+        let (mut wb, s) = one_sheet();
+        spend_the_budget(&mut wb, s);
+        for row in 1..=3 {
+            put_num(&mut wb, s, &format!("E{row}"), f64::from(row));
+        }
+        let spent = "IF(SUM(E1:E3)>0,_xlfn.WEBSERVICE(\"x\"),1)";
+        put_cached_formula(&mut wb, s, "B20", spent, num(5.0));
+        put_formula(&mut wb, s, "B21", spent);
+        put_cached_formula(&mut wb, s, "C20", "B20+1", num(99.0));
+        put_formula(&mut wb, s, "C21", "B21+1");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.budget_exhausted);
+        assert_eq!(value(&wb, s, "B20"), num(5.0));
+        assert_eq!(value(&wb, s, "C20"), num(99.0));
+        assert_eq!(value(&wb, s, "B21"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "C21"), CellValue::Empty);
+        let all = reported(&[("B20", ws), ("C20", ws), ("B21", ws), ("C21", ws)]);
+        assert_eq!(unevaluated(&result), all);
+    }
+
+    /// A1 runs before the array B1 spills into B2 and writes its plain
+    /// branch. once B2 holds 20 the next round reaches the call: it measures
+    /// its reach over the rectangle recorded before the recalc, so D1 reading
+    /// A2 is not taken for a reader of its result, and the rectangle a round
+    /// reshaped without moving a value comes back too.
+    #[test]
+    fn a_later_round_keeps_the_rectangle_recorded_before_the_recalc() {
+        let (mut wb, s) = one_sheet();
+        let grows = "IF(B2=20,_xlfn.WEBSERVICE(\"http://x\"),{100;200})";
+        put_recorded(&mut wb, s, "A1", grows, "A1");
+        set_cached(&mut wb, s, "A1", num(77.0));
+        put_formula(&mut wb, s, "D1", "A2+1");
+        put_recorded(&mut wb, s, "B1", "_xlfn.SEQUENCE(2)*10", "B1");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B2"), num(20.0));
+        assert_eq!(value(&wb, s, "A1"), num(77.0));
+        assert_eq!(value(&wb, s, "A2"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "D1"), num(1.0));
+        assert_eq!(
+            wb.sheet(s).unwrap().array_formula(a1("A1")),
+            Some(CellRange::parse_a1("A1").unwrap())
+        );
+        assert_eq!(unevaluated(&result), reported(&[("A1", &["WEBSERVICE"])]));
+
+        let (mut wb, s) = one_sheet();
+        let shrinks = "IF(B2=20,_xlfn.WEBSERVICE(\"http://x\"),{77;88})";
+        put_recorded(&mut wb, s, "A1", shrinks, "A1:A3");
+        set_cached(&mut wb, s, "A1", num(77.0));
+        put_num(&mut wb, s, "A2", 88.0);
+        put_recorded(&mut wb, s, "B1", "_xlfn.SEQUENCE(2)*10", "B1");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B2"), num(20.0));
+        assert_eq!(value(&wb, s, "A1"), num(77.0));
+        assert_eq!(value(&wb, s, "A2"), num(88.0));
+        assert_eq!(
+            wb.sheet(s).unwrap().array_formula(a1("A1")),
+            Some(CellRange::parse_a1("A1:A3").unwrap())
+        );
+        assert_eq!(unevaluated(&result), reported(&[("A1", &["WEBSERVICE"])]));
+    }
+
+    #[test]
+    fn a_computable_workbook_reports_no_unevaluated_cells() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 2.0);
+        put_cached_formula(&mut wb, s, "B1", "IFERROR(A1/0,\"x\")", num(1.0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), text("x"));
+        assert!(result.unevaluated_cells.is_empty());
     }
 
     #[test]
