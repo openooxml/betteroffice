@@ -53,7 +53,7 @@ export function PasteOptionsControl(props: {
   };
 
   return (
-    <div ref={rootRef} data-paste-options style={style}>
+    <div ref={rootRef} data-paste-options style={style} onKeyDown={(event) => event.stopPropagation()}>
       <button
         type="button"
         aria-haspopup="menu"
