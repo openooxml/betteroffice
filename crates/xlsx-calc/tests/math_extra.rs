@@ -757,3 +757,139 @@ fn scalar_functions_lift_over_array_arguments() {
         0.0,
     );
 }
+
+/// (1 + 10^16)! / (1! 10^16!) is 10^16 + 1 whichever order the counts come
+/// in; the 1 must not vanish into a rounded running total.
+#[test]
+fn multinomial_keeps_a_small_count_beside_a_huge_one() {
+    assert_close("MULTINOMIAL(1,1E16)", 1e16);
+    assert_close("MULTINOMIAL(1E16,1)", 1e16);
+    // exact integer arithmetic: (10^16 + 2)(10^16 + 1) / 2
+    assert_close("MULTINOMIAL(2,1E16)", 5.000000000000001e31);
+    assert_close("MULTINOMIAL(1E16,2)", 5.000000000000001e31);
+    assert_close("MULTINOMIAL(2^53,1)", 9_007_199_254_740_992.0);
+    assert_close("MULTINOMIAL(1,2^53)", 9_007_199_254_740_992.0);
+    assert_exact("MULTINOMIAL(0,1E16)", 1.0);
+    assert_error("MULTINOMIAL(-1E-200,2)", ErrorValue::Num);
+}
+
+/// 10^15 + 0.75 has a real fraction: FLOOR.MATH must round it down to
+/// 10^15, as microsoft documents, and the ceilings up to 10^15 + 1.
+#[test]
+fn significance_roundings_keep_real_fractions_of_large_numbers() {
+    assert_exact("FLOOR.MATH(1000000000000000+0.75)", 1e15);
+    assert_exact("FLOOR.PRECISE(1000000000000000+0.75)", 1e15);
+    assert_exact("FLOOR.MATH(1000000000000000+0.875)", 1e15);
+    assert_exact("CEILING.MATH(1000000000000000+0.75)", 1e15 + 1.0);
+    assert_exact("CEILING.PRECISE(1000000000000000+0.125)", 1e15 + 1.0);
+    assert_exact("ISO.CEILING(1000000000000000+0.25)", 1e15 + 1.0);
+    assert_exact("FLOOR.MATH(-1000000000000000-0.75)", -1e15 - 1.0);
+    assert_exact("FLOOR.MATH(-1000000000000000-0.75,1,1)", -1e15);
+    assert_exact("CEILING.MATH(-1000000000000000-0.75)", -1e15);
+    assert_exact("CEILING.MATH(-1000000000000000-0.75,1,1)", -1e15 - 1.0);
+    assert_exact("FLOOR.MATH(1000000000000000+0.75,0.5)", 1e15 + 0.5);
+    assert_exact("CEILING.MATH(1000000000000000+0.75,0.5)", 1e15 + 1.0);
+    assert_exact("FLOOR.MATH(2^52-0.5)", 4_503_599_627_370_495.0);
+    assert_exact("CEILING.MATH(2^51+0.5)", 2_251_799_813_685_249.0);
+    assert_exact("FLOOR.MATH(2^53+2,0.5)", 9_007_199_254_740_994.0);
+    assert_exact("CEILING.MATH(1E19)", 1e19);
+}
+
+/// a multiple that exists must come back even when the quotient overflows or
+/// underflows on the way.
+#[test]
+fn significance_roundings_survive_extreme_magnitudes() {
+    assert_exact("CEILING.MATH(1E308,0.1)", 1e308);
+    assert_exact("FLOOR.PRECISE(1E300,1E-300)", 1e300);
+    assert_exact("CEILING.MATH(1E-200,1E200)", 1e200);
+    assert_exact("FLOOR.MATH(1E-200,1E200)", 0.0);
+    assert_exact("FLOOR.MATH(-1E-200,1E200)", -1e200);
+    assert_exact("CEILING.PRECISE(-1E-200,1E200)", 0.0);
+    assert_exact("CEILING.MATH(0.5,1E-308)", 0.5);
+    assert_error("CEILING.MATH(1.7E308,1E308)", ErrorValue::Num);
+}
+
+#[test]
+fn reciprocal_hyperbolics_do_not_underflow_to_zero_early() {
+    // mpmath 40 digits; the results are subnormal, where a double keeps
+    // about 11 significant digits
+    assert_close_in(&[], "SECH(720)", 4.06446160484e-313, 1e-10);
+    assert_close_in(&[], "SECH(-720)", 4.06446160484e-313, 1e-10);
+    assert_close_in(&[], "CSCH(-730)", -1.8452626e-317, 1e-6);
+    assert_exact("SECH(800)", 0.0);
+    assert_close("CSCH(1E-200)", 1e200);
+    assert_error("CSCH(1E-309)", ErrorValue::Num);
+    assert_error("COT(1E-310)", ErrorValue::Num);
+}
+
+#[test]
+fn sqrtpi_and_paired_sums_survive_extreme_magnitudes() {
+    // mpmath 40 digits
+    assert_close("SQRTPI(1E308)", 1.772_453_850_905_516_2e154);
+    assert_close("SQRTPI(5E-324)", 3.939_737_305_158_755e-162);
+    assert_exact("SUMX2MY2(1E200,1E200)", 0.0);
+    assert_exact("SUMX2MY2(1E308,-1E308)", 0.0);
+    assert_error("SUMX2MY2(1.7E308,1E308)", ErrorValue::Num);
+    assert_error("SUMXMY2(1E308,-1E308)", ErrorValue::Num);
+}
+
+#[test]
+fn mdeterm_survives_an_intermediate_overflow() {
+    assert_close("MDETERM({1E200,0,0;0,1E200,0;0,0,1E-200})", 1e200);
+    assert_close("MDETERM({1E-200,0,0;0,1E-200,0;0,0,1E200})", 1e-200);
+    assert_error("MDETERM({1E200,0;0,1E200})", ErrorValue::Num);
+    assert_exact("MDETERM({1E-200,0;0,1E-200})", 0.0);
+}
+
+#[test]
+fn negative_fractions_are_refused_before_truncation() {
+    assert_error("BASE(-0.5,2)", ErrorValue::Num);
+    assert_error("BASE(5,2,-0.5)", ErrorValue::Num);
+    assert_error("ROMAN(5,-0.5)", ErrorValue::Value);
+    assert_error("ROMAN(-0.5)", ErrorValue::Value);
+    assert_error("DAYS360(-0.5,10)", ErrorValue::Num);
+    assert_error("COMBINA(-1E-200,0)", ErrorValue::Num);
+    assert_error("FACTDOUBLE(-1E-200)", ErrorValue::Num);
+    assert_eq!(block_error("RANDARRAY(-0.5)"), error(ErrorValue::Value));
+    assert_eq!(block_error("MUNIT(-0.5)"), error(ErrorValue::Value));
+}
+
+#[test]
+fn whole_number_limits_hold_past_2_to_the_53() {
+    assert!(matches!(eval("FACTDOUBLE(300)"), CellValue::Number { .. }));
+    assert_error("FACTDOUBLE(301)", ErrorValue::Num);
+    assert_error("FACTDOUBLE(2^53+1)", ErrorValue::Num);
+    assert_error("FACTDOUBLE(1E300)", ErrorValue::Num);
+    assert_exact("COMBINA(1E16,1)", 1e16);
+    assert_exact("COMBINA(2^53+2,1)", 9_007_199_254_740_994.0);
+    assert_error("COMBINA(1E300,2)", ErrorValue::Num);
+    assert_error("MULTINOMIAL(1E300,1E300)", ErrorValue::Num);
+    assert_text("BASE(2^52-0.5,2)", &"1".repeat(52));
+    assert_error("ROMAN(1E200)", ErrorValue::Value);
+    assert_error("DAYS360(1,2^53)", ErrorValue::Num);
+    assert_eq!(block_error("MUNIT(1E200)"), error(ErrorValue::Value));
+    assert_eq!(block_error("MUNIT(65536)"), error(ErrorValue::Num));
+    assert_eq!(
+        block_error("RANDARRAY(1048576,1048576)"),
+        error(ErrorValue::Num)
+    );
+    assert_eq!(block_error("RANDARRAY(1E300)"), error(ErrorValue::Value));
+}
+
+/// bounds that span the whole double range still draw finite numbers.
+#[test]
+fn randarray_draws_across_the_whole_double_range() {
+    let (_, _, wide) = block("RANDARRAY(20,1,-1E308,1E308)", Some(5));
+    assert!(
+        wide.iter()
+            .all(|x| x.is_finite() && (-1e308..=1e308).contains(x))
+    );
+    let (_, _, whole) = block("RANDARRAY(20,1,-1E308,1E308,TRUE)", Some(5));
+    assert!(whole.iter().all(|x| x.is_finite() && x.fract() == 0.0));
+    let (_, _, big) = block("RANDARRAY(20,1,1E16,1E16+4,TRUE)", Some(5));
+    assert!(big.iter().all(|x| (1e16..=1e16 + 4.0).contains(x)));
+    assert_eq!(
+        block_error("RANDARRAY(1,1,1000000000000000+0.25,1000000000000000+0.75,TRUE)"),
+        error(ErrorValue::Value)
+    );
+}

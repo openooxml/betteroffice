@@ -19,6 +19,13 @@ const TRIG_LIMIT: f64 = 134_217_728.0;
 const WHOLE_LIMIT: f64 = 9_007_199_254_740_992.0;
 /// the longest text ARABIC and DECIMAL read, and the widest BASE pads to.
 const MAX_DIGITS: usize = 255;
+/// sqrt(pi), correctly rounded.
+const SQRT_PI: f64 = 1.772_453_850_905_516;
+/// past this magnitude every double is whole, so a quotient there needs no
+/// rounding.
+const ALL_WHOLE: f64 = 4_503_599_627_370_496.0;
+/// the largest whole number FACTDOUBLE reaches before a double overflows.
+const LAST_DOUBLE_FACTORIAL: f64 = 300.0;
 /// the largest side a generated block may have.
 const MAX_SIDE: f64 = array::MAX_ARRAY_CELLS as f64;
 
@@ -64,34 +71,52 @@ pub(crate) fn acoth(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// COT(number): `#DIV/0!` at zero.
 pub(crate) fn cot(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reciprocal(args, ctx, fmath::tan, true)
+    reciprocal(args, ctx, |x| 1.0 / fmath::tan(x), true)
 }
 
 /// COTH(number): `#DIV/0!` at zero.
 pub(crate) fn coth(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reciprocal(args, ctx, fmath::tanh, true)
+    reciprocal(args, ctx, |x| 1.0 / fmath::tanh(x), true)
 }
 
 /// CSC(number): `#DIV/0!` at zero.
 pub(crate) fn csc(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reciprocal(args, ctx, fmath::sin, true)
+    reciprocal(args, ctx, |x| 1.0 / fmath::sin(x), true)
 }
 
 /// CSCH(number): `#DIV/0!` at zero.
 pub(crate) fn csch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reciprocal(args, ctx, fmath::sinh, true)
+    reciprocal(args, ctx, hyperbolic_cosecant, true)
 }
 
 pub(crate) fn sec(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reciprocal(args, ctx, fmath::cos, false)
+    reciprocal(args, ctx, |x| 1.0 / fmath::cos(x), false)
 }
 
 pub(crate) fn sech(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reciprocal(args, ctx, fmath::cosh, false)
+    reciprocal(args, ctx, hyperbolic_secant, false)
 }
 
-/// `1 / f(number)`: excel refuses a magnitude at or past 2^27 with `#NUM!`,
-/// and a function with its pole at zero answers `#DIV/0!` there.
+/// where `cosh` and `sinh` overflow; their reciprocals there are `2 e^-|x|`
+/// to the last bit, a subnormal that dividing by infinity would flush to 0.
+const HYPERBOLIC_TAIL: f64 = 709.0;
+
+fn hyperbolic_secant(x: f64) -> f64 {
+    if x.abs() > HYPERBOLIC_TAIL {
+        return 2.0 * fmath::exp(-x.abs());
+    }
+    1.0 / fmath::cosh(x)
+}
+
+fn hyperbolic_cosecant(x: f64) -> f64 {
+    if x.abs() > HYPERBOLIC_TAIL {
+        return x.signum() * 2.0 * fmath::exp(-x.abs());
+    }
+    1.0 / fmath::sinh(x)
+}
+
+/// a reciprocal trig function: excel refuses a magnitude at or past 2^27 with
+/// `#NUM!`, and a function with its pole at zero answers `#DIV/0!` there.
 fn reciprocal(
     args: &[Expr],
     ctx: &EvalContext<'_>,
@@ -105,7 +130,7 @@ fn reciprocal(
         if pole_at_zero && x == 0.0 {
             return Err(ErrorValue::Div0);
         }
-        Ok(1.0 / f(x))
+        Ok(f(x))
     })
 }
 
@@ -214,7 +239,10 @@ pub(crate) fn roman(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                         4.0
                     }
                 }
-                value => coerce_number(&value, ctx)?.trunc(),
+                value => match coerce_number(&value, ctx)? {
+                    form if form < 0.0 => return Err(ErrorValue::Value),
+                    form => form.trunc(),
+                },
             },
             _ => 0.0,
         };
@@ -247,9 +275,13 @@ pub(crate) fn roman(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn base(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let digits = (|| {
         arity(args, 2, 3)?;
-        let number = nth_number(args, ctx, 0)?.trunc();
+        let number = nth_number(args, ctx, 0)?;
         let radix = nth_number(args, ctx, 1)?.trunc();
-        let width = optional(args, ctx, 2, 0.0)?.trunc();
+        let width = optional(args, ctx, 2, 0.0)?;
+        if number < 0.0 || width < 0.0 {
+            return Err(ErrorValue::Num);
+        }
+        let (number, width) = (number.trunc(), width.trunc());
         if !(0.0..WHOLE_LIMIT).contains(&number)
             || !(2.0..=36.0).contains(&radix)
             || !(0.0..=MAX_DIGITS as f64).contains(&width)
@@ -358,23 +390,42 @@ fn precise_rounding(args: &[Expr], ctx: &EvalContext<'_>, rule: fn(f64) -> f64) 
 }
 
 /// the multiple of `|significance|` that `rule` picks for `number`; zero
-/// significance gives 0. the quotient is snapped to a whole number within a
-/// couple of ulps first, so binary noise such as 0.3 / 0.1 =
-/// 2.9999999999999996 does not cost a multiple, as it does not in excel. a
-/// significance whose reciprocal is whole divides by that reciprocal rather
-/// than multiplying, so FLOOR.MATH(0.3, 0.1) is 0.3 and not
-/// 0.30000000000000004. a negative zero comes back as zero.
+/// significance gives 0, and a negative zero comes back as zero.
+///
+/// a whole significance needs no help: a decimal that is a multiple of it is
+/// a whole number, which a double holds exactly below 2^53. a fractional one
+/// such as 0.1 is not exact in binary, so 0.3 / 0.1 = 2.9999999999999996;
+/// there the quotient is snapped to a whole number within one ulp first, as
+/// excel does not lose that multiple either, and only below 2^51 where an ulp
+/// is still smaller than any real half. a significance whose reciprocal is
+/// whole divides by that reciprocal rather than multiplying, so
+/// FLOOR.MATH(0.3, 0.1) is 0.3 and not 0.30000000000000004. a quotient past
+/// 2^52 is already whole, so the number is its own multiple, and one that
+/// underflows keeps its sign.
 fn to_multiple(number: f64, significance: f64, rule: fn(f64) -> f64) -> f64 {
     let significance = significance.abs();
     if significance == 0.0 || number == 0.0 {
         return 0.0;
     }
-    let scale = near_whole(1.0 / significance).filter(|scale| *scale > 1.0);
+    let fractional = significance.fract() != 0.0;
+    let scale = Some(1.0 / significance)
+        .filter(|scale| fractional && *scale > 1.0 && scale.is_finite())
+        .and_then(near_whole);
     let quotient = match scale {
         Some(scale) => number * scale,
         None => number / significance,
     };
-    let multiple = rule(near_whole(quotient).unwrap_or(quotient));
+    if !quotient.is_finite() || quotient.abs() >= ALL_WHOLE {
+        return number;
+    }
+    let quotient = if quotient == 0.0 {
+        number.signum() * f64::MIN_POSITIVE
+    } else if fractional {
+        near_whole(quotient).unwrap_or(quotient)
+    } else {
+        quotient
+    };
+    let multiple = rule(quotient);
     let rounded = match scale {
         Some(scale) => multiple / scale,
         None => multiple * significance,
@@ -382,10 +433,11 @@ fn to_multiple(number: f64, significance: f64, rule: fn(f64) -> f64) -> f64 {
     if rounded == 0.0 { 0.0 } else { rounded }
 }
 
-/// the whole number `x` is within a couple of ulps of, if any.
+/// the whole number `x` lies within one ulp of, if any, below 2^51.
 fn near_whole(x: f64) -> Option<f64> {
     let whole = x.round();
-    ((x - whole).abs() <= 4.0 * f64::EPSILON * whole.abs()).then_some(whole)
+    (whole.abs() < ALL_WHOLE / 2.0 && (x - whole).abs() <= f64::EPSILON * whole.abs())
+        .then_some(whole)
 }
 
 /// COMBINA(number, chosen): combinations with repetition, that is
@@ -404,31 +456,31 @@ pub(crate) fn combina(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if number < chosen {
             return Err(ErrorValue::Num);
         }
-        if number == 0.0 {
-            return Ok(1.0);
-        }
-        binomial(number + chosen - 1.0, chosen).ok_or(ErrorValue::Num)
+        binomial_from(number, chosen).ok_or(ErrorValue::Num)
     })
 }
 
-/// C(n, k) for whole `n >= k >= 0`, exact while the running product fits in
-/// 2^53; `None` past a double.
-fn binomial(n: f64, k: f64) -> Option<f64> {
-    let k = k.min(n - k);
+/// `first (first + 1) ... (first + k - 1) / k!`, that is
+/// C(first + k - 1, k), for whole `first >= k >= 0`. both sides are passed as
+/// written, so no count is recovered by subtracting rounded totals; the
+/// partial products are whole numbers, exact below 2^53. every factor past
+/// the first is at least 1.5, so the loop overflows to `None` within a couple
+/// of thousand steps however large `k` is.
+fn binomial_from(first: f64, k: f64) -> Option<f64> {
     let mut result = 1.0;
-    let mut i = 1.0;
-    while i <= k {
-        let factor = n - k + i;
+    let steps = k as u64;
+    for step in 0..steps {
+        let factor = first + step as f64;
+        let divisor = (step + 1) as f64;
         let product = result * factor;
         result = if product.is_finite() {
-            product / i
+            product / divisor
         } else {
-            result / i * factor
+            result / divisor * factor
         };
         if !result.is_finite() {
             return None;
         }
-        i += 1.0;
     }
     Some(result.round())
 }
@@ -438,19 +490,15 @@ fn binomial(n: f64, k: f64) -> Option<f64> {
 /// is a result past a double.
 pub(crate) fn factdouble(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, |x| {
-        if x < 0.0 {
+        if x < 0.0 || x.trunc() > LAST_DOUBLE_FACTORIAL {
             return Err(ErrorValue::Num);
         }
-        let mut result = 1.0;
-        let mut factor = x.trunc();
-        while factor > 1.0 {
-            result *= factor;
-            if !result.is_finite() {
-                return Err(ErrorValue::Num);
-            }
-            factor -= 2.0;
-        }
-        Ok(result)
+        let n = x.trunc() as u64;
+        Ok((1..=n)
+            .rev()
+            .step_by(2)
+            .map(|factor| factor as f64)
+            .product())
     })
 }
 
@@ -478,7 +526,8 @@ pub(crate) fn multinomial(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                     return Err(ErrorValue::Num);
                 }
                 let n = value.trunc();
-                result *= binomial(total + n, n).ok_or(ErrorValue::Num)?;
+                let (small, large) = if n < total { (n, total) } else { (total, n) };
+                result *= binomial_from(large + 1.0, small).ok_or(ErrorValue::Num)?;
                 total += n;
             }
         }
@@ -486,19 +535,29 @@ pub(crate) fn multinomial(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     })
 }
 
-/// SQRTPI(number): `sqrt(number * pi)`; a negative number is `#NUM!`.
+/// SQRTPI(number): `sqrt(number * pi)`, taken as `sqrt(number) sqrt(pi)` so
+/// neither a huge nor a subnormal number loses the product; a negative number
+/// is `#NUM!`.
 pub(crate) fn sqrtpi(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, |x| {
         if x < 0.0 {
             return Err(ErrorValue::Num);
         }
-        Ok((x * std::f64::consts::PI).sqrt())
+        Ok(x.sqrt() * SQRT_PI)
     })
 }
 
-/// SUMX2MY2(array_x, array_y): the sum of `x^2 - y^2` over paired values.
+/// SUMX2MY2(array_x, array_y): the sum of `x^2 - y^2` over paired values,
+/// each taken as `(x - y)(x + y)` so equal magnitudes cancel to 0 even where
+/// the squares overflow.
 pub(crate) fn sumx2my2(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    paired_sum(args, ctx, |x, y| x * x - y * y)
+    paired_sum(args, ctx, |x, y| {
+        if x.abs() == y.abs() {
+            0.0
+        } else {
+            (x - y) * (x + y)
+        }
+    })
 }
 
 /// SUMX2PY2(array_x, array_y): the sum of `x^2 + y^2` over paired values.
@@ -570,7 +629,7 @@ pub(crate) fn mdeterm(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         arity(args, 1, 1)?;
         let (n, mut a) = square_matrix(&args[0], ctx)?;
         charge_cube(ctx, n)?;
-        let mut det = 1.0;
+        let mut det = Scaled::ONE;
         for col in 0..n {
             let pivot = pivot_row(&a, n, col);
             if a[pivot * n + col] == 0.0 {
@@ -578,10 +637,10 @@ pub(crate) fn mdeterm(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             }
             if pivot != col {
                 swap_rows(&mut a, n, pivot, col);
-                det = -det;
+                det.negate();
             }
             let p = a[col * n + col];
-            det *= p;
+            det.multiply(p);
             for row in col + 1..n {
                 let factor = a[row * n + col] / p;
                 if factor != 0.0 {
@@ -591,8 +650,61 @@ pub(crate) fn mdeterm(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 }
             }
         }
-        Ok(det)
+        Ok(det.value())
     })
+}
+
+/// a product kept as `mantissa * 2^exponent`, so a determinant whose running
+/// product leaves the double range on the way still comes back when the
+/// final value fits.
+struct Scaled {
+    mantissa: f64,
+    exponent: i32,
+}
+
+/// how far the mantissa may drift before it is renormalised: 2^512.
+const SCALE_STEP: i32 = 512;
+
+impl Scaled {
+    const ONE: Self = Scaled {
+        mantissa: 1.0,
+        exponent: 0,
+    };
+
+    fn negate(&mut self) {
+        self.mantissa = -self.mantissa;
+    }
+
+    fn multiply(&mut self, factor: f64) {
+        let step = 2f64.powi(SCALE_STEP);
+        self.mantissa *= factor;
+        if !self.mantissa.is_finite() || self.mantissa == 0.0 {
+            return;
+        }
+        while self.mantissa.abs() > step {
+            self.mantissa /= step;
+            self.exponent += SCALE_STEP;
+        }
+        while self.mantissa.abs() < 1.0 / step {
+            self.mantissa *= step;
+            self.exponent -= SCALE_STEP;
+        }
+    }
+
+    fn value(&self) -> f64 {
+        let step = 2f64.powi(SCALE_STEP);
+        let mut value = self.mantissa;
+        let mut exponent = self.exponent;
+        while exponent >= SCALE_STEP && value.is_finite() {
+            value *= step;
+            exponent -= SCALE_STEP;
+        }
+        while exponent <= -SCALE_STEP && value != 0.0 {
+            value /= step;
+            exponent += SCALE_STEP;
+        }
+        value * 2f64.powi(exponent)
+    }
 }
 
 /// MINVERSE(array): the inverse of a square numeric block, by gauss-jordan
@@ -685,19 +797,34 @@ pub(crate) fn randarray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             .map(|_| {
                 let unit = ctx.next_random_unit();
                 if whole {
-                    low + (unit * (high - low + 1.0)).floor().min(high - low)
+                    let span = high - low + 1.0;
+                    if span.is_finite() {
+                        low + (unit * span).floor().min(high - low)
+                    } else {
+                        between(low, high, unit).floor().clamp(low, high)
+                    }
                 } else {
-                    low + unit * (high - low)
+                    between(low, high, unit)
                 }
             })
             .collect())
     })
 }
 
+/// the point `unit` of the way from `low` to `high`, weighted so a span past
+/// the largest double does not overflow.
+fn between(low: f64, high: f64, unit: f64) -> f64 {
+    ((1.0 - unit) * low + unit * high).clamp(low, high)
+}
+
 /// a RANDARRAY size: 1 when omitted, truncated, `#CALC!` at 0 and `#VALUE!`
 /// below it or past the largest block.
 fn block_side(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<usize, ErrorValue> {
-    let side = optional(args, ctx, index, 1.0)?.trunc();
+    let side = optional(args, ctx, index, 1.0)?;
+    if side < 0.0 {
+        return Err(ErrorValue::Value);
+    }
+    let side = side.trunc();
     if side == 0.0 {
         return Err(ErrorValue::Calc);
     }
@@ -815,10 +942,11 @@ fn date_argument(
     let serial = match parsed {
         Some(serial) => serial,
         None => {
-            let serial = ctx.number(&value)?.trunc();
+            let serial = ctx.number(&value)?;
             if serial < 0.0 {
                 return Err(ErrorValue::Num);
             }
+            let serial = serial.trunc();
             serial as i64
         }
     };
