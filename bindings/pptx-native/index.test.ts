@@ -29,7 +29,10 @@ describe('@betteroffice/pptx-native', () => {
       '@betteroffice/fonts-latin': 'workspace:^',
     });
     expect(manifest.sideEffects).toEqual(wasmManifest.sideEffects);
-    expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({ type: 'module' });
+    expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({
+      type: 'module',
+      imports: { '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.browser.js' } },
+    });
   });
 
   test('the browser entry throws', async () => {

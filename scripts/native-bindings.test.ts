@@ -68,6 +68,29 @@ describe('native package registry', () => {
     }
   });
 
+  test('selects worker variants through private conditional imports', () => {
+    for (const format of ['xlsx', 'pptx', 'docx']) {
+      const extension = format === 'docx' ? 'mjs' : 'js';
+      const directory = format === 'docx' ? 'yrs' : 'session';
+      const core = JSON.parse(readFileSync(new URL(`../packages/${format}/package.json`, import.meta.url), 'utf8'));
+      const native = JSON.parse(readFileSync(new URL(`../bindings/${format}-native/package.json`, import.meta.url), 'utf8'));
+      const imports = { '#session-worker': {
+        node: `./dist/sessionWorker.node.${extension}`,
+        default: `./dist/sessionWorker.browser.${extension}`,
+      } };
+      expect(core.imports).toEqual(imports);
+      expect(native.imports).toEqual(imports);
+      const config = JSON.parse(readFileSync(new URL(`../packages/${format}/tsconfig.json`, import.meta.url), 'utf8'));
+      expect(config.compilerOptions.paths['#session-worker']).toEqual([`./src/${directory}/sessionWorker.node.ts`]);
+      for (const path of [`packages/${format}/tsup.config.ts`, `bindings/${format}-native/js/tsup.config.ts`]) {
+        const build = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+        expect(build).toMatch(/external: \[[^\]]*'#session-worker'/);
+        expect(build).toContain("'sessionWorker.browser':");
+        expect(build).toContain("'sessionWorker.node':");
+      }
+    }
+  });
+
   test('pins workspace dependencies in native package manifests before packing', () => {
     const root = mkdtempSync(join(tmpdir(), 'native-workspace-deps-'));
     const nativeManifest = join(root, 'bindings/pptx-native/package.json');
@@ -392,7 +415,7 @@ describe('native package release wiring', () => {
     const job = ci.jobs.native;
     expect(job.name).toBe('Native gate');
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(60);
     expect(job.strategy).toBeUndefined();
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
@@ -413,7 +436,8 @@ describe('native package release wiring', () => {
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeLessThan(build.run.indexOf('for package in'));
-    expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
+    expect(build.run).toContain('bunx napi build --cwd "$package" --platform --release -- --locked');
+    expect(build.run).not.toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
     expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
     expect(build.run.indexOf('(cd packages/fonts && bunx tsup)')).toBeGreaterThan(-1);
@@ -444,6 +468,13 @@ describe('native package release wiring', () => {
     );
     expect(xlsx.run).toContain('bun run build:docx-wasm');
     expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
+    const docx = job.steps.find(
+      (step: any) => step.name === 'Test the docx packages on the native engine'
+    );
+    expect(docx.run).toBe(
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/'
+    );
+    expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(docx));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
@@ -461,6 +492,12 @@ describe('native package release wiring', () => {
     expect(smoke.run).toContain('bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"');
     expect(smoke.run).toContain('if [ -d "$package/dist" ]; then cp -R "$package/dist" "$package_dir/"; fi');
     expect(smoke.run).toContain('node scripts/native-bindings-smoke.mjs');
+    expect(smoke.run).toContain('(cd packages/docx && bun scripts/copy-assets.ts)');
+    expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs\n');
+    expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs --keep-alive');
+    expect(smoke.run).toContain('bun scripts/worker-bundling-smoke.mjs');
+    expect(smoke.run).not.toContain('bun scripts/node-worker-sessions-smoke.mjs');
+    expect(smoke.run).not.toContain('deno run scripts/node-worker-sessions-smoke.mjs');
     expect(smoke.run).toContain('bun scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(smoke.run).toContain('$smoke_dir/node_modules/@betteroffice/$format');

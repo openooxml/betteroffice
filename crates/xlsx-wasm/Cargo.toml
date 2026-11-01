@@ -10,8 +10,9 @@ description = "The single wasm-bindgen boundary: coarse JSON-string calls over t
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["raster"]
+default = ["raster", "peer-snapshot"]
 raster = ["betteroffice-xlsx/raster", "betteroffice-xlsx-engine/raster"]
+peer-snapshot = []
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
