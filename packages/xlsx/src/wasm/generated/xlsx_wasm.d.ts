@@ -123,6 +123,10 @@ export class XlsxDocument {
     rangeCellsJson(args: string): string;
     readCellsJson(request: string): string;
     /**
+     * Recalculate every formula; the next save writes the recalculated values.
+     */
+    recalculateJson(): string;
+    /**
      * Checkpoints are only restorable by the same engine version and codec.
      */
     recoveryCheckpoint(through_seq: number, preserve_history?: boolean | null): Uint8Array;
@@ -289,6 +293,7 @@ export interface InitOutput {
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_recalculateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];

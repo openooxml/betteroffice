@@ -460,6 +460,12 @@ impl XlsxDocument {
         self.inner.cell_rect_json(args).map_err(map_engine_error)
     }
 
+    /// Recalculate every formula; the next save writes the recalculated values.
+    #[wasm_bindgen(js_name = recalculateJson)]
+    pub fn recalculate_json(&mut self) -> Result<String, JsValue> {
+        self.inner.recalculate_json().map_err(map_engine_error)
+    }
+
     #[wasm_bindgen(js_name = calculationStatusJson)]
     pub fn calculation_status_json(&self) -> Result<String, JsValue> {
         self.inner

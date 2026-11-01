@@ -22,6 +22,7 @@ type EngineDocument = {
   displayListJson(viewportJson: string): string;
   editCellJson(args: string): string;
   setCalculationContextJson(context: string): void;
+  recalculateJson(): string;
   encodeStateVector(): Uint8Array;
   encodeStateAsUpdate(): Uint8Array;
   encodeDiff(stateVector: Uint8Array): Uint8Array;
@@ -321,6 +322,18 @@ describe('xlsx native engine parity', () => {
       expect(withoutVersion(nativeResult.readCells)).toBe(withoutVersion(wasmResult.readCells));
       expect(withoutVersion(nativeResult.exported)).toBe(withoutVersion(wasmResult.exported));
       expect(new Uint8Array(nativeResult.saved)).toEqual(new Uint8Array(wasmResult.saved));
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
+  test('recalculation reports and saves the same on both engines', () => {
+    const wasmDoc = WasmDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    try {
+      expect(nativeDoc.recalculateJson()).toBe(wasmDoc.recalculateJson());
+      expect(new Uint8Array(nativeDoc.saveBytes())).toEqual(new Uint8Array(wasmDoc.saveBytes()));
     } finally {
       wasmDoc.free();
       nativeDoc.free();

@@ -70,6 +70,7 @@ export const xlsxdocument_printDisplayListJson: (a: number, b: number, c: number
 export const xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_recalculateJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_redoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];

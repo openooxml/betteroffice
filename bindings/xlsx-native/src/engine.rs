@@ -480,6 +480,14 @@ impl XlsxDocument {
     }
 
     #[napi]
+    pub fn recalculate_json(&mut self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document_mut(env)?
+            .recalculate_json()
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
     pub fn calculation_status_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?

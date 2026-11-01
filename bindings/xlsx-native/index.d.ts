@@ -40,6 +40,7 @@ export declare class XlsxDocument {
   sheetInfoForJson(sheet: number): string
   selectionDataJson(args: string): string
   cellRectJson(args: string): string
+  recalculateJson(): string
   calculationStatusJson(): string
   setActiveSheet(index: number): void
   editCellJson(args: string): string
