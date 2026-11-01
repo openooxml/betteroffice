@@ -208,7 +208,7 @@ pub(crate) fn type_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return num(16.0);
     }
     if let Some(area) = as_area(arg, ctx) {
-        if area.rows * area.cols > 1 {
+        if area.rows > 1 || area.cols > 1 {
             return num(64.0);
         }
         return num(kind(&evaluate(arg, ctx)));
@@ -218,7 +218,7 @@ pub(crate) fn type_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     match evaluate_array(arg, ctx) {
         Value::Lambda(_) => num(128.0),
-        Value::Array(array) if array.rows() * array.cols() > 1 => num(64.0),
+        Value::Array(array) if array.rows() > 1 || array.cols() > 1 => num(64.0),
         value => num(kind(&value.into_scalar())),
     }
 }

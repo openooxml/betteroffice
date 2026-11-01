@@ -402,15 +402,16 @@ pub(crate) fn phonetic(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut out = String::new();
     for row in 0..rows {
         for col in 0..cols {
+            let value = match area.get(ctx, row, col) {
+                Ok(value) => value,
+                Err(e) => return err(e),
+            };
             let at =
                 xlsx_model::CellRef::new(area.start.row + row as u32, area.start.col + col as u32);
-            if ctx.provider.formula(area.sheet, at).is_some() {
-                continue;
-            }
-            match area.get(ctx, row, col) {
-                Ok(CellValue::Text { value }) => out.push_str(&value),
-                Ok(_) => {}
-                Err(e) => return err(e),
+            if let CellValue::Text { value } = value
+                && ctx.provider.formula(area.sheet, at).is_none()
+            {
+                out.push_str(&value);
             }
             if out.len() > 4 * crate::eval::MAX_CELL_TEXT_CHARS {
                 return err(ErrorValue::Value);
@@ -446,14 +447,20 @@ pub(crate) fn longtext(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() {
         return err(ErrorValue::Value);
     }
-    let joined: Result<String, ErrorValue> = args
-        .iter()
-        .map(|arg| to_text(&evaluate(arg, ctx)))
-        .collect();
-    match joined {
-        Ok(s) => text(ctx, s),
-        Err(e) => err(e),
+    let mut out = String::new();
+    let mut chars = 0usize;
+    for arg in args {
+        let part = match to_text(&evaluate(arg, ctx)) {
+            Ok(part) => part,
+            Err(e) => return err(e),
+        };
+        chars = chars.saturating_add(part.chars().count());
+        if chars > crate::eval::MAX_CELL_TEXT_CHARS {
+            return err(ErrorValue::Value);
+        }
+        out.push_str(&part);
     }
+    text(ctx, out)
 }
 
 fn one_text(args: &[Expr], ctx: &EvalContext<'_>) -> Result<String, ErrorValue> {

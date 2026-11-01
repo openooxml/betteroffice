@@ -386,3 +386,75 @@ fn regex_and_filterxml_keep_the_value_excel_cached() {
     assert_eq!(value(&book, "B2"), number(1.0));
     assert_eq!(value(&book, "B3"), error(ErrorValue::Name));
 }
+
+/// joining stops once the cell text limit is passed, before reading the
+/// arguments after it, as CONCAT does.
+#[test]
+fn longtext_stops_at_the_text_limit() {
+    let mut book = book();
+    put_value(&mut book, "A1", text(&"a".repeat(20_000)));
+    check_in(
+        book,
+        &[
+            ("_xlfn._LONGTEXT(A1,A1,1/0)", error(ErrorValue::Value)),
+            ("_xlfn._LONGTEXT(A1,A1)", error(ErrorValue::Value)),
+            ("LEN(_xlfn._LONGTEXT(A1,\"b\"))", number(20_001.0)),
+        ],
+    );
+}
+
+/// excel keeps 15 significant digits, so huge amounts print their first 15
+/// digits and zeros; tiny ones round to zero.
+#[test]
+fn extreme_magnitudes() {
+    let mut big = String::from("1");
+    for i in (0..200).rev() {
+        if i % 3 == 2 {
+            big.push(',');
+        }
+        big.push('0');
+    }
+    let bahts = |groups: usize| format!("หนึ่งร้อย{}บาทถ้วน", "ล้าน".repeat(groups));
+    check(&[
+        ("DOLLAR(1E200)", text(&format!("${big}.00"))),
+        ("DOLLAR(-1E200)", text(&format!("(${big}.00)"))),
+        ("DOLLAR(1E-200)", text("$0.00")),
+        ("DOLLAR(-1E-308)", text("$0.00")),
+        ("DOLLAR(-0)", text("$0.00")),
+        ("LEN(DOLLAR(1E308))", number(415.0)),
+        ("DOLLAR(2^53,0)", text("$9,007,199,254,740,990")),
+        ("DOLLAR(1E15+0.75)", text("$1,000,000,000,000,000.00")),
+        ("DOLLAR(1,1E200)", error(ErrorValue::Value)),
+        ("DOLLAR(1234.5,-1E200)", text("$0")),
+        ("BAHTTEXT(1E200)", text(&bahts(33))),
+        ("BAHTTEXT(1E308)", text(&bahts(51))),
+        ("BAHTTEXT(1E-200)", text("ศูนย์บาทถ้วน")),
+        ("UNICHAR(1E200)", error(ErrorValue::Value)),
+        ("UNICHAR(2^53)", error(ErrorValue::Value)),
+        ("VALUETOTEXT(1,1E200)", error(ErrorValue::Value)),
+        ("ARRAYTOTEXT(1,-1E200)", error(ErrorValue::Value)),
+    ]);
+}
+
+/// results past 32,767 characters are `#VALUE!` however they grow.
+#[test]
+fn oversized_results_are_value_errors() {
+    let mut book = book();
+    put_value(&mut book, "A1", text(&"\u{E9}".repeat(20_000)));
+    put_value(&mut book, "A2", text(&"\"".repeat(20_000)));
+    put_value(&mut book, "A3", text(&"a".repeat(20_000)));
+    put_value(&mut book, "A4", text(&"a".repeat(20_000)));
+    put_value(&mut book, "B1", text(&"\u{FF71}".repeat(20_000)));
+    check_in(
+        book,
+        &[
+            ("ENCODEURL(A1)", error(ErrorValue::Value)),
+            ("VALUETOTEXT(A2,1)", error(ErrorValue::Value)),
+            ("LEN(VALUETOTEXT(A2,0))", number(20_000.0)),
+            ("ARRAYTOTEXT(A3:A4)", error(ErrorValue::Value)),
+            ("PHONETIC(A3:A4)", error(ErrorValue::Value)),
+            ("LEN(JIS(B1))", number(20_000.0)),
+            ("LEN(ASC(JIS(A3)))", number(20_000.0)),
+        ],
+    );
+}

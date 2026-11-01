@@ -317,3 +317,19 @@ fn type_classifies_values() {
         ],
     );
 }
+
+/// a whole-sheet reference is 1,048,576 by 16,384 cells, more than a 32-bit
+/// `usize` holds as one product.
+#[test]
+fn type_of_whole_sheet_references_is_array() {
+    check(
+        book(),
+        &[
+            ("TYPE('My Data'!A:XFD)", number(64.0)),
+            ("TYPE(1:1048576)", number(64.0)),
+            ("TYPE(A:A)", number(64.0)),
+            ("TYPE(1:1)", number(64.0)),
+            ("TYPE(_xlfn.SEQUENCE(1))", number(1.0)),
+        ],
+    );
+}
