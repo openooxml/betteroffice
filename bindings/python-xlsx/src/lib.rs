@@ -521,7 +521,10 @@ impl PyWorkbook {
         let sheet = self.resolve_sheet(sheet)?;
         let cell = parse_cell(address)?;
         let sheet = self.inner.sheet(sheet).map_err(map_error)?;
-        Ok(sheet.cell(cell).and_then(|found| found.formula.clone()))
+        Ok(sheet
+            .cell(cell)
+            .and_then(|found| found.formula.as_deref())
+            .map(|formula| betteroffice_xlsx::display_formula(formula).into_owned()))
     }
 
     /// Takes what a user would type; returns whether anything changed.

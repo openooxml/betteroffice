@@ -10,7 +10,7 @@ use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
     MAX_DIAGNOSTIC_CELLS, failure, refusal,
 };
-use crate::{CellAddress, Result, XlsxSheetVisibility};
+use crate::{CellAddress, Result, XlsxSheetVisibility, display_formula};
 
 /// Most cells one read may return.
 const MAX_READ_CELLS: u64 = 100_000;
@@ -507,7 +507,10 @@ impl Workbook {
             Some(cell) => CellRead {
                 a1: at.to_a1(),
                 value: cell.value.clone(),
-                formula: cell.formula.clone(),
+                formula: cell
+                    .formula
+                    .as_deref()
+                    .map(|formula| display_formula(formula).into_owned()),
                 display_text: display_text(&self.model.styles, self.model.date_system, cell),
             },
             None => CellRead {

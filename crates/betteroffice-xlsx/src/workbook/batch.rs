@@ -21,11 +21,11 @@ use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    current_cell_state, edit_cell_state, validate_cell_state, validate_model_sheets, validate_op,
-    written_cell_style,
+    committed_formula, current_cell_state, edit_cell_state, validate_cell_state,
+    validate_model_sheets, validate_op, written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
-use crate::{CalculationOptions, Error, Result};
+use crate::{CalculationOptions, Error, Result, display_formula};
 
 const MAX_STEPS: usize = 128;
 /// Most target and guard cells one batch may address.
@@ -569,7 +569,10 @@ impl Workbook {
             return Some("value");
         }
         if let Some(formula) = &guard.formula
-            && stored.and_then(|cell| cell.formula.as_ref()) != formula.as_ref()
+            && stored
+                .and_then(|cell| cell.formula.as_deref())
+                .map(display_formula)
+                != formula.as_deref().map(display_formula)
         {
             return Some("formula");
         }
@@ -802,7 +805,10 @@ impl Workbook {
                     let current = current_cell_state(&self.model, resolved.sheet, cell);
                     let state = CellState {
                         value: CellValue::Empty,
-                        formula: Some(source.clone()),
+                        formula: Some(committed_formula(
+                            source.clone(),
+                            current.formula.as_deref(),
+                        )),
                         style: written_cell_style(&self.model, resolved.sheet, cell, false),
                     };
                     if !cell_states_semantically_equal(&current, &state) {

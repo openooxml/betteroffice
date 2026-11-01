@@ -1,7 +1,9 @@
 //! The functions Excel stores under a version prefix, and the save-time pass
 //! that writes formula text the way Excel does: `_xlfn.` before every function
-//! newer than Excel 2007, `_xlfn._xlws.` before the worksheet ones, and
-//! `_xlpm.` before the names a `LET` or `LAMBDA` binds.
+//! newer than Excel 2007, `_xlfn._xlws.` before the worksheet ones, `_xlpm.`
+//! before the names a `LET` or `LAMBDA` binds, and `_xleta.` before a function
+//! passed by name to a lambda helper. [`display_formula`] is the reverse, for
+//! formula text shown to people.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -556,12 +558,36 @@ const FUNCTION_PREFIX: &str = "_xlfn.";
 const WORKSHEET_PREFIX: &str = "_xlws.";
 const WORKSHEET_FUNCTION_PREFIX: &str = "_xlfn._xlws.";
 const PARAMETER_PREFIX: &str = "_xlpm.";
+const ETA_PREFIX: &str = "_xleta.";
+
+/// the argument of a lambda helper that takes its function: the one at an
+/// index, or the last of two or more.
+#[derive(Clone, Copy)]
+enum Callback {
+    At(usize),
+    Last,
+}
+
+/// the functions that take a lambda, with the argument where a bare function
+/// name stands for one. Every other argument is data, dimensions or an initial
+/// value, where a bare name is a defined name.
+const LAMBDA_HELPERS: &[(&str, Callback)] = &[
+    ("BYCOL", Callback::At(1)),
+    ("BYROW", Callback::At(1)),
+    ("GROUPBY", Callback::At(2)),
+    ("MAKEARRAY", Callback::At(2)),
+    ("MAP", Callback::Last),
+    ("PIVOTBY", Callback::At(3)),
+    ("REDUCE", Callback::At(2)),
+    ("SCAN", Callback::At(2)),
+];
 
 /// `formula` as Excel stores it. Text already in that form comes back
 /// borrowed, so the pass is idempotent, and so does text the prefixes would
-/// push past the formula length limit, which this crate could not read back.
-pub(crate) fn excel_formula(formula: &str) -> Cow<'_, str> {
-    if !formula.contains('(') {
+/// push past the formula length limit, which this crate could not read back,
+/// or that is already past it.
+pub fn excel_formula(formula: &str) -> Cow<'_, str> {
+    if formula.len() > MAX_FORMULA_BYTES || !formula.contains('(') {
         return Cow::Borrowed(formula);
     }
     let tokens = tokenize(formula);
@@ -572,18 +598,85 @@ pub(crate) fn excel_formula(formula: &str) -> Cow<'_, str> {
         .iter()
         .map(|edit| edit.text.len() - (edit.end - edit.start).min(edit.text.len()))
         .sum::<usize>();
-    if pass.edits.is_empty() || formula.len().saturating_add(grown) > MAX_FORMULA_BYTES {
+    if formula.len().saturating_add(grown) > MAX_FORMULA_BYTES {
         return Cow::Borrowed(formula);
     }
-    let mut out = String::with_capacity(formula.len() + 8 * pass.edits.len());
+    splice(formula, &pass.edits)
+}
+
+/// `formula` as people read and type it: the storage prefixes `_xlfn.`,
+/// `_xlws.`, `_xlpm.` and `_xleta.` dropped from function names and `LET` or
+/// `LAMBDA` names, never from string literals, sheet names or structured
+/// references. A stripped text is shown only when it [`saves_as`] `formula`,
+/// otherwise a text keeping `_xleta.`, otherwise `formula` itself, so the
+/// result is idempotent. Text past the formula length limit comes back as it
+/// is; below it the work is linear: one tokenizing pass and at most two
+/// rewrites.
+pub fn display_formula(formula: &str) -> Cow<'_, str> {
+    if formula.len() > MAX_FORMULA_BYTES
+        || !formula
+            .as_bytes()
+            .windows(3)
+            .any(|window| window.eq_ignore_ascii_case(b"_xl"))
+    {
+        return Cow::Borrowed(formula);
+    }
+    let tokens = tokenize(formula);
+    let pass = Pass::new(formula, &tokens);
+    for keep_eta in [false, true] {
+        let shown = splice(formula, &pass.unprefixed(keep_eta));
+        if matches!(shown, Cow::Borrowed(_)) || saves_as(&shown, formula) {
+            return shown;
+        }
+    }
+    Cow::Borrowed(formula)
+}
+
+/// Whether formula text people typed or were shown saves as exactly `stored`,
+/// byte for byte. The one test for showing a text in place of the stored one
+/// and for keeping the stored text when that text is committed.
+pub fn saves_as(typed: &str, stored: &str) -> bool {
+    excel_formula(typed) == stored
+}
+
+/// `formula` with the source-ordered `edits` applied.
+fn splice<'a>(formula: &'a str, edits: &[Edit]) -> Cow<'a, str> {
+    if edits.is_empty() {
+        return Cow::Borrowed(formula);
+    }
+    let mut out = String::with_capacity(formula.len() + 8 * edits.len());
     let mut cursor = 0;
-    for edit in &pass.edits {
+    for edit in edits {
         out.push_str(&formula[cursor..edit.start]);
         out.push_str(edit.text);
         cursor = edit.end;
     }
     out.push_str(&formula[cursor..]);
     Cow::Owned(out)
+}
+
+/// `name` without its leading storage prefixes, keeping `_xleta.` when asked
+/// and never stripping a name down to nothing.
+fn unprefixed(name: &str, keep_eta: bool) -> &str {
+    let prefixes: &[&str] = if keep_eta {
+        &[FUNCTION_PREFIX, WORKSHEET_PREFIX, PARAMETER_PREFIX]
+    } else {
+        &[
+            FUNCTION_PREFIX,
+            WORKSHEET_PREFIX,
+            PARAMETER_PREFIX,
+            ETA_PREFIX,
+        ]
+    };
+    let mut rest = name;
+    while let Some(next) = prefixes
+        .iter()
+        .find_map(|prefix| strip_prefix(rest, prefix))
+        .filter(|next| !next.is_empty())
+    {
+        rest = next;
+    }
+    rest
 }
 
 /// the canonical spelling of a future function and the prefix it is stored
@@ -602,10 +695,24 @@ fn future_function(name: &str) -> Option<(&'static str, &'static str)> {
 }
 
 fn builtin(name: &str) -> bool {
-    future_function(name).is_some()
-        || CLASSIC_FUNCTIONS
+    canonical(name).is_some()
+}
+
+/// the canonical spelling of any worksheet function, matched case-insensitively.
+fn canonical(name: &str) -> Option<&'static str> {
+    match future_function(name) {
+        Some((canonical, _)) => Some(canonical),
+        None => CLASSIC_FUNCTIONS
             .binary_search_by(|probe| compare_upper(probe, name))
-            .is_ok()
+            .ok()
+            .map(|index| CLASSIC_FUNCTIONS[index]),
+    }
+}
+
+/// the spelling of a function passed by name to a lambda helper. `TRUE` and
+/// `FALSE` stay the booleans they read as.
+fn eta_function(name: &str) -> Option<&'static str> {
+    canonical(name).filter(|name| !matches!(*name, "TRUE" | "FALSE"))
 }
 
 fn compare_upper(probe: &str, name: &str) -> Ordering {
@@ -773,33 +880,39 @@ enum Action {
 struct Pass<'a> {
     source: &'a str,
     tokens: &'a [Token],
-    /// the closing token of every opening parenthesis or brace.
+    /// the closing token of every opening parenthesis or brace, paired on one
+    /// stack so pairs nest; a close that does not match the innermost open
+    /// pairs with nothing.
     partners: Vec<Option<usize>>,
     actions: Vec<Action>,
     /// the lower-cased names bound by every enclosing `LET` and `LAMBDA`,
     /// innermost last, with how often each is bound.
     scopes: Vec<String>,
     bound: HashMap<String, usize>,
+    /// the name tokens that are the whole callback argument of a lambda helper.
+    eta: Vec<bool>,
     edits: Vec<Edit>,
 }
 
 impl<'a> Pass<'a> {
     fn new(source: &'a str, tokens: &'a [Token]) -> Self {
         let mut partners = vec![None; tokens.len()];
-        let mut parens = Vec::new();
-        let mut braces = Vec::new();
+        let mut open = Vec::new();
         for (index, token) in tokens.iter().enumerate() {
-            let (stack, closing) = match token.kind {
-                Kind::Open => (&mut parens, false),
-                Kind::BraceOpen => (&mut braces, false),
-                Kind::Close => (&mut parens, true),
-                Kind::BraceClose => (&mut braces, true),
+            let opening = match token.kind {
+                Kind::Open | Kind::BraceOpen => {
+                    open.push(index);
+                    continue;
+                }
+                Kind::Close => Kind::Open,
+                Kind::BraceClose => Kind::BraceOpen,
                 _ => continue,
             };
-            if !closing {
-                stack.push(index);
-            } else if let Some(opening) = stack.pop() {
-                partners[opening] = Some(index);
+            if let Some(&top) = open.last()
+                && tokens[top].kind == opening
+            {
+                open.pop();
+                partners[top] = Some(index);
             }
         }
         Self {
@@ -811,8 +924,30 @@ impl<'a> Pass<'a> {
                 .collect(),
             scopes: Vec::new(),
             bound: HashMap::new(),
+            eta: vec![false; tokens.len()],
             edits: Vec::new(),
         }
+    }
+
+    /// the edits that drop the storage prefixes of every name outside a sheet
+    /// qualifier or structured reference.
+    fn unprefixed(&self, keep_eta: bool) -> Vec<Edit> {
+        self.tokens
+            .iter()
+            .enumerate()
+            .filter(|&(index, token)| {
+                token.kind == Kind::Name && !self.qualified(index) && !self.next_to_bracket(index)
+            })
+            .filter_map(|(_, token)| {
+                let text = &self.source[token.start..token.end];
+                let cut = text.len() - unprefixed(text, keep_eta).len();
+                (cut > 0).then_some(Edit {
+                    start: token.start,
+                    end: token.start + cut,
+                    text: "",
+                })
+            })
+            .collect()
     }
 
     fn run(&mut self) {
@@ -861,6 +996,16 @@ impl<'a> Pass<'a> {
             return;
         }
         if !call {
+            if self.eta[index]
+                && let Some(name) = eta_function(text)
+            {
+                self.insert(token.start, ETA_PREFIX);
+                self.edits.push(Edit {
+                    start: token.start,
+                    end: token.end,
+                    text: name,
+                });
+            }
             return;
         }
         let bare = match strip_prefix(text, FUNCTION_PREFIX) {
@@ -882,6 +1027,22 @@ impl<'a> Pass<'a> {
         } else if bare.eq_ignore_ascii_case("LAMBDA") {
             Binder::Lambda
         } else {
+            if let Ok(helper) =
+                LAMBDA_HELPERS.binary_search_by(|(probe, _)| compare_upper(probe, bare))
+                && let Some(close) = self.partners[index + 1]
+            {
+                let arguments = self.arguments(index + 1, close);
+                let slot = match LAMBDA_HELPERS[helper].1 {
+                    Callback::At(slot) => Some(slot),
+                    Callback::Last => arguments.len().checked_sub(1).filter(|&last| last > 0),
+                };
+                if let Some(at) = slot
+                    .and_then(|slot| arguments.get(slot))
+                    .and_then(|&(lo, hi)| self.single(lo, hi))
+                {
+                    self.eta[at] = true;
+                }
+            }
             return;
         };
         if let Some(close) = self.partners[index + 1] {
@@ -939,11 +1100,7 @@ impl<'a> Pass<'a> {
     /// a table name or R1C1 axis right next to its bracket, or one end of a
     /// whole column range such as `A:A`.
     fn reference_part(&self, index: usize, text: &str) -> bool {
-        if self.kind(index + 1) == Some(Kind::Bracket)
-            || index
-                .checked_sub(1)
-                .is_some_and(|before| self.kind(before) == Some(Kind::Bracket))
-        {
+        if self.next_to_bracket(index) {
             return true;
         }
         if !column_shaped(text) {
@@ -959,6 +1116,14 @@ impl<'a> Pass<'a> {
         };
         (self.kind_after(index, 1) == Some(Kind::Colon) && column(self.after(index, 2)))
             || (self.kind_before(index, 1) == Some(Kind::Colon) && column(self.before(index, 2)))
+    }
+
+    /// a table name or R1C1 axis right next to its bracket.
+    fn next_to_bracket(&self, index: usize) -> bool {
+        self.kind(index + 1) == Some(Kind::Bracket)
+            || index
+                .checked_sub(1)
+                .is_some_and(|before| self.kind(before) == Some(Kind::Bracket))
     }
 
     fn is_bound(&self, text: &str) -> bool {
@@ -1036,14 +1201,17 @@ impl<'a> Pass<'a> {
     /// the token a binding argument holds, when it is a single name Excel
     /// accepts as a parameter.
     fn parameter(&self, lo: usize, hi: usize) -> Option<usize> {
-        let mut names = (lo..hi).filter(|&index| self.tokens[index].kind != Kind::Space);
-        let index = names.next()?;
+        let index = self.single(lo, hi)?;
         let token = self.tokens[index];
-        if names.next().is_some() || token.kind != Kind::Name {
-            return None;
-        }
         let text = &self.source[token.start..token.end];
         parameter_name(strip_prefix(text, PARAMETER_PREFIX).unwrap_or(text)).then_some(index)
+    }
+
+    /// the one name token an argument holds, whitespace aside.
+    fn single(&self, lo: usize, hi: usize) -> Option<usize> {
+        let mut tokens = (lo..hi).filter(|&index| self.tokens[index].kind != Kind::Space);
+        let index = tokens.next()?;
+        (tokens.next().is_none() && self.tokens[index].kind == Kind::Name).then_some(index)
     }
 
     /// prefix the name a binder declares at `index` when it is still bare,
@@ -1078,6 +1246,27 @@ mod tests {
             matches!(excel_formula(&once), Cow::Borrowed(_)),
             "not idempotent: {once}"
         );
+        let shown = display_formula(&once);
+        assert_eq!(excel_formula(&shown), once, "round trip of {once}");
+        assert!(
+            matches!(display_formula(&shown), Cow::Borrowed(_)),
+            "display not idempotent: {shown}"
+        );
+    }
+
+    #[track_caller]
+    fn shown(stored: &str, expected: &str) {
+        let display = display_formula(stored);
+        assert_eq!(display, expected, "{stored}");
+        assert!(
+            matches!(display_formula(&display), Cow::Borrowed(_)),
+            "display not idempotent: {display}"
+        );
+        assert_eq!(
+            excel_formula(&display),
+            stored,
+            "{display} does not store as {stored}"
+        );
     }
 
     #[test]
@@ -1102,6 +1291,12 @@ mod tests {
                 *name
             );
         }
+        assert!(LAMBDA_HELPERS.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(
+            LAMBDA_HELPERS
+                .iter()
+                .all(|(name, _)| FUTURE_FUNCTIONS.binary_search(name).is_ok())
+        );
         for name in [
             "SUM",
             "IFERROR",
@@ -1203,6 +1398,7 @@ mod tests {
             "_xlfn.xlookup(1,A1:A3,B1:B3)",
             "IFERROR(_xlfn.XLOOKUP(1,A1:A3,B1:B3),0)",
             "SUM(_xlfn.MAKEARRAY(2,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r+_xlpm.c)))",
+            "_xlfn.GROUPBY(A2:A9,B2:B9,_xleta.SUM)",
         ] {
             assert!(
                 matches!(excel_formula(source), Cow::Borrowed(_)),
@@ -1517,5 +1713,257 @@ mod tests {
         let over = format!("{}0", call.repeat((MAX_FORMULA_BYTES - 1) / call.len()));
         assert!(over.len() <= MAX_FORMULA_BYTES);
         assert!(matches!(excel_formula(&over), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn functions_passed_by_name_to_a_lambda_helper_take_the_eta_prefix() {
+        for (source, expected) in [
+            (
+                "GROUPBY(A2:A9,B2:B9,SUM)",
+                "_xlfn.GROUPBY(A2:A9,B2:B9,_xleta.SUM)",
+            ),
+            ("BYROW(A1:B2, sum)", "_xlfn.BYROW(A1:B2, _xleta.SUM)"),
+            (
+                "PIVOTBY(A2:A9,B2:B9,C2:C9,AVERAGE,FALSE)",
+                "_xlfn.PIVOTBY(A2:A9,B2:B9,C2:C9,_xleta.AVERAGE,FALSE)",
+            ),
+            (
+                "LET(sum,LAMBDA(x,x),MAP(A1:A3,sum))",
+                "_xlfn.LET(_xlpm.sum,_xlfn.LAMBDA(_xlpm.x,_xlpm.x),_xlfn.MAP(A1:A3,_xlpm.sum))",
+            ),
+            ("MAP(A1:A3,Total)", "_xlfn.MAP(A1:A3,Total)"),
+            ("HSTACK(SUM,AVERAGE)", "_xlfn.HSTACK(SUM,AVERAGE)"),
+            ("SUM(A1,ABS)", "SUM(A1,ABS)"),
+        ] {
+            written(source, expected);
+        }
+    }
+
+    #[test]
+    fn display_drops_the_storage_prefixes_of_names() {
+        for (stored, expected) in [
+            ("_xlfn.SEQUENCE(2,2)", "SEQUENCE(2,2)"),
+            ("_xlfn.XLOOKUP(A1,B1:B3,C1:C3)", "XLOOKUP(A1,B1:B3,C1:C3)"),
+            ("_xlfn._xlws.FILTER(A1:A3,B1:B3>0)", "FILTER(A1:A3,B1:B3>0)"),
+            (
+                "_xlfn._xlws.SORT(_xlfn.UNIQUE(A1:A3))",
+                "SORT(UNIQUE(A1:A3))",
+            ),
+            (
+                "_xlfn.LET(_xlpm.x,1,_xlpm.y,2,_xlpm.x+_xlpm.y)",
+                "LET(x,1,y,2,x+y)",
+            ),
+            ("_xlfn.LAMBDA(_xlpm.a,_xlpm.a*2)(3)", "LAMBDA(a,a*2)(3)"),
+            (
+                "_xlfn.LET(_xlpm.f,_xlfn.LAMBDA(_xlpm.v,_xlpm.v+1),_xlpm.f(2))",
+                "LET(f,LAMBDA(v,v+1),f(2))",
+            ),
+            (
+                "SUM(_xlfn.MAKEARRAY(2,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r+_xlpm.c)))",
+                "SUM(MAKEARRAY(2,1,LAMBDA(r,c,r+c)))",
+            ),
+            (
+                "_xlfn.GROUPBY(A2:A9,B2:B9,_xleta.SUM)",
+                "GROUPBY(A2:A9,B2:B9,SUM)",
+            ),
+            ("_xlfn.ANCHORARRAY(A1)", "ANCHORARRAY(A1)"),
+            ("_xlfn.SINGLE(A1:A3)", "SINGLE(A1:A3)"),
+            (
+                "IFERROR(_xlfn.XLOOKUP(1,A1:A3,B1:B3),\"_xlfn.\")",
+                "IFERROR(XLOOKUP(1,A1:A3,B1:B3),\"_xlfn.\")",
+            ),
+        ] {
+            shown(stored, expected);
+        }
+    }
+
+    #[test]
+    fn display_leaves_literals_sheets_and_tables_alone() {
+        for stored in [
+            "\"_xlfn.SEQUENCE(2)\"&A1",
+            "'_xlfn.Data'!A1",
+            "_xlfn.Data!A1+SUM(_xlfn.Data!B1:B3)",
+            "SUM(Table1[_xlfn.Col])",
+            "SUM(_xlfn.T[Col])",
+            "SUM(A1:A3)",
+            "_xlpm.x+1",
+            "",
+        ] {
+            assert!(
+                matches!(display_formula(stored), Cow::Borrowed(_)),
+                "{stored}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_keeps_a_prefix_saving_would_not_restore() {
+        shown(
+            "_xlfn.GROUPBY(A2:A9,B2:B9,_xlfn.HSTACK(_xleta.SUM,_xleta.AVERAGE))",
+            "GROUPBY(A2:A9,B2:B9,HSTACK(_xleta.SUM,_xleta.AVERAGE))",
+        );
+    }
+
+    #[test]
+    fn display_of_deep_and_long_formulas_is_linear_and_bounded() {
+        for depth in [MAX_FORMULA_BYTES / 30, MAX_FORMULA_BYTES / 10] {
+            let stored = format!(
+                "{}_xlpm.x{}",
+                "_xlfn.LET(_xlpm.x,1,".repeat(depth),
+                ")".repeat(depth)
+            );
+            let shown = format!("{}x{}", "LET(x,1,".repeat(depth), ")".repeat(depth));
+            if stored.len() <= MAX_FORMULA_BYTES {
+                assert_eq!(display_formula(&stored), shown);
+            } else {
+                assert!(matches!(display_formula(&stored), Cow::Borrowed(_)));
+            }
+        }
+        let calls = "_xlfn.SEQUENCE(1)+".repeat(MAX_FORMULA_BYTES / 20);
+        let stored = format!("{calls}0");
+        assert_eq!(
+            display_formula(&stored),
+            format!("{}0", "SEQUENCE(1)+".repeat(MAX_FORMULA_BYTES / 20))
+        );
+        let prefixes = format!("{}SUM(1)", "_xlfn.".repeat(MAX_FORMULA_BYTES / 8));
+        assert!(matches!(display_formula(&prefixes), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn only_the_callback_slot_of_a_lambda_helper_takes_the_eta_prefix() {
+        for (source, expected) in [
+            (
+                "MAKEARRAY(rows,columns,LAMBDA(r,c,r*c))",
+                "_xlfn.MAKEARRAY(rows,columns,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r*_xlpm.c))",
+            ),
+            (
+                "BYROW(value,LAMBDA(r,SUM(r)))",
+                "_xlfn.BYROW(value,_xlfn.LAMBDA(_xlpm.r,SUM(_xlpm.r)))",
+            ),
+            (
+                "REDUCE(0,value,LAMBDA(a,v,a+v))",
+                "_xlfn.REDUCE(0,value,_xlfn.LAMBDA(_xlpm.a,_xlpm.v,_xlpm.a+_xlpm.v))",
+            ),
+            ("BYROW(A1:B2,SUM)", "_xlfn.BYROW(A1:B2,_xleta.SUM)"),
+            ("BYCOL(rate,MAX)", "_xlfn.BYCOL(rate,_xleta.MAX)"),
+            ("MAP(N,T,year,CONCAT)", "_xlfn.MAP(N,T,year,_xleta.CONCAT)"),
+            ("MAP(value)", "_xlfn.MAP(value)"),
+            (
+                "MAKEARRAY(rows,columns,SUM)",
+                "_xlfn.MAKEARRAY(rows,columns,_xleta.SUM)",
+            ),
+            (
+                "REDUCE(value,rate,SUM)",
+                "_xlfn.REDUCE(value,rate,_xleta.SUM)",
+            ),
+            ("SCAN(,year,SUM)", "_xlfn.SCAN(,year,_xleta.SUM)"),
+            (
+                "GROUPBY(year,value,SUM,rate,T)",
+                "_xlfn.GROUPBY(year,value,_xleta.SUM,rate,T)",
+            ),
+            (
+                "PIVOTBY(year,rows,value,AVERAGE,N)",
+                "_xlfn.PIVOTBY(year,rows,value,_xleta.AVERAGE,N)",
+            ),
+        ] {
+            written(source, expected);
+        }
+    }
+
+    #[test]
+    fn display_shows_stripped_text_only_when_it_saves_as_the_stored_text() {
+        for stored in [
+            "_xlfn.xlookup(1,A1:A3,B1:B3)",
+            "_XLFN.SEQUENCE(2,2)",
+            "_xlfn.BYROW(A1:B2,_xleta.sum)",
+            "_xlfn.MAP(A1:A3,SUM)",
+            "_xlfn.BYROW(value,_xlfn.LAMBDA(_xlpm.r,SUM(_xlpm.r)))",
+            "_xlfn.MAKEARRAY(rows,columns,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r*_xlpm.c))",
+            "_xlfn.LET(_xlpm.x,1,SEQUENCE(_xlpm.x))",
+            "_xlfn.REDUCE(0,value,_xlfn.LAMBDA(_xlpm.a,_xlpm.v,_xlpm.a+_xlpm.v))",
+        ] {
+            let display = display_formula(stored);
+            assert!(
+                display == stored || excel_formula(&display) == stored,
+                "{stored} shown as {display}"
+            );
+            assert!(
+                matches!(display_formula(&display), Cow::Borrowed(_)),
+                "display not idempotent: {display}"
+            );
+        }
+        for stored in [
+            "_xlfn.xlookup(1,A1:A3,B1:B3)",
+            "_XLFN.SEQUENCE(2,2)",
+            "_xlfn.MAP(A1:A3,SUM)",
+        ] {
+            assert_eq!(display_formula(stored), stored);
+        }
+        shown("_xlfn.BYROW(A1:B2,_xleta.sum)", "BYROW(A1:B2,_xleta.sum)");
+        shown(
+            "_xlfn.BYROW(value,_xlfn.LAMBDA(_xlpm.r,SUM(_xlpm.r)))",
+            "BYROW(value,LAMBDA(r,SUM(r)))",
+        );
+        shown(
+            "_xlfn.MAKEARRAY(rows,columns,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r*_xlpm.c))",
+            "MAKEARRAY(rows,columns,LAMBDA(r,c,r*c))",
+        );
+    }
+
+    #[test]
+    fn interleaved_brackets_pair_on_one_stack_and_stay_linear() {
+        let source = format!(
+            "{}}}{}{}{}",
+            "MAP({".repeat(700),
+            ",a".repeat(1500),
+            "}".repeat(699),
+            ")".repeat(700)
+        );
+        assert!(source.len() <= MAX_FORMULA_BYTES);
+        let tokens = tokenize(&source);
+        let pass = Pass::new(&source, &tokens);
+        let mut opener = vec![None; tokens.len()];
+        for (open, close) in pass.partners.iter().enumerate() {
+            if let Some(close) = *close {
+                assert!(matches!(
+                    (tokens[open].kind, tokens[close].kind),
+                    (Kind::Open, Kind::Close) | (Kind::BraceOpen, Kind::BraceClose)
+                ));
+                opener[close] = Some(open);
+            }
+        }
+        let mut open = Vec::new();
+        for (index, (partner, start)) in pass.partners.iter().zip(&opener).enumerate() {
+            if partner.is_some() {
+                open.push(index);
+            }
+            if let Some(start) = *start {
+                assert_eq!(
+                    open.pop(),
+                    Some(start),
+                    "pair {start}..{index} crosses another"
+                );
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let stored = excel_formula(&source).into_owned();
+        assert_eq!(stored, source.replace("MAP(", "_xlfn.MAP("));
+        assert_eq!(display_formula(&stored), source);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn text_over_the_formula_limit_is_returned_unchanged() {
+        let calls = MAX_FORMULA_BYTES / "_xlfn.SEQUENCE(1)+".len() + 1;
+        let stored = format!("{}0", "_xlfn.SEQUENCE(1)+".repeat(calls));
+        assert!(stored.len() > MAX_FORMULA_BYTES);
+        assert!(matches!(display_formula(&stored), Cow::Borrowed(_)));
+        let typed = format!("{}0", "SEQUENCE(1)+".repeat(MAX_FORMULA_BYTES / 12 + 1));
+        assert!(typed.len() > MAX_FORMULA_BYTES);
+        assert!(matches!(excel_formula(&typed), Cow::Borrowed(_)));
+        let huge = "_xlfn.SEQUENCE(1)+".repeat(200_000);
+        assert!(matches!(display_formula(&huge), Cow::Borrowed(_)));
+        assert!(matches!(excel_formula(&huge), Cow::Borrowed(_)));
     }
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CellEdit, CellRange, CellRef, DifferentialFormat, Error, Result, SheetId, SheetInfo, Viewport,
-    Workbook,
+    Workbook, display_formula,
 };
 
 /// Sheet metadata shared by binding payloads.
@@ -298,7 +298,7 @@ impl Workbook {
             .map(|name| DefinedNameInfo {
                 hidden: name.hidden,
                 name: name.name.clone(),
-                refers_to: name.formula.clone(),
+                refers_to: display_formula(&name.formula).into_owned(),
                 scope: name.local_sheet.map(|sheet| sheet.0),
             })
             .collect::<Vec<_>>();
@@ -335,7 +335,11 @@ impl Workbook {
                     dxf_id: rule.dxf_id,
                     editable: rule.editable(),
                     format: rule.format.clone(),
-                    formulas: rule.formulas.clone(),
+                    formulas: rule
+                        .formulas
+                        .iter()
+                        .map(|formula| display_formula(formula).into_owned())
+                        .collect(),
                     id: rule.id.clone(),
                     operator: rule.operator.clone(),
                     priority: rule.priority,

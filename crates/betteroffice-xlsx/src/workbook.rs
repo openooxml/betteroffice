@@ -49,7 +49,7 @@ use xlsx_ops::{
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     insertion_keeps_chart_anchor_on_grid,
 };
-use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
+use xlsx_parse::{ChartRefresh, ChartRefreshPlan, display_formula, saves_as};
 use xlsx_render::chart::chart_regions_with_geometry;
 use xlsx_render::region::{
     viewport_for_range_with_geometry, viewport_for_used_range_with_geometry,
@@ -1458,7 +1458,7 @@ impl Workbook {
         let sheet_ref = self.sheet(sheet)?;
         let (input, is_formula) = match sheet_ref.cell(cell) {
             Some(stored) => match &stored.formula {
-                Some(formula) => (format!("={formula}"), true),
+                Some(formula) => (format!("={}", display_formula(formula)), true),
                 None => (
                     value_to_input(&self.model, sheet, cell, &stored.value),
                     false,
@@ -1957,7 +1957,7 @@ impl Workbook {
 
     fn apply_ops_marked(
         &mut self,
-        ops: Vec<Op>,
+        mut ops: Vec<Op>,
         options: CalculationOptions,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
@@ -1976,7 +1976,8 @@ impl Workbook {
         let mut origins = self.preserved.origins.clone();
         let mut names = self.sheet_names();
         let mut per_op = Vec::with_capacity(ops.len());
-        for op in &ops {
+        for op in &mut ops {
+            keep_stored_formula(&preview, op);
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet_in(&preview, &origins, sheet)?;
             }
@@ -4630,6 +4631,9 @@ fn edit_cell_state(
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
     let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    state.formula = state
+        .formula
+        .map(|typed| committed_formula(typed, stored_formula(workbook, sheet, cell)));
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     let format = inferred.map(|id| {
         let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));
@@ -4652,6 +4656,48 @@ fn edit_cell_state(
         }
     });
     (state, format)
+}
+
+fn stored_formula(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> Option<&str> {
+    workbook.sheet(sheet)?.cell(cell)?.formula.as_deref()
+}
+
+/// `typed`, or `stored` when `typed` saves as exactly that text, so committing
+/// shown formula text unchanged leaves the stored text as it was.
+fn committed_formula(typed: String, stored: Option<&str>) -> String {
+    match stored {
+        Some(stored) if typed != stored && saves_as(&typed, stored) => stored.to_owned(),
+        _ => typed,
+    }
+}
+
+/// An op that re-commits a cell formula or defined name in a form that saves
+/// as exactly the stored text keeps the stored text.
+fn keep_stored_formula(workbook: &WorkbookModel, op: &mut Op) {
+    match op {
+        Op::SetCell { sheet, at, cell } => {
+            cell.formula = cell
+                .formula
+                .take()
+                .map(|typed| committed_formula(typed, stored_formula(workbook, *sheet, *at)));
+        }
+        Op::SetDefinedName {
+            name,
+            refers_to,
+            scope,
+            ..
+        } => {
+            let stored = workbook
+                .defined_names
+                .iter()
+                .find(|defined| {
+                    defined.local_sheet == *scope && defined.name.eq_ignore_ascii_case(name)
+                })
+                .map(|defined| defined.formula.as_str());
+            *refers_to = committed_formula(std::mem::take(refers_to), stored);
+        }
+        _ => {}
+    }
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {

@@ -16,6 +16,7 @@ use xlsx_model::{
 use xlsx_parse::{
     DrawingObjectKind, InspectionBudget, PreservedPackage, SharedStringCells, SheetAxes,
     SheetInventory, SheetVisibility, SourceCellFacts, SourceObject, SourceSheetKind,
+    display_formula,
 };
 use xlsx_render::{display_text, format_code_for_cell};
 
@@ -641,7 +642,7 @@ impl Walk<'_> {
                     ordinal: ordinal as u32,
                 },
                 name: defined.name.clone(),
-                formula: defined.formula.clone(),
+                formula: display_formula(&defined.formula).into_owned(),
                 hidden: defined.hidden,
                 local_sheet,
             };
@@ -1323,7 +1324,10 @@ impl Walk<'_> {
             id: format!("s{index}!{}", a1(at)),
             anchor,
             value,
-            formula: cell.formula.clone(),
+            formula: cell
+                .formula
+                .as_deref()
+                .map(|formula| display_formula(formula).into_owned()),
             display_text: display_text(&model.styles, model.date_system, cell),
             number_format: format_code_for_cell(&model.styles, cell),
             formula_result,
