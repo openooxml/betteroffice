@@ -110,6 +110,7 @@ export function createWorkbookSessionRecovery(
   version?: string, fail?: (error: unknown) => void
 ) {
   let source: Uint8Array | undefined = bytes;
+  let disposed = false;
   const settings = { ...options, signal: undefined, retainPeerHydration: false,
     calculation: options.calculation ? { ...options.calculation } : undefined,
     initialViewport: options.initialViewport ? { ...options.initialViewport } : undefined,
@@ -122,7 +123,7 @@ export function createWorkbookSessionRecovery(
   let forcing = false;
   let retryStep = 0;
   let captureMark = CHECKPOINT_MARK;
-  const active = () => { if (!source) throw new SessionFailure('disposed', 'Workbook recovery was disposed'); };
+  const active = () => { if (disposed) throw new SessionFailure('disposed', 'Workbook recovery was disposed'); };
   const normalizePayload = (payload: WorkbookCommand['payload']): WorkbookCommand['payload'] => {
     if (!liveCalculation || !('args' in payload) || payload.calculation) return payload;
     return { ...payload, calculation: { nowSerial: localNowSerial(Date.now()),
@@ -148,13 +149,14 @@ export function createWorkbookSessionRecovery(
           throw new WorkbookRecoveryReplayError(value.throughSeq, 'invalid-checkpoint');
         }
         captured = { ...value, state: value.state.slice() };
+        source = undefined;
         for (const seq of log.keys()) if (seq <= value.throughSeq) log.delete(seq);
         retryStep = 0;
         captureMark = CHECKPOINT_MARK;
         return true;
       })().catch((error: unknown) => {
-        if (!source || error instanceof SessionFailure || error instanceof WorkbookRecoveryReplayError) {
-          if (source) fail?.(error);
+        if (disposed || error instanceof SessionFailure || error instanceof WorkbookRecoveryReplayError) {
+          if (!disposed) fail?.(error);
           throw error;
         }
         const message = error instanceof Error ? error.message : String(error);
@@ -185,7 +187,15 @@ export function createWorkbookSessionRecovery(
               kind: input.kind, payload,
             } as WorkbookCommand } } });
         }
-        const opened = await workbookRecoveryBackend.open(source!, settings, captured, version);
+        const checkpoint = captured;
+        if (!checkpoint && !source) throw new WorkbookRecoveryReplayError(0, 'missing-source');
+        let opened: RecoverySession;
+        try { opened = await workbookRecoveryBackend.open(source ?? new Uint8Array(0), settings, checkpoint, version); }
+        catch (error) {
+          active();
+          if (!checkpoint || error instanceof SessionFailure) throw error;
+          throw Object.assign(new WorkbookRecoveryReplayError(checkpoint.throughSeq, 'checkpoint-unreadable'), { cause: error });
+        }
         try {
           assertCurrent(); active();
           const identifiers = new Map<string, string>();
@@ -220,11 +230,11 @@ export function createWorkbookSessionRecovery(
     },
   };
   const checkpointAboveMark = () => {
-    if (forcing || !source || log.size < captureMark) return;
+    if (forcing || disposed || log.size < captureMark) return;
     forcing = true;
     void (capture ?? Promise.resolve(true)).then(() => {
       forcing = false;
-      if (source && log.size >= captureMark) return recovery.capture(() => source !== undefined);
+      if (!disposed && log.size >= captureMark) return recovery.capture(() => !disposed);
     }, () => { forcing = false; }).catch(() => {});
   };
   return {
@@ -249,6 +259,6 @@ export function createWorkbookSessionRecovery(
         entry.identifier = identifier(status);
       }
     },
-    dispose() { source = undefined; captured = undefined; log.clear(); },
+    dispose() { disposed = true; source = undefined; captured = undefined; log.clear(); },
   };
 }
