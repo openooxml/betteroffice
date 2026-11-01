@@ -141,7 +141,8 @@ enum Condition {
     Field(usize, Criterion),
     /// a computed criterion: a formula under a label that names no field,
     /// written against the first record and true for the records it holds for.
-    Computed(Arc<Expr>),
+    /// it is evaluated where its cell is, moved down with the record.
+    Computed { formula: Arc<Expr>, at: CellRef },
     /// a constant under a label that names no field.
     Constant(bool),
 }
@@ -196,7 +197,7 @@ impl Query {
                     Some(column) => criterion(*column, value.as_ref(), ctx),
                     None => computed(&criteria, row, col, value.as_ref(), ctx),
                 };
-                if let Some(Condition::Computed(formula)) = &condition
+                if let Some(Condition::Computed { formula, .. }) = &condition
                     && !tracked(formula, &database, criteria.sheet, ctx)
                 {
                     ctx.record_unsupported_function();
@@ -212,7 +213,7 @@ impl Query {
         let computes = rows
             .iter()
             .flatten()
-            .any(|condition| matches!(condition, Condition::Computed(_)));
+            .any(|condition| matches!(condition, Condition::Computed { .. }));
         let mut blank = 0;
         let used = used_height(&database, ctx);
         let reported = ctx.provider.used_rows(database.sheet) > 0;
@@ -232,20 +233,13 @@ impl Query {
     /// the records any criteria row holds for. every record a criteria row
     /// is tried on is charged to the budget.
     fn matching(&self, ctx: &EvalContext<'_>) -> Result<Matches, ErrorValue> {
-        let other;
-        let formula_ctx = if self.criteria_sheet == ctx.sheet {
-            ctx
-        } else {
-            other = ctx.for_sheet(self.criteria_sheet);
-            &other
-        };
         let mut records = Vec::new();
         for record in 1..self.database.rows {
             for row in &self.rows {
                 if !ctx.consume_cells(1) {
                     return Err(ErrorValue::Num);
                 }
-                if self.holds(row, record, ctx, formula_ctx)? {
+                if self.holds(row, record, ctx)? {
                     records.push(record);
                     break;
                 }
@@ -255,7 +249,7 @@ impl Query {
             row.iter().all(|condition| match condition {
                 Condition::Field(_, criterion) => criterion.matches(&CellValue::Empty, ctx),
                 Condition::Constant(holds) => *holds,
-                Condition::Computed(_) => false,
+                Condition::Computed { .. } => false,
             })
         });
         Ok(Matches {
@@ -269,7 +263,6 @@ impl Query {
         row: &[Condition],
         record: usize,
         ctx: &EvalContext<'_>,
-        formula_ctx: &EvalContext<'_>,
     ) -> Result<bool, ErrorValue> {
         for condition in row {
             let holds = match condition {
@@ -277,14 +270,11 @@ impl Query {
                     criterion.matches(self.database.get_ref(ctx, record, *column)?.as_ref(), ctx)
                 }
                 Condition::Constant(holds) => *holds,
-                Condition::Computed(formula) => {
+                Condition::Computed { formula, at } => {
                     if !ctx.consume_cells(1) {
                         return Err(ErrorValue::Num);
                     }
-                    u32::try_from(record - 1)
-                        .ok()
-                        .and_then(|by| shifted(formula, by))
-                        .is_some_and(|formula| truthy(&evaluate(&formula, formula_ctx)))
+                    self.computed_holds(formula, *at, record, ctx)?
                 }
             };
             if !holds {
@@ -292,6 +282,35 @@ impl Query {
             }
         }
         Ok(true)
+    }
+
+    /// a computed criterion for one record: the formula moved down to it and
+    /// evaluated at its own cell, moved likewise. a function the engine lacks
+    /// leaves the answer unknown, so the call reports the gap with `#NAME?`.
+    fn computed_holds(
+        &self,
+        formula: &Expr,
+        at: CellRef,
+        record: usize,
+        ctx: &EvalContext<'_>,
+    ) -> Result<bool, ErrorValue> {
+        let Some(by) = u32::try_from(record - 1).ok() else {
+            return Ok(false);
+        };
+        let (Some(moved), Some(row)) = (
+            shifted(formula, by),
+            at.row.checked_add(by).filter(|row| *row < MAX_ROWS),
+        ) else {
+            return Ok(false);
+        };
+        let mut local = ctx.for_sheet(self.criteria_sheet);
+        local.cell = Some(CellRef::new(row, at.col));
+        let unsupported = ctx.unsupported_checkpoint();
+        let value = evaluate(&moved, &local);
+        if ctx.unsupported_checkpoint() > unsupported {
+            return Err(ErrorValue::Name);
+        }
+        Ok(truthy(&value))
     }
 }
 
@@ -393,7 +412,7 @@ fn computed(
             None => parse_formula(source).ok().map(Arc::new),
         };
         return Some(match formula {
-            Some(formula) => Condition::Computed(formula),
+            Some(formula) => Condition::Computed { formula, at },
             None => Condition::Constant(false),
         });
     }

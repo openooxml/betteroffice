@@ -587,3 +587,99 @@ fn a_range_with_a_relative_top_and_an_anchored_bottom_is_a_gap() {
     let reaching = [("H2", formula("SUM(C10:$C$5)>0"))];
     fails_with(&reaching, "DSUM(A4:E10,\"Profit\",H1:H2)", ErrorValue::Name);
 }
+
+/// a computed criterion is evaluated at its own cell, moved down with the
+/// record, so COLUMN() and ROW() describe the criteria cell.
+#[test]
+fn computed_criteria_evaluate_at_the_criteria_cell() {
+    let column = [("H2", formula("COLUMN()=8"))];
+    close_with(&column, "DSUM(A4:E10,\"Profit\",H1:H2)", 502.8);
+    let row = [("H2", formula("ROW()<=3"))];
+    close_with(&row, "DSUM(A4:E10,\"Profit\",H1:H2)", 201.0);
+}
+
+/// a function the engine lacks leaves the criterion unknown: the call is
+/// `#NAME?`, or keeps the value excel cached, never a partial total.
+#[test]
+fn an_unsupported_function_in_a_computed_criterion_is_a_gap() {
+    let extra = [("H2", formula("NOSUCHFUNCTION(A5)>0"))];
+    let source = "DSUM(A4:E10,\"Profit\",H1:H2)";
+    fails_with(&extra, source, ErrorValue::Name);
+    let mut book = book_with(&extra, cached(source, 42.0));
+    rebuild_and_recalc_all(&mut book, None);
+    assert_eq!(result(&book), CellValue::Number { value: 42.0 });
+    let handled = [("H2", formula("IFERROR(NOSUCHFUNCTION(A5),FALSE)"))];
+    close_with(&handled, source, 0.0);
+}
+
+fn huge(values: &[f64]) -> Vec<(&'static str, Cell)> {
+    let mut cells = vec![("J1", text("N")), ("K1", text("N"))];
+    for (address, value) in ["J2", "J3", "J4"].into_iter().zip(values) {
+        cells.push((address, number(*value)));
+    }
+    cells
+}
+
+#[test]
+fn huge_fields_overflow_to_num_not_a_wrong_number() {
+    fails_with(
+        &huge(&[1e200, 1e200]),
+        "DPRODUCT(J1:J4,\"N\",K1:K2)",
+        ErrorValue::Num,
+    );
+    fails_with(
+        &huge(&[1e308, 1e308]),
+        "DSUM(J1:J4,\"N\",K1:K2)",
+        ErrorValue::Num,
+    );
+    close_with(
+        &huge(&[1e200, 1e200, 1e200]),
+        "DVAR(J1:J4,\"N\",K1:K2)",
+        0.0,
+    );
+    close_with(
+        &huge(&[1e200, 1e200, 1e200]),
+        "DVARP(J1:J4,\"N\",K1:K2)",
+        0.0,
+    );
+    close_with(
+        &huge(&[1e200, -1e200, 1e-200]),
+        "DMAX(J1:J4,\"N\",K1:K2)",
+        1e200,
+    );
+    close_with(
+        &huge(&[1e-308, -0.0, 5e-324]),
+        "DSUM(J1:J4,\"N\",K1:K2)",
+        1e-308 + 5e-324,
+    );
+    for (database, plain) in [
+        ("DSTDEV(J1:J4,\"N\",K1:K2)", "STDEV(J2:J4)"),
+        ("DVAR(J1:J4,\"N\",K1:K2)", "VAR(J2:J4)"),
+        ("DAVERAGE(J1:J4,\"N\",K1:K2)", "AVERAGE(J2:J4)"),
+    ] {
+        for values in [[1e200, -1e200], [1e308, 1e308]] {
+            assert_eq!(
+                eval_with(&huge(&values), database),
+                eval_with(&huge(&values), plain),
+                "{database} over {values:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn huge_field_positions_are_value_errors() {
+    for field in ["1E+200", "-0.5", "1E15+0.75", "2^53+1"] {
+        fails(&format!("DSUM(A4:E10,{field},A1:A2)"), ErrorValue::Value);
+    }
+}
+
+/// a database spanning every column of a million rows is cut to the used
+/// columns and its blank records counted at once.
+#[test]
+fn full_sheet_databases_stay_bounded() {
+    close("DCOUNTA(4:1048576,,A1:A2)", 3.0);
+    close("DSUM(A4:XFD1048576,\"Profit\",A1:A3)", 397.8);
+    let all = [("H1", text("Tree"))];
+    close_with(&all, "DCOUNTA(A4:XFD1048576,,H1:H2)", 1_048_572.0);
+}
