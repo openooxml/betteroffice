@@ -67,7 +67,10 @@ Per-layer crates for single pipeline stages:
 - [betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff): the token diff behind proposal previews and DOCX comparison.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): shared DrawingML colors, themes and geometry.
 - [betteroffice-metafile](https://crates.io/crates/betteroffice-metafile): EMF, EMF+ and WMF replay into vector drawings and SVG.
-- [betteroffice-fonts](https://crates.io/crates/betteroffice-fonts): the font pack decoder (zstd and woff2t) shared by every engine; the pack builder is behind the `build` feature.
+- [betteroffice-fonts](https://crates.io/crates/betteroffice-fonts): shared font pack decoding and optional native family resolution.
+- [betteroffice-fonts-latin](https://crates.io/crates/betteroffice-fonts-latin): bundled Latin and RTL font bytes.
+- [betteroffice-fonts-intl](https://crates.io/crates/betteroffice-fonts-intl): bundled international font bytes.
+- [betteroffice-fonts-cjk](https://crates.io/crates/betteroffice-fonts-cjk): bundled CJK font bytes, grouped from the [SC](https://crates.io/crates/betteroffice-fonts-cjk-sc), [TC](https://crates.io/crates/betteroffice-fonts-cjk-tc), [JP](https://crates.io/crates/betteroffice-fonts-cjk-jp), [KR](https://crates.io/crates/betteroffice-fonts-cjk-kr), and [Serif SC](https://crates.io/crates/betteroffice-fonts-cjk-serif-sc) face crates.
 
 ## Python packages
 

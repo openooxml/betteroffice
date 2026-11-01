@@ -1,10 +1,11 @@
-import { expect, mock, test } from 'bun:test';
+import { expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createDocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { ResidentEngineWorkerClient, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
 import { applyFrameDelta, decodeFrameDelta } from '@betteroffice/docx/layout/render';
 import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandConnection } from '@betteroffice/docx/worker';
 import type { RustTextEngine } from '@betteroffice/docx/layout/measure/rustMeasureSource';
+import type { EmbeddedFontFace, FontDefinition } from '@betteroffice/docx/utils';
 import { buildCommandFrame } from '../../../../../docx/src/yrs/residentCommandFrame';
 import { registerCommandFonts } from '../../../../../docx/src/yrs/residentCommandFonts';
 import { stageCommandPresentation } from '../../../../../docx/src/yrs/residentCommandPresentation';
@@ -12,7 +13,7 @@ import { openCommandEngine, closeCommandEngines } from '../../../../../docx/src/
 import { projectCommandEchoContext } from '../../../../../docx/src/yrs/residentCommandViewProjection';
 import { EchoGlyphSources } from '../../../../../docx/src/yrs/residentEchoGlyphSource';
 import { buildGlyphPath, parseOutlineJson } from '../../../../../docx/src/layout/render/glyphCache';
-import { fontEnvironmentForRegistrations } from './workerFonts';
+import { customWorkerFontFaces, fontEnvironmentForRegistrations } from './workerFonts';
 import { createEchoPainter, type PeerlessEchoIntent } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { admitInputIntents, createInputAdmission } from './inputAdmission';
@@ -22,7 +23,8 @@ import { decodeSvgMedia } from './svgMedia';
 
 type DocxCommandInitRequest = Parameters<ResidentEngineWorkerClient['commandInit']>[0];
 
-async function openFontConnection(hold = false, fontKeys: readonly string[] = ['face'], getRasterScale?: () => number) {
+async function openFontConnection(hold = false, fontKeys: readonly string[] = ['face'], getRasterScale?: () => number,
+  configured: { fonts?: FontDefinition[]; embedded?: EmbeddedFontFace[] } = {}) {
   const source = readFileSync(`${import.meta.dir}/PeerlessDocxEditor.tsx`, 'utf8');
   const start = source.indexOf('    signal.throwIfAborted();', source.indexOf('const openResident ='));
   const end = source.indexOf('\n  }, [', start);
@@ -40,6 +42,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   let collector: RustTextEngine | undefined;
   let measureOptions: { bundled?: unknown } | undefined;
   const reportRecoverableError = mock((_error: Error) => {});
+  const setEmbeddedFaces = mock((_faces: EmbeddedFontFace[]) => {});
   let collected: YrsResidentFontRegistration[] | undefined;
   let init: DocxCommandInitRequest | undefined;
   let ready: () => void = () => {};
@@ -86,7 +89,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
       collector = engine;
       let ids: number[] = [];
       return {
-        setCompat() {}, setEmbeddedFaces() {},
+        setCompat() {}, setEmbeddedFaces,
         async prepareFontRequirements() {
           ids = [engine.registerFont(Uint8Array.of(11, 12))];
           ids.push(engine.registerSubstituteFont!(ids[0], 'Calibri'));
@@ -96,19 +99,20 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
         clear() { cleared = true; },
       };
     },
-    extractEmbeddedFontFaces: async () => [],
+    extractEmbeddedFontFaces: async () => configured.embedded ?? [],
+    customWorkerFontFaces,
     decodeSvgMedia,
     createDocxCommandConnection,
     discardCommandPresentation: () => {},
-    settings: { current: { readOnly: false } }, identity: {}, retained: {}, pageIndexes: {}, prepared: {},
+    settings: { current: { readOnly: false, fonts: configured.fonts } }, identity: {}, retained: {}, pageIndexes: {}, prepared: {},
   };
   const open = new Function(...Object.keys(dependencies), `${body}\nreturn open;`)(...Object.values(dependencies)) as
     (bytes: Uint8Array, signal: AbortSignal, getRasterScale?: () => number) => Promise<typeof connection>;
   const result = open(Uint8Array.of(1), controller.signal, getRasterScale);
-  await initialized;
+  await Promise.race([initialized, result]);
   return { result, controller, get init() { return init; }, registerFont, registerSubstituteFont,
     getRustTextEngine, get collector() { return collector; }, get collected() { return collected; },
-    get measureOptions() { return measureOptions; }, reportRecoverableError,
+    get measureOptions() { return measureOptions; }, reportRecoverableError, setEmbeddedFaces,
     cleared: () => cleared, destroyed: () => destroyed };
 }
 
@@ -121,6 +125,23 @@ test('no font provider: the font fallback warning never reaches onError', async 
     expect('onWarning' in opened.measureOptions!).toBe(false);
     expect(opened.reportRecoverableError).not.toHaveBeenCalled();
   } finally { await connection.client.dispose(); opened.controller.abort(); }
+});
+
+test('command preflight opens with a 404 URL font without fetching it', async () => {
+  const embedded: EmbeddedFontFace = {
+    family: 'Custom', data: Uint8Array.of(1, 2).buffer, weight: 'normal', style: 'normal', subsetted: false,
+  };
+  const fetchFont = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
+  try {
+    const opened = await openFontConnection(false, ['custom|0|0'], undefined, {
+      fonts: [{ family: 'Custom', src: '/fonts/custom.ttf' }], embedded: [embedded],
+    });
+    const connection = await opened.result;
+    try {
+      expect(opened.setEmbeddedFaces).toHaveBeenCalledWith([embedded]);
+      expect(fetchFont).not.toHaveBeenCalled();
+    } finally { await connection.client.dispose(); opened.controller.abort(); }
+  } finally { fetchFont.mockRestore(); }
 });
 
 test('command init receives the latest raster scale', async () => {

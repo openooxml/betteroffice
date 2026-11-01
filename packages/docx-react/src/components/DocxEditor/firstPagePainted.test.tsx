@@ -4,6 +4,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spy
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
+import JSZip from 'jszip';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -90,7 +92,7 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 beforeEach(() => {
   globalThis.Worker = undefined as unknown as typeof Worker;
 });
@@ -163,6 +165,80 @@ test('a document reports its first page painted once its canvas presents, not at
   await act(async () => releaseReplays());
   await waitFor(() => expect(painted).toBe(1), { timeout: 20_000 });
 }, 40_000);
+
+test('a legacy editor measures and paints an app URL family through the no-provider path', async () => {
+  const zip = await JSZip.loadAsync(await pagedDocx(1));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:r>',
+    '<w:r><w:rPr><w:rFonts w:ascii="Brand Sans" w:hAnsi="Brand Sans"/></w:rPr>'));
+  const buffer = await zip.generateAsync({ type: 'arraybuffer' });
+  const noProvider = {
+    resolve: () => undefined,
+    resolveFamily: () => undefined,
+    resolveScriptFallback: () => undefined,
+    resolveLastResort: () => undefined,
+  };
+  const open = async (measurementFontProvider?: typeof noProvider) => {
+    const ref = createRef<Editor>();
+    let painted = false;
+    let display: DisplayList | undefined;
+    const unsubscribe = onPresented((list) => { display = list as DisplayList; });
+    const view = render(<DocxEditor ref={ref} experimentalWorkerOpen={false}
+      documentBuffer={buffer} fonts={[{ family: 'Brand Sans', src: '/brand.woff2' }]}
+      measurementFontProvider={measurementFontProvider} onFirstPagePainted={() => { painted = true; }} />);
+    try {
+      await waitFor(() => expect(ref.current).not.toBeNull(), { timeout: 20_000 });
+      expect(await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 })).toBe(1);
+      await waitFor(() => expect(painted).toBe(true), { timeout: 20_000 });
+      expect(document.head.textContent).toContain('/brand.woff2');
+      return display!.pages.flatMap((page) => page.primitives).filter(
+        (primitive) => primitive.kind === 'text' || primitive.kind === 'glyphRun',
+      );
+    } finally { unsubscribe(); view.unmount(); }
+  };
+  const browser = await open(noProvider);
+  expect(browser.some((primitive) => primitive.kind === 'text' && primitive.font.includes('Brand Sans'))).toBe(true);
+  expect(await open()).toEqual(browser);
+}, 60_000);
+
+test('a legacy editor leaves hosted Calibri to the browser while unhosted Cambria uses the manager', async () => {
+  const zip = await JSZip.loadAsync(await pagedDocx(1));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const paragraph = (family: string, text: string) =>
+    `<w:p><w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+  zip.file('word/document.xml', xml.replace(/<w:p>.*?<\/w:p>/,
+    paragraph('Calibri', 'Hosted Calibri') + paragraph('Cambria', 'Unhosted Cambria')));
+  const buffer = await zip.generateAsync({ type: 'arraybuffer' });
+  const noProvider = { resolve: () => undefined };
+  const open = async (measurementFontProvider?: typeof noProvider) => {
+    const ref = createRef<Editor>();
+    let painted = false;
+    let display: DisplayList | undefined;
+    const unsubscribe = onPresented((list) => { display = list as DisplayList; });
+    const view = render(<DocxEditor ref={ref} experimentalWorkerOpen={false}
+      documentBuffer={buffer} fonts={[{ family: 'Calibri', src: '/calibri.woff2' }]}
+      measurementFontProvider={measurementFontProvider} onFirstPagePainted={() => { painted = true; }} />);
+    try {
+      await waitFor(() => expect(ref.current).not.toBeNull(), { timeout: 20_000 });
+      expect(await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 })).toBe(1);
+      await waitFor(() => expect(painted).toBe(true), { timeout: 20_000 });
+      expect(document.head.textContent).toContain('/calibri.woff2');
+      return display!.pages.flatMap((page) => page.primitives).filter(
+        (primitive) => primitive.kind === 'text' || primitive.kind === 'glyphRun',
+      );
+    } finally { unsubscribe(); view.unmount(); }
+  };
+  const browser = await open(noProvider);
+  const implicit = await open();
+  const hosted = (primitives: typeof browser) => primitives.filter(
+    (primitive) => primitive.kind === 'text' && primitive.font.includes('Calibri'),
+  );
+  expect(hosted(browser)).not.toHaveLength(0);
+  expect(hosted(implicit)).toEqual(hosted(browser));
+  const nativeText = implicit.filter((primitive) => primitive.kind === 'glyphRun').map((primitive) => primitive.text).join('');
+  expect(nativeText).not.toContain('Hosted Calibri');
+  expect(nativeText).toContain('Unhosted Cambria');
+}, 60_000);
 
 test('each document reports its first page painted once, however often its pages repaint', async () => {
   const ref = createRef<Editor>();

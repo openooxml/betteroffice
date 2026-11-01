@@ -311,7 +311,7 @@ pub(crate) fn serialize_inline_node(
     }
 }
 
-fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
+pub(super) fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
     let mut writer = XmlWriter::with_capacity(96);
     writer
         .start_element("w:bookmarkStart")
@@ -327,7 +327,7 @@ fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
     writer.finish()
 }
 
-fn serialize_bookmark_end(bookmark: &BookmarkEnd) -> String {
+pub(super) fn serialize_bookmark_end(bookmark: &BookmarkEnd) -> String {
     let mut writer = XmlWriter::with_capacity(40);
     writer
         .start_element("w:bookmarkEnd")

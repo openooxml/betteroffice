@@ -48,9 +48,8 @@ use js_sys::{Function, Uint8Array};
 #[cfg(test)]
 use serde_json::json;
 use wasm_bindgen::prelude::*;
-use yrs::Subscription;
 
-use crate::session::{EditSessionCore, EngineError, EngineErrorKind, Host};
+use crate::session::{EditSessionCore, EngineError, EngineErrorKind, Host, UpdateSubscription};
 
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
@@ -226,7 +225,7 @@ impl RunInheritance {
 #[wasm_bindgen]
 pub struct EditSession {
     core: EditSessionCore,
-    update_observer: Option<Subscription>,
+    update_observer: Option<UpdateSubscription>,
 }
 
 #[wasm_bindgen]
@@ -1022,16 +1021,14 @@ impl EditSession {
         let callback = callback.clone();
         let subscription = self
             .core
-            .engine
-            .doc()
-            .observe_update_v1(move |update, remote| {
+            .observe_updates(move |update, remote| {
                 // Uint8Array::from copies out of wasm memory — the JS side
                 // owns the bytes and may hold them across further edits.
                 let bytes = Uint8Array::from(update);
                 let origin = if remote { 1.0 } else { 0.0 };
                 let _ = callback.call2(&JsValue::NULL, &bytes.into(), &JsValue::from_f64(origin));
             })
-            .map_err(js_err)?;
+            .map_err(JsValue::from)?;
         self.update_observer = Some(subscription);
         Ok(())
     }

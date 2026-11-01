@@ -2337,27 +2337,25 @@ fn inherited_run_attrs(
 }
 
 /// What runs inherit under one package's styles.
-#[cfg(any(test, feature = "wasm"))]
-pub(crate) struct RunInheritance(StyleResolver);
+#[doc(hidden)]
+pub struct RunInheritance(StyleResolver);
 
-#[cfg(any(test, feature = "wasm"))]
 impl RunInheritance {
-    pub(crate) fn new(definitions: Option<&Value>) -> Self {
+    #[doc(hidden)]
+    pub fn new(definitions: Option<&Value>) -> Self {
         Self(StyleResolver::new(definitions))
     }
 
     /// What seeding merges into the marks of a run of `run_style` in a paragraph of
     /// `paragraph_style` before the run's direct formatting.
-    pub(crate) fn run_attrs(
-        &self,
-        paragraph_style: Option<&str>,
-        run_style: Option<&str>,
-    ) -> JsonObject {
+    #[doc(hidden)]
+    pub fn run_attrs(&self, paragraph_style: Option<&str>, run_style: Option<&str>) -> JsonObject {
         self.0.run_attrs(paragraph_style, run_style)
     }
 
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
-    pub(crate) fn table_run_attrs(
+    #[doc(hidden)]
+    pub fn table_run_attrs(
         &mut self,
         paragraph_style: Option<&str>,
         run_style: Option<&str>,
@@ -2369,7 +2367,8 @@ impl RunInheritance {
         attrs
     }
 
-    pub(crate) fn paragraph_formatting(
+    #[doc(hidden)]
+    pub fn paragraph_formatting(
         &mut self,
         paragraph_style: Option<&str>,
         table_formatting: Option<Value>,
@@ -2381,7 +2380,8 @@ impl RunInheritance {
         formatting
     }
 
-    pub(crate) fn table_attrs(&self, table: &Value) -> Value {
+    #[doc(hidden)]
+    pub fn table_attrs(&self, table: &Value) -> Value {
         let projected = project_table(table, &self.0, None, 12);
         let rows: Vec<Vec<Value>> = projected
             .rows

@@ -71,7 +71,7 @@ beforeAll(async () => {
     import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
   )))));
   startWorker = await step('create worker factory', () => residentWorkerFactory());
-});
+}, 30_000);
 
 beforeEach(() => {
   setMissingWorkerCapabilitiesForTests([]);

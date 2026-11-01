@@ -422,6 +422,8 @@
         "strikethroughDescription": "स्ट्राइकथ्रू टॉगल करें",
         "subscript": "सबस्क्रिप्ट",
         "subscriptDescription": "सबस्क्रिप्ट टॉगल करें",
+        "clearFormatting": "प्रारूपण साफ करें",
+        "clearFormattingDescription": "टेक्स्ट की फ़ॉर्मैटिंग साफ़ करें",
         "superscript": "सुपरस्क्रिप्ट",
         "superscriptDescription": "सुपरस्क्रिप्ट टॉगल करें",
         "alignLeft": "बाएं संरेखित करें",
@@ -763,7 +765,11 @@
     "leftIndent": "बायां इंडेंट",
     "rightIndent": "दायां इंडेंट",
     "topMargin": "शीर्ष मार्जिन",
-    "bottomMargin": "तल मार्जिन"
+    "bottomMargin": "तल मार्जिन",
+    "leftMargin": "बायाँ मार्जिन",
+    "rightMargin": "दायाँ मार्जिन",
+    "hangingIndent": "हैंगिंग इंडेंट",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "प्रिंट करें",

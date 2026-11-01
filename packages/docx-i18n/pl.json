@@ -422,6 +422,8 @@
         "strikethroughDescription": "Przełącz przekreślenie",
         "subscript": "Indeks dolny",
         "subscriptDescription": "Przełącz indeks dolny",
+        "clearFormatting": "Wyczyść formatowanie",
+        "clearFormattingDescription": "Wyczyść formatowanie tekstu",
         "superscript": "Indeks górny",
         "superscriptDescription": "Przełącz indeks górny",
         "alignLeft": "Wyrównaj do lewej",
@@ -763,7 +765,11 @@
     "leftIndent": "Wcięcie z lewej",
     "rightIndent": "Wcięcie z prawej",
     "topMargin": "Margines górny",
-    "bottomMargin": "Margines dolny"
+    "bottomMargin": "Margines dolny",
+    "leftMargin": "Lewy margines",
+    "rightMargin": "Prawy margines",
+    "hangingIndent": "Wcięcie wysunięte",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Drukuj",

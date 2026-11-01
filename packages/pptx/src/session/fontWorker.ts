@@ -1,6 +1,8 @@
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { requireWebWorker } from '../../../../shared/office-session/webWorker';
+import { shipsWasmAsset } from '../wasm/asset';
 import type { PresentationCommandMethods } from './commandProtocol';
 
 type Methods = Pick<PresentationCommandMethods, 'decodeFontFace'>;
@@ -30,6 +32,7 @@ export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer)
 }
 
 function createPreparedFontWorker() {
+  requireWebWorker('openPresentation');
   const worker = new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' });
   const transport = createWorkerTransport(worker);
   const subscriptions = new Set<() => void>();
@@ -56,7 +59,7 @@ function createPreparedFontWorker() {
   const rpc = createSessionClient<Methods, {}>(connection, {
     methods: { decodeFontFace: true },
   });
-  requestWasmCompile(connection);
+  if (shipsWasmAsset) requestWasmCompile(connection);
   function release(): void {
     if (!retired) { detach(); void rpc.dispose(); transport.close(); }
   }

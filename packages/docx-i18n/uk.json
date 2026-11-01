@@ -422,6 +422,8 @@
         "strikethroughDescription": "Увімкнути або вимкнути закреслення",
         "subscript": "Нижній індекс",
         "subscriptDescription": "Увімкнути або вимкнути нижній індекс",
+        "clearFormatting": "Очистити форматування",
+        "clearFormattingDescription": "Очистити форматування тексту",
         "superscript": "Верхній індекс",
         "superscriptDescription": "Увімкнути або вимкнути верхній індекс",
         "alignLeft": "Вирівняти ліворуч",
@@ -763,7 +765,11 @@
     "leftIndent": "Відступ зліва",
     "rightIndent": "Відступ справа",
     "topMargin": "Верхнє поле",
-    "bottomMargin": "Нижнє поле"
+    "bottomMargin": "Нижнє поле",
+    "leftMargin": "Ліве поле",
+    "rightMargin": "Праве поле",
+    "hangingIndent": "Виступ",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Друк",

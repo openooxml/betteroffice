@@ -52,6 +52,7 @@ export default defineConfig([
     shims: true,
     dts: true,
     splitting: true,
+    external: ['@betteroffice/fonts'],
     sourcemap: false,
     clean: true,
     treeshake: true,

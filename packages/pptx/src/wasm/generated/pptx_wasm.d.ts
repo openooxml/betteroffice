@@ -71,6 +71,7 @@ export class PptxDocument {
     insertTextProfiledJson(args: string): string;
     listProposalsJson(): string;
     mediaBytes(part_path: string): Uint8Array;
+    metafileSvg(part_path: string): Uint8Array | undefined;
     moveShapeJson(args: string): string;
     moveShapeProfiledJson(args: string): string;
     moveSlideJson(args: string): string;
@@ -169,7 +170,7 @@ export class PptxRenderer {
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
-     * requested font faces before layout, for one slide or the whole deck.
+     * Requested faces with optional script coverage buckets, before layout.
      */
     requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
@@ -280,6 +281,7 @@ export interface InitOutput {
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveShapeProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];

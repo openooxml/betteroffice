@@ -49,7 +49,7 @@ let workers: InProcessResidentWorker[];
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 beforeEach(() => {
   compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
     new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])

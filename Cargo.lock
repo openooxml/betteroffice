@@ -204,8 +204,12 @@ dependencies = [
 name = "betteroffice-fonts"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts-cjk",
+ "betteroffice-fonts-intl",
+ "betteroffice-fonts-latin",
  "cc",
  "lol_alloc",
+ "quick-xml",
  "ruzstd",
  "semver",
  "serde",
@@ -214,6 +218,67 @@ dependencies = [
  "tempfile",
  "wuff",
  "zstd",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-fonts-cjk-jp",
+ "betteroffice-fonts-cjk-kr",
+ "betteroffice-fonts-cjk-sc",
+ "betteroffice-fonts-cjk-serif-sc",
+ "betteroffice-fonts-cjk-tc",
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-jp"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-kr"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-sc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-serif-sc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-tc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-intl"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-latin"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -297,6 +362,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-ooxml-diff",
  "betteroffice-opc",
  "betteroffice-pptx-parse",
@@ -314,6 +380,7 @@ name = "betteroffice-pptx-engine"
 version = "0.0.0"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
@@ -343,7 +410,9 @@ name = "betteroffice-pptx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-ooxml-text",
+ "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
  "png",
@@ -369,6 +438,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
  "unicode-segmentation",
 ]
 
@@ -545,6 +615,7 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-fonts",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",

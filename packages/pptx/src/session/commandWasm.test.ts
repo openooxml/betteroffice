@@ -237,7 +237,7 @@ test.skipIf(engineKind === 'native')('p1_main_wasm_guard_detects_transitive_impo
   let initialization: Promise<WebAssembly.Module> | undefined;
   mock.module('../wasm/asset', () => {
     initialization = initialize();
-    return { wasmAssetUrl: () => new URL('https://example.test/pptx.wasm') };
+    return { shipsWasmAsset: true, wasmAssetUrl: () => new URL('https://example.test/pptx.wasm') };
   });
   try {
     expect(initialize).not.toHaveBeenCalled();

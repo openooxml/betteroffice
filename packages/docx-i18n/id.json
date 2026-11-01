@@ -422,6 +422,8 @@
         "strikethroughDescription": "Aktifkan/nonaktifkan teks coret",
         "subscript": "Subskrip",
         "subscriptDescription": "Aktifkan/nonaktifkan subskrip",
+        "clearFormatting": "Hapus Semua Pemformatan",
+        "clearFormattingDescription": "Hapus pemformatan teks",
         "superscript": "Superskrip",
         "superscriptDescription": "Aktifkan/nonaktifkan superskrip",
         "alignLeft": "Rata Kiri",
@@ -763,7 +765,11 @@
     "leftIndent": "Inden Kiri",
     "rightIndent": "Inden Kanan",
     "topMargin": "Margin Atas",
-    "bottomMargin": "Margin Bawah"
+    "bottomMargin": "Margin Bawah",
+    "leftMargin": "Margin kiri",
+    "rightMargin": "Margin kanan",
+    "hangingIndent": "Inden gantung",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Cetak",

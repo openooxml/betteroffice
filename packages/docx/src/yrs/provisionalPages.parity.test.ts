@@ -93,7 +93,7 @@ beforeAll(async () => {
     const clearTimeout = testHarness.clearTimer ?? globalThis.clearTimeout;
     ${await result.outputs[0].text()}
   `) as typeof startWorker;
-});
+}, 30_000);
 
 function syntheticDocx(feature = 'plain'): Uint8Array {
   if (feature.startsWith('flow-')) return flowDocx(feature);

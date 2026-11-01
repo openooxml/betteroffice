@@ -422,6 +422,8 @@
         "strikethroughDescription": "取り消し線の切り替え",
         "subscript": "下付き",
         "subscriptDescription": "下付きの切り替え",
+        "clearFormatting": "書式のクリア",
+        "clearFormattingDescription": "テキストの書式をクリア",
         "superscript": "上付き",
         "superscriptDescription": "上付きの切り替え",
         "alignLeft": "左揃え",
@@ -763,7 +765,11 @@
     "leftIndent": "左インデント",
     "rightIndent": "右インデント",
     "topMargin": "上余白",
-    "bottomMargin": "下余白"
+    "bottomMargin": "下余白",
+    "leftMargin": "左余白",
+    "rightMargin": "右余白",
+    "hangingIndent": "ぶら下げインデント",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "印刷",

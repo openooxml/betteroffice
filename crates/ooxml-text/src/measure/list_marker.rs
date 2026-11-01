@@ -129,7 +129,8 @@ fn marker_text_width(
     } else {
         crate::bidi::BaseDirection::Ltr
     };
-    let natural_width = super::prepare::measure_plain_text(store, &chain, text, size_px, base)?;
+    let natural_width =
+        super::prepare::measure_plain_text(store, &chain, text, size_px, base, input.font_chains)?;
     Ok((natural_width, size_px))
 }
 

@@ -422,6 +422,8 @@
         "strikethroughDescription": "Durchstreichung umschalten",
         "subscript": "Tiefgestellt",
         "subscriptDescription": "Tiefstellung umschalten",
+        "clearFormatting": "Formatierung löschen",
+        "clearFormattingDescription": "Textformatierung löschen",
         "superscript": "Hochgestellt",
         "superscriptDescription": "Hochstellung umschalten",
         "alignLeft": "Linksbündig",
@@ -763,7 +765,11 @@
     "leftIndent": "Linker Einzug",
     "rightIndent": "Rechter Einzug",
     "topMargin": "Oberer Seitenrand",
-    "bottomMargin": "Unterer Seitenrand"
+    "bottomMargin": "Unterer Seitenrand",
+    "leftMargin": "Linker Seitenrand",
+    "rightMargin": "Rechter Seitenrand",
+    "hangingIndent": "Hängender Einzug",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Drucken",

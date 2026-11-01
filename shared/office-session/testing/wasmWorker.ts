@@ -29,7 +29,8 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
             loader: 'js',
           }));
           build.onLoad({ filter: /\/wasm\/asset\.ts$/ }, () => ({
-            contents: `export const wasmAssetUrl = (png = true) => new URL(png
+            contents: `export const shipsWasmAsset = true;
+              export const wasmAssetUrl = (png = true) => new URL(png
               ? testHarness.assetUrl : testHarness.assetUrl.replace(/\\.wasm$/, '_lean.wasm'));`,
             loader: 'js',
           }));

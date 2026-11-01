@@ -135,6 +135,7 @@
       "unsupportedCommand": "Belum didukung.",
       "invalidArguments": "Nilai ini tidak valid.",
       "inputFailed": "Entri sel sebelumnya tidak dapat disimpan.",
+      "sheetProtected": "Sel ini berada di lembar yang dilindungi.",
       "documentReplaced": "Buku kerja lain telah dibuka.",
       "targetChanged": "Pilihan telah berubah.",
       "gestureActive": "Selesaikan memindahkan bagan terlebih dahulu.",

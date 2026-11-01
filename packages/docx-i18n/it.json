@@ -422,6 +422,8 @@
         "strikethroughDescription": "Attiva/disattiva il barrato",
         "subscript": "Pedice",
         "subscriptDescription": "Attiva/disattiva il pedice",
+        "clearFormatting": "Cancella tutta la formattazione",
+        "clearFormattingDescription": "Cancella la formattazione del testo",
         "superscript": "Apice",
         "superscriptDescription": "Attiva/disattiva l'apice",
         "alignLeft": "Allinea a sinistra",
@@ -763,7 +765,11 @@
     "leftIndent": "Rientro sinistro",
     "rightIndent": "Rientro destro",
     "topMargin": "Margine superiore",
-    "bottomMargin": "Margine inferiore"
+    "bottomMargin": "Margine inferiore",
+    "leftMargin": "Margine sinistro",
+    "rightMargin": "Margine destro",
+    "hangingIndent": "Rientro sporgente",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Stampa",

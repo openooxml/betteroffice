@@ -37,6 +37,7 @@ import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
+import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
 import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 
@@ -808,7 +809,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   }
 
   async warm(hostModule = false): Promise<void> {
-    if (!hostModule) {
+    if (!hostModule || !shipsWasmAsset) {
       await this.request({ type: 'warm' });
       return;
     }

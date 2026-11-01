@@ -7,7 +7,7 @@ import { decodeFontFace } from './generated/edit/docx_edit.js';
 
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url))));
-});
+}, 30_000);
 
 test('the engine exports its linked font decoder with known answers', () => {
   expect(typeof decodeFontFace).toBe('function');

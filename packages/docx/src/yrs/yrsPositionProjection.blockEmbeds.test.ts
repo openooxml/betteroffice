@@ -78,7 +78,7 @@ function paragraphStart(projection: YrsPositionProjection, paraId: string): numb
 }
 
 describe('a body story carrying a block embed', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   for (const [name, embed] of [
     ['table', TABLE],

@@ -422,6 +422,8 @@
         "strikethroughDescription": "Activer/désactiver le texte barré",
         "subscript": "Indice",
         "subscriptDescription": "Activer/désactiver l'indice",
+        "clearFormatting": "Effacer toute la mise en forme",
+        "clearFormattingDescription": "Effacer la mise en forme du texte",
         "superscript": "Exposant",
         "superscriptDescription": "Activer/désactiver l'exposant",
         "alignLeft": "Aligner à gauche",
@@ -763,7 +765,11 @@
     "leftIndent": "Retrait gauche",
     "rightIndent": "Retrait droit",
     "topMargin": "Marge supérieure",
-    "bottomMargin": "Marge inférieure"
+    "bottomMargin": "Marge inférieure",
+    "leftMargin": "Marge gauche",
+    "rightMargin": "Marge droite",
+    "hangingIndent": "Retrait négatif",
+    "markerValue": "{name} : {value}"
   },
   "print": {
     "label": "Imprimer",

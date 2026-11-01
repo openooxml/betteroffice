@@ -12,6 +12,7 @@
 
 import wasmInit, {
   initSync,
+  engineKind,
   EditSession,
   decodeFontFace as decodePackedFontFace,
   export_docx_markdown_json,
@@ -25,15 +26,17 @@ import wasmInit, {
   wasm_heap_counted,
   wasm_live_bytes,
   wasm_peak_bytes,
-} from './generated/edit/docx_edit.js';
-import * as editGlue from './generated/edit/docx_edit.js';
+} from './engineEdit';
+import * as editGlue from './engineEdit';
+import { wasmAssetUrl } from './assetEdit';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 import { registerResidentEngine } from './residentEngine';
 
 export const editWasmState = createWasmModuleState({
   label: 'docx-edit',
   preloadName: 'preloadEditWasm',
-  assetUrl: () => new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url),
+  assetUrl: wasmAssetUrl,
+  engineKind,
   initAsync: wasmInit,
   initSync,
   shareModule: true,

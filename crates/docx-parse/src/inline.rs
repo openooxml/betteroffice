@@ -12,7 +12,7 @@ use crate::formatting::{
 };
 use crate::relationships::RelationshipMap;
 use crate::styles::{DocDefaults, StyleMap, get_default_character_style};
-use crate::theme::{Theme, get_theme_color, resolve_theme_font_ref};
+use crate::theme::{Theme, get_theme_color, resolve_rfonts_theme_font, resolve_theme_font_ref};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
 const MAX_FIELD_NESTING: usize = 32;
@@ -278,10 +278,12 @@ pub fn parse_run(
             (&mut fonts.east_asia, &fonts.east_asia_theme),
             (&mut fonts.cs, &fonts.cs_theme),
         ] {
-            if explicit.as_deref().is_none_or(str::is_empty)
-                && let Some(reference) = reference
-            {
-                *explicit = Some(resolve_theme_font_ref(theme, reference));
+            if let Some(reference) = reference {
+                if let Some(font) = resolve_rfonts_theme_font(theme, reference) {
+                    *explicit = Some(font.to_owned());
+                } else if explicit.as_deref().is_none_or(str::is_empty) {
+                    *explicit = Some(resolve_theme_font_ref(theme, reference));
+                }
             }
         }
     }

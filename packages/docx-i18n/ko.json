@@ -422,6 +422,8 @@
         "strikethroughDescription": "취소선 설정/해제",
         "subscript": "아래 첨자",
         "subscriptDescription": "아래 첨자 설정/해제",
+        "clearFormatting": "서식 지우기",
+        "clearFormattingDescription": "텍스트 서식 지우기",
         "superscript": "위 첨자",
         "superscriptDescription": "위 첨자 설정/해제",
         "alignLeft": "왼쪽 맞춤",
@@ -763,7 +765,11 @@
     "leftIndent": "왼쪽 들여쓰기",
     "rightIndent": "오른쪽 들여쓰기",
     "topMargin": "위쪽 여백",
-    "bottomMargin": "아래쪽 여백"
+    "bottomMargin": "아래쪽 여백",
+    "leftMargin": "왼쪽 여백",
+    "rightMargin": "오른쪽 여백",
+    "hangingIndent": "내어쓰기",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "인쇄",

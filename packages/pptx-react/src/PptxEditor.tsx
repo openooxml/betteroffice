@@ -168,6 +168,7 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   fileName?: string;
   /** 1-based; clamped to the deck. */
   initialSlide?: number;
+  /** Called once an opened deck's first slide is painted. */
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;

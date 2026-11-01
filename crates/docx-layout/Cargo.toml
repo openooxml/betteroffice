@@ -16,6 +16,7 @@ name = "docx_layout"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+font-registration = []
 test-support = []
 wasm-query = []
 

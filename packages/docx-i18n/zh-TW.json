@@ -422,6 +422,8 @@
         "strikethroughDescription": "切換刪除線",
         "subscript": "下標",
         "subscriptDescription": "切換下標",
+        "clearFormatting": "清除所有格式設定",
+        "clearFormattingDescription": "清除文字格式",
         "superscript": "上標",
         "superscriptDescription": "切換上標",
         "alignLeft": "靠左對齊",
@@ -763,7 +765,11 @@
     "leftIndent": "左方縮排",
     "rightIndent": "右方縮排",
     "topMargin": "上邊界",
-    "bottomMargin": "下邊界"
+    "bottomMargin": "下邊界",
+    "leftMargin": "左邊界",
+    "rightMargin": "右邊界",
+    "hangingIndent": "首行凸排",
+    "markerValue": "{name}：{value}"
   },
   "print": {
     "label": "列印",

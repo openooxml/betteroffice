@@ -116,6 +116,8 @@ jobs:
         run: |
           bun scripts/api-surface.ts --check xlsx
           bun scripts/api-surface.ts --check pptx
+          bun scripts/api-surface.ts --check xlsx-native
+          bun scripts/api-surface.ts --check pptx-native
 
       # What `bun run test` builds; the tests themselves run in the package-tests shards.
       - name: Build the Wasm modules
@@ -125,6 +127,11 @@ jobs:
 
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
+
+      - name: Check Wasm memory limits
+        env:
+          BETTEROFFICE_REQUIRE_WASM: "1"
+        run: bun test scripts/wasm-memory.test.ts
 
       - name: Check demo assets
         run: |
@@ -138,6 +145,14 @@ jobs:
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --test fonts
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown --no-default-features --features raster
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown --no-default-features --features raster
           cargo check -p pptx-wasm --target wasm32-unknown-unknown
           cargo check -p vsdx-wasm --target wasm32-unknown-unknown --no-default-features
 
@@ -199,10 +214,41 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Sample CPU and IO pressure
+        run: |
+          if command -v vmstat >/dev/null; then
+            nohup vmstat -t 5 > "$RUNNER_TEMP/vmstat.log" 2>&1 &
+          fi
+          nohup bash -c 'while :; do
+            date -u +%FT%TZ
+            for kind in cpu io memory; do
+              [ -r "/proc/pressure/$kind" ] && sed "s/^/$kind /" "/proc/pressure/$kind"
+            done
+            sleep 5
+          done' > "$RUNNER_TEMP/pressure.log" 2>&1 &
+          true
+
       - name: Test
         env:
           BETTEROFFICE_PACKAGE_DECLARATIONS: skip
         run: bun run test --shard=${{ matrix.shard }}/2
+
+      - name: Print CPU and IO pressure samples
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/vmstat.log" 2>/dev/null || true
+          cat "$RUNNER_TEMP/pressure.log" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          name: package-tests-pressure-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/vmstat.log
+            ${{ runner.temp }}/pressure.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   audit:
     name: Security audit
@@ -235,9 +281,8 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.rust || 'kyora-8x16' }}
     timeout-minutes: 90
-    # Full debuginfo in every test binary fills a kyora VM's disk; backtraces keep file:line.
     env:
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--compress-debug-sections=zlib
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -277,6 +322,8 @@ jobs:
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-fonts --all-targets --features build -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features manager -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features manager,fonts-latin,fonts-intl,fonts-cjk -- -D warnings
 
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
@@ -295,6 +342,10 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: cargo test
 
+      - name: Remove the workspace test binaries
+        if: steps.ws.outputs.present == 'true'
+        run: find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+
       # Optional features are only unified into `cargo test` while some other
       # workspace member enables them.
       - name: Test optional features
@@ -308,6 +359,8 @@ jobs:
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
           cargo test -p betteroffice-fonts --features build
+          cargo test -p betteroffice-fonts --features manager
+          cargo test -p betteroffice-fonts --features manager,fonts-latin,fonts-intl,fonts-cjk
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
@@ -326,6 +379,12 @@ jobs:
       - name: License and advisory gate for the fuzz package
         if: steps.ws.outputs.present == 'true'
         run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
+
+      - name: Disk usage
+        if: always() && steps.ws.outputs.present == 'true'
+        run: |
+          df -h .
+          du -sh target
 
   native-viewer:
     name: Native viewer lint
@@ -455,17 +514,52 @@ jobs:
         run: |
           bun run --filter @betteroffice/xlsx build:wasm
           bun run --filter @betteroffice/pptx build:wasm
+          bun run --filter @betteroffice/docx build:wasm
 
       - name: Build and test
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: |
+          bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build
+          (cd packages/fonts && bunx tsup)
           for package in $(node scripts/native-bindings.mjs --paths); do
             if [ "$package" = "bindings/xlsx-native" ] || [ "$package" = "bindings/pptx-native" ]; then
               bunx napi build --cwd "$package" --platform --release -- --locked
             else
               bunx napi build --cwd "$package" --platform -- --locked
             fi
+            bun run --cwd "$package" --if-present build:js
             bun test "$package/index.test.ts"
           done
+
+      - name: Check native declarations
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          (cd packages/xlsx && bunx tsup)
+          ls packages/xlsx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/wasm-declarations"
+          ls bindings/xlsx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/wasm-declarations" -
+          while read -r file; do cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"; done < "$RUNNER_TEMP/wasm-declarations"
+          (cd packages/pptx && bunx tsup)
+          ls packages/pptx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/pptx-wasm-declarations"
+          ls bindings/pptx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/pptx-wasm-declarations" -
+          while read -r file; do cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"; done < "$RUNNER_TEMP/pptx-wasm-declarations"
+          (cd packages/docx && bunx tsup)
+          for asset in edit/docx_edit parse/docx_parse query/docx_query opc/ooxml_opc preflight/docx_preflight; do
+            asset_chunks=$(grep -rlF --include='*.mjs' "./generated/${asset}_bg.wasm" packages/docx/dist)
+            test -n "$asset_chunks"
+            while IFS= read -r chunk; do
+              test "$(dirname "$chunk")" = packages/docx/dist
+            done <<< "$asset_chunks"
+          done
+          for package in packages/docx bindings/docx-native; do
+            (cd "$package/dist" && find . -type f \( -name '*.d.ts' -o -name '*.d.mts' \) | LC_ALL=C sort) > "$RUNNER_TEMP/$(basename "$package")-declarations.txt"
+          done
+          test -s "$RUNNER_TEMP/docx-declarations.txt"
+          cmp "$RUNNER_TEMP/docx-declarations.txt" "$RUNNER_TEMP/docx-native-declarations.txt"
+          while IFS= read -r declaration; do
+            cmp "packages/docx/dist/$declaration" "bindings/docx-native/dist/$declaration"
+          done < "$RUNNER_TEMP/docx-declarations.txt"
 
       - name: Test the xlsx packages on the native engine
         run: |
@@ -478,6 +572,11 @@ jobs:
         run: |
           bun scripts/check-engine-surface.ts xlsx
           bun scripts/check-engine-surface.ts pptx
+          bun scripts/check-engine-surface.ts docx
+          bun scripts/check-engine-surface.ts docx-parse
+          bun scripts/check-engine-surface.ts docx-query
+          bun scripts/check-engine-surface.ts docx-opc
+          bun scripts/check-engine-surface.ts docx-preflight
 
       - name: Test the pptx packages on the native engine
         run: |
@@ -485,13 +584,15 @@ jobs:
           bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
 
       - name: Check native and wasm parity
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
 
       - name: Check runtimes
         run: |
+          export BETTEROFFICE_EXPORT_KEYS="$RUNNER_TEMP/native-export-keys.json"
+          bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"
           node scripts/native-bindings-smoke.mjs
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
@@ -501,6 +602,7 @@ jobs:
             package_dir="$smoke_dir/node_modules/@betteroffice/$format"
             mkdir -p "$package_dir"
             cp "$package/package.json" "$package/index.js" "$package/index.d.ts" "$package/"*.node "$package_dir/"
+            if [ -d "$package/dist" ]; then cp -R "$package/dist" "$package_dir/"; fi
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"

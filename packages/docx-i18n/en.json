@@ -422,6 +422,8 @@
         "strikethroughDescription": "Toggle strikethrough",
         "subscript": "Subscript",
         "subscriptDescription": "Toggle subscript",
+        "clearFormatting": "Clear Formatting",
+        "clearFormattingDescription": "Clear text formatting",
         "superscript": "Superscript",
         "superscriptDescription": "Toggle superscript",
         "alignLeft": "Align Left",
@@ -763,7 +765,11 @@
     "leftIndent": "Left indent",
     "rightIndent": "Right indent",
     "topMargin": "Top margin",
-    "bottomMargin": "Bottom margin"
+    "bottomMargin": "Bottom margin",
+    "leftMargin": "Left margin",
+    "rightMargin": "Right margin",
+    "hangingIndent": "Hanging indent",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Print",

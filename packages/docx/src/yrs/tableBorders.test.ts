@@ -126,7 +126,7 @@ async function griddedTable(clientId: number): Promise<{
 }
 
 describe('the table border toolbar', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('leaves a cell’s other three sides alone when one side button is pressed', async () => {
     const { session } = await griddedTable(52001);

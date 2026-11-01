@@ -422,6 +422,8 @@
         "strikethroughDescription": "Doorhalen in- of uitschakelen",
         "subscript": "Subscript",
         "subscriptDescription": "Subscript in- of uitschakelen",
+        "clearFormatting": "Alle opmaak wissen",
+        "clearFormattingDescription": "Tekstopmaak wissen",
         "superscript": "Superscript",
         "superscriptDescription": "Superscript in- of uitschakelen",
         "alignLeft": "Links uitlijnen",
@@ -763,7 +765,11 @@
     "leftIndent": "Inspringing links",
     "rightIndent": "Inspringing rechts",
     "topMargin": "Bovenmarge",
-    "bottomMargin": "Ondermarge"
+    "bottomMargin": "Ondermarge",
+    "leftMargin": "Linkermarge",
+    "rightMargin": "Rechtermarge",
+    "hangingIndent": "Verkeerd-om inspringen",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Afdrukken",

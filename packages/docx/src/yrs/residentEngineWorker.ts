@@ -54,6 +54,7 @@ import {
 } from './residentEngineSession';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
+import { shipsWasmAsset } from '../wasm/assetEdit';
 import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
 import {
   createProposalRegistry,
@@ -1426,7 +1427,7 @@ scope.onmessage = (
   interruptSaveWarmup(message.type);
   if (message.type === 'editModule') {
     // The queued warm waits for this message.
-    resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
+    resolveHostEditModule(shipsWasmAsset && message.module instanceof WebAssembly.Module ? message.module : null);
     scheduleSaveWarmup();
     return;
   }
@@ -1440,6 +1441,7 @@ scope.onmessage = (
 scope.onmessageerror = () => resolveHostEditModule(null);
 
 function nextHostEditModule(): Promise<WebAssembly.Module | null> {
+  if (!shipsWasmAsset) return Promise.resolve(null);
   return new Promise((resolve) => {
     resolveHostEditModule = resolve;
   });
@@ -1649,7 +1651,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
   ) supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
-      if (request.hostModule) {
+      if (request.hostModule && shipsWasmAsset) {
         const timer = setTimeout(() => resolveHostEditModule(null), RESIDENT_HOST_MODULE_WAIT_MS);
         await preloadEditWasmFrom(
           hostEditModule.then((module) => {

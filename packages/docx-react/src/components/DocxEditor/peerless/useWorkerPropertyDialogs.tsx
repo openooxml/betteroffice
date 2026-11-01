@@ -47,7 +47,7 @@ export function buildImageTransformPatch(currentAttrs: Readonly<Record<string, u
 
 type WorkerLink = { query: WorkerPropertyQuery; initialData: HyperlinkData; targetSelection: DocxCommandSelection; replaceText: boolean };
 
-export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets'>) {
+export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets' | 'rulerUnit'>) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const page = useWorkerPageSetupControls(controller, props.onError);
   const watermark = useWorkerWatermarkControls(controller, props.onError);
@@ -208,7 +208,8 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
     imageState, applyImageWrap, applyImageTransform,
     openParagraphSpacing, openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell, openTableProperties,
     element: <>
-      {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps} onApply={page.handlePageSetupApply} />}
+      {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps}
+        unit={props.rulerUnit} onApply={page.handlePageSetupApply} />}
       {watermark.showWatermark && <WatermarkDialog isOpen onClose={watermark.close} current={watermark.currentWatermark}
         presets={props.watermarkPresets} onApply={watermark.handleWatermarkApply} />}
       {link && <HyperlinkDialog isOpen onClose={closeLink} isEditing={hyperlink !== null} selectedText={link.initialData.displayText}

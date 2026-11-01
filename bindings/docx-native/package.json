@@ -3,9 +3,241 @@
   "version": "0.5.1",
   "private": true,
   "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js, Bun and Deno.",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "./dist/core.mjs",
+  "module": "./dist/core.mjs",
+  "types": "./dist/core.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/core.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/core.mjs"
+    },
+    "./docx": {
+      "types": "./dist/docx/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/docx/index.mjs"
+    },
+    "./docx/wrapTypes": {
+      "types": "./dist/docx/wrapTypes.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/docx/wrapTypes.mjs"
+    },
+    "./styles": {
+      "types": "./dist/styles/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/styles/index.mjs"
+    },
+    "./layout/pagination": {
+      "types": "./dist/layout/pagination/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/layout/pagination/index.mjs"
+    },
+    "./layout/render": {
+      "types": "./dist/layout/render/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/layout/render/index.mjs"
+    },
+    "./layout": {
+      "types": "./dist/layout/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/layout/index.mjs"
+    },
+    "./plugin-api": {
+      "types": "./dist/plugin-api/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/plugin-api/index.mjs"
+    },
+    "./plugin-api/RenderedDomContext": {
+      "types": "./dist/plugin-api/RenderedDomContext.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/plugin-api/RenderedDomContext.mjs"
+    },
+    "./plugin-api/resolveItemPositions": {
+      "types": "./dist/plugin-api/resolveItemPositions.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/plugin-api/resolveItemPositions.mjs"
+    },
+    "./types/document": {
+      "types": "./dist/types/document.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/types/document.mjs"
+    },
+    "./types/content": {
+      "types": "./dist/types/content.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/types/content.mjs"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/index.mjs"
+    },
+    "./utils/cardStyles": {
+      "types": "./dist/utils/cardStyles.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/cardStyles.mjs"
+    },
+    "./utils/comments": {
+      "types": "./dist/utils/comments.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/comments.mjs"
+    },
+    "./utils/stylePreview": {
+      "types": "./dist/utils/stylePreview.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/stylePreview.mjs"
+    },
+    "./utils/findReplace": {
+      "types": "./dist/utils/findReplace.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/findReplace.mjs"
+    },
+    "./utils/findVerticalScrollParent": {
+      "types": "./dist/utils/findVerticalScrollParent.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/findVerticalScrollParent.mjs"
+    },
+    "./utils/fontOptions": {
+      "types": "./dist/utils/fontOptions.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/fontOptions.mjs"
+    },
+    "./utils/listState": {
+      "types": "./dist/utils/listState.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/listState.mjs"
+    },
+    "./utils/reportIssue": {
+      "types": "./dist/utils/reportIssue.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/reportIssue.mjs"
+    },
+    "./utils/sidebarConstants": {
+      "types": "./dist/utils/sidebarConstants.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/sidebarConstants.mjs"
+    },
+    "./utils/units": {
+      "types": "./dist/utils/units.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/units.mjs"
+    },
+    "./utils/autoScroll": {
+      "types": "./dist/utils/autoScroll.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/utils/autoScroll.mjs"
+    },
+    "./yrs": {
+      "types": "./dist/yrs/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/yrs/index.mjs"
+    },
+    "./collaboration": {
+      "types": "./dist/collaboration/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/collaboration/index.mjs"
+    },
+    "./editor": {
+      "types": "./dist/editor/index.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/editor/index.mjs"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.mts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/worker.mjs"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "docx": [
+        "./dist/docx/index.d.mts"
+      ],
+      "docx/wrapTypes": [
+        "./dist/docx/wrapTypes.d.mts"
+      ],
+      "styles": [
+        "./dist/styles/index.d.mts"
+      ],
+      "layout/pagination": [
+        "./dist/layout/pagination/index.d.mts"
+      ],
+      "layout/render": [
+        "./dist/layout/render/index.d.mts"
+      ],
+      "layout": [
+        "./dist/layout/index.d.mts"
+      ],
+      "plugin-api": [
+        "./dist/plugin-api/index.d.mts"
+      ],
+      "plugin-api/RenderedDomContext": [
+        "./dist/plugin-api/RenderedDomContext.d.mts"
+      ],
+      "plugin-api/resolveItemPositions": [
+        "./dist/plugin-api/resolveItemPositions.d.mts"
+      ],
+      "types/document": [
+        "./dist/types/document.d.mts"
+      ],
+      "types/content": [
+        "./dist/types/content.d.mts"
+      ],
+      "utils": [
+        "./dist/utils/index.d.mts"
+      ],
+      "utils/cardStyles": [
+        "./dist/utils/cardStyles.d.mts"
+      ],
+      "utils/comments": [
+        "./dist/utils/comments.d.mts"
+      ],
+      "utils/stylePreview": [
+        "./dist/utils/stylePreview.d.mts"
+      ],
+      "utils/findReplace": [
+        "./dist/utils/findReplace.d.mts"
+      ],
+      "utils/findVerticalScrollParent": [
+        "./dist/utils/findVerticalScrollParent.d.mts"
+      ],
+      "utils/fontOptions": [
+        "./dist/utils/fontOptions.d.mts"
+      ],
+      "utils/listState": [
+        "./dist/utils/listState.d.mts"
+      ],
+      "utils/reportIssue": [
+        "./dist/utils/reportIssue.d.mts"
+      ],
+      "utils/sidebarConstants": [
+        "./dist/utils/sidebarConstants.d.mts"
+      ],
+      "utils/units": [
+        "./dist/utils/units.d.mts"
+      ],
+      "utils/autoScroll": [
+        "./dist/utils/autoScroll.d.mts"
+      ],
+      "yrs": [
+        "./dist/yrs/index.d.mts"
+      ],
+      "collaboration": [
+        "./dist/collaboration/index.d.mts"
+      ],
+      "editor": [
+        "./dist/editor/index.d.mts"
+      ],
+      "worker": [
+        "./dist/worker.d.mts"
+      ]
+    }
+  },
+  "sideEffects": [
+    "**/docxWorker.*"
+  ],
   "files": [
+    "dist",
     "index.js",
     "index.d.ts"
   ],
@@ -23,15 +255,16 @@
     ]
   },
   "engines": {
-    "node": ">=18"
+    "node": "^20.16.0 || >=22.3.0"
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release",
+    "build": "napi build --platform --release && bun run build:js",
     "build:debug": "napi build --platform",
     "prepublishOnly": "napi pre-publish --tag-style npm --no-gh-release",
     "test": "bun test",
-    "typecheck": "tsc --noEmit --types node --target es2022 --module nodenext index.d.ts"
+    "typecheck": "tsc --noEmit --types node --target es2022 --module nodenext index.d.ts && tsc -p js",
+    "build:js": "cd js && tsup"
   },
   "keywords": [
     "docx",
@@ -56,8 +289,15 @@
     "provenance": true
   },
   "type": "commonjs",
+  "dependencies": {
+    "@betteroffice/fonts": "workspace:^0",
+    "@betteroffice/fonts-cjk": "workspace:^0",
+    "@betteroffice/fonts-intl": "workspace:^0",
+    "@betteroffice/fonts-latin": "workspace:^0"
+  },
   "devDependencies": {
     "@types/node": "^26.0.0",
+    "tsup": "^8.5.1",
     "typescript": "^6.0.3"
   }
 }

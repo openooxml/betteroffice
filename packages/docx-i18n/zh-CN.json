@@ -422,6 +422,8 @@
         "strikethroughDescription": "为所选文本添加删除线",
         "subscript": "下标",
         "subscriptDescription": "将所选文本设置为下标",
+        "clearFormatting": "清除格式",
+        "clearFormattingDescription": "清除文本格式",
         "superscript": "上标",
         "superscriptDescription": "将所选文本设置为上标",
         "alignLeft": "左对齐",
@@ -763,7 +765,11 @@
     "leftIndent": "左缩进",
     "rightIndent": "右缩进",
     "topMargin": "上边距",
-    "bottomMargin": "下边距"
+    "bottomMargin": "下边距",
+    "leftMargin": "左边距",
+    "rightMargin": "右边距",
+    "hangingIndent": "悬挂缩进",
+    "markerValue": "{name}：{value}"
   },
   "print": {
     "label": "打印",

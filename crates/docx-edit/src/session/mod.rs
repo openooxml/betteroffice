@@ -45,6 +45,10 @@ pub struct ParagraphIdentitiesCache {
     pub(crate) json: String,
 }
 
+pub struct UpdateSubscription {
+    _subscription: Subscription,
+}
+
 pub struct UpdateEventObserver {
     pub(crate) pending: Rc<RefCell<VecDeque<Vec<u8>>>>,
     pub(crate) _subscription: Subscription,

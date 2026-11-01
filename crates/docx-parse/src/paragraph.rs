@@ -432,6 +432,7 @@ pub fn parse_document_paragraph_properties(
             paragraph_ordinal: None,
             para_id_attribute: None,
             bookmark_xml: None,
+            bookmark_replay_xml: None,
         };
         value.run_properties = parse_run(&shell, theme, styles, None).run.formatting;
     }
@@ -1082,6 +1083,7 @@ pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
         paragraph_ordinal: element.paragraph_ordinal,
         para_id_attribute: element.para_id_attribute.clone(),
         bookmark_xml: element.bookmark_xml.clone(),
+        bookmark_replay_xml: element.bookmark_replay_xml.clone(),
         children: element
             .children
             .iter()
@@ -1181,7 +1183,7 @@ fn parse_run_with_context(
                 if in_control && parsed.is_empty() && is_text_box_drawing(child) {
                     parsed.push(RunContent::OpaqueDrawing {
                         kind: "drawing".to_owned(),
-                        xml: child.to_raw_inline_xml(),
+                        xml: crate::text_box::source_xml(child),
                         preview: None,
                         previews: Vec::new(),
                         text_box: None,
@@ -1199,7 +1201,7 @@ fn parse_run_with_context(
                     in_header_footer,
                     in_control,
                 )?;
-                let (branch, parsed) = match selected {
+                let (branch, mut parsed) = match selected {
                     Some((branch, parsed)) => (Some(branch), parsed),
                     None => (None, Vec::new()),
                 };
@@ -1249,13 +1251,16 @@ fn parse_run_with_context(
                     };
                     replacements.push(vec![RunContent::OpaqueDrawing {
                         kind: "alternateContent".to_owned(),
-                        xml: child.to_raw_inline_xml(),
+                        xml: crate::text_box::source_xml(child),
                         preview,
                         previews,
                         text_box: None,
                         drawing_properties: fallback_properties,
                     }]);
                 } else {
+                    if let [RunContent::Shape { shape, .. }] = parsed.as_mut_slice() {
+                        crate::text_box::capture_bookmark_source(shape, child);
+                    }
                     replacements.push(parsed);
                 }
             }
@@ -1278,7 +1283,17 @@ fn parse_run_with_context(
     {
         match run.content.as_mut_slice() {
             [RunContent::Shape { shape, .. }] if shape.drawing_xml.is_some() => {
-                shape.drawing_run_xml = Some(element.to_raw_inline_xml());
+                shape.drawing_run_xml = Some(
+                    if shape
+                        .drawing_model
+                        .as_ref()
+                        .is_some_and(|model| model.get("textBoxContentSha256").is_some())
+                    {
+                        element.to_bookmarked_raw_inline_xml()
+                    } else {
+                        element.to_raw_inline_xml()
+                    },
+                );
                 shape.drawing_xml = None;
             }
             [RunContent::OpaqueDrawing { kind, xml, .. }]
@@ -1323,7 +1338,8 @@ fn parse_drawing_owned_inner(
     in_header_footer: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
     if matches!(element.local_name(), "pict" | "object") {
-        if let Some(rule) = parse_horizontal_rule(element) {
+        let bookmarked = crate::text_box::has_bookmarked_text_box(element);
+        if !bookmarked && let Some(rule) = parse_horizontal_rule(element) {
             return Ok(vec![RunContent::HorizontalRule {
                 rule: Box::new(rule),
             }]);
@@ -1332,7 +1348,7 @@ fn parse_drawing_owned_inner(
         if element.local_name() == "object" || has_ole_object(element, 0) {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: vml_image_content(element, relationships, media, Some(budget))
                     .map(Box::new),
                 previews: Vec::new(),
@@ -1341,7 +1357,10 @@ fn parse_drawing_owned_inner(
             }]);
         }
         let images = vml_image_contents(element, relationships, media, Some(budget));
-        if images.len() == 1 && find_descendant_by_name(element, "v:group", 0).is_none() {
+        if !bookmarked
+            && images.len() == 1
+            && find_descendant_by_name(element, "v:group", 0).is_none()
+        {
             return Ok(images
                 .into_iter()
                 .map(|image| RunContent::Drawing {
@@ -1353,17 +1372,17 @@ fn parse_drawing_owned_inner(
         if !images.is_empty() {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: images,
                 text_box: None,
                 drawing_properties: None,
             }]);
         }
-        if !has_vml_image_data(element, 0) || !in_header_footer {
+        if bookmarked || !has_vml_image_data(element, 0) || !in_header_footer {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
@@ -1386,7 +1405,7 @@ fn parse_drawing_owned_inner(
         DrawingChart::Unread => {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
@@ -1415,7 +1434,7 @@ fn parse_drawing_owned_inner(
             }
             None => RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
@@ -1434,6 +1453,7 @@ fn parse_drawing_owned_inner(
             let media = drawing.as_ref().map(|context| context.media);
             resolve_shape_fill_pictures(&mut shape, relationships, media);
             apply_shape_metadata(&mut shape, element);
+            crate::text_box::capture_bookmark_source(&mut shape, element);
             return Ok(vec![RunContent::Shape {
                 shape: Box::new(shape),
                 drawing_properties: None,
@@ -1495,6 +1515,19 @@ fn parse_alternate_content_branch_with_context<'a>(
     in_header_footer: bool,
     preserve_text_box: bool,
 ) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
+    if crate::text_box::has_bookmarked_text_box(element)
+        && element.child_elements().any(|branch| {
+            branch
+                .child_elements()
+                .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+                .count()
+                > 1
+        })
+    {
+        return Err(ParseError::Canonical(
+            "bookmarked alternate content has multiple drawings".to_owned(),
+        ));
+    }
     let has_media = drawing.is_some();
     let is_resolved_image = |image: &crate::image::Image| {
         image.src.is_some() || (!has_media && !image.relationship_id.is_empty())
@@ -1579,7 +1612,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                             text_box_branch.unwrap_or(branch),
                             vec![RunContent::OpaqueDrawing {
                                 kind: "alternateContent".to_owned(),
-                                xml: element.to_raw_inline_xml(),
+                                xml: crate::text_box::source_xml(element),
                                 preview,
                                 previews,
                                 text_box: None,

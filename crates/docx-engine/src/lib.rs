@@ -1,8 +1,10 @@
 //! Target-neutral DOCX engine boundary shared by the wasm and native backends.
 
+pub use docx_edit::RunInheritance;
 pub use docx_edit::engine::RetainedLayoutMeta;
 pub use docx_edit::session::{
     EditSessionCore as Document, EngineError, EngineErrorKind, EngineResult, Host,
+    UpdateSubscription,
 };
 
 pub fn renderer_version() -> &'static str {

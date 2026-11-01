@@ -124,6 +124,8 @@ interface XlsxHostProps {
 
 /** Props for XlsxEditor. */
 export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHostProps {
+  /** Load bundled workbook fonts. Defaults to true. */
+  defaultFonts?: boolean;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: false;
   onError?: (error: Error) => void;
@@ -141,7 +143,7 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   collaboration?: XlsxEditorCollaborationOptions;
   i18n?: Translations;
   /**
-   * Called when a workbook opens, with a handle to stage agent proposals and a
+   * Called once an opened workbook's first frame is painted, with a handle to stage agent proposals and a
    * way to refresh the panel afterward. Enables demo/host agents without
    * exposing the wasm object through the render tree. A returned cleanup runs
    * before the workbook is replaced or disposed.

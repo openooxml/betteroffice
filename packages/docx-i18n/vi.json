@@ -422,6 +422,8 @@
         "strikethroughDescription": "Bật/tắt gạch ngang",
         "subscript": "Chỉ số dưới",
         "subscriptDescription": "Bật/tắt chỉ số dưới",
+        "clearFormatting": "Xóa mọi định dạng",
+        "clearFormattingDescription": "Xóa định dạng văn bản",
         "superscript": "Chỉ số trên",
         "superscriptDescription": "Bật/tắt chỉ số trên",
         "alignLeft": "Căn trái",
@@ -763,7 +765,11 @@
     "leftIndent": "Thụt lề trái",
     "rightIndent": "Thụt lề phải",
     "topMargin": "Lề trên",
-    "bottomMargin": "Lề dưới"
+    "bottomMargin": "Lề dưới",
+    "leftMargin": "Lề trái",
+    "rightMargin": "Lề phải",
+    "hangingIndent": "Thụt lề treo",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "In",

@@ -2,6 +2,7 @@ import { createScopeTransport, type SessionScope } from '../../../../shared/offi
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { compileWasm, createWorkerWasmInitializer } from '../../../../shared/office-session/wasm';
 import { wasmAssetUrl } from '../wasm/asset';
+import { engineKind } from '../wasm/engine';
 import { initWasm } from '../wasm/loader';
 import { createWorkbookSessionHost } from './host';
 
@@ -27,7 +28,7 @@ const initialize = createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(), 
 });
 let initializeLean: ReturnType<typeof createWorkerWasmInitializer> | undefined;
 const host = createWorkbookSessionHost(transport, {
-  initWasm: (input, options) => {
+  initWasm: engineKind === 'native' ? initWasm : (input, options) => {
     if (options?.png !== false) return initialize(input);
     initializeLean ??= createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(false), initWasm, async (url) => {
       module = await compileWasm(url);

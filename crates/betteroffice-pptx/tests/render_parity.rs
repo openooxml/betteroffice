@@ -19,7 +19,7 @@ struct Pair {
 impl Pair {
     fn new(fonts: bool) -> Self {
         let mut pair = Self {
-            facade: Presentation::open(DECK).unwrap(),
+            facade: Presentation::open_with_options(DECK, &backstop_options()).unwrap(),
             session: DeckSession::open(DECK, 1).unwrap(),
             renderer: SlideRenderer::new(),
         };
@@ -267,4 +267,14 @@ fn invalid_targets_and_fonts_keep_engine_errors() {
         assert_eq!(actual.to_string(), expected.to_string());
         assert!(matches!(actual, Error::Render(RenderError::Font(_))));
     }
+}
+
+fn backstop_options() -> betteroffice_pptx::OpenOptions {
+    let options = betteroffice_pptx::OpenOptions::default();
+    #[cfg(feature = "fonts")]
+    let options = betteroffice_pptx::OpenOptions {
+        font_source: betteroffice_pptx::fonts::FontSource::Backstop,
+        ..options
+    };
+    options
 }

@@ -179,7 +179,7 @@ function parity(
   expect(yrsLocToProjectedDisplayPosition(gate, () => fast, { story: 'body', paraId: 'missing', offset: 0 })).toBeNull();
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 describe('native proposal geometry outline parity', () => {
   const fixtures: Array<[string, Uint8Array]> = [

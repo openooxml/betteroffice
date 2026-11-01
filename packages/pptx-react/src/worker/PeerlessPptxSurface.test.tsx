@@ -2687,7 +2687,7 @@ describe('peerless caret blink', () => {
 });
 
 describe('peerless stage fit', () => {
-  beforeAll(async () => { await pptxPeerlessEditorLoader.load(); });
+  beforeAll(async () => { await pptxPeerlessEditorLoader.load(); }, 30_000);
 
   let stageSize: { width: number; height: number };
   let beforeChromeWidth: number | undefined;

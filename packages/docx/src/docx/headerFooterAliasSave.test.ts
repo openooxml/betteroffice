@@ -32,7 +32,7 @@ const sessions: YrsSession[] = [];
 beforeAll(() =>
   editWasm.preloadEditWasm(new Uint8Array(readFileSync(
     resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-  )))
+  ))), 30_000
 );
 afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();

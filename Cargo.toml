@@ -11,6 +11,15 @@ homepage = "https://betteroffice.dev"
 repository = "https://github.com/openooxml/betteroffice"
 
 [workspace.dependencies]
+betteroffice-fonts-latin = { path = "crates/betteroffice-fonts-latin", version = "0.5.1" }
+betteroffice-fonts-intl = { path = "crates/betteroffice-fonts-intl", version = "0.5.1" }
+betteroffice-fonts-cjk-sc = { path = "crates/betteroffice-fonts-cjk-sc", version = "0.5.1" }
+betteroffice-fonts-cjk-tc = { path = "crates/betteroffice-fonts-cjk-tc", version = "0.5.1" }
+betteroffice-fonts-cjk-jp = { path = "crates/betteroffice-fonts-cjk-jp", version = "0.5.1" }
+betteroffice-fonts-cjk-kr = { path = "crates/betteroffice-fonts-cjk-kr", version = "0.5.1" }
+betteroffice-fonts-cjk-serif-sc = { path = "crates/betteroffice-fonts-cjk-serif-sc", version = "0.5.1" }
+betteroffice-fonts-cjk = { path = "crates/betteroffice-fonts-cjk", version = "0.5.1" }
+
 betteroffice-fonts = { path = "crates/betteroffice-fonts", version = "0.5.1", default-features = false }
 quick-xml = "0.41"
 wasm-bindgen = "0.2"
@@ -48,6 +57,9 @@ vsdx-raster = { package = "betteroffice-vsdx-raster", path = "crates/vsdx-raster
 vsdx-validate = { package = "betteroffice-vsdx-validate", path = "crates/vsdx-validate", version = "0.5.1" }
 vsdx-edit = { package = "betteroffice-vsdx-edit", path = "crates/vsdx-edit", version = "0.5.1" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.5.1" }
+
+[profile.test]
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = "s"

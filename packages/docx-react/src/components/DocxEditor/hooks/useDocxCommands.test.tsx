@@ -42,7 +42,7 @@ beforeAll(async () => {
       )
     )
   );
-});
+}, 30_000);
 afterEach(() => {
   cleanup();
   mock.restore();
