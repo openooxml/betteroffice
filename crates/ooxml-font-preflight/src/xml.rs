@@ -127,6 +127,7 @@ fn name(namespace: u8, local: &[u8]) -> &'static str {
         (b'w', b"tc") => "w:tc",
         (b'w', b"tcPr") => "w:tcPr",
         (b'w', b"themeFontLang") => "w:themeFontLang",
+        (b'w', b"lang") => "w:lang",
         (b'w', b"tr") => "w:tr",
         (b'w', b"trPr") => "w:trPr",
         (b'w', b"txbxContent") => "w:txbxContent",
