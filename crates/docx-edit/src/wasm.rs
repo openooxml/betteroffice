@@ -2704,6 +2704,18 @@ impl EditSession {
         self.core.prime_save_seed_states(paragraphs, inflated)
     }
 
+    /// One slice of [`Self::prime_save_seed_states`], digesting about `max_bytes` bytes of the
+    /// stories: 0 once the states are known, 1 when more slices are needed, 2 when declined.
+    pub fn prime_save_seed_states_slice(
+        &self,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+    ) -> u32 {
+        self.core
+            .prime_save_seed_states_slice(paragraphs, inflated, max_bytes)
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,

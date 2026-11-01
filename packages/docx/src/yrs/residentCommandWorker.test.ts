@@ -639,6 +639,18 @@ test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', 
   }
 }, TIMEOUT);
 
+test('worker scheduler turns go through the turn channel the worker was given', async () => {
+  const { client, worker } = await openWorker();
+  try {
+    for (let turn = 0; turn < 200 && worker.turnPosts === 0; turn += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    expect(worker.turnPosts).toBeGreaterThan(0);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test('d1a_worker_keeps_sticky_provenance_until_document_epoch_replacement', async () => {
   const { client, worker, engine, init, initial, point } = await openWorker();
   try {
