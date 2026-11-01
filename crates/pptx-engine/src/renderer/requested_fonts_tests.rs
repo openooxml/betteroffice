@@ -1183,7 +1183,7 @@ fn undecided_han_beside_tagged_pieces_keeps_the_paragraph_context() {
 }
 
 #[test]
-fn edits_beside_untagged_runs_keep_only_east_asian_languages() {
+fn edits_beside_untagged_runs_keep_the_untagged_fallback() {
     let slide = shape(
         2,
         "",
@@ -1215,7 +1215,7 @@ fn edits_beside_untagged_runs_keep_only_east_asian_languages() {
         .unwrap();
     assert_eq!(
         faces(&Renderer::new(), &session, None),
-        json!([{"family":"Year Edit","bold":false,"italic":false,"scripts":["cjk-jp"]}])
+        json!([{"family":"Year Edit","bold":false,"italic":false,"scripts":["cjk-jp","cjk-sc"]}])
     );
 }
 
@@ -1274,5 +1274,115 @@ fn slide_number_fields_keep_their_run_language() {
     assert_eq!(
         faces(&Renderer::new(), &session, None),
         json!([{"family":"Footer Face","bold":false,"italic":false,"scripts":["cjk-tc"]}])
+    );
+}
+
+#[test]
+fn untagged_han_beside_a_tagged_run_keeps_its_own_fallback() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            "<a:p>{}{}</a:p>",
+            lang_run("日本", "ja-JP", "Tag Jp"),
+            font_run("汉字", "Plain Hans"),
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([
+            {"family":"Tag Jp","bold":false,"italic":false,"scripts":["cjk-jp"]},
+            {"family":"Plain Hans","bold":false,"italic":false,"scripts":["cjk-sc"]},
+        ])
+    );
+}
+
+#[test]
+fn edits_keep_the_paragraph_mark_language_of_untagged_runs() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            r#"<a:p>{}{}<a:endParaRPr lang="zh-TW"/></a:p>"#,
+            lang_run("日本", "ja-JP", "Mark Jp"),
+            font_run("繁體", "Mark Untagged"),
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    let untagged = |requests: &Value| {
+        requests
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|face| face["family"] == "Mark Untagged")
+            .unwrap()["scripts"]
+            .clone()
+    };
+    assert_eq!(
+        untagged(&faces(&Renderer::new(), &session, None)),
+        json!(["cjk-tc"])
+    );
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    session
+        .insert_text(
+            &EditCtx::local("fonts"),
+            &story.id,
+            0,
+            "x",
+            &pptx_edit::TextStyle {
+                font_family: Some("Mark Jp".to_owned()),
+                ..pptx_edit::TextStyle::default()
+            },
+        )
+        .unwrap();
+    let after = untagged(&faces(&Renderer::new(), &session, None));
+    assert!(
+        after.as_array().unwrap().contains(&json!("cjk-tc")),
+        "{after}"
+    );
+}
+
+#[test]
+fn split_paragraphs_keep_their_language_on_both_halves() {
+    let slide = shape(
+        2,
+        "",
+        "",
+        &format!(
+            "<a:p>{}</a:p>",
+            lang_run("日本語推計", "ja-JP", "Split Face")
+        ),
+    );
+    let session = Fixture {
+        slides: &[&slide],
+        ..Fixture::default()
+    }
+    .session();
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    session
+        .insert_paragraph_break(&EditCtx::local("fonts"), &story.id, 3)
+        .unwrap();
+    assert_eq!(
+        session.slide_scope(0).unwrap().slide.shapes[0].text_stories[0]
+            .paragraphs
+            .len(),
+        2
+    );
+    assert_eq!(
+        faces(&Renderer::new(), &session, None),
+        json!([{"family":"Split Face","bold":false,"italic":false,"scripts":["cjk-jp"]}])
     );
 }
