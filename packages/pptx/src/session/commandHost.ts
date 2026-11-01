@@ -1527,7 +1527,14 @@ export function registerPresentationCommandHandlers(
       }
       opening = true;
       try {
-        await (options.initWasm ?? initWasm)(input.wasm);
+        const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
+        if (input.defaultFonts !== false) {
+          void import('./coverageScan').then(async (scan) => {
+            const scripts = await scan.activeSlideCoverageScripts(bytes, input.activeSlideIndex ?? 0);
+            if (scripts.length) (await commandDefaultFontModule.load()).prefetchCoverageFaces(scripts, wasmReady);
+          }).catch(() => {});
+        }
+        await wasmReady;
         if (disposed) throw new Error('Presentation command session is disposed');
         handle = openPresentation(new Uint8Array(bytes), { clientId: input.clientId,
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),

@@ -7,9 +7,25 @@ type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean }
   | { kind: 'coverage'; script: string; bold: boolean; italic: boolean };
 
-export const commandFontProvider = {
-  async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: decodeFontFace }); },
+let decoderReady: Promise<unknown> = Promise.resolve();
+
+const sessionDecoder: typeof decodeFontFace = async (bytes, options) => {
+  await decoderReady.catch(() => {});
+  return decodeFontFace(bytes, options);
 };
+
+export const commandFontProvider = {
+  async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: sessionDecoder }); },
+};
+
+/** Starts loading coverage faces before the deck is parsed; decoding waits for `wasmReady`. */
+export function prefetchCoverageFaces(scripts: readonly string[], wasmReady: Promise<unknown>): void {
+  decoderReady = wasmReady;
+  if (!scripts.length) return;
+  void commandFontProvider.load().then((source) => {
+    for (const script of scripts) void source.resolveScriptFallback(script as BundledFontScript, false, false)?.().catch(() => {});
+  }).catch(() => {});
+}
 
 export function createCommandDefaultFonts(
   supplied: readonly { family: string }[],

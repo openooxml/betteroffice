@@ -2,7 +2,7 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
-import { commandFontProvider, createCommandDefaultFonts } from './commandDefaultFonts';
+import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
 
 const restorers: (() => void)[] = [];
@@ -34,7 +34,39 @@ test('the manager decodes packed faces with the worker engine', async () => {
   const create = spyOn(fonts, 'createFontProvider');
   restorers.push(() => create.mockRestore());
   await commandFontProvider.load();
-  expect(create).toHaveBeenCalledWith(undefined, { decoder: decodeFontFace });
+  const decoder = (create.mock.calls[0]![1] as { decoder: typeof decodeFontFace }).decoder;
+  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  expect((await decoder(packed, { codec: 'zstd' })).font.byteLength).toBe((await notoSansJP()).byteLength);
+});
+
+test('coverage prefetch loads each face once and decodes only after the session wasm is ready', async () => {
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { release = resolve; });
+  const load = mock(async () => bytes);
+  const { resolveScriptFallback } = provider(() => undefined, (script) => script === 'cjk-jp' ? load : undefined);
+  prefetchCoverageFaces(['cjk-jp'], ready);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+  expect(load).toHaveBeenCalledTimes(1);
+  restorers.splice(0).forEach((restore) => restore());
+  const create = spyOn(fonts, 'createFontProvider');
+  restorers.push(() => create.mockRestore());
+  await commandFontProvider.load();
+  const decoder = (create.mock.calls[0]![1] as { decoder: typeof decodeFontFace }).decoder;
+  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  let decoded = false;
+  const decoding = decoder(packed, { codec: 'zstd' }).then((face) => { decoded = true; return face; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(decoded).toBe(false);
+  release();
+  expect((await decoding).font.byteLength).toBeGreaterThan(0);
+});
+
+test('coverage prefetch without scripts loads nothing', async () => {
+  const { imported } = provider(() => undefined);
+  prefetchCoverageFaces([], Promise.resolve());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(imported).not.toHaveBeenCalled();
 });
 
 test('app families exclude all styles without importing the manager', async () => {
