@@ -64,6 +64,14 @@ import { usePasteOptions } from './pasteOptions/usePasteOptions';
 
 const LazyPasteOptionsControl = lazy(() => import('./pasteOptions/PasteOptionsControl'));
 
+interface PasteRecord {
+  fragment: DocxClipboardFragment;
+  plainText: string;
+  range: YrsStoryRange;
+  end: YrsLoc;
+  version: string;
+}
+
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
 
@@ -692,13 +700,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal]
   );
 
-  const pasteRecordRef = useRef<{
-    fragment: DocxClipboardFragment;
-    plainText: string;
-    range: YrsStoryRange;
-    end: YrsLoc;
-    version: string;
-  } | null>(null);
+  const pasteRecordRef = useRef<PasteRecord | null>(null);
   const pasteReplacingRef = useRef(false);
   const pastePendingAnchorRef = useRef(false);
   const choosePasteOption = useCallback((option: PasteFormattingOption): void => {
@@ -719,7 +721,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       pasteReplacingRef.current = true;
       session.addUndoBoundary();
-      let chosen: typeof pasteRecordRef.current = null;
+      let chosen: PasteRecord | null = null;
       try {
         if (!session.undo()) {
           pasteRecordRef.current = null;
@@ -1893,7 +1895,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             return;
           }
           session.addUndoBoundary();
-          let recorded: typeof pasteRecordRef.current = null;
+          let recorded: PasteRecord | null = null;
           try {
             const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
             session.setSelection(caret);
