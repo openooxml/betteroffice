@@ -80,6 +80,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     });
     if (!outcome) {
       pasteReplacingRef.current = false;
+      pasteRecordRef.current = null;
+      pasteOptionsRef.current.dismiss();
       return;
     }
     void outcome.then((applied) => {

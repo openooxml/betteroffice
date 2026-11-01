@@ -719,6 +719,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       pasteReplacingRef.current = true;
       session.addUndoBoundary();
+      let chosen: typeof pasteRecordRef.current = null;
       try {
         if (!session.undo()) {
           pasteRecordRef.current = null;
@@ -754,11 +755,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
         session.setSelection(caret);
         finishMutation();
-        pasteRecordRef.current = { ...record, end: caret, version: session.version() };
+        chosen = { ...record, end: caret, version: '' };
+        pasteRecordRef.current = chosen;
       } finally {
         if (isCurrentInput(session)) session.addUndoBoundary();
         pasteReplacingRef.current = false;
       }
+      if (chosen && pasteRecordRef.current === chosen) chosen.version = session.version();
     }, 'mutation');
   }, [enqueueInputOperation, finishMutation, isCurrentInput, readOnly, session, suggestingAuthor]);
   const pasteOptions = usePasteOptions({
@@ -1890,18 +1893,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             return;
           }
           session.addUndoBoundary();
+          let recorded: typeof pasteRecordRef.current = null;
           try {
             const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
             session.setSelection(caret);
             const plainText = plain !== '' ? plain : clipboardFragmentPlainText(fragment);
             if (pasteOptionsEnabled && pasteOptionsApply(fragment, plainText)) {
-              pasteRecordRef.current = {
+              recorded = {
                 fragment: structuredClone(fragment),
                 plainText,
                 range,
                 end: caret,
-                version: session.version(),
+                version: '',
               };
+              pasteRecordRef.current = recorded;
               pastePendingAnchorRef.current = true;
             } else {
               pasteRecordRef.current = null;
@@ -1911,6 +1916,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           } finally {
             if (isCurrentInput(session)) session.addUndoBoundary();
           }
+          if (recorded && pasteRecordRef.current === recorded) recorded.version = session.version();
         }, 'mutation');
         return;
       }
@@ -2274,7 +2280,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         at.story === end.story && at.paraId === end.paraId && at.offset === end.offset);
       const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
       const pending = pastePendingAnchorRef.current;
-      const changed = !pending && (session.canRedo() || session.version() !== pasteRecord.version);
+      const changed = session.canRedo() || session.version() !== pasteRecord.version;
       if (pasteReplacingRef.current) {
       } else if (changed || (!atEnd && !focusInControl)) {
         pasteRecordRef.current = null;
@@ -2283,7 +2289,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (pending) {
         if (atEnd) {
           pastePendingAnchorRef.current = false;
-          pasteRecord.version = session.version();
           pasteOptionsRef.current.show(anchor);
         }
       } else if (atEnd && pasteOptionsRef.current.visible) {
