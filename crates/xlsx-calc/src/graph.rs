@@ -48,7 +48,14 @@ impl NodeKey {
 /// edit; cells calling them re-evaluate on every recalc. OFFSET joins them per
 /// call site, but only where its target is not statically resolvable; INDIRECT
 /// always does, since its target is a string the graph cannot read.
-const VOLATILE_FNS: [&str; 5] = ["TODAY", "NOW", "RAND", "RANDBETWEEN", "INDIRECT"];
+const VOLATILE_FNS: [&str; 6] = [
+    "TODAY",
+    "NOW",
+    "RAND",
+    "RANDBETWEEN",
+    "RANDARRAY",
+    "INDIRECT",
+];
 
 pub struct DepGraph {
     pub(crate) currency_coercion: std::sync::Mutex<Option<crate::coercion::CurrencyCoercion>>,
@@ -931,7 +938,7 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
     while let Some(expression) = expressions.pop() {
         match expression {
             Expr::FuncCall { name, args, .. } => {
-                let upper = name.to_ascii_uppercase();
+                let upper = crate::functions::bare_name(name).to_ascii_uppercase();
                 if VOLATILE_FNS.contains(&upper.as_str())
                     || (upper == "OFFSET" && offset_target(args).is_none())
                 {
