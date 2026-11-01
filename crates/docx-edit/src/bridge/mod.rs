@@ -5760,8 +5760,20 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     if target.snap_to_grid.is_none() {
         target.snap_to_grid = defaults.snap_to_grid;
     }
-    if target.language.is_none() {
-        target.language = defaults.language.clone();
+    match (&mut target.language, &defaults.language) {
+        (None, defaults) => target.language = defaults.clone(),
+        (Some(language), Some(defaults)) => {
+            if language.latin.is_none() {
+                language.latin = defaults.latin.clone();
+            }
+            if language.east_asia.is_none() {
+                language.east_asia = defaults.east_asia.clone();
+            }
+            if language.bidi.is_none() {
+                language.bidi = defaults.bidi.clone();
+            }
+        }
+        (Some(_), None) => {}
     }
 }
 
@@ -7842,6 +7854,45 @@ mod tests {
         assert_eq!(pm_position(3, 0), 4);
         assert_eq!(pm_position(5, 2), 8);
         assert_eq!(pm_position(9, 2), 12);
+    }
+
+    #[test]
+    fn run_languages_inherit_each_missing_slot_from_defaults() {
+        let slots = |latin: Option<&str>, east_asia: Option<&str>, bidi: Option<&str>| {
+            Some(RunLanguageSlots {
+                latin: latin.map(str::to_owned),
+                east_asia: east_asia.map(str::to_owned),
+                bidi: bidi.map(str::to_owned),
+            })
+        };
+        let defaults = RunFormatting {
+            language: slots(Some("en-GB"), Some("ja-JP"), Some("ar-SA")),
+            ..RunFormatting::default()
+        };
+        for (own, expected) in [
+            (None, slots(Some("en-GB"), Some("ja-JP"), Some("ar-SA"))),
+            (
+                slots(Some("en-US"), None, None),
+                slots(Some("en-US"), Some("ja-JP"), Some("ar-SA")),
+            ),
+            (
+                slots(None, Some("zh-TW"), None),
+                slots(Some("en-GB"), Some("zh-TW"), Some("ar-SA")),
+            ),
+        ] {
+            let mut run = RunFormatting {
+                language: own,
+                ..RunFormatting::default()
+            };
+            apply_run_defaults(&mut run, &defaults);
+            assert_eq!(run.language, expected);
+        }
+        let mut run = RunFormatting {
+            language: slots(Some("en-US"), None, None),
+            ..RunFormatting::default()
+        };
+        apply_run_defaults(&mut run, &RunFormatting::default());
+        assert_eq!(run.language, slots(Some("en-US"), None, None));
     }
 
     #[test]

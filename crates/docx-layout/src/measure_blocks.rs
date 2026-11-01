@@ -701,9 +701,15 @@ fn paragraph_scripts_with_han_fallback(
     paragraph: &ParagraphBlock,
     include_han_fallback: bool,
 ) -> Vec<String> {
-    ooxml_text::paragraph_scripts_with_han_fallback(
+    ooxml_text::paragraph_scripts_with_languages(
         paragraph.runs.iter().filter_map(|run| match run {
-            Run::Text(text) => Some(text.text.as_str()),
+            Run::Text(text) => Some((
+                text.text.as_str(),
+                text.fmt
+                    .language
+                    .as_ref()
+                    .and_then(|language| language.east_asia.as_deref()),
+            )),
             _ => None,
         }),
         include_han_fallback,
@@ -7427,6 +7433,56 @@ mod tests {
             assert_eq!(requirements[0].scripts, ["cjk-jp"]);
             assert_eq!(requirements[1].scripts, ["cjk-jp", "cjk-sc"]);
             assert_eq!(requirements[2].scripts, ["cjk-jp", "cjk-sc"]);
+        }
+    }
+
+    #[test]
+    fn east_asian_run_language_selects_han_faces() {
+        let cases: [(&str, Option<&str>, &str, &[&str], &[&str]); 7] = [
+            ("漢字", Some("ja-JP"), "Ja Font", &["cjk-jp"], &["cjk-jp"]),
+            (
+                "日本語かな",
+                Some("ja-JP"),
+                "Kana Font",
+                &["cjk-jp"],
+                &["cjk-jp"],
+            ),
+            (
+                "日本語かな",
+                None,
+                "Plain Font",
+                &["cjk-jp"],
+                &["cjk-jp", "cjk-sc"],
+            ),
+            ("漢字", None, "Han Font", &["cjk-sc"], &["cjk-sc"]),
+            ("繁體", Some("zh-TW"), "Tc Font", &["cjk-tc"], &["cjk-tc"]),
+            ("漢字", Some("ko-KR"), "Kr Font", &["cjk-kr"], &["cjk-kr"]),
+            ("漢字", Some("en-US"), "En Font", &["cjk-sc"], &["cjk-sc"]),
+        ];
+        let blocks: Vec<LayoutBlock> = cases
+            .iter()
+            .enumerate()
+            .map(|(index, (text, language, family, _, _))| {
+                let mut run = json!({"kind": "text", "text": text, "fontFamily": family});
+                if let Some(language) = language {
+                    run["language"] = json!({"latin": "en-US", "eastAsia": language});
+                }
+                serde_json::from_value(json!({
+                    "kind": "paragraph", "id": format!("p{index}"), "runs": [run]
+                }))
+                .unwrap()
+            })
+            .collect();
+        let mut ordinary = FontRequirementCollector::default();
+        ordinary.collect(&blocks, "Calibri");
+        let ordinary = ordinary.finish();
+        let mut preview = FontRequirementCollector::default();
+        preview.collect_preview(&blocks, "Calibri");
+        let preview = preview.finish();
+        for (_, _, family, expected, expected_preview) in cases {
+            let key = format!("{}|0|0", family.to_lowercase());
+            assert_eq!(ordinary[&key].scripts, expected, "{family}");
+            assert_eq!(preview[&key].scripts, expected_preview, "{family} preview");
         }
     }
 
