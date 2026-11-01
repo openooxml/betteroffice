@@ -102,6 +102,9 @@ pub(super) struct WalkPosition {
     pub(super) paragraph_pm_units: u32,
     pub(super) pm_cursor: u64,
     pub(super) at_block_boundary: bool,
+    /// No table, block content control or page or column break came since the last pilcrow:
+    /// a paragraph starting here starts its save unit.
+    pub(super) at_unit_boundary: bool,
     pub(super) section_margins: SectionMarginsTwips,
     pub(super) stories: u32,
     pub(super) paragraphs: u32,
@@ -120,6 +123,7 @@ impl WalkPosition {
             paragraph_pm_units: 0,
             pm_cursor: pm_base,
             at_block_boundary: true,
+            at_unit_boundary: true,
             section_margins: SectionMarginsTwips::default(),
             stories: map.story_count(),
             paragraphs: map.paragraph_count(),
