@@ -3907,3 +3907,8 @@ test('showing hidden text in a script without a fallback face hints, and require
     client.destroy();
   }
 }, TIMEOUT);
+
+test('worker command sessions name OffscreenCanvas when the runtime lacks it', async () => {
+  const factory = await residentWorkerFactory({ offscreenCanvas: undefined });
+  await expect(openWorker({ factory })).rejects.toThrow('DOCX worker editing paints frames and needs OffscreenCanvas');
+}, TIMEOUT);
