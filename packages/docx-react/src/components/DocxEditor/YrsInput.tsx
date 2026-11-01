@@ -753,9 +753,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           caret = applyClipboardFragment(session, record.range, variant!, suggestingAuthor());
         }
         session.setSelection(caret);
-        pasteRecordRef.current = { ...record, end: caret, version: session.version() };
-        pastePendingAnchorRef.current = true;
         finishMutation();
+        pasteRecordRef.current = { ...record, end: caret, version: session.version() };
       } finally {
         if (isCurrentInput(session)) session.addUndoBoundary();
         pasteReplacingRef.current = false;
@@ -2274,20 +2273,21 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const atEnd = !!current && [current.anchor, current.head].every((at) =>
         at.story === end.story && at.paraId === end.paraId && at.offset === end.offset);
       const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
-      if (focusInControl) {
-      } else if (atEnd && pastePendingAnchorRef.current) {
+      const pending = pastePendingAnchorRef.current;
+      const changed = !pending && (session.canRedo() || session.version() !== pasteRecord.version);
+      if (pasteReplacingRef.current) {
+      } else if (changed || (!atEnd && !focusInControl)) {
+        pasteRecordRef.current = null;
         pastePendingAnchorRef.current = false;
-        pasteRecord.version = session.version();
-        pasteOptionsRef.current.show(anchor);
-      } else if (!pasteReplacingRef.current && !pastePendingAnchorRef.current &&
-        (session.canRedo() || session.version() !== pasteRecord.version)) {
-        pasteRecordRef.current = null;
         pasteOptionsRef.current.dismiss();
-      } else if (atEnd) {
-        if (pasteOptionsRef.current.visible) pasteOptionsRef.current.setAnchor(anchor);
-      } else if (!pasteReplacingRef.current && !pastePendingAnchorRef.current) {
-        pasteRecordRef.current = null;
-        pasteOptionsRef.current.dismiss();
+      } else if (pending) {
+        if (atEnd) {
+          pastePendingAnchorRef.current = false;
+          pasteRecord.version = session.version();
+          pasteOptionsRef.current.show(anchor);
+        }
+      } else if (atEnd && pasteOptionsRef.current.visible) {
+        pasteOptionsRef.current.setAnchor(anchor);
       }
     }
     const stickySelection = session?.selection() ?? null;

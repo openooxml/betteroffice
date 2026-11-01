@@ -32,7 +32,7 @@ export interface PeerlessInputProps {
   onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
-  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection): boolean;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection): Promise<boolean> | false;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
   onNavigateCell?(direction: 'forward' | 'backward'): void;
@@ -74,11 +74,20 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         ? plainTextClipboardFragment(record.plainText)
         : structuredClone(record.fragment);
     pasteReplacingRef.current = true;
-    const submitted = callbacks.current.onReplacePasteFragment?.(variant, {
+    const outcome = callbacks.current.onReplacePasteFragment?.(variant, {
       anchor: { ...record.end },
       focus: { ...record.end },
     });
-    if (!submitted) pasteReplacingRef.current = false;
+    if (!outcome) {
+      pasteReplacingRef.current = false;
+      return;
+    }
+    void outcome.then((applied) => {
+      if (applied || pasteRecordRef.current !== record) return;
+      pasteReplacingRef.current = false;
+      pasteRecordRef.current = null;
+      pasteOptionsRef.current.dismiss();
+    });
   }, [admission, viewStore]);
   const pasteOptions = usePasteOptions({
     enabled: props.pasteOptions !== false && !readOnly,

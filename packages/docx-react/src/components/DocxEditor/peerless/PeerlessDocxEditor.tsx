@@ -51,7 +51,7 @@ import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevision
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
-import { admitInputIntents } from './inputAdmission';
+import { admitInputIntents, submitInputIntent, type PeerlessAdmissionResult } from './inputAdmission';
 import type { DocxClipboardFragment, DocxCommandSelection, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
@@ -1000,13 +1000,18 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     props.onPaste?.();
     return true;
   }, [controller, props.onPaste]);
-  const onReplacePasteFragment = useCallback((fragment: DocxClipboardFragment, selection: DocxCommandSelection): boolean => {
+  const onReplacePasteFragment = useCallback((fragment: DocxClipboardFragment, selection: DocxCommandSelection): Promise<boolean> | false => {
     const current = active.current;
     if (!current) return false;
     if (!isPasteFragmentAllowed(controller.commands.store)) return false;
-    admitInputIntents(current.binding.admission, [{ kind: 'replacePasteFragment', payload: { fragment, selection } }],
-      { inputTime: performance.now(), source: 'paste', fence: true });
-    return true;
+    const applied = (result: PeerlessAdmissionResult): Promise<boolean> =>
+      result.status === 'submitted'
+        ? result.ticket.ack.then((outcome) => outcome.status === 'applied', () => false)
+        : result.status === 'held'
+          ? result.released.then(applied, () => false)
+          : Promise.resolve(false);
+    return applied(submitInputIntent(current.binding.admission, { kind: 'replacePasteFragment', payload: { fragment, selection } },
+      { inputTime: performance.now(), source: 'paste', fence: true }));
   }, [controller]);
   const selectionAnchor = useCallback(() => {
     const frame = controller.getSnapshot().view?.geometry;

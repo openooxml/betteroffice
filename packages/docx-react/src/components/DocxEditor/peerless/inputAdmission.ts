@@ -555,6 +555,15 @@ export function admitInputIntents(
   }
 }
 
+/** @internal Submits one input intent and returns its admission, for callers that act on the outcome. */
+export function submitInputIntent(
+  admission: PeerlessInputAdmission,
+  intent: PeerlessInputIntent,
+  options: PeerlessAdmissionOptions
+): PeerlessAdmissionResult {
+  return submitAdmission(admission, intent, options);
+}
+
 /** @internal */
 export function submitFormattingIntent(
   _admission: PeerlessInputAdmission,
