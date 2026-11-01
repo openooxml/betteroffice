@@ -27,13 +27,13 @@ thread_local! {
 }
 
 /// count one unit of array work in tests.
-fn step() {
+pub(crate) fn step() {
     #[cfg(test)]
     STEPS.with(|steps| steps.set(steps.get() + 1));
 }
 
 /// a copy of one cell of a block.
-fn copied(value: &CellValue) -> CellValue {
+pub(crate) fn copied(value: &CellValue) -> CellValue {
     #[cfg(test)]
     COPIES.with(|copies| copies.set(copies.get() + 1));
     value.clone()
@@ -46,13 +46,17 @@ pub const MAX_ARRAY_CELLS: usize = 1 << 20;
 /// a rectangular block of values, row-major.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Array {
-    rows: usize,
-    cols: usize,
-    values: Vec<CellValue>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) values: Vec<CellValue>,
 }
 
 impl Array {
-    fn new(rows: usize, cols: usize, values: Vec<CellValue>) -> Result<Self, ErrorValue> {
+    pub(crate) fn new(
+        rows: usize,
+        cols: usize,
+        values: Vec<CellValue>,
+    ) -> Result<Self, ErrorValue> {
         if rows == 0 || cols == 0 || rows.checked_mul(cols) != Some(values.len()) {
             return Err(ErrorValue::Value);
         }
@@ -97,7 +101,7 @@ impl Array {
         self.values
     }
 
-    fn row_values(&self, row: usize) -> &[CellValue] {
+    pub(crate) fn row_values(&self, row: usize) -> &[CellValue] {
         &self.values[row * self.cols..(row + 1) * self.cols]
     }
 
@@ -118,10 +122,12 @@ impl Array {
 /// scope the literal was written in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lambda {
-    params: Vec<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) params: Vec<String>,
     body: Expr,
     /// budget one call costs beyond the cell it fills.
     cost: u64,
+    pub(crate) vector: Option<(bool, Vec<Rc<Lambda>>)>,
 }
 
 /// a `LET` name or `LAMBDA` parameter bound for the body being evaluated.
@@ -179,7 +185,7 @@ pub enum Value {
 }
 
 impl Value {
-    fn error(value: ErrorValue) -> Self {
+    pub(crate) fn error(value: ErrorValue) -> Self {
         Value::Scalar(err(value))
     }
 
@@ -250,14 +256,14 @@ const FREE_NODES: u64 = 8;
 
 /// inner-loop steps, a multiply-add or a separator probe, one budget unit pays
 /// for in the builtins whose work outgrows the cells they read and write.
-const STEPS_PER_UNIT: u64 = 16;
+pub(crate) const STEPS_PER_UNIT: u64 = 16;
 
 /// the budget units `steps` inner-loop steps cost.
 pub(crate) fn step_units(steps: u64) -> u64 {
     steps / STEPS_PER_UNIT
 }
 
-fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
+pub(crate) fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
     if !ctx.consume_cells(step_units(steps)) {
         return Err(ErrorValue::Num);
     }
@@ -331,13 +337,17 @@ pub(crate) fn number_block(
 
 /// an output block being filled: its cells are paid for before any is
 /// computed, and each cell's text before the block keeps it.
-struct Cells<'c, 'a> {
+pub(crate) struct Cells<'c, 'a> {
     ctx: &'c EvalContext<'a>,
     values: Vec<CellValue>,
 }
 
 impl<'c, 'a> Cells<'c, 'a> {
-    fn reserve(ctx: &'c EvalContext<'a>, rows: usize, cols: usize) -> Result<Self, ErrorValue> {
+    pub(crate) fn reserve(
+        ctx: &'c EvalContext<'a>,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Self, ErrorValue> {
         let count = reserve(ctx, rows, cols)?;
         Ok(Self {
             ctx,
@@ -345,7 +355,7 @@ impl<'c, 'a> Cells<'c, 'a> {
         })
     }
 
-    fn push(&mut self, value: CellValue) -> Result<(), ErrorValue> {
+    pub(crate) fn push(&mut self, value: CellValue) -> Result<(), ErrorValue> {
         if !self.ctx.keep_text(&value) {
             return Err(ErrorValue::Num);
         }
@@ -362,7 +372,7 @@ impl<'c, 'a> Cells<'c, 'a> {
         Ok(())
     }
 
-    fn block(self, rows: usize, cols: usize) -> Value {
+    pub(crate) fn block(self, rows: usize, cols: usize) -> Value {
         reserved(rows, cols, self.values)
     }
 }
@@ -400,7 +410,26 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
                 }
                 _ => binding.value(),
             },
-            None => resolved_values(expr, ctx),
+            None => match crate::eval::resolve_area(expr, ctx) {
+                Some(Ok(area)) => area_values(&used_extent(area, ctx), ctx),
+                Some(Err(error)) => Value::error(error),
+                None => {
+                    if scope.is_none()
+                        && let Some(rest) = crate::functions::strip_ascii_prefix(name, "_xleta.")
+                    {
+                        return eta_lambda(rest)
+                            .map_or_else(|| Value::error(ErrorValue::Name), Value::Lambda);
+                    }
+                    let scalar = evaluate(expr, ctx);
+                    if scalar == err(ErrorValue::Name)
+                        && scope.is_none()
+                        && let Some(lambda) = eta_lambda(name)
+                    {
+                        return Value::Lambda(lambda);
+                    }
+                    Value::Scalar(scalar)
+                }
+            },
         },
         Expr::ArrayLiteral { cols, values } => array_literal(*cols, values, ctx),
         Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| {
@@ -507,7 +536,7 @@ fn used_extent(mut area: Area, ctx: &EvalContext<'_>) -> Area {
     area
 }
 
-fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
+pub(crate) fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
     match area.values_ref(ctx) {
         Ok(values) => {
             // reading the cells into a block copies their text
@@ -529,7 +558,11 @@ fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
 }
 
 /// read one argument as a block, whatever shape it has.
-fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array, ErrorValue> {
+pub(crate) fn argument(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Array, ErrorValue> {
     let value = args
         .get(index)
         .map(|arg| evaluate_array(arg, ctx))
@@ -590,7 +623,7 @@ fn block_of(value: Value) -> Result<Array, ErrorValue> {
 }
 
 /// an optional scalar argument; omitted and blank arguments give `None`.
-fn optional(
+pub(crate) fn optional(
     args: &[Expr],
     ctx: &EvalContext<'_>,
     index: usize,
@@ -605,7 +638,7 @@ fn optional(
     }
 }
 
-fn optional_number(
+pub(crate) fn optional_number(
     args: &[Expr],
     ctx: &EvalContext<'_>,
     index: usize,
@@ -643,7 +676,7 @@ fn blank(value: &CellValue) -> bool {
 
 /// excel's dynamic-array ordering: blanks sort last whichever way the order
 /// runs, everything else by the usual cross-type ranking.
-fn order_values(a: &CellValue, b: &CellValue, descending: bool) -> std::cmp::Ordering {
+pub(crate) fn order_values(a: &CellValue, b: &CellValue, descending: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (blank(a), blank(b)) {
         (true, true) => Ordering::Equal,
@@ -718,7 +751,7 @@ fn lines(ctx: &EvalContext<'_>, data: &Array, picks: &[usize], by_row: bool) -> 
     })())
 }
 
-fn result(value: Result<Value, ErrorValue>) -> Value {
+pub(crate) fn result(value: Result<Value, ErrorValue>) -> Value {
     value.unwrap_or_else(Value::error)
 }
 
@@ -1138,10 +1171,16 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "ANCHORARRAY" => anchorarray,
         "BYCOL" => bycol,
         "BYROW" => byrow,
+        "GROUPBY" => crate::functions::grouping::groupby,
         "LAMBDA" => lambda,
         "LET" => let_,
         "MAKEARRAY" => makearray,
         "MAP" => map,
+        "PIVOTBY" => crate::functions::grouping::pivotby,
+        "TRIMRANGE" => crate::functions::grouping::trimrange,
+        "_TRO_ALL" => crate::functions::grouping::trim_all,
+        "_TRO_LEADING" => crate::functions::grouping::trim_leading,
+        "_TRO_TRAILING" => crate::functions::grouping::trim_trailing,
         "REDUCE" => reduce,
         "SCAN" => scan,
         "TEXTSPLIT" => textsplit,
@@ -1248,7 +1287,11 @@ fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 
 /// charge a sort of `count` lines by `keys` keys for its comparisons before
 /// it runs.
-fn charge_sort(ctx: &EvalContext<'_>, count: usize, keys: usize) -> Result<(), ErrorValue> {
+pub(crate) fn charge_sort(
+    ctx: &EvalContext<'_>,
+    count: usize,
+    keys: usize,
+) -> Result<(), ErrorValue> {
     let depth = u64::from(usize::BITS - count.leading_zeros());
     charge_steps(ctx, (count as u64 * depth).saturating_mul(keys as u64))
 }
@@ -1479,7 +1522,10 @@ fn choose(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
 
 fn hstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     result((|| {
-        let blocks = stack_arguments(args, ctx)?;
+        let blocks = match stack_arguments(args, ctx, true)? {
+            Stacked::Lambdas(lambdas) => return Ok(lambdas),
+            Stacked::Blocks(blocks) => blocks,
+        };
         let rows = blocks.iter().map(|block| block.rows).max().unwrap_or(1);
         let cols = blocks
             .iter()
@@ -1499,7 +1545,10 @@ fn hstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 
 fn vstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     result((|| {
-        let blocks = stack_arguments(args, ctx)?;
+        let blocks = match stack_arguments(args, ctx, false)? {
+            Stacked::Lambdas(lambdas) => return Ok(lambdas),
+            Stacked::Blocks(blocks) => blocks,
+        };
         let cols = blocks.iter().map(|block| block.cols).max().unwrap_or(1);
         let rows = blocks
             .iter()
@@ -1517,13 +1566,58 @@ fn vstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     })())
 }
 
-fn stack_arguments(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<Array>, ErrorValue> {
+enum Stacked {
+    Blocks(Vec<Array>),
+    Lambdas(Value),
+}
+
+fn stack_lambdas(values: Vec<Value>, by_col: bool) -> Result<Value, ErrorValue> {
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        match value {
+            Value::Lambda(lambda) => match &lambda.vector {
+                None => out.push(lambda),
+                Some((dir, list)) if *dir == by_col => out.extend(list.iter().cloned()),
+                Some(_) => return Err(ErrorValue::Value),
+            },
+            Value::Scalar(CellValue::Error { value }) => return Err(value),
+            _ => return Err(ErrorValue::Value),
+        }
+    }
+    if out.len() == 1 {
+        return Ok(Value::Lambda(out.pop().unwrap()));
+    }
+    Ok(Value::Lambda(Rc::new(Lambda {
+        name: None,
+        params: Vec::new(),
+        body: Expr::Literal(CellValue::Empty),
+        cost: 0,
+        vector: Some((by_col, out)),
+    })))
+}
+
+fn stack_arguments(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    by_col: bool,
+) -> Result<Stacked, ErrorValue> {
     if args.is_empty() {
         return Err(ErrorValue::Value);
     }
-    (0..args.len())
-        .map(|index| argument(args, ctx, index))
-        .collect()
+    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    if values.iter().any(|v| matches!(v, Value::Lambda(_))) {
+        return stack_lambdas(values, by_col).map(Stacked::Lambdas);
+    }
+    let mut blocks = Vec::with_capacity(values.len());
+    for value in values {
+        match value {
+            Value::Scalar(CellValue::Error { value }) => return Err(value),
+            Value::Scalar(value) => blocks.push(Array::new(1, 1, vec![value])?),
+            Value::Array(array) => blocks.push(array),
+            Value::Lambda(_) => return Err(ErrorValue::Value),
+        }
+    }
+    Ok(Stacked::Blocks(blocks))
 }
 
 fn tocol(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
@@ -2010,9 +2104,7 @@ fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 }
 
 fn product(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    aggregate(args, ctx, "PRODUCT", |values| {
-        num(values.iter().product::<f64>())
-    })
+    aggregate(args, ctx, "PRODUCT", crate::functions::stats::product_of)
 }
 
 fn average(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
@@ -2654,7 +2746,7 @@ fn column_at(xs: &[Vec<f64>], observation: usize) -> Vec<f64> {
 }
 
 /// an optional block argument; an omitted or blank slot gives `None`.
-fn optional_block(
+pub(crate) fn optional_block(
     args: &[Expr],
     ctx: &EvalContext<'_>,
     index: usize,
@@ -3103,31 +3195,33 @@ fn lambda(args: &[Expr], _ctx: &EvalContext<'_>) -> Value {
     }
     let cost = (nodes(body) + params.len() as u64).saturating_sub(FREE_NODES);
     Value::Lambda(Rc::new(Lambda {
+        name: None,
         params,
         body: body.clone(),
         cost,
+        vector: None,
     }))
 }
 
 /// one argument of a lambda call: its value, plus the reference it stands for
 /// when the caller handed over part of a real range.
-type Argument = (Value, Option<Expr>);
+pub(crate) type Argument = (Value, Option<Expr>);
 
-fn plain(value: Value) -> Argument {
+pub(crate) fn plain(value: Value) -> Argument {
     (value, None)
 }
 
 fn callback(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Rc<Lambda>, ErrorValue> {
     match args.get(index).map(|arg| evaluate_array(arg, ctx)) {
-        Some(Value::Lambda(lambda)) => Ok(lambda),
+        Some(Value::Lambda(lambda)) if lambda.vector.is_none() => Ok(lambda),
         Some(Value::Scalar(CellValue::Error { value })) => Err(value),
         _ => Err(ErrorValue::Value),
     }
 }
 
 /// call a lambda with one value per parameter.
-fn invoke(lambda: &Lambda, argv: Vec<Argument>, ctx: &EvalContext<'_>) -> Value {
-    if lambda.params.len() != argv.len() {
+pub(crate) fn invoke(lambda: &Lambda, argv: Vec<Argument>, ctx: &EvalContext<'_>) -> Value {
+    if lambda.vector.is_some() || lambda.params.len() != argv.len() {
         return Value::error(ErrorValue::Value);
     }
     if !ctx.consume_cells(lambda.cost) {
@@ -3479,6 +3573,81 @@ fn next_char_width(source: &str, at: usize) -> usize {
         .get(at..)
         .and_then(|rest| rest.chars().next())
         .map_or(1, char::len_utf8)
+}
+
+/// a function name without the `_xleta.`, `_xlfn.` and `_xlws.` prefixes a
+/// file writes before it.
+fn strip_eta_prefixes(mut name: &str) -> &str {
+    loop {
+        if let Some(rest) = crate::functions::strip_ascii_prefix(name, "_xleta.")
+            .or_else(|| crate::functions::strip_ascii_prefix(name, "_xlfn."))
+            .or_else(|| crate::functions::strip_ascii_prefix(name, "_xlws."))
+        {
+            name = rest;
+        } else {
+            return name;
+        }
+    }
+}
+
+/// an eta-reduced builtin such as `SUM` passed where a LAMBDA is expected:
+/// one parameter, or two for PERCENTOF's subset and total.
+fn eta_lambda(name: &str) -> Option<Rc<Lambda>> {
+    let bare = strip_eta_prefixes(name);
+    let upper = bare.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "LAMBDA"
+            | "LET"
+            | "ANCHORARRAY"
+            | "GROUPBY"
+            | "PIVOTBY"
+            | "BYROW"
+            | "BYCOL"
+            | "MAP"
+            | "REDUCE"
+            | "SCAN"
+            | "MAKEARRAY"
+    ) {
+        return None;
+    }
+    if upper == "PERCENTOF" {
+        return Some(Rc::new(Lambda {
+            name: Some(upper.clone()),
+            params: vec!["x".to_string(), "y".to_string()],
+            body: Expr::func_call(
+                upper,
+                vec![
+                    Expr::Name {
+                        scope: None,
+                        name: "x".to_string(),
+                    },
+                    Expr::Name {
+                        scope: None,
+                        name: "y".to_string(),
+                    },
+                ],
+            ),
+            cost: 0,
+            vector: None,
+        }));
+    }
+    if crate::functions::resolve(&upper).is_none() && lookup_array(&upper).is_none() {
+        return None;
+    }
+    Some(Rc::new(Lambda {
+        name: Some(upper.clone()),
+        params: vec!["x".to_string()],
+        body: Expr::func_call(
+            upper,
+            vec![Expr::Name {
+                scope: None,
+                name: "x".to_string(),
+            }],
+        ),
+        cost: 0,
+        vector: None,
+    }))
 }
 
 /// where an array formula's result lands and what it holds.

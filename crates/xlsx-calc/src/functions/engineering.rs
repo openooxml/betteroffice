@@ -672,7 +672,7 @@ fn format_complex(z: Complex, unit: char) -> String {
 /// `x` rounded to 15 significant digits without trailing zeros, in plain
 /// notation when its decimal exponent is from -4 to 14 and as `1.5E-16` or
 /// `1E+15` outside that.
-fn significant(x: f64) -> String {
+pub(crate) fn significant(x: f64) -> String {
     if x == 0.0 {
         return "0".to_string();
     }
