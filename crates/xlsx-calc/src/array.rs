@@ -799,6 +799,12 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "FORECAST" | "FORECAST.LINEAR" => &[0],
         "LARGE" | "SMALL" => &[1],
         "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC" => &[1],
+        "IRR" => &[1],
+        "XIRR" => &[2],
+        "MIRR" => &[1, 2],
+        "XNPV" | "FVSCHEDULE" | "CELL" => &[0],
+        "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DGET" | "DMAX" | "DMIN" | "DPRODUCT" | "DSTDEV"
+        | "DSTDEVP" | "DSUM" | "DVAR" | "DVARP" => &[1],
         _ => return None,
     })
 }
@@ -892,6 +898,23 @@ fn lifts(name: &str) -> bool {
             | "WEEKDAY"
             | "WEEKNUM"
             | "YEAR"
+            | "RATE"
+            | "IPMT"
+            | "PPMT"
+            | "CUMIPMT"
+            | "CUMPRINC"
+            | "ISPMT"
+            | "DB"
+            | "DDB"
+            | "VDB"
+            | "SLN"
+            | "SYD"
+            | "EFFECT"
+            | "NOMINAL"
+            | "PDURATION"
+            | "RRI"
+            | "DOLLARDE"
+            | "DOLLARFR"
     )
 }
 
@@ -3372,3 +3395,6 @@ pub fn evaluate_spill(
 pub fn evaluate_scalar(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
     evaluate_array(expr, ctx).into_scalar()
 }
+
+#[cfg(test)]
+mod argument_shapes;

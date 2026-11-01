@@ -10,6 +10,7 @@ import {
   type WorkbookEditState, type WorkbookSharedAck, type WorkbookSharedCommand,
   type WorkbookCommandTicket, type WorkbookSubmitOptions,
 } from './commandProtocol';
+import { registerPostedReads } from './postedReads';
 
 type SessionOptions<X> = WorkerEditSessionOptions<unknown, WorkbookEditPayload,
   WorkbookCommandSelection, Partial<WorkbookEditState>, WorkbookCommandFrame, X>;
@@ -235,7 +236,24 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
     for (const listener of [...frames]) listener(frame);
   }
 
-  return {
+  function runAfter<T>(call: () => Promise<T>, untilPosted: boolean): Promise<T> {
+    if (failure) return Promise.reject(failure);
+    if (disposed) return Promise.reject(new SessionFailure('disposed', 'Session was disposed'));
+    const flushed = dispatchOrder === 0 ? undefined : shared.flush();
+    const invoke = () => {
+      if (failure) throw failure;
+      if (disposed) throw new SessionFailure('disposed', 'Session was disposed');
+      return call();
+    };
+    const result = flushed ? flushed.then(invoke) : invoke();
+    const gate = untilPosted ? (flushed ?? Promise.resolve()).then(() => {}) : result;
+    const barrier = { order: dispatchOrder, done: gate.then(() => {}, () => {}) };
+    barriers.add(barrier);
+    void barrier.done.then(() => { barriers.delete(barrier); });
+    return result;
+  }
+
+  const session: WorkbookEditSession<X> = {
     backend: shared.backend,
     get state() { return failure ? { ...shared.state,
       editState: { ...shared.state.editState, readOnly: true } } : shared.state; },
@@ -262,21 +280,7 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
     subscribe: (listener) => shared.subscribe(listener),
     flush: () => shared.flush(),
     whenPresented: (seq) => shared.whenPresented(seq),
-    runAfterEdits(call) {
-      if (failure) return Promise.reject(failure);
-      if (disposed) return Promise.reject(new SessionFailure('disposed', 'Session was disposed'));
-      const flushed = dispatchOrder === 0 ? undefined : shared.flush();
-      const invoke = () => {
-        if (failure) throw failure;
-        if (disposed) throw new SessionFailure('disposed', 'Session was disposed');
-        return call();
-      };
-      const result = flushed ? flushed.then(invoke) : invoke();
-      const barrier = { order: dispatchOrder, done: result.then(() => {}, () => {}) };
-      barriers.add(barrier);
-      void barrier.done.then(() => { barriers.delete(barrier); });
-      return result;
-    },
+    runAfterEdits: (call) => runAfter(call, false),
     async command(input) {
       validateWorkbookCommandEnvelope(input);
       if (options.onAdmit) input = structuredClone(input);
@@ -375,4 +379,6 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
       return shared.dispose();
     },
   };
+  registerPostedReads(session, (call) => runAfter(call, true));
+  return session;
 }

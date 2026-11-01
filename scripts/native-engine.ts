@@ -8,10 +8,10 @@ type NativeAsset = { asset: string; native: string };
 
 /** The engine modules each wasm package links, and their native replacements. */
 export const NATIVE_ENGINES = {
-  xlsx: {
-    engine: 'packages/xlsx/src/wasm/engine.ts',
-    native: 'bindings/xlsx-native/js/engine.ts',
-  },
+  xlsx: [
+    { engine: 'packages/xlsx/src/wasm/engine.ts', native: 'bindings/xlsx-native/js/engine.ts' },
+    { engine: 'packages/xlsx/src/wasm/engineRaster.ts', native: 'bindings/xlsx-native/js/engineRaster.ts' },
+  ],
   pptx: {
     engine: 'packages/pptx/src/wasm/engine.ts',
     native: 'bindings/pptx-native/js/engine.ts',

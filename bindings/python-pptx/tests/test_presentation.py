@@ -260,6 +260,11 @@ def test_format_text_may_cross_a_paragraph_boundary(deck):
     ] == ["es,", "withou"]
 
 
+def test_render_slide_uses_the_bundled_fonts_without_registration(sample_bytes):
+    assert len(bo.Presentation.open(sample_bytes).render_slide(0)) > 0
+
+
+@pytest.mark.without_font_packs
 def test_render_slide_needs_a_registered_font(deck):
     with pytest.raises(bo.RenderError, match="font"):
         deck.render_slide(0)

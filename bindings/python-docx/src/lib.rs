@@ -1422,7 +1422,9 @@ impl PyDocument {
 #[pymodule]
 fn _betteroffice_docx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
+    module.add_function(wrap_pyfunction!(python_common::font_packs, module)?)?;
     let py = module.py();
+    python_common::install_font_packs(py)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyDocument>()?;
     module.add_class::<PyParagraph>()?;

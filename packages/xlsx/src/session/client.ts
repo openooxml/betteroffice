@@ -43,6 +43,7 @@ import type {
   WorkbookSharedAck, WorkbookSharedWireAck,
 } from './commandProtocol';
 import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
+import { runAfterEditsUntilPosted } from './postedReads';
 import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
@@ -440,6 +441,7 @@ export async function createWorkbookSession(
           args = structuredClone(args);
         }
       } catch (error) { return Promise.reject(error); }
+      if (method === 'renderPng' || method === 'renderRangePng') return runAfterEditsUntilPosted(edits, () => call(...args));
       return edits.runAfterEdits(() => call(...args));
     } });
   }
