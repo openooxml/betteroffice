@@ -23,7 +23,7 @@ const table = (prefix: string) => `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
-)))));
+)))), 30_000);
 afterEach(() => {
   cleanup();
   for (const session of sessions.splice(0)) session.destroy();

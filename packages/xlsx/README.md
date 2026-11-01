@@ -41,6 +41,7 @@ These entry points are exported from `@betteroffice/xlsx`:
 | entry point | description |
 | --- | --- |
 | `initWasm(input?)` | Initialize the engine; concurrent calls share initialization. |
+| `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the selected engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `openWorkbook(bytes, options?)` | Open XLSX bytes as a synchronous `WorkbookHandle` after initialization. |
 | `openWorkbookSession(bytes, options?)` | Open a workbook in a dedicated worker with asynchronous access. |
 | `paintDisplayList(ctx, frame, dpr, origin?)` | Paint a display list onto a canvas 2D context. |

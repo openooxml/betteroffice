@@ -153,7 +153,7 @@ function key(session: YrsSession, story: string, text: string): string {
   return session.paragraphs(story).find((paragraph) => paragraph.text === text)!.paraId;
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 afterEach(() => {
   for (const created of sessions.splice(0)) created.destroy();

@@ -304,17 +304,44 @@ function dropNulls(value: unknown): unknown {
   return result;
 }
 
-function stableStringify(value: unknown): string {
+const SIMPLE_JSON_KEY = /^[A-Za-z0-9_$]+$/;
+const NON_FORMATTING_ATTRS = new Set(['hyperlink', 'ins', 'del']);
+
+/** @internal */
+export function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const object = asObject(value);
-  if (object) {
-    return `{${Object.keys(object)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`)
-      .join(',')}}`;
+  if (Array.isArray(value)) {
+    let result = '[';
+    const length = value.length;
+    for (let index = 0; index < length; index += 1) {
+      if (index > 0) result += ',';
+      if (index in value) {
+        const entry = stableStringify(value[index]);
+        if (entry !== undefined) result += entry;
+      }
+    }
+    return result + ']';
   }
+  const object = asObject(value);
+  if (object) return stableStringifyObject(object);
   return JSON.stringify(value);
+}
+
+function stableStringifyObject(value: Attrs, omitted?: ReadonlySet<string>): string {
+  let result = '{';
+  let separator = '';
+  for (const key of Object.keys(value).sort()) {
+    if (omitted?.has(key)) continue;
+    const quotedKey = SIMPLE_JSON_KEY.test(key) ? '"' + key + '"' : JSON.stringify(key);
+    result += separator + quotedKey + ':' + stableStringify(value[key]);
+    separator = ',';
+  }
+  return result + '}';
+}
+
+/** @internal */
+export function stableStringifyWithout(value: Attrs, omitted: ReadonlySet<string>): string {
+  return stableStringifyObject(value, omitted);
 }
 
 function formattingAttrs(attributes: Attrs): Attrs {
@@ -514,7 +541,17 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
   return result as TextFormatting;
 }
 
-function runContentForText(text: string, formatting: TextFormatting): RunContent[] {
+const SPECIAL_RUN_TEXT = /[\u00ad\u2011\uf000-\uf8ff]/;
+
+/** @internal */
+export function runContentForText(
+  text: string,
+  formatting: TextFormatting | (() => TextFormatting)
+): RunContent[] {
+  if (!SPECIAL_RUN_TEXT.test(text)) {
+    return text ? [{ type: 'text', text }] : [];
+  }
+  if (typeof formatting === 'function') formatting = formatting();
   const content: RunContent[] = [];
   let plainText = '';
   const flushText = (): void => {
@@ -561,7 +598,7 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
   return {
     type: 'run',
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
-    content: runContentForText(text, directFormatting(attributes)),
+    content: runContentForText(text, () => directFormatting(attributes)),
   };
 }
 
@@ -882,7 +919,7 @@ function imageRunFromPayload(payload: Attrs): Run {
 /** The seeded shape, carrying the text body and everything else no payload field describes. */
 function storedShape(value: unknown): Shape | undefined {
   const json = asString(value);
-  if (!json || json.length > 2_000_000) return undefined;
+  if (!json) return undefined;
   try {
     const parsed = JSON.parse(json) as Shape;
     if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
@@ -922,6 +959,25 @@ function chartRunFromPayload(payload: Attrs, recovery: ChartRecovery): Run | nul
   }
 }
 
+function replayedRunProperties(payload: Attrs, attributes: Attrs, format: RunFormatter): Pick<Run, 'formatting' | 'propertyChanges'> {
+  const source = asObject(payload.sourceRun);
+  const seeded = asObject(source?.attributes);
+  if (!source || !seeded) return {};
+  const before = directFormatting(seeded);
+  const current = directFormatting(attributes);
+  const projected: Attrs = { ...format(attributes) };
+  const formatting: Attrs = { ...asObject(source.formatting) };
+  for (const key of new Set([...Object.keys(before), ...Object.keys(current)])) {
+    if (sameJson(before[key as keyof TextFormatting], current[key as keyof TextFormatting])) continue;
+    if (projected[key] === undefined) delete formatting[key];
+    else formatting[key] = projected[key];
+  }
+  return {
+    formatting: formatting as TextFormatting,
+    ...(Array.isArray(source.propertyChanges) ? { propertyChanges: source.propertyChanges as Run['propertyChanges'] } : {}),
+  };
+}
+
 function opaqueDrawingRunFromPayload(
   payload: Attrs,
   attributes: Attrs,
@@ -935,7 +991,6 @@ function opaqueDrawingRunFromPayload(
     ? payload.previews.map(asObject).filter((image): image is Attrs => !!image).map(imageFromPayload)
     : [];
   const textBox = storedShape(payload.textBoxJson);
-  const formatting = format(attributes);
   return {
     type: 'run',
     content: [{
@@ -944,11 +999,11 @@ function opaqueDrawingRunFromPayload(
       ...(previews.length ? { previews } : {}),
       ...(textBox ? { textBox } : {}),
     }],
-    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    ...(kind === 'drawingRun' ? replayedRunProperties(payload, attributes, format) : { formatting: format(attributes) }),
   };
 }
 
-function shapeRunFromPayload(payload: Attrs): Run {
+function shapeRunFromPayload(payload: Attrs, attributes: Attrs, format: RunFormatter): Run {
   const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
     shapeType: 'rect',
@@ -1027,7 +1082,10 @@ function shapeRunFromPayload(payload: Attrs): Run {
     transform.flipV = true;
   if (transform.rotation || transform.flipH || transform.flipV) shape.transform = transform;
 
-  return { type: 'run', content: [{ type: 'shape', shape }] };
+  return {
+    type: 'run', content: [{ type: 'shape', shape }],
+    ...(shape.drawingRunXml ? replayedRunProperties(payload, attributes, format) : { formatting: format(attributes) }),
+  };
 }
 
 function inlineSdtFromPayload(
@@ -1149,7 +1207,7 @@ function ordinaryContentForItem(
     case 'horizontalRule':
       return horizontalRuleRun(item.payload, item.attributes, format);
     case 'shape':
-      return shapeRunFromPayload(item.payload);
+      return shapeRunFromPayload(item.payload, item.attributes, format);
     case 'chart':
       return chartRunFromPayload(item.payload, recovery);
     case 'opaqueDrawing':
@@ -1200,7 +1258,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
-    child = shapeRunFromPayload(item.payload);
+    child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
     child = chartRunFromPayload(item.payload, recovery) ?? { type: 'run', content: [] };
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
@@ -1246,7 +1304,7 @@ function addToHyperlink(
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
   } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
-  else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload);
+  else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
   else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? undefined;
   else if (item.embedKind === 'field') {
@@ -1437,7 +1495,7 @@ function buildParagraphContent(
 
     flushHyperlink();
     if (item.kind === 'text') {
-      const key = stableStringify(formattingAttrs(item.attributes));
+      const key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
       const nextRun = createTextRun(item.text, item.attributes, format);
       if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
       else {
@@ -1686,7 +1744,7 @@ function restoreOriginalRuns(
     while (remaining > 0) {
       const item = items[itemIndex];
       if (item?.kind !== 'text') return fallback();
-      if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
+      if (stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS) !== stableStringify(expected)) {
         return fallback();
       }
       const available = item.text.length - itemOffset;
@@ -2253,7 +2311,10 @@ function paragraphFromStory(
   );
   restoreLineBreaks(content, baseParagraph);
   content = restoreRawInlines(content, baseParagraph);
-  if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
+  if (baseParagraph) {
+    restoreNestedOrdinals(content, baseParagraph.content);
+    restoreTextBoxBookmarks(content, baseParagraph.content);
+  }
   content = insertBoundaries(content, commentBoundaries);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
@@ -2732,22 +2793,54 @@ function paragraphChartRuns(content: readonly ParagraphContent[]): Run[] {
 }
 
 function isBlockBookmark(block: BlockContent): boolean {
-  return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>])/.test(block.xml);
+  return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>]|$)/.test(block.xml.trimStart());
+}
+
+function containsBookmark(blocks: readonly BlockContent[]): boolean {
+  return blocks.some(block => {
+    if (isBlockBookmark(block)) return true;
+    if (block.type === 'blockSdt') return containsBookmark(block.content);
+    if (block.type === 'table') return block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)));
+    return false;
+  });
+}
+
+export function assertCommentBookmarkReplacement(blocks: readonly BlockContent[]): void {
+  if (blocks.some(block =>
+    block.type === 'blockSdt' ? containsBookmark(block.content)
+      : block.type === 'table' && block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)))
+  )) throw new Error('Cannot replace comment body with bookmarks in nested blocks');
 }
 
 type BookmarkKind = 'start' | 'end';
+const WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
 function rawBlockBookmark(xml: string): { kind: BookmarkKind; id?: string } | undefined {
-  const kind = /^<w:bookmark(Start|End)(?=[\s/>])/.exec(xml)?.[1];
+  xml = xml.trimStart();
+  const kind = /^<w:bookmark(Start|End)(?=[\s/>]|$)/.exec(xml)?.[1];
   if (!kind) return undefined;
+  const decoded = (value: string): string => value.replace(/&#(?:x([0-9a-fA-F]+)|([0-9]+));|&(amp|lt|gt|quot|apos);/g, (entity, hex, decimal, named) => {
+    if (named) return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[named] ?? entity;
+    const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
+    return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+  });
+  const tag = /^<[^<>"']*(?:"[^"]*"[^<>"']*|'[^']*'[^<>"']*)*>/.exec(xml)?.[0];
+  if (!tag) throw new Error('Invalid block bookmark');
+  const attributes = [...tag.matchAll(/([^\s=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)]
+    .map(attribute => [attribute[1]!, decoded(attribute[2] ?? attribute[3]!)] as const);
+  const namespaces = new Map([['w', WORD_NAMESPACE], ['xml', 'http://www.w3.org/XML/1998/namespace']]);
+  for (const [name, value] of attributes) {
+    if (name.startsWith('xmlns:')) namespaces.set(name.slice(6), value);
+  }
   let value: string | undefined;
-  for (const attribute of xml.matchAll(/([^\s=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
-    if (attribute[1] !== 'w:id') continue;
-    value = (attribute[2] ?? attribute[3]!).replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, (entity, hex, decimal) => {
-      const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
-      return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
-    });
-    break;
+  for (const [name, attribute] of attributes) {
+    const [prefix, local] = name.split(':');
+    if (prefix === 'xmlns' || (local !== 'id' && local !== 'name')) continue;
+    const namespace = namespaces.get(prefix!);
+    if (namespace === undefined) throw new Error(`Unbound block bookmark attribute ${name}`);
+    if (namespace !== WORD_NAMESPACE || local !== 'id') continue;
+    if (value !== undefined) throw new Error('Duplicate block bookmark id');
+    value = attribute;
   }
   const id = value === undefined ? undefined
     : Number.isSafeInteger(Number(value)) ? String(Number(value)) : value;
@@ -2815,7 +2908,7 @@ interface BlockBookmarkPlacement {
   following?: BlockContent;
 }
 
-function restoreBlockBookmarks(
+export function restoreBlockBookmarks(
   projected: BlockContent[],
   base: readonly BlockContent[],
   storyId: string
@@ -2845,15 +2938,14 @@ function restoreBlockBookmarks(
       const id = marker.id ?? `\0${index}`;
       let pair = pairs.get(id);
       if (!pair) pairs.set(id, pair = {});
-      if (!pair[marker.kind]) {
-        const boundary = {
-          block, index,
-          position: nextPositions[index] ?? (previous === undefined ? 0 : previous + 1),
-          omit: present.get(id)?.[marker.kind] !== undefined,
-        };
-        pair[marker.kind] = boundary;
-        boundaries.push(boundary);
-      }
+      if (pair[marker.kind]) throw new Error(`Duplicate block bookmark ${marker.kind} for id ${id}`);
+      const boundary = {
+        block, index,
+        position: nextPositions[index] ?? (previous === undefined ? 0 : previous + 1),
+        omit: present.get(id)?.[marker.kind] !== undefined,
+      };
+      pair[marker.kind] = boundary;
+      boundaries.push(boundary);
     }
     const key = keys[index];
     const position = key === undefined ? undefined : live.get(key);
@@ -2889,6 +2981,36 @@ function restoreBlockBookmarks(
     if (index < projected.length) restored.push(projected[index]!);
   }
   return restored;
+}
+
+function restoreTextBoxBookmarks(content: ParagraphContent[], base: readonly ParagraphContent[]): void {
+  const bodies = (value: unknown): Map<string, Array<{ content: BlockContent[] }>> => {
+    const found = new Map<string, Array<{ content: BlockContent[] }>>();
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child);
+      } else if (value !== null && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const body = asObject(record.textBody);
+        if (body && Array.isArray(body.content)) {
+          const id = typeof record.id === 'string' ? record.id : String(found.size);
+          const copies = found.get(id) ?? [];
+          copies.push(body as { content: BlockContent[] });
+          found.set(id, copies);
+        }
+        for (const [key, child] of Object.entries(record)) if (key !== 'drawingModel') visit(child);
+      }
+    };
+    visit(value);
+    return found;
+  };
+  const sources = bodies(base);
+  for (const [id, copies] of bodies(content)) {
+    copies.forEach((body, index) => {
+      const source = sources.get(id)?.[index];
+      if (source) body.content = restoreBlockBookmarks(body.content, source.content, `txbx:${id}`);
+    });
+  }
 }
 
 function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[], storyId: string): BlockContent[] {
@@ -3965,6 +4087,22 @@ function projectStories(
   };
   const footnotes = projectNotes(base.package.footnotes, 'fn:');
   const endnotes = projectNotes(base.package.endnotes, 'en:');
+  const commentBodies = base.package.document.comments?.some(comment => containsBookmark(comment.blockContent ?? []))
+    ? new Map(session.listComments().map(comment => [comment.id, comment.body])) : undefined;
+  const comments = commentBodies && base.package.document.comments?.map(comment => {
+    if (!containsBookmark(comment.blockContent ?? [])) return comment;
+    const body = commentBodies.get(String(comment.id));
+    if (!Array.isArray(body) || !body.every(block =>
+      block && ['paragraph', 'table', 'blockSdt', 'rawXml'].includes(block.type)
+    ) || sameJson(body, comment.blockContent ?? comment.content)) return comment;
+    assertCommentBookmarkReplacement(comment.blockContent ?? comment.content);
+    const blockContent = restoreBlockBookmarks(body, comment.blockContent ?? comment.content, `comment:${comment.id}`);
+    return {
+      ...comment,
+      content: blockContent.filter((block): block is Paragraph => block.type === 'paragraph'),
+      blockContent,
+    };
+  });
 
   const sourcePackage = sessionSourcePackage(session);
   const liveSections = sourcePackage && shouldProject('body') ? session.listSections?.() ?? [] : [];
@@ -3993,6 +4131,7 @@ function projectStories(
       document: {
         ...base.package.document,
         content: bodyContent,
+        ...(comments ? { comments } : {}),
         ...(sectionChanges ? { sections: projectedSections } : {}),
         ...(finalSectionChanges ? { finalSectionProperties: withHostSectionChanges(liveSections.at(-1)!.authored, sourceFinal ?? {}, base.package.document.finalSectionProperties ?? {}) } : {}),
       },

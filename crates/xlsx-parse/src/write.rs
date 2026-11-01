@@ -12,6 +12,7 @@ use std::ops::Range;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
+use xlsx_model::sort::sort_by_shared;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
@@ -1153,7 +1154,7 @@ fn displaced_source_sheets(
 ) -> Vec<String> {
     let retained = origins.iter().flatten().copied().collect::<Vec<_>>();
     let mut ranked = retained.clone();
-    ranked.sort_unstable();
+    sort_by_shared(&mut ranked, Ord::cmp);
     let mut displaced = Vec::new();
     for (index, original) in package.original_workbook.sheets.iter().enumerate() {
         let rank = retained.iter().position(|origin| *origin == index);
@@ -3605,7 +3606,7 @@ pub(crate) struct ColRun {
 /// `covered`. Widths stay one column per run.
 pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
     let mut sorted = covered.to_vec();
-    sorted.sort_unstable_by_key(|range| range.start);
+    sort_by_shared(&mut sorted, |left, right| left.start.cmp(&right.start));
     let mut covered: Vec<Range<ColId>> = Vec::with_capacity(sorted.len());
     for range in sorted {
         match covered.last_mut() {
@@ -3625,7 +3626,7 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
     for range in &covered {
         bounds.extend([range.start, range.end]);
     }
-    bounds.sort_unstable();
+    sort_by_shared(&mut bounds, Ord::cmp);
     bounds.dedup();
     let mut runs: Vec<ColRun> = Vec::new();
     for pair in bounds.windows(2) {

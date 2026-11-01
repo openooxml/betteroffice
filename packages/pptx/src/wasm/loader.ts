@@ -1,4 +1,5 @@
 import initWasmModule, {
+  decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
   exportPptxMarkdownJson,
   exportPptxStructuredJson,
@@ -8,10 +9,17 @@ import initWasmModule, {
   PptxRenderer,
   renderPptxMarkdownJson,
   rendererVersion,
-} from './generated/pptx_wasm.js';
+} from './engine';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { presentationContexts } from './presentationContext';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
@@ -178,6 +186,7 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  metafileSvg(partPath: string): Uint8Array | undefined;
   /**
    * serialize the presentation back to .pptx bytes, edits included. Normal
    * autofit text the edits changed is fitted with the registered faces, or
@@ -355,7 +364,7 @@ export type PresentationPeerHandle = Pick<PresentationHandle,
   'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
   'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
   'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' |
-  'mediaBytes' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
+  'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
 >;
 
 type PeerMode = { kind: 'baseline' } | { kind: 'peer'; identity: string };
@@ -599,15 +608,18 @@ function openPresentationInternal(
   try {
     renderer = construct(() => new PptxRenderer());
   } catch (error) {
-    if (peer) {
-      try { doc.free(); } catch {}
-      throw peerError(error);
-    }
-    throw error;
+    try { doc.free(); } catch {}
+    throw peer ? peerError(error) : error;
   }
   if (!peer) {
-    for (const face of options.fonts ?? []) registerFont(renderer, face);
-    for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+    try {
+      for (const face of options.fonts ?? []) registerFont(renderer, face);
+      for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+    } catch (error) {
+      try { renderer.free(); } catch {}
+      try { doc.free(); } catch {}
+      throw error;
+    }
   }
   const listeners = new Map<
     number,
@@ -848,6 +860,9 @@ function openPresentationInternal(
     },
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath));
+    },
+    metafileSvg(partPath: string): Uint8Array | undefined {
+      return wasmCall(() => doc.metafileSvg(partPath));
     },
     save(options?: SavePresentationOptions): Uint8Array {
       if (!options) return wasmCall(() => renderer.saveBytes(doc));

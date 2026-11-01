@@ -77,7 +77,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -95,7 +95,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_fallback_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -151,29 +151,13 @@ impl Renderer {
             .collect::<Result<Vec<_>, _>>()?;
         let faces = self
             .renderer
-            .requested_font_faces(session.package(), &scopes)
+            .requested_font_faces_with_scripts(session.package(), &scopes)
             .map_err(engine_error)?;
         #[derive(Serialize)]
-        struct Face {
-            family: String,
-            bold: bool,
-            italic: bool,
-        }
-        #[derive(Serialize)]
         struct RequestedFaces {
-            faces: Vec<Face>,
+            faces: Vec<pptx_render::RequestedFontFace>,
         }
-        serde_json::to_string(&RequestedFaces {
-            faces: faces
-                .into_iter()
-                .map(|(family, bold, italic)| Face {
-                    family,
-                    bold,
-                    italic,
-                })
-                .collect(),
-        })
-        .map_err(engine_error)
+        serde_json::to_string(&RequestedFaces { faces }).map_err(engine_error)
     }
 
     /// `layoutSlideJson` with its stages timed, returned as
@@ -341,12 +325,12 @@ impl Renderer {
             .renderer
             .layout_scoped_slide(session.package(), &preview.scope)
             .map_err(engine_error)?;
-        serde_json::to_string(&serde_json::json!({
-            "proposal": preview.proposal,
-            "snapshot": preview.snapshot,
-            "textChanges": preview.text_changes,
-            "frame": rendered.display_list,
-        }))
+        serde_json::to_string(&pptx_render::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            frame: rendered.display_list,
+        })
         .map_err(engine_error)
     }
 }
@@ -518,6 +502,15 @@ impl Renderer {
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn font_error(error: pptx_render::RenderError) -> EngineError {
+    match error {
+        pptx_render::RenderError::ResourceLimit(_) => {
+            EngineError::resource_limit(error.to_string())
+        }
+        error => engine_error(error),
     }
 }
 

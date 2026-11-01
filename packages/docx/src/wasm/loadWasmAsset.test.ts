@@ -504,3 +504,26 @@ describe('wasmModuleMemories', () => {
     });
   });
 });
+
+it('native state becomes ready without touching assets, initialization or WebAssembly', async () => {
+  const assetUrl = mock(() => { throw new Error('Unexpected asset read'); });
+  const initAsync = mock(async () => { throw new Error('Unexpected async init'); });
+  const initSync = mock(() => { throw new Error('Unexpected sync init'); });
+  const options = { label: 'native', preloadName: 'preloadNative', engineKind: 'native' as const, assetUrl, initAsync, initSync, shareModule: true };
+  const asyncState = createWasmModuleState(options);
+  expect(asyncState.status()).toBe('idle');
+  expect(await asyncState.sharedModule()).toBeNull();
+  await expect(asyncState.module()).rejects.toThrow('Native engines have no WebAssembly module');
+  await asyncState.preload(new URL('https://invalid.example/unused'));
+  expect(asyncState.status()).toBe('ready');
+  const syncState = createWasmModuleState(options);
+  syncState.ensure();
+  expect(syncState.status()).toBe('ready');
+  const workerState = createWasmModuleState(options);
+  await workerState.preloadFrom(new Promise<WebAssembly.Module | null>(() => {}));
+  expect(workerState.status()).toBe('ready');
+  expect(await workerState.sharedModule()).toBeNull();
+  expect(assetUrl).not.toHaveBeenCalled();
+  expect(initAsync).not.toHaveBeenCalled();
+  expect(initSync).not.toHaveBeenCalled();
+});

@@ -10,8 +10,12 @@ export async function installDefaultFonts(
     if (!allowed(font.family)) return undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      const traits = font.ownWeight ? undefined : await import('../fontTraits')
+        .then((module) => module.readFontTraits(new Uint8Array(font.bytes))).catch(() => undefined);
+      if (!current() || !allowed(font.family)) return;
       const loading = new FontFace(font.family, font.bytes, {
-        weight: font.bold ? '700' : '400', style: font.italic ? 'italic' : 'normal',
+        weight: traits ? String(traits.weight) : font.bold ? '700' : '400',
+        style: traits ? traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal' : font.italic ? 'italic' : 'normal',
       }).load();
       const deadline = new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), 5000);

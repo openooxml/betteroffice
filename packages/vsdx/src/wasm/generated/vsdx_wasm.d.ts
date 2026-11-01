@@ -1,5 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 export class VsdxDocument {
     private constructor();
@@ -73,6 +75,13 @@ export class VsdxRenderer {
     validatePageJson(document: VsdxDocument, page_index: number): string;
 }
 
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
 export function parseVsdxJson(data: Uint8Array): string;
 
 export function rendererVersion(): string;
@@ -90,6 +99,7 @@ export interface InitOutput {
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly memory: WebAssembly.Memory;
     readonly parseVsdxJson: (a: number, b: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];

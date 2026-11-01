@@ -396,6 +396,19 @@ impl EditSessionCore {
         result
     }
 
+    pub fn observe_updates(
+        &self,
+        callback: impl Fn(&[u8], bool) + 'static,
+    ) -> EngineResult<super::UpdateSubscription> {
+        self.engine
+            .doc()
+            .observe_update_v1(callback)
+            .map(|subscription| super::UpdateSubscription {
+                _subscription: subscription,
+            })
+            .map_err(EngineError::message)
+    }
+
     /// Starts queueing committed transactions for
     /// [`EditSessionCore::drain_update_event`] instead of pushing them through a
     /// callback. Idempotent while observation is running.

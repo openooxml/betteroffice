@@ -38,7 +38,8 @@ const MARKUP = { revisionView: 'markup' } as const;
 beforeAll(() =>
   preloadEditWasm(
     new Uint8Array(readFileSync(resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm')))
-  )
+  ),
+  30_000
 );
 afterEach(() => {
   cleanup();

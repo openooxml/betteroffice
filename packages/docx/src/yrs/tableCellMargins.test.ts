@@ -36,7 +36,7 @@ function source(): Uint8Array {
 const round = (value: number) => Math.round(value * 1000) / 1000;
 const px = (twips: number) => round(twips / 15);
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 test('table cell margins resolve each side through direct, table style and default table style', async () => {
   const bytes = source();

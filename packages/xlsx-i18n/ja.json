@@ -135,6 +135,7 @@
       "unsupportedCommand": "まだサポートされていません。",
       "invalidArguments": "この値は有効ではありません。",
       "inputFailed": "この前のセルの入力を保存できませんでした。",
+      "sheetProtected": "このセルは保護されたシート上にあります。",
       "documentReplaced": "別のブックが開かれました。",
       "targetChanged": "選択範囲が変更されました。",
       "gestureActive": "グラフの移動を先に完了してください。",

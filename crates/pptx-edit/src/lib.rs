@@ -19,6 +19,7 @@ mod comments;
 mod deck;
 mod effects;
 mod inherit;
+mod metafile;
 mod model;
 mod outline_gradients;
 pub mod paragraph;
@@ -45,6 +46,8 @@ pub use batch::{
 };
 #[doc(hidden)]
 pub use deck::baseline_snapshot;
+#[doc(hidden)]
+pub use metafile::MetafileSvgCache;
 pub use model::*;
 pub use ooxml_drawingml::{ColorValue, GradientFill, GradientStop, ShapeFill};
 #[doc(hidden)]
@@ -117,6 +120,7 @@ pub struct DeckSession {
     _epoch_observer: UpdateSubscription,
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
     remote_deletions: remote_cleanup::RemoteDeletions,
+    metafile_svgs: RefCell<MetafileSvgCache>,
 }
 
 fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
@@ -237,6 +241,7 @@ impl DeckSession {
             _epoch_observer,
             state_update: RefCell::new(None),
             remote_deletions: Default::default(),
+            metafile_svgs: Default::default(),
         })
     }
 

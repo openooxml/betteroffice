@@ -265,9 +265,16 @@ function cell(value: string) {
 
 api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
   const bytes = new Uint8Array(input);
-  const fonts = useFonts ? await fontsFor(bytes) : [];
+  const params = new URLSearchParams(location.search);
+  const workerHost = format === 'pptx' ? params.get('pptxWorker') : null;
+  const fonts = useFonts && !workerHost ? await fontsFor(bytes) : [];
   let pages: number;
-  if (format === 'pptx') {
+  if (workerHost) {
+    const { openWorkerCapture } = await import('./pptx-worker-capture');
+    const opened = await openWorkerCapture(bytes, workerHost, fontProvider() as never, params.get('defaultFonts') !== '0');
+    pages = opened.pages;
+    capture = (index) => opened.capture(index);
+  } else if (format === 'pptx') {
     const {
       initWasm,
       openPresentation,
@@ -276,6 +283,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       presentationImageBlob,
       needsElementDecode,
       decodePresentationImage,
+      metafileImageBytes,
     } = await import(
       'virtual:office-quality-renderer'
     );
@@ -292,7 +300,12 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
         await paintSlide(canvas.getContext('2d')!, frame, 150 / 96, 1, {
           resolveImage: async (path: string) => {
             if (!images.has(path)) {
-              const bytes = handle.mediaBytes(path);
+              const source = handle.mediaBytes(path);
+              const bytes =
+                typeof metafileImageBytes === 'function' && typeof handle.metafileSvg === 'function'
+                  ? metafileImageBytes(source, () => handle.metafileSvg(path))
+                  : source;
+              if (bytes !== source && !bytes.byteLength) return null;
               const blob =
                 typeof presentationImageBlob === 'function'
                   ? presentationImageBlob(bytes)

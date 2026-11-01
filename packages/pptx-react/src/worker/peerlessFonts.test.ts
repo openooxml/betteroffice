@@ -36,7 +36,7 @@ test('reads selection flags while keeping the weight class authoritative', () =>
   });
 });
 
-test('default faces install under requested families and traits before their gate resolves', async () => {
+test('default faces install under requested families with the face weight and style before their gate resolves', async () => {
   const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
   const created: { family: string; descriptors: FontFaceDescriptors }[] = [];
   const added: FontFace[] = [];
@@ -50,14 +50,25 @@ test('default faces install under requested families and traits before their gat
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: { add: (face: FontFace) => added.push(face) } } });
   try {
     const installed: FontFace[] = [];
-    const ready = installDefaultFonts([{ family: 'Calibri', bold: true, italic: true, bytes: sfnt().buffer as ArrayBuffer }],
-      installed, () => true, () => {});
+    const ready = installDefaultFonts([
+      { family: 'Calibri', bold: true, italic: true, bytes: sfnt({ weight: 700, selection: 1 }).buffer as ArrayBuffer },
+      { family: 'Microsoft YaHei', bold: true, italic: true, bytes: sfnt().buffer as ArrayBuffer },
+      { family: 'Calibri Light', bold: true, italic: false, bytes: sfnt().buffer as ArrayBuffer, ownWeight: true },
+      { family: 'Unparsed', bold: true, italic: false, bytes: new ArrayBuffer(8) },
+    ], installed, () => true, () => {});
+    for (let tick = 0; tick < 20 && created.length < 4; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
     expect(added).toEqual([]);
-    expect(created).toEqual([{ family: 'Calibri', descriptors: { weight: '700', style: 'italic' } }]);
+    expect(created.map(({ family, descriptors }) => ({ family, descriptors }))
+      .sort((left, right) => left.family.localeCompare(right.family))).toEqual([
+      { family: 'Calibri', descriptors: { weight: '700', style: 'italic' } },
+      { family: 'Calibri Light', descriptors: { weight: '700', style: 'normal' } },
+      { family: 'Microsoft YaHei', descriptors: { weight: '400', style: 'normal' } },
+      { family: 'Unparsed', descriptors: { weight: '700', style: 'normal' } },
+    ]);
     finish();
     await ready;
     expect(installed).toEqual(added);
-    expect(installed).toHaveLength(1);
+    expect(installed).toHaveLength(4);
   } finally {
     finish();
     for (const [key, descriptor] of descriptors) {

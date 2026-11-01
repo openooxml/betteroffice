@@ -271,14 +271,14 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     if (reservationsPayload && session) {
       resolved = resolveReservations(session, reservationsPayload, reservationsPayload.version,
         kept.session === session ? kept.resolved : null);
-      keyResolvedReservations(resolved, reservationsPayload.version, serial);
+      keyResolvedReservations(resolved, reservationsPayload.version, serial, reservationsPayload);
     }
     resolvedRef.current = { payload: reservationsPayload, session, resolved, serial };
     return resolved;
   }, [reservationsPayload, options.session, options.viewerSelection]);
   const reservationSets = useMemo(() => {
     const payload = options.viewerSelection ? reservationsPayload : null;
-    if (payload) keyResolvedReservations(payload, payload.version, ++reservationSerial.current);
+    if (payload) keyResolvedReservations(payload, payload.version, ++reservationSerial.current, payload);
     return payload;
   }, [reservationsPayload, options.viewerSelection]);
   const reservationsRef = useRef({ resolved: reservations, payload: reservationSets });

@@ -117,7 +117,7 @@ fn editing_a_cell_leaves_its_cell_properties_in_place() {
     assert!(slide.contains("New Header spans two"));
     assert_eq!(
         slide
-            .matches(r#"<a:tcPr anchor="ctr" marL="91440" marR="91440"/>"#)
+            .matches(r#"<a:tcPr marL="91440" marR="91440" anchor="ctr"/>"#)
             .count(),
         7
     );

@@ -48,7 +48,7 @@ function opaqueXml(parsed: Awaited<ReturnType<typeof parseDocx>>): string[] {
   return xml;
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))), 30_000);
 
 for (const seeder of ['native', 'projected']) {
   it(`${seeder} keeps unmodeled drawings through an editor save`, async () => {

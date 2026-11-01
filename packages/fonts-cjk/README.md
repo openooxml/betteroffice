@@ -1,7 +1,7 @@
 # @betteroffice/fonts-cjk
 
 Chinese, Japanese and Korean faces for [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts).
-The five faces add 33 MB, so they ship as a separate, optional package.
+The optional package contains 34.82 MB of decoded fonts and 26.66 MB of packed assets.
 
 ## Install
 
@@ -43,8 +43,21 @@ advances.
 import { CJK_FONT_ASSET_URLS } from '@betteroffice/fonts-cjk';
 ```
 
-`CJK_FONT_ASSET_URLS` maps each asset filename, as named in the `@betteroffice/fonts` manifest, to a
-`() => URL` resolver. It exists so bundlers emit the assets; hosts do not normally import it.
+`CJK_FONT_ASSET_URLS` maps each `<Face>.otf.zst` filename, as named in the
+`@betteroffice/fonts` manifest, to a `() => URL` resolver with a literal asset path
+for bundlers. Hosts do not normally import it.
+
+## Assets
+
+The package ships font pack format 1: one Zstandard frame per face and a schema 1
+`assets/manifest.json` recording `codec`, `dict`, `sha256`, `encodedLength` and
+decoded `byteLength`. These CFF faces use `zstd`; each family has one face and no
+dictionary. The font manager decodes and verifies the assets before returning
+independently owned sfnt buffers.
+
+For a custom `baseUrl`, copy the packed assets alongside the other font packs and
+serve `node_modules/@betteroffice/fonts/dist/decoder/fontpack.wasm` at
+`<baseUrl>/decoder/fontpack.wasm` as `application/wasm`.
 
 ## Documentation
 
@@ -54,4 +67,9 @@ import { CJK_FONT_ASSET_URLS } from '@betteroffice/fonts-cjk';
 
 ## Licensing
 
-The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed under the SIL Open Font License 1.1; `LICENSES/OFL-NotoCJK.txt` carries the full license text preceded by the copyright notices it applies to. Notices: Copyright 2014-2021 Adobe for Noto Sans SC/TC/JP/KR, and Copyright 2017-2024 Adobe for Noto Serif SC, both with Reserved Font Name "Source". Static `SubsetOTF` Regulars vendored from [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk) at commit `f8d157532fbfaeda587e826d4cd5b21a49186f7c` (`Sans/SubsetOTF/{SC,TC,JP,KR}/`, `Serif/SubsetOTF/SC/`).
+Loader code is Apache-2.0 (see `LICENSE`). Fonts use the SIL Open Font License
+1.1; `LICENSES/OFL-NotoCJK.txt` carries the license and copyright notices.
+Static `SubsetOTF` Regulars come from
+[notofonts/noto-cjk](https://github.com/notofonts/noto-cjk), with Sans pinned to
+`523d033d6cb47f4a80c58a35753646f5c3608a78` and Serif to
+`9b0f1436e455d902de067a2501422e5dc71ad16b`.

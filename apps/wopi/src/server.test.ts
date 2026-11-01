@@ -76,7 +76,6 @@ describe("wopi server routes", () => {
     const handle = handler();
     for (const req of [
       request("/"),
-      request("/wopi/edit"),
       request("/hosting/discovery", "POST"),
       request("/healthz", "POST"),
     ]) {

@@ -55,6 +55,10 @@ pub(super) struct Lineage {
 impl Lineage {
     fn capture(workbook: &Workbook) -> SnapshotResult<Self> {
         let Workbook {
+            #[cfg(feature = "fonts")]
+                font_manager: _,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+                fonts: _,
             authority,
             mode: _,
             pending_remote_updates,
@@ -1966,6 +1970,14 @@ impl WorkbookSnapshotBuilder {
             authority_revision: authority.snapshot_revision(),
         });
         self.restored = Some(Workbook {
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )
+            .map_err(|source| error(source.to_string()))?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
             authority,
             mode: WorkbookMode::Standalone,
             pending_remote_updates: Vec::new(),

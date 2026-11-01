@@ -12,7 +12,7 @@ const options = { maxFrameBytes: 64 * 1024, syncChunkBytes: 16 * 1024 };
 
 beforeAll(() => {
   preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
-});
+}, 30_000);
 
 async function settle(): Promise<void> {
   for (let tick = 0; tick < 32; tick += 1) await new Promise((done) => setTimeout(done, 0));

@@ -28,6 +28,7 @@ const proc = globalThis as {
 const native = proc.process?.getBuiltinModule?.('node:zlib') as Zlib | undefined;
 const wasmUrl = new URL('../dist/decoder/fontpack.wasm', import.meta.url);
 const hasWasm = existsSync(wasmUrl);
+const hasBundledWasm = existsSync(new URL('./decoder/fontpack.wasm', import.meta.url));
 const canDecode = typeof native?.zstdDecompressSync === 'function' || hasWasm;
 const canCompress = typeof zlib.zstdCompressSync === 'function';
 const options = typeof native?.zstdDecompressSync === 'function' ? undefined : { wasmUrl };
@@ -198,6 +199,66 @@ describe('internal font decoder', () => {
       expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
     });
 
+    test.skipIf(!hasWasm)('concurrent decodes recover when one traps the shared instance', async () => {
+      const trapUrl = new URL('https://font-decoder.invalid/concurrent-trap.wasm');
+      const trapModule = trappingDecoder();
+      const originalFetch = globalThis.fetch;
+      let loads = 0;
+      const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url !== trapUrl.href) return originalFetch(input, init);
+        loads++;
+        const bytes = loads === 1 ? trapModule : new Uint8Array(readFileSync(wasmUrl));
+        return Promise.resolve(new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } }));
+      }) as typeof fetch);
+      try {
+        const [first, second] = await Promise.allSettled([
+          decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl }),
+          decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl }),
+        ]);
+        expect(first.status).toBe('rejected');
+        expect(second.status === 'fulfilled' ? new Uint8Array(second.value) : second.reason).toEqual(hello);
+        expect(loads).toBe(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    test.skipIf(!hasBundledWasm)('a decoder missing at the configured URL falls back to the decoder shipped with the package', async () => {
+      const missing = new URL('https://fonts-only.example/assets/decoder/fontpack.wasm');
+      const originalFetch = globalThis.fetch;
+      const requested: string[] = [];
+      const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url !== missing.href) return originalFetch(input, init);
+        requested.push(url);
+        return Promise.resolve(new Response('missing', { status: 404 }));
+      }) as typeof fetch);
+      try {
+        expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl: missing }))).toEqual(hello);
+        expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl: missing }))).toEqual(hello);
+        expect(requested).toEqual([missing.href]);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    test('a failing decoder server is reported instead of masked by the bundled decoder', async () => {
+      const failing = new URL('https://decoder-down.example/decoder/fontpack.wasm');
+      const originalFetch = globalThis.fetch;
+      const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url !== failing.href) return originalFetch(input, init);
+        return Promise.resolve(new Response('unavailable', { status: 503 }));
+      }) as typeof fetch);
+      try {
+        await expect(decodeFontBytes(helloFrame, undefined, { wasmUrl: failing }))
+          .rejects.toThrow('Cannot load font decoder wasm: HTTP 503');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     test.skipIf(!hasWasm)('a trapping wasm instance is discarded and the next decode reloads it', async () => {
       const trapUrl = new URL('https://font-decoder.invalid/trap-recovery.wasm');
       const trapModule = trappingDecoder();
@@ -252,7 +313,7 @@ describe('internal font decoder', () => {
           entrypoints: [new URL('../dist/index.js', import.meta.url).pathname],
           target: 'browser',
           outdir: join(deployment, 'dist'),
-          external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
+          external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin'],
           define: { 'import.meta.url': JSON.stringify('https://consumer.example/dist/index.js') },
         });
         expect(build.success).toBe(true);
@@ -337,7 +398,7 @@ describe('internal font decoder', () => {
 });
 
 function fixture(name: string): Uint8Array<ArrayBuffer> {
-  return new Uint8Array(readFileSync(new URL(`../../../crates/fontpack/tests/fixtures/${name}`, import.meta.url)));
+  return new Uint8Array(readFileSync(new URL(`../../../crates/betteroffice-fonts/tests/fixtures/${name}`, import.meta.url)));
 }
 
 function trappingDecoder(): Uint8Array<ArrayBuffer> {

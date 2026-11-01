@@ -14,6 +14,7 @@
       "@betteroffice/fonts": ["../../packages/fonts/src/index.ts"],
       "@betteroffice/fonts-cjk": ["../../packages/fonts-cjk/src/index.ts"],
       "@betteroffice/fonts-intl": ["../../packages/fonts-intl/src/index.ts"],
+      "@betteroffice/fonts-latin": ["../../packages/fonts-latin/src/index.ts"],
       "@betteroffice/docx-i18n": ["../../packages/docx-i18n/src/index.ts"],
       "@betteroffice/docx-i18n/*": ["../../packages/docx-i18n/src/*"],
       "@betteroffice/xlsx-i18n": ["../../packages/xlsx-i18n/src/index.ts"],

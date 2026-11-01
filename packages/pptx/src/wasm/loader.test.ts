@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
@@ -11,6 +11,8 @@ import type {
   TextBoxPrimitive,
 } from '../index';
 import { initWasm, openPresentation, paintSlide, StaleProposalError } from '../index';
+import { engineKind } from './engine';
+import { PptxDocument, PptxRenderer } from './generated/pptx_wasm.js';
 
 const root = resolve(import.meta.dir, '../../../..');
 let handle: PresentationHandle;
@@ -74,6 +76,26 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 });
 
 afterAll(() => handle.dispose());
+
+for (const fallback of [false, true]) test.skipIf(engineKind === 'native')(`failed ${fallback ? 'fallback ' : ''}font registration frees the renderer and document`, () => {
+  const original = Object.assign(new Error('render resource limit exceeded: more than 256 font faces'), {
+    name: 'PptxResourceLimitError', code: 'font-face-limit',
+  });
+  const register = spyOn(PptxRenderer.prototype, fallback ? 'registerFallbackFont' : 'registerFont')
+    .mockImplementation(() => { throw original; });
+  const freeRenderer = spyOn(PptxRenderer.prototype, 'free');
+  const freeDocument = spyOn(PptxDocument.prototype, 'free');
+  try {
+    let failure: unknown;
+    try {
+      openPresentation(fixture, { clientId: 9304,
+        [fallback ? 'fallbackFonts' : 'fonts']: [{ family: 'Liberation Sans', bytes: fontBytes }] }).dispose();
+    } catch (error) { failure = error; }
+    expect(failure).toBe(original);
+    expect(freeRenderer).toHaveBeenCalledTimes(1);
+    expect(freeDocument).toHaveBeenCalledTimes(1);
+  } finally { register.mockRestore(); freeRenderer.mockRestore(); freeDocument.mockRestore(); }
+});
 
 test('worker handles without retained source still edit and save but cannot fork', () => {
   const source = openPresentation(fixture, { clientId: 9301, retainSource: false });

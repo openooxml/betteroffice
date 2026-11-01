@@ -23,11 +23,12 @@ import type {
 /** Why work queued behind accepted input could not run. */
 export type XlsxCommandAdmissionCode = Extract<
   XlsxCommandFailureCode,
-  'input-failed' | 'document-replaced' | 'target-changed' | 'gesture-active' | 'editor-unavailable'
+  'input-failed' | 'sheet-protected' | 'document-replaced' | 'target-changed' | 'gesture-active' | 'editor-unavailable'
 >;
 
 const ADMISSION_MESSAGES: Record<XlsxCommandAdmissionCode, string> = {
   'input-failed': 'Input accepted earlier could not be written',
+  'sheet-protected': 'This cell is on a protected sheet.',
   'document-replaced': 'The workbook was replaced',
   'target-changed': 'The selection changed',
   'gesture-active': 'Finish the chart drag first',
@@ -170,6 +171,7 @@ function snapshotKey(id: AnyCommandId, args: unknown): string {
 function disabledCode(code: XlsxCommandFailureCode): XlsxCommandDisabledCode {
   switch (code) {
     case 'input-failed':
+    case 'sheet-protected':
     case 'target-changed':
     case 'gesture-active':
     case 'proposal-stale':

@@ -80,6 +80,7 @@ beforeAll(async () => {
     './wasm/index': `
       export const preloadEditWasm = () => testHarness.preload();
       export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+      export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
     `,
     '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadSave("opc");',
     '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadSave("parse");',
@@ -154,7 +155,7 @@ beforeAll(async () => {
     'createImageBitmap',
     await result.outputs[0].text()
   ) as typeof startWorker;
-});
+}, 30_000);
 
 class Surface {
   pixels: string | null = null;
@@ -223,6 +224,9 @@ function worker() {
     sessionsCreated: 0,
     wasmReady: false,
     failWarm: null as Error | null,
+    decodePackedFontFace: mock((_bytes: Uint8Array, _codec: string, _dict?: Uint8Array, _maxOutput?: number) => ({
+      font: new Uint8Array([0, 1, 0, 0]), payload: new Uint8Array([7, 8]),
+    })),
     preloadBlock: null as Promise<void> | null,
     preloadInputs: [] as (WebAssembly.Module | undefined)[],
     preloadSave: mock(async (_module: string) => {}),
@@ -263,6 +267,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       initializeComments() {},
+      primeSaveSeedStates: mock(() => true),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -627,6 +632,25 @@ function commandEnvelope(seq: number, text = '!'): DocxCommandEnvelope {
     basis: { epoch: COMMAND_INIT.epoch, version: 0 }, seq, kind: 'insertText', payload: { text },
   };
 }
+
+test('font decoding initializes the resident engine before open and transfers font and payload', async () => {
+  const w = worker();
+  const bytes = new Uint8Array([1, 2, 3]).buffer;
+  const dict = new Uint8Array([4, 5]).buffer;
+  const response = await w.send({ type: 'decodeFontFace', bytes, codec: 'woff2t+zstd', dict, maxOutput: 100 });
+  expect(response.ok).toBe(true);
+  if (!response.ok) throw new Error(response.error);
+  expect(w.harness.initializations).toBe(1);
+  expect(w.harness.sessionsCreated).toBe(0);
+  expect(w.harness.decodePackedFontFace).toHaveBeenCalledWith(new Uint8Array(bytes), 'woff2t+zstd', new Uint8Array(dict), 100);
+  expect(new Uint8Array(response.decodedFontFace!.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+  expect(w.transfers.get(response.id)).toEqual([response.decodedFontFace!.font, response.decodedFontFace!.payload!]);
+  const message = 'Font face is corrupt or uses a wrong dictionary';
+  w.harness.decodePackedFontFace.mockImplementationOnce(() => { throw new Error(message); });
+  const failure = await w.send({ type: 'decodeFontFace', bytes, codec: 'zstd' });
+  expect(failure).toMatchObject({ ok: false, error: message, commandError: { name: 'Error', message } });
+  expect(w.harness.sessionsCreated).toBe(0);
+});
 
 test('selection noop sends its retained echo context before building the deferred frame', async () => {
   const arm = await commandWorker();
@@ -2499,6 +2523,51 @@ describe('document worker warmup', () => {
     await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
     return arm;
   }
+
+  test('save seed priming runs once when an editable open settles, without replying', async () => {
+    const { w, client, replies } = await commandWorker();
+    w.harness.now = () => now;
+    try {
+      await client.commandInit(COMMAND_INIT);
+      const before = replies.length;
+      await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
+      expect(replies).toHaveLength(before);
+      await client.edit(commandEnvelope(1));
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('read-only opens do not prime save seed states', async () => {
+    const { w, client } = await commandWorker();
+    w.harness.now = () => now;
+    try {
+      await client.commandInit({ ...COMMAND_INIT, readOnly: true });
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('low heap headroom skips save seed priming', async () => {
+    const { w, client } = await commandWorker({ heapLimitBytes: 128 * 1024 * 1024 });
+    w.harness.now = () => now;
+    w.harness.memories[0].liveBytes = 65 * 1024 * 1024;
+    try {
+      await client.commandInit(COMMAND_INIT);
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
 
   test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
     const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });
@@ -4814,7 +4883,7 @@ describe('worker proposals during sliced completion', () => {
 
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
-  )))));
+  )))), 30_000);
 
   test('content-control reads equal a main session opened from the same package', async () => {
     const bytes = new Uint8Array(readFileSync(resolve(

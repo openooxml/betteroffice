@@ -31,7 +31,6 @@ impl EditSessionCore {
     /// Typing with the caret inside a surrogate pair lands before the pair,
     /// while the sticky head stays inside it: collapse the selection after the
     /// inserted text instead.
-    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn settle_snapped_input(
         &self,
         story: &str,

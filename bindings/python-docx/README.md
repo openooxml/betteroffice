@@ -52,6 +52,7 @@ print(edit.para_id, edit.start, edit.end)
 document.save_path("report-edited.docx")
 ```
 
+`replace_paragraph_text(para_id, text)` is an alias of `replace_text`.
 `replace_text` rewrites one paragraph and keeps its style, alignment, and the
 run formatting it already had. The engine rebuilds the paragraph from a single
 run, so a paragraph that mixes runs (half bold, a hyperlink, a field) raises

@@ -1,0 +1,1 @@
+{"type":"setCharts","sheet":2,"charts":[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"absolute","pos":{"x":1,"y":2},"extent":{"cx":3,"cy":4}},"refs":[{"kind":"values","formula":"Sheet1!$A$1"}],"rawXml":"<chart/>"}]}

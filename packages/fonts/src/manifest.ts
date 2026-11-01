@@ -1,4 +1,5 @@
 import intlSizes from './intl-sizes.json';
+import latinManifest from '../../fonts-latin/assets/manifest.json';
 
 /** Script bucket a bundled face provides glyph coverage for. */
 export type BundledFontScript =
@@ -44,7 +45,7 @@ export interface BundledFontFace {
   metricCompatWith?: string;
   weight: 400 | 700;
   style: 'normal' | 'italic';
-  /** Asset filename under this package's `assets/` directory. */
+  /** Asset filename within its font pack. */
   file: string;
   byteLength: number;
   /** Present on faces that serve as per-script coverage fallbacks. */
@@ -112,8 +113,7 @@ function intlFamilyFaces(
   });
 }
 
-/** Complete face manifest, ordered by script fallback preference. */
-export const BUNDLED_FONTS: BundledFontFace[] = [
+const bundledFaces: BundledFontFace[] = [
   ...familyFaces(
     'Carlito',
     'Calibri',
@@ -347,7 +347,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'Microsoft YaHei',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansSC-Regular.otf',
+    file: 'NotoSansSC-Regular.otf.zst',
     byteLength: 8331336,
     script: 'cjk-sc',
   },
@@ -356,7 +356,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'SimSun',
     weight: 400,
     style: 'normal',
-    file: 'NotoSerifSC-Regular.otf',
+    file: 'NotoSerifSC-Regular.otf.zst',
     byteLength: 11625800,
     script: 'cjk-sc',
   },
@@ -365,7 +365,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'Microsoft JhengHei',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansTC-Regular.otf',
+    file: 'NotoSansTC-Regular.otf.zst',
     byteLength: 5683368,
     script: 'cjk-tc',
   },
@@ -374,7 +374,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'MS Gothic',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansJP-Regular.otf',
+    file: 'NotoSansJP-Regular.otf.zst',
     byteLength: 4533028,
     script: 'cjk-jp',
   },
@@ -383,11 +383,19 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'Malgun Gothic',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansKR-Regular.otf',
+    file: 'NotoSansKR-Regular.otf.zst',
     byteLength: 4644748,
     script: 'cjk-kr',
   },
 ];
+
+const latinFaces = new Map(latinManifest.faces.map((face) => [face.source, face]));
+
+/** Complete face manifest, ordered by script fallback preference. */
+export const BUNDLED_FONTS: BundledFontFace[] = bundledFaces.map((face) => {
+  const packed = latinFaces.get(face.file);
+  return packed === undefined ? face : { ...face, file: packed.file, byteLength: packed.byteLength };
+});
 
 /**
  * Alternate Word font names that resolve to the same bundled face as a
@@ -684,6 +692,19 @@ function lightVariantOf(
     return undefined;
   }
   return resolveMetricCompatFace(words.slice(0, -1).join(' '), false, italic);
+}
+
+/**
+ * The bundled face for a lighter member of a family we carry, such as
+ * `Calibri Light`, at its own weight whatever weight the run claims; undefined
+ * for any other name.
+ */
+export function resolveLightVariantFace(
+  family: string,
+  _bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  return lightVariantOf(family, italic);
 }
 
 /**

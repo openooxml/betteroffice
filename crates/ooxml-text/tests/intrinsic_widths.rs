@@ -35,6 +35,21 @@ fn measured_widths(runs: serde_json::Value, attrs: serde_json::Value) -> ((f32, 
 }
 
 #[test]
+fn nonbreaking_hyphen_keeps_the_full_word_as_its_minimum_width() {
+    let expected = widths(
+        json!([{"kind": "text", "text": "co\u{2010}operate"}]),
+        json!({}),
+    )
+    .1;
+    let (minimum, maximum) = widths(
+        json!([{"kind": "text", "text": "co\u{2011}operate"}]),
+        json!({}),
+    );
+    assert_eq!(minimum, expected);
+    assert_eq!(maximum, expected);
+}
+
+#[test]
 fn a_word_across_run_boundaries_stays_unbreakable() {
     let (minimum, maximum) = widths(
         json!([

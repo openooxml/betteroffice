@@ -224,6 +224,13 @@ impl PptxDocument {
         self.inner.media_bytes(part_path).map_err(to_js)
     }
 
+    #[wasm_bindgen(js_name = metafileSvg)]
+    pub fn metafile_svg(&self, part_path: &str) -> Option<Vec<u8>> {
+        self.session()
+            .metafile_svg(part_path)
+            .map(|svg| svg.to_vec())
+    }
+
     /// Serializes the deck back to `.pptx` bytes, edits included.
     #[wasm_bindgen(js_name = saveBytes)]
     pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {
@@ -548,7 +555,8 @@ impl PptxDocument {
     }
 }
 
-fn to_js(error: EngineError) -> JsValue {
+/// The JS value an engine error throws as, typed by its kind.
+pub fn to_js(error: EngineError) -> JsValue {
     match error.kind {
         engine::ErrorKind::Message => JsValue::from_str(&error.message),
         engine::ErrorKind::Peer { code } => {
@@ -564,6 +572,11 @@ fn to_js(error: EngineError) -> JsValue {
         engine::ErrorKind::Decode => {
             let exception = js_sys::Error::new(&error.message);
             exception.set_name("PptxEditDecodeError");
+            exception.into()
+        }
+        engine::ErrorKind::ResourceLimit => {
+            let exception = js_sys::Error::new(&error.message);
+            exception.set_name("PptxResourceLimitError");
             exception.into()
         }
     }

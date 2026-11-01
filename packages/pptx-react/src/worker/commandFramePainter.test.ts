@@ -349,3 +349,46 @@ describe('command frame incremental raster', () => {
     expect(lists.filter((value) => value.deref()).length).toBeLessThanOrEqual(4);
   });
 });
+
+describe('thumbnail frame images', () => {
+  function pictureFrame(slideId: string, assetId: string, bytes: number[]): PeerlessConfirmedFrame {
+    const confirmed = frame({ ...list(), primitives: [{ kind: 'image', objectId: 3, name: 'Picture', assetId,
+      x: 10, y: 10, w: 40, h: 40 }] });
+    confirmed.frame.slideId = slideId;
+    confirmed.frame.media = [{ assetId, bytes: new Uint8Array(bytes).buffer }];
+    return confirmed;
+  }
+
+  test('thumbnails reuse a decode the stage holds and decode other pictures themselves', async () => {
+    const closed: number[] = [];
+    let decodes = 0;
+    const decode = async () => {
+      const index = decodes++;
+      return { width: 100, height: 100, close() { closed.push(index); } } as unknown as ImageBitmap;
+    };
+    for (const target of [globalThis, window]) {
+      const original = Object.getOwnPropertyDescriptor(target, 'createImageBitmap');
+      Object.defineProperty(target, 'createImageBitmap', { configurable: true, writable: true, value: decode });
+      restorers.push(() => {
+        if (original) Object.defineProperty(target, 'createImageBitmap', original);
+        else Reflect.deleteProperty(target, 'createImageBitmap');
+      });
+    }
+    const slides = createCommandFrameImages();
+    const thumbnails = createCommandFrameImages({ maxDimension: 512, reuse: slides });
+    const stage = slides.pin(pictureFrame('slide', 'picture', [1, 2]));
+    const active = thumbnails.pin(pictureFrame('slide', 'picture', [1, 2]));
+    await Promise.all([stage.ready, active.ready]);
+    expect(decodes).toBe(1);
+    expect(await active.resolve('picture')).toBe(await stage.resolve('picture'));
+    const other = thumbnails.pin(pictureFrame('other', 'chart', [3]));
+    const changed = thumbnails.pin(pictureFrame('changed', 'picture', [1, 3]));
+    await Promise.all([other.ready, changed.ready]);
+    expect(decodes).toBe(3);
+    stage.release();
+    expect(closed).not.toContain(0);
+    active.release(); other.release(); changed.release();
+    slides.dispose(); thumbnails.dispose();
+    expect(closed.sort()).toEqual([0, 1, 2]);
+  });
+});

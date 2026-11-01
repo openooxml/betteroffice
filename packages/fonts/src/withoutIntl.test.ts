@@ -1,3 +1,5 @@
+import { isLatinFont } from './packed';
+import { fontAssetResponse } from './test-assets';
 import { afterEach, expect, mock, test } from 'bun:test';
 
 type IntlAddon = { INTL_FONT_ASSET_URLS?: unknown };
@@ -21,12 +23,11 @@ afterEach(() => {
 
 test('does not import intl for Latin or unknown assets', async () => {
   const { loadBundledFontBytes, resolveMetricCompatFace } = await import('./index');
-  const face = { ...resolveMetricCompatFace('Arial', false, false)!, byteLength: 4 };
-  const expected = new Uint8Array([0, 1, 0, 0]);
-  globalThis.fetch = (async () => new Response(expected)) as unknown as typeof fetch;
+  const face = resolveMetricCompatFace('Arial', false, false)!;
+  globalThis.fetch = fontAssetResponse as typeof fetch;
   expect(importIntl).not.toHaveBeenCalled();
-  expect(await loadBundledFontBytes(face, { baseUrl: 'https://without-intl.example/' }))
-    .toEqual(expected.buffer);
+  expect((await loadBundledFontBytes(face, { baseUrl: 'https://without-intl.example/' })).byteLength)
+    .toBe(face.byteLength);
   await expect(loadBundledFontBytes({ ...face, file: 'Unlisted-Regular.ttf.zst' })).rejects.toThrow(
     /^Unknown bundled font asset: Unlisted-Regular\.ttf\.zst$/,
   );
@@ -36,7 +37,7 @@ test('does not import intl for Latin or unknown assets', async () => {
 test('reports the missing intl add-on for every intl face and retries misses', async () => {
   const { BUNDLED_FONTS, loadBundledFontBytes } = await import('./index');
   let attempts = 0;
-  for (const face of BUNDLED_FONTS.filter((candidate) => candidate.file.endsWith('.ttf.zst'))) {
+  for (const face of BUNDLED_FONTS.filter((candidate) => candidate.file.endsWith('.ttf.zst') && !isLatinFont(candidate.file))) {
     for (const script of [face.script, undefined]) {
       await expect(loadBundledFontBytes({ ...face, script })).rejects.toThrow(
         `Bundled font ${face.file} needs the optional intl add-on - install @betteroffice/fonts-intl`,
@@ -88,33 +89,31 @@ test('rejects invalid intl exports and retries without falling back to Latin', a
 
 test('custom bases bypass the optional add-on and return owned buffers', async () => {
   const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
-  const face = { ...resolveScriptFallbackFace('mongolian', false, false)!, byteLength: 4 };
-  const expected = new Uint8Array([0, 1, 0, 0]);
+  const face = resolveScriptFallbackFace('mongolian', false, false)!;
   const requested: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     requested.push(String(input));
-    return new Response(expected);
+    return fontAssetResponse(input);
   }) as typeof fetch;
   const options = { baseUrl: 'https://without-intl-custom.example/' };
   const first = await loadBundledFontBytes(face, options);
   structuredClone(first, { transfer: [first] });
-  expect(new Uint8Array(await loadBundledFontBytes(face, options))).toEqual(expected);
-  expect(requested).toEqual([`https://without-intl-custom.example/${face.file}`]);
+  expect((await loadBundledFontBytes(face, options)).byteLength).toBe(face.byteLength);
+  expect(requested.filter((url) => !url.endsWith('.wasm'))).toEqual([`https://without-intl-custom.example/${face.file}`]);
   expect(importIntl).not.toHaveBeenCalled();
 });
 
 test('recovers after installing intl and reports missing asset entries', async () => {
   const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
-  const face = { ...resolveScriptFallbackFace('tifinagh', false, false)!, byteLength: 4 };
+  const face = resolveScriptFallbackFace('tifinagh', false, false)!;
   await expect(loadBundledFontBytes(face)).rejects.toThrow('install @betteroffice/fonts-intl');
-  const bytes = new Uint8Array([0, 1, 0, 0]);
   importIntl.mockImplementation(() => ({
     INTL_FONT_ASSET_URLS: {
       [face.file]: () => new URL('https://intl-installed.example/NotoSansTifinagh-Regular.ttf.zst'),
     },
   }));
-  globalThis.fetch = (async () => new Response(bytes)) as unknown as typeof fetch;
-  expect(new Uint8Array(await loadBundledFontBytes(face))).toEqual(bytes);
+  globalThis.fetch = fontAssetResponse as typeof fetch;
+  expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
   const other = resolveScriptFallbackFace('thai', false, false)!;
   await expect(loadBundledFontBytes(other)).rejects.toThrow(
     `Unknown bundled font asset: ${other.file}`,

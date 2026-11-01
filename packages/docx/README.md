@@ -33,6 +33,7 @@ await writeFile('output.docx', new Uint8Array(bytes));
 | `parseDocx` | Read an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File` into a document model. |
 | `repackDocx`, `repackDocxWithWarnings` | Save a parsed model against its original package; the latter also returns save warnings. |
 | `createDocx` | Write a new document model without an original package. |
+| `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `createYrsSession` (from `@betteroffice/docx/yrs`) | Asynchronously create a CRDT editing session. |
 | `saveYrsDocx` (from `@betteroffice/docx/yrs`) | Save a session opened from DOCX bytes, returning bytes and persisted paragraph anchors. |
 

@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import packManifest from '../../fonts-intl/assets/manifest.json';
+import latinManifest from '../../fonts-latin/assets/manifest.json';
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { INTL_FONT_ASSET_URLS } from '../../fonts-intl/src';
 import { version as fontsIntlVersion } from '../../fonts-intl/package.json';
@@ -42,7 +45,7 @@ const families: readonly [string, BundledFontScript, boolean][] = [
   ['Noto Sans Lao Looped', 'lao', true],
   ['Noto Sans Tifinagh', 'tifinagh', false],
 ];
-const intl = BUNDLED_FONTS.filter((face) => face.file.endsWith('.ttf.zst'));
+const intl = BUNDLED_FONTS.filter((face) => face.file.endsWith('.ttf.zst') && !latinManifest.faces.some((entry) => entry.file === face.file));
 
 describe('international font manifest', () => {
   test('ships the pack, licenses, and built entry points at the CJK package version', () => {
@@ -230,6 +233,8 @@ test('script blocks include extensions and keep neighboring scripts distinct', (
   }
 });
 
+const { decodeFontFace: actualDecodeFace } = await import('./decode');
+
 const decodedRegular = new Uint8Array([0, 1, 0, 0, 10]);
 const decodedBold = new Uint8Array([0, 1, 0, 0, 20]);
 const decode = mock(async (
@@ -247,7 +252,17 @@ const decode = mock(async (
   expect(new Uint8Array(dictionary as ArrayBuffer)).toEqual(decodedRegular);
   return decodedBold.slice().buffer;
 });
-mock.module('./decode', () => ({ decodeFontBytes: decode }));
+mock.module('./decode', () => ({
+  decodeFontBytes: decode,
+  decodeFontFace: async (...args: Parameters<typeof decode>) => args[0].byteLength === 1
+    ? { font: await decode(...args) }
+    : actualDecodeFace(...args),
+}));
+for (const entry of packManifest.faces) {
+  entry.encodedLength = 1;
+  entry.byteLength = 5;
+  entry.sha256 = createHash('sha256').update(entry.dict ? decodedBold : decodedRegular).digest('hex');
+}
 
 const importIntl = mock(() => ({
   INTL_FONT_ASSET_URLS: Object.fromEntries(

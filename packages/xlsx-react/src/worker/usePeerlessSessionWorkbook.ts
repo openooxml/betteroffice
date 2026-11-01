@@ -9,7 +9,9 @@ import { createAsyncEditorApi, type XlsxAsyncEditorApi } from './createAsyncEdit
 import { XlsxAsyncApiSyncAccessError } from './asyncApiErrors';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { WorkerDraftController } from './WorkerDraftController';
-import { asError, editableWorkbookSessionBackend, XlsxWorkerSessionFailedError } from './useEditableSessionWorkbook';
+import { asError } from './asError';
+import { XlsxWorkerSessionFailedError } from './workerEditorErrors';
+import { editableWorkbookSessionBackend } from './workbookSessionBackend';
 import type { EditableSessionWorkbookProps, EditableWorkbookSessionOptions } from './useEditableSessionWorkbook';
 
 interface SessionWorkbookOptions {

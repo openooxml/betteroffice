@@ -5,6 +5,7 @@ import {
   createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
   isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
 } from 'typescript';
+import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
@@ -31,31 +32,31 @@ function compileRequests(worker: WasmTestWorker) {
   return worker.requests.filter((message) => message.kind === 'wasm-compile');
 }
 
-describe('presentation session wasm reuse', () => {
-  test('keeps worker URLs and options statically evaluable', () => {
-    const source = createSourceFile('client.ts',
-      readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);
-    const workers: Array<Record<string, string>> = [];
-    function visit(node: Node): void {
-      if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
-        expect(node.getText(source))
-          .toBe("new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' })");
-        expect(node.arguments?.[0]?.getText(source))
-          .toBe("new URL('./pptxSessionWorker.mjs', import.meta.url)");
-        const options = node.arguments?.[1];
-        if (!options || !isObjectLiteralExpression(options)) throw new Error('Non-literal worker options');
-        workers.push(Object.fromEntries(options.properties.map((property) => {
-          if (!isPropertyAssignment(property) || !isIdentifier(property.name) ||
-            !isStringLiteral(property.initializer)) throw new Error('Non-literal worker option');
-          return [property.name.text, property.initializer.text];
-        })));
-      }
-      forEachChild(node, visit);
+test('keeps worker URLs and options statically evaluable', () => {
+  const source = createSourceFile('client.ts',
+    readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);
+  const workers: Array<Record<string, string>> = [];
+  function visit(node: Node): void {
+    if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
+      expect(node.getText(source))
+        .toBe("new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' })");
+      expect(node.arguments?.[0]?.getText(source))
+        .toBe("new URL('./pptxSessionWorker.mjs', import.meta.url)");
+      const options = node.arguments?.[1];
+      if (!options || !isObjectLiteralExpression(options)) throw new Error('Non-literal worker options');
+      workers.push(Object.fromEntries(options.properties.map((property) => {
+        if (!isPropertyAssignment(property) || !isIdentifier(property.name) ||
+          !isStringLiteral(property.initializer)) throw new Error('Non-literal worker option');
+        return [property.name.text, property.initializer.text];
+      })));
     }
-    visit(source);
-    expect(workers).toEqual([{ type: 'module' }]);
-  });
+    forEachChild(node, visit);
+  }
+  visit(source);
+  expect(workers).toEqual([{ type: 'module' }]);
+});
 
+describe.skipIf(engineKind === 'native')('presentation session wasm reuse', () => {
   test('starts before open delivery and reuses the first worker module after disposal', async () => {
     const h = factory();
     const spies = mainThreadWasmSpies();

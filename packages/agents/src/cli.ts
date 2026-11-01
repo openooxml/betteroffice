@@ -3,7 +3,6 @@ import { parseArgs } from 'node:util';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createOfficeMcpServer } from './mcp';
 import { renderDocxPage } from './render';
-import { writeStartupDiagnostics } from './diagnostics';
 import { resolveFormats, resolveTools } from './tool-filter';
 
 try {
@@ -16,7 +15,6 @@ try {
     const tools = resolveTools(values.tools, process.env.BETTEROFFICE_MCP_TOOLS);
     const server = await createOfficeMcpServer({ root: values.root, readOnly: values['read-only'], renderer: renderDocxPage, formats, tools });
     await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 1024 * 1024 }));
-    writeStartupDiagnostics();
   }
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

@@ -331,6 +331,8 @@ export type DocxCommandState<K extends DocxCommandId = DocxCommandId> = CommandS
 export interface DocxCommandShortcut<K extends DocxCommandId = DocxCommandId> {
   chord: string;
   args: DocxCommandArgs[K];
+  /** This binding exists only on the specified platform. */
+  platform?: 'mac' | 'other';
 }
 
 /**

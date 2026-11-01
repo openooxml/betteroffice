@@ -57,6 +57,7 @@ All entry points below are exported from `@betteroffice/pptx`.
 | entry point | description |
 | --- | --- |
 | `initWasm(input?)` | Initialize WebAssembly before opening or inspecting a file. Browsers can omit the input; Node hosts can pass WASM bytes. |
+| `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `openPresentation(bytes, options?)` | Open a synchronous `PresentationHandle` for reads, edits, layout, and saving. |
 | `inspectPresentation(bytes, options?)` | Inspect parsed content without opening an editing handle; `includeMedia: false` omits media. |
 | `sizeCanvasForSlide(canvas, frame, dpr, scale?)` | Set canvas backing dimensions and CSS size for a slide. |

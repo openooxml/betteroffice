@@ -2337,27 +2337,25 @@ fn inherited_run_attrs(
 }
 
 /// What runs inherit under one package's styles.
-#[cfg(any(test, feature = "wasm"))]
-pub(crate) struct RunInheritance(StyleResolver);
+#[doc(hidden)]
+pub struct RunInheritance(StyleResolver);
 
-#[cfg(any(test, feature = "wasm"))]
 impl RunInheritance {
-    pub(crate) fn new(definitions: Option<&Value>) -> Self {
+    #[doc(hidden)]
+    pub fn new(definitions: Option<&Value>) -> Self {
         Self(StyleResolver::new(definitions))
     }
 
     /// What seeding merges into the marks of a run of `run_style` in a paragraph of
     /// `paragraph_style` before the run's direct formatting.
-    pub(crate) fn run_attrs(
-        &self,
-        paragraph_style: Option<&str>,
-        run_style: Option<&str>,
-    ) -> JsonObject {
+    #[doc(hidden)]
+    pub fn run_attrs(&self, paragraph_style: Option<&str>, run_style: Option<&str>) -> JsonObject {
         self.0.run_attrs(paragraph_style, run_style)
     }
 
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
-    pub(crate) fn table_run_attrs(
+    #[doc(hidden)]
+    pub fn table_run_attrs(
         &mut self,
         paragraph_style: Option<&str>,
         run_style: Option<&str>,
@@ -2369,7 +2367,8 @@ impl RunInheritance {
         attrs
     }
 
-    pub(crate) fn paragraph_formatting(
+    #[doc(hidden)]
+    pub fn paragraph_formatting(
         &mut self,
         paragraph_style: Option<&str>,
         table_formatting: Option<Value>,
@@ -2381,7 +2380,8 @@ impl RunInheritance {
         formatting
     }
 
-    pub(crate) fn table_attrs(&self, table: &Value) -> Value {
+    #[doc(hidden)]
+    pub fn table_attrs(&self, table: &Value) -> Value {
         let projected = project_table(table, &self.0, None, 12);
         let rows: Vec<Vec<Value>> = projected
             .rows
@@ -3014,7 +3014,31 @@ fn run_to_units(
     let direct = field(Some(run), "formatting").map(|formatting| Arc::new(formatting.clone()));
     array(field(Some(run), "content"))
         .iter()
-        .flat_map(|content| run_content_to_units(content, &marks, source))
+        .flat_map(|content| {
+            let mut units = run_content_to_units(content, &marks, source);
+            let replayed = match string(field(Some(content), "type")) {
+                Some("shape") => field(field(Some(content), "shape"), "drawingRunXml")
+                    .and_then(Value::as_str)
+                    .is_some(),
+                Some("opaqueDrawing") => string(field(Some(content), "kind")) == Some("drawingRun"),
+                _ => false,
+            };
+            if replayed {
+                for unit in &mut units {
+                    if let UnitContent::Embed { payload, .. } = &mut unit.content {
+                        payload.insert(
+                            "sourceRun".to_owned(),
+                            json!({
+                                "formatting": field(Some(run), "formatting").cloned().unwrap_or_else(|| json!({})),
+                                "attributes": unit.attrs,
+                                "propertyChanges": field(Some(run), "propertyChanges"),
+                            }),
+                        );
+                    }
+                }
+            }
+            units
+        })
         .map(|mut unit| {
             unit.direct_formatting = direct.clone();
             unit
@@ -8558,6 +8582,31 @@ mod tests {
             inheritance.run_attrs(None, None)["fontSize"]["size"],
             json!(22)
         );
+    }
+
+    #[test]
+    fn replayed_drawings_capture_source_properties_and_seed_attributes() {
+        let formatting = json!({"hidden": true, "position": 20});
+        let run = json!({"type": "run", "formatting": formatting, "content": [
+            {"type": "shape", "shape": {"shapeType": "rect", "drawingRunXml": "<w:r><w:drawing/></w:r>"}},
+            {"type": "opaqueDrawing", "kind": "drawingRun", "xml": "<w:r><w:drawing/></w:r>"},
+            {"type": "drawing", "image": {"wrap": {"type": "inline"}}},
+        ]});
+        let styles = StyleResolver::new(None);
+        let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
+        assert_eq!(units.len(), 3);
+        for (at, unit) in units.iter().enumerate() {
+            let UnitContent::Embed { payload, .. } = &unit.content else {
+                panic!("expected drawing embed");
+            };
+            if at < 2 {
+                assert_eq!(payload["sourceRun"]["formatting"], formatting);
+                assert_eq!(payload["sourceRun"]["attributes"], json!({"hidden": true}));
+                assert!(payload["sourceRun"]["propertyChanges"].is_null());
+            } else {
+                assert!(!payload.contains_key("sourceRun"));
+            }
+        }
     }
 
     #[test]

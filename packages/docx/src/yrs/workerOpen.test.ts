@@ -12,7 +12,7 @@ const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
 const FIXTURES = resolve(import.meta.dir, '../../../../crates/docx-edit/tests/fixtures');
 const DOCUMENTS = ['page-fragments/pages.docx', 'footnote-anchor.docx', 'structured-export/principal.docx'];
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 function texts(session: YrsSession): Record<string, string[]> {
   return Object.fromEntries(

@@ -1,3 +1,4 @@
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
@@ -179,7 +180,15 @@ export class CommandOutcomeUnknown extends Error {
   }
 }
 
-export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure;
+/** Opening needed more than an engine budget allows (today: more than 256 distinct font faces). */
+export class PptxResourceLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PptxResourceLimitError';
+  }
+}
+
+export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure | PptxResourceLimitError;
 
 export interface PresentationCommandOutcome {
   seq: number;
@@ -246,6 +255,7 @@ export interface PresentationCommandOpenOptions
   activeSlideIndex?: number;
   collaboration?: boolean;
   observeChanges?: boolean;
+  defaultFonts?: boolean;
 }
 
 export interface PresentationCommandOpenResult extends PresentationCommandAck {
@@ -289,7 +299,7 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
   result: PptxReadResult;
 }
 
-export type PresentationCommandMethods = {
+export type PresentationCommandMethods = FontDecoderMethods & {
   openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
   command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -326,6 +336,7 @@ export interface PresentationCommandClient {
 }
 
 export const PRESENTATION_COMMAND_METHODS = {
+  decodeFontFace: true,
   openCommandEditor: true,
   command: true,
   thumbnailFrame: true,

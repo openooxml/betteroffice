@@ -1,0 +1,1 @@
+{"type":"addConditionalFormat","sheet":2,"range":{"start":{"row":0,"col":0},"end":{"row":1,"col":1}},"kind":"cellIs","operator":"greaterThan","formulas":["1"],"format":{"fontColor":"#112233","bold":true,"italic":true,"fill":"#445566"}}

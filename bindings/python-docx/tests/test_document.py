@@ -159,13 +159,33 @@ def test_a_rewritten_paragraph_keeps_its_style_and_run_formatting(
     )
 
 
-def test_replace_text_refuses_what_it_cannot_rebuild(minimal_bytes: bytes) -> None:
+def test_replace_paragraph_text_alias(minimal_bytes: bytes) -> None:
+    original = Document.open(minimal_bytes)
+    aliased = Document.open(minimal_bytes)
+    expected = original.replace_text("11111111", "Edited through the alias")
+    actual = aliased.replace_paragraph_text("11111111", "Edited through the alias")
+
+    assert type(actual) is type(expected)
+    assert (actual.para_id, actual.story, actual.start, actual.end) == (
+        expected.para_id,
+        expected.story,
+        expected.start,
+        expected.end,
+    )
+    assert Document.open(aliased.save()).text == Document.open(original.save()).text
+
+
+@pytest.mark.parametrize("method", ["replace_text", "replace_paragraph_text"])
+def test_replace_text_refuses_what_it_cannot_rebuild(
+    minimal_bytes: bytes, method: str
+) -> None:
     document = Document.open(minimal_bytes)
+    replace = getattr(document, method)
 
     with pytest.raises(KeyError):
-        document.replace_text("deadbeef", "nope")
+        replace("deadbeef", "nope")
     with pytest.raises(UnsupportedEditError) as raised:
-        document.replace_text("44444444", "nope")
+        replace("44444444", "nope")
     assert issubclass(raised.type, DocxError)
 
     # A refused edit leaves the document intact.

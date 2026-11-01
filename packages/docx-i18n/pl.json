@@ -417,6 +417,8 @@
         "strikethroughDescription": "Przełącz przekreślenie",
         "subscript": "Indeks dolny",
         "subscriptDescription": "Przełącz indeks dolny",
+        "clearFormatting": "Wyczyść formatowanie",
+        "clearFormattingDescription": "Wyczyść formatowanie tekstu",
         "superscript": "Indeks górny",
         "superscriptDescription": "Przełącz indeks górny",
         "alignLeft": "Wyrównaj do lewej",

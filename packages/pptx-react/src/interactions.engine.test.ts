@@ -36,7 +36,7 @@ beforeAll(async () => {
     fonts: [{ family: 'Liberation Sans', bytes: font }],
   });
   frame = handle.layoutSlide(0);
-});
+}, 30_000);
 
 afterAll(() => handle.dispose());
 

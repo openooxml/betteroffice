@@ -7,9 +7,10 @@ import json
 import math
 import numbers
 import os
-from typing import Iterable, Iterator, Mapping, Union
+from typing import Any, Iterable, Iterator, Mapping, Union
 
 from ._betteroffice_xlsx import (
+    decode_font_face,
     Calculation,
     CellError,
     CollaborativeStateError,
@@ -53,6 +54,7 @@ from .exports import (
 )
 
 __all__ = [
+    "decode_font_face",
     "Calculation",
     "CellError",
     "CellValue",
@@ -366,6 +368,60 @@ class Workbook:
         what an export reports about results move it; the active sheet and proposals do not.
         """
         return self._inner.version()
+
+    def cell(self, sheet: SheetKey, row: int, col: int) -> "dict[str, Any]":
+        return json.loads(self._inner.cell_json(sheet, row, col))
+
+    def range_cells(self, sheet: SheetKey, range: str) -> "list[list[dict[str, Any]]]":
+        return json.loads(self._inner.range_cells_json(sheet, range))
+
+    def sheet_info(self) -> "dict[str, Any]":
+        return json.loads(self._inner.sheet_info_json())
+
+    def sheet_info_for(self, sheet: SheetKey) -> "dict[str, Any]":
+        return json.loads(self._inner.sheet_info_for_json(sheet))
+
+    def calculation_status(self) -> "dict[str, Any]":
+        return json.loads(self._inner.calculation_status_json())
+
+    def list_defined_names(
+        self, request: "dict[str, Any] | None" = None
+    ) -> "dict[str, Any]":
+        return json.loads(
+            self._inner.list_defined_names_json(json.dumps({} if request is None else request))
+        )
+
+    def conditional_formats(self, sheet: SheetKey) -> "list[dict[str, Any]]":
+        return json.loads(self._inner.conditional_formats_json(sheet))
+
+    def search_text(
+        self,
+        query: str,
+        *,
+        case_sensitive: bool = False,
+        limit: "int | None" = None,
+    ) -> "list[dict[str, Any]]":
+        if not query:
+            return []
+        if limit is not None and (type(limit) is not int or not 0 <= limit <= 0xFFFFFFFF):
+            raise RangeError("search limit must be an unsigned 32-bit integer")
+        return json.loads(
+            self._inner.search_text_json(query, case_sensitive=case_sensitive, limit=limit)
+        )
+
+    def selection_formatting(self, sheet: SheetKey, range: str) -> "dict[str, Any]":
+        return json.loads(self._inner.selection_formatting_json(sheet, range))
+
+    def merged_range_list(self, sheet: SheetKey, range: str) -> "list[dict[str, Any]]":
+        return json.loads(self._inner.merged_range_list_json(sheet, range))
+
+    def visible_merged_ranges(
+        self, sheet: SheetKey, viewport: "dict[str, Any]"
+    ) -> "list[dict[str, Any]]":
+        return json.loads(self._inner.visible_merged_ranges_json(sheet, json.dumps(viewport)))
+
+    def charts(self, sheet: SheetKey) -> "list[dict[str, Any]]":
+        return json.loads(self._inner.charts_json(sheet))
 
     def read_cells(self, request: ReadRequest) -> ReadResult:
         """Cells with the version they were read at; empty ``ranges`` reads the sheet catalog."""

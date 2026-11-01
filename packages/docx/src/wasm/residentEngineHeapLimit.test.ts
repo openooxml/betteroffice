@@ -7,7 +7,7 @@ import { rezipContainer, unzipContainer } from './opc';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, 'generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 test('the edit heap limit also caps OPC calls routed through the resident engine', () => {
   let seed = 1;

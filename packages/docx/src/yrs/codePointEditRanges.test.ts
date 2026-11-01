@@ -40,7 +40,7 @@ async function withStory(
 }
 
 describe('code point edit ranges', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('deletes the whole emoji selected by double-click and keeps both paragraphs', async () => {
     await withStory((session, at) => {

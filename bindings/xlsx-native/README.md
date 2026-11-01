@@ -1,44 +1,31 @@
 # @betteroffice/xlsx-native
 
-The native engine for `@betteroffice/xlsx` on Node.js, Bun and Deno. Install it
-next to the matching version of `@betteroffice/xlsx`:
+The `@betteroffice/xlsx` API on the native Rust engine, for Node.js, Bun and Deno.
+Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
 
 ```sh
-npm install @betteroffice/xlsx @betteroffice/xlsx-native
+npm install @betteroffice/xlsx-native
 ```
 
-`@betteroffice/xlsx` picks this engine automatically when a matching native
-binary is available, and falls back to WebAssembly otherwise. Prebuilt binaries
-cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
+This package has the same entry points (`.`, `./headless`, `./worker`, `./collaboration`), exports
+and type declarations as `@betteroffice/xlsx`, so code written for one runs on the other; pick the
+engine by the package you import. `initWasm()` needs no WebAssembly input here and ignores any it is given.
 
-```js
-import { engineBackend } from '@betteroffice/xlsx';
+```ts
+import { initWasm, openWorkbook } from '@betteroffice/xlsx-native';
 
-console.log(engineBackend());
+export async function updateWorkbook(bytes: Uint8Array): Promise<Uint8Array> {
+  await initWasm();
+  const workbook = openWorkbook(bytes);
+  try {
+    workbook.editCell(0, 9, 2, '=SUM(C1:C9)');
+    return workbook.save();
+  } finally {
+    workbook.dispose();
+  }
+}
 ```
 
-`engineBackend()` reports `'native'` or `'wasm'`. Set `BETTEROFFICE_ENGINE=wasm`
-to force WebAssembly, or `BETTEROFFICE_ENGINE=native` to require the native
-engine. Requiring native throws if the binary cannot load or its version does
-not match `@betteroffice/xlsx`.
-
-## Deprecated facade
-
-The asynchronous `openWorkbook` and `Workbook` facade exported by this package
-is deprecated and removed in 0.7. Use `@betteroffice/xlsx`, which runs on this
-native engine when it is installed. Initialize the core once with `initWasm`
-before opening workbooks; pass WebAssembly bytes for the fallback in server
-runtimes. Edits and saves are synchronous. Cell row and column indexes are
-zero-based, so A1 is row 0, column 0.
-
-| 0.5 facade | @betteroffice/xlsx |
-| --- | --- |
-| `await openWorkbook(buf, { recalculate, nowSerial })` | `openWorkbook(bytes, { calculation: { nowSerial, randSeed } })` |
-| `await wb.set(0, 'A1', v)` | `wb.editCell(0, row, col, v)` |
-| `await wb.setStyle(0, 'A1:B1', patch)` | `wb.patchRangeStyle(0, 'A1:B1', patch)` |
-| `await wb.save()` (Buffer) | `wb.save()` (Uint8Array) |
-
-The facade keeps the cached formula values unless `recalculate` is true;
-`@betteroffice/xlsx` always recalculates on open, so formula values that were
-stale in the file can change. A `calculation` context needs both `nowSerial`
-and `randSeed`; without one, `NOW()` and `TODAY()` use the current time.
+Browsers need the WebAssembly engine: the `browser` export condition of this package throws, so
+use `@betteroffice/xlsx` there. Main-thread edit peers hydrated from a worker session
+(`retainPeerHydration`) also need the WebAssembly engine.

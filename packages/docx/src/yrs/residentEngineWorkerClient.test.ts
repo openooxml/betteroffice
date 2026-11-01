@@ -67,6 +67,39 @@ class FakeWorker implements ResidentEngineWorkerPort {
   }
 }
 
+test('font decoder RPC transfers exact copies and returns font and payload before open', async () => {
+  const port = new FakeWorker();
+  const client = new ResidentEngineWorkerClient(port);
+  const source = new Uint8Array([99, 1, 2, 3, 99]);
+  const result = client.fontRuntime.decoder(source.subarray(1, 4), {
+    codec: 'woff2t+zstd', dict: source.subarray(2, 4), maxOutput: 1024,
+  });
+  const request = port.requestAt(0);
+  expect(request.type).toBe('decodeFontFace');
+  if (request.type !== 'decodeFontFace') throw new Error('Expected decode request');
+  expect(new Uint8Array(request.bytes)).toEqual(new Uint8Array([1, 2, 3]));
+  expect(new Uint8Array(request.dict!)).toEqual(new Uint8Array([2, 3]));
+  expect(request.codec).toBe('woff2t+zstd');
+  expect(request.maxOutput).toBe(1024);
+  structuredClone(request, { transfer: port.transfers[0]! });
+  expect(source.byteLength).toBe(5);
+  const face = { font: new Uint8Array([0, 1, 0, 0]).buffer, payload: new Uint8Array([5, 6]).buffer };
+  port.reply({ id: request.id, ok: true, decodedFontFace: face });
+  expect(await result).toEqual(face);
+  client.destroy();
+});
+
+test('font decoder RPC preserves worker error messages without retrying', async () => {
+  const port = new FakeWorker();
+  const client = new ResidentEngineWorkerClient(port);
+  const result = client.decodeFontFace(new Uint8Array([1]), { codec: 'zstd' });
+  const message = 'Font face is corrupt or uses a wrong dictionary';
+  port.reply({ id: port.lastId(), ok: false, error: message, commandError: { name: 'Error', message } });
+  await expect(result).rejects.toThrow(message);
+  expect(port.posted).toHaveLength(1);
+  client.destroy();
+});
+
 type Timer = { callback: () => void; ms: number };
 const timers = new Map<number, Timer>();
 let nextTimer = 1;

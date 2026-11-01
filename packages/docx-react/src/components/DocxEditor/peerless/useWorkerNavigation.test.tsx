@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { useRef } from 'react';
 import { createPeerlessShellController, WorkerReadSupersededError } from './shellController';
 import { createPeerlessViewStore } from './viewStore';
@@ -79,6 +79,66 @@ test('zoom updates the page indicator without requiring a scroll event', async (
     expect(view.getByLabelText('Current page').textContent).toBe('2');
   } finally { cleanup(); box.mockRestore(); controller.dispose(); viewStore.dispose(); }
 });
+
+for (const event of ['window resize', 'width change', 'height change', 'plain scroll'] as const) {
+  test(`${event} refreshes the page indicator and only plain scrolling reveals it`, () => {
+    const identity = { session: 'pages', incarnation: 1, epoch: 1 };
+    const viewStore = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+      workerSelection: null, anchors: null, editState: undefined, geometry: { identity, frameEpoch: 1, layoutRevision: 1,
+        coversThroughSeq: 0, caret: null, selectionRects: [], pages: [0, 1, 2].map((pageIndex) => ({
+          page: { pageId: String(pageIndex + 1), pageIndex }, bounds: { x: 0, y: pageIndex * 124, width: 200, height: 100 },
+          transform: [1, 0, 0, 1, 0, 0],
+        })) } });
+    const controller = createPeerlessShellController({ zoom: 1, focus() {}, read: async () => ({} as never) });
+    controller.attach({ viewStore, admission: {} } as PeerlessEditSessionBinding);
+    let width = 200, height = 60;
+    let navigation!: ReturnType<typeof useWorkerNavigation>;
+    function Harness() {
+      const scroller = useRef<HTMLDivElement>(null);
+      const host = useRef<HTMLDivElement>(null);
+      navigation = useWorkerNavigation(controller, () => null, scroller, host, 1, {});
+      return <div ref={(element) => {
+        scroller.current = element;
+        if (element) Object.defineProperties(element, {
+          clientWidth: { configurable: true, get: () => width }, clientHeight: { configurable: true, get: () => height },
+        });
+      }} data-testid="scroll"><div ref={host} data-testid="host" /></div>;
+    }
+    const box = spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const top = this.getAttribute('data-testid') === 'host' ? -(this.parentElement?.scrollTop ?? 0) : 0;
+      return { top, bottom: top + height, left: 0, right: width, width, height, x: 0, y: top, toJSON() {} };
+    });
+    jest.useFakeTimers();
+    const frames = spyOn(globalThis, 'requestAnimationFrame').mockImplementation(() => 1);
+    const flushFrame = () => act(() => { frames.mock.calls.at(-1)![0](0); });
+    try {
+      const view = render(<Harness />);
+      const scroller = view.getByTestId('scroll');
+      expect(navigation.pageInfo).toEqual({ currentPage: 1, totalPages: 3, visible: false, scrollLeft: 0 });
+      scroller.scrollTop = 230; scroller.scrollLeft = 12;
+      if (event === 'width change') width = 180;
+      if (event === 'height change') height = 80;
+      if (event === 'window resize') { fireEvent(window, new Event('resize')); fireEvent(window, new Event('resize')); }
+      else fireEvent.scroll(scroller);
+      expect(frames).toHaveBeenCalledTimes(1);
+      flushFrame();
+      expect(navigation.pageInfo).toEqual({ currentPage: 3, totalPages: 3, visible: event === 'plain scroll', scrollLeft: 12 });
+      fireEvent.scroll(scroller);
+      flushFrame();
+      expect(navigation.pageInfo.visible).toBe(true);
+      act(() => { jest.advanceTimersByTime(300); });
+      if (event === 'width change') { width = 160; fireEvent.scroll(scroller); }
+      else if (event === 'height change') { height = 100; fireEvent.scroll(scroller); }
+      else fireEvent(window, new Event('resize'));
+      flushFrame();
+      expect(navigation.pageInfo.visible).toBe(true);
+      act(() => { jest.advanceTimersByTime(299); });
+      expect(navigation.pageInfo.visible).toBe(true);
+      act(() => { jest.advanceTimersByTime(1); });
+      expect(navigation.pageInfo.visible).toBe(false);
+    } finally { cleanup(); frames.mockRestore(); jest.useRealTimers(); box.mockRestore(); controller.dispose(); viewStore.dispose(); }
+  });
+}
 
 type Shown = { caret: { x: number; y: number; width: number; height: number } | null; selectionRects: { x: number; y: number; width: number; height: number }[] };
 

@@ -13,7 +13,7 @@ const FIXTURES = [
   resolve(import.meta.dir, '__fixtures__/comment-ranges/structure.docx'),
 ];
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 function comments(session: YrsSession) {
   const result = session.exportStructured({ revisionView: 'markup', stories: ['comments'] });

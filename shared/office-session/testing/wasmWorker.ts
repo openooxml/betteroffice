@@ -11,6 +11,7 @@ export interface WasmTestWorker {
   readonly modules: WebAssembly.Module[];
   readonly urls: string[];
   readonly terminated: boolean;
+  terminate(): void;
   crash(): void;
 }
 
@@ -28,7 +29,8 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
             loader: 'js',
           }));
           build.onLoad({ filter: /\/wasm\/asset\.ts$/ }, () => ({
-            contents: `export const wasmAssetUrl = (png = true) => new URL(png
+            contents: `export const shipsWasmAsset = true;
+              export const wasmAssetUrl = (png = true) => new URL(png
               ? testHarness.assetUrl : testHarness.assetUrl.replace(/\\.wasm$/, '_lean.wasm'));`,
             loader: 'js',
           }));
@@ -56,6 +58,12 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
                 }
               }
               export const decodeTiffImage = () => { throw new Error('decodeTiffImage is not stubbed'); };
+              export const decodeFontFace = async (bytes, options) => {
+                if (options.codec !== 'zstd' && options.codec !== 'woff2t+zstd') {
+                  throw new Error('unsupported font face codec: ' + options.codec);
+                }
+                return { font: (bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).slice().buffer };
+              };
               export const presentationDisplayListJson = () => { throw new Error('presentationDisplayListJson is not stubbed'); };
               export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const presentationStoryFormatting = () => { throw new Error('presentationStoryFormatting is not stubbed'); };

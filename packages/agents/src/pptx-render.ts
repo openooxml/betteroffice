@@ -2,14 +2,14 @@ import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
 import { inflateRawSync } from 'node:zlib';
 import { createFontProvider, resolveGlyphFallbackFace, type BundledFontSource } from '@betteroffice/fonts';
-import { paintSlide, type PresentationHandle, type CanvasImageResolver, type PptxFontFace, type ShapeSnapshot, type SlideSnapshot } from '@betteroffice/pptx';
+import { decodeFontFace, paintSlide, type PresentationHandle, type CanvasImageResolver, type PptxFontFace, type ShapeSnapshot, type SlideSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
 
 export async function renderPptxSlide(
   handle: PresentationHandle,
   page: number,
   scale = 1,
-  provider = createFontProvider(),
+  provider = createFontProvider(undefined, { decoder: decodeFontFace }),
   theme?: PptxThemeFonts,
 ): Promise<RenderedPage> {
   const snapshot = handle.snapshot();

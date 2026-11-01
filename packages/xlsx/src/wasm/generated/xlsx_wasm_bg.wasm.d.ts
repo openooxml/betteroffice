@@ -11,6 +11,7 @@ export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_start: () => void;
 export const allocationFailure: () => number;
+export const decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const displayListCellLimit: () => number;
 export const exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

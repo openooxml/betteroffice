@@ -34,6 +34,7 @@ function replyError(error: unknown): ReplyError {
     name: error instanceof Error ? error.name : 'Error',
     message: error instanceof Error ? error.message : String(error),
   };
+  if (error !== null && typeof error === 'object' && 'code' in error && typeof error.code === 'string') result.code = error.code;
   if (error !== null && typeof error === 'object' && 'refusal' in error) result.refusal = error.refusal;
   return result;
 }

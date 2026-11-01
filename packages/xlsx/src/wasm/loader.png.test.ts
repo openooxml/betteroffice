@@ -30,8 +30,7 @@ async function loaderFactory(native = false): Promise<(fetch: Fetch) => Loader> 
         build.onLoad({ filter: /\/wasm\/engine\.ts$/ }, () => ({
           contents: `
             export * from ${JSON.stringify(glue)};
-            export const backend = ${JSON.stringify(native ? 'native' : 'wasm')};
-            export const engineBackend = () => backend;
+            export const engineKind = ${JSON.stringify(native ? 'native' : 'wasm')};
             ${native
               ? 'export default async function init() { return { memory: undefined }; }'
               : `export { default } from ${JSON.stringify(glue)};`}
