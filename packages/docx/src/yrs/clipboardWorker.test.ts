@@ -317,6 +317,26 @@ test('replacePasteFragment over a replaced selection restores the replaced text 
   }
 }, TIMEOUT);
 
+test('replacePasteFragment without a paste to undo is refused and changes nothing', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    const paragraphs = engine.paragraphs('body');
+    const atPara = paragraphs[paragraphs.length - 1]!;
+    const atSpan = engine.geometryReader.locateParagraph('body', atPara.paraId);
+    const at = { story: 'body', paraId: atPara.paraId, offset: atSpan.end - atSpan.start };
+    const before = engine.paragraphs('body').map((paragraph) => paragraph.text);
+    const replaced = await client.edit(intent(1, 0, 'replacePasteFragment', {
+      selection: { anchor: at, focus: at },
+      original: { anchor: at, focus: at },
+      fragment: { paragraphs: [{ text: 'Plain' }] },
+    }));
+    expect(replaced.outcomes[0]).toMatchObject({ status: 'refused', reason: 'nothing-to-undo' });
+    expect(engine.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(before);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test('paste replays text, tables and splits across paragraphs', async () => {
   const { client, engine } = await openTableWorker();
   try {
