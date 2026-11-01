@@ -347,3 +347,56 @@ fn edited_save_of_prefixed_formulas_keeps_their_text() {
         );
     }
 }
+
+#[test]
+fn a_hidden_flag_edit_of_a_deeply_nested_defined_name_saves() {
+    for (depth, prefixed) in [(1_489, true), (3_276, false)] {
+        let formula = format!("{}a{}", "LAMBDA(a,".repeat(depth), ")".repeat(depth));
+        assert!(formula.len() <= 32_768);
+        let mut parts = ooxml_opc::unzip_parts(&source()).unwrap();
+        for (path, bytes) in &mut parts {
+            if path == "xl/workbook.xml" {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace(
+                        "</workbook>",
+                        &format!(
+                            r#"<definedNames><definedName name="Deep">{formula}</definedName></definedNames></workbook>"#
+                        ),
+                    )
+                    .into_bytes();
+            }
+        }
+        let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        workbook
+            .apply_ops(
+                vec![Op::SetDefinedName {
+                    name: "Deep".into(),
+                    refers_to: formula.clone(),
+                    scope: None,
+                    hidden: Some(true),
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let expected = if prefixed {
+            format!(
+                "{}_xlpm.a{}",
+                "_xlfn.LAMBDA(_xlpm.a,".repeat(depth),
+                ")".repeat(depth)
+            )
+        } else {
+            formula
+        };
+        assert_eq!(
+            element_text(
+                &part(&saved, "xl/workbook.xml"),
+                "<definedName name=\"Deep\"",
+                "</definedName>"
+            ),
+            expected
+        );
+        Workbook::open(&saved).unwrap();
+    }
+}

@@ -10,7 +10,7 @@ use xlsx_model::{CellRange, CellRef, Sheet};
 use crate::ParseError;
 use crate::xml::attr;
 
-const MAX_FORMULA_BYTES: usize = 32_768;
+pub(crate) const MAX_FORMULA_BYTES: usize = 32_768;
 const MAX_SHARED_FORMULA_BYTES: usize = 32 * 1024 * 1024;
 
 struct Master {

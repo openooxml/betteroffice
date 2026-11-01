@@ -5,10 +5,11 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 
-use crate::formula::{skip_brackets, skip_quoted};
+use crate::formula::{MAX_FORMULA_BYTES, skip_brackets, skip_quoted};
 
 /// every function Excel writes behind `_xlfn.`, upper case and sorted.
 const FUTURE_FUNCTIONS: &[&str] = &[
@@ -557,20 +558,21 @@ const WORKSHEET_FUNCTION_PREFIX: &str = "_xlfn._xlws.";
 const PARAMETER_PREFIX: &str = "_xlpm.";
 
 /// `formula` as Excel stores it. Text already in that form comes back
-/// borrowed, so the pass is idempotent.
+/// borrowed, so the pass is idempotent, and so does text the prefixes would
+/// push past the formula length limit, which this crate could not read back.
 pub(crate) fn excel_formula(formula: &str) -> Cow<'_, str> {
     if !formula.contains('(') {
         return Cow::Borrowed(formula);
     }
     let tokens = tokenize(formula);
-    let mut pass = Pass {
-        source: formula,
-        tokens: &tokens,
-        scopes: Vec::new(),
-        edits: Vec::new(),
-    };
-    pass.expression(0, tokens.len());
-    if pass.edits.is_empty() {
+    let mut pass = Pass::new(formula, &tokens);
+    pass.run();
+    let grown = pass
+        .edits
+        .iter()
+        .map(|edit| edit.text.len() - (edit.end - edit.start).min(edit.text.len()))
+        .sum::<usize>();
+    if pass.edits.is_empty() || formula.len().saturating_add(grown) > MAX_FORMULA_BYTES {
         return Cow::Borrowed(formula);
     }
     let mut out = String::with_capacity(formula.len() + 8 * pass.edits.len());
@@ -752,28 +754,97 @@ enum Binder {
     Lambda,
 }
 
-/// one left-to-right walk over the tokens, so edits come out in source order.
+/// what the walk does on reaching a token, besides rewriting it.
+#[derive(Default)]
+enum Action {
+    #[default]
+    None,
+    /// a name a binder declares: prefix it and bring it into scope, at once
+    /// or on reaching the given token.
+    Declare { visible_at: Option<usize> },
+    /// a `LET` value ends here, so its name comes into scope.
+    Bring(String),
+    /// a binder closes here, so the scope drops back to this many names.
+    Close(usize),
+}
+
+/// one flat left-to-right walk over the tokens, so edits come out in source
+/// order and nesting costs no stack.
 struct Pass<'a> {
     source: &'a str,
     tokens: &'a [Token],
-    /// the lower-cased names bound by every enclosing `LET` and `LAMBDA`.
+    /// the closing token of every opening parenthesis or brace.
+    partners: Vec<Option<usize>>,
+    actions: Vec<Action>,
+    /// the lower-cased names bound by every enclosing `LET` and `LAMBDA`,
+    /// innermost last, with how often each is bound.
     scopes: Vec<String>,
+    bound: HashMap<String, usize>,
     edits: Vec<Edit>,
 }
 
-impl Pass<'_> {
-    fn expression(&mut self, lo: usize, hi: usize) {
-        let mut index = lo;
-        while index < hi {
-            index = self.term(index, hi);
+impl<'a> Pass<'a> {
+    fn new(source: &'a str, tokens: &'a [Token]) -> Self {
+        let mut partners = vec![None; tokens.len()];
+        let mut parens = Vec::new();
+        let mut braces = Vec::new();
+        for (index, token) in tokens.iter().enumerate() {
+            let (stack, closing) = match token.kind {
+                Kind::Open => (&mut parens, false),
+                Kind::BraceOpen => (&mut braces, false),
+                Kind::Close => (&mut parens, true),
+                Kind::BraceClose => (&mut braces, true),
+                _ => continue,
+            };
+            if !closing {
+                stack.push(index);
+            } else if let Some(opening) = stack.pop() {
+                partners[opening] = Some(index);
+            }
+        }
+        Self {
+            source,
+            tokens,
+            partners,
+            actions: std::iter::repeat_with(Action::default)
+                .take(tokens.len())
+                .collect(),
+            scopes: Vec::new(),
+            bound: HashMap::new(),
+            edits: Vec::new(),
         }
     }
 
-    /// rewrite the token at `index`, returning the index after what it used.
-    fn term(&mut self, index: usize, hi: usize) -> usize {
+    fn run(&mut self) {
+        for index in 0..self.tokens.len() {
+            match std::mem::take(&mut self.actions[index]) {
+                Action::None => self.term(index),
+                Action::Declare { visible_at } => self.declare(index, visible_at),
+                Action::Bring(name) => self.bring(name),
+                Action::Close(frame) => {
+                    for name in self.scopes.drain(frame..) {
+                        if let Some(count) = self.bound.get_mut(&name) {
+                            *count -= 1;
+                            if *count == 0 {
+                                self.bound.remove(&name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn bring(&mut self, name: String) {
+        *self.bound.entry(name.clone()).or_default() += 1;
+        self.scopes.push(name);
+    }
+
+    /// rewrite the token at `index`.
+    fn term(&mut self, index: usize) {
         let token = self.tokens[index];
         if token.kind != Kind::Name || self.qualified(index) {
-            return index + 1;
+            return;
         }
         let text = &self.source[token.start..token.end];
         let parameter = strip_prefix(text, PARAMETER_PREFIX);
@@ -783,14 +854,14 @@ impl Pass<'_> {
         } else {
             !self.reference_part(index, text)
         };
-        if self.bound(text) && used {
+        if used && self.is_bound(text) {
             if parameter.is_none() {
                 self.insert(token.start, PARAMETER_PREFIX);
             }
-            return index + 1;
+            return;
         }
         if !call {
-            return index + 1;
+            return;
         }
         let bare = match strip_prefix(text, FUNCTION_PREFIX) {
             Some(rest) => strip_prefix(rest, WORKSHEET_PREFIX).unwrap_or(rest),
@@ -811,63 +882,93 @@ impl Pass<'_> {
         } else if bare.eq_ignore_ascii_case("LAMBDA") {
             Binder::Lambda
         } else {
-            return index + 1;
+            return;
         };
-        let Some(close) = self.matching(index + 1, hi) else {
-            return index + 1;
-        };
-        let arguments = self.arguments(index + 2, close);
-        self.bind(binder, &arguments);
-        close + 1
+        if let Some(close) = self.partners[index + 1] {
+            let arguments = self.arguments(index + 1, close);
+            self.bind(binder, &arguments, close);
+        }
     }
 
     fn kind(&self, index: usize) -> Option<Kind> {
         self.tokens.get(index).map(|token| token.kind)
     }
 
-    fn kind_before(&self, index: usize, back: usize) -> Option<Kind> {
-        index.checked_sub(back).and_then(|before| self.kind(before))
+    /// the `steps`-th token after `index`, not counting whitespace.
+    fn after(&self, index: usize, steps: usize) -> Option<usize> {
+        let mut at = index;
+        for _ in 0..steps {
+            at += 1;
+            if self.kind(at) == Some(Kind::Space) {
+                at += 1;
+            }
+        }
+        (at < self.tokens.len()).then_some(at)
+    }
+
+    /// the `steps`-th token before `index`, not counting whitespace.
+    fn before(&self, index: usize, steps: usize) -> Option<usize> {
+        let mut at = index;
+        for _ in 0..steps {
+            at = at.checked_sub(1)?;
+            if self.kind(at) == Some(Kind::Space) {
+                at = at.checked_sub(1)?;
+            }
+        }
+        Some(at)
+    }
+
+    fn kind_after(&self, index: usize, steps: usize) -> Option<Kind> {
+        self.after(index, steps).and_then(|at| self.kind(at))
+    }
+
+    fn kind_before(&self, index: usize, steps: usize) -> Option<Kind> {
+        self.before(index, steps).and_then(|at| self.kind(at))
     }
 
     /// a sheet name before `!` or starting a `First:Last!` span, or a name
     /// scoped to a sheet after it.
     fn qualified(&self, index: usize) -> bool {
-        self.kind(index + 1) == Some(Kind::Bang)
+        self.kind_after(index, 1) == Some(Kind::Bang)
             || self.kind_before(index, 1) == Some(Kind::Bang)
-            || (self.kind(index + 1) == Some(Kind::Colon)
-                && self.kind(index + 2) == Some(Kind::Name)
-                && self.kind(index + 3) == Some(Kind::Bang))
+            || (self.kind_after(index, 1) == Some(Kind::Colon)
+                && self.kind_after(index, 2) == Some(Kind::Name)
+                && self.kind_after(index, 3) == Some(Kind::Bang))
     }
 
-    /// a table name or R1C1 axis next to its bracket, or one end of a whole
-    /// column range such as `A:A`.
+    /// a table name or R1C1 axis right next to its bracket, or one end of a
+    /// whole column range such as `A:A`.
     fn reference_part(&self, index: usize, text: &str) -> bool {
-        let next = self.kind(index + 1);
-        let before = self.kind_before(index, 1);
-        if next == Some(Kind::Bracket) || before == Some(Kind::Bracket) {
+        if self.kind(index + 1) == Some(Kind::Bracket)
+            || index
+                .checked_sub(1)
+                .is_some_and(|before| self.kind(before) == Some(Kind::Bracket))
+        {
             return true;
         }
         if !column_shaped(text) {
             return false;
         }
-        let column = |at: usize| {
-            let token = self.tokens[at];
-            token.kind == Kind::Name
-                && self.kind(at + 1) != Some(Kind::Open)
-                && column_shaped(&self.source[token.start..token.end])
+        let column = |at: Option<usize>| {
+            at.is_some_and(|at| {
+                let token = self.tokens[at];
+                token.kind == Kind::Name
+                    && self.kind(at + 1) != Some(Kind::Open)
+                    && column_shaped(&self.source[token.start..token.end])
+            })
         };
-        (next == Some(Kind::Colon) && index + 2 < self.tokens.len() && column(index + 2))
-            || (before == Some(Kind::Colon) && index >= 2 && column(index - 2))
+        (self.kind_after(index, 1) == Some(Kind::Colon) && column(self.after(index, 2)))
+            || (self.kind_before(index, 1) == Some(Kind::Colon) && column(self.before(index, 2)))
     }
 
-    fn bound(&self, text: &str) -> bool {
-        if self.scopes.is_empty() {
+    fn is_bound(&self, text: &str) -> bool {
+        if self.bound.is_empty() {
             return false;
         }
         let bare = strip_prefix(text, PARAMETER_PREFIX)
             .unwrap_or(text)
             .to_lowercase();
-        self.scopes.contains(&bare)
+        self.bound.contains_key(&bare)
     }
 
     fn insert(&mut self, at: usize, text: &'static str) {
@@ -878,104 +979,77 @@ impl Pass<'_> {
         });
     }
 
-    fn matching(&self, open: usize, hi: usize) -> Option<usize> {
-        let mut depth = 0usize;
-        for (offset, token) in self.tokens[open..hi].iter().enumerate() {
-            match token.kind {
-                Kind::Open => depth += 1,
-                Kind::Close => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(open + offset);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    /// the top-level argument token ranges between `lo` and `hi`.
-    fn arguments(&self, lo: usize, hi: usize) -> Vec<(usize, usize)> {
+    /// the top-level argument token ranges inside the parentheses at `open`
+    /// and `close`, stepping over nested groups whole.
+    fn arguments(&self, open: usize, close: usize) -> Vec<(usize, usize)> {
         let mut arguments = Vec::new();
-        let mut depth = 0usize;
-        let mut start = lo;
-        for (offset, token) in self.tokens[lo..hi].iter().enumerate() {
-            match token.kind {
-                Kind::Open | Kind::BraceOpen => depth += 1,
-                Kind::Close | Kind::BraceClose => depth = depth.saturating_sub(1),
-                Kind::Comma if depth == 0 => {
-                    arguments.push((start, lo + offset));
-                    start = lo + offset + 1;
+        let mut start = open + 1;
+        let mut index = open + 1;
+        while index < close {
+            match self.tokens[index].kind {
+                Kind::Open | Kind::BraceOpen => {
+                    index = self.partners[index]
+                        .filter(|&partner| partner < close)
+                        .unwrap_or(index);
+                }
+                Kind::Comma => {
+                    arguments.push((start, index));
+                    start = index + 1;
                 }
                 _ => {}
             }
+            index += 1;
         }
-        arguments.push((start, hi));
+        arguments.push((start, close));
         arguments
     }
 
-    /// bind the names of one `LET` or `LAMBDA` over its later arguments. one
-    /// slot that is not a valid name leaves every argument a plain expression,
+    /// queue the scope changes of one `LET` or `LAMBDA` for the walk. one slot
+    /// that is not a valid name leaves every argument a plain expression,
     /// since Excel refuses such a formula.
-    fn bind(&mut self, binder: Binder, arguments: &[(usize, usize)]) {
-        let Some((&(body_lo, body_hi), names)) = arguments.split_last() else {
+    fn bind(&mut self, binder: Binder, arguments: &[(usize, usize)], close: usize) {
+        let Some((_, names)) = arguments.split_last() else {
             return;
         };
-        let (pairs, rest) = names.as_chunks::<2>();
-        let valid = match binder {
+        let (pairs, _) = names.as_chunks::<2>();
+        let slots = match binder {
             Binder::Lambda => names
                 .iter()
-                .all(|&(lo, hi)| self.parameter(lo, hi).is_some()),
+                .map(|&(lo, hi)| self.parameter(lo, hi).map(|slot| (slot, None)))
+                .collect::<Option<Vec<_>>>(),
             Binder::Let => pairs
                 .iter()
-                .all(|&[(lo, hi), _]| self.parameter(lo, hi).is_some()),
+                .map(|&[(lo, hi), (_, value_hi)]| {
+                    self.parameter(lo, hi).map(|slot| (slot, Some(value_hi)))
+                })
+                .collect::<Option<Vec<_>>>(),
         };
-        if !valid {
-            for &(lo, hi) in arguments {
-                self.expression(lo, hi);
-            }
+        let Some(slots) = slots else {
             return;
+        };
+        for (slot, visible_at) in slots {
+            self.actions[slot] = Action::Declare { visible_at };
         }
-        let frame = self.scopes.len();
-        match binder {
-            Binder::Lambda => {
-                for &(lo, hi) in names {
-                    let name = self.declare(lo, hi);
-                    self.scopes.extend(name);
-                }
-            }
-            Binder::Let => {
-                for &[(name_lo, name_hi), (value_lo, value_hi)] in pairs {
-                    let name = self.declare(name_lo, name_hi);
-                    self.expression(value_lo, value_hi);
-                    self.scopes.extend(name);
-                }
-                for &(lo, hi) in rest {
-                    self.expression(lo, hi);
-                }
-            }
-        }
-        self.expression(body_lo, body_hi);
-        self.scopes.truncate(frame);
+        self.actions[close] = Action::Close(self.scopes.len());
     }
 
-    /// the name token a binding argument holds, when it is a single name
-    /// Excel accepts as a parameter.
-    fn parameter(&self, lo: usize, hi: usize) -> Option<Token> {
+    /// the token a binding argument holds, when it is a single name Excel
+    /// accepts as a parameter.
+    fn parameter(&self, lo: usize, hi: usize) -> Option<usize> {
         let mut names = (lo..hi).filter(|&index| self.tokens[index].kind != Kind::Space);
-        let token = self.tokens[names.next()?];
+        let index = names.next()?;
+        let token = self.tokens[index];
         if names.next().is_some() || token.kind != Kind::Name {
             return None;
         }
         let text = &self.source[token.start..token.end];
-        parameter_name(strip_prefix(text, PARAMETER_PREFIX).unwrap_or(text)).then_some(token)
+        parameter_name(strip_prefix(text, PARAMETER_PREFIX).unwrap_or(text)).then_some(index)
     }
 
-    /// the lower-cased name a binding argument declares, prefixing it when it
-    /// is still bare.
-    fn declare(&mut self, lo: usize, hi: usize) -> Option<String> {
-        let token = self.parameter(lo, hi)?;
+    /// prefix the name a binder declares at `index` when it is still bare,
+    /// and bring it into scope now or once its value ends.
+    fn declare(&mut self, index: usize, visible_at: Option<usize>) {
+        let token = self.tokens[index];
         let text = &self.source[token.start..token.end];
         let bare = match strip_prefix(text, PARAMETER_PREFIX) {
             Some(rest) => rest,
@@ -984,7 +1058,11 @@ impl Pass<'_> {
                 text
             }
         };
-        Some(bare.to_lowercase())
+        let name = bare.to_lowercase();
+        match visible_at {
+            Some(at) => self.actions[at] = Action::Bring(name),
+            None => self.bring(name),
+        }
     }
 }
 
@@ -1330,5 +1408,114 @@ mod tests {
         ] {
             written(source, expected);
         }
+    }
+
+    #[test]
+    fn spaces_around_range_and_sheet_punctuation_keep_references() {
+        for (source, expected) in [
+            (
+                "LET(a,1,SUM(A : A)+a)",
+                "_xlfn.LET(_xlpm.a,1,SUM(A : A)+_xlpm.a)",
+            ),
+            (
+                "LET(a,1,SUM(Data!A :A)+a)",
+                "_xlfn.LET(_xlpm.a,1,SUM(Data!A :A)+_xlpm.a)",
+            ),
+            (
+                "LET(s,1,SUM(s : Sheet2!A1)+s)",
+                "_xlfn.LET(_xlpm.s,1,SUM(s : Sheet2!A1)+_xlpm.s)",
+            ),
+            (
+                "LET(x,A3,SUM(A1 : x))",
+                "_xlfn.LET(_xlpm.x,A3,SUM(A1 : _xlpm.x))",
+            ),
+            (
+                "LET(t,A1:A3,SUM(Table1[Col] t))",
+                "_xlfn.LET(_xlpm.t,A1:A3,SUM(Table1[Col] _xlpm.t))",
+            ),
+            (
+                "LET(\n  a, 1,\n  SUM(A\t:\tA) + a\n)",
+                "_xlfn.LET(\n  _xlpm.a, 1,\n  SUM(A\t:\tA) + _xlpm.a\n)",
+            ),
+        ] {
+            written(source, expected);
+        }
+    }
+
+    #[test]
+    fn deep_nesting_is_rewritten_without_recursion() {
+        for (depth, fits) in [(1_489, true), (200_000, false)] {
+            let source = format!("{}a{}", "LAMBDA(a,".repeat(depth), ")".repeat(depth));
+            let expected = format!(
+                "{}_xlpm.a{}",
+                "_xlfn.LAMBDA(_xlpm.a,".repeat(depth),
+                ")".repeat(depth)
+            );
+            assert_eq!(expected.len() <= MAX_FORMULA_BYTES, fits);
+            written(&source, if fits { &expected } else { &source });
+        }
+        for (depth, fits) in [(1_000, true), (200_000, false)] {
+            let source = format!("{}1{}", "SUM(LET(x,".repeat(depth), ",x))".repeat(depth));
+            let expected = format!(
+                "{}1{}",
+                "SUM(_xlfn.LET(_xlpm.x,".repeat(depth),
+                ",_xlpm.x))".repeat(depth)
+            );
+            assert_eq!(expected.len() <= MAX_FORMULA_BYTES, fits);
+            written(&source, if fits { &expected } else { &source });
+        }
+        let unbalanced = "LET(x,(".repeat(2_000);
+        assert_eq!(excel_formula(&unbalanced), "_xlfn.LET(x,(".repeat(2_000));
+        let unbalanced = "LET(x,(".repeat(200_000);
+        assert!(matches!(excel_formula(&unbalanced), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn long_formulas_with_many_tokens_and_names_are_rewritten() {
+        let call = "XLOOKUP(1,A1:A3,B1:B3)+";
+        let count = (MAX_FORMULA_BYTES - 1) / (call.len() + FUNCTION_PREFIX.len());
+        let source = format!("{}0", call.repeat(count));
+        let expected = format!("{}0", "_xlfn.XLOOKUP(1,A1:A3,B1:B3)+".repeat(count));
+        assert!(expected.len() <= MAX_FORMULA_BYTES);
+        written(&source, &expected);
+
+        let names = 800;
+        let bindings = (0..names).map(|index| format!("name{index},{index},"));
+        let uses = (0..names)
+            .map(|index| format!("name{index}"))
+            .collect::<Vec<_>>();
+        let source = format!("LET({}{})", bindings.collect::<String>(), uses.join("+"));
+        let bindings = (0..names).map(|index| format!("_xlpm.name{index},{index},"));
+        let uses = (0..names)
+            .map(|index| format!("_xlpm.name{index}"))
+            .collect::<Vec<_>>();
+        let expected = format!(
+            "_xlfn.LET({}{})",
+            bindings.collect::<String>(),
+            uses.join("+")
+        );
+        assert!(expected.len() <= MAX_FORMULA_BYTES);
+        written(&source, &expected);
+
+        let array = format!("LET(x,{{{}}},x)", vec!["1,2"; 6_000].join(";"));
+        let expected = format!(
+            "_xlfn.LET(_xlpm.x,{{{}}},_xlpm.x)",
+            vec!["1,2"; 6_000].join(";")
+        );
+        assert!(expected.len() <= MAX_FORMULA_BYTES);
+        written(&array, &expected);
+    }
+
+    #[test]
+    fn a_rewrite_past_the_formula_limit_keeps_the_text() {
+        let call = "IFS(1,2)+";
+        let fits = format!(
+            "{}0",
+            call.repeat((MAX_FORMULA_BYTES - 1) / (call.len() + 6))
+        );
+        assert!(matches!(excel_formula(&fits), Cow::Owned(_)));
+        let over = format!("{}0", call.repeat((MAX_FORMULA_BYTES - 1) / call.len()));
+        assert!(over.len() <= MAX_FORMULA_BYTES);
+        assert!(matches!(excel_formula(&over), Cow::Borrowed(_)));
     }
 }
