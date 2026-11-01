@@ -130,7 +130,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         workerSelection.anchor.offset === workerSelection.focus.offset) {
         const anchorPos = { left: (bounds?.left ?? 0) + focus.x * zoom + 6, top: top + height + 4 };
         const admitted = admission.getSnapshot();
-        const settled = admitted.originalUnackedIntents === 0 && admitted.pendingInputs === 0;
+        const settled = admitted.originalUnackedIntents === 0 && admitted.pendingInputs === 0 &&
+          state.version !== pasteRecord.version;
         if (!settled && (pastePendingRef.current || pasteReplacingRef.current)) {
         } else if (pastePendingRef.current) {
           pasteRecord.end = { ...workerSelection.focus };
@@ -348,7 +349,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
               fragment: structuredClone(fragment),
               plainText,
               end: null,
-              version: -1,
+              version: viewStore.getSnapshot().version,
             };
             pastePendingRef.current = true;
           } else {
