@@ -191,12 +191,19 @@ pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
 fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
     let in_text_box = in_text_box || element.name == "w:txbxContent";
     if in_text_box && element.name == "w:p" {
-        return false;
+        return contains_bookmark_boundary(element);
     }
     (in_text_box && crate::block::has_direct_block_bookmark(element))
         || element
             .child_elements()
             .any(|child| has_block_bookmarks(child, in_text_box))
+}
+
+fn contains_bookmark_boundary(element: &XmlElement) -> bool {
+    element.child_elements().any(|child| {
+        matches!(child.local_name(), "bookmarkStart" | "bookmarkEnd")
+            || contains_bookmark_boundary(child)
+    })
 }
 
 pub(crate) fn source_xml(source: &XmlElement) -> String {
