@@ -318,8 +318,11 @@ test('replacePasteFragment over a replaced selection restores the replaced text 
 }, TIMEOUT);
 
 test('replacePasteFragment without a paste to undo is refused and changes nothing', async () => {
-  const { client, engine } = await openTableWorker();
+  const worker = startWorker(8403);
+  const client = new ResidentEngineWorkerClient(worker);
   try {
+    await client.open(seedDoc(), { generation: 'tclip-no-history' });
+    const engine = worker.sessions[0]!;
     const paragraphs = engine.paragraphs('body');
     const atPara = paragraphs[paragraphs.length - 1]!;
     const atSpan = engine.geometryReader.locateParagraph('body', atPara.paraId);

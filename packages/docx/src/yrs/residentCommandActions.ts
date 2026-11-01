@@ -1161,7 +1161,7 @@ function applyPreparedDocxCommand(
     isTableCommandKind(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
-  let replacePasteRefused = false;
+  let replacePasteRefused: 'nothing-to-undo' | 'paste-changed' | null = null;
   switch (command.kind) {
     case 'setTabStops':
       engine.setParagraphAttrs(range, { tabs: command.payload.tabs });
@@ -1288,9 +1288,9 @@ function applyPreparedDocxCommand(
     }
     case 'replacePasteFragment': {
       state.storedMarks = null;
-      if (!engine.undo()) { replacePasteRefused = true; break; }
+      if (!engine.undo()) { replacePasteRefused = 'nothing-to-undo'; break; }
       const originalRange = commandSelectionRange(engine, command.payload.original);
-      if (!originalRange) throw new Error('Original paste selection is invalid');
+      if (!originalRange) { engine.redo(); replacePasteRefused = 'paste-changed'; break; }
       caret(applyClipboardFragment(engine, originalRange, command.payload.fragment, command.payload.suggesting));
       break;
     }
@@ -1302,7 +1302,7 @@ function applyPreparedDocxCommand(
   }
   resetCellSelectionForEdit(engine, state, command.kind);
   if (discrete) engine.addUndoBoundary();
-  if (replacePasteRefused) return { ...result('noop'), status: 'refused', reason: 'nothing-to-undo' };
+  if (replacePasteRefused) return { ...result('noop'), status: 'refused', reason: replacePasteRefused };
   return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
 }
 
