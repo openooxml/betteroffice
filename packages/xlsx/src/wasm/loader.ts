@@ -343,6 +343,7 @@ export type WorkbookUpdateListener = (
 ) => void;
 
 export interface WorkbookCalculationContext {
+  /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
   nowSerial: number;
   randSeed: number;
 }
