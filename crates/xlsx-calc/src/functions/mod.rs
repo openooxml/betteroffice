@@ -11,6 +11,7 @@ pub mod cash_flow;
 pub mod cell_info;
 pub mod criteria;
 pub(crate) mod criteria_index;
+pub mod database;
 pub mod datetime;
 pub mod financial;
 pub mod info;
@@ -258,6 +259,18 @@ pub enum Func {
     DollarFr,
     NormDist,
     Cell,
+    DAverage,
+    DCount,
+    DCountA,
+    DGet,
+    DMax,
+    DMin,
+    DProduct,
+    DStdev,
+    DStdevP,
+    DSum,
+    DVar,
+    DVarP,
     /// the `(a,b)` reference union the parser builds under [`UNION_NAME`].
     Union,
 }
@@ -529,6 +542,18 @@ pub fn resolve(name: &str) -> Option<Func> {
         "PHONETIC" => Func::Phonetic,
         "ENCODEURL" => Func::EncodeUrl,
         "_LONGTEXT" => Func::LongText,
+        "DAVERAGE" => Func::DAverage,
+        "DCOUNT" => Func::DCount,
+        "DCOUNTA" => Func::DCountA,
+        "DGET" => Func::DGet,
+        "DMAX" => Func::DMax,
+        "DMIN" => Func::DMin,
+        "DPRODUCT" => Func::DProduct,
+        "DSTDEV" => Func::DStdev,
+        "DSTDEVP" => Func::DStdevP,
+        "DSUM" => Func::DSum,
+        "DVAR" => Func::DVar,
+        "DVARP" => Func::DVarP,
         "(UNION)" => Func::Union,
         _ => return None,
     })
@@ -770,6 +795,18 @@ impl Func {
             Func::Phonetic => text_extra::phonetic(args, ctx),
             Func::EncodeUrl => text_extra::encodeurl(args, ctx),
             Func::LongText => text_extra::longtext(args, ctx),
+            Func::DAverage => database::daverage(args, ctx),
+            Func::DCount => database::dcount(args, ctx),
+            Func::DCountA => database::dcounta(args, ctx),
+            Func::DGet => database::dget(args, ctx),
+            Func::DMax => database::dmax(args, ctx),
+            Func::DMin => database::dmin(args, ctx),
+            Func::DProduct => database::dproduct(args, ctx),
+            Func::DStdev => database::dstdev(args, ctx),
+            Func::DStdevP => database::dstdevp(args, ctx),
+            Func::DSum => database::dsum(args, ctx),
+            Func::DVar => database::dvar(args, ctx),
+            Func::DVarP => database::dvarp(args, ctx),
             Func::Union => err(ErrorValue::Value),
         }
     }
@@ -1199,6 +1236,18 @@ mod tests {
             (Func::Phonetic, "PHONETIC"),
             (Func::EncodeUrl, "ENCODEURL"),
             (Func::LongText, "_LONGTEXT"),
+            (Func::DAverage, "DAVERAGE"),
+            (Func::DCount, "DCOUNT"),
+            (Func::DCountA, "DCOUNTA"),
+            (Func::DGet, "DGET"),
+            (Func::DMax, "DMAX"),
+            (Func::DMin, "DMIN"),
+            (Func::DProduct, "DPRODUCT"),
+            (Func::DStdev, "DSTDEV"),
+            (Func::DStdevP, "DSTDEVP"),
+            (Func::DSum, "DSUM"),
+            (Func::DVar, "DVAR"),
+            (Func::DVarP, "DVARP"),
             (Func::Union, UNION_NAME),
         ];
         for &(func, name) in canonical {
