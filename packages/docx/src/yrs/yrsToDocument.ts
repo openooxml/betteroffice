@@ -12,6 +12,7 @@ import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
+import { seededCellIndices } from './tableRowSpans';
 import { pixelsToEmu } from '../utils/units';
 import {
   applyContentControlValue,
@@ -2483,6 +2484,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     rowspan: number;
     colspan: number;
     cell: TableCell;
+    story?: string;
   }> = [];
   let totalColumns = 0;
 
@@ -2499,6 +2501,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
         rowspan,
         colspan,
         cell: tableCellFromPayload(context, cellPayload),
+        story: asString(cellPayload.story),
       });
       for (let r = rowIndex; r < rowIndex + rowspan; r += 1) {
         occupied[r] ??= [];
@@ -2519,8 +2522,11 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     }
   }
 
+  const cellStories: TableCellSource[][] = [];
   const rows: TableRow[] = rowPayloads.map((rowPayload, rowIndex) => {
     const cells: TableCell[] = [];
+    const stories: TableCellSource[] = [];
+    cellStories.push(stories);
     for (let col = tableRowGrid(rowPayload.trPr).before; col < totalColumns; ) {
       const anchor = byStart.get(`${rowIndex}-${col}`);
       if (anchor) {
@@ -2535,6 +2541,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
           ...anchor.cell,
           formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
         });
+        stories.push(anchor.story);
         col += anchor.colspan;
         continue;
       }
@@ -2548,6 +2555,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
       else delete formatting.gridSpan;
       formatting.vMerge = 'continue';
       cells.push({ ...covering.cell, content: [], formatting });
+      stories.push(covering.story === undefined ? undefined : { covering: covering.story, rowOffset: rowIndex - covering.row });
       col += covering.colspan;
     }
 
@@ -2592,7 +2600,217 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
   if (Array.isArray(attrs.tblPrChange) && attrs.tblPrChange.length > 0) {
     table.propertyChanges = attrs.tblPrChange;
   }
+  const prefixHint = rowPayloads.flatMap((row) => Array.isArray(row.cells) ? row.cells : [])
+    .map((cell) => (asString(cell.tcPr?._sourceCellStory) ?? asString(cell.story))?.match(/^(.*:t\d+):r\d+c\d+(?:~\d+)?$/)?.[1])
+    .find((prefix) => prefix !== undefined);
+  restoreTableBookmarks(context, table, cellStories, prefixHint);
+  projectedTableCells.set(table, cellStories);
   return table;
+}
+
+/** A projected cell's source: its own story, or the anchor story and row offset of the vertical merge it continues. */
+type TableCellSource = string | { covering: string; rowOffset: number } | undefined;
+
+/** The cell sources of each projected table, so a later save that takes this projection as its base maps cells by story rather than position. */
+const projectedTableCells = new WeakMap<Table, ReadonlyArray<ReadonlyArray<TableCellSource>>>();
+
+function tableCellKey(entry: TableCellSource): string | undefined {
+  return typeof entry === 'string' ? entry : entry ? `${entry.covering}#${entry.rowOffset}` : undefined;
+}
+
+/** Where each cell story (or continuation `anchor#offset`) of a base table sits in it. */
+function baseTableCells(table: Table, prefix: string): Map<string, { row: number; cell: number }> {
+  const cells = new Map<string, { row: number; cell: number }>();
+  const recorded = projectedTableCells.get(table);
+  if (recorded) {
+    recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+      const key = tableCellKey(entry);
+      if (key !== undefined && !cells.has(key)) cells.set(key, { row: rowIndex, cell: cellIndex });
+    }));
+    return cells;
+  }
+  const seeded = seededCellIndices(table);
+  const spans = new Map<number, { story: string; row: number }>();
+  table.rows.forEach((row, rowIndex) => {
+    const starts = gridStarts(row);
+    row.cells.forEach((cell, cellIndex) => {
+      const ordinal = seeded[rowIndex]!.indexOf(cellIndex);
+      const column = starts[cellIndex]!;
+      if (ordinal >= 0) {
+        const story = `${prefix}:r${rowIndex}c${ordinal}`;
+        cells.set(story, { row: rowIndex, cell: cellIndex });
+        if (cell.formatting?.vMerge === 'restart') spans.set(column, { story, row: rowIndex });
+        else spans.delete(column);
+        return;
+      }
+      const anchor = spans.get(column);
+      if (anchor) cells.set(`${anchor.story}#${rowIndex - anchor.row}`, { row: rowIndex, cell: cellIndex });
+    });
+  });
+  return cells;
+}
+
+function gridStarts(row: TableRow): number[] {
+  let column = row.formatting?.gridBefore ?? 0;
+  return row.cells.map((cell) => {
+    const start = column;
+    column += cell.formatting?.gridSpan ?? 1;
+    return start;
+  });
+}
+
+const SOURCE_CELL_STORY = /^(.*:t\d+):r(\d+)c(\d+)$/;
+
+function rowCellBookmarks(row: TableRow): string[] {
+  return [...row.cells.flatMap((cell) => cell.leadingBookmarks ?? []), ...(row.trailingBookmarks ?? [])];
+}
+
+function tableHasBookmarks(table: Table): boolean {
+  return (table.trailingBookmarks?.length ?? 0) > 0
+    || table.rows.some((row) => (row.leadingBookmarks?.length ?? 0) > 0 || rowCellBookmarks(row).length > 0);
+}
+
+/** A stand-in block for a row or cell; `scan` exposes the boundaries already inside it to the collapse rules. */
+function bookmarkMarker(key: string, scan?: readonly BlockContent[]): Paragraph {
+  return { type: 'paragraph', paraId: key, content: [], ...(scan ? { scan } : {}) } as unknown as Paragraph;
+}
+
+function distributeBookmarks<T>(
+  restored: readonly BlockContent[],
+  items: readonly T[],
+  leading: (item: T, xml: string) => void,
+  trailing: (xml: string) => void
+): void {
+  let index = 0;
+  for (const block of restored) {
+    if (isRawXml(block)) {
+      if (index < items.length) leading(items[index]!, block.xml);
+      else trailing(block.xml);
+    } else {
+      index += 1;
+    }
+  }
+}
+
+/** Puts the source table's row and cell bookmark boundaries back on the projected table, collapsing those of removed rows and cells. */
+function restoreTableBookmarks(
+  context: SaveContext,
+  table: Table,
+  cellStories: ReadonlyArray<ReadonlyArray<TableCellSource>>,
+  prefixHint: string | undefined
+): void {
+  const parse = (story: string) => {
+    const match = SOURCE_CELL_STORY.exec(story);
+    return match ? { prefix: match[1]!, row: Number(match[2]), ordinal: Number(match[3]) } : undefined;
+  };
+  const prefix = prefixHint ?? cellStories.flat().map((entry) =>
+    typeof entry === 'string' ? parse(entry)?.prefix : entry ? parse(entry.covering)?.prefix : undefined)
+    .find((candidate) => candidate !== undefined);
+  const source = prefix === undefined ? undefined : context.sourceTable(prefix);
+  if (!source || !tableHasBookmarks(source)) return;
+  const located = baseTableCells(source, prefix!);
+  const starts = source.rows.map(gridStarts);
+  const continues = (row: number, cell: number) => source.rows[row]?.cells[cell]?.formatting?.vMerge === 'continue';
+  const resolved = cellStories.map((row) => row.map((entry) => {
+    if (entry === undefined) return undefined;
+    if (typeof entry === 'string') {
+      const at = located.get(entry);
+      return at ? { direct: true as const, row: at.row, cell: at.cell } : undefined;
+    }
+    const anchor = located.get(entry.covering);
+    return anchor
+      ? { direct: false as const, row: anchor.row + entry.rowOffset, column: starts[anchor.row]![anchor.cell]! }
+      : undefined;
+  }));
+  const seen = new Set<number>();
+  const rowKeys: Array<number | undefined> = resolved.map((row) => {
+    const rows = new Set(row.flatMap((cell) => cell?.direct ? [cell.row] : []));
+    const sourceRow = rows.size === 1 ? [...rows][0]! : undefined;
+    if (sourceRow === undefined || seen.has(sourceRow)) return undefined;
+    seen.add(sourceRow);
+    return sourceRow;
+  });
+  resolved.forEach((row, index) => {
+    if (rowKeys[index] !== undefined || row.some((cell) => cell?.direct)) return;
+    const rows = new Set(row.flatMap((cell) => cell && !cell.direct
+      && continues(cell.row, starts[cell.row]?.indexOf(cell.column) ?? -1) ? [cell.row] : []));
+    const sourceRow = rows.size === 1 ? [...rows][0]! : undefined;
+    if (sourceRow === undefined || seen.has(sourceRow)) return;
+    seen.add(sourceRow);
+    rowKeys[index] = sourceRow;
+  });
+  const sources = resolved.map((row, index) => row.map((cell) => {
+    if (!cell) return undefined;
+    if (cell.direct) return { row: cell.row, cell: cell.cell };
+    const sourceRow = rowKeys[index];
+    const covered = sourceRow === undefined ? -1 : starts[sourceRow]?.indexOf(cell.column) ?? -1;
+    return covered >= 0 && continues(sourceRow!, covered) ? { row: sourceRow!, cell: covered } : undefined;
+  }));
+  const contentOf = (rows: readonly TableRow[]) => projectedBookmarkPositions(rows.flatMap((row) => row.cells.flatMap((cell) => cell.content)));
+  const sourceContent = contentOf(source.rows);
+  const projectedContent = contentOf(table.rows);
+  const orphaned = (xml: string): boolean => {
+    const marker = rawBlockBookmark(xml);
+    if (marker?.id === undefined) return false;
+    const partner = marker.kind === 'start' ? 'end' : 'start';
+    return sourceContent.get(marker.id)?.[partner] !== undefined && projectedContent.get(marker.id)?.[partner] === undefined;
+  };
+  const raw = (xml: string): BlockContent[] => orphaned(xml) ? [] : [{ type: 'rawXml', xml }];
+  const projected = table.rows.map((row, index) => bookmarkMarker(
+    rowKeys[index] === undefined ? `N${index}` : `R${rowKeys[index]}`, row.cells.flatMap((cell) => cell.content)));
+  const placed = projectedBookmarkPositions(projected);
+  const promoted = new Set<string>();
+  rowKeys.forEach((sourceIndex, index) => {
+    if (sourceIndex === undefined) return;
+    for (const xml of rowCellBookmarks(source.rows[sourceIndex]!)) {
+      const marker = rawBlockBookmark(xml);
+      if (marker?.id === undefined) continue;
+      const partner = placed.get(marker.id)?.[marker.kind === 'start' ? 'end' : 'start'];
+      if (partner !== undefined && (marker.kind === 'start' ? partner < index + 0.5 : partner > index + 0.5)) promoted.add(xml);
+    }
+  });
+  const base: BlockContent[] = [];
+  source.rows.forEach((row, index) => {
+    for (const xml of row.leadingBookmarks ?? []) base.push(...raw(xml));
+    for (const xml of rowCellBookmarks(row)) if (!seen.has(index) || promoted.has(xml)) base.push(...raw(xml));
+    base.push(bookmarkMarker(`R${index}`));
+  });
+  for (const xml of source.trailingBookmarks ?? []) base.push(...raw(xml));
+  delete table.trailingBookmarks;
+  for (const row of table.rows) {
+    delete row.leadingBookmarks;
+    delete row.trailingBookmarks;
+    for (const cell of row.cells) delete cell.leadingBookmarks;
+  }
+  distributeBookmarks(
+    restoreBlockBookmarks(projected, base, `${prefix}:rows`),
+    table.rows,
+    (row, xml) => (row.leadingBookmarks ??= []).push(xml),
+    (xml) => (table.trailingBookmarks ??= []).push(xml)
+  );
+  table.rows.forEach((row, index) => {
+    const sourceIndex = rowKeys[index];
+    if (sourceIndex === undefined) return;
+    const sourceRow = source.rows[sourceIndex]!;
+    if (rowCellBookmarks(sourceRow).length === 0) return;
+    const cellBase: BlockContent[] = [];
+    const kept = (xml: string) => promoted.has(xml) ? [] : raw(xml);
+    sourceRow.cells.forEach((cell, cellIndex) => {
+      for (const xml of cell.leadingBookmarks ?? []) cellBase.push(...kept(xml));
+      cellBase.push(bookmarkMarker(`C${cellIndex}`));
+    });
+    for (const xml of sourceRow.trailingBookmarks ?? []) cellBase.push(...kept(xml));
+    const cellProjected = row.cells.map((cell, cellIndex) => {
+      const key = sources[index]![cellIndex];
+      return bookmarkMarker(key && key.row === sourceIndex ? `C${key.cell}` : `N${cellIndex}`, cell.content);
+    });
+    distributeBookmarks(
+      restoreBlockBookmarks(cellProjected, cellBase, `${prefix}:r${sourceIndex}`),
+      row.cells,
+      (cell, xml) => (cell.leadingBookmarks ??= []).push(xml),
+      (xml) => (row.trailingBookmarks ??= []).push(xml)
+    );
+  });
 }
 
 function pageBreakParagraph(): Paragraph {
@@ -2687,9 +2905,16 @@ function collectBaseStories(
       }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
-      block.rows.forEach((row, rowIndex) => {
-        row.cells.forEach((cell, cellIndex) => {
-          visit(`${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex}`, cell.content);
+      const recorded = projectedTableCells.get(block);
+      if (recorded) {
+        recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+          if (typeof entry === 'string') visit(entry, block.rows[rowIndex]!.cells[cellIndex]!.content);
+        }));
+        continue;
+      }
+      seededCellIndices(block).forEach((cells, rowIndex) => {
+        cells.forEach((cellIndex, ordinal) => {
+          visit(`${storyId}:t${currentTableIndex}:r${rowIndex}c${ordinal}`, block.rows[rowIndex]!.cells[cellIndex]!.content);
         });
       });
     }
@@ -2800,7 +3025,7 @@ function containsBookmark(blocks: readonly BlockContent[]): boolean {
   return blocks.some(block => {
     if (isBlockBookmark(block)) return true;
     if (block.type === 'blockSdt') return containsBookmark(block.content);
-    if (block.type === 'table') return block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)));
+    if (block.type === 'table') return tableHasBookmarks(block) || block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)));
     return false;
   });
 }
@@ -2808,7 +3033,7 @@ function containsBookmark(blocks: readonly BlockContent[]): boolean {
 export function assertCommentBookmarkReplacement(blocks: readonly BlockContent[]): void {
   if (blocks.some(block =>
     block.type === 'blockSdt' ? containsBookmark(block.content)
-      : block.type === 'table' && block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)))
+      : block.type === 'table' && containsBookmark([block])
   )) throw new Error('Cannot replace comment body with bookmarks in nested blocks');
 }
 
@@ -2893,6 +3118,17 @@ function projectedBookmarkPositions(blocks: readonly BlockContent[]): Map<string
       if (!pair) positions.set(marker.id, pair = {});
       pair[marker.kind] ??= position;
       return;
+    }
+    for (const key of ['leadingBookmarks', 'trailingBookmarks']) {
+      const fragments = record[key];
+      if (!Array.isArray(fragments)) continue;
+      for (const xml of fragments) {
+        const boundary = typeof xml === 'string' ? rawBlockBookmark(xml) : undefined;
+        if (boundary?.id === undefined) continue;
+        let pair = positions.get(boundary.id);
+        if (!pair) positions.set(boundary.id, pair = {});
+        pair[boundary.kind] ??= position;
+      }
     }
     for (const child of Object.values(record)) visit(child, position);
   };
@@ -3275,6 +3511,10 @@ class SaveContext {
   private runInheritance: YrsRunInheritance | null = null;
   private readonly inheritedRuns = new Map<string, TextFormatting>();
   private readonly sourceTables = new Map<string, Table>();
+
+  sourceTable(prefix: string): Table | undefined {
+    return this.sourceTables.get(prefix);
+  }
   private readonly tableBaselines = new Map<Table, YrsTableInheritance>();
   private readonly payloadBaselines = new WeakMap<TablePayload, YrsTableInheritance>();
   private readonly sourceCells = new Map<string, YrsTableInheritance['rows'][number][number]>();
@@ -3376,11 +3616,22 @@ class SaveContext {
       }
       this.payloadBaselines.set(payload, baseline);
       const prefix = source.prefix;
-      baseline.rows.forEach((row, rowIndex) => {
-        row.forEach((cell, cellIndex) => {
-          this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+      const recorded = projectedBlocks.get(source.table)?.tableBaseline
+        ? undefined
+        : projectedTableCells.get(source.table);
+      if (recorded) {
+        const seeded = seededCellIndices(source.table);
+        recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+          const cell = baseline!.rows[rowIndex]?.[seeded[rowIndex]?.indexOf(cellIndex) ?? -1];
+          if (typeof entry === 'string' && cell) this.sourceCells.set(entry, cell);
+        }));
+      } else {
+        baseline.rows.forEach((row, rowIndex) => {
+          row.forEach((cell, cellIndex) => {
+            this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+          });
         });
-      });
+      }
     }
     for (const cell of cells) {
       if (typeof cell.story !== 'string') continue;

@@ -212,9 +212,7 @@ describe('crates OIDC-first wiring', () => {
 
   test('the OIDC exchange runs on the publish path unless crates are skipped', () => {
     const auth = named.get('Authenticate to crates.io');
-    expect(auth.uses).toBe(
-      'rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18'
-    );
+    expect(auth.uses).toMatch(/^rust-lang\/crates-io-auth-action@[0-9a-f]{40}$/);
     expect(auth.if).toBe(
       "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
     );

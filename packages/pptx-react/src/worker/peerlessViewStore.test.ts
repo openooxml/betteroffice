@@ -1162,7 +1162,7 @@ test('background font acknowledgements invalidate thumbnails without a document 
   expect(store.installThumbnail(frame('other', 7, 0, { slideId: 'other', slideIndex: 1 }))).toBe(true);
   const structural = mock(() => {});
   store.subscribeStructure(structural);
-  const defaultFonts = [{ family: 'Calibri', bold: false, italic: false, bytes: new ArrayBuffer(1) }];
+  const defaultFonts = [{ family: 'Calibri', bold: false, italic: false }];
   client.ack(0, { dirtySlideIds: ['other'], outcomes: [], defaultFonts } as Partial<PresentationCommandAck>);
   expect(store.getSnapshot().thumbnails.has('other')).toBe(false);
   expect(store.getSnapshot().dirtyThumbnailIds.has('other')).toBe(true);

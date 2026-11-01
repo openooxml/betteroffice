@@ -318,6 +318,18 @@ impl Document {
             .map_err(message)
     }
 
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, EngineError> {
+        self.session
+            .png_display_list_json(viewport_json)
+            .map_err(message)
+    }
+
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, EngineError> {
+        self.session
+            .range_png_display_list_json(args)
+            .map_err(message)
+    }
+
     #[cfg(feature = "raster")]
     pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, EngineError> {
         self.session.render_png(viewport_json).map_err(message)
@@ -346,6 +358,11 @@ impl Document {
 
     pub fn cell_rect_json(&self, args: &str) -> Result<String, EngineError> {
         self.session.cell_rect_json(args).map_err(message)
+    }
+
+    pub fn recalculate_json(&mut self) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session.recalculate_json(now_serial).map_err(message)
     }
 
     pub fn calculation_status_json(&self) -> Result<String, EngineError> {

@@ -19,6 +19,7 @@
     "declarationMap": true,
     "types": ["bun"],
     "paths": {
+      "#session-worker": ["../pptx/src/session/sessionWorker.node.ts"],
       "@betteroffice/pptx": ["../pptx/src/index.ts"],
       "@betteroffice/pptx-i18n": ["../pptx-i18n/src/index.ts"],
       "@betteroffice/pptx/*": ["../pptx/src/*"]

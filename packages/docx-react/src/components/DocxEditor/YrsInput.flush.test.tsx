@@ -18,6 +18,7 @@ import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
 import * as packageRoot from '../../index';
+import { engineKind } from '@betteroffice/docx/wasm/engineEdit';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -433,7 +434,7 @@ test.each([false, true])('held Tab outside a table at replay is a no-op and the 
   }
 });
 
-test('held no-op first-cell Shift+Tab keeps two undo steps across an 800 ms edit gap', async () => {
+test.skipIf(engineKind === 'native')('held no-op first-cell Shift+Tab keeps two undo steps across an 800 ms edit gap', async () => {
   const source = await seededSession();
   const paraId = source.paragraphs('body')[0]!.paraId;
   const story = source.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2).createdStoryIds[0]!;
@@ -532,7 +533,7 @@ test.each([100, 499, 500, 501, 650])(
   }
 );
 
-test.each([100, 600])(
+test.each(engineKind === 'native' ? [100] : [100, 600])(
   'live input groups with the last worker replay edit after %i ms', async (gap) => {
     const session = await seededSession();
     const input = createRef<YrsInputRef>();

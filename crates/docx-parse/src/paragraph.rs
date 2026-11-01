@@ -812,6 +812,9 @@ fn process_field_run(
     if let Some(active) = fields.last_mut() {
         active.append_instruction(&instruction);
         active.adopt_formatting(&run);
+        if (has_begin || has_separate) && !instruction.is_empty() {
+            active.absorb_instruction(&run);
+        }
         if has_separate {
             active.switch_to_result();
         }

@@ -46,10 +46,13 @@ const RUNTIME_ALLOWED = new Set([
   "/app/apps/wopi/src",
   "/app/apps/wopi/web/dist",
   "/app/packages/docx/src",
+  "/app/packages/docx/tsconfig.json",
   "/app/packages/fonts/assets",
   "/app/packages/fonts-cjk/assets",
   "/app/packages/pptx/src",
+  "/app/packages/pptx/tsconfig.json",
   "/app/packages/xlsx/src",
+  "/app/packages/xlsx/tsconfig.json",
   "/app/shared/collaboration-limits.ts",
   "/app/shared/collaboration-pipe",
   "/app/shared/media.ts",
@@ -95,6 +98,19 @@ function resolveRelative(fromFile: string, specifier: string): string {
   return base.split("\\").join("/");
 }
 
+function resolveImport(fromFile: string, specifier: string): { tsconfig: string; target: string } | undefined {
+  const owner = /^(packages\/[^/]+)\//.exec(fromFile)?.[1];
+  if (!owner) return undefined;
+  const tsconfig = `${owner}/tsconfig.json`;
+  if (!isFile(tsconfig)) return undefined;
+  const { compilerOptions } = JSON.parse(readFileSync(join(repoRoot, tsconfig), "utf8")) as {
+    compilerOptions?: { paths?: Record<string, string[]> };
+  };
+  const mapped = compilerOptions?.paths?.[specifier]?.[0];
+  if (!mapped) return undefined;
+  return { tsconfig, target: resolveRelative(tsconfig, mapped) };
+}
+
 function walkGraph(): { files: Set<string>; bare: Set<string> } {
   const files = new Set<string>();
   const bare = new Set<string>();
@@ -112,6 +128,10 @@ function walkGraph(): { files: Set<string>; bare: Set<string> } {
       if (specifier.startsWith("node:") || specifier === "bun:test") continue;
       if (specifier.startsWith("./") || specifier.startsWith("../")) {
         stack.push(resolveRelative(file, specifier));
+      } else if (specifier.startsWith("#") && resolveImport(file, specifier)) {
+        const { tsconfig, target } = resolveImport(file, specifier)!;
+        files.add(tsconfig);
+        stack.push(target);
       } else {
         const name = specifier.startsWith("@")
           ? specifier.split("/").slice(0, 2).join("/")

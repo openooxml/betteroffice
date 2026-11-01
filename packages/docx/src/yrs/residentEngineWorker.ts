@@ -131,7 +131,9 @@ import {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 
-const scope = self as unknown as DedicatedWorkerGlobalScope;
+import { sessionWorkerScope } from '#session-worker';
+
+let scope: DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
@@ -1420,25 +1422,29 @@ function reportProgress(): void {
 }
 Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
 
-scope.onmessage = (
-  event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
-) => {
-  const message = event.data;
-  interruptSaveWarmup(message.type);
-  if (message.type === 'editModule') {
-    // The queued warm waits for this message.
-    resolveHostEditModule(shipsWasmAsset && message.module instanceof WebAssembly.Module ? message.module : null);
+function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
+  scope = workerScope;
+  scope.onmessage = (
+    event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
+  ) => {
+    const message = event.data;
+    interruptSaveWarmup(message.type);
+    if (message.type === 'editModule') {
+      resolveHostEditModule(shipsWasmAsset && message.module instanceof WebAssembly.Module ? message.module : null);
+      scheduleSaveWarmup();
+      return;
+    }
+    if (message.type === 'prepare-save') {
+      scheduleSaveWasmPreload();
+      return;
+    }
+    scheduler.submit(classify(message));
     scheduleSaveWarmup();
-    return;
-  }
-  if (message.type === 'prepare-save') {
-    scheduleSaveWasmPreload();
-    return;
-  }
-  scheduler.submit(classify(message));
-  scheduleSaveWarmup();
-};
-scope.onmessageerror = () => resolveHostEditModule(null);
+  };
+  scope.onmessageerror = () => resolveHostEditModule(null);
+}
+
+startWorker(sessionWorkerScope() as unknown as DedicatedWorkerGlobalScope);
 
 function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   if (!shipsWasmAsset) return Promise.resolve(null);
@@ -1685,6 +1691,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
     return;
   }
   if (request.type === 'commandInit') {
+    if (typeof OffscreenCanvas !== 'function') {
+      throw new Error('DOCX worker editing paints frames and needs OffscreenCanvas, which this runtime lacks; edit documents headless with the in-thread edit session');
+    }
     if (!session || !openedDocument || previewing) {
       throw new Error('Worker commands require a whole opened document');
     }

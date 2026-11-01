@@ -10,7 +10,7 @@ import {
   outline_glyph_json,
   register_measure_font,
   register_substitute_measure_font,
-} from './generated/edit/docx_edit.js';
+} from './engineEdit';
 
 const font = new Uint8Array(readFileSync(resolve(
   import.meta.dir,

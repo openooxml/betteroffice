@@ -520,8 +520,14 @@ impl PyWorkbook {
     fn formula(&self, sheet: &Bound<'_, PyAny>, address: &str) -> PyResult<Option<String>> {
         let sheet = self.resolve_sheet(sheet)?;
         let cell = parse_cell(address)?;
-        let sheet = self.inner.sheet(sheet).map_err(map_error)?;
-        Ok(sheet.cell(cell).and_then(|found| found.formula.clone()))
+        let shown = self.inner.cell(sheet, cell).map_err(map_error)?;
+        Ok(shown.is_formula.then(|| {
+            shown
+                .input
+                .strip_prefix('=')
+                .unwrap_or(&shown.input)
+                .to_owned()
+        }))
     }
 
     /// Takes what a user would type; returns whether anything changed.
@@ -1105,7 +1111,9 @@ fn render_xlsx_markdown_json(py: Python<'_>, content: &str, options: &str) -> Py
 #[pymodule]
 fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
+    module.add_function(wrap_pyfunction!(python_common::font_packs, module)?)?;
     let py = module.py();
+    python_common::install_font_packs(py)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyWorkbook>()?;
     module.add_class::<PyCellError>()?;

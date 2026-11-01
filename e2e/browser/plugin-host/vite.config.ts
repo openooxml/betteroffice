@@ -1,11 +1,22 @@
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 
 const root = resolve(import.meta.dirname, '../../..');
 const fromReact = createRequire(resolve(root, 'packages/docx-react/package.json'));
 const tailwind = fromReact('tailwindcss');
 const autoprefixer = fromReact('autoprefixer');
+
+const sourceSessionWorker: Plugin = {
+  name: 'source-session-worker',
+  enforce: 'pre',
+  resolveId(source, importer) {
+    if (source !== '#session-worker' || !importer) return null;
+    const format = /\/packages\/(docx|pptx|xlsx)\/src\//.exec(importer)?.[1];
+    if (!format) return null;
+    return resolve(root, 'packages', format, 'src', format === 'docx' ? 'yrs' : 'session', 'sessionWorker.browser.ts');
+  },
+};
 
 /** Serves the plugin-host harnesses against the package sources. */
 export default defineConfig({
@@ -13,6 +24,7 @@ export default defineConfig({
   optimizeDeps: { entries: ['*.html'] },
   define: { 'globalThis.__DOCX_PEERLESS_HARNESS__': JSON.stringify(process.env.DOCX_PEERLESS_HARNESS === '1') },
   plugins: [
+    sourceSessionWorker,
     {
       name: 'main-document-load-probe',
       enforce: 'pre',
@@ -87,5 +99,5 @@ export default defineConfig({
     },
   },
   server: { fs: { allow: [root] } },
-  worker: { format: 'es' },
+  worker: { format: 'es', plugins: () => [sourceSessionWorker] },
 });

@@ -30,6 +30,8 @@ export declare class XlsxDocument {
   printDisplayListJson(args: string): string
   displayListJson(viewportJson: string): string
   displayListForJson(sheet: number, viewportJson: string): string
+  pngDisplayListJson(viewportJson: string): string
+  rangePngDisplayListJson(args: string): string
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
   moveChartJson(args: string): string
@@ -40,6 +42,7 @@ export declare class XlsxDocument {
   sheetInfoForJson(sheet: number): string
   selectionDataJson(args: string): string
   cellRectJson(args: string): string
+  recalculateJson(): string
   calculationStatusJson(): string
   setActiveSheet(index: number): void
   editCellJson(args: string): string
