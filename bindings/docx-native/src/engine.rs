@@ -6,6 +6,7 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::thread::{self, ThreadId};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use docx_engine::{Document, EngineError, EngineErrorKind, Host};
@@ -113,9 +114,27 @@ fn native_clock_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn native_host() -> Host {
+fn js_clock_ms(raw: usize, thread: ThreadId) -> u64 {
+    if thread::current().id() != thread {
+        return native_clock_ms();
+    }
+    let env = Env::from_raw(raw as napi::sys::napi_env);
+    let read = || -> Result<f64> {
+        let date: Function<f64> = env.get_global()?.get_named_property("Date")?;
+        let now: Function<(), f64> = date.get_named_property("now")?;
+        now.apply(date, ())
+    };
+    match read() {
+        Ok(ms) if ms.is_finite() && ms >= 0.0 => ms as u64,
+        _ => native_clock_ms(),
+    }
+}
+
+fn native_host(env: Env) -> Host {
+    let raw = env.raw() as usize;
+    let thread = thread::current().id();
     Host::new(
-        Arc::new(native_clock_ms),
+        Arc::new(move || js_clock_ms(raw, thread)),
         Arc::new(native_entropy),
         Arc::new(native_timer_ms),
     )
@@ -1614,7 +1633,7 @@ impl EditSession {
         Ok(Self {
             update_observer: RefCell::new(None),
             delivering: Cell::new(false),
-            core: RefCell::new(Some(Document::new(client_id as u64, native_host()))),
+            core: RefCell::new(Some(Document::new(client_id as u64, native_host(env)))),
         })
     }
 

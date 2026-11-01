@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
@@ -122,6 +122,35 @@ describe('docx native engine parity', () => {
     } finally {
       expected.free();
       session.free();
+    }
+  });
+
+  test('undo grouping reads the JavaScript clock, as wasm does', () => {
+    let time = 1_000;
+    const clock = spyOn(Date, 'now').mockImplementation(() => time);
+    const texts = (engine: Engine) => {
+      const session = new engine.EditSession(13);
+      try {
+        session.seed_from_docx(fixture, 'opening');
+        session.track_undo();
+        const steps: string[] = [];
+        for (const [at, text] of [[1_000, 'A'], [1_100, 'B'], [2_000, 'C']] as const) {
+          time = at;
+          session.insert_text('body', paragraphId(session), 0, text);
+        }
+        steps.push(read(session).paragraphs[0].text);
+        while (session.undo()) steps.push(read(session).paragraphs[0].text);
+        return steps;
+      } finally {
+        session.free();
+      }
+    };
+    try {
+      const expected = texts(wasm);
+      expect(expected).toEqual(['CBAEngine text', 'BAEngine text', 'Engine text']);
+      expect(texts(native)).toEqual(expected);
+    } finally {
+      clock.mockRestore();
     }
   });
 
