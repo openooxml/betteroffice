@@ -3,8 +3,8 @@ import { useTranslation } from '../../i18n';
 import { getDefaultLineSpacingOptions } from '../ui/LineSpacingPicker';
 
 export interface ParagraphSpacingData {
-  before: number;
-  after: number;
+  before?: number;
+  after?: number;
   lineSpacing?: number;
 }
 
@@ -42,6 +42,8 @@ export function ParagraphSpacingDialog({ isOpen, onClose, onApply, currentProps 
   const [before, setBefore] = useState(String(initialBefore / 20));
   const [after, setAfter] = useState(String(initialAfter / 20));
   const [line, setLine] = useState(String(initialLine / 240));
+  const [beforeChanged, setBeforeChanged] = useState(false);
+  const [afterChanged, setAfterChanged] = useState(false);
   const [lineChanged, setLineChanged] = useState(false);
   const options = getDefaultLineSpacingOptions();
   const [multiple, setMultiple] = useState(!options.some((option) => option.twipsValue === initialLine));
@@ -51,6 +53,8 @@ export function ParagraphSpacingDialog({ isOpen, onClose, onApply, currentProps 
     setAfter(String(initialAfter / 20));
     setLine(String(initialLine / 240));
     setMultiple(!getDefaultLineSpacingOptions().some((option) => option.twipsValue === initialLine));
+    setBeforeChanged(false);
+    setAfterChanged(false);
     setLineChanged(false);
   }, [isOpen, initialBefore, initialAfter, initialLine]);
   if (!isOpen) return null;
@@ -59,8 +63,12 @@ export function ParagraphSpacingDialog({ isOpen, onClose, onApply, currentProps 
     (line.trim() !== '' && Number.isFinite(Number(line)) && Number(line) > 0 && Number(line) <= 132));
   const apply = () => {
     if (!valid) return;
-    onApply({ before: Math.round(Number(before) * 20), after: Math.round(Number(after) * 20),
-      ...(lineChanged ? { lineSpacing: Math.round(Number(line) * 240) } : {}) });
+    const spacing: ParagraphSpacingData = {
+      ...(beforeChanged ? { before: Math.round(Number(before) * 20) } : {}),
+      ...(afterChanged ? { after: Math.round(Number(after) * 20) } : {}),
+      ...(lineChanged ? { lineSpacing: Math.round(Number(line) * 240) } : {}),
+    };
+    if (Object.keys(spacing).length > 0) onApply(spacing);
     onClose();
   };
   return (
@@ -80,13 +88,13 @@ export function ParagraphSpacingDialog({ isOpen, onClose, onApply, currentProps 
           <div style={rowStyle}>
             <label htmlFor={`${id}-before`} style={labelStyle}>{t('dialogs.paragraphSpacing.before')}</label>
             <input id={`${id}-before`} type="number" min={0} max={1584} step={1} autoFocus required aria-describedby={`${id}-before-unit`}
-              style={inputStyle} value={before} onChange={(event) => setBefore(event.target.value)} />
+              style={inputStyle} value={before} onChange={(event) => { setBefore(event.target.value); setBeforeChanged(true); }} />
             <span id={`${id}-before-unit`}>{t('common.units.pt')}</span>
           </div>
           <div style={rowStyle}>
             <label htmlFor={`${id}-after`} style={labelStyle}>{t('dialogs.paragraphSpacing.after')}</label>
             <input id={`${id}-after`} type="number" min={0} max={1584} step={1} required aria-describedby={`${id}-after-unit`}
-              style={inputStyle} value={after} onChange={(event) => setAfter(event.target.value)} />
+              style={inputStyle} value={after} onChange={(event) => { setAfter(event.target.value); setAfterChanged(true); }} />
             <span id={`${id}-after-unit`}>{t('common.units.pt')}</span>
           </div>
           <div style={rowStyle}>
