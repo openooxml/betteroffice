@@ -558,6 +558,7 @@ export interface XlsxEditRequest {
     history?: XlsxEditHistory;
     /** Overrides the handle clock for this request; without either clock, NOW() has no clock. */
     calculation?: {
+        /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
         nowSerial?: number;
     };
     steps: readonly XlsxEditStep[];
@@ -3451,6 +3452,7 @@ export interface WorkbookUpdateInfo {
 }
 export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin, info: WorkbookUpdateInfo) => void;
 export interface WorkbookCalculationContext {
+    /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
     nowSerial: number;
     randSeed: number;
 }

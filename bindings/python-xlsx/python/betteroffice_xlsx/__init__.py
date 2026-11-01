@@ -180,7 +180,11 @@ class Workbook:
         return cls(_Workbook.open_recalculated(_as_bytes(data), now_serial=now_serial))
 
     def recalculate(self, *, now_serial: "float | None" = None) -> Calculation:
-        """Recalculate every formula."""
+        """Recalculate every formula.
+
+        ``now_serial`` is the current date and time as a 1900 date-system
+        serial (days since 1899-12-30), also for 1904 workbooks.
+        """
         return self._inner.recalculate(now_serial=now_serial)
 
     @property
