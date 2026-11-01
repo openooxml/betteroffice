@@ -29,6 +29,8 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "GCD",
     "GEOMEAN",
     "HARMEAN",
+    "IMPRODUCT",
+    "IMSUM",
     "INDIRECT",
     "INTERCEPT",
     "KURT",
