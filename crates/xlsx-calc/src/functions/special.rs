@@ -9,14 +9,30 @@
 //! computed directly rather than as one minus the other tail, so small
 //! probabilities keep their relative precision.
 
-use std::f64::consts::{FRAC_1_SQRT_2, PI};
+use std::cell::Cell;
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_2_SQRT_PI, PI};
 
 const EPS: f64 = 1e-15;
 const TINY: f64 = 1e-300;
 const MAX_ITER: usize = 1000;
-const BETA_MAX_ITER: usize = 10_000;
+const BETA_MAX_ITER: usize = 20_000;
 const SOLVE_MAX_ITER: usize = 500;
 const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_8;
+
+thread_local! {
+    static STEPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// count `n` iterations of the series, fractions and solvers, so the caller
+/// can charge them to the recalculation budget.
+fn tick(n: usize) {
+    STEPS.with(|steps| steps.set(steps.get().saturating_add(n as u64)));
+}
+
+/// the iterations counted since the last call.
+pub(crate) fn take_steps() -> u64 {
+    STEPS.with(|steps| steps.replace(0))
+}
 
 /// lanczos coefficients for g = 7.
 const LANCZOS: [f64; 9] = [
@@ -144,10 +160,10 @@ fn lanczos(z: f64) -> f64 {
 }
 
 /// ln Gamma(z) for z > 0: lanczos below 10, the stirling series above, and
-/// reflection below 0.5.
+/// the recurrence below 0.5 so subnormal arguments stay finite.
 pub(crate) fn lngamma(z: f64) -> f64 {
     if z < 0.5 {
-        (PI / (PI * z).sin()).ln() - lngamma(1.0 - z)
+        lngamma(z + 1.0) - z.ln()
     } else if z >= 10.0 {
         (z - 0.5) * z.ln() - z + LN_SQRT_2PI + stirling_tail(z)
     } else {
@@ -226,32 +242,29 @@ fn gamma_prefactor(a: f64, x: f64) -> f64 {
 }
 
 fn gamma_p_series(a: f64, x: f64) -> f64 {
-    let mut ap = a;
     let mut sum = 1.0 / a;
     let mut del = sum;
-    for _ in 0..MAX_ITER {
-        ap += 1.0;
-        del *= x / ap;
+    for i in 1..MAX_ITER {
+        del *= x / (a + i as f64);
         sum += del;
         if del.abs() < sum.abs() * EPS {
-            break;
+            tick(i);
+            return sum * gamma_prefactor(a, x);
         }
     }
-    sum * gamma_prefactor(a, x)
+    tick(MAX_ITER);
+    f64::NAN
 }
 
 fn gamma_q_cf(a: f64, x: f64) -> f64 {
-    let mut b = x + 1.0 - a;
-    if b.abs() < TINY {
-        b = TINY;
-    }
+    let first = x + 1.0 - a;
     let mut c = 1.0 / TINY;
-    let mut d = 1.0 / b;
+    let mut d = 1.0 / if first.abs() < TINY { TINY } else { first };
     let mut h = d;
     for i in 1..MAX_ITER {
         let fi = i as f64;
         let an = -fi * (fi - a);
-        b += 2.0;
+        let b = first + 2.0 * fi;
         d = an * d + b;
         if d.abs() < TINY {
             d = TINY;
@@ -264,10 +277,12 @@ fn gamma_q_cf(a: f64, x: f64) -> f64 {
         let del = d * c;
         h *= del;
         if (del - 1.0).abs() < EPS {
-            break;
+            tick(i);
+            return gamma_prefactor(a, x) * h;
         }
     }
-    gamma_prefactor(a, x) * h
+    tick(MAX_ITER);
+    f64::NAN
 }
 
 fn polynomial(coefficients: &[f64], x: f64) -> f64 {
@@ -300,6 +315,8 @@ fn gamma_temme(a: f64, x: f64) -> (f64, f64) {
 pub(crate) fn gamma_pq(a: f64, x: f64) -> (f64, f64) {
     if x <= 0.0 {
         (0.0, 1.0)
+    } else if x == f64::INFINITY {
+        (1.0, 0.0)
     } else if a >= TEMME_MIN_SHAPE && (x - a).abs() <= TEMME_SPAN * a {
         gamma_temme(a, x)
     } else if x < a + 1.0 {
@@ -323,11 +340,18 @@ pub(crate) fn gamma_q(a: f64, x: f64) -> f64 {
 
 /// the standard gamma density z^(a-1) e^-z / Gamma(a) for z > 0.
 fn gamma_density(a: f64, z: f64) -> f64 {
-    gamma_prefactor(a, z) / z
+    if a < 10.0 {
+        ((a - 1.0) * z.ln() - z - lngamma(a)).exp()
+    } else {
+        gamma_prefactor(a, z) / z
+    }
 }
 
 /// erf(x) through the incomplete gamma function: erf(x) = sign(x) P(1/2, x^2).
 pub(crate) fn erf_fn(x: f64) -> f64 {
+    if x.abs() < 1e-8 {
+        return if x == 0.0 { 0.0 } else { x * FRAC_2_SQRT_PI };
+    }
     let mag = gamma_p(0.5, x * x);
     if x < 0.0 { -mag } else { mag }
 }
@@ -418,9 +442,9 @@ fn midpoint(lo: f64, hi: f64) -> f64 {
     if lo <= 0.0 {
         if hi > 1e-300 { hi * 1e-3 } else { 0.5 * hi }
     } else if hi > 4.0 * lo {
-        (lo * hi).sqrt()
+        lo.sqrt() * hi.sqrt()
     } else {
-        0.5 * (lo + hi)
+        lo + 0.5 * (hi - lo)
     }
 }
 
@@ -431,7 +455,11 @@ fn midpoint(lo: f64, hi: f64) -> f64 {
 fn solve(f: impl Fn(f64) -> f64, slope: impl Fn(f64) -> f64, mut lo: f64, mut hi: f64) -> f64 {
     let mut x = midpoint(lo, hi);
     for _ in 0..SOLVE_MAX_ITER {
+        tick(1);
         let fx = f(x);
+        if fx.is_nan() {
+            return f64::NAN;
+        }
         if fx == 0.0 {
             return x;
         }
@@ -455,14 +483,21 @@ fn solve(f: impl Fn(f64) -> f64, slope: impl Fn(f64) -> f64, mut lo: f64, mut hi
     x
 }
 
-/// the smallest power-of-`factor` multiple of `start` where the increasing
-/// `f` is no longer negative.
-fn upper_bracket(f: &impl Fn(f64) -> f64, start: f64, factor: f64) -> f64 {
+/// the smallest power-of-`factor` multiple of `start` (capped at the
+/// largest finite value) where the increasing `f` is no longer negative, or
+/// `None` when the root lies past every finite value.
+fn upper_bracket(f: &impl Fn(f64) -> f64, start: f64, factor: f64) -> Option<f64> {
     let mut hi = start;
-    while f(hi) < 0.0 && hi < 1e300 {
-        hi *= factor;
+    loop {
+        tick(1);
+        if f(hi) >= 0.0 {
+            return Some(hi);
+        }
+        if hi >= f64::MAX {
+            return None;
+        }
+        hi = (hi * factor).min(f64::MAX);
     }
-    hi
 }
 
 /// the standard gamma quantile: z with P(a, z) = p, where q = 1 - p is
@@ -475,8 +510,10 @@ pub(crate) fn gamma_quantile(a: f64, p: f64, q: f64) -> f64 {
         let (lower, upper) = gamma_pq(a, z);
         if p <= q { lower - p } else { q - upper }
     };
-    let hi = upper_bracket(&f, a.max(1.0), 4.0);
-    solve(f, |z| gamma_density(a, z), 0.0, hi)
+    match upper_bracket(&f, a.max(1.0), 4.0) {
+        Some(hi) => solve(f, |z| gamma_density(a, z), 0.0, hi),
+        None => f64::INFINITY,
+    }
 }
 
 /// the density of the gamma distribution with shape `a` and scale `beta`.
@@ -539,10 +576,12 @@ fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
         let del = d * c;
         h *= del;
         if (del - 1.0).abs() < EPS {
-            break;
+            tick(m);
+            return h;
         }
     }
-    h
+    tick(BETA_MAX_ITER);
+    f64::NAN
 }
 
 /// (ln x, ln y) for y = 1 - x, each taken from the smaller of the two.
@@ -563,19 +602,26 @@ fn beta_side(a: f64, x: f64, lx: f64, s: f64) -> f64 {
     }
 }
 
-/// x^a y^b / B(a, b) with y = 1 - x supplied: the stirling form when both
-/// parameters are large, a stirling difference for B when one is.
-fn beta_prefactor(a: f64, b: f64, x: f64, y: f64) -> f64 {
+/// x^a y^b / (B(a, b) d) with y = 1 - x supplied: the stirling form when
+/// both parameters are large, a stirling difference for B when one is. the
+/// divisor d enters the exponent there, so a tiny shape that makes B huge
+/// does not pass through a subnormal.
+fn beta_prefactor_over(a: f64, b: f64, x: f64, y: f64, d: f64) -> f64 {
     let (lx, ly) = ln_pair(x, y);
     if a >= 10.0 && b >= 10.0 {
         let s = a + b;
         let exponent =
             beta_side(a, x, lx, s) + beta_side(b, y, ly, s) - stirling_tail(a) - stirling_tail(b)
                 + stirling_tail(s);
-        exponent.exp() * (a * b / (2.0 * PI * s)).sqrt()
+        exponent.exp() * (a * b / (2.0 * PI * s)).sqrt() / d
     } else {
-        (a * lx + b * ly - lnbeta(a, b)).exp()
+        (a * lx + b * ly - lnbeta(a, b) - d.ln()).exp()
     }
+}
+
+/// x^a y^b / B(a, b).
+fn beta_prefactor(a: f64, b: f64, x: f64, y: f64) -> f64 {
+    beta_prefactor_over(a, b, x, y, 1.0)
 }
 
 /// the regularized incomplete beta ratios (I_x(a, b), 1 - I_x(a, b)) with
@@ -587,19 +633,29 @@ pub(crate) fn beta_pq(a: f64, b: f64, x: f64, y: f64) -> (f64, f64) {
     if y <= 0.0 {
         return (1.0, 0.0);
     }
-    let bt = beta_prefactor(a, b, x, y);
     if x < (a + 1.0) / (a + b + 2.0) {
-        let w = bt * beta_cf(a, b, x) / a;
+        let w = beta_prefactor_over(a, b, x, y, a) * beta_cf(a, b, x);
         (w, 1.0 - w)
     } else {
-        let w = bt * beta_cf(b, a, y) / b;
+        let w = beta_prefactor_over(a, b, x, y, b) * beta_cf(b, a, y);
         (1.0 - w, w)
+    }
+}
+
+/// (x - lo, hi - x) / (hi - lo), halving first when the span overflows.
+fn unit_position(x: f64, lo: f64, hi: f64) -> (f64, f64) {
+    let span = hi - lo;
+    if span.is_finite() {
+        ((x - lo) / span, (hi - x) / span)
+    } else {
+        let half = 0.5 * hi - 0.5 * lo;
+        ((0.5 * x - 0.5 * lo) / half, (0.5 * hi - 0.5 * x) / half)
     }
 }
 
 /// the density of the beta distribution on `[lo, hi]`.
 pub(crate) fn beta_pdf(x: f64, a: f64, b: f64, lo: f64, hi: f64) -> f64 {
-    let t = (x - lo) / (hi - lo);
+    let (t, y) = unit_position(x, lo, hi);
     if !(0.0..=1.0).contains(&t) {
         return 0.0;
     }
@@ -618,13 +674,13 @@ pub(crate) fn beta_pdf(x: f64, a: f64, b: f64, lo: f64, hi: f64) -> f64 {
     if t == 1.0 {
         return edge(b, a);
     }
-    let y = (hi - x) / (hi - lo);
     beta_prefactor(a, b, t, y) / (t * y * (hi - lo))
 }
 
 /// the cdf of the beta distribution on `[lo, hi]`.
 pub(crate) fn beta_cdf(x: f64, a: f64, b: f64, lo: f64, hi: f64) -> f64 {
-    beta_pq(a, b, (x - lo) / (hi - lo), (hi - x) / (hi - lo)).0
+    let (t, y) = unit_position(x, lo, hi);
+    beta_pq(a, b, t, y).0
 }
 
 /// the standard beta quantile on `[0, 1]`: t with I_t(a, b) = p, where
@@ -648,6 +704,9 @@ pub(crate) fn beta_quantile(a: f64, b: f64, p: f64, q: f64) -> f64 {
 fn t_parts(t: f64, df: f64) -> (f64, f64) {
     let q = t / df.sqrt();
     let r = q * q;
+    if r.is_infinite() {
+        return (0.0, 1.0);
+    }
     (1.0 / (1.0 + r), r / (1.0 + r))
 }
 
@@ -656,6 +715,11 @@ fn t_parts(t: f64, df: f64) -> (f64, f64) {
 pub(crate) fn t_tail(t: f64, df: f64) -> f64 {
     if t == 0.0 {
         return 0.5;
+    }
+    let q = t / df.sqrt();
+    if q > 1e16 {
+        let a = 0.5 * df;
+        return (-df * q.ln() - a.ln() - lnbeta(a, 0.5)).exp() * 0.5;
     }
     let (w, y) = t_parts(t, df);
     0.5 * beta_pq(0.5 * df, 0.5, w, y).0
@@ -691,14 +755,19 @@ pub(crate) fn t_upper_quantile(q: f64, df: f64) -> f64 {
         return 0.0;
     }
     let f = |t: f64| q - t_tail(t, df);
-    let hi = upper_bracket(&f, 1.0, 16.0);
-    solve(f, |t| t_pdf(t, df), 0.0, hi)
+    match upper_bracket(&f, 1.0, 16.0) {
+        Some(hi) => solve(f, |t| t_pdf(t, df), 0.0, hi),
+        None => f64::INFINITY,
+    }
 }
 
 /// (d1 x / (d1 x + d2), d2 / (d1 x + d2)) for x > 0, formed from the ratio
 /// d2 / (d1 x) so neither overflows nor rounds to 1 too early.
 fn f_parts(x: f64, d1: f64, d2: f64) -> (f64, f64) {
     let r = d2 / d1 / x;
+    if r.is_infinite() {
+        return (0.0, 1.0);
+    }
     (1.0 / (1.0 + r), r / (1.0 + r))
 }
 
@@ -739,8 +808,10 @@ pub(crate) fn f_quantile(p: f64, q: f64, d1: f64, d2: f64) -> f64 {
         let (lower, upper) = f_tails(x, d1, d2);
         if p <= q { lower - p } else { q - upper }
     };
-    let hi = upper_bracket(&f, 1.0, 16.0);
-    solve(f, |x| f_pdf(x, d1, d2), 0.0, hi)
+    match upper_bracket(&f, 1.0, 16.0) {
+        Some(hi) => solve(f, |x| f_pdf(x, d1, d2), 0.0, hi),
+        None => f64::INFINITY,
+    }
 }
 
 /// the chi-square cdf with `df` degrees of freedom.

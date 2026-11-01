@@ -48,7 +48,12 @@ fn flag(args: &[Expr], ctx: &EvalContext<'_>, i: usize) -> Result<bool, ErrorVal
     to_bool(&evaluate(&args[i], ctx))
 }
 
-fn finish(value: f64) -> CellValue {
+/// the result, after charging the iterations the special functions ran to
+/// the recalculation budget.
+fn finish(ctx: &EvalContext<'_>, value: f64) -> CellValue {
+    if !ctx.consume_cells(crate::array::step_units(special::take_steps())) {
+        return err(ErrorValue::Num);
+    }
     finite(value)
 }
 
@@ -62,7 +67,7 @@ pub(crate) fn gamma(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if z <= 0.0 && z == z.trunc() {
         return err(ErrorValue::Num);
     }
-    finish(special::gamma_fn(z))
+    finish(ctx, special::gamma_fn(z))
 }
 
 /// GAMMALN and GAMMALN.PRECISE(x): ln Gamma(x) for x > 0.
@@ -74,7 +79,7 @@ pub(crate) fn gammaln(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if v[0] <= 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(special::lngamma(v[0]))
+    finish(ctx, special::lngamma(v[0]))
 }
 
 fn gamma_dist_impl(x: f64, alpha: f64, beta: f64, cumulative: bool) -> Result<f64, ErrorValue> {
@@ -102,7 +107,7 @@ pub(crate) fn gamma_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     match gamma_dist_impl(v[0], v[1], v[2], cumulative) {
-        Ok(value) => finish(value),
+        Ok(value) => finish(ctx, value),
         Err(e) => err(e),
     }
 }
@@ -120,7 +125,7 @@ pub(crate) fn gamma_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if p == 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(beta * special::gamma_quantile(alpha, p, 1.0 - p))
+    finish(ctx, beta * special::gamma_quantile(alpha, p, 1.0 - p))
 }
 
 fn beta_bounds(
@@ -177,7 +182,7 @@ pub(crate) fn beta_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     match beta_dist_impl(v[0], v[1], v[2], cumulative, lo, hi) {
-        Ok(value) => finish(value),
+        Ok(value) => finish(ctx, value),
         Err(e) => err(e),
     }
 }
@@ -196,7 +201,7 @@ pub(crate) fn betadist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     match beta_dist_impl(v[0], v[1], v[2], true, lo, hi) {
-        Ok(value) => finish(value),
+        Ok(value) => finish(ctx, value),
         Err(e) => err(e),
     }
 }
@@ -218,7 +223,16 @@ pub(crate) fn beta_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if !(0.0..=1.0).contains(&p) || alpha <= 0.0 || beta <= 0.0 || hi <= lo {
         return err(ErrorValue::Num);
     }
-    finish(lo + (hi - lo) * special::beta_quantile(alpha, beta, p, 1.0 - p))
+    let t = special::beta_quantile(alpha, beta, p, 1.0 - p);
+    let span = hi - lo;
+    finish(
+        ctx,
+        if span.is_finite() {
+            lo + span * t
+        } else {
+            2.0 * (0.5 * lo + (0.5 * hi - 0.5 * lo) * t)
+        },
+    )
 }
 
 /// ERF(lower, [upper]): the error function, or its difference over a range.
@@ -228,9 +242,9 @@ pub(crate) fn erf(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     if v.len() == 1 {
-        finish(special::erf_fn(v[0]))
+        finish(ctx, special::erf_fn(v[0]))
     } else {
-        finish(special::erf_fn(v[1]) - special::erf_fn(v[0]))
+        finish(ctx, special::erf_fn(v[1]) - special::erf_fn(v[0]))
     }
 }
 
@@ -240,20 +254,16 @@ pub(crate) fn erf_precise(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    finish(special::erf_fn(v[0]))
+    finish(ctx, special::erf_fn(v[0]))
 }
 
-/// ERFC and ERFC.PRECISE(x): the complementary error function; excel
-/// requires x >= 0 and gives `#NUM!` below it.
+/// ERFC and ERFC.PRECISE(x): the complementary error function, for any x.
 pub(crate) fn erfc(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let v = match numbers(args, ctx, 1) {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if v[0] < 0.0 {
-        return err(ErrorValue::Num);
-    }
-    finish(special::erfc_fn(v[0]))
+    finish(ctx, special::erfc_fn(v[0]))
 }
 
 /// NORM.S.DIST(z, cumulative).
@@ -269,11 +279,14 @@ pub(crate) fn norm_s_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(b) => b,
         Err(e) => return err(e),
     };
-    finish(if cumulative {
-        special::norm_cdf(z)
-    } else {
-        special::norm_pdf(z)
-    })
+    finish(
+        ctx,
+        if cumulative {
+            special::norm_cdf(z)
+        } else {
+            special::norm_pdf(z)
+        },
+    )
 }
 
 /// NORMSDIST(z): the standard normal cdf; no cumulative flag.
@@ -282,7 +295,7 @@ pub(crate) fn normsdist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    finish(special::norm_cdf(v[0]))
+    finish(ctx, special::norm_cdf(v[0]))
 }
 
 /// PHI(x): the standard normal density.
@@ -291,7 +304,7 @@ pub(crate) fn phi(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    finish(special::norm_pdf(v[0]))
+    finish(ctx, special::norm_pdf(v[0]))
 }
 
 /// GAUSS(z): the probability that a standard normal value falls between the
@@ -301,7 +314,10 @@ pub(crate) fn gauss(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    finish(0.5 * special::erf_fn(v[0] * std::f64::consts::FRAC_1_SQRT_2))
+    finish(
+        ctx,
+        0.5 * special::erf_fn(v[0] * std::f64::consts::FRAC_1_SQRT_2),
+    )
 }
 
 /// NORM.S.INV and NORMSINV(probability).
@@ -313,7 +329,7 @@ pub(crate) fn norm_s_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if v[0] <= 0.0 || v[0] >= 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(special::norm_inv_cdf(v[0]))
+    finish(ctx, special::norm_inv_cdf(v[0]))
 }
 
 /// NORM.INV and NORMINV(probability, mean, standard_dev).
@@ -325,7 +341,7 @@ pub(crate) fn norm_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if v[0] <= 0.0 || v[0] >= 1.0 || v[2] <= 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(v[1] + v[2] * special::norm_inv_cdf(v[0]))
+    finish(ctx, v[1] + v[2] * special::norm_inv_cdf(v[0]))
 }
 
 fn lognorm_cdf(x: f64, mean: f64, sd: f64) -> f64 {
@@ -353,11 +369,14 @@ pub(crate) fn lognorm_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if v[0] <= 0.0 || v[2] <= 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(if cumulative {
-        lognorm_cdf(v[0], v[1], v[2])
-    } else {
-        lognorm_pdf(v[0], v[1], v[2])
-    })
+    finish(
+        ctx,
+        if cumulative {
+            lognorm_cdf(v[0], v[1], v[2])
+        } else {
+            lognorm_pdf(v[0], v[1], v[2])
+        },
+    )
 }
 
 /// LOGNORMDIST(x, mean, standard_dev): always cumulative.
@@ -369,7 +388,7 @@ pub(crate) fn lognormdist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if v[0] <= 0.0 || v[2] <= 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(lognorm_cdf(v[0], v[1], v[2]))
+    finish(ctx, lognorm_cdf(v[0], v[1], v[2]))
 }
 
 /// LOGNORM.INV and LOGINV(probability, mean, standard_dev).
@@ -381,11 +400,21 @@ pub(crate) fn lognorm_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if v[0] <= 0.0 || v[0] >= 1.0 || v[2] <= 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(fmath::exp(v[1] + v[2] * special::norm_inv_cdf(v[0])))
+    finish(ctx, fmath::exp(v[1] + v[2] * special::norm_inv_cdf(v[0])))
 }
 
+/// a degrees-of-freedom argument, truncated toward zero.
 fn degrees_of_freedom(args: &[Expr], ctx: &EvalContext<'_>, i: usize) -> Result<f64, ErrorValue> {
-    Ok(nth_int(args, ctx, i)? as f64)
+    Ok(nth_number(args, ctx, i)?.trunc())
+}
+
+/// the chi-square functions reject more than 10^10 degrees of freedom.
+const CHISQ_MAX_DF: f64 = 1e10;
+
+/// the right-tailed and legacy f functions reject 10^10 or more degrees of
+/// freedom in either argument.
+fn f_df_out_of_range(d1: f64, d2: f64) -> bool {
+    d1 >= 1e10 || d2 >= 1e10
 }
 
 /// CHISQ.DIST(x, deg_freedom, cumulative).
@@ -405,14 +434,17 @@ pub(crate) fn chisq_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(b) => b,
         Err(e) => return err(e),
     };
-    if x < 0.0 || df < 1.0 {
+    if x < 0.0 || df < 1.0 || df > CHISQ_MAX_DF {
         return err(ErrorValue::Num);
     }
-    finish(if cumulative {
-        special::chisq_cdf(x, df)
-    } else {
-        special::chisq_pdf(x, df)
-    })
+    finish(
+        ctx,
+        if cumulative {
+            special::chisq_cdf(x, df)
+        } else {
+            special::chisq_pdf(x, df)
+        },
+    )
 }
 
 /// CHISQ.DIST.RT and CHIDIST(x, deg_freedom): the right tail.
@@ -428,10 +460,10 @@ pub(crate) fn chisq_dist_rt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if x < 0.0 || df < 1.0 {
+    if x < 0.0 || df < 1.0 || df > CHISQ_MAX_DF {
         return err(ErrorValue::Num);
     }
-    finish(special::chisq_tail(x, df))
+    finish(ctx, special::chisq_tail(x, df))
 }
 
 /// CHISQ.INV(probability, deg_freedom): the left-tailed inverse.
@@ -447,10 +479,10 @@ pub(crate) fn chisq_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if !(0.0..=1.0).contains(&p) || df < 1.0 || p == 1.0 {
+    if !(0.0..=1.0).contains(&p) || df < 1.0 || df > CHISQ_MAX_DF || p == 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(2.0 * special::gamma_quantile(0.5 * df, p, 1.0 - p))
+    finish(ctx, 2.0 * special::gamma_quantile(0.5 * df, p, 1.0 - p))
 }
 
 /// CHISQ.INV.RT and CHIINV(probability, deg_freedom): the right-tailed inverse.
@@ -466,10 +498,10 @@ pub(crate) fn chisq_inv_rt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if !(0.0..=1.0).contains(&p) || df < 1.0 || p == 0.0 {
+    if !(0.0..=1.0).contains(&p) || df < 1.0 || df > CHISQ_MAX_DF || p == 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(2.0 * special::gamma_quantile(0.5 * df, 1.0 - p, p))
+    finish(ctx, 2.0 * special::gamma_quantile(0.5 * df, 1.0 - p, p))
 }
 
 /// T.DIST(x, deg_freedom, cumulative).
@@ -492,11 +524,14 @@ pub(crate) fn t_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if df < 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(if cumulative {
-        special::t_cdf(x, df)
-    } else {
-        special::t_pdf(x, df)
-    })
+    finish(
+        ctx,
+        if cumulative {
+            special::t_cdf(x, df)
+        } else {
+            special::t_pdf(x, df)
+        },
+    )
 }
 
 /// T.DIST.RT(x, deg_freedom).
@@ -515,7 +550,7 @@ pub(crate) fn t_dist_rt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if df < 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(special::t_right(x, df))
+    finish(ctx, special::t_right(x, df))
 }
 
 /// T.DIST.2T(x, deg_freedom): both tails; x must be non-negative.
@@ -534,7 +569,7 @@ pub(crate) fn t_dist_2t(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if x < 0.0 || df < 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(2.0 * special::t_tail(x, df))
+    finish(ctx, 2.0 * special::t_tail(x, df))
 }
 
 /// TDIST(x, deg_freedom, tails) with tails truncated to 1 or 2.
@@ -558,7 +593,7 @@ pub(crate) fn tdist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Num);
     }
     let rt = special::t_tail(x, df);
-    finish(if tails == 1 { rt } else { 2.0 * rt })
+    finish(ctx, if tails == 1 { rt } else { 2.0 * rt })
 }
 
 /// T.INV(probability, deg_freedom): the left-tailed inverse.
@@ -577,11 +612,14 @@ pub(crate) fn t_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if p <= 0.0 || p >= 1.0 || df < 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(if p < 0.5 {
-        -special::t_upper_quantile(p, df)
-    } else {
-        special::t_upper_quantile(1.0 - p, df)
-    })
+    finish(
+        ctx,
+        if p < 0.5 {
+            -special::t_upper_quantile(p, df)
+        } else {
+            special::t_upper_quantile(1.0 - p, df)
+        },
+    )
 }
 
 /// T.INV.2T and TINV(probability, deg_freedom): the two-tailed inverse,
@@ -602,9 +640,9 @@ pub(crate) fn t_inv_2t(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Num);
     }
     if p == 1.0 {
-        return finish(0.0);
+        return finish(ctx, 0.0);
     }
-    finish(special::t_upper_quantile(0.5 * p, df))
+    finish(ctx, special::t_upper_quantile(0.5 * p, df))
 }
 
 /// F.DIST(x, deg_freedom1, deg_freedom2, cumulative).
@@ -631,11 +669,14 @@ pub(crate) fn f_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if x < 0.0 || d1 < 1.0 || d2 < 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(if cumulative {
-        special::f_tails(x, d1, d2).0
-    } else {
-        special::f_pdf(x, d1, d2)
-    })
+    finish(
+        ctx,
+        if cumulative {
+            special::f_tails(x, d1, d2).0
+        } else {
+            special::f_pdf(x, d1, d2)
+        },
+    )
 }
 
 /// F.DIST.RT and FDIST(x, deg_freedom1, deg_freedom2): the right tail.
@@ -655,10 +696,10 @@ pub(crate) fn f_dist_rt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if x < 0.0 || d1 < 1.0 || d2 < 1.0 {
+    if x < 0.0 || d1 < 1.0 || d2 < 1.0 || f_df_out_of_range(d1, d2) {
         return err(ErrorValue::Num);
     }
-    finish(special::f_tails(x, d1, d2).1)
+    finish(ctx, special::f_tails(x, d1, d2).1)
 }
 
 /// F.INV(probability, deg_freedom1, deg_freedom2): the left-tailed inverse.
@@ -681,7 +722,7 @@ pub(crate) fn f_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if !(0.0..=1.0).contains(&p) || d1 < 1.0 || d2 < 1.0 || p == 1.0 {
         return err(ErrorValue::Num);
     }
-    finish(special::f_quantile(p, 1.0 - p, d1, d2))
+    finish(ctx, special::f_quantile(p, 1.0 - p, d1, d2))
 }
 
 /// F.INV.RT and FINV(probability, deg_freedom1, deg_freedom2): the
@@ -702,10 +743,10 @@ pub(crate) fn f_inv_rt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if !(0.0..=1.0).contains(&p) || d1 < 1.0 || d2 < 1.0 || p == 0.0 {
+    if !(0.0..=1.0).contains(&p) || d1 < 1.0 || d2 < 1.0 || f_df_out_of_range(d1, d2) || p == 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(special::f_quantile(1.0 - p, p, d1, d2))
+    finish(ctx, special::f_quantile(1.0 - p, p, d1, d2))
 }
 
 /// CONFIDENCE.NORM and CONFIDENCE(alpha, standard_dev, size).
@@ -725,7 +766,10 @@ pub(crate) fn confidence_norm(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue
     if alpha <= 0.0 || alpha >= 1.0 || sd <= 0.0 || size < 1 {
         return err(ErrorValue::Num);
     }
-    finish(-special::norm_inv_lower(0.5 * alpha) * sd / (size as f64).sqrt())
+    finish(
+        ctx,
+        -special::norm_inv_lower(0.5 * alpha) * sd / (size as f64).sqrt(),
+    )
 }
 
 /// CONFIDENCE.T(alpha, standard_dev, size).
@@ -749,7 +793,7 @@ pub(crate) fn confidence_t(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Div0);
     }
     let critical = special::t_upper_quantile(0.5 * alpha, (size - 1) as f64);
-    finish(critical * sd / (size as f64).sqrt())
+    finish(ctx, critical * sd / (size as f64).sqrt())
 }
 
 /// one test argument by position: `None` where a cell is not a number. the
@@ -829,6 +873,27 @@ fn paired(first: &Grid, second: &Grid) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// a power of two near the largest magnitude in both samples. the t and f
+/// statistics do not depend on scale, so dividing by it keeps squares of
+/// huge or tiny values finite and nonzero without changing any digit.
+fn common_scale(first: &Grid, second: &Grid) -> f64 {
+    let max = first
+        .cells
+        .iter()
+        .chain(&second.cells)
+        .flatten()
+        .fold(0.0f64, |m, v| m.max(v.abs()));
+    if max > 0.0 && max.is_finite() {
+        2f64.powi((max.log2().floor() as i32).clamp(-1000, 1000))
+    } else {
+        1.0
+    }
+}
+
+fn scaled(values: Vec<f64>, scale: f64) -> Vec<f64> {
+    values.into_iter().map(|v| v / scale).collect()
+}
+
 fn sample_stats(values: &[f64]) -> (f64, f64) {
     let n = values.len() as f64;
     let mean = values.iter().sum::<f64>() / n;
@@ -858,8 +923,11 @@ pub(crate) fn chisq_test(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::NA);
     }
     let pairs = paired(&actual, &expected);
-    if pairs.iter().any(|(a, e)| *a < 0.0 || *e <= 0.0) {
+    if pairs.iter().any(|(a, e)| *a < 0.0 || *e < 0.0) {
         return err(ErrorValue::Num);
+    }
+    if pairs.iter().any(|(_, e)| *e == 0.0) {
+        return err(ErrorValue::Div0);
     }
     if pairs.is_empty() {
         return err(ErrorValue::NA);
@@ -873,7 +941,7 @@ pub(crate) fn chisq_test(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::NA);
     }
     let stat: f64 = pairs.iter().map(|(a, e)| (a - e) * (a - e) / e).sum();
-    finish(special::gamma_q(0.5 * df as f64, 0.5 * stat))
+    finish(ctx, special::gamma_q(0.5 * df as f64, 0.5 * stat))
 }
 
 /// T.TEST and TTEST(array1, array2, tails, type). the paired test pairs the
@@ -899,7 +967,7 @@ pub(crate) fn t_test(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     let rt = special::t_tail(t.abs(), df);
-    finish(if tails == 1 { rt } else { 2.0 * rt })
+    finish(ctx, if tails == 1 { rt } else { 2.0 * rt })
 }
 
 fn t_statistic(args: &[Expr], ctx: &EvalContext<'_>, kind: i64) -> Result<(f64, f64), ErrorValue> {
@@ -910,7 +978,11 @@ fn t_statistic(args: &[Expr], ctx: &EvalContext<'_>, kind: i64) -> Result<(f64, 
         {
             return Err(ErrorValue::NA);
         }
-        let diffs: Vec<f64> = paired(&first, &second).iter().map(|(a, b)| a - b).collect();
+        let scale = common_scale(&first, &second);
+        let diffs: Vec<f64> = paired(&first, &second)
+            .iter()
+            .map(|(a, b)| a / scale - b / scale)
+            .collect();
         if diffs.len() < 2 {
             return Err(ErrorValue::Div0);
         }
@@ -921,8 +993,9 @@ fn t_statistic(args: &[Expr], ctx: &EvalContext<'_>, kind: i64) -> Result<(f64, 
         let n = diffs.len() as f64;
         Ok((mean / (var / n).sqrt(), n - 1.0))
     } else {
-        let first = first.numbers();
-        let second = second.numbers();
+        let scale = common_scale(&first, &second);
+        let first = scaled(first.numbers(), scale);
+        let second = scaled(second.numbers(), scale);
         if first.len() < 2 || second.len() < 2 {
             return Err(ErrorValue::Div0);
         }
@@ -957,7 +1030,13 @@ pub(crate) fn f_test(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let (first, second) = match grids(args, ctx) {
-        Ok((first, second)) => (first.numbers(), second.numbers()),
+        Ok((first, second)) => {
+            let scale = common_scale(&first, &second);
+            (
+                scaled(first.numbers(), scale),
+                scaled(second.numbers(), scale),
+            )
+        }
         Err(e) => return err(e),
     };
     if first.len() < 2 || second.len() < 2 {
@@ -970,5 +1049,5 @@ pub(crate) fn f_test(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     let f = v1 / v2;
     let (cdf, tail) = special::f_tails(f, (first.len() - 1) as f64, (second.len() - 1) as f64);
-    finish(2.0 * cdf.min(tail))
+    finish(ctx, 2.0 * cdf.min(tail))
 }
