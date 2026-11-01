@@ -110,3 +110,72 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export', () => {
     }
   }, 30_000);
 });
+
+async function controlled(entry: 'pngRasterDelayWorker' | 'pngRasterFailWorker') {
+  const worker = new Worker(new URL(`./testing/${entry}.ts`, import.meta.url), { type: 'module' });
+  const requests: string[] = [];
+  worker.addEventListener('message', (event: MessageEvent) => {
+    const message: unknown = event.data;
+    if (isHostMessage(message) && message.kind === 'event' && message.name === 'png-test-fetch' &&
+      typeof message.payload === 'string') requests.push(message.payload);
+  });
+  try {
+    const session = await openWorkbookSession(fixture, { worker: () => worker, png: false,
+      calculation: { nowSerial: 45000, randSeed: 1 } });
+    return { session, requests };
+  } catch (error) {
+    worker.terminate();
+    throw error;
+  }
+}
+
+async function edit(session: WorkbookSession, seq: number, value: string) {
+  await session.submit({ ...session.commandIdentity, basis: session.confirmedBasis, seq,
+    kind: 'editCell', payload: { args: [0, 2, 1, value] } });
+}
+
+describe.skipIf(engineKind === 'native')('lazy worker PNG export while the rasterizer loads', () => {
+  test('a slow raster download does not block later edits, frames or saves, which the export does not see', async () => {
+    const { session, requests } = await controlled('pngRasterDelayWorker');
+    const full = await opened(true);
+    try {
+      let settled = false;
+      const exported = session.call.renderPng(viewport).finally(() => { settled = true; });
+      const edited = edit(session, 1, 'after export');
+      const before = await full.session.call.renderPng(viewport);
+      await edited;
+      expect((await session.call.frame(viewport)).sheet).toBe(0);
+      expect((await session.save()).byteLength).toBeGreaterThan(0);
+      while (rasterRequests(requests).length === 0) await Bun.sleep(5);
+      expect(settled).toBe(false);
+      expect(await exported).toEqual(before);
+      await edit(full.session, 1, 'after export');
+      const after = await full.session.call.renderPng(viewport);
+      expect(after).not.toEqual(before);
+      expect(await session.call.renderPng(viewport)).toEqual(after);
+      expect(rasterRequests(requests)).toHaveLength(1);
+      expect(session.failure).toBeUndefined();
+    } finally {
+      await session.dispose();
+      await full.session.dispose();
+    }
+  }, 30_000);
+
+  test('a failed raster download rejects only that export and the next export retries it', async () => {
+    const { session, requests } = await controlled('pngRasterFailWorker');
+    const full = await opened(true);
+    try {
+      expect(await failure(session.call.renderPng(viewport))).toBe('Raster download failed');
+      expect(session.failure).toBeUndefined();
+      await edit(session, 1, 'after failure');
+      expect((await session.save()).byteLength).toBeGreaterThan(0);
+      await edit(full.session, 1, 'after failure');
+      expect(await session.call.renderPng(viewport)).toEqual(await full.session.call.renderPng(viewport));
+      expect(rasterRequests(requests)).toHaveLength(2);
+      expect(session.failure).toBeUndefined();
+    } finally {
+      await session.dispose();
+      await full.session.dispose();
+    }
+  }, 30_000);
+});

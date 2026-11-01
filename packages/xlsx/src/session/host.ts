@@ -170,7 +170,7 @@ export function createWorkbookSessionHost(
       if (sheet !== active) opened.setActiveSheet(sheet);
       if (isPngExportAvailable()) return transferBytes(render(opened));
       const json = displayList(opened);
-      return options.renderPng!(json).then(transferBytes);
+      return deferReply(options.renderPng!(json).then(transferBytes));
     } finally {
       if (sheet !== active) opened.setActiveSheet(active);
     }

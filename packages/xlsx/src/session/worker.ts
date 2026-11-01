@@ -38,6 +38,6 @@ const host = createWorkbookSessionHost(transport, {
     return initializeLean(input);
   },
   wasmModule: () => module,
-  renderPng,
+  renderPng: (displayListJson) => renderPng(displayListJson, { progress: () => host.progress() }),
 });
 Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });
