@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -87,6 +93,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-fonts"
+version = "0.5.1"
+dependencies = [
+ "cc",
+ "ruzstd",
+ "wuff",
+]
+
+[[package]]
 name = "betteroffice-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -95,6 +110,7 @@ dependencies = [
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
+ "betteroffice-xlsx",
  "betteroffice-xlsx-ops",
  "libfuzzer-sys",
  "serde",
@@ -200,6 +216,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-xlsx"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-fonts",
+ "betteroffice-opc",
+ "betteroffice-xlsx-calc",
+ "betteroffice-xlsx-model",
+ "betteroffice-xlsx-ops",
+ "betteroffice-xlsx-parse",
+ "betteroffice-xlsx-render",
+ "serde",
+ "serde_json",
+ "sha2",
+ "yrs",
+]
+
+[[package]]
 name = "betteroffice-xlsx-calc"
 version = "0.5.1"
 dependencies = [
@@ -224,6 +258,28 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "betteroffice-xlsx-parse"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-xlsx-model",
+ "quick-xml",
+ "serde",
+]
+
+[[package]]
+name = "betteroffice-xlsx-render"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-xlsx-model",
+ "hashbrown 0.17.1",
+ "libm",
+ "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -272,6 +328,12 @@ name = "byteorder-lite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
+
+[[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
@@ -480,6 +542,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "font-types"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -590,6 +658,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "image"
@@ -972,6 +1045,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1221,6 +1303,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
+
+[[package]]
 name = "typed-path"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1375,6 +1463,15 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "wuff"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200a7b806377b65f1ff9a985874332f15357c87e5dd7855f35f06dade95b8b3d"
+dependencies = [
+ "bytes",
+]
 
 [[package]]
 name = "xmlwriter"
