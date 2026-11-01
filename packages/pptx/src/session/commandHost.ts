@@ -21,7 +21,7 @@ import { buildCommandFrame } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
-import type { DefaultFontFace, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
+import type { DefaultFontFace, DefaultFontLanding, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
   type PresentationSharedAck, type PresentationSharedMethods } from './commandSharedAdapter';
 import { findLine, hitGeometry, indexHitGeometry, navigateGeometry, transformedRect,
@@ -126,7 +126,7 @@ export function registerPresentationCommandHandlers(
   let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
   let cancelDefaultFontImport: (() => void) | undefined;
   let gatingFonts = false;
-  const gatedDefaultFonts: DefaultFontFace[] = [];
+  const gatedDefaultFonts: DefaultFontLanding[] = [];
   let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
@@ -181,7 +181,7 @@ export function registerPresentationCommandHandlers(
     } catch { return false; }
   }
 
-  function requestDefaultFonts(slideId?: string): DefaultFontFace[] | Promise<DefaultFontFace[]> {
+  function requestDefaultFonts(slideId?: string): DefaultFontLanding[] | Promise<DefaultFontLanding[]> {
     if (!hasDefaultFonts(slideId)) return [];
     if (defaultFonts) return defaultFonts.load(slideId);
     creatingDefaultFonts ??= new Promise<ReturnType<typeof createCommandDefaultFonts> | undefined>((resolve) => {
@@ -218,8 +218,7 @@ export function registerPresentationCommandHandlers(
             if (gatingFonts) { gatedDefaultFonts.push(...faces); return; }
             if (!opening && options.onDefaultFonts) {
               const result = ack([], [...revisions.keys()]);
-              options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces },
-                [...result.transfer, ...faces.map((face) => face.bytes)]));
+              options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces }, result.transfer));
             }
           }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()));
         finish(defaultFonts);
@@ -1483,8 +1482,7 @@ export function registerPresentationCommandHandlers(
           admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
           admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
         if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
-        return faces.length ? transferable({ ...result.value, defaultFonts: faces },
-          [...result.transfer, ...faces.map((face) => face.bytes)]) : result;
+        return faces.length ? transferable({ ...result.value, defaultFonts: faces }, result.transfer) : result;
       };
       if (activeSlideId !== previous.activeSlideId && activeSlideId !== null && hasDefaultFonts(activeSlideId)) {
         gatingFonts = true;
@@ -1575,7 +1573,7 @@ export function registerPresentationCommandHandlers(
           activeSlideId, frame: result.value.frame ?? null, recoveryBaseline: sourceBaseline ? 'source' : 'update',
           recoveryEngine: engineVersion(), ...(recoveryUpdate ? { recoveryUpdate } : {}),
           ...(fonts ? { defaultFonts: fonts } : {}) },
-          [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : []), ...(fonts ?? []).map((face) => face.bytes)]);
+          [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : [])]);
       } catch (error) {
         dispose();
         throw error;

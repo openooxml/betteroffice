@@ -15,17 +15,18 @@ type Methods = {
   trap(): never;
   exhaust(): never;
   transfer(buffer: ArrayBuffer): ArrayBuffer;
+  later(): string;
 };
 type Events = { tick: number };
 const methods = {
   echo: true, add: true, slow: true, mutate: true, throw: true, trap: true,
-  exhaust: true, transfer: true,
+  exhaust: true, transfer: true, later: true,
 } as const;
 const policies: MethodPolicies<Methods> = {
   echo: { lane: 'interactive' }, add: { lane: 'interactive' },
   slow: { lane: 'interactive' }, mutate: { lane: 'input', mutates: true },
   throw: { lane: 'interactive' }, trap: { lane: 'interactive' }, transfer: { lane: 'interactive' },
-  exhaust: { lane: 'interactive' },
+  exhaust: { lane: 'interactive' }, later: { lane: 'interactive' },
 };
 
 function deferred<T>() {
@@ -38,6 +39,7 @@ function deferred<T>() {
 function session(executor?: TaskExecutor) {
   const pair = createInProcessPair();
   const held = deferred<string>();
+  const later = deferred<string>();
   const started = deferred<void>();
   const disposed = deferred<void>();
   const order: string[] = [];
@@ -54,11 +56,12 @@ function session(executor?: TaskExecutor) {
       trap: () => { throw new WebAssembly.RuntimeError('unreachable'); },
       exhaust: () => { throw new SessionFailure('out-of-memory', 'Memory exhausted'); },
       transfer: (_, buffer) => { hostBuffer = buffer; return transferable(buffer, [buffer]); },
+      later: () => deferReply(later.promise),
     },
     onDispose: () => { disposeCount += 1; disposed.resolve(); },
   });
   const client = createSessionClient<Methods, Events>(pair.client, { methods });
-  return { pair, host, client, held, started, disposed, order,
+  return { pair, host, client, held, later, started, disposed, order,
     get disposeCount() { return disposeCount; },
     get hostBuffer() { return hostBuffer; },
   };
@@ -93,6 +96,30 @@ describe('session host and cloned transport', () => {
     s.host.progress();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(seen).toEqual(['progress:1', 'reply:1', 'reply:2']);
+    await s.client.dispose();
+  });
+
+  it('reports progress for a pending deferred reply once no call is running', async () => {
+    const s = session();
+    const seen: string[] = [];
+    s.pair.client.listen((message) => {
+      if (isHostMessage(message) && (message.kind === 'progress' || message.kind === 'reply')) {
+        seen.push(`${message.kind}:${message.id}`);
+      }
+    });
+    const pending = s.client.call.later();
+    expect(await s.client.call.add(1, 2)).toBe(3);
+    const realNow = Date.now;
+    Date.now = () => realNow() + 1_000;
+    try { s.host.progress(); } finally { Date.now = realNow; }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['reply:2', 'progress:1']);
+    s.later.resolve('late');
+    expect(await pending).toBe('late');
+    Date.now = () => realNow() + 2_000;
+    try { s.host.progress(); } finally { Date.now = realNow; }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['reply:2', 'progress:1', 'reply:1']);
     await s.client.dispose();
   });
 

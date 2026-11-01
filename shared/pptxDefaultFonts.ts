@@ -15,8 +15,11 @@ export interface DefaultFontFace {
   ownWeight?: boolean;
 }
 
+/** A default face the worker registered; its bytes reach the main thread only in the install request. */
+export type DefaultFontLanding = Omit<DefaultFontFace, 'bytes'>;
+
 export interface DefaultFontPayload {
-  defaultFonts?: DefaultFontFace[];
+  defaultFonts?: DefaultFontLanding[];
 }
 
 export const defaultFontInstaller = 'pptxDefaultFontInstaller';

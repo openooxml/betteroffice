@@ -217,7 +217,10 @@ name = "betteroffice-fonts"
 version = "0.5.1"
 dependencies = [
  "cc",
+ "quick-xml",
  "ruzstd",
+ "serde",
+ "serde_json",
  "wuff",
 ]
 
@@ -502,6 +505,7 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-fonts",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",

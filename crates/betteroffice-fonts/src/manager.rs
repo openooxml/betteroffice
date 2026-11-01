@@ -83,9 +83,22 @@ pub enum FontSource {
     Provider(Arc<dyn FontProvider>),
 }
 
+static DEFAULT_FONT_SOURCE: OnceLock<FontSource> = OnceLock::new();
+
+/// Sets the source that [`FontSource::default`] returns for the rest of the
+/// process, so every open path that takes default options uses it. Only the
+/// first call takes effect; a later call returns its source unchanged.
+#[doc(hidden)]
+pub fn set_default_font_source(source: FontSource) -> Result<(), FontSource> {
+    DEFAULT_FONT_SOURCE.set(source)
+}
+
 impl Default for FontSource {
     fn default() -> Self {
-        Self::Bundled(BundledFontOptions::default())
+        DEFAULT_FONT_SOURCE
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Self::Bundled(BundledFontOptions::default()))
     }
 }
 

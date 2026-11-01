@@ -17,6 +17,11 @@ await buildWasmModules([
     cargoArgs: ['--no-default-features', '--locked'],
     variant: 'lean',
   },
+  {
+    crate: 'xlsx-raster-wasm',
+    name: 'xlsx_raster',
+    generated: 'packages/xlsx/src/wasm/generated/raster',
+  },
 ]);
 
 for (const file of ['xlsx_wasm.js', 'xlsx_wasm.d.ts', 'xlsx_wasm_bg.wasm.d.ts']) {
