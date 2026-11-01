@@ -1620,8 +1620,13 @@ impl FontRequestWalker<'_, '_> {
             )?;
         } else if let Some(story) = shape.text_stories.first() {
             let cascade = scope.cascade(nodes, shape.placeholder.as_ref(), false);
-            let content =
-                content_from_story(story, cascade.primary, scope.slide_number, scope.theme);
+            let content = content_from_story(
+                story,
+                cascade.primary,
+                scope.slide_number,
+                scope.theme,
+                true,
+            );
             self.requests.content(scope.theme, &content, cascade)?;
         }
         Ok(())
@@ -1711,6 +1716,7 @@ impl FontRequestWalker<'_, '_> {
                                 Some(&cell.text),
                                 scope.slide_number,
                                 scope.theme,
+                                true,
                             ),
                             None => content_from_body(
                                 &format!("{shape_id}:table:{row_index}:{column}"),
@@ -2088,6 +2094,7 @@ impl<'a> LayoutBuilder<'a> {
                         body_cascade.primary,
                         self.slide_number,
                         self.theme,
+                        false,
                     );
                     content.refit_autofit =
                         matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
@@ -2881,9 +2888,13 @@ impl<'a> LayoutBuilder<'a> {
                 let span = (cell.grid_span as usize).clamp(1, column_count - column);
                 let row_span = (cell.row_span as usize).clamp(1, row_count - row_index);
                 let content = match story {
-                    Some(story) => {
-                        content_from_story(story, Some(&cell.text), self.slide_number, self.theme)
-                    }
+                    Some(story) => content_from_story(
+                        story,
+                        Some(&cell.text),
+                        self.slide_number,
+                        self.theme,
+                        false,
+                    ),
                     None => content_from_body(
                         &format!("{shape_id}:table:{row_index}:{column}"),
                         &cell.text,
@@ -3781,11 +3792,14 @@ struct ContentRun {
     languages: Vec<(std::ops::Range<usize>, Option<String>)>,
 }
 
+/// Live story content; `with_languages` attaches the source languages that only font
+/// requests read, so layout skips that work.
 fn content_from_story(
     story: &StorySnapshot,
     source: Option<&TextBody>,
     slide_number: i64,
     theme: &Theme,
+    with_languages: bool,
 ) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
@@ -3802,9 +3816,9 @@ fn content_from_story(
                 let insertions = source_para
                     .map(|source| slide_number_insertions(source, &live))
                     .unwrap_or_default();
-                let sources: Vec<&pptx_parse::TextParagraph> = if paragraph.source_paragraphs.len()
-                    > 1
-                {
+                let sources: Vec<&pptx_parse::TextParagraph> = if !with_languages {
+                    Vec::new()
+                } else if paragraph.source_paragraphs.len() > 1 {
                     paragraph
                         .source_paragraphs
                         .iter()
@@ -3816,7 +3830,12 @@ fn content_from_story(
                 } else {
                     source_para.into_iter().collect()
                 };
-                let mut live_languages = live_run_languages(&sources, &live).into_iter();
+                let mut live_languages = if with_languages {
+                    live_run_languages(&sources, &live)
+                } else {
+                    Vec::new()
+                }
+                .into_iter();
                 let mut runs = Vec::with_capacity(paragraph.runs.len() + insertions.len());
                 let mut insertion_index = 0;
                 let mut offset = 0;
@@ -3827,10 +3846,11 @@ fn content_from_story(
                         let source_run = insertions[insertion_index].1;
                         let text = slide_number.to_string();
                         runs.push(ContentRun {
-                            languages: vec![(
-                                0..text.len(),
-                                source_run.properties.language.clone(),
-                            )],
+                            languages: if with_languages {
+                                vec![(0..text.len(), source_run.properties.language.clone())]
+                            } else {
+                                Vec::new()
+                            },
                             text,
                             style: style_from_run_properties(&source_run.properties, Some(theme)),
                         });
@@ -3843,13 +3863,13 @@ fn content_from_story(
                         .and_then(|values| values.get(run_index))
                         .and_then(|value| value.clone());
                     let languages = match &replaced {
-                        Some(text) => {
+                        Some(text) if with_languages => {
                             east_asian_languages(&mut languages.iter().map(|(_, tag)| tag.as_ref()))
                                 .into_iter()
                                 .map(|tag| (0..text.len(), tag))
                                 .collect()
                         }
-                        None => languages,
+                        _ => languages,
                     };
                     runs.push(ContentRun {
                         languages,
@@ -3861,7 +3881,11 @@ fn content_from_story(
                     let source_run = insertions[insertion_index].1;
                     let text = slide_number.to_string();
                     runs.push(ContentRun {
-                        languages: vec![(0..text.len(), source_run.properties.language.clone())],
+                        languages: if with_languages {
+                            vec![(0..text.len(), source_run.properties.language.clone())]
+                        } else {
+                            Vec::new()
+                        },
                         text,
                         style: style_from_run_properties(&source_run.properties, Some(theme)),
                     });
