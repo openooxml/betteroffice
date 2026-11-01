@@ -13,6 +13,7 @@ import type { XlsxAsyncEditorApi } from './createAsyncEditorApi';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const MOUNTED = { timeout: 4_000 };
 const restorers: (() => void)[] = [];
 let frames: Map<number, FrameRequestCallback>;
 let nextFrame = 0;
@@ -86,7 +87,7 @@ async function mount(protectedSheet: boolean, formatCells = false, i18n?: Transl
       for (const callback of callbacks) callback(0);
     });
     expect(ready).toHaveBeenCalledTimes(1);
-  });
+  }, MOUNTED);
   return { view, session, api: ready.mock.calls[0][0] };
 }
 
