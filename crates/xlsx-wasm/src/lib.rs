@@ -2,7 +2,9 @@
 //! `Session` methods in `core.rs`.
 
 use wasm_bindgen::prelude::*;
-use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
+#[cfg(feature = "peer-snapshot")]
+use xlsx_engine::SnapshotBuilder;
+use xlsx_engine::{Document, EngineError, ErrorKind, Host};
 
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
@@ -167,7 +169,13 @@ pub struct XlsxDocument {
 
 #[wasm_bindgen]
 pub struct XlsxSnapshotBuilder {
+    #[cfg(feature = "peer-snapshot")]
     inner: SnapshotBuilder,
+}
+
+#[cfg(not(feature = "peer-snapshot"))]
+fn peer_snapshot_unavailable() -> JsValue {
+    JsValue::from_str("peer snapshots not in this build")
 }
 
 #[wasm_bindgen]
@@ -175,23 +183,47 @@ impl XlsxSnapshotBuilder {
     #[wasm_bindgen(constructor)]
     pub fn new() -> XlsxSnapshotBuilder {
         Self {
+            #[cfg(feature = "peer-snapshot")]
             inner: SnapshotBuilder::new(wasm_host()),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
-        self.inner.push(chunk).map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner.push(chunk).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = chunk;
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     pub fn advance(&mut self, records: usize, bytes: usize) -> Result<bool, JsValue> {
-        self.inner.advance(records, bytes).map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner.advance(records, bytes).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (records, bytes);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     pub fn finish(self) -> Result<XlsxDocument, JsValue> {
-        self.inner
-            .finish()
-            .map(|inner| XlsxDocument { inner })
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .finish()
+                .map(|inner| XlsxDocument { inner })
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            Err(peer_snapshot_unavailable())
+        }
     }
 }
 
@@ -228,21 +260,37 @@ impl XlsxDocument {
 
     #[wasm_bindgen(js_name = beginPeerSnapshot)]
     pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), JsValue> {
-        self.inner
-            .begin_peer_snapshot(records, bytes)
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .begin_peer_snapshot(records, bytes)
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (records, bytes);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     #[wasm_bindgen(js_name = nextPeerSnapshotChunk)]
     pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
-        self.inner
-            .next_peer_snapshot_chunk()
-            .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .next_peer_snapshot_chunk()
+                .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     #[wasm_bindgen(js_name = endPeerSnapshot)]
     pub fn end_peer_snapshot(&mut self) {
+        #[cfg(feature = "peer-snapshot")]
         self.inner.end_peer_snapshot();
     }
 
@@ -266,9 +314,17 @@ impl XlsxDocument {
         bytes: &[u8],
         hydration: &str,
     ) -> Result<XlsxDocument, JsValue> {
-        Document::open_with_peer_hydration_json(bytes, hydration, wasm_host())
-            .map(|inner| XlsxDocument { inner })
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            Document::open_with_peer_hydration_json(bytes, hydration, wasm_host())
+                .map(|inner| XlsxDocument { inner })
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (bytes, hydration);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     /// open a workbook from raw `.xlsx` bytes.
