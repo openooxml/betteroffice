@@ -336,7 +336,7 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn for_sheet(&self, sheet: SheetId) -> Self {
+    pub(crate) fn for_sheet(&self, sheet: SheetId) -> Self {
         Self {
             provider: self.provider,
             sheet,
