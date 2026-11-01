@@ -273,7 +273,7 @@ fn array_formula_reads_include_anchors_members_and_empty_members() {
         workbook.cell(SheetId(0), cell("B1")).unwrap(),
         CellEdit {
             cell: cell("B1"),
-            input: "=SEQUENCE(2,2)".into(),
+            input: "=_xlfn.SEQUENCE(2,2)".into(),
             is_formula: true
         },
     );
