@@ -1,5 +1,5 @@
 import { createScopeTransport, type SessionScope } from '../../../../shared/office-session/transport';
-import { sessionWorkerScope, compileSessionWasm } from '#session-worker';
+import { sessionWorkerScope, compileSessionWasm } from '#session-scope';
 import { createWorkerWasmInitializer } from '../../../../shared/office-session/wasm';
 import { sessionWasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';

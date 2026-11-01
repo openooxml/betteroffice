@@ -165,6 +165,13 @@ jobs:
           BETTEROFFICE_PACKAGE_DECLARATIONS: prebuilt
         run: bun test scripts/docx-plugin-declarations.test.ts scripts/xlsx-plugin-declarations.test.ts scripts/pptx-plugin-declarations.test.ts
 
+      - name: Build the demo app
+        timeout-minutes: 15
+        working-directory: apps/demo
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: bunx next build
+
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: "24"

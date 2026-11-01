@@ -31,7 +31,10 @@ describe('@betteroffice/pptx-native', () => {
     expect(manifest.sideEffects).toEqual(wasmManifest.sideEffects);
     expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({
       type: 'module',
-      imports: { '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.browser.js' } },
+      imports: {
+        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.browser.js' },
+        '#session-scope': { node: './sessionScope.node.js', default: './sessionScope.browser.js' },
+      },
     });
   });
 

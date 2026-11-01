@@ -74,19 +74,28 @@ describe('native package registry', () => {
       const directory = format === 'docx' ? 'yrs' : 'session';
       const core = JSON.parse(readFileSync(new URL(`../packages/${format}/package.json`, import.meta.url), 'utf8'));
       const native = JSON.parse(readFileSync(new URL(`../bindings/${format}-native/package.json`, import.meta.url), 'utf8'));
-      const imports = { '#session-worker': {
-        node: `./dist/sessionWorker.node.${extension}`,
-        default: `./dist/sessionWorker.browser.${extension}`,
-      } };
+      const imports = {
+        '#session-worker': {
+          node: `./dist/sessionWorker.node.${extension}`,
+          default: `./dist/sessionWorker.browser.${extension}`,
+        },
+        '#session-scope': {
+          node: `./dist/sessionScope.node.${extension}`,
+          default: `./dist/sessionScope.browser.${extension}`,
+        },
+      };
       expect(core.imports).toEqual(imports);
       expect(native.imports).toEqual(imports);
       const config = JSON.parse(readFileSync(new URL(`../packages/${format}/tsconfig.json`, import.meta.url), 'utf8'));
       expect(config.compilerOptions.paths['#session-worker']).toEqual([`./src/${directory}/sessionWorker.node.ts`]);
+      expect(config.compilerOptions.paths['#session-scope']).toEqual([`./src/${directory}/sessionScope.node.ts`]);
       for (const path of [`packages/${format}/tsup.config.ts`, `bindings/${format}-native/js/tsup.config.ts`]) {
         const build = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
-        expect(build).toMatch(/external: \[[^\]]*'#session-worker'/);
+        expect(build).toMatch(/external: \[[^\]]*'#session-worker', '#session-scope'/);
         expect(build).toContain("'sessionWorker.browser':");
         expect(build).toContain("'sessionWorker.node':");
+        expect(build).toContain("'sessionScope.browser':");
+        expect(build).toContain("'sessionScope.node':");
       }
     }
   });

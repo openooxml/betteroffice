@@ -131,7 +131,7 @@ import {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 
-import { sessionWorkerScope } from '#session-worker';
+import { sessionWorkerScope } from '#session-scope';
 
 let scope: DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;

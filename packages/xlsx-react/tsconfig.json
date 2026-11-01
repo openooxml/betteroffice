@@ -21,6 +21,7 @@
     "declarationMap": true,
     "paths": {
       "#session-worker": ["../xlsx/src/session/sessionWorker.node.ts"],
+      "#session-scope": ["../xlsx/src/session/sessionScope.node.ts"],
       "@/*": ["./src/*"],
       "@betteroffice/xlsx": ["../xlsx/src/index.ts"],
       "@betteroffice/xlsx-i18n": ["../xlsx-i18n/src/index.ts"],

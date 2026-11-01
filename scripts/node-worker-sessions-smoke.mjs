@@ -47,9 +47,11 @@ if (process.argv.includes('--keep-alive-child')) {
   for (const suffix of ['', '-native']) {
     for (const format of ['xlsx', 'pptx', 'docx']) {
       const entry = import.meta.resolve(`@betteroffice/${format}${suffix}/worker`);
-      const adapter = createRequire(entry).resolve('#session-worker');
-      assert.match(adapter, /sessionWorker\.node\.(?:js|mjs)$/);
-      assert.ok(existsSync(adapter), `Missing conditional worker adapter: ${adapter}`);
+      for (const [specifier, variant] of [['#session-worker', 'sessionWorker'], ['#session-scope', 'sessionScope']]) {
+        const adapter = createRequire(entry).resolve(specifier);
+        assert.match(adapter, new RegExp(`${variant}\\.node\\.(?:js|mjs)$`));
+        assert.ok(existsSync(adapter), `Missing conditional worker adapter: ${adapter}`);
+      }
     }
     const { openWorkbookSession } = await import(`@betteroffice/xlsx${suffix}/worker`);
     const workbook = await openWorkbookSession(xlsxBytes);
