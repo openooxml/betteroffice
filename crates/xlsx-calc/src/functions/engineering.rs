@@ -30,6 +30,10 @@ const MAX_ORDER: f64 = 2_147_483_647.0;
 const PRODUCT_ORDERS: usize = 100_000;
 /// the power of two series rescale by to stay inside the double range.
 const RESCALE_BITS: i32 = 500;
+/// past this argument K underflows at every order up to [`MAX_ORDER`].
+const K_VANISHES: f64 = 1e30;
+/// from here on e^-x is no longer a normal double.
+const EXP_UNDERFLOW: f64 = 700.0;
 /// below this natural logarithm a result is lost to underflow.
 const UNDERFLOW: f64 = -750.0;
 /// loops longer than this spend the recalculation budget.
@@ -335,19 +339,72 @@ impl Complex {
         )
     }
 
+    fn is_finite(self) -> bool {
+        self.re.is_finite() && self.im.is_finite()
+    }
+
+    /// the textbook quotient over the divisor's squared modulus; when that
+    /// square leaves the double range, or the quotient does, smith's
+    /// rescaled division, so `IMDIV("1+i","1E200+1E200i")` is `1E-200`.
     fn div(self, other: Self) -> Option<Self> {
-        let scale = other.re * other.re + other.im * other.im;
-        if scale == 0.0 {
+        if other.is_zero() {
             return None;
         }
-        Some(Self::new(
+        let scale = other.re * other.re + other.im * other.im;
+        let plain = Self::new(
             (self.re * other.re + self.im * other.im) / scale,
             (self.im * other.re - self.re * other.im) / scale,
-        ))
+        );
+        if scale.is_normal() && plain.is_finite() {
+            return Some(plain);
+        }
+        let (c, d) = (other.re, other.im);
+        Some(if c.abs() >= d.abs() {
+            let ratio = d / c;
+            let scale = c + d * ratio;
+            Self::new(
+                (self.re + self.im * ratio) / scale,
+                (self.im - self.re * ratio) / scale,
+            )
+        } else {
+            let ratio = c / d;
+            let scale = c * ratio + d;
+            Self::new(
+                (self.re * ratio + self.im) / scale,
+                (self.im * ratio - self.re) / scale,
+            )
+        })
     }
 
     fn abs(self) -> f64 {
         hypot(self.re, self.im)
+    }
+
+    /// |z| as `(largest part, |z| / largest part)`, for a modulus that
+    /// overflows on its own.
+    fn split_abs(self) -> (f64, f64) {
+        let largest = self.re.abs().max(self.im.abs());
+        (largest, hypot(self.re / largest, self.im / largest))
+    }
+
+    /// ln |z|, rescaled when |z| itself overflows.
+    fn ln_abs(self) -> f64 {
+        let modulus = self.abs();
+        if modulus.is_finite() {
+            return fmath::ln(modulus);
+        }
+        let (largest, rest) = self.split_abs();
+        fmath::ln(largest) + fmath::ln(rest)
+    }
+
+    /// |z|^n, rescaled when |z| itself overflows.
+    fn abs_pow(self, n: f64) -> f64 {
+        let modulus = self.abs();
+        if modulus.is_finite() {
+            return fmath::pow(modulus, n);
+        }
+        let (largest, rest) = self.split_abs();
+        fmath::pow(largest, n) * fmath::pow(rest, n)
     }
 
     fn arg(self) -> f64 {
@@ -360,7 +417,7 @@ impl Complex {
         if self.is_zero() {
             return (n > 0.0).then_some(Self::ZERO);
         }
-        let radius = fmath::pow(self.abs(), n);
+        let radius = self.abs_pow(n);
         let angle = n * self.arg();
         Some(Self::new(
             radius * fmath::cos(angle),
@@ -371,7 +428,13 @@ impl Complex {
     /// the principal root through the polar form, so `IMSQRT("-4")` keeps the
     /// cosine's residue: `1.22464679914735E-16+2i`.
     fn sqrt(self) -> Self {
-        let radius = self.abs().sqrt();
+        let modulus = self.abs();
+        let radius = if modulus.is_finite() {
+            modulus.sqrt()
+        } else {
+            let (largest, rest) = self.split_abs();
+            largest.sqrt() * rest.sqrt()
+        };
         let angle = self.arg() / 2.0;
         Self::new(radius * fmath::cos(angle), radius * fmath::sin(angle))
     }
@@ -382,7 +445,7 @@ impl Complex {
     }
 
     fn ln(self) -> Self {
-        Self::new(fmath::ln(self.abs()), self.arg())
+        Self::new(self.ln_abs(), self.arg())
     }
 
     fn sin(self) -> Self {
@@ -420,59 +483,85 @@ impl Complex {
     /// the reciprocal trigonometric forms over the double angle, as excel
     /// takes them: `IMSEC("4+3i")` is `-0.0652940278579471-0.0752249603027732i`
     /// where the plain reciprocal of the cosine prints `-0.065294027857947`.
+    /// when that denominator cancels below 1 or overflows, the same quotient
+    /// over a sum of squares scaled by the hyperbolic cosine, so
+    /// `IMCOT(1E-9)` is `1000000000` and `IMSEC("400i")` is
+    /// `3.83033919342801E-174`.
     fn tan(self) -> Option<Self> {
         let (a, b) = (self.re, self.im);
-        over(
-            fmath::sin(2.0 * a),
-            fmath::sinh(2.0 * b),
-            fmath::cos(2.0 * a) + fmath::cosh(2.0 * b),
-        )
+        let scale = fmath::cos(2.0 * a) + fmath::cosh(2.0 * b);
+        if double_angle(scale) {
+            return over(fmath::sin(2.0 * a), fmath::sinh(2.0 * b), scale);
+        }
+        let (s, t) = (1.0 / fmath::cosh(b), fmath::tanh(b));
+        let (sin, cos) = (fmath::sin(a), fmath::cos(a));
+        over(sin * cos * s * s, t, (cos * s).powi(2) + t * t)
     }
 
     fn cot(self) -> Option<Self> {
         let (a, b) = (self.re, self.im);
-        over(
-            fmath::sin(2.0 * a),
-            -fmath::sinh(2.0 * b),
-            fmath::cosh(2.0 * b) - fmath::cos(2.0 * a),
-        )
+        let scale = fmath::cosh(2.0 * b) - fmath::cos(2.0 * a);
+        if double_angle(scale) {
+            return over(fmath::sin(2.0 * a), -fmath::sinh(2.0 * b), scale);
+        }
+        let (s, t) = (1.0 / fmath::cosh(b), fmath::tanh(b));
+        let (sin, cos) = (fmath::sin(a), fmath::cos(a));
+        over(sin * cos * s * s, -t, (sin * s).powi(2) + t * t)
     }
 
     fn sec(self) -> Option<Self> {
         let (a, b) = (self.re, self.im);
-        over(
-            2.0 * fmath::cos(a) * fmath::cosh(b),
-            2.0 * fmath::sin(a) * fmath::sinh(b),
-            fmath::cos(2.0 * a) + fmath::cosh(2.0 * b),
-        )
+        let scale = fmath::cos(2.0 * a) + fmath::cosh(2.0 * b);
+        let (sin, cos) = (fmath::sin(a), fmath::cos(a));
+        if double_angle(scale) {
+            let (cosh, sinh) = (fmath::cosh(b), fmath::sinh(b));
+            return over(2.0 * cos * cosh, 2.0 * sin * sinh, scale);
+        }
+        let (s, t) = (1.0 / fmath::cosh(b), fmath::tanh(b));
+        over(cos * s, sin * t * s, (cos * s).powi(2) + t * t)
     }
 
     fn csc(self) -> Option<Self> {
         let (a, b) = (self.re, self.im);
-        over(
-            2.0 * fmath::sin(a) * fmath::cosh(b),
-            -2.0 * fmath::cos(a) * fmath::sinh(b),
-            fmath::cosh(2.0 * b) - fmath::cos(2.0 * a),
-        )
+        let scale = fmath::cosh(2.0 * b) - fmath::cos(2.0 * a);
+        let (sin, cos) = (fmath::sin(a), fmath::cos(a));
+        if double_angle(scale) {
+            let (cosh, sinh) = (fmath::cosh(b), fmath::sinh(b));
+            return over(2.0 * sin * cosh, -2.0 * cos * sinh, scale);
+        }
+        let (s, t) = (1.0 / fmath::cosh(b), fmath::tanh(b));
+        over(sin * s, -cos * t * s, (sin * s).powi(2) + t * t)
     }
 
     fn sech(self) -> Option<Self> {
         let (a, b) = (self.re, self.im);
-        over(
-            2.0 * fmath::cosh(a) * fmath::cos(b),
-            -2.0 * fmath::sinh(a) * fmath::sin(b),
-            fmath::cosh(2.0 * a) + fmath::cos(2.0 * b),
-        )
+        let scale = fmath::cosh(2.0 * a) + fmath::cos(2.0 * b);
+        let (sin, cos) = (fmath::sin(b), fmath::cos(b));
+        if double_angle(scale) {
+            let (cosh, sinh) = (fmath::cosh(a), fmath::sinh(a));
+            return over(2.0 * cosh * cos, -2.0 * sinh * sin, scale);
+        }
+        let (s, t) = (1.0 / fmath::cosh(a), fmath::tanh(a));
+        over(cos * s, -sin * t * s, (cos * s).powi(2) + t * t)
     }
 
     fn csch(self) -> Option<Self> {
         let (a, b) = (self.re, self.im);
-        over(
-            2.0 * fmath::sinh(a) * fmath::cos(b),
-            -2.0 * fmath::cosh(a) * fmath::sin(b),
-            fmath::cosh(2.0 * a) - fmath::cos(2.0 * b),
-        )
+        let scale = fmath::cosh(2.0 * a) - fmath::cos(2.0 * b);
+        let (sin, cos) = (fmath::sin(b), fmath::cos(b));
+        if double_angle(scale) {
+            let (cosh, sinh) = (fmath::cosh(a), fmath::sinh(a));
+            return over(2.0 * sinh * cos, -2.0 * cosh * sin, scale);
+        }
+        let (s, t) = (1.0 / fmath::cosh(a), fmath::tanh(a));
+        over(t * cos * s, -sin * s, (sin * s).powi(2) + t * t)
     }
+}
+
+/// whether a double-angle denominator is safe to divide by: finite, and at
+/// least 1, so its two terms have not cancelled.
+fn double_angle(scale: f64) -> bool {
+    scale.is_finite() && scale >= 1.0
 }
 
 /// `(re + im i) / scale`, none when the scale is zero.
@@ -750,14 +839,20 @@ pub(crate) fn imln(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// IMLOG10(inumber).
 pub(crate) fn imlog10(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     im_unary(args, ctx, |z| {
-        Some(Complex::new(fmath::log10(z.abs()), z.arg() / LN_10))
+        let modulus = z.abs();
+        let re = if modulus.is_finite() {
+            fmath::log10(modulus)
+        } else {
+            z.ln_abs() / LN_10
+        };
+        Some(Complex::new(re, z.arg() / LN_10))
     })
 }
 
 /// IMLOG2(inumber).
 pub(crate) fn imlog2(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     im_unary(args, ctx, |z| {
-        Some(Complex::new(fmath::ln(z.abs()) / LN_2, z.arg() / LN_2))
+        Some(Complex::new(z.ln_abs() / LN_2, z.arg() / LN_2))
     })
 }
 
@@ -905,11 +1000,21 @@ pub(crate) fn besselj(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 }
 
 /// BESSELK(x, n): the modified bessel function of the second kind, for
-/// positive `x`.
+/// positive `x`. the recurrence runs on e^x K, so `BESSELK(1000,1000)` keeps
+/// its 1.3E-233 although e^-1000 underflows.
 pub(crate) fn besselk(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     bessel(args, ctx, true, |x, n| {
-        let (k0, k1) = modified_second_low(x);
-        recur_up(k0, k1, n, ctx, |k, low, high| low + 2.0 * k / x * high)
+        if x > K_VANISHES {
+            return Ok(0.0);
+        }
+        let (k0, k1) = modified_second_scaled(x, ctx)?;
+        let (value, exponent) = recur_up(k0, k1, n, ctx, |k, low, high| low + 2.0 * k / x * high)?;
+        if exponent == 0 && x < EXP_UNDERFLOW {
+            return Ok(value * fmath::exp(-x));
+        }
+        Ok(fmath::exp(
+            fmath::ln(value) + f64::from(exponent) * LN_2 - x,
+        ))
     })
 }
 
@@ -917,7 +1022,8 @@ pub(crate) fn besselk(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn bessely(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     bessel(args, ctx, true, |x, n| {
         let (y0, y1) = second_kind_low(x);
-        recur_up(y0, y1, n, ctx, |k, low, high| 2.0 * k / x * high - low)
+        let (value, exponent) = recur_up(y0, y1, n, ctx, |k, low, high| 2.0 * k / x * high - low)?;
+        Ok(times_power_of_two(value, exponent))
     })
 }
 
@@ -930,35 +1036,42 @@ fn bessel(
     compute(|| {
         arity(args, 2, 2)?;
         let x = number_arg(args, ctx, 0)?;
-        let n = number_arg(args, ctx, 1)?.trunc();
+        let n = number_arg(args, ctx, 1)?;
         if !(0.0..=MAX_ORDER).contains(&n) || (positive && x <= 0.0) {
             return Err(ErrorValue::Num);
         }
-        f(x, n as usize)
+        f(x, n.trunc() as usize)
     })
 }
 
 /// the order `n` member of a sequence that grows by `step(k, f(k-1), f(k))`
-/// from `f(0)` and `f(1)`, the stable direction for Y and K.
+/// from `f(0)` and `f(1)`, the stable direction for Y and K, as a value and
+/// the power of two it was scaled down by on the way.
 fn recur_up(
     f0: f64,
     f1: f64,
     n: usize,
     ctx: &EvalContext<'_>,
     step: impl Fn(f64, f64, f64) -> f64,
-) -> Result<f64, ErrorValue> {
+) -> Result<(f64, i32), ErrorValue> {
     if n == 0 {
-        return Ok(f0);
+        return Ok((f0, 0));
     }
     charge(ctx, n)?;
-    let (mut low, mut high) = (f0, f1);
+    let rescale = 2f64.powi(RESCALE_BITS);
+    let (mut low, mut high, mut exponent) = (f0, f1, 0);
     for k in 1..n {
         if !high.is_finite() {
             break;
         }
         (low, high) = (high, step(k as f64, low, high));
+        if high.abs() > rescale {
+            low /= rescale;
+            high /= rescale;
+            exponent += RESCALE_BITS;
+        }
     }
-    Ok(high)
+    Ok((high, exponent))
 }
 
 /// J_n(x) for x >= 0: the power series below 2; past hankel's threshold and
@@ -971,7 +1084,8 @@ fn first_kind(x: f64, n: usize, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue
     if x >= HANKEL_FROM && (n as f64) < x {
         let (j0, _) = hankel(0, x);
         let (j1, _) = hankel(1, x);
-        return recur_up(j0, j1, n, ctx, |k, low, high| 2.0 * k / x * high - low);
+        let (value, exponent) = recur_up(j0, j1, n, ctx, |k, low, high| 2.0 * k / x * high - low)?;
+        return Ok(times_power_of_two(value, exponent));
     }
     if n as f64 > x && n as f64 * fmath::ln(x / 2.0) - ln_factorial(n) < UNDERFLOW {
         return Ok(0.0);
@@ -1197,18 +1311,22 @@ fn ln_factorial(n: usize) -> f64 {
         + inverse * (1.0 / 12.0 - square * (1.0 / 360.0 - square / 1260.0))
 }
 
-/// (K_0(x), K_1(x)) for x > 0: their ascending series below 2, and from 2
-/// on K_v(x) = integral over t > 0 of exp(-x cosh t) cosh(v t). the
-/// trapezoid rule converges geometrically on it; the step keeps the aliasing
-/// error under e^-45.
-fn modified_second_low(x: f64) -> (f64, f64) {
+/// (e^x K_0(x), e^x K_1(x)) for x > 0: the ascending series below 2, and
+/// from 2 on e^x K_v(x) = integral over t > 0 of exp(-x (cosh t - 1))
+/// cosh(v t). the trapezoid rule converges geometrically on it; the step
+/// keeps the aliasing error under e^-45.
+fn modified_second_scaled(x: f64, ctx: &EvalContext<'_>) -> Result<(f64, f64), ErrorValue> {
     if x < SERIES_BELOW {
-        return modified_second_series(x);
+        let (k0, k1) = modified_second_series(x);
+        let grow = fmath::exp(x);
+        return Ok((k0 * grow, k1 * grow));
     }
     let h = 0.2_f64.min(2.0 * PI / (90.0 * x).sqrt());
     let mut k0 = 0.5;
     let mut k1 = 0.5;
+    let mut steps = 0;
     for j in 1..100_000 {
+        steps = j;
         let t = j as f64 * h;
         let half = fmath::sinh(t / 2.0);
         let decay = fmath::exp(-2.0 * x * half * half);
@@ -1219,8 +1337,8 @@ fn modified_second_low(x: f64) -> (f64, f64) {
             break;
         }
     }
-    let scale = fmath::exp(-x) * h;
-    (scale * k0, scale * k1)
+    charge(ctx, steps)?;
+    Ok((h * k0, h * k1))
 }
 
 /// (K_0(x), K_1(x)) from the ascending series, with harmonic numbers H_k:

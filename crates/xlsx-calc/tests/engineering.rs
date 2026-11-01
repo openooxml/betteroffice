@@ -962,3 +962,94 @@ fn besselk_reaches_the_smallest_arguments() {
     close("BESSELK(1E-308,0)", 709.312_140_157_824_5, 1e-12);
     close("BESSELK(1E-10,1)", 1e10, 1e-12);
 }
+
+#[test]
+fn imdiv_scales_huge_and_tiny_divisors() {
+    says("IMDIV(\"1+i\",\"1E200+1E200i\")", "1E-200");
+    says("IMDIV(\"1E-200\",\"1E-200\")", "1");
+    says("IMDIV(\"3+4i\",\"1E-300+2E-300i\")", "2.2E+300-4E+299i");
+    says("IMDIV(\"1E200+1E200i\",\"1E200-1E200i\")", "i");
+}
+
+#[test]
+fn reciprocal_trigonometry_keeps_small_denominators() {
+    // mpmath 30 digits
+    says("IMCOT(1E-9)", "1000000000");
+    says("IMCSC(1E-9)", "1000000000");
+    says("IMCSCH(1E-9)", "1000000000");
+    says("IMCSC(\"1E-9+1E-9i\")", "500000000-500000000i");
+    says("IMCOT(\"1E-9i\")", "-1000000000i");
+}
+
+#[test]
+fn reciprocal_trigonometry_survives_large_arguments() {
+    // mpmath 30 digits: sech(400) = csch(400) = 3.83033919342801E-174
+    says("IMTAN(\"400i\")", "i");
+    says("IMCOT(\"400i\")", "-i");
+    says("IMTAN(\"1-400i\")", "-i");
+    says("IMSEC(\"400i\")", "3.83033919342801E-174");
+    says("IMCSC(\"400i\")", "-3.83033919342801E-174i");
+    says("IMSECH(400)", "3.83033919342801E-174");
+    says("IMCSCH(400)", "3.83033919342801E-174");
+    says("IMSECH(1000)", "0");
+}
+
+#[test]
+fn complex_logarithms_and_roots_take_the_largest_operands() {
+    // mpmath 30 digits
+    let z = "\"1.5E+308+1.5E+308i\"";
+    let quarter = std::f64::consts::FRAC_PI_4;
+    let log = 709.948_247_340_554_2;
+    complex_close(&format!("IMLN({z})"), log, quarter, 1e-13);
+    let (re, im) = (1.345_607_733_249_115e154, 5.573_689_727_459_013_4e153);
+    complex_close(&format!("IMSQRT({z})"), re, im, 1e-13);
+    complex_close(&format!("IMPOWER({z},0.5)"), re, im, 1e-13);
+    let (re, im) = (308.326_606_256_887_66, 0.341_094_088_460_460_35);
+    complex_close(&format!("IMLOG10({z})"), re, im, 1e-13);
+    let (re, im) = (1_024.238_815_726_028_9, 1.133_090_035_456_798_5);
+    complex_close(&format!("IMLOG2({z})"), re, im, 1e-13);
+    fails(&format!("IMABS({z})"), ErrorValue::Num);
+}
+
+#[test]
+fn besselk_keeps_its_seeds_scaled_past_exp_underflow() {
+    // mpmath 30 digits
+    close("BESSELK(1000,1000)", 1.298_180_251_466_701e-233, 1e-12);
+    close("BESSELK(700,3)", 4.699_871_529_146_931e-306, 1e-12);
+    exact("BESSELK(1000,0)", 0.0);
+    exact("BESSELK(1E200,0)", 0.0);
+    exact("BESSELK(1E308,5)", 0.0);
+}
+
+#[test]
+fn negative_fractional_bessel_orders_are_num() {
+    fails("BESSELJ(1,-0.5)", ErrorValue::Num);
+    fails("BESSELI(1,-0.5)", ErrorValue::Num);
+    fails("BESSELK(1,-0.5)", ErrorValue::Num);
+    fails("BESSELY(1,-0.5)", ErrorValue::Num);
+}
+
+#[test]
+fn engineering_functions_at_extreme_operands() {
+    // mpmath 30 digits
+    says("DEC2HEX(549755813887.75)", "7FFFFFFFFF");
+    fails("DEC2BIN(1E200)", ErrorValue::Num);
+    fails("DEC2HEX(1E15+0.75)", ErrorValue::Num);
+    fails("HEX2DEC(1E15)", ErrorValue::Num);
+    fails("BIN2DEC(1E-200)", ErrorValue::Num);
+    fails("BITAND(9007199254740992,1)", ErrorValue::Num);
+    fails("BITLSHIFT(1,1E200)", ErrorValue::Num);
+    exact("BITLSHIFT(281474976710655,53)", 2.535_301_200_456_449_8e30);
+    says("IMPRODUCT(\"1E200+1E200i\",\"1E-200-1E-200i\")", "2");
+    fails("IMSUM(\"1E308\",\"1E308\")", ErrorValue::Num);
+    fails("IMPRODUCT(\"1E200i\",\"1E200i\")", ErrorValue::Num);
+    says("IMEXP(-1000)", "0");
+    fails("IMEXP(710)", ErrorValue::Num);
+    says("COMPLEX(1E308,-1E308)", "1E+308-1E+308i");
+    says("COMPLEX(-0,1E-308)", "1E-308i");
+    close("BESSELY(1E-308,0)", -451.562_133_204_836_2, 1e-12);
+    close("BESSELY(1E-308,1)", -6.366_197_723_675_814e307, 1e-12);
+    exact("BESSELJ(1E-308,0)", 1.0);
+    exact("BESSELI(1E-308,0)", 1.0);
+    fails("BESSELI(1E200,0)", ErrorValue::Num);
+}
