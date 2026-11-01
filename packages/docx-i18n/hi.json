@@ -32,6 +32,7 @@
     "ariaLabel": "प्रारूपण टूलबार",
     "file": "फ़ाइल",
     "format": "प्रारूप",
+    "layout": "लेआउट",
     "insert": "डालें",
     "open": "खोलें",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "वर्तमान"
     }
+  },
+  "layout": {
+    "margins": "हाशिया",
+    "normal": "सामान्य",
+    "narrow": "संकीर्ण",
+    "moderate": "मध्यम",
+    "wide": "चौड़ा",
+    "customMargins": "कस्टम हाशिए...",
+    "morePaperSizes": "अधिक कागज़ आकार...",
+    "indent": "इंडेंट"
   },
   "formattingBar": {
     "groups": {
@@ -755,7 +766,11 @@
     "leftIndent": "बायां इंडेंट",
     "rightIndent": "दायां इंडेंट",
     "topMargin": "शीर्ष मार्जिन",
-    "bottomMargin": "तल मार्जिन"
+    "bottomMargin": "तल मार्जिन",
+    "leftMargin": "बायाँ मार्जिन",
+    "rightMargin": "दायाँ मार्जिन",
+    "hangingIndent": "हैंगिंग इंडेंट",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "प्रिंट करें",

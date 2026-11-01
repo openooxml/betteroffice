@@ -32,6 +32,7 @@
     "ariaLabel": "Bilah alat pemformatan",
     "file": "File",
     "format": "Format",
+    "layout": "Tata Letak",
     "insert": "Sisipkan",
     "open": "Buka",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Saat ini"
     }
+  },
+  "layout": {
+    "margins": "Margin",
+    "normal": "Normal",
+    "narrow": "Sempit",
+    "moderate": "Sedang",
+    "wide": "Lebar",
+    "customMargins": "Margin kustom...",
+    "morePaperSizes": "Ukuran kertas lainnya...",
+    "indent": "Indentasi"
   },
   "formattingBar": {
     "groups": {
@@ -755,7 +766,11 @@
     "leftIndent": "Inden Kiri",
     "rightIndent": "Inden Kanan",
     "topMargin": "Margin Atas",
-    "bottomMargin": "Margin Bawah"
+    "bottomMargin": "Margin Bawah",
+    "leftMargin": "Margin kiri",
+    "rightMargin": "Margin kanan",
+    "hangingIndent": "Inden gantung",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Cetak",

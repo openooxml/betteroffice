@@ -42,6 +42,7 @@ interface MenuDropdownProps {
   disabled?: boolean;
   tabIndex?: number;
   onFocus?: () => void;
+  onOpen?: () => void;
   /** When true, the trigger renders a down-arrow caret next to the label.
    *  Default `false` — every in-tree caller is a top-level menubar button. */
   showChevron?: boolean;
@@ -116,7 +117,7 @@ const submenuPanelStyle: CSSProperties = {
 };
 
 function focusMenuItem(menu: HTMLElement, key: string) {
-  const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]')).filter(
+  const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"]')).filter(
     (item) => item.closest('[role="menu"]') === menu
   );
   if (items.length === 0) return;
@@ -138,6 +139,7 @@ export function MenuDropdown({
   disabled,
   tabIndex = 0,
   onFocus,
+  onOpen,
   showChevron = false,
 }: MenuDropdownProps) {
   const menuId = useId();
@@ -161,7 +163,7 @@ export function MenuDropdown({
 
   const focusSubmenu = () => {
     submenuRef.current
-      ?.querySelector<HTMLElement>('[role="gridcell"][tabindex="0"], [role="menuitem"]')
+      ?.querySelector<HTMLElement>('[role="gridcell"][tabindex="0"], [role="menuitem"], [role="menuitemradio"]')
       ?.focus();
   };
 
@@ -170,6 +172,7 @@ export function MenuDropdown({
       focusMenuItem(dropdownRef.current, key);
     } else {
       pendingFocus.current = key;
+      onOpen?.();
       setIsOpen(true);
     }
   };
@@ -330,7 +333,10 @@ export function MenuDropdown({
         onClick={() => {
           if (disabled) return;
           if (isOpen) closeMenu();
-          else setIsOpen(true);
+          else {
+            onOpen?.();
+            setIsOpen(true);
+          }
         }}
         onMouseDown={(e) => e.preventDefault()}
         aria-disabled={disabled || undefined}

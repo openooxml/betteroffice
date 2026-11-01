@@ -32,6 +32,7 @@
     "ariaLabel": "Werkbalk voor opmaak",
     "file": "Bestand",
     "format": "Opmaak",
+    "layout": "Indeling",
     "insert": "Invoegen",
     "open": "Openen",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Huidige"
     }
+  },
+  "layout": {
+    "margins": "Marges",
+    "normal": "Normaal",
+    "narrow": "Smal",
+    "moderate": "Gemiddeld",
+    "wide": "Breed",
+    "customMargins": "Aangepaste marges...",
+    "morePaperSizes": "Meer papierformaten...",
+    "indent": "Inspringing"
   },
   "formattingBar": {
     "groups": {
@@ -755,7 +766,11 @@
     "leftIndent": "Inspringing links",
     "rightIndent": "Inspringing rechts",
     "topMargin": "Bovenmarge",
-    "bottomMargin": "Ondermarge"
+    "bottomMargin": "Ondermarge",
+    "leftMargin": "Linkermarge",
+    "rightMargin": "Rechtermarge",
+    "hangingIndent": "Verkeerd-om inspringen",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Afdrukken",
