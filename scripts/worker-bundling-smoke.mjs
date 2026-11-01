@@ -36,7 +36,7 @@ async function checkOutput(directory) {
   for (const path of files.filter(path => /\.(?:m?js|html)$/.test(path))) {
     const contents = await readFile(path, 'utf8');
     if (/\.(?:m?js)$/.test(path)) javascript += contents;
-    assert.doesNotMatch(contents, /worker_threads|getBuiltinModule|sessionWorker\.node/,
+    assert.doesNotMatch(contents, /worker_threads|nodeSessionWorker|sessionWorker\.node/,
       `Node worker code in browser output: ${path}`);
   }
   assert.match(javascript, /new Worker\s*\(/, 'Browser worker constructors must survive bundling');
