@@ -123,10 +123,12 @@ test('arrow keys move between menu items and Enter chooses', () => {
   expect(chosen).toEqual(['merge']);
 });
 
-test('scroll hides the control', () => {
+test('scroll keeps the control and resize hides it', () => {
   render(<Harness />);
   fireEvent.click(screen.getByText('show'));
   expect(screen.getByRole('button', { name: 'Paste Options (Ctrl)' })).toBeTruthy();
   fireEvent.scroll(window);
+  expect(screen.getByRole('button', { name: 'Paste Options (Ctrl)' })).toBeTruthy();
+  fireEvent(window, new Event('resize'));
   expect(screen.queryByRole('button', { name: 'Paste Options (Ctrl)' })).toBeNull();
 });

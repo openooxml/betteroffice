@@ -780,6 +780,30 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   });
   const pasteOptionsRef = useRef(pasteOptions);
   pasteOptionsRef.current = pasteOptions;
+  const pasteOptionsVisible = pasteOptions.visible;
+  useEffect(() => {
+    if (!pasteOptionsVisible || !displayListQueries) return;
+    const follow = () => {
+      const record = pasteRecordRef.current;
+      const host = canvasHostRef?.current;
+      if (!record || !host || !displayListQueries.isReady()) return;
+      const position = locToDisplayPosition(record.end);
+      const caret = position === null ? null : displayListQueries.caretRect(position);
+      if (!caret) return;
+      const pageRect = resolveDisplayPageClientRect(host, displayListQueries, caret.pageIndex);
+      const pageSize = displayListQueries.pageSize(caret.pageIndex);
+      if (!pageRect || !pageSize) return;
+      const scaleX = pageSize.width > 0 ? pageRect.width / pageSize.width : 1;
+      const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
+      const top = pageRect.top + caret.y * scaleY;
+      pasteOptionsRef.current.setAnchor({
+        left: pageRect.left + caret.x * scaleX + 6,
+        top: top + Math.max(1, caret.height * scaleY) + 4,
+      });
+    };
+    window.addEventListener('scroll', follow, true);
+    return () => window.removeEventListener('scroll', follow, true);
+  }, [canvasHostRef, displayListQueries, locToDisplayPosition, pasteOptionsVisible]);
 
   const finishResidentMutation = useCallback(
     (result: ResidentFrameApplyResult): void => {
@@ -2255,9 +2279,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     );
     const pasteRecord = pasteRecordRef.current;
     if (pasteRecord && session) {
-      const endPosition = locToDisplayPosition(pasteRecord.end);
       const focusInControl = typeof document !== 'undefined' && !!document.activeElement?.closest?.('[data-paste-options]');
-      const atEnd = endPosition !== null && selection.anchor === endPosition && selection.head === endPosition;
+      const current = session.selection();
+      const end = pasteRecord.end;
+      const atEnd = !!current && [current.anchor, current.head].every((at) =>
+        at.story === end.story && at.paraId === end.paraId && at.offset === end.offset);
       const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
       if (focusInControl) {
       } else if (atEnd && pastePendingAnchorRef.current) {

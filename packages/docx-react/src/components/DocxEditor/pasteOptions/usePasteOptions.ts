@@ -98,11 +98,9 @@ export function usePasteOptions(options: {
       if (target?.closest?.('[data-paste-options]')) return;
       dismiss();
     };
-    window.addEventListener('scroll', hide, true);
     window.addEventListener('resize', hide);
     document.addEventListener('pointerdown', pointer, true);
     return () => {
-      window.removeEventListener('scroll', hide, true);
       window.removeEventListener('resize', hide);
       document.removeEventListener('pointerdown', pointer, true);
     };

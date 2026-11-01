@@ -239,7 +239,7 @@ test('paste options text-only over a selection replaces it and one undo restores
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a BAR b']);
-    const control = view.getByRole('button', { name: 'Paste Options (Ctrl)' });
+    const control = await view.findByRole('button', { name: 'Paste Options (Ctrl)' });
     fireEvent.click(control);
     fireEvent.keyDown(view.getByRole('menu'), { key: 'Escape' });
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
@@ -307,7 +307,7 @@ test('a paste option after the paste was undone elsewhere changes nothing', asyn
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a BAR b']);
-    const control = view.getByRole('button', { name: 'Paste Options (Ctrl)' });
+    const control = await view.findByRole('button', { name: 'Paste Options (Ctrl)' });
     expect(session.undo()).toBe(true);
     expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a foo b']);
     fireEvent.click(control);
