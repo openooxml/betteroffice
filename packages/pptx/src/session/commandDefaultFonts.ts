@@ -1,6 +1,6 @@
 import type { BundledFontScript } from '@betteroffice/fonts';
 import { scriptFontFace } from './commandScriptFonts';
-import type { DefaultFontFace, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
+import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
 
 type FontRequest =
@@ -15,7 +15,7 @@ export function createCommandDefaultFonts(
   supplied: readonly { family: string }[],
   collect: (slideId?: string) => RequestedFontFace[],
   register: (face: DefaultFontFace) => void,
-  settled: (faces: DefaultFontFace[]) => void,
+  settled: (faces: DefaultFontLanding[]) => void,
   install?: (faces: readonly DefaultFontFace[]) => Promise<readonly DefaultFontFace[]>,
   beforeRegister?: () => void,
 ) {
@@ -109,12 +109,12 @@ export function createCommandDefaultFonts(
   return {
     isLoading(): boolean { return pending.size > 0; },
     hasPending(slideId?: string): boolean { return requests(slideId).length > 0; },
-    load(slideId?: string): DefaultFontFace[] | Promise<DefaultFontFace[]> {
+    load(slideId?: string): DefaultFontLanding[] | Promise<DefaultFontLanding[]> {
       const wanted = requests(slideId);
       if (!wanted.length) return [];
       return Promise.all(wanted.map(request)).then((faces) => {
         if (disposed) return [];
-        const additions: DefaultFontFace[] = [];
+        const additions: DefaultFontLanding[] = [];
         for (const [index, face] of faces.entries()) {
           pending.delete(key(wanted[index]));
           if (!face || suppliedFamily(wanted[index])) continue;
@@ -127,7 +127,8 @@ export function createCommandDefaultFonts(
             }
             register(face);
             registered.add(registeredKey);
-            additions.push({ ...face, bytes: face.bytes.slice(0) });
+            additions.push({ family: face.family, bold: face.bold, italic: face.italic,
+              ...(face.kind ? { kind: face.kind } : {}), ...(face.ownWeight ? { ownWeight: true } : {}) });
           } catch {}
         }
         if (additions.length) settled(additions);
