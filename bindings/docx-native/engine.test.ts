@@ -154,6 +154,37 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('native edits survive a throwing clock and a clock that reads the session', () => {
+    const session = new native.EditSession(17);
+    let reentrant: (() => unknown) | undefined;
+    let depth = 0;
+    const clock = spyOn(Date, 'now').mockImplementation(() => {
+      if (!reentrant) throw new Error('clock unavailable');
+      if (depth === 0) {
+        depth += 1;
+        try {
+          reentrant();
+        } finally {
+          depth -= 1;
+        }
+      }
+      return 5_000;
+    });
+    try {
+      session.seed_from_docx(fixture, 'opening');
+      session.track_undo();
+      session.insert_text('body', paragraphId(session), 0, 'A');
+      expect(read(session).paragraphs[0].text).toBe('AEngine text');
+      reentrant = () => read(session);
+      session.insert_text('body', paragraphId(session), 0, 'B');
+      expect(read(session).paragraphs[0].text).toBe('BAEngine text');
+      expect(session.undo()).toBe(true);
+    } finally {
+      clock.mockRestore();
+      session.free();
+    }
+  });
+
   test('state crosses both boundaries and native diffs update a wasm peer', () => {
     const nativeSource = new native.EditSession(21);
     const wasmPeer = new wasm.EditSession(22);

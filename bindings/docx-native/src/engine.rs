@@ -114,30 +114,57 @@ fn native_clock_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn js_clock_ms(raw: usize, thread: ThreadId) -> u64 {
-    if thread::current().id() != thread {
-        return native_clock_ms();
-    }
-    let env = Env::from_raw(raw as napi::sys::napi_env);
+fn read_js_clock(env: Env) -> Option<u64> {
     let read = || -> Result<f64> {
         let date: Function<f64> = env.get_global()?.get_named_property("Date")?;
         let now: Function<(), f64> = date.get_named_property("now")?;
         now.apply(date, ())
     };
     match read() {
-        Ok(ms) if ms.is_finite() && ms >= 0.0 => ms as u64,
-        _ => native_clock_ms(),
+        Ok(ms) if ms.is_finite() && ms >= 0.0 => Some(ms as u64),
+        Ok(_) => None,
+        Err(_) => {
+            let _ = take_pending_exception(env);
+            None
+        }
     }
 }
 
-fn native_host(env: Env) -> Host {
-    let raw = env.raw() as usize;
-    let thread = thread::current().id();
-    Host::new(
-        Arc::new(move || js_clock_ms(raw, thread)),
-        Arc::new(native_entropy),
-        Arc::new(native_timer_ms),
-    )
+struct JsClock {
+    env: usize,
+    thread: ThreadId,
+    now: Arc<AtomicU64>,
+}
+
+impl JsClock {
+    fn new(env: Env) -> Self {
+        let clock = Self {
+            env: env.raw() as usize,
+            thread: thread::current().id(),
+            now: Arc::new(AtomicU64::new(0)),
+        };
+        clock.refresh();
+        clock
+    }
+
+    fn refresh(&self) {
+        let now = if thread::current().id() == self.thread {
+            read_js_clock(Env::from_raw(self.env as napi::sys::napi_env))
+        } else {
+            None
+        };
+        self.now
+            .store(now.unwrap_or_else(native_clock_ms), Ordering::Relaxed);
+    }
+
+    fn host(&self) -> Host {
+        let now = Arc::clone(&self.now);
+        Host::new(
+            Arc::new(move || now.load(Ordering::Relaxed)),
+            Arc::new(native_entropy),
+            Arc::new(native_timer_ms),
+        )
+    }
 }
 
 fn map_error(env: Env, error: EngineError) -> Error {
@@ -243,10 +270,12 @@ pub struct EditSession {
     update_observer: RefCell<Option<UpdateObserver>>,
     delivering: Cell<bool>,
     core: RefCell<Option<Document>>,
+    clock: JsClock,
 }
 
 impl EditSession {
     fn document(&self) -> Result<DocumentGuard<'_, Ref<'_, Document>>> {
+        self.clock.refresh();
         let core = self.core.try_borrow().map_err(|_| borrow_error())?;
         let core = Ref::filter_map(core, Option::as_ref)
             .map_err(|_| Error::from_reason("EditSession was freed"))?;
@@ -257,6 +286,7 @@ impl EditSession {
     }
 
     fn document_mut(&self) -> Result<DocumentGuard<'_, RefMut<'_, Document>>> {
+        self.clock.refresh();
         let core = self.core.try_borrow_mut().map_err(|_| borrow_error())?;
         let core = RefMut::filter_map(core, Option::as_mut)
             .map_err(|_| Error::from_reason("EditSession was freed"))?;
@@ -1630,10 +1660,12 @@ impl EditSession {
                 EngineError::message("client_id must be a non-negative safe integer"),
             ));
         }
+        let clock = JsClock::new(env);
         Ok(Self {
             update_observer: RefCell::new(None),
             delivering: Cell::new(false),
-            core: RefCell::new(Some(Document::new(client_id as u64, native_host(env)))),
+            core: RefCell::new(Some(Document::new(client_id as u64, clock.host()))),
+            clock,
         })
     }
 
