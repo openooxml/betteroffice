@@ -19,6 +19,7 @@
     "declarationMap": true,
     "types": ["bun", "node"],
     "paths": {
+      "#session-worker": ["./src/yrs/sessionWorker.node.ts"],
       "@/*": ["./src/*"]
     }
   },

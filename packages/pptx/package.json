@@ -32,6 +32,12 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "imports": {
+    "#session-worker": {
+      "node": "./dist/sessionWorker.node.js",
+      "default": "./dist/sessionWorker.browser.js"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
