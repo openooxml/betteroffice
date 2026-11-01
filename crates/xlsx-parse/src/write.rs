@@ -21,6 +21,7 @@ use xlsx_model::{
 
 use crate::ParseError;
 use crate::axis::SheetAxes;
+use crate::future_functions::excel_formula;
 use crate::package::{
     ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship,
     SourceSheetKind, XmlAttribute, XmlTemplate, attributes_from_fragment, effective_content_type,
@@ -254,7 +255,10 @@ fn conditional_formatting_bytes(
             } else {
                 rule_xml.push('>');
                 for formula in &rule.formulas {
-                    rule_xml.push_str(&format!("<formula>{}</formula>", escape_xml_text(formula)));
+                    rule_xml.push_str(&format!(
+                        "<formula>{}</formula>",
+                        escape_xml_text(&excel_formula(formula))
+                    ));
                 }
                 rule_xml.push_str("</cfRule>");
             }
@@ -2366,7 +2370,9 @@ fn write_defined_name(
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Start(element))?;
-    w.write_event(Event::Text(BytesText::new(&defined.formula)))?;
+    w.write_event(Event::Text(BytesText::new(&excel_formula(
+        &defined.formula,
+    ))))?;
     w.write_event(Event::End(BytesEnd::new("definedName")))?;
     Ok(())
 }
@@ -2697,7 +2703,9 @@ fn patch_defined_name(
             element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
         }
         writer.write_event(Event::Start(element))?;
-        writer.write_event(Event::Text(BytesText::new(&defined.formula)))?;
+        writer.write_event(Event::Text(BytesText::new(&excel_formula(
+            &defined.formula,
+        ))))?;
         writer.write_event(Event::End(BytesEnd::new(element_name.as_str())))?;
         Ok(())
     })
@@ -3804,7 +3812,7 @@ pub(crate) fn write_cell(
                 .with_attribute(("t", "array"))
                 .with_attribute(("ref", reference.as_str()));
         }
-        element.write_text_content(BytesText::new(f))?;
+        element.write_text_content(BytesText::new(&excel_formula(f)))?;
     }
     if let Some(v) = &value {
         w.create_element("v")

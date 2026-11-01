@@ -140,7 +140,7 @@ export function LayoutMenu({ tabIndex, onFocus }: { tabIndex: number; onFocus():
     const pageWidth = orientation === 'landscape' ? size.height : size.width;
     const pageHeight = orientation === 'landscape' ? size.width : size.height;
     return {
-      label: t(size.labelKey).replace(/\s*\([^()]*×[^()]*\)\s*$/, ''),
+      label: t(size.labelKey).replace(/\s*[(（][^()（）]*×[^()（）]*[)）]\s*$/, ''),
       secondaryText: `${formatLayoutLength(pageWidth, unit, t, lang)} × ${formatLayoutLength(pageHeight, unit, t, lang)}`,
       checked: Math.abs((properties?.pageWidth || 12240) - pageWidth) < 20 &&
         Math.abs((properties?.pageHeight || 15840) - pageHeight) < 20,

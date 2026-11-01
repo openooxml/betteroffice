@@ -311,6 +311,24 @@ fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
     }
 }
 
+/// a block of numbers a builtin outside this module computes: paid for as
+/// `reserve` pays and charged `steps` inner-loop steps before `fill` runs; a
+/// non-finite cell is `#NUM!`.
+pub(crate) fn number_block(
+    ctx: &EvalContext<'_>,
+    rows: usize,
+    cols: usize,
+    steps: u64,
+    fill: impl FnOnce() -> Result<Vec<f64>, ErrorValue>,
+) -> Value {
+    result((|| {
+        reserve(ctx, rows, cols)?;
+        charge_steps(ctx, steps)?;
+        let cells = fill()?.into_iter().map(crate::functions::finite).collect();
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
 /// an output block being filled: its cells are paid for before any is
 /// computed, and each cell's text before the block keeps it.
 struct Cells<'c, 'a> {
@@ -817,14 +835,23 @@ fn lifts(name: &str) -> bool {
         name,
         "ABS"
             | "ACOS"
+            | "ACOSH"
+            | "ACOT"
+            | "ACOTH"
+            | "ARABIC"
             | "ASIN"
+            | "ASINH"
             | "ATAN"
             | "ATAN2"
+            | "ATANH"
+            | "BASE"
             | "BETA.DIST"
             | "BETA.INV"
             | "BETADIST"
             | "BETAINV"
             | "CEILING"
+            | "CEILING.MATH"
+            | "CEILING.PRECISE"
             | "CHAR"
             | "CHIDIST"
             | "CHIINV"
@@ -835,14 +862,21 @@ fn lifts(name: &str) -> bool {
             | "CLEAN"
             | "CODE"
             | "COMBIN"
+            | "COMBINA"
             | "CONFIDENCE"
             | "CONFIDENCE.NORM"
             | "CONFIDENCE.T"
             | "COS"
             | "COSH"
+            | "COT"
+            | "COTH"
+            | "CSC"
+            | "CSCH"
             | "DATE"
             | "DATEDIF"
             | "DAY"
+            | "DAYS360"
+            | "DECIMAL"
             | "DEGREES"
             | "EDATE"
             | "EOMONTH"
@@ -858,11 +892,14 @@ fn lifts(name: &str) -> bool {
             | "F.INV"
             | "F.INV.RT"
             | "FACT"
+            | "FACTDOUBLE"
             | "FDIST"
             | "FIND"
             | "FINV"
             | "FIXED"
             | "FLOOR"
+            | "FLOOR.MATH"
+            | "FLOOR.PRECISE"
             | "GAMMA"
             | "GAMMA.DIST"
             | "GAMMA.INV"
@@ -880,6 +917,7 @@ fn lifts(name: &str) -> bool {
             | "ISLOGICAL"
             | "ISNA"
             | "ISNUMBER"
+            | "ISO.CEILING"
             | "ISODD"
             | "ISOWEEKNUM"
             | "ISTEXT"
@@ -917,15 +955,19 @@ fn lifts(name: &str) -> bool {
             | "REPLACE"
             | "REPT"
             | "RIGHT"
+            | "ROMAN"
             | "ROUND"
             | "ROUNDDOWN"
             | "ROUNDUP"
             | "SEARCH"
+            | "SEC"
+            | "SECH"
             | "SECOND"
             | "SIGN"
             | "SIN"
             | "SINH"
             | "SQRT"
+            | "SQRTPI"
             | "SUBSTITUTE"
             | "T"
             | "T.DIST"
@@ -1018,6 +1060,9 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "TREND" => trend,
         "FREQUENCY" => frequency,
         "MMULT" => mmult,
+        "MINVERSE" => crate::functions::math_extra::minverse,
+        "MUNIT" => crate::functions::math_extra::munit,
+        "RANDARRAY" => crate::functions::math_extra::randarray,
         "MAX" => max,
         "MIN" => min,
         "PRODUCT" => product,
