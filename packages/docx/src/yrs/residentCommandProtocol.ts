@@ -328,7 +328,7 @@ export interface DocxCommandPayloads {
   setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
   setTableProperties: DocxSelectionIntent & { op: 'patch'; patch: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }; expectVersion?: string };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
-  replacePasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
+  replacePasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment; original: DocxCommandSelection };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &

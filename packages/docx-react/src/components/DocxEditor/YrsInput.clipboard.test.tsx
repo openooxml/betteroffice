@@ -11,6 +11,7 @@ import {
   type DocxClipboardFragment,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { YrsInput } from './YrsInput';
 import { clipboardFragmentHtml } from './internals/clipboardHtml';
 import { yrsCellStory } from './yrsCommands';
@@ -185,6 +186,69 @@ test('paste of html with a table lands after text typed in the same tick', async
   const textIndex = segments.findIndex((segment) => segment.kind === 'text' && segment.text.includes('Z'));
   expect(textIndex).toBeGreaterThanOrEqual(0);
   expect(textIndex).toBeLessThan(embedIndex);
+});
+
+test('paste options text-only over a selection replaces it and one undo restores it', async () => {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', 'a foo b');
+  session.setSelection({ story: 'body', paraId, offset: 2 }, { story: 'body', paraId, offset: 5 });
+  const map = (story = 'body') =>
+    createYrsInputPositionMap(
+      story,
+      session.paragraphs(story).map((p) => ({ paraId: p.paraId, length: p.text.length }))
+    );
+  const host = document.createElement('div');
+  const page = document.createElement('div');
+  page.className = 'canvas-page';
+  page.dataset.pageIndex = '0';
+  page.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+  host.append(page);
+  document.body.append(host);
+  const queries = {
+    isReady: () => true,
+    caretRect: (position: number) => ({ pageIndex: 0, x: position, y: 10, width: 1, height: 20 }),
+    anchorRect: (position: number) => ({ pageIndex: 0, x: position, y: 10, width: 1, height: 20 }),
+    pageCount: () => 1,
+    pageSize: () => ({ width: 800, height: 1000 }),
+    visualLines: () => [],
+    visualLinesOnPage: () => [],
+    visualLineExtent: () => null,
+    verticalMove: () => null,
+  };
+  try {
+    const view = render(
+      <YrsInput
+        enabled
+        readOnly={false}
+        session={session}
+        canvasHostRef={{ current: host }}
+        displayListQueries={queries as unknown as DisplayListQueries}
+        inputPositionMap={map}
+        displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
+        locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
+        onStateChange={() => {}}
+        onDirectInput={() => {}}
+      />
+    );
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    const fragment: DocxClipboardFragment = {
+      paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { bold: true } }] }],
+    };
+    pasteWith(textarea, clipboardFragmentHtml(fragment), 'BAR');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a BAR b']);
+    const control = view.getByRole('button', { name: 'Paste Options (Ctrl)' });
+    fireEvent.click(control);
+    fireEvent.click(view.getByRole('menuitemradio', { name: 'Keep Text Only' }));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a BAR b']);
+    expect(session.undo()).toBe(true);
+    expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a foo b']);
+  } finally {
+    host.remove();
+  }
 });
 
 test('suggesting mode pastes plain text', async () => {

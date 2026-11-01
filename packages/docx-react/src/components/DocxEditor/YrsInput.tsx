@@ -714,11 +714,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       pasteReplacingRef.current = true;
       session.addUndoBoundary();
       try {
-        const undone = session.undo();
-        const range = undone
-          ? { story: record.range.story, start: record.range.start, end: record.range.start }
-          : record.range;
-        const caret = applyClipboardFragment(session, range, variant, suggestingAuthor());
+        if (!session.undo()) {
+          pasteRecordRef.current = null;
+          pastePendingAnchorRef.current = false;
+          pasteOptionsRef.current.dismiss();
+          return;
+        }
+        const caret = applyClipboardFragment(session, record.range, variant, suggestingAuthor());
         session.setSelection(caret);
         pasteRecordRef.current = { ...record, end: caret, version: session.version() };
         pastePendingAnchorRef.current = true;

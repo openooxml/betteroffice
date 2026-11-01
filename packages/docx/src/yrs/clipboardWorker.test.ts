@@ -255,6 +255,7 @@ test('replacePasteFragment swaps the paste variant in a single undo step', async
     const pastedEnd = pasted.selection!.focus;
     const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
       selection: { anchor: at, focus: pastedEnd },
+      original: { anchor: at, focus: at },
       fragment: { paragraphs: [{ text: 'Plain' }] },
     }));
     expect(replaced.outcomes[0]?.status).toBe('applied');
@@ -268,6 +269,49 @@ test('replacePasteFragment swaps the paste variant in a single undo step', async
     const redone = await client.edit(intent(++seq, version, 'redo', {}));
     expect(redone.outcomes[0]?.status).toBe('applied');
     expect(engine.paragraphs('body').map((paragraph) => paragraph.text)).toContain('SeedPlain');
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('replacePasteFragment over a replaced selection restores the replaced text on one undo', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    let version = 0;
+    let seq = 0;
+    const paragraphs = engine.paragraphs('body');
+    const last = paragraphs[paragraphs.length - 1]!;
+    const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+    const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+    const base = { story: 'body', paraId: split.secondParaId, offset: 0 };
+    const paragraphText = () => engine.paragraphs('body').find((paragraph) => paragraph.paraId === split.secondParaId)?.text;
+    const typed = await client.edit(intent(++seq, version, 'insertText', {
+      selection: { anchor: base, focus: base },
+      text: 'a foo b',
+    }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    version = typed.version;
+    expect(paragraphText()).toBe('a foo b');
+    const fooStart = { ...base, offset: 2 };
+    const fooEnd = { ...base, offset: 5 };
+    const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
+      selection: { anchor: fooStart, focus: fooEnd },
+      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { bold: true } }] }] },
+    }));
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    version = pasted.version;
+    expect(paragraphText()).toBe('a BAR b');
+    const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+      selection: { anchor: fooStart, focus: pasted.selection!.focus },
+      original: { anchor: fooStart, focus: fooEnd },
+      fragment: { paragraphs: [{ text: 'BAR' }] },
+    }));
+    expect(replaced.outcomes[0]?.status).toBe('applied');
+    version = replaced.version;
+    expect(paragraphText()).toBe('a BAR b');
+    const undone = await client.edit(intent(++seq, version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(paragraphText()).toBe('a foo b');
   } finally {
     client.destroy();
   }

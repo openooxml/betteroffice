@@ -84,4 +84,36 @@ for (const arm of ['&peerless=0', '']) {
     await page.keyboard.type('x');
     await expect(control).toBeHidden();
   });
+
+  test(`paste options over a selection replace it and one undo restores it (${arm ? 'legacy' : 'peerless'})`, async ({ page, context }, info) => {
+    const input = await open(page, arm);
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(page.url()).origin });
+    await page.evaluate(async () => {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob(
+          ['<span style="font-weight:bold">BAR</span>'],
+          { type: 'text/html' },
+        ),
+        'text/plain': new Blob(['BAR'], { type: 'text/plain' }),
+      })]);
+    });
+    await input.focus();
+    await input.press('ControlOrMeta+Home');
+    for (let index = 0; index < 6; index++) await page.keyboard.press('Shift+ArrowRight');
+    await page.keyboard.press('ControlOrMeta+V');
+    const control = page.getByRole('button', { name: 'Paste Options (Ctrl)' });
+    await expect(control).toBeVisible({ timeout: 30000 });
+
+    await control.click();
+    await page.getByRole('menuitemradio', { name: 'Keep Text Only' }).click();
+    const textOnly = await savedXml(page, info, 'text-only-over-selection.docx');
+    expect(xmlText(textOnly)).toContain('BAR paragraph');
+    expect(xmlText(textOnly)).not.toContain('Target');
+
+    await input.focus();
+    await input.press('ControlOrMeta+z');
+    const undone = await savedXml(page, info, 'undone-over-selection.docx');
+    expect(xmlText(undone)).toContain('Target paragraph');
+    expect(xmlText(undone)).not.toContain('BAR');
+  });
 }
