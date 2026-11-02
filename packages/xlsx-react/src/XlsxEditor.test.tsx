@@ -46,6 +46,7 @@ import {
   type XlsxInThreadEditorProps,
 } from './XlsxEditor';
 import { editableWorkbookSessionBackend } from './worker/useEditableSessionWorkbook';
+import { MOUNTED } from './__fixtures__/mounted';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -55,7 +56,6 @@ const UNDRAWABLE_FIXTURE = resolve(
   '../../xlsx/test-fixtures/unsupported-charts.xlsx'
 );
 const VIEWPORT = { width: 800, height: 600 };
-const MOUNTED = { timeout: 4_000 };
 const LINK_TARGET = 'https://example.com/report';
 const LINK_CELL: CellAddr = { row: 5, col: 4 };
 
@@ -3146,7 +3146,7 @@ describe('XlsxEditor host controls', () => {
     const props = { onReady: (ready: XlsxEditorApi) => { opened.push(ready); },
       onSaveRequest: () => { requests++; return pending; }, onSave: (bytes: Uint8Array) => { saved.push(bytes); } };
     const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={plain.bytes.slice()} />);
-    await waitFor(() => expect(opened).toHaveLength(1));
+    await waitFor(() => expect(opened).toHaveLength(1), MOUNTED);
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
     await waitFor(() => expect(requests).toBe(1));
     fireEvent.compositionStart(view.getByTestId('xlsx-formula-input'));
@@ -3229,7 +3229,7 @@ describe('async editor host props', () => {
     const ready: unknown[] = [];
     const onReady = (api: unknown) => { ready.push(api); };
     const view = render(<XlsxEditor experimentalWorkerOpen={false} file={file} onReady={onReady} />);
-    await waitFor(() => expect(ready).toHaveLength(1));
+    await waitFor(() => expect(ready).toHaveLength(1), MOUNTED);
     view.rerender(<XlsxEditor experimentalWorkerOpen={false} file={file} onReady={onReady} className="updated" />);
     await act(async () => {});
     expect(ready).toHaveLength(1);
@@ -3251,7 +3251,7 @@ describe('async editor host props', () => {
     const second = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
       collaboration={{ clientId: 202 }} onReady={(api) => { target = api; }}
       onChange={() => targetChanges++} onDocumentChange={({ version }) => targetVersions.push(version)} />);
-    await waitFor(() => { expect(source).toBeDefined(); expect(target).toBeDefined(); });
+    await waitFor(() => { expect(source).toBeDefined(); expect(target).toBeDefined(); }, MOUNTED);
     const before = await target.version();
     const vector = await target.collaboration!.encodeStateVector();
     await act(async () => {
@@ -3290,7 +3290,7 @@ describe('async editor host props', () => {
     const second = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
       collaboration={{ clientId: 404 }} onReady={(api) => { target = api; }}
       onChange={() => targetChanges++} onDocumentChange={({ version }) => targetVersions.push(version)} />);
-    await waitFor(() => { expect(source).toBeDefined(); expect(target).toBeDefined(); });
+    await waitFor(() => { expect(source).toBeDefined(); expect(target).toBeDefined(); }, MOUNTED);
     const before = await target.version();
     await act(async () => {
       await source.applyEdits({ expectVersion: await source.version(), steps: [{ op: 'setCellInputs',
@@ -3368,13 +3368,13 @@ it('in-thread renders the supplied loading indicator while opening a file', asyn
   const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
     loadingIndicator={<span>Opening in thread</span>} onReady={() => { ready = true; }} />);
   expect(view.queryByText('Opening in thread')).not.toBeNull();
-  await waitFor(() => expect(ready).toBe(true));
+  await waitFor(() => expect(ready).toBe(true), MOUNTED);
   expect(view.queryByText('Opening in thread')).toBeNull();
 });
 
 it('pins the editor root to ltr', async () => {
   const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} onReady={() => {}} />);
-  await waitFor(() => expect(view.getByTestId('xlsx-name-box')).toBeDefined());
+  await waitFor(() => expect(view.getByTestId('xlsx-name-box')).toBeDefined(), MOUNTED);
   expect((view.container.firstElementChild as HTMLElement).getAttribute('dir')).toBe('ltr');
 });
 
