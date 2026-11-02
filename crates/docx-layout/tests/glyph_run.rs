@@ -1393,14 +1393,14 @@ fn painted_pen_honors_the_kerning_threshold() {
 }
 
 #[test]
-fn text_runs_carry_the_east_asian_language_only_for_han_it_decides() {
+fn text_runs_carry_the_scripts_their_paragraph_resolves() {
     let store = FontStore::new();
-    let cases = [
-        ("漢字", Some("ja-JP"), Some("ja-JP")),
-        ("漢字", Some("zh-TW"), Some("zh-TW")),
-        ("漢字", Some("en-US"), None),
-        ("Latin", Some("ja-JP"), None),
-        ("漢字", None, None),
+    let cases: [(&str, Option<&str>, &[&str]); 5] = [
+        ("漢字", Some("ja-JP"), &["cjk-jp"]),
+        ("漢字", Some("zh-TW"), &["cjk-tc"]),
+        ("漢字", Some("en-US"), &["cjk-sc"]),
+        ("漢字", None, &["cjk-sc"]),
+        ("Latin", Some("ja-JP"), &[]),
     ];
     for (text, language, expected) in cases {
         let mut input: serde_json::Value =
@@ -1419,8 +1419,8 @@ fn text_runs_carry_the_east_asian_language_only_for_han_it_decides() {
                 _ => None,
             })
             .expect("text run");
-        assert_eq!(run.east_asia_language.as_deref(), expected, "{text} {language:?}");
+        assert_eq!(run.scripts, expected, "{text} {language:?}");
         let json = serde_json::to_value(&run).unwrap();
-        assert_eq!(json.get("eastAsiaLanguage").and_then(|value| value.as_str()), expected);
+        assert_eq!(json.get("scripts").is_some(), !expected.is_empty());
     }
 }

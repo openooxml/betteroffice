@@ -49,24 +49,6 @@ pub fn paragraph_scripts_with_languages<'a>(
     scripts_of(&mut texts.into_iter(), include_han_fallback)
 }
 
-fn is_han(point: u32) -> bool {
-    matches!(
-        point,
-        0x3000..=0x303f
-            | 0x3400..=0x4dbf
-            | 0x4e00..=0x9fff
-            | 0xf900..=0xfaff
-            | 0xfe30..=0xfe4f
-            | 0xff00..=0xff65
-            | 0x20000..=0x3ffff
-    )
-}
-
-/// Whether `text` has a character whose face [`han_script_for_language`] chooses.
-pub fn contains_han(text: &str) -> bool {
-    text.chars().any(|character| is_han(character as u32))
-}
-
 fn scripts_of<'a>(
     texts: &mut dyn Iterator<Item = (&'a str, Option<&'a str>)>,
     include_han_fallback: bool,
@@ -95,7 +77,13 @@ fn scripts_of<'a>(
                 | 0xac00..=0xd7ff
                 | 0xffa0..=0xffdc => hangul = true,
                 0x3040..=0x30ff | 0x31f0..=0x31ff | 0xff66..=0xff9f => kana = true,
-                point if is_han(point) => han = true,
+                0x3000..=0x303f
+                | 0x3400..=0x4dbf
+                | 0x4e00..=0x9fff
+                | 0xf900..=0xfaff
+                | 0xfe30..=0xfe4f
+                | 0xff00..=0xff65
+                | 0x20000..=0x3ffff => han = true,
                 _ => {}
             }
             let script = match point {

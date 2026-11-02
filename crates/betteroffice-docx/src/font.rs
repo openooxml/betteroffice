@@ -257,10 +257,11 @@ fn text_requirement(run: &docx_layout::display_list::TextRunPrimitive) -> Option
         family: family.to_owned(),
         bold,
         italic,
-        scripts: ooxml_text::paragraph_scripts_with_languages(
-            [(run.text.as_str(), run.east_asia_language.as_deref())],
-            false,
-        ),
+        scripts: if run.scripts.is_empty() {
+            ooxml_text::paragraph_scripts_with_han_fallback([run.text.as_str()], false)
+        } else {
+            run.scripts.clone()
+        },
     })
 }
 
@@ -269,23 +270,20 @@ mod tests {
     use super::text_requirement;
     use docx_layout::display_list::TextRunPrimitive;
 
-    fn run(text: &str, language: Option<&str>) -> TextRunPrimitive {
-        let mut value = serde_json::json!({
+    fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {
+        serde_json::from_value(serde_json::json!({
             "text": text, "x": 0.0, "baselineY": 0.0, "width": 10.0,
-            "font": "bold 16px 'MS Mincho', serif", "color": "#000000"
-        });
-        if let Some(language) = language {
-            value["eastAsiaLanguage"] = serde_json::json!(language);
-        }
-        serde_json::from_value(value).unwrap()
+            "font": "bold 16px 'MS Mincho', serif", "color": "#000000", "scripts": scripts
+        }))
+        .unwrap()
     }
 
     #[test]
-    fn text_requirements_choose_han_faces_by_language() {
-        let japanese = text_requirement(&run("漢字", Some("ja-JP"))).unwrap();
+    fn text_requirements_take_the_paragraph_scripts() {
+        let japanese = text_requirement(&run("骨", &["cjk-jp"])).unwrap();
         assert_eq!((japanese.family.as_str(), japanese.bold), ("MS Mincho", true));
         assert_eq!(japanese.scripts, ["cjk-jp"]);
-        assert_eq!(text_requirement(&run("漢字", Some("zh-TW"))).unwrap().scripts, ["cjk-tc"]);
-        assert_eq!(text_requirement(&run("漢字", None)).unwrap().scripts, ["cjk-sc"]);
+        assert_eq!(text_requirement(&run("漢字", &[])).unwrap().scripts, ["cjk-sc"]);
+        assert!(text_requirement(&run("Latin", &[])).unwrap().scripts.is_empty());
     }
 }
