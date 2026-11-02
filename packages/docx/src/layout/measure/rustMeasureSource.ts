@@ -1,6 +1,6 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
-import { charactersFromBits } from './fontCoverage';
+import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
 import {
   excludeHostedFontFamilies,
   hostedFontFamilies,
@@ -77,6 +77,10 @@ export interface RustMeasureSource {
   measurementConfigForRequirements(
     requirements: ResidentFontRequirement[],
   ): ResidentMeasurementConfig | undefined;
+  /** @internal Whether later requirements need no face the prepared chains lack; holds no font bytes, so it outlives `clear()`. */
+  coverageCheck(
+    requirements: ResidentFontRequirement[],
+  ): (next: ResidentFontRequirement[]) => boolean;
   clear(): void;
 }
 
@@ -254,6 +258,35 @@ export function createRustMeasureSource(options: {
         },
         authoritativeShaping: true,
       };
+    },
+
+    coverageCheck(requirements) {
+      const chains = new Map<string, FontCoverage[] | null>();
+      for (const requirement of mergeRequirements(requirements)) {
+        const familyIds = registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false);
+        const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
+          registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false);
+        if (familyIds === undefined || scriptIds === undefined) continue;
+        const earlier = [...familyIds, ...scriptIds];
+        const coverage = earlier.map(id => registry.coverageOf(id));
+        if (hostedCoverageUnknown(requirement.family) || earlier.length === 0 || coverage.some(covers => !covers)) {
+          chains.set(requirement.key, null);
+          continue;
+        }
+        const backstopIds = registry.getCachedBaseLatinIds(requirement.family, requirement.bold, requirement.italic,
+          requirement.characters, earlier, requirement.key);
+        if (backstopIds === undefined) continue;
+        chains.set(requirement.key, [...coverage, ...backstopIds.map(id => registry.coverageOf(id))]
+          .filter((covers): covers is FontCoverage => covers !== undefined));
+      }
+      return next => mergeRequirements(next).every(requirement => {
+        const coverage = chains.get(requirement.key);
+        if (coverage === undefined) return false;
+        const aliases = symbolFamily(requirement.family);
+        return coverage === null || (requirement.characters ?? []).every(character =>
+          !baseLatinCandidate(character, false) || (baseLatinAlias(character) && !aliases) ||
+          coverage.some(covers => covers(character)));
+      });
     },
 
     clear(): void {

@@ -668,7 +668,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         initial: fontEnvironmentForRegistrations(fonts, config.fontChains, requirements, families, fontStyles),
         signature: settings.current.fonts === undefined && !settings.current.reportFonts ? '[]' : null,
         provider: settings.current.measurementFontProvider,
-        covers: next => measurement?.measurementConfigForRequirements(next) !== undefined };
+        covers: measurement?.coverageCheck(requirements) };
       controller.fontChoices(families);
       identity.current = {
         session: connection.initial.session,
@@ -780,6 +780,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!isCurrent()) return;
       let payload: DocxFontEnvironment;
       let requirements = opened.requirements;
+      let covers = opened.covers;
       if (!requirementsChanged && opened.signature === null && !fonts?.length && provider === opened.provider) payload = structuredClone(opened.initial);
       else {
         if (requirementsChanged) fontRefresh.current.read = performance.now();
@@ -791,7 +792,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         requirements = uncovered;
         const embedded = await extractEmbeddedFontFaces(opened.document);
         payload = await prepareWorkerFontEnvironment({ fonts, provider, runtime: client.fontRuntime, embedded, requirements, families: opened.families,
-          compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
+          compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal, onCoverage: check => { covers = check; } });
       }
       if (!isCurrent()) return;
       const result = current.binding.commands.submit({ kind: 'setFontEnvironment', payload }, { fence: true, onSubmitted: ticket => {
@@ -801,7 +802,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           if (outcome.status === 'refused' || outcome.status === 'cancelled') {
             reportRecoverableError(new Error(`DOCX font environment was rejected: ${outcome.reason}`));
           } else {
-            opened.signature = signature; opened.provider = provider; opened.requirements = requirements; opened.initial.faces.length = 0;
+            opened.signature = signature; opened.provider = provider; opened.requirements = requirements; opened.covers = covers; opened.initial.faces.length = 0;
           }
           settle();
         }, (error: unknown) => {

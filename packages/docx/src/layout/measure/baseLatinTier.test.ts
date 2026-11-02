@@ -67,6 +67,22 @@ test('a prepared backstop covers new candidates synchronously', async () => {
   expect(load).toHaveBeenCalledTimes(1);
 });
 
+test('the coverage check answers after the registry is cleared', async () => {
+  let next = 0;
+  const source = createRustMeasureSource({ engine: { registerFont: () => next++, clearFonts() {} },
+    bundled: { resolve: () => async () => hebrew, resolveBaseLatin: () => async () => regular } });
+  const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false, characters: ['Ω'] };
+  const plain = { key: 'plain|0|0', family: 'Plain', bold: false, italic: false };
+  await source.prepareFontRequirements([requirement, plain]);
+  const covers = source.coverageCheck([requirement, plain]);
+  source.clear();
+  expect(source.measurementConfigForRequirements([requirement, plain])).toBeUndefined();
+  expect(covers([{ ...requirement, characters: ['Ω', 'Ж'] }, plain])).toBe(true);
+  expect(covers([requirement, { ...plain, characters: ['日'] }])).toBe(true);
+  expect(covers([requirement, { ...plain, characters: ['Ω'] }])).toBe(false);
+  expect(covers([requirement, plain, { key: 'other|0|0', family: 'Other', bold: false, italic: false }])).toBe(false);
+});
+
 test('aliased requirement keys settle with independent character sets', async () => {
   let next = 0;
   const source = createRustMeasureSource({

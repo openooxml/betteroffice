@@ -70,6 +70,7 @@ export async function prepareWorkerFontEnvironment(options: {
   runtime?: Parameters<typeof createRustMeasureSource>[0]['runtime'];
   compat: Parameters<ReturnType<typeof createRustMeasureSource>['setCompat']>[0];
   signal: AbortSignal;
+  onCoverage?: (covers: (requirements: ResidentFontRequirement[]) => boolean) => void;
 }): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
   const styles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>();
@@ -95,6 +96,7 @@ export async function prepareWorkerFontEnvironment(options: {
     options.signal.throwIfAborted();
     const config = measurement.measurementConfigForRequirements(requirements);
     if (!config) throw new Error('DOCX worker fonts are not ready');
+    options.onCoverage?.(measurement.coverageCheck(requirements));
     return fontEnvironmentForRegistrations(fonts, config.fontChains, requirements,
       [...options.families, ...custom.map(face => face.family)], styles);
   } finally { measurement.setEmbeddedFaces([]); measurement.clear(); }

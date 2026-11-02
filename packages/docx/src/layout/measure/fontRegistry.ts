@@ -324,6 +324,10 @@ export class TextMeasureFontRegistry {
     return resolution?.ids;
   }
 
+  coverageOf(id: number): FontCoverage | undefined {
+    return this.coverage.get(id);
+  }
+
   getCachedBaseLatinIds(
     family: string,
     bold: boolean,
