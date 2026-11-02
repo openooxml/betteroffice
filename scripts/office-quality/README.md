@@ -55,6 +55,8 @@ Keep `--ref main`; set `branch` to the repository branch to measure. The optiona
 
 The final job requires every selected format and sample, combines the original comparisons, and updates the [README scores](../../README.md#benchmarks) as `openooxml-bot[bot]`. Unchanged results create no commit; a changed branch head requires a rerun. Runs are manual only. Score JSON and generated Markdown are retained for 30 days; per-format reports and optional commit PNGs are transferred as seven-day artifacts.
 
+`private_corpus` marks a run on a corpus that must stay private: public output is then aggregates only. The run refuses a `samples` list and render publishing, runs every corpus-reading script through `private-step.mjs` (which writes the script's output to a log under `$RUNNER_TEMP/private-logs` and prints only its exit code), skips the asset cache, uploads no per-document artifact, and neither publishes renders nor commits the README; the only artifact is `section.md`. Per-document reports do not yet move between jobs in this mode, so a private run stops before the reconciler until a private handoff store is configured.
+
 ## Native DOCX and LibreOffice
 
 The DOCX table adds LibreOffice fidelity and a native CLI render-time row. BetterOffice fidelity still measures the browser renderer at 150 DPI. Native timings exercise the Rust rasterizer at 96 DPI; they do not claim that it has the browser renderer's fidelity or feature coverage. PPTX adds the same render-time comparison; XLSX adds LibreOffice SSIM, recalculation accuracy and recalculation time.

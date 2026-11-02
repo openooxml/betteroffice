@@ -28,12 +28,18 @@ on:
         default: ''
         required: false
         type: string
+      private_corpus:
+        description: Private corpus run; logs, artifacts and caches carry no per-document data
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
 
 env:
   QUALITY_CORPUS_ORIGIN: ${{ inputs.corpus_origin }}
+  QUALITY_PRIVATE: ${{ inputs.private_corpus && 'true' || 'false' }}
 
 concurrency:
   group: visual-fidelity-${{ inputs.branch }}
@@ -81,6 +87,17 @@ jobs:
           echo "::error::A custom corpus origin cannot publish renders: the public viewer reads references from the default corpus. Re-run with publish_renders off."
           exit 1
 
+      - name: Keep private runs aggregate-only
+        if: inputs.private_corpus
+        env:
+          SAMPLES_GIVEN: ${{ inputs.samples != '' }}
+          PUBLISH_RENDERS: ${{ inputs.publish_renders }}
+        run: |
+          if [ "$SAMPLES_GIVEN" != false ] || [ "$PUBLISH_RENDERS" != false ]; then
+            echo "::error::Private corpus runs take a collection, not a samples list, and never publish renders"
+            exit 1
+          fi
+
       - name: Record the runner image
         id: runner
         run: echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
@@ -96,7 +113,7 @@ jobs:
           QUALITY_COLLECTION: ${{ inputs.collection }}
           QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-plan
         run: |
-          node scripts/office-quality/plan.mjs
+          node scripts/office-quality/private-step.mjs plan -- node scripts/office-quality/plan.mjs
           node --input-type=module - <<'JS'
           import { appendFile, readFile } from 'node:fs/promises';
           import { docxShards } from './scripts/office-quality/docx-benchmark.mjs';
@@ -119,7 +136,8 @@ jobs:
           await appendFile(process.env.GITHUB_OUTPUT, `pptx-published-source=${plan.pptx_published_source_sha ?? ''}\n`);
           JS
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - if: ${{ !inputs.private_corpus }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan/plan.json
@@ -157,6 +175,7 @@ jobs:
 
       - name: Restore fidelity asset cache
         id: fidelity-cache
+        if: ${{ !inputs.private_corpus }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/fidelity-assets
@@ -224,24 +243,25 @@ jobs:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_FORMAT: ${{ matrix.format }}
           QUALITY_OUTPUT: .source/office-quality/ci
-          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
-        run: node scripts/office-quality/run.mjs
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+        run: node scripts/office-quality/private-step.mjs measure -- node scripts/office-quality/run.mjs
 
       - name: Compute fidelity asset cache digest
         id: asset-cache
-        if: always()
+        if: always() && !inputs.private_corpus
         run: |
           digest=$(node scripts/office-quality/asset-cache.mjs "${RUNNER_TEMP}/fidelity-assets")
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Save fidelity asset cache
-        if: always() && steps.asset-cache.outputs.digest != '' && steps.fidelity-cache.outputs.cache-matched-key != format('fidelity-assets-v2-{0}-{1}-{2}', runner.os, matrix.format, steps.asset-cache.outputs.digest)
+        if: always() && !inputs.private_corpus && steps.asset-cache.outputs.digest != '' && steps.fidelity-cache.outputs.cache-matched-key != format('fidelity-assets-v2-{0}-{1}-{2}', runner.os, matrix.format, steps.asset-cache.outputs.digest)
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/fidelity-assets
           key: fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-${{ steps.asset-cache.outputs.digest }}
 
       - name: Upload the format report
+        if: ${{ !inputs.private_corpus }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: visual-fidelity-report-${{ matrix.format }}
@@ -251,7 +271,7 @@ jobs:
           retention-days: 7
 
       - name: Upload the format renders
-        if: inputs.publish_renders && inputs.corpus_origin == ''
+        if: inputs.publish_renders && inputs.corpus_origin == '' && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: visual-fidelity-renders-${{ matrix.format }}
@@ -439,6 +459,7 @@ jobs:
           "$SOFFICE" --version
 
       - name: Restore DOCX source and reference assets
+        if: ${{ !inputs.private_corpus }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/fidelity-assets
@@ -451,17 +472,18 @@ jobs:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
-          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
-        run: node scripts/office-quality/docx-benchmark.mjs
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+        run: node scripts/office-quality/private-step.mjs docx-benchmark-stage -- node scripts/office-quality/docx-benchmark.mjs
 
       - name: Measure native CLI times and LibreOffice fidelity
         env:
           QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
           QUALITY_NATIVE: ${{ runner.temp }}/native
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
-        run: python scripts/office-quality/docx_benchmark.py
+        run: node scripts/office-quality/private-step.mjs docx-benchmark -- python scripts/office-quality/docx_benchmark.py
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - if: ${{ !inputs.private_corpus }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: docx-benchmark-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/docx-benchmark/report.json
@@ -469,7 +491,7 @@ jobs:
           retention-days: 7
 
       - name: Upload DOCX benchmark diagnostics
-        if: always()
+        if: always() && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: docx-benchmark-diagnostics-${{ matrix.shard }}
@@ -576,21 +598,22 @@ jobs:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-benchmark
-          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
-        run: node scripts/office-quality/xlsx-benchmark.mjs
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+        run: node scripts/office-quality/private-step.mjs xlsx-benchmark-stage -- node scripts/office-quality/xlsx-benchmark.mjs
       - name: Measure calculation accuracy and native CLI times
         env:
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-benchmark
           QUALITY_NATIVE: ${{ runner.temp }}/native
-        run: python scripts/office-quality/xlsx_benchmark.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        run: node scripts/office-quality/private-step.mjs xlsx-benchmark -- python scripts/office-quality/xlsx_benchmark.py
+      - if: ${{ !inputs.private_corpus }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: xlsx-benchmark-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/xlsx-benchmark/report.json
           if-no-files-found: error
           retention-days: 7
       - name: Upload XLSX calculation diagnostics
-        if: always()
+        if: always() && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: xlsx-benchmark-diagnostics-${{ matrix.shard }}
@@ -693,22 +716,23 @@ jobs:
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/pptx-benchmark
-          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
-        run: node scripts/office-quality/pptx-benchmark.mjs
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+        run: node scripts/office-quality/private-step.mjs pptx-benchmark-stage -- node scripts/office-quality/pptx-benchmark.mjs
       - name: Measure native slide render times and LibreOffice fidelity
         env:
           QUALITY_OUTPUT: ${{ runner.temp }}/pptx-benchmark
           QUALITY_NATIVE: ${{ runner.temp }}/native
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
-        run: python scripts/office-quality/pptx_benchmark.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        run: node scripts/office-quality/private-step.mjs pptx-benchmark -- python scripts/office-quality/pptx_benchmark.py
+      - if: ${{ !inputs.private_corpus }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pptx-benchmark-report
           path: ${{ runner.temp }}/pptx-benchmark/report.json
           if-no-files-found: error
           retention-days: 7
       - name: Upload PPTX LibreOffice diagnostics
-        if: always()
+        if: always() && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pptx-benchmark-diagnostics
@@ -769,21 +793,22 @@ jobs:
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-fidelity
-          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
-        run: node scripts/office-quality/xlsx-fidelity.mjs
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+        run: node scripts/office-quality/private-step.mjs xlsx-fidelity-stage -- node scripts/office-quality/xlsx-fidelity.mjs
       - name: Measure LibreOffice XLSX range fidelity
         env:
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-fidelity
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
-        run: python scripts/office-quality/xlsx_fidelity.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        run: node scripts/office-quality/private-step.mjs xlsx-fidelity -- python scripts/office-quality/xlsx_fidelity.py
+      - if: ${{ !inputs.private_corpus }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: xlsx-fidelity-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/xlsx-fidelity/report.json
           if-no-files-found: error
           retention-days: 7
       - name: Upload XLSX LibreOffice diagnostics
-        if: always()
+        if: always() && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: xlsx-fidelity-diagnostics-${{ matrix.shard }}
@@ -886,8 +911,8 @@ jobs:
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/roundtrip
-          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
-        run: node scripts/office-quality/roundtrip.mjs
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+        run: node scripts/office-quality/private-step.mjs roundtrip-stage -- node scripts/office-quality/roundtrip.mjs
       - name: Measure parsing and preservation after an edit
         env:
           FORMAT: ${{ matrix.format }}
@@ -895,15 +920,16 @@ jobs:
           QUALITY_NATIVE: ${{ runner.temp }}/roundtrip-native
         run: |
           chmod +x "${QUALITY_NATIVE}/published/${FORMAT}-roundtrip-bench" "${QUALITY_NATIVE}/commit/${FORMAT}-roundtrip-bench"
-          python scripts/office-quality/roundtrip.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+          node scripts/office-quality/private-step.mjs roundtrip -- python scripts/office-quality/roundtrip.py
+      - if: ${{ !inputs.private_corpus }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: roundtrip-report-${{ matrix.format }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/roundtrip/report.json
           if-no-files-found: error
           retention-days: 7
       - name: Upload edit/save diagnostics
-        if: always()
+        if: always() && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: roundtrip-diagnostics-${{ matrix.format }}-${{ matrix.shard }}
@@ -1039,10 +1065,11 @@ jobs:
           QUALITY_REQUIRE_XLSX_FIDELITY: 'true'
           QUALITY_REQUIRE_ROUNDTRIP: 'true'
         run: |
-          node scripts/office-quality/merge.mjs
+          node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
           cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - if: ${{ !inputs.private_corpus }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: visual-fidelity
           path: |
@@ -1051,13 +1078,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - if: inputs.private_corpus
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: visual-fidelity
+          path: ${{ runner.temp }}/fidelity-report/section.md
+          if-no-files-found: error
+          retention-days: 30
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        if: inputs.publish_renders && inputs.corpus_origin == '' && github.repository == 'openooxml/betteroffice'
+        if: inputs.publish_renders && inputs.corpus_origin == '' && !inputs.private_corpus && github.repository == 'openooxml/betteroffice'
         with:
           bun-version: "1.4.3"
 
       - name: Publish the reconciled commit renders
-        if: inputs.publish_renders && inputs.corpus_origin == '' && github.repository == 'openooxml/betteroffice'
+        if: inputs.publish_renders && inputs.corpus_origin == '' && !inputs.private_corpus && github.repository == 'openooxml/betteroffice'
         env:
           QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-report
           QUALITY_RENDER_BUCKET: betteroffice-fidelity
@@ -1066,6 +1101,7 @@ jobs:
         run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
+        if: ${{ !inputs.private_corpus }}
         run: |
           python3 - <<'PY'
           import os
@@ -1088,6 +1124,7 @@ jobs:
 
       - name: Detect a changed report
         id: changed
+        if: ${{ !inputs.private_corpus }}
         run: |
           if git diff --quiet -- README.md; then
             echo "value=false" >> "$GITHUB_OUTPUT"
