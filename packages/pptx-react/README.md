@@ -31,11 +31,12 @@ export function Presentation({ file, fontBytes }: {
 `fonts` is required. Byte faces supply a family name and the bytes of a TTF or OTF file, for example
 fetched from your server or loaded with `loadBundledFontBytes` from
 [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts).
-You can also pass a bundled face such as `notoSansJp` as a descriptor; the editor decodes it in its
+You can also pass a bundled face from `@betteroffice/fonts` as a descriptor; the editor decodes it in its
 worker without loading the main-thread decoder:
 
 ```tsx
-<PptxEditor file={file} fonts={[{ face: notoSansJp, baseUrl }]} />
+const arial = resolveMetricCompatFace('Arial', false, false)!;
+<PptxEditor file={file} fonts={[{ face: arial, baseUrl }]} />
 ```
 
 ## Key options

@@ -55,7 +55,8 @@ Hosts loading bundled bytes themselves can import `preparePresentationFontDecode
 then reuses that worker. Call `release()` on the prepared decoder if no session adopts it.
 
 ```ts
-const { decoder, release } = preparePresentationFontDecoder(file); const bytes = await loadBundledFontBytes(face, { baseUrl }, { decoder });
+const { decoder, release } = preparePresentationFontDecoder(file);
+const bytes = await loadBundledFontBytes(face, { baseUrl }, { decoder });
 ```
 
 ## Entry points
