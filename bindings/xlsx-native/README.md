@@ -41,8 +41,7 @@ running. The native engine has no such cap: a document that needs more memory th
 makes the whole process run out of memory.
 
 Both engines bound their input the same way. A package is refused above 512 MiB uncompressed or
-5,000 parts, and XML nested deeper than 256 levels is refused. The native engine decodes images in
-Rust, which skips images above 33,554,432 pixels or 256 MiB. Worksheets are read up to 10,000,000 cells and the shared string table up to 10,000,000 entries.
+5,000 parts, and XML nested deeper than 256 levels is refused. Worksheets are read up to 10,000,000 cells and the shared string table up to 10,000,000 entries.
 
 When you open documents from untrusted sources with this package on a server, run it under a
 memory limit (a container or cgroup limit, or a separate process) so an oversized document cannot
