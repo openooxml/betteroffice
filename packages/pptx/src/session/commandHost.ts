@@ -178,15 +178,19 @@ export function registerPresentationCommandHandlers(
   let metafileLoad: Promise<void> | undefined;
   let metafileTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function repaintMetafiles(): void {
-    if (disposed || opening || !metafiles.ready() || !pendingMetafiles.size) return;
+  function applyMetafileRepaint(): boolean {
+    if (disposed || opening || !metafiles.ready() || !pendingMetafiles.size) return false;
     for (const assetId of pendingMetafiles) sentMedia.delete(assetId);
     pendingMetafiles.clear();
-    const dirty = [...revisions.keys()];
-    for (const id of dirty) revisions.set(id, revisions.get(id)! + 1);
+    for (const [id, revision] of revisions) revisions.set(id, revision + 1);
     layouts.clear();
+    return true;
+  }
+
+  function repaintMetafiles(): void {
+    if (gatingFonts || !applyMetafileRepaint()) return;
     if (options.onDefaultFonts) {
-      const result = ack([], dirty);
+      const result = ack([], [...revisions.keys()]);
       options.onDefaultFonts(transferable({ ...result.value, defaultFonts: [] }, result.transfer));
     }
   }
@@ -1522,7 +1526,8 @@ export function registerPresentationCommandHandlers(
       const publish = () => {
         gatingFonts = false;
         const faces = gatedDefaultFonts.splice(0);
-        const result = ack([outcome], faces.length ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
+        const repainted = applyMetafileRepaint();
+        const result = ack([outcome], faces.length || repainted ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
           admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
           admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
         if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;

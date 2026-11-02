@@ -5,6 +5,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { initWasm } from '../wasm/loader';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
+import { commandFontProvider } from './commandDefaultFonts';
 import { openPresentationSession, type PresentationSession } from './client';
 import { createPresentationSessionHost } from './host';
 import { commandMetafileSvgModule, type MetafileSvgModule } from './metafileSvg';
@@ -24,7 +25,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function deck(pictureSlide?: number, hiddenFromScan = false): Promise<Uint8Array> {
+async function deck(pictureSlide?: number, hiddenFromScan = false, slideTwoFont?: string): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const rels = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -36,7 +37,8 @@ async function deck(pictureSlide?: number, hiddenFromScan = false): Promise<Uint
   const mediaName = hiddenFromScan ? 'picture.bin' : 'picture.emf';
   for (const number of [1, 2]) {
     const picture = number === pictureSlide ? '<p:pic><p:nvPicPr><p:cNvPr id="2" name="Metafile"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="picture"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>' : '';
-    zip.file(`ppt/slides/slide${number}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${picture}</p:spTree></p:cSld></p:sld>`);
+    const text = number === 2 && slideTwoFont ? `<p:sp><p:nvSpPr><p:cNvPr id="3" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"><a:latin typeface="${slideTwoFont}"/></a:rPr><a:t>alpha</a:t></a:r></a:p></p:txBody></p:sp>` : '';
+    zip.file(`ppt/slides/slide${number}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${picture}${text}</p:spTree></p:cSld></p:sld>`);
     if (picture) zip.file(`ppt/slides/_rels/slide${number}.xml.rels`, `<Relationships xmlns="${rels}"><Relationship Id="picture" Type="${rel}/image" Target="../media/${mediaName}"/></Relationships>`);
   }
   if (pictureSlide) zip.file(`ppt/media/${mediaName}`, await readFile(new URL('../../../../crates/pptx-render/tests/fixtures/metafile-text.emf', import.meta.url)));
@@ -189,6 +191,76 @@ for (const shared of [false, true]) test(`fallback loading sends a worker repain
   expect(frame.media[0]?.bytes).not.toBe(first.media[0]?.bytes);
   expect(new Uint8Array(frame.media[0]!.bytes)).toEqual(svg);
   expect(wire.messages.some((message) => isHostMessage(message) && message.kind === 'event' && message.name === 'defaultFonts')).toBe(true);
+});
+
+test('shared navigation folds a metafile repaint into its font-gated reply', async () => {
+  const converter = deferred<MetafileSvgModule>();
+  const converterRequested = deferred<void>();
+  const load = loader(() => { converterRequested.resolve(); return converter.promise; });
+  const font = deferred<ArrayBuffer>();
+  const fontRequested = deferred<void>();
+  const provider = spyOn(commandFontProvider, 'load').mockResolvedValue({
+    resolve: (family: string) => family === 'Cambria' ? () => { fontRequested.resolve(); return font.promise; } : undefined,
+    resolveFamily: () => undefined,
+    resolveScriptFallback: () => undefined,
+    resolveLastResort: () => { throw new Error('Unrelated substitution'); },
+  });
+  restorers.push(() => provider.mockRestore());
+  const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
+  restorers.push(() => fetch.mockRestore());
+  const fontBytes = new Uint8Array(await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url))).buffer;
+  const wire = connection();
+  const client = await createSharedPresentationCommandClient(await deck(2, true, 'Cambria'), {
+    ...options, defaultFonts: true,
+  }, wire.transport);
+  clients.push(client);
+  await fontRequested.promise;
+  expect(load).not.toHaveBeenCalled();
+  const destination = client.state.slides[1].id;
+  const first = await client.thumbnail(destination);
+  expect(first.status).toBe('frame');
+  if (first.status !== 'frame') throw new Error('Missing slide two thumbnail');
+  expect(first.frame.media[0]?.bytes.byteLength).toBe(0);
+  await converterRequested.promise;
+  const throughSeq = client.state.throughSeq;
+  const acknowledgements: number[] = [];
+  let following: ReturnType<PresentationCommandClient['dispatch']> | undefined;
+  client.subscribe((ack) => {
+    acknowledgements.push(ack.throughSeq);
+    if (ack.throughSeq === throughSeq + 1 && ack.outcomes[0]?.status === 'applied') {
+      following = client.dispatch({ kind: 'activateSlide', payload: { slideId: client.state.slides[0].id } });
+    }
+  });
+  const start = wire.messages.length;
+  let navigated = false;
+  const navigation = client.dispatch({ kind: 'activateSlide', payload: { slideId: destination } }).then((ack) => {
+    navigated = true;
+    return ack;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(navigated).toBe(false);
+  converter.resolve(svgModule());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(navigated).toBe(false);
+  expect(client.state.throughSeq).toBe(throughSeq);
+  expect(acknowledgements).toEqual([]);
+  expect(wire.messages.slice(start).filter((message) => isHostMessage(message) &&
+    (message.kind === 'reply' || message.kind === 'event' && message.name === 'defaultFonts'))).toEqual([]);
+  font.resolve(fontBytes);
+  const ack = await navigation;
+  expect(ack.outcomes[0]?.status).toBe('applied');
+  expect(ack.dirtySlideIds).toEqual(client.state.slides.map((slide) => slide.id));
+  expect(ack.frame?.slideId).toBe(destination);
+  expect(ack.frame?.slideRevision).toBeGreaterThan(first.frame.slideRevision);
+  expect(ack.frame?.media).toEqual([{ assetId: 'ppt/media/picture.bin', bytes: svg.buffer }]);
+  expect(following).toBeDefined();
+  const second = await following!;
+  expect(second.outcomes[0]?.status).toBe('applied');
+  expect(second.outcomes[0]?.reason).toBeUndefined();
+  expect(acknowledgements).toEqual([throughSeq + 1, throughSeq + 2]);
+  expect(wire.messages.slice(start).some((message) => isHostMessage(message) &&
+    message.kind === 'event' && message.name === 'defaultFonts')).toBe(false);
+  expect(load).toHaveBeenCalledTimes(1);
 });
 
 test('disposal during a converter load sends no later messages', async () => {
