@@ -389,6 +389,9 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     return new WorkbookCommandRefusal('stale-proposal', { cells: error.cells, targets: error.targets });
   }
   if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError) return undefined;
+  if (/^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(error.message)) {
+    return new WorkbookCommandRefusal('locked-target', { ok: false, failure: { code: 'locked-target', message: error.message } });
+  }
   if (method === 'applyOps' && error.message === 'structural operations are unavailable in collaborative mode') {
     return new WorkbookCommandRefusal('unsupported');
   }

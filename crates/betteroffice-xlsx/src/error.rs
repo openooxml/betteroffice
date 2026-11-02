@@ -34,6 +34,9 @@ pub enum Error {
     SheetOutOfRange(SheetId),
     CellOutOfRange(CellRef),
     InvalidOperation(String),
+    /// A user edit sheet protection refuses: input into a locked cell, or formatting or
+    /// moving objects on a protected sheet that does not allow it. The workbook is unchanged.
+    LockedTarget(String),
     /// A JSON request that does not decode to the request type.
     InvalidRequest(String),
     /// A stored `SetChartAnchor` named a frame that no longer holds the chart
@@ -123,6 +126,7 @@ impl fmt::Display for Error {
                 u64::from(cell.col) + 1
             ),
             Self::InvalidOperation(message) => f.write_str(message),
+            Self::LockedTarget(message) => f.write_str(message),
             Self::InvalidRequest(message) => write!(f, "malformed request: {message}"),
             Self::ChartFrameShifted { frame } => write!(
                 f,

@@ -64,9 +64,11 @@ import {
   type InputDraft,
 } from './commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from './commands/pluginEvents';
+import type { XlsxCommandFailureCode } from './commands/types';
 import { useCommandShortcuts } from './commands/useCommandShortcuts';
 import { useSaveRequest } from './commands/useSaveRequest';
 import { useXlsxCommandBinding, type XlsxEditorBridge } from './commands/useXlsxCommands';
+import { isSheetProtectedError } from './commands/workerInputErrors';
 import { XlsxCommandContext } from './commands/XlsxCommandProvider';
 import { EditorToolbar } from './components/EditorToolbar';
 import { EditorChromeContext } from './components/EditorToolbarContext';
@@ -98,7 +100,7 @@ import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPan
 import type { XlsxPluginSelection } from './plugins/types';
 import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
 
-import { initialZoomScale } from './commands/evaluate';
+import { commandReason, initialZoomScale } from './commands/evaluate';
 import { WorkbookFailure } from './components/WorkbookFailure';
 
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
@@ -503,6 +505,12 @@ export function XlsxEditorContent({
 
   const [sheetInfo, setSheetInfo, sheetInfoRef] = useSyncedState<SheetInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<XlsxCommandFailureCode | null>(null);
+  /** Shows a failed edit: a sheet protection refusal as a notice, anything else as a failure. */
+  const reportEditFailure = useCallback((cause: unknown) => {
+    if (isSheetProtectedError(cause)) setRefusal('sheet-protected');
+    else setError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [frame, setFrame] = useState<DisplayList | null>(null);
   const [selection, setRawSelection, selectionRef] = useSyncedState<Selection | null>(null);
@@ -624,6 +632,7 @@ export function XlsxEditorContent({
       paintSourceRef.current = null;
       showRejected(sheet);
       setError(null);
+      setRefusal(null);
       commandController.refresh();
     },
     [dropDrafts, showRejected, commandController]
@@ -885,6 +894,7 @@ export function XlsxEditorContent({
     borderColorChoiceRef.current = undefined;
     setCapturedFormat(null);
     setRenderError(null);
+    setRefusal(null);
     paintSourceRef.current = null;
     pendingSheetViewRef.current = false;
     paintedRef.current = null;
@@ -1293,7 +1303,10 @@ export function XlsxEditorContent({
   // pending proposals because structural ops and undo/redo can drop them.
   const applyResult = useCallback(
     (result: EditResult) => {
-      if (result.applied) cellClipboard.changed();
+      if (result.applied) {
+        cellClipboard.changed();
+        setRefusal(null);
+      }
       mutationRef.current += 1;
       setSheetInfo(result.sheetInfo);
       setRevision((r) => r + 1);
@@ -1341,8 +1354,8 @@ export function XlsxEditorContent({
         }
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        return false;
+        reportEditFailure(e);
+        return isSheetProtectedError(e) ? 'sheet-protected' : false;
       }
     },
     close(draft) {
@@ -1457,12 +1470,12 @@ export function XlsxEditorContent({
           applyResult(handle.moveChart(sheet, id, dx, dy));
           return true;
         } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
+          reportEditFailure(e);
           return false;
         }
       });
     },
-    [activeSheet, applyResult, readOnly, coordinator]
+    [activeSheet, applyResult, readOnly, coordinator, reportEditFailure]
   );
 
   // land a run of arrow nudges as one edit. key repeat fires as fast as the os
@@ -1616,11 +1629,11 @@ export function XlsxEditorContent({
         applyResult(handle.editCells(sheet, edits));
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     },
-    [applyResult, t]
+    [applyResult, t, reportEditFailure]
   );
 
   const clearCells = useCallback(() => {
@@ -1704,11 +1717,11 @@ export function XlsxEditorContent({
         }
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     });
-  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection, cellClipboard]);
+  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection, cellClipboard, reportEditFailure]);
 
   useEffect(() => {
     const handle = handleRef.current;
@@ -1729,7 +1742,7 @@ export function XlsxEditorContent({
         focusContainer();
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     });
@@ -1743,6 +1756,7 @@ export function XlsxEditorContent({
     focusContainer,
     readOnly,
     coordinator,
+    reportEditFailure,
   ]);
 
   const deliverSave = useCallback(
@@ -2212,6 +2226,7 @@ export function XlsxEditorContent({
     translate: t,
     apply: applyResult,
     fail: (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
+    refuse: setRefusal,
     setZoom,
     setProposalsPanelOpen,
     setCapturedFormat: (format, source) => {
@@ -2616,6 +2631,11 @@ export function XlsxEditorContent({
       )}
 
       {error && <WorkbookFailure kind="open" details={error} />}
+      {refusal && (
+        <div data-testid="xlsx-input-refusal" role="alert">
+          {commandReason(refusal, { translate: t }).message}
+        </div>
+      )}
 
       {sheetInfo && sheetInfo.sheetNames.length > 0 && (
         <div

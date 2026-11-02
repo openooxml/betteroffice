@@ -1,5 +1,15 @@
 import { XlsxCommandAdmissionError, type XlsxCommandAdmissionCode } from './createXlsxCommandStore';
 
+/** Whether an engine refusal names a locked cell or a protected sheet. */
+export function isSheetProtectedMessage(message: string): boolean {
+  return /^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(message);
+}
+
+/** Whether `error` is the engine refusing a user edit for sheet protection. */
+export function isSheetProtectedError(error: unknown): boolean {
+  return error instanceof Error && isSheetProtectedMessage(error.message);
+}
+
 export class WorkerInputRefusal extends XlsxCommandAdmissionError {
   constructor(message: string, readonly barrier = false, code: XlsxCommandAdmissionCode = 'input-failed') {
     super(code);

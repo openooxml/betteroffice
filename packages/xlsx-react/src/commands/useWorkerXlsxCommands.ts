@@ -26,7 +26,7 @@ import type {
   XlsxCommandResult,
 } from './types';
 
-export interface WorkerXlsxEditorBridge extends Omit<XlsxEditorBridge, 'handle' | 'coordinator' | 'exportPng'> {
+export interface WorkerXlsxEditorBridge extends Omit<XlsxEditorBridge, 'handle' | 'coordinator' | 'exportPng' | 'refuse'> {
   peer(): WorkbookHandle | null;
   editPeer(): WorkbookEditPeer | null;
   coordinator: WorkerInputCoordinator;

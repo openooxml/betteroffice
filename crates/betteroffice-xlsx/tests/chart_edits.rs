@@ -504,6 +504,57 @@ fn chart_owner_protection_is_enforced_by_native_edits() {
 }
 
 #[test]
+fn chart_moves_are_refused_on_a_protected_worksheet() {
+    let mut parts = ooxml_opc::unzip_parts(&bytes(CHART)).unwrap();
+    let sheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    sheet.1 = String::from_utf8(sheet.1.clone())
+        .unwrap()
+        .replace(
+            "</sheetData>",
+            r#"</sheetData><sheetProtection sheet="1"/>"#,
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut book = Workbook::open(&source).unwrap();
+    let frame = book.model().sheets[0].charts[0].frame_id();
+    let anchor = book.model().sheets[0].charts[0].anchor;
+    let version = book.version();
+    let error = book
+        .move_chart(
+            SheetId(0),
+            &frame,
+            40.0,
+            20.0,
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::LockedTarget(message) if message == r#"sheet "Data" is protected"#),
+        "{error:?}"
+    );
+    assert_eq!(book.model().sheets[0].charts[0].anchor, anchor);
+    assert_eq!(book.version(), version);
+    assert_eq!(book.save().unwrap(), source);
+
+    let mut open = Workbook::open(&bytes(CHART)).unwrap();
+    let frame = open.model().sheets[0].charts[0].frame_id();
+    assert!(
+        open.move_chart(
+            SheetId(0),
+            &frame,
+            40.0,
+            20.0,
+            CalculationOptions::default()
+        )
+        .unwrap()
+        .applied
+    );
+}
+
+#[test]
 fn missing_xy_references_use_scatter_and_bubble_slots() {
     for kind in ["scatterChart", "bubbleChart"] {
         let mut chart = CHART

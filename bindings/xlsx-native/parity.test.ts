@@ -3,6 +3,7 @@
 // Both opens recalculate with nowSerial=45000.75 and randSeed=42; the fixture and edits contain no volatile functions.
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
+import JSZip from 'jszip';
 import * as wasm from '../../packages/xlsx/src/wasm/loader';
 import { FORMATS } from '../../scripts/api-surface';
 import { expectSavedPartsEqual } from '../native-parity';
@@ -20,9 +21,9 @@ beforeAll(async () => {
   await wasm.initWasm(readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
 });
 
-async function compare(script: (workbook: WorkbookHandle) => unknown) {
-  const nativeWorkbook = native.openWorkbook(fixture, { calculation });
-  const wasmWorkbook = wasm.openWorkbook(fixture, { calculation });
+async function compare(script: (workbook: WorkbookHandle) => unknown, bytes: Uint8Array = fixture) {
+  const nativeWorkbook = native.openWorkbook(bytes, { calculation });
+  const wasmWorkbook = wasm.openWorkbook(bytes, { calculation });
   try {
     expect(script(nativeWorkbook)).toEqual(script(wasmWorkbook));
     await expectSavedPartsEqual(nativeWorkbook.save(), wasmWorkbook.save());
@@ -88,6 +89,36 @@ describe('xlsx native/wasm package parity', () => {
       const accepted = workbook.acceptProposal(proposal.id);
       return [proposal, listed, accepted, workbook.listProposals(), workbook.cell(0, 3, 2)];
     });
+  });
+
+  test('locked cells on a protected sheet refuse cell edits', async () => {
+    const zip = await JSZip.loadAsync(fixture);
+    const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+    zip.file('xl/worksheets/sheet1.xml', sheet.replace('</sheetData>', '</sheetData><sheetProtection sheet="1"/>'));
+    const locked = await zip.generateAsync({ type: 'uint8array' });
+    const refusal = (edit: () => unknown) => {
+      try {
+        edit();
+        return null;
+      } catch (error) {
+        return (error as Error).message;
+      }
+    };
+    await compare((workbook) => {
+      const version = workbook.version();
+      const refusals = [
+        refusal(() => workbook.editCell(0, 2, 1, '1')),
+        refusal(() => workbook.editCells(0, [{ row: 2, col: 1, input: '1' }])),
+        refusal(() => workbook.patchRangeStyle(0, 'B3', { bold: true })),
+      ];
+      expect(refusals).toEqual([
+        'B3 is locked on protected sheet "Budget"',
+        'B3 is locked on protected sheet "Budget"',
+        'sheet "Budget" is protected',
+      ]);
+      expect(workbook.version()).toBe(version);
+      return [refusals, workbook.cell(0, 2, 1), workbook.editCell(1, 0, 0, 'open')];
+    }, locked);
   });
 
   test('cell reads, markdown and structured exports', async () => {
