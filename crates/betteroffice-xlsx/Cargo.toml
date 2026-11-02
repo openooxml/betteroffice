@@ -18,6 +18,7 @@ fonts-latin = ["fonts", "betteroffice-fonts/fonts-latin"]
 fonts-intl = ["fonts", "betteroffice-fonts/fonts-intl"]
 fonts-cjk = ["fonts", "betteroffice-fonts/fonts-cjk"]
 raster = ["dep:xlsx-raster"]
+fuzzing = []
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
@@ -41,3 +42,4 @@ xlsx-model = { workspace = true, features = ["test-counters"] }
 xlsx-parse = { workspace = true, features = ["test-counters", "test-oracle"] }
 xlsx-render = { workspace = true, features = ["test-counters"] }
 png = "0.18"
+proptest = "1"

@@ -66,8 +66,8 @@ describe.skipIf(engineKind === 'native')('workbook session wasm reuse', () => {
   });
 
   test('keeps worker URLs and options statically evaluable', () => {
-    const source = createSourceFile('client.ts',
-      readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);
+    const source = createSourceFile('sessionWorker.browser.ts',
+      readFileSync(resolve(import.meta.dir, 'sessionWorker.browser.ts'), 'utf8'), ScriptTarget.Latest);
     const workers: Array<Record<string, string>> = [];
     function visit(node: Node): void {
       if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {

@@ -29,6 +29,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
+import { pngDisplayListReaders } from './pngDisplayList';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -343,6 +344,7 @@ export type WorkbookUpdateListener = (
 ) => void;
 
 export interface WorkbookCalculationContext {
+  /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
   nowSerial: number;
   randSeed: number;
 }
@@ -521,6 +523,12 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
+  /**
+   * Recalculate every formula with the handle's calculation context (or the host clock).
+   * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+   * keeps the result the file stored.
+   */
+  recalculate(): CalculationStatus;
   /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
@@ -792,12 +800,14 @@ export function openWorkbook(
 const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
 const recoveryReaders = new WeakMap<WorkbookHandle, (throughSeq: number, preserveHistory: boolean) => Uint8Array>();
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory = false): Uint8Array {
   const capture = recoveryReaders.get(handle);
   if (!capture) throw new TypeError('Workbook does not support recovery checkpoints');
   return capture(throughSeq, preserveHistory);
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number,
   options: OpenWorkbookOptions = {}): WorkbookHandle {
   requireInitialized();
@@ -1092,6 +1102,10 @@ function wrapWorkbookDocument(
       }
       return parseJson(() => doc.sheetInfoForJson(sheet));
     },
+    recalculate(): CalculationStatus {
+      assertAlive();
+      return parseJson<CalculationStatus>(() => doc.recalculateJson(), true);
+    },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
         const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
@@ -1383,6 +1397,10 @@ function wrapWorkbookDocument(
       reportDisplayLimit(JSON.parse(json) as DisplayList);
     }
     return json;
+  });
+  pngDisplayListReaders.set(handle, {
+    viewport: (viewport) => wasmCall(() => doc.pngDisplayListJson(JSON.stringify(viewport))),
+    range: (options) => wasmCall(() => doc.rangePngDisplayListJson(JSON.stringify(options ?? {}))),
   });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));

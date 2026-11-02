@@ -511,6 +511,9 @@ impl<T: Codec> Codec for Vec<T> {
 
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         let count = r.var_usize()?;
+        if count > r.clone().rest().len() {
+            return Err(SnapshotError::new("snapshot payload is truncated"));
+        }
         let mut values = Vec::new();
         for _ in 0..count {
             values.push(T::read(r)?);
@@ -614,6 +617,9 @@ impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
 
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         let count = r.var_usize()?;
+        if count > r.clone().rest().len() {
+            return Err(SnapshotError::new("snapshot payload is truncated"));
+        }
         let mut values = Self::new();
         for _ in 0..count {
             let key = K::read(r)?;
@@ -749,6 +755,44 @@ macro_rules! enum_codec {
             }
         }
     };
+}
+
+impl Codec for SheetOrderEntry {
+    fn write(&self, w: &mut Writer) {
+        let Self { before, after } = self;
+        w.u8(0);
+        before.write(w);
+        after.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        if r.u8()? != 0 {
+            return Err(SnapshotError::new("invalid recovery sheet-order entry"));
+        }
+        Ok(Self {
+            before: Codec::read(r)?,
+            after: Codec::read(r)?,
+        })
+    }
+}
+
+impl Codec for SheetOrderHistory {
+    fn write(&self, w: &mut Writer) {
+        let Self { undo, redo } = self;
+        w.u8(0);
+        undo.write(w);
+        redo.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        if r.u8()? != 0 {
+            return Err(SnapshotError::new("invalid recovery sheet-order history"));
+        }
+        Ok(Self {
+            undo: Codec::read(r)?,
+            redo: Codec::read(r)?,
+        })
+    }
 }
 
 enum_codec!(DateSystem { V1900 = 0, V1904 = 1 });
@@ -1153,7 +1197,7 @@ struct_codec!(SheetChart {
 
 /// A chart with the edited part XML it saves, laid out after the released
 /// chart fields.
-struct EditedChart {
+pub(crate) struct EditedChart {
     chart: SheetChart,
     raw_xml: Option<String>,
 }
@@ -1171,7 +1215,7 @@ impl From<&SheetChart> for EditedChart {
     }
 }
 
-fn edited_charts(charts: Vec<EditedChart>) -> SnapshotResult<Vec<SheetChart>> {
+pub(crate) fn edited_charts(charts: Vec<EditedChart>) -> SnapshotResult<Vec<SheetChart>> {
     charts
         .into_iter()
         .map(|EditedChart { chart, raw_xml }| {

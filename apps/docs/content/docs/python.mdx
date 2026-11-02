@@ -13,6 +13,12 @@ Each package includes its Rust engine and runs independently of Microsoft Office
 Wheels support CPython 3.9 and later on Linux (x86_64, aarch64), macOS (arm64,
 x86_64), and Windows (x86_64).
 
+Each package also installs the bundled fonts as three data wheels,
+`betteroffice-fonts-latin` (4.7 MB), `betteroffice-fonts-intl` (2.2 MB) and
+`betteroffice-fonts-cjk` (26.7 MB), shared by all three packages. Layout and
+rendering read them from disk; nothing is downloaded at run time.
+`register_font` adds a family or replaces a bundled one.
+
 [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) is the
 spreadsheet package. Start with the workbook example below, or jump to
 [DOCX](#docx) or [PPTX](#pptx).
@@ -49,7 +55,7 @@ png = wb.render_png("Sheet1", scale=2.0, range="A1:H40")
 png.write("preview.png")
 ```
 
-Spreadsheet rendering uses the bundled Carlito font. Opening, recalculating,
+Spreadsheet rendering uses the bundled fonts. Opening, recalculating,
 rendering, and saving release the GIL, allowing these operations to run across
 Python threads.
 
@@ -122,8 +128,8 @@ paragraphs, tables, and sections, edits plain single-run paragraphs, and saves
 DOCX files while preserving unsupported package content.
 
 `layout` paginates an input containing measured blocks and layout options.
-`render_png` renders a page from that layout. Register the required fonts before
-rendering; a missing font produces an error.
+`render_png` renders a page from that layout with the bundled fonts and any
+registered with `register_font`.
 
 `export_structured` returns anchored content in the shared camelCase schema;
 `export_markdown` renders Markdown:
@@ -161,7 +167,7 @@ the JavaScript package's `compareDocx` offers it.
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,
 edits shapes and text, and saves `.pptx` files. `render_slide` returns a display
 list; `render_png` produces PNG bytes and reads embedded images from the file.
-Call `register_font` with at least one font face before rendering.
+Rendering uses the bundled fonts; `register_font` adds or replaces a family.
 
 A `Presentation` must be used and released on the thread that opened it.
 

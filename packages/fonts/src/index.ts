@@ -213,7 +213,7 @@ async function assetUrl(
 export function loadBundledFontBytes(
   face: BundledFontFace,
   options?: FontAssetOptions,
-  runtime?: { decoder?: FontDecoder },
+  runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<ArrayBuffer> {
   const baseUrl =
     options?.baseUrl === undefined
@@ -258,7 +258,7 @@ export function registerBundledFontFace(
   face: BundledFontFace,
   cssFamily?: string,
   options?: FontAssetOptions,
-  runtime?: { decoder?: FontDecoder },
+  runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<void> {
   if (
     typeof document === 'undefined' ||
@@ -297,7 +297,7 @@ export function registerBundledFontFace(
 /** Creates a lazy provider with optional custom asset URLs. */
 export function createFontProvider(
   options?: FontAssetOptions,
-  runtime?: { decoder?: FontDecoder },
+  runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): BundledFontSource {
   const resolvedOptions =
     options?.baseUrl === undefined

@@ -6,7 +6,7 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { requireWebWorker } from '../../../../shared/office-session/webWorker';
+import { createSessionWorker } from '#session-worker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
@@ -43,6 +43,7 @@ import type {
   WorkbookSharedAck, WorkbookSharedWireAck,
 } from './commandProtocol';
 import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
+import { runAfterEditsUntilPosted } from './postedReads';
 import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
@@ -257,10 +258,8 @@ export async function openWorkbookSession(
   bytes: Uint8Array | ArrayBuffer,
   options: OpenWorkbookSessionOptions = {}
 ): Promise<WorkbookSession> {
-  if (!options.worker) requireWebWorker('openWorkbook');
   const transport = createWorkerTransport(
-    options.worker ? options.worker() :
-      new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
+    options.worker ? options.worker() : createSessionWorker()
   );
   if (engineKind !== 'native' && !options.worker && options.wasm === undefined && options.png !== false &&
     !wasmModules.has(wasmAssetUrl().href)) {
@@ -440,6 +439,7 @@ export async function createWorkbookSession(
           args = structuredClone(args);
         }
       } catch (error) { return Promise.reject(error); }
+      if (method === 'renderPng' || method === 'renderRangePng') return runAfterEditsUntilPosted(edits, () => call(...args));
       return edits.runAfterEdits(() => call(...args));
     } });
   }

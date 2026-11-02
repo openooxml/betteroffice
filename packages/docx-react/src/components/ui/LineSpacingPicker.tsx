@@ -1,24 +1,7 @@
-/**
- * Line Spacing Picker Component (Radix UI)
- *
- * A dropdown selector for choosing line spacing values using Radix Select.
- * Styled like Google Docs with options: Single, 1.15, 1.5, Double
- */
-
-import * as React from 'react';
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-} from './Select';
+import { MenuDropdown, type MenuEntry } from './MenuDropdown';
 import { cn } from '../../lib/utils';
 import { IconLineSpacing } from './Icons';
 import { useTranslation } from '../../i18n';
-import { useDisabledDescription } from './disabledDescription';
 import { createT, en } from '@betteroffice/docx-i18n';
 import type { TFunction, TranslationKey } from '@betteroffice/docx-i18n';
 
@@ -40,6 +23,10 @@ export interface LineSpacingOption {
 export interface LineSpacingPickerProps {
   value?: number;
   onChange?: (twipsValue: number) => void;
+  spaceBefore?: number;
+  spaceAfter?: number;
+  onParagraphSpacingChange?: (spacing: { before?: number; after?: number }) => void;
+  onOpenOptions?: () => void;
   options?: LineSpacingOption[];
   disabled?: boolean;
   /** Why the picker is disabled. */
@@ -71,67 +58,52 @@ const DEFAULT_OPTIONS: LineSpacingOption[] = [
 export function LineSpacingPicker({
   value,
   onChange,
+  spaceBefore = 0,
+  spaceAfter = 0,
+  onParagraphSpacingChange,
+  onOpenOptions,
   options = DEFAULT_OPTIONS,
   disabled = false,
   description,
   className,
 }: LineSpacingPickerProps) {
   const { t, lang } = useTranslation();
-  const reason = useDisabledDescription(disabled, description);
-  const [open, setOpen] = React.useState(false);
-  // Find current option by twips value
-  const currentOption = React.useMemo(() => {
-    if (value === undefined) return options[0]; // Default to Single
-    return options.find((opt) => opt.twipsValue === value) || options[0];
-  }, [value, options]);
-
-  const handleValueChange = React.useCallback(
-    (newValue: string) => {
-      const twips = parseInt(newValue, 10);
-      if (!isNaN(twips) && !disabled) {
-        onChange?.(twips);
-      }
-    },
-    [disabled, onChange]
-  );
-
   const getOptionLabel = (option: LineSpacingOption) =>
     option.labelKey ? t(option.labelKey) : formatMultiplier(option.value, lang);
 
+  const currentOption = options.find((option) => option.twipsValue === value) ?? options[0];
+  const items: MenuEntry[] = options.map((option) => ({
+    label: getOptionLabel(option),
+    icon: option.twipsValue === currentOption.twipsValue ? 'check' : undefined,
+    checked: option.twipsValue === currentOption.twipsValue,
+    onClick: () => onChange?.(option.twipsValue),
+  }));
+  items.push(
+    { type: 'separator' },
+    {
+      label: t(spaceBefore !== 0 ? 'lineSpacing.removeBefore' : 'lineSpacing.addBefore'),
+      disabled: !onParagraphSpacingChange,
+      onClick: () => onParagraphSpacingChange?.({ before: spaceBefore !== 0 ? 0 : 240 }),
+    },
+    {
+      label: t(spaceAfter !== 0 ? 'lineSpacing.removeAfter' : 'lineSpacing.addAfter'),
+      disabled: !onParagraphSpacingChange,
+      onClick: () => onParagraphSpacingChange?.({ after: spaceAfter !== 0 ? 0 : 240 }),
+    },
+    { label: t('lineSpacing.options'), disabled: !onOpenOptions, onClick: onOpenOptions }
+  );
+
   return (
-    <Select
-      value={currentOption.twipsValue.toString()}
-      onValueChange={handleValueChange}
-      disabled={reason.triggerProps.disabled}
-      open={open && !disabled}
-      onOpenChange={(next) => setOpen(next && !disabled)}
-    >
-      <SelectTrigger
-        className={cn('h-7 text-sm gap-0.5 px-2', disabled && 'opacity-[0.38]', className)}
-        style={{ width: 'auto' }}
-        aria-label={t('lineSpacing.label')}
-        aria-disabled={reason.triggerProps['aria-disabled']}
-        aria-describedby={reason.triggerProps['aria-describedby']}
-        title={
-          reason.title ??
-          t('lineSpacing.lineSpacingTitle', { label: getOptionLabel(currentOption) })
-        }
-      >
-        <IconLineSpacing className="h-5 w-5 shrink-0" />
-        {reason.node}
-      </SelectTrigger>
-      <SelectContent>
-        {options.map((option) => (
-          <SelectItem key={option.twipsValue} value={option.twipsValue.toString()}>
-            {getOptionLabel(option)}
-          </SelectItem>
-        ))}
-        <SelectSeparator />
-        <SelectGroup>
-          <SelectLabel>{t('lineSpacing.paragraphSpacing')}</SelectLabel>
-        </SelectGroup>
-      </SelectContent>
-    </Select>
+    <MenuDropdown
+      label={t('lineSpacing.label')}
+      trigger={<IconLineSpacing className="h-5 w-5 shrink-0" />}
+      triggerClassName={cn('h-7 text-sm gap-0.5 px-2', disabled && 'opacity-[0.38]', className)}
+      title={description ?? t('lineSpacing.lineSpacingTitle', { label: getOptionLabel(currentOption) })}
+      description={disabled ? description : undefined}
+      showChevron
+      disabled={disabled}
+      items={items}
+    />
   );
 }
 

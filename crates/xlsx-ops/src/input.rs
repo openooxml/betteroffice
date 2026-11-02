@@ -553,7 +553,7 @@ mod tests {
                 "15/1",
                 FormatCode::Custom("d/m/yyyy"),
                 DateSystem::V1904,
-                Some(43844.0)
+                Some(45306.0)
             ),
             (ParsedInput::Number(43844.0), None)
         );
@@ -691,6 +691,14 @@ mod tests {
         let state = cell_state_for_input("=SUM(A1:A2)", &wb, SheetId(0));
         assert_eq!(state.value, CellValue::Number { value: 5.0 });
         assert_eq!(state.formula.as_deref(), Some("SUM(A1:A2)"));
+    }
+
+    #[test]
+    fn formula_entry_evaluates_in_the_workbook_date_system() {
+        let mut wb = wb_with(&[]);
+        wb.date_system = DateSystem::V1904;
+        let state = cell_state_for_input("=DATE(2026,11,1)", &wb, SheetId(0));
+        assert_eq!(state.value, CellValue::Number { value: 44865.0 });
     }
 
     #[test]

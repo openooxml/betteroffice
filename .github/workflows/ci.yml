@@ -168,6 +168,7 @@ jobs:
           cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown
           cargo check -p betteroffice-vsdx --target wasm32-unknown-unknown --no-default-features --features raster
           cargo check -p pptx-wasm --target wasm32-unknown-unknown
+          cargo check -p pptx-wasm --target wasm32-unknown-unknown --no-default-features
           cargo check -p vsdx-wasm --target wasm32-unknown-unknown --no-default-features
 
       - name: Build
@@ -228,41 +229,10 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Sample CPU and IO pressure
-        run: |
-          if command -v vmstat >/dev/null; then
-            nohup vmstat -t 5 > "$RUNNER_TEMP/vmstat.log" 2>&1 &
-          fi
-          nohup bash -c 'while :; do
-            date -u +%FT%TZ
-            for kind in cpu io memory; do
-              [ -r "/proc/pressure/$kind" ] && sed "s/^/$kind /" "/proc/pressure/$kind"
-            done
-            sleep 5
-          done' > "$RUNNER_TEMP/pressure.log" 2>&1 &
-          true
-
       - name: Test
         env:
           BETTEROFFICE_PACKAGE_DECLARATIONS: skip
         run: bun run test --shard=${{ matrix.shard }}/2
-
-      - name: Print CPU and IO pressure samples
-        if: failure()
-        run: |
-          cat "$RUNNER_TEMP/vmstat.log" 2>/dev/null || true
-          cat "$RUNNER_TEMP/pressure.log" 2>/dev/null || true
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        with:
-          name: package-tests-pressure-${{ matrix.shard }}
-          path: |
-            ${{ runner.temp }}/vmstat.log
-            ${{ runner.temp }}/pressure.log
-          if-no-files-found: ignore
-          retention-days: 7
 
   audit:
     name: Security audit
@@ -469,8 +439,10 @@ jobs:
       - name: Build and install the extensions
         run: |
           python -m pip install --upgrade pip pytest
+          python -I scripts/python_font_packs.py --out "$RUNNER_TEMP/font-packs"
+          python -m pip install "$RUNNER_TEMP"/font-packs/*.whl
           for binding in $(node scripts/python-bindings.mjs --paths); do
-            python -m pip install -e "$binding"
+            python -m pip install --find-links "$RUNNER_TEMP/font-packs" -e "$binding"
           done
 
       - name: Test
@@ -482,7 +454,7 @@ jobs:
   native:
     name: Native gate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -540,11 +512,7 @@ jobs:
           bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build
           (cd packages/fonts && bunx tsup)
           for package in $(node scripts/native-bindings.mjs --paths); do
-            if [ "$package" = "bindings/xlsx-native" ] || [ "$package" = "bindings/pptx-native" ]; then
-              bunx napi build --cwd "$package" --platform --release -- --locked
-            else
-              bunx napi build --cwd "$package" --platform -- --locked
-            fi
+            bunx napi build --cwd "$package" --platform --release -- --locked
             bun run --cwd "$package" --if-present build:js
             bun test "$package/index.test.ts"
           done
@@ -600,6 +568,9 @@ jobs:
           bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/
           bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
 
+      - name: Test the docx packages on the native engine
+        run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/
+
       - name: Check native and wasm parity
         run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts
 
@@ -611,6 +582,10 @@ jobs:
           export BETTEROFFICE_EXPORT_KEYS="$RUNNER_TEMP/native-export-keys.json"
           bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"
           node scripts/native-bindings-smoke.mjs
+          (cd packages/docx && bun scripts/copy-assets.ts)
+          node scripts/node-worker-sessions-smoke.mjs
+          node scripts/node-worker-sessions-smoke.mjs --keep-alive
+          bun scripts/worker-bundling-smoke.mjs
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "$smoke_dir"' EXIT

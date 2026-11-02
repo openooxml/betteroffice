@@ -6,6 +6,12 @@
   "main": "./dist/core.mjs",
   "module": "./dist/core.mjs",
   "types": "./dist/core.d.mts",
+  "imports": {
+    "#session-worker": {
+      "node": "./dist/sessionWorker.node.mjs",
+      "default": "./dist/sessionWorker.browser.mjs"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/core.d.mts",

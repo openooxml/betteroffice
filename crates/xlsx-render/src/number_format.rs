@@ -1,16 +1,16 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use xlsx_model::numfmt::{FormatPart, FormatPartKind};
 
 use crate::Align;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NumberFormatLayout {
     pub left: f32,
     pub width: f32,
     pub parts: Vec<FormatPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub general: Option<f64>,
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub overflow: bool,
 }
 

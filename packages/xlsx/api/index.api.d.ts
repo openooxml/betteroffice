@@ -680,6 +680,7 @@ export interface XlsxEditRequest {
     history?: XlsxEditHistory;
     /** Overrides the handle clock for this request; without either clock, NOW() has no clock. */
     calculation?: {
+        /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
         nowSerial?: number;
     };
     steps: readonly XlsxEditStep[];
@@ -1403,8 +1404,10 @@ interface RecoverySession {
 /** @experimental */
 export declare const workbookSessionRecovery: WeakMap<WorkbookSession, WorkbookSessionRecovery>;
 export declare const workbookRecoveryBackend: {
+    /** Checkpoints are only restorable by the same engine version and codec. */
     open(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession>;
 };
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function createWorkbookRecoverySession(bytes: Uint8Array, options: OpenWorkbookSessionOptions, transport: SessionTransport, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession>;
 export declare function createWorkbookSessionRecovery(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint: (allowed: () => boolean) => Promise<WorkbookCheckpoint | undefined>, epoch: number, liveCalculation?: boolean, version?: string, fail?: (error: unknown) => void): {
     recovery: WorkbookSessionRecovery;
@@ -1791,6 +1794,7 @@ export interface WorkbookSessionEvents {
  */
 export type WorkbookSessionMethods = FontDecoderMethods & {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
+    /** Checkpoints are only restorable by the same engine version and codec. */
     openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
@@ -1802,6 +1806,7 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
     applyEdits(request: XlsxEditRequest): XlsxEditResult;
     command(command: WorkbookCommand): WorkbookWireAck;
     edit(command: WorkbookSharedCommand): WorkbookSharedWireAck;
+    /** Checkpoints are only restorable by the same engine version and codec. */
     checkpoint(preserveHistory?: boolean): WorkbookCheckpoint;
     commandFrame(request?: WorkbookCommandFrameRequest): FrameEnvelope<WorkbookCommandWireFrame> | undefined;
     frame(viewport: Viewport, options?: WorkbookFrameOptions): WorkbookWireFrame;
@@ -3293,6 +3298,9 @@ export class XlsxDocument {
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     static openRecoveryCheckpoint(bytes: Uint8Array, through_seq: number): XlsxDocument;
     static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
     static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument;
@@ -3302,6 +3310,7 @@ export class XlsxDocument {
     static open(bytes: Uint8Array): XlsxDocument;
     patchRangeStyleJson(args: string): string;
     peerHydrationJson(): string;
+    pngDisplayListJson(viewport_json: string): string;
     printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
@@ -3311,7 +3320,15 @@ export class XlsxDocument {
      * a rectangular block of cells for clipboard copy.
      */
     rangeCellsJson(args: string): string;
+    rangePngDisplayListJson(args: string): string;
     readCellsJson(request: string): string;
+    /**
+     * Recalculate every formula; the next save writes the recalculated values.
+     */
+    recalculateJson(): string;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     recoveryCheckpoint(through_seq: number, preserve_history?: boolean | null): Uint8Array;
     /**
      * redo the last undone transaction; same shape as `undoJson`.
@@ -3472,10 +3489,13 @@ export interface InitOutput {
     readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_peerHydrationJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_pngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_rangePngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_recalculateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3800,6 +3820,7 @@ export interface WorkbookUpdateInfo {
 }
 export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin, info: WorkbookUpdateInfo) => void;
 export interface WorkbookCalculationContext {
+    /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
     nowSerial: number;
     randSeed: number;
 }
@@ -3921,6 +3942,12 @@ export interface WorkbookHandle extends CollaborationReplica {
     /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
     sheetInfoFor(sheet: number): SheetInfo;
     calculationStatus(): CalculationStatus;
+    /**
+     * Recalculate every formula with the handle's calculation context (or the host clock).
+     * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+     * keeps the result the file stored.
+     */
+    recalculate(): CalculationStatus;
     /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
     displayList(viewport: Viewport): DisplayList;
     /** `displayList` with build and encode time measured inside the core. */
@@ -4093,7 +4120,9 @@ export declare function isProposalsAvailable(): boolean;
  * Throws an `Error` if the bytes are not a readable workbook.
  */
 export declare function openWorkbook(bytes: Uint8Array, options?: OpenWorkbookOptions): WorkbookHandle;
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory?: boolean): Uint8Array;
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number, options?: OpenWorkbookOptions): WorkbookHandle;
 export declare function workbookPeerSnapshot(handle: WorkbookHandle): {
     begin(records: number, bytes: number): void;

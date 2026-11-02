@@ -41,6 +41,14 @@ def test_layout_paginates_a_measured_envelope(
     assert len(display_list) == 1
     assert display_list.primitives > 0
     page = display_list.to_dict()["pages"][0]
+    assert {primitive["kind"] for primitive in page["primitives"]} == {"glyphRun"}
+
+
+@pytest.mark.without_font_packs
+def test_layout_without_font_packs_emits_unshaped_text(
+    minimal_bytes: bytes, layout_input: "dict[str, Any]"
+) -> None:
+    page = Document.open(minimal_bytes).layout(layout_input).display_list.to_dict()["pages"][0]
     assert {primitive["kind"] for primitive in page["primitives"]} == {"text"}
 
 
@@ -91,6 +99,17 @@ def test_a_display_list_survives_a_json_round_trip(
         DisplayList.from_json('{"pages": 3}')
 
 
+def test_rendering_uses_the_bundled_fonts_without_registration(
+    minimal_bytes: bytes, layout_input: "dict[str, Any]"
+) -> None:
+    document = Document.open(minimal_bytes)
+    png = document.render_png(document.layout(layout_input).display_list, 0)
+
+    assert png.bytes[:8] == PNG_MAGIC
+    assert len(png) == len(png.bytes) > 1000
+
+
+@pytest.mark.without_font_packs
 def test_rendering_text_needs_the_family_registered(
     minimal_bytes: bytes, layout_input: "dict[str, Any]", font_bytes: bytes
 ) -> None:

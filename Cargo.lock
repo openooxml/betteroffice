@@ -316,6 +316,7 @@ dependencies = [
 name = "betteroffice-ooxml-font-preflight"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-ooxml-text",
  "miniz_oxide 0.8.9",
  "quick-xml",
  "serde_json",
@@ -632,6 +633,7 @@ dependencies = [
  "betteroffice-xlsx-raster",
  "betteroffice-xlsx-render",
  "png",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",
@@ -2588,6 +2590,17 @@ dependencies = [
  "betteroffice-xlsx",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
+]
+
+[[package]]
+name = "xlsx-raster-wasm"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-xlsx",
+ "betteroffice-xlsx-raster",
+ "betteroffice-xlsx-render",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

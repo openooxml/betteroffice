@@ -242,41 +242,28 @@ fn slot_use(text: &str, complex: bool, hint: Option<&str>) -> (bool, bool) {
     (east_asia, cs)
 }
 
-fn scripts(runs: &[Run<'_>]) -> Vec<String> {
-    let mut flags = [false; 5];
-    for (_, text) in runs {
-        for ch in text.as_deref().unwrap_or_default().chars() {
-            match ch as u32 {
-                0x0590..=0x05ff | 0xfb1d..=0xfb4f => flags[4] = true,
-                0x0600..=0x06ff
-                | 0x0750..=0x077f
-                | 0x0870..=0x08ff
-                | 0xfb50..=0xfdff
-                | 0xfe70..=0xfeff => flags[3] = true,
-                0x1100..=0x11ff
-                | 0x3130..=0x318f
-                | 0xa960..=0xa97f
-                | 0xac00..=0xd7ff
-                | 0xffa0..=0xffdc => flags[1] = true,
-                0x3040..=0x30ff | 0x31f0..=0x31ff | 0xff66..=0xff9f => flags[0] = true,
-                0x3000..=0x303f
-                | 0x3400..=0x4dbf
-                | 0x4e00..=0x9fff
-                | 0xf900..=0xfaff
-                | 0xfe30..=0xfe4f
-                | 0xff00..=0xff65
-                | 0x20000..=0x3ffff => flags[2] = true,
-                _ => {}
-            }
-        }
-    }
-    flags[2] &= !flags[0] && !flags[1];
-    ["cjk-jp", "cjk-kr", "cjk-sc", "arabic", "hebrew"]
-        .into_iter()
-        .zip(flags)
-        .filter(|(_, active)| *active)
-        .map(|(key, _)| key.to_owned())
-        .collect()
+fn scripts(runs: &[Run<'_>], paragraph_language: Option<&str>, run_languages: bool) -> Vec<String> {
+    ooxml_text::paragraph_scripts_with_languages(
+        runs.iter().map(|(props, text)| {
+            (
+                text.as_deref().unwrap_or_default(),
+                if run_languages {
+                    props.east_asia_language.as_deref()
+                } else {
+                    paragraph_language
+                },
+            )
+        }),
+        false,
+    )
+    .into_iter()
+    .filter(|script| {
+        matches!(
+            script.as_str(),
+            "cjk-jp" | "cjk-kr" | "cjk-tc" | "cjk-sc" | "arabic" | "hebrew"
+        )
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -572,7 +559,7 @@ impl<'a> Scan<'a> {
                 generated_label = false;
             }
         }
-        let scripts = scripts(&runs);
+        let scripts = scripts(&runs, mark.east_asia_language.as_deref(), self.shape);
         self.collector.name(&default, false, false, &scripts, true);
         for (index, (props, text)) in runs.iter().enumerate() {
             self.collector

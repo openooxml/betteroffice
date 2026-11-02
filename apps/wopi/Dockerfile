@@ -62,6 +62,9 @@ COPY --from=build --chown=root:root /app/apps/wopi/web/dist ./apps/wopi/web/dist
 COPY --from=build --chown=root:root /app/packages/docx/src ./packages/docx/src
 COPY --from=build --chown=root:root /app/packages/xlsx/src ./packages/xlsx/src
 COPY --from=build --chown=root:root /app/packages/pptx/src ./packages/pptx/src
+COPY --from=build --chown=root:root /app/packages/docx/tsconfig.json ./packages/docx/tsconfig.json
+COPY --from=build --chown=root:root /app/packages/xlsx/tsconfig.json ./packages/xlsx/tsconfig.json
+COPY --from=build --chown=root:root /app/packages/pptx/tsconfig.json ./packages/pptx/tsconfig.json
 COPY --from=build --chown=root:root /app/packages/fonts/assets ./packages/fonts/assets
 COPY --from=build --chown=root:root /app/packages/fonts-cjk/assets ./packages/fonts-cjk/assets
 COPY --from=build --chown=root:root /app/shared/collaboration-limits.ts ./shared/collaboration-limits.ts

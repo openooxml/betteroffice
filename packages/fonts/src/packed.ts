@@ -70,7 +70,7 @@ async function loadFace(
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
   timeoutMs?: number,
   wasmUrl?: URL,
-  runtime?: { decoder?: FontDecoder },
+  runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<DecodedFace> {
   const decoder = runtime?.decoder;
   let cache = decodedCache;
@@ -95,7 +95,7 @@ async function loadFace(
         readFontBytes(face.file, url, timeoutMs),
         regular === undefined ? undefined : loadFace(
           { ...face, file: regular.file, byteLength: regular.byteLength },
-          manifest, resolveUrl, timeoutMs, wasmUrl, decoder === undefined ? undefined : { decoder },
+          manifest, resolveUrl, timeoutMs, wasmUrl, runtime,
         ),
       ]);
       if (encoded.byteLength !== entry.encodedLength) {
@@ -123,9 +123,10 @@ async function loadFace(
     })();
     cache.set(key, pending);
     const current = pending;
-    pending.catch(() => {
+    const forget = () => {
       if (cache.get(key) === current) cache.delete(key);
-    });
+    };
+    pending.then(runtime?.retain === false ? forget : undefined, forget);
   }
   return pending;
 }
@@ -136,7 +137,7 @@ export async function loadPackedFontBytes(
   timeoutMs?: number,
   wasmUrl?: URL,
   manifest: PackManifest = isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl,
-  runtime?: { decoder?: FontDecoder },
+  runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<ArrayBuffer> {
   return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font.slice(0);
 }

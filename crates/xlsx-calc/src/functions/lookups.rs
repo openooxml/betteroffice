@@ -847,7 +847,7 @@ fn r1c1_part(letter: char, index: i64, absolute: bool) -> String {
 
 /// a sheet name as it appears in a reference: quoted when anything but
 /// letters, digits and underscores appears, or when it starts with a digit.
-fn quoted_sheet(name: &str) -> String {
+pub(crate) fn quoted_sheet(name: &str) -> String {
     let plain = !name.is_empty()
         && !name.starts_with(|ch: char| ch.is_ascii_digit())
         && name

@@ -128,7 +128,10 @@ export interface XlsxEditRequest {
   /** Defaults to `separate`. */
   history?: XlsxEditHistory;
   /** Overrides the handle clock for this request; without either clock, NOW() has no clock. */
-  calculation?: { nowSerial?: number };
+  calculation?: {
+    /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
+    nowSerial?: number;
+  };
   steps: readonly XlsxEditStep[];
 }
 

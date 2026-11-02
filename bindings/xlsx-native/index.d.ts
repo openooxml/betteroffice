@@ -12,6 +12,7 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 export declare class XlsxDocument {
   free(): void
   get clientId(): number
+  /** Checkpoints are only restorable by the same engine version and codec. */
   recoveryCheckpoint(throughSeq: number, preserveHistory?: boolean | undefined | null): Uint8Array
   beginPeerSnapshot(records: number, bytes: number): void
   nextPeerSnapshotChunk(): Uint8Array | undefined
@@ -29,6 +30,8 @@ export declare class XlsxDocument {
   printDisplayListJson(args: string): string
   displayListJson(viewportJson: string): string
   displayListForJson(sheet: number, viewportJson: string): string
+  pngDisplayListJson(viewportJson: string): string
+  rangePngDisplayListJson(args: string): string
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
   moveChartJson(args: string): string
@@ -39,6 +42,7 @@ export declare class XlsxDocument {
   sheetInfoForJson(sheet: number): string
   selectionDataJson(args: string): string
   cellRectJson(args: string): string
+  recalculateJson(): string
   calculationStatusJson(): string
   setActiveSheet(index: number): void
   editCellJson(args: string): string
@@ -79,6 +83,7 @@ export declare class XlsxDocument {
   saveBytes(): Uint8Array
   static open(bytes: Uint8Array): XlsxDocument
   static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument
+  /** Checkpoints are only restorable by the same engine version and codec. */
   static openRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number): XlsxDocument
   static openCollaborative(bytes: Uint8Array, clientId: number): XlsxDocument
   static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument

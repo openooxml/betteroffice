@@ -14,8 +14,9 @@ use xlsx_model::{
     Workbook as WorkbookModel,
 };
 use xlsx_parse::{
-    DrawingObjectKind, InspectionBudget, PreservedPackage, SharedStringCells, SheetAxes,
-    SheetInventory, SheetVisibility, SourceCellFacts, SourceObject, SourceSheetKind,
+    DefinedFunctionNames, DrawingObjectKind, InspectionBudget, PreservedPackage, SharedStringCells,
+    SheetAxes, SheetInventory, SheetVisibility, SourceCellFacts, SourceObject, SourceSheetKind,
+    display_formula,
 };
 use xlsx_render::{display_text, format_code_for_cell};
 
@@ -343,6 +344,7 @@ pub(super) fn export_within(
         inspection: budgets.inspection,
         content,
         failures: failure_cells(source.calculation),
+        names: DefinedFunctionNames::new(&source.model.defined_names),
     };
     let finished = walk.defined_names().and_then(|()| {
         selections
@@ -448,6 +450,8 @@ struct Walk<'a> {
     inspection: InspectionBudget,
     /// Cycle cells, then limited cells, of the last calculation.
     failures: [HashSet<(u32, u32, u32)>; 2],
+    /// The defined names formulas resolve, for showing formula text.
+    names: DefinedFunctionNames,
 }
 
 /// Diagnostics each sheet raises once, at the first cell that needs it.
@@ -641,7 +645,11 @@ impl Walk<'_> {
                     ordinal: ordinal as u32,
                 },
                 name: defined.name.clone(),
-                formula: defined.formula.clone(),
+                formula: display_formula(
+                    &defined.formula,
+                    self.names.visible_from(defined.local_sheet),
+                )
+                .into_owned(),
                 hidden: defined.hidden,
                 local_sheet,
             };
@@ -1323,7 +1331,13 @@ impl Walk<'_> {
             id: format!("s{index}!{}", a1(at)),
             anchor,
             value,
-            formula: cell.formula.clone(),
+            formula: cell.formula.as_deref().map(|formula| {
+                display_formula(
+                    formula,
+                    self.names.visible_from(Some(SheetId(index as u32))),
+                )
+                .into_owned()
+            }),
             display_text: display_text(&model.styles, model.date_system, cell),
             number_format: format_code_for_cell(&model.styles, cell),
             formula_result,
