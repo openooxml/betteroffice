@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
@@ -121,6 +121,128 @@ describe('docx native engine parity', () => {
       expect(read(session)).toEqual(edited);
     } finally {
       expected.free();
+      session.free();
+    }
+  });
+
+  test('undo grouping reads the JavaScript clock, as wasm does', () => {
+    let time = 1_000;
+    const clock = spyOn(Date, 'now').mockImplementation(() => time);
+    const texts = (engine: Engine) => {
+      const session = new engine.EditSession(13);
+      try {
+        session.seed_from_docx(fixture, 'opening');
+        session.track_undo();
+        const steps: string[] = [];
+        for (const [at, text] of [[1_000, 'A'], [1_100, 'B'], [2_000, 'C']] as const) {
+          time = at;
+          session.insert_text('body', paragraphId(session), 0, text);
+        }
+        steps.push(read(session).paragraphs[0].text);
+        while (session.undo()) steps.push(read(session).paragraphs[0].text);
+        return steps;
+      } finally {
+        session.free();
+      }
+    };
+    try {
+      const expected = texts(wasm);
+      expect(expected).toEqual(['CBAEngine text', 'BAEngine text', 'Engine text']);
+      expect(texts(native)).toEqual(expected);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test('native edits survive a throwing clock and a clock that reads the session', () => {
+    const session = new native.EditSession(17);
+    let reentrant: (() => unknown) | undefined;
+    let depth = 0;
+    const clock = spyOn(Date, 'now').mockImplementation(() => {
+      if (!reentrant) throw new Error('clock unavailable');
+      if (depth === 0) {
+        depth += 1;
+        try {
+          reentrant();
+        } finally {
+          depth -= 1;
+        }
+      }
+      return 5_000;
+    });
+    try {
+      session.seed_from_docx(fixture, 'opening');
+      session.track_undo();
+      session.insert_text('body', paragraphId(session), 0, 'A');
+      expect(read(session).paragraphs[0].text).toBe('AEngine text');
+      reentrant = () => read(session);
+      session.insert_text('body', paragraphId(session), 0, 'B');
+      expect(read(session).paragraphs[0].text).toBe('BAEngine text');
+      expect(session.undo()).toBe(true);
+    } finally {
+      clock.mockRestore();
+      session.free();
+    }
+  });
+
+  test('worker updates applied as local edits group by the JavaScript clock, as wasm does', () => {
+    let time = 1_000;
+    const clock = spyOn(Date, 'now').mockImplementation(() => time);
+    const texts = (engine: Engine) => {
+      const source = new wasm.EditSession(21);
+      const target = new engine.EditSession(23);
+      try {
+        source.seed_from_docx(fixture, 'opening');
+        target.load(source.encode_state());
+        target.track_undo();
+        for (const [at, text] of [[1_000, 'A'], [1_100, 'B'], [2_000, 'C']] as const) {
+          source.insert_text('body', paragraphId(source), 0, text);
+          const update = source.encode_diff(target.encode_state_vector());
+          time = at;
+          target.apply_local_update(update);
+        }
+        const steps = [read(target).paragraphs[0].text];
+        while (target.undo()) steps.push(read(target).paragraphs[0].text);
+        return steps;
+      } finally {
+        target.free();
+        source.free();
+      }
+    };
+    try {
+      const expected = texts(wasm);
+      expect(expected).toEqual(['CBAEngine text', 'BAEngine text', 'Engine text']);
+      expect(texts(native)).toEqual(expected);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test('native calls that borrow typed arrays never run the JavaScript clock', () => {
+    const session = new native.EditSession(19);
+    const bytes = new Uint8Array(fontBytes);
+    let reads = 0;
+    const clock = spyOn(Date, 'now').mockImplementation(() => {
+      reads += 1;
+      bytes.buffer.transfer(0);
+      return 1_000;
+    });
+    try {
+      expect(session.register_measure_font(bytes)).toBe(0);
+      expect(reads).toBe(0);
+      expect(bytes.byteLength).toBe(fontBytes.byteLength);
+      session.seed_from_docx(fixture, 'opening');
+      const vector = new Uint8Array(new Uint8Array([0]));
+      clock.mockImplementation(() => {
+        reads += 1;
+        vector.buffer.transfer(0);
+        return 1_000;
+      });
+      expect(session.encode_diff_chunks(vector, 1 << 20).length).toBeGreaterThan(0);
+      expect(reads).toBe(0);
+      expect(vector.byteLength).toBe(1);
+    } finally {
+      clock.mockRestore();
       session.free();
     }
   });

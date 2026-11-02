@@ -1895,7 +1895,7 @@ impl Scan {
                 _ => None,
             })
             .collect();
-        texts.sort_by(|left, right| left.0.cmp(&right.0));
+        crate::sort::sort_by(&mut texts, &|left, right| left.0.cmp(&right.0));
         for (story, text) in texts {
             let mut content = false;
             for diff in text.diff(txn, YChange::identity) {
@@ -2485,8 +2485,10 @@ fn collisions(
             }
         }
     }
-    retired.sort_by(|left, right| (left.1.id, &left.1.owner).cmp(&(right.1.id, &right.1.owner)));
-    ordered.sort_by_key(|(order, _)| *order);
+    crate::sort::sort_by(&mut retired, &|left, right| {
+        (left.1.id, &left.1.owner).cmp(&(right.1.id, &right.1.owner))
+    });
+    crate::sort::sort_by_key(&mut ordered, &|(order, _)| *order);
     ordered.extend(retired);
     let mut groups: BTreeMap<u32, Vec<Claimant>> = BTreeMap::new();
     for (_, claimant) in ordered {
@@ -2700,7 +2702,7 @@ impl EditingDoc {
                 let mut names: Vec<String> = crate::live_stories(&stories, &txn)
                     .map(|(id, _)| id.to_owned())
                     .collect();
-                names.sort();
+                crate::sort::sort(&mut names);
                 names.first().and_then(|name| stories.get(&txn, name))
             })
         });
@@ -2809,7 +2811,7 @@ impl IdentityRepair {
                 renamed.push((index, pilcrow.key.clone(), key));
             }
         }
-        renamed.sort_by_key(|(index, _, _)| *index);
+        crate::sort::sort_by_key(&mut renamed, &|(index, _, _)| *index);
         let renamed_keys: HashMap<usize, &str> = renamed
             .iter()
             .map(|(index, _, key)| (*index, key.as_str()))
@@ -4234,7 +4236,7 @@ fn spliced_part(
     paragraphs.sort_unstable();
     changed.sort_unstable();
     removed.sort_unstable();
-    inserted.sort_by_key(|anchor| anchor.position());
+    crate::sort::sort_by_key(&mut inserted, &|anchor| anchor.position());
     Some(SplicedPart {
         part: part.path().to_owned(),
         sha256: part.sha256.clone(),
