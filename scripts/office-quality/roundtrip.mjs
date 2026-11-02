@@ -5,7 +5,7 @@ import { fetchAsset } from './asset-cache.mjs';
 import { digest } from './docx-benchmark.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const METHOD = 'office-single-edit-preservation-v2';
 export const CHANNELS = ['published', 'commit', 'libreoffice'];
@@ -14,12 +14,17 @@ export const SHARD_SIZE = 16;
 export const ENGINE_TIMEOUT = 180;
 export const HELPER_TIMEOUT = 30;
 
+export const MAX_MATRIX_JOBS = 256;
+
 export function roundtripShards(plan) {
-  return plan.formats.flatMap(format => {
+  const shards = plan.formats.flatMap(format => {
     const ids = plan.samples.filter(sample => sample.format === format).map(sample => sample.id).sort();
     return Array.from({ length: Math.ceil(ids.length / SHARD_SIZE) }, (_, shard) =>
       ({ format, shard, ids: ids.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE) }));
   });
+  if (shards.length > MAX_MATRIX_JOBS)
+    throw new Error(`Roundtrip needs ${shards.length} jobs; one workflow matrix holds at most ${MAX_MATRIX_JOBS}`);
+  return shards;
 }
 
 function validateOutcome(result) {
@@ -145,7 +150,7 @@ export async function stageRoundtrip(planPath, output, format, shardIndex, cache
     const directory = resolve(output, sample.id);
     await mkdir(directory, { recursive: true });
     await writeFile(resolve(directory, `source.${format}`), await fetchAsset(sample.metadata.source, sample.id,
-      download, { cacheDir, origin: CORPUS_ORIGIN, maximum: 128 * 1024 * 1024 }));
+      download, { cacheDir, origin: corpusOrigin(), maximum: 128 * 1024 * 1024 }));
     if (++completed % 25 === 0 || completed === samples.length)
       console.log(`${format.toUpperCase()} roundtrip: staged ${completed}/${samples.length} verified files`);
   });

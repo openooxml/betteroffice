@@ -6,7 +6,7 @@ import { fetchAsset } from './asset-cache.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const CHANNELS = ['published', 'commit', 'libreoffice'];
 export const TRIALS = 5;
@@ -147,7 +147,7 @@ export async function stageDocx(planPath, shard, output, cacheDir) {
   }
   let completed = 0;
   await mapPool(tasks, 8, async ({ sample, asset, path, maximum }) => {
-    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: CORPUS_ORIGIN, maximum }));
+    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: corpusOrigin(), maximum }));
     if (++completed % 50 === 0 || completed === tasks.length)
       console.log(`DOCX shard ${shard}: staged ${completed}/${tasks.length} verified assets`);
   });

@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { FORMATS } from './readme.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
-import { CORPUS_ORIGIN, MAX_SAMPLES, selectSamples } from './samples.mjs';
+import { MAX_SAMPLES, corpusOrigin, selectSamples } from './samples.mjs';
 import { download } from './download.mjs';
 
 export const PLAN_SCHEMA_VERSION = 1;
@@ -124,10 +124,11 @@ export async function preparePlan(environment, dependencies) {
     registry,
     poolSize = METADATA_POOL_SIZE,
   } = dependencies;
+  const origin = corpusOrigin(environment);
   const ids = await selectSamples(environment, downloadMetadata);
   const samples = await mapPool(ids, poolSize, async (id) => {
     const metadata = JSON.parse(
-      await downloadMetadata(`${CORPUS_ORIGIN}/${id}/metadata.json`, 2 * 1024 * 1024)
+      await downloadMetadata(`${origin}/${id}/metadata.json`, 2 * 1024 * 1024)
     );
     if (!FORMATS.includes(metadata?.format))
       throw new Error(`Unsupported sample format: ${id}`);

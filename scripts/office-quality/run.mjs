@@ -8,13 +8,14 @@ import { measureSamples } from './results.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
 import { download } from './download.mjs';
 import { fetchAsset, resolveAssetCacheDir } from './asset-cache.mjs';
-import { CORPUS_ORIGIN as corpus } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 import { preparePlan, selectPlanSamples, validatePlan } from './plan.mjs';
 
 const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
 const assetCache = resolveAssetCacheDir(process.env);
 const python = process.env.QUALITY_PYTHON ?? 'python3';
+const corpus = corpusOrigin();
 if (
   (
     await command('git', [
