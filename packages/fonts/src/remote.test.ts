@@ -177,6 +177,49 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('one caller aborting leaves a shared stylesheet to the others', async () => {
+    let release!: (response: Response) => void;
+    const fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeDefined();
+      return new Promise<Response>((resolve) => { release = resolve; });
+    });
+    const faces = [{ weight: 400, style: 'normal' as const }];
+    const leaving = new AbortController();
+    const first = fetchRemoteFontRules('Archivo Narrow', faces, { fetch: fetch as unknown as typeof globalThis.fetch, signal: leaving.signal });
+    const second = fetchRemoteFontRules('Archivo Narrow', faces, { fetch: fetch as unknown as typeof globalThis.fetch });
+    leaving.abort();
+    await expect(first).rejects.toThrow();
+    release(new Response(BUNNY_CSS));
+    expect(await second).toHaveLength(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a caller abort reaches font downloads without AbortSignal.any', async () => {
+    const any = AbortSignal.any;
+    Object.defineProperty(AbortSignal, 'any', { configurable: true, value: undefined });
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const controller = new AbortController();
+      const signals: AbortSignal[] = [];
+      const fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes('/css?')) return new Response(BUNNY_CSS);
+        signals.push(init!.signal!);
+        controller.abort();
+        return new Response(new Uint8Array([1]));
+      });
+      const fontSet = { add: mock(() => {}) } as unknown as FontFaceSet;
+      await expect(loadRemoteFontFaces('Tahoma', 'Tahoma', { weight: 400, style: 'normal' }, fontSet,
+        { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.org/css' }, signal: controller.signal })).rejects.toThrow();
+      expect(signals.length).toBeGreaterThan(0);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect((fontSet.add as unknown as ReturnType<typeof mock>)).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(AbortSignal, 'any', { configurable: true, value: any });
+      globalThis.FontFace = original;
+    }
+  });
+
   test('registers nothing when aborted, when a font file fails, or when the face has too many slices', async () => {
     const original = globalThis.FontFace;
     globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;

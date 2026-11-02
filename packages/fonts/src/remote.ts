@@ -51,9 +51,17 @@ const MAX_STYLESHEET_BYTES = 512 * 1024;
 const MAX_RULES = 512;
 const DEFAULT_TIMEOUT_MS = 5000;
 
-function deadline(options: RemoteFontLoadOptions): AbortSignal {
+function deadline(options: RemoteFontLoadOptions, shared = false): AbortSignal {
   const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  return options.signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const caller = shared ? undefined : options.signal;
+  if (!caller) return timeout;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([caller, timeout]);
+  const controller = new AbortController();
+  for (const signal of [caller, timeout]) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
 }
 
 function within<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -138,7 +146,7 @@ export function fetchRemoteFontRules(
   if (!pending) {
     const request = options.fetch ?? globalThis.fetch;
     pending = (async () => {
-      const signal = deadline(options);
+      const signal = deadline(options, true);
       const response = await within(request(url, { credentials: 'omit', referrerPolicy: 'no-referrer', signal }), signal);
       if (!response.ok) throw new Error(`Remote font stylesheet failed: ${response.status} ${url}`);
       const css = await within(response.text(), signal);
@@ -149,7 +157,7 @@ export function fetchRemoteFontRules(
     const settled = pending;
     void settled.catch(() => { if (stylesheets.get(url) === settled) stylesheets.delete(url); });
   }
-  return pending;
+  return options.signal ? within(pending, options.signal) : pending;
 }
 
 const MAX_FONT_BYTES = 8 * 1024 * 1024;
@@ -182,6 +190,7 @@ export async function loadRemoteFontFaces(
   const matching = (rules: RemoteFontFaceRule[], wanted: RemoteFaceRequest) =>
     rules.filter((rule) => rule.style === wanted.style && rule.weight === String(wanted.weight));
   let rules = matching(await fetchRemoteFontRules(remote, [face], options), face);
+  options.signal?.throwIfAborted();
   if (rules.length === 0 && (face.weight !== 400 || face.style !== 'normal')) {
     const regular = { weight: 400, style: 'normal' } as const;
     rules = matching(await fetchRemoteFontRules(remote, [regular], options), regular);
