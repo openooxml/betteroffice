@@ -1274,15 +1274,15 @@ function applyPreparedDocxCommand(
         { caret, repair: () => repairCommandSelection(engine, state) });
       break;
     }
-    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
+    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }, command.payload.suggesting); break;
     case 'pasteFragment': {
       state.storedMarks = null;
       caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
       break;
     }
-    case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
-    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta); break;
-    case 'clearFormatting': engine.clearFormatting(range); break;
+    case 'toggleMark': engine.toggleMark(range, command.payload.mark, command.payload.suggesting); break;
+    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta, command.payload.suggesting); break;
+    case 'clearFormatting': engine.clearFormatting(range, command.payload.suggesting); break;
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }

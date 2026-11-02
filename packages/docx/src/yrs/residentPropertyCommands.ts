@@ -4,7 +4,7 @@ import { patchSection, readResidentProperties, resolvePropertyImage, sectionProp
 
 export const PROPERTY_COMMANDS = ['setHyperlink', 'setObjectProperties', 'setSectionProperties', 'setNoteProperties', 'setWatermark'] as const;
 const keys: Record<(typeof PROPERTY_COMMANDS)[number], string[]> = {
-  setHyperlink: ['selection', 'hyperlink', 'displayText', 'expectVersion'],
+  setHyperlink: ['selection', 'hyperlink', 'displayText', 'expectVersion', 'suggesting'],
   setObjectProperties: ['handle', 'patch', 'expectVersion'],
   setSectionProperties: ['section', 'patch', 'expectVersion'],
   setNoteProperties: ['section', 'footnotePr', 'endnotePr', 'expectVersion'],
@@ -101,7 +101,8 @@ export function validPropertyCommand(command: DocxCommandEnvelope): boolean {
   const allowed = keys[command.kind];
   if (!text(payload.expectVersion) || Object.keys(payload).some(key => !allowed.includes(key))) return false;
   switch (command.kind) {
-    case 'setHyperlink': return record(payload.selection) && (payload.displayText === undefined || text(payload.displayText)) && (payload.hyperlink === null ||
+    case 'setHyperlink': return (payload.suggesting === undefined || record(payload.suggesting) &&
+      Object.keys(payload.suggesting).every(key => ['name', 'date'].includes(key)) && text(payload.suggesting.name) && text(payload.suggesting.date)) && record(payload.selection) && (payload.displayText === undefined || text(payload.displayText)) && (payload.hyperlink === null ||
       record(payload.hyperlink) && text(payload.hyperlink.href) && Object.entries(payload.hyperlink).every(([key, entry]) => ['href', 'tooltip', 'rId'].includes(key) && text(entry)));
     case 'setObjectProperties': return text(payload.handle) && imagePatch(payload.patch);
     case 'setSectionProperties': return text(payload.section) && sectionPatch(payload.patch);
@@ -135,12 +136,12 @@ export function applyPropertyCommand(engine: DocxWorkerCommandEngine, command: D
       let range = commandSelectionRange(engine, command.payload.selection)!;
       if (command.payload.displayText) {
         const receipt = range.start.paraId === range.end.paraId && range.start.offset === range.end.offset
-          ? engine.insertText({ story: range.story, ...range.start }, command.payload.displayText)
-          : engine.replaceRange(range, command.payload.displayText);
+          ? engine.insertText({ story: range.story, ...range.start }, command.payload.displayText, command.payload.suggesting)
+          : engine.replaceRange(range, command.payload.displayText, command.payload.suggesting);
         if (!receipt.range) throw new Error('Text receipt lacks range');
         range = receipt.range;
       }
-      engine.setHyperlink(range, command.payload.hyperlink);
+      engine.setHyperlink(range, command.payload.hyperlink, command.payload.suggesting);
       break;
     }
     case 'setObjectProperties': {

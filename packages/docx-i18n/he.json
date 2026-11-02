@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "סימן פסקה שנוסף",
     "paragraphMarkDeleted": "סימן פסקה שנמחק",
     "paragraphPropertiesChanged": "מאפייני פסקה שהשתנו",
+    "runPropertiesChanged": null,
     "rowInserted": "שורה שנוספה",
     "rowDeleted": "שורה שנמחקה",
     "rowPropertiesChanged": "מאפייני שורה שהשתנו",

@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "Interruzione di paragrafo inserita",
     "paragraphMarkDeleted": "Interruzione di paragrafo eliminata",
     "paragraphPropertiesChanged": "Proprietà del paragrafo modificate",
+    "runPropertiesChanged": null,
     "rowInserted": "Riga inserita",
     "rowDeleted": "Riga eliminata",
     "rowPropertiesChanged": "Proprietà della riga modificate",

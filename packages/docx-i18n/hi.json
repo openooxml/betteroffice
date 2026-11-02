@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "डाला गया पैराग्राफ़ विराम",
     "paragraphMarkDeleted": "हटाया गया पैराग्राफ़ विराम",
     "paragraphPropertiesChanged": "पैराग्राफ़ गुण बदले गए",
+    "runPropertiesChanged": null,
     "rowInserted": "डाली गई पंक्ति",
     "rowDeleted": "हटाई गई पंक्ति",
     "rowPropertiesChanged": "पंक्ति के गुण बदले गए",

@@ -980,9 +980,19 @@ impl EditSession {
         start_offset: u32,
         end_para: String,
         end_offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         self.document()?
-            .clear_formatting(&story, &start_para, start_offset, &end_para, end_offset)
+            .clear_formatting(
+                &story,
+                &start_para,
+                start_offset,
+                &end_para,
+                end_offset,
+                author_name,
+                author_date,
+            )
             .map_err(|error| map_error(env, error))
     }
 
@@ -1295,6 +1305,8 @@ impl EditSession {
         end_para: String,
         end_offset: u32,
         delta_json: String,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         self.document()?
             .format_range(
@@ -1304,6 +1316,8 @@ impl EditSession {
                 &end_para,
                 end_offset,
                 &delta_json,
+                author_name,
+                author_date,
             )
             .map_err(|error| map_error(env, error))
     }
@@ -2197,6 +2211,8 @@ impl EditSession {
         end_para: String,
         end_offset: u32,
         hyperlink_json: String,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         self.document()?
             .set_hyperlink(
@@ -2206,6 +2222,8 @@ impl EditSession {
                 &end_para,
                 end_offset,
                 &hyperlink_json,
+                author_name,
+                author_date,
             )
             .map_err(|error| map_error(env, error))
     }
@@ -2516,6 +2534,8 @@ impl EditSession {
         end_para: String,
         end_offset: u32,
         mark_json: String,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         self.document()?
             .toggle_mark(
@@ -2525,6 +2545,8 @@ impl EditSession {
                 &end_para,
                 end_offset,
                 &mark_json,
+                author_name,
+                author_date,
             )
             .map_err(|error| map_error(env, error))
     }

@@ -46,7 +46,7 @@ export const editsession_can_undo: (a: number) => number;
 export const editsession_cell_selection: (a: number) => [number, number, number, number];
 export const editsession_clear_cell_selection: (a: number) => [number, number];
 export const editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
-export const editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+export const editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
 export const editsession_clear_measure_fonts: (a: number) => void;
 export const editsession_clear_undo_input_time: (a: number) => void;
 export const editsession_clear_update_event_observation: (a: number) => void;
@@ -89,7 +89,7 @@ export const editsession_fail_compared_docx_json: (a: number, b: number, c: numb
 export const editsession_find_content_controls_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_finish_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
-export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
+export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_geometry_position_outline_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_has_pending_update: (a: number) => number;
@@ -202,7 +202,7 @@ export const editsession_set_display_retain_built_pages: (a: number, b: number) 
 export const editsession_set_display_window: (a: number, b: number, c: number) => void;
 export const editsession_set_document_property: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_set_header_footer_aliases: (a: number, b: number, c: number) => [number, number];
-export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
+export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_set_local_lowering: (a: number, b: number) => void;
@@ -232,7 +232,7 @@ export const editsession_story_segment_unit_digests: (a: number, b: number, c: n
 export const editsession_story_segment_units: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-export const editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
+export const editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_track_undo: (a: number) => void;
 export const editsession_undo: (a: number) => number;
 export const editsession_undo_capture_mode: (a: number) => [number, number];

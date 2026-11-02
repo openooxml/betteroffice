@@ -997,3 +997,32 @@ describe('docx native engine parity', () => {
     expectThrownParity(() => wasmFontPreflight(invalid), () => nativePreflight(invalid));
   });
 });
+
+test('native and wasm track and resolve character formatting with the same optional author arguments', () => {
+  for (const engine of [wasm, native]) {
+    for (const accept of [true, false]) {
+      const session = new engine.EditSession(9303);
+      try {
+        session.open_docx(fixture, true, 'format-tracking');
+        const id = paragraphId(session);
+        session.toggle_mark('body', id, 0, id, 6, '{"type":"bold"}', 'Writer', '2026-10-01T12:00:00Z');
+        session.format_range('body', id, 1, id, 5, '{"italic":true}', 'Writer', '2026-10-01T12:00:00Z');
+        session.clear_formatting('body', id, 2, id, 4, 'Writer', '2026-10-01T12:00:00Z');
+        const revisions = JSON.parse(session.list_revisions());
+        expect(revisions).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'rPrChange', author: 'Writer' })]));
+        for (const revisionId of new Set(revisions.map((revision: { revisionId: string }) => revision.revisionId))) {
+          const target = JSON.stringify({ revisionId });
+          if (accept) session.accept_change(target);
+          else session.reject_change(target);
+        }
+        expect(JSON.parse(session.list_revisions())).toEqual([]);
+        const context = JSON.parse(session.selection_context('body', id, 0, id, 1));
+        expect(context.bold).toBe(accept);
+        session.set_hyperlink('body', id, 0, id, 6, '{"href":"#target"}', 'Writer', '2026-10-01T12:00:00Z');
+        expect(JSON.parse(session.list_revisions()).length).toBeGreaterThan(0);
+      } finally {
+        session.free();
+      }
+    }
+  }
+});

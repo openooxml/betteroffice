@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "Menyisipkan tanda paragraf",
     "paragraphMarkDeleted": "Menghapus tanda paragraf",
     "paragraphPropertiesChanged": "Mengubah properti paragraf",
+    "runPropertiesChanged": null,
     "rowInserted": "Menyisipkan baris",
     "rowDeleted": "Menghapus baris",
     "rowPropertiesChanged": "Mengubah properti baris",

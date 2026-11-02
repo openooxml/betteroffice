@@ -1228,7 +1228,7 @@ export function wrapSession(
           ) as YrsRevisionReceipt
       );
     },
-    toggleMark: (range, mark) => {
+    toggleMark: (range, mark, suggesting) => {
       ensureUndo(range.story);
       mutate(() =>
         session.toggle_mark(
@@ -1237,11 +1237,13 @@ export function wrapSession(
           range.start.offset,
           range.end.paraId,
           range.end.offset,
-          JSON.stringify(mark)
+          JSON.stringify(mark),
+          suggesting?.name,
+          suggesting?.date
         )
       );
     },
-    formatRange: (range, delta) => {
+    formatRange: (range, delta, suggesting) => {
       ensureUndo(range.story);
       mutate(() =>
         session.format_range(
@@ -1250,11 +1252,13 @@ export function wrapSession(
           range.start.offset,
           range.end.paraId,
           range.end.offset,
-          JSON.stringify(delta)
+          JSON.stringify(delta),
+          suggesting?.name,
+          suggesting?.date
         )
       );
     },
-    setHyperlink: (range, hyperlink) => {
+    setHyperlink: (range, hyperlink, suggesting) => {
       ensureUndo(range.story);
       mutate(() =>
         session.set_hyperlink(
@@ -1263,11 +1267,13 @@ export function wrapSession(
           range.start.offset,
           range.end.paraId,
           range.end.offset,
-          JSON.stringify(hyperlink)
+          JSON.stringify(hyperlink),
+          suggesting?.name,
+          suggesting?.date
         )
       );
     },
-    clearFormatting: (range) => {
+    clearFormatting: (range, suggesting) => {
       ensureUndo(range.story);
       mutate(() =>
         session.clear_formatting(
@@ -1275,7 +1281,9 @@ export function wrapSession(
           range.start.paraId,
           range.start.offset,
           range.end.paraId,
-          range.end.offset
+          range.end.offset,
+          suggesting?.name,
+          suggesting?.date
         )
       );
     },

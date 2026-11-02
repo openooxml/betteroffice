@@ -809,8 +809,8 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       const payload = session.table_payload(story, index);
       return payload === undefined ? null : JSON.parse(payload);
     },
-    setHyperlink: (range, hyperlink) => applyCommandMutation(range.story, () =>
-      session.set_hyperlink(...rangeArgs(range), JSON.stringify(hyperlink))),
+    setHyperlink: (range, hyperlink, suggesting) => applyCommandMutation(range.story, () =>
+      session.set_hyperlink(...rangeArgs(range), JSON.stringify(hyperlink), suggesting?.name, suggesting?.date)),
     setImageGeometryAt: (at, geometry) => applyCommandMutation(at.story, () =>
       session.set_image_geometry_at(at.story, at.paraId, at.offset, JSON.stringify(geometry))),
     setColumnWidth: (at, width) => applyCommandMutation(at.story, () =>
@@ -846,12 +846,12 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     splitParagraph: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date))),
     nextParagraphStyle: at => session.next_paragraph_style(at.story, at.paraId, at.offset) ?? null,
-    toggleMark: (range, mark) => applyCommandMutation(range.story, () =>
-      session.toggle_mark(...rangeArgs(range), JSON.stringify(mark))),
-    formatRange: (range, delta) => applyCommandMutation(range.story, () =>
-      session.format_range(...rangeArgs(range), JSON.stringify(delta))),
-    clearFormatting: (range) => applyCommandMutation(range.story, () =>
-      session.clear_formatting(...rangeArgs(range))),
+    toggleMark: (range, mark, suggesting) => applyCommandMutation(range.story, () =>
+      session.toggle_mark(...rangeArgs(range), JSON.stringify(mark), suggesting?.name, suggesting?.date)),
+    formatRange: (range, delta, suggesting) => applyCommandMutation(range.story, () =>
+      session.format_range(...rangeArgs(range), JSON.stringify(delta), suggesting?.name, suggesting?.date)),
+    clearFormatting: (range, suggesting) => applyCommandMutation(range.story, () =>
+      session.clear_formatting(...rangeArgs(range), suggesting?.name, suggesting?.date)),
     setParagraphAttrs: (range, attrs, author) => applyCommandMutation(range.story, () =>
       session.set_paragraph_attrs(...rangeArgs(range), JSON.stringify(attrs), author?.name, author?.date)),
     applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>

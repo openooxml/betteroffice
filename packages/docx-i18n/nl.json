@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "Alinea-einde ingevoegd",
     "paragraphMarkDeleted": "Alinea-einde verwijderd",
     "paragraphPropertiesChanged": "Alinea-eigenschappen gewijzigd",
+    "runPropertiesChanged": null,
     "rowInserted": "Rij ingevoegd",
     "rowDeleted": "Rij verwijderd",
     "rowPropertiesChanged": "Rijeigenschappen gewijzigd",

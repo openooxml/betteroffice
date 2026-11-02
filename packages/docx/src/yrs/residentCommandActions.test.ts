@@ -17,7 +17,7 @@ import { readResidentProperties } from './residentProperties';
 import { wrapSession } from './yrsSessionFacade';
 import { yrsToDocument } from './yrsToDocument';
 import type {
-  DocxCommandEnvelope, DocxCommandIntent, DocxCommandPayload, DocxCommandSelection, DocxEditState,
+  DocxCommandEnvelope, DocxCommandIntent, DocxCommandPayload, DocxCommandPayloads, DocxCommandSelection, DocxEditState,
 } from './residentCommandProtocol';
 import {
   TIMEOUT, closeCommandEngines, command, context, execute, expectCaret,
@@ -1018,4 +1018,105 @@ test('setObjectProperties aligns side presets at the text margins and round-trip
       expect(new TextDecoder().decode(unzipContainer(new Uint8Array(resaved))['word/document.xml'])).toContain(horizontalXml);
     }
   }
+}, TIMEOUT);
+
+test('formatting commands forward the suggesting author and create reviewable run changes', async () => {
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const cases = [
+    ['toggleMark', { mark: { type: 'bold' } }, 'toggleMark'],
+    ['toggleStrike', {}, 'formatRange'],
+    ['formatRange', { delta: { italic: true } }, 'formatRange'],
+    ['formatSelection', { delta: { highlight: 'yellow' } }, 'formatRange'],
+    ['clearFormatting', {}, 'clearFormatting'],
+  ] as const;
+  for (const [kind, payload, method] of cases) {
+    const arm = await openCommandEngine();
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    if (kind === 'clearFormatting') arm.engine.formatRange(storyRange(selection(id, 0, 5)), { bold: true });
+    const call = spyOn(arm.engine, method);
+    try {
+      const result = execute(arm, command(arm, kind, { ...payload, selection: selection(id, 0, 5), suggesting } as DocxCommandPayloads[typeof kind]));
+      expect(result.status).toBe('applied');
+      expect(call.mock.calls[0]?.at(-1)).toEqual(suggesting);
+      expect(arm.engine.geometryReader.listRevisions()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'rPrChange', author: suggesting.name, date: suggesting.date }),
+      ]));
+    } finally {
+      call.mockRestore();
+    }
+  }
+}, TIMEOUT);
+
+test('suggested formatting survives save and reopen and rejection restores the original runs', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml: '<w:p w14:paraId="00000001"><w:r><w:rPr><w:i/></w:rPr><w:t>abcdef</w:t></w:r></w:p>' });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  expect(execute(arm, command(arm, 'toggleMark', { selection: selection(id, 1, 5), mark: { type: 'bold' }, suggesting })).status).toBe('applied');
+  expect(execute(arm, command(arm, 'clearFormatting', { selection: selection(id, 2, 4), suggesting })).status).toBe('applied');
+  const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
+  const saved = await repackDocx(projected);
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml.match(/<w:rPrChange\s/g)).toHaveLength(3);
+  expect(xml).toContain('w:author="Writer"');
+  expect(xml).toMatch(/<w:rPrChange[^>]*><w:rPr><w:i\s*\/><\/w:rPr><\/w:rPrChange>/);
+  const reopened = await openCommandEngine();
+  reopened.engine.openDocx(new Uint8Array(saved), undefined, 'format-reopened');
+  const revisions = reopened.engine.geometryReader.listRevisions();
+  expect(revisions.length).toBeGreaterThan(0);
+  expect(revisions.every(revision => revision.kind === 'rPrChange')).toBe(true);
+  for (const revisionId of new Set(revisions.map(revision => revision.revisionId))) reopened.engine.rejectChange({ revisionId });
+  const para = reopened.engine.paragraphs('body')[0]!;
+  expect(reopened.engine.selectionContext(storyRange(selection(para.paraId, 0, 6)))).toMatchObject({ italic: true, bold: false });
+  const rejected = await repackDocx(yrsToDocument(wrapSession(reopened.native, 8102), reopened.engine.propertyDocument()));
+  expect(new TextDecoder().decode(unzipContainer(new Uint8Array(rejected))['word/document.xml'])).not.toContain('w:rPrChange');
+}, TIMEOUT);
+
+test('hyperlink commands forward suggesting for the link and display text', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const link = spyOn(arm.engine, 'setHyperlink');
+  const replace = spyOn(arm.engine, 'replaceRange');
+  try {
+    expect(execute(arm, command(arm, 'setHyperlink', {
+      selection: selection(id, 0, 5), hyperlink: { href: '#target' }, displayText: 'label',
+      expectVersion: arm.engine.proposalEngine.version(), suggesting,
+    })).status).toBe('applied');
+    expect(link.mock.calls[0]?.[2]).toEqual(suggesting);
+    expect(replace.mock.calls[0]?.[2]).toEqual(suggesting);
+    expect(arm.engine.geometryReader.listRevisions().length).toBeGreaterThan(0);
+  } finally {
+    link.mockRestore();
+    replace.mockRestore();
+  }
+}, TIMEOUT);
+
+test('suggested hyperlink replacement saves both targets and rejection restores the old target', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml: '<w:p w14:paraId="00000001"><w:hyperlink w:anchor="old"><w:r><w:t>label</w:t></w:r></w:hyperlink></w:p>' });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'setHyperlink', {
+    selection: selection(id, 0, 5), hyperlink: { href: '#new' },
+    expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
+  })).status).toBe('applied');
+  const saved = await repackDocx(yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument()));
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml).toContain('w:anchor="old"');
+  expect(xml).toContain('w:anchor="new"');
+  expect(xml).toContain('<w:ins ');
+  expect(xml).toContain('<w:del ');
+  const reopened = await openCommandEngine();
+  reopened.engine.openDocx(new Uint8Array(saved), undefined, 'hyperlink-reopened');
+  for (const revisionId of new Set(reopened.engine.geometryReader.listRevisions().map(revision => revision.revisionId))) {
+    reopened.engine.rejectChange({ revisionId });
+  }
+  const rejected = await repackDocx(yrsToDocument(wrapSession(reopened.native, 8102), reopened.engine.propertyDocument()));
+  const rejectedXml = new TextDecoder().decode(unzipContainer(new Uint8Array(rejected))['word/document.xml']);
+  expect(rejectedXml).toContain('w:anchor="old"');
+  expect(rejectedXml).not.toContain('w:anchor="new"');
 }, TIMEOUT);

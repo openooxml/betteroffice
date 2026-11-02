@@ -862,7 +862,7 @@ export interface YrsSelectionContext {
 }
 
 /**
- * One tracked insertion, deletion, or paragraph-mark revision read from yrs.
+ * One pending tracked change read from yrs.
  *
  * @public
  */
@@ -876,6 +876,7 @@ export interface YrsRevisionInfo {
     | 'pPrIns'
     | 'pPrDel'
     | 'pPrChange'
+    | 'rPrChange'
     | 'trIns'
     | 'trDel'
     | 'tableIns'
@@ -1369,13 +1370,13 @@ export interface YrsSession extends CollaborationReplica {
    * carries it, otherwise adds it. Adding superscript clears subscript and
    * vice versa.
    */
-  toggleMark(range: YrsStoryRange, mark: YrsRunMark): void;
+  toggleMark(range: YrsStoryRange, mark: YrsRunMark, suggesting?: YrsAuthor): void;
   /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */
-  formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta): void;
+  formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta, suggesting?: YrsAuthor): void;
   /** Sets or clears the protected hyperlink attribute over a non-empty range. */
-  setHyperlink(range: YrsStoryRange, hyperlink: YrsHyperlinkAttrs | null): void;
+  setHyperlink(range: YrsStoryRange, hyperlink: YrsHyperlinkAttrs | null, suggesting?: YrsAuthor): void;
   /** Clears direct formatting while retaining hyperlinks and tracked-change stamps. */
-  clearFormatting(range: YrsStoryRange): void;
+  clearFormatting(range: YrsStoryRange, suggesting?: YrsAuthor): void;
   /** Applies a paragraph style id to every paragraph intersecting the range. */
   applyParagraphStyle(range: YrsStoryRange, styleId: string, suggesting?: YrsAuthor): void;
   /** Applies tri-state paragraph properties to every paragraph intersecting the range. */

@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "已插入段落分隔符",
     "paragraphMarkDeleted": "已删除段落分隔符",
     "paragraphPropertiesChanged": "已更改段落属性",
+    "runPropertiesChanged": null,
     "rowInserted": "已插入行",
     "rowDeleted": "已删除行",
     "rowPropertiesChanged": "已更改行属性",
