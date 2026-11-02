@@ -1,5 +1,6 @@
 import { compileSessionWasm } from '#session-worker';
-import { metafileSvgBindings, metafileWasmAssetUrl } from '../wasm/asset';
+import { metafileWasmAssetUrl } from '../wasm/asset';
+import { metafileSvgBindings } from '../wasm/engine';
 
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const SESSION_BYTES = 64 * 1024 * 1024;
