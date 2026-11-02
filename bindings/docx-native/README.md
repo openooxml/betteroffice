@@ -33,3 +33,18 @@ package and each face is read from disk the first time a document needs it; noth
 The previous `Document` and `openDocument` facade has been removed. Use the
 [DOCX API](https://docs.betteroffice.dev/docs/javascript) with the native package name.
 Browser imports throw; use `@betteroffice/docx` in browsers.
+
+## Memory and untrusted input
+
+The native engine runs inside the calling process. `@betteroffice/docx` runs each engine in a WebAssembly
+memory of at most 4 GiB, so a document that needs more fails the open or the session with a typed
+out-of-memory error. The native engine has no such cap: a document that needs more memory than the
+machine has makes the whole process run out of memory.
+
+Both engines bound their input the same way. A package is refused above 512 MiB uncompressed or
+5,000 parts, XML nested deeper than 256 levels is refused, and images above 33,554,432 pixels or
+256 MiB are not decoded.
+
+When you open documents from untrusted sources with this package on a server, run it under a
+memory limit (a container or cgroup limit, or a separate process) so an oversized document cannot
+take the server down.
