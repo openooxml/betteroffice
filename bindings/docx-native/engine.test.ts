@@ -185,6 +185,25 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('native calls that borrow typed arrays never run the JavaScript clock', () => {
+    const session = new native.EditSession(19);
+    const bytes = new Uint8Array(fontBytes);
+    let reads = 0;
+    const clock = spyOn(Date, 'now').mockImplementation(() => {
+      reads += 1;
+      bytes.buffer.transfer(0);
+      return 1_000;
+    });
+    try {
+      expect(session.register_measure_font(bytes)).toBe(0);
+      expect(reads).toBe(0);
+      expect(bytes.byteLength).toBe(fontBytes.byteLength);
+    } finally {
+      clock.mockRestore();
+      session.free();
+    }
+  });
+
   test('state crosses both boundaries and native diffs update a wasm peer', () => {
     const nativeSource = new native.EditSession(21);
     const wasmPeer = new wasm.EditSession(22);
