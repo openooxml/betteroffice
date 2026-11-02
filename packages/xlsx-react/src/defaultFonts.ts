@@ -7,7 +7,13 @@ export const xlsxDefaultFontManager = {
   loadRemote: () => import('@betteroffice/fonts/remote'),
 };
 
-const remoteFaces = new Map<string, Promise<boolean>>();
+interface RemoteTask {
+  done: Promise<boolean>;
+  owners: Set<symbol>;
+  controller: AbortController;
+}
+
+const remoteFaces = new Map<string, RemoteTask>();
 let remoteFontSet: FontFaceSet | undefined;
 
 function installedLocally(family: string): boolean {
@@ -15,7 +21,7 @@ function installedLocally(family: string): boolean {
   try { context = document.createElement('canvas').getContext('2d'); } catch {}
   if (!context) return false;
   const sample = 'mmmmmmmmmmwwwwwlliI0O&@';
-  return (['monospace', 'serif'] as const).every((generic) => {
+  return (['monospace', 'serif', 'sans-serif'] as const).some((generic) => {
     context.font = `72px ${generic}`;
     const fallback = context.measureText(sample).width;
     context.font = `72px ${JSON.stringify(family)}, ${generic}`;
@@ -23,31 +29,52 @@ function installedLocally(family: string): boolean {
   });
 }
 
-function loadRemoteFace(
-  fontFamily: string, bold: boolean, italic: boolean, provider: RemoteFontProvider, lateLoad: () => void,
+function releaseRemote(key: string, task: RemoteTask, owner: symbol): void {
+  task.owners.delete(owner);
+  if (task.owners.size > 0) return;
+  task.controller.abort();
+  if (remoteFaces.get(key) === task) remoteFaces.delete(key);
+}
+
+async function loadRemoteFace(
+  fontFamily: string, bold: boolean, italic: boolean, provider: RemoteFontProvider, owner: symbol,
+  held: Map<string, RemoteTask>, isLive: () => boolean,
 ): Promise<boolean> {
   const fontSet = document.fonts;
   if (remoteFontSet !== fontSet) {
+    for (const task of remoteFaces.values()) task.controller.abort();
     remoteFaces.clear();
     remoteFontSet = fontSet;
   }
   const key = JSON.stringify([provider, fontFamily.trim().toLowerCase(), bold, italic]);
   let task = remoteFaces.get(key);
   if (!task) {
-    const loading = (async () => {
+    const controller = new AbortController();
+    const done = (async () => {
       const remote = await xlsxDefaultFontManager.loadRemote();
+      controller.signal.throwIfAborted();
       if (!remote.resolveWordFamilySubstitute(fontFamily)?.remote) return false;
       if (installedLocally(fontFamily.trim())) return false;
       const faces = await remote.loadRemoteFontFaces(fontFamily, fontFamily,
         { weight: bold ? 700 : 400, style: italic ? 'italic' : 'normal' }, fontSet,
-        { provider, onLateLoad: lateLoad });
+        { provider, signal: controller.signal });
       return faces.length > 0;
     })().catch(() => false);
-    task = loading;
-    remoteFaces.set(key, loading);
-    void loading.then((success) => { if (!success && remoteFaces.get(key) === loading) remoteFaces.delete(key); });
+    const created: RemoteTask = { done, owners: new Set(), controller };
+    task = created;
+    remoteFaces.set(key, created);
+    void done.then((success) => { if (!success && remoteFaces.get(key) === created) remoteFaces.delete(key); });
   }
-  return task;
+  const current = task;
+  current.owners.add(owner);
+  held.set(key, current);
+  try {
+    const success = await current.done;
+    return success && isLive();
+  } finally {
+    if (held.get(key) === current) held.delete(key);
+    current.owners.delete(owner);
+  }
 }
 
 const registeredFaces = new Map<string, Promise<boolean>>();
@@ -85,6 +112,7 @@ export function createDefaultFontPainter(
   options: { defaultFonts?: boolean; remoteFonts?: RemoteFontProvider; onSettled?: () => void } = {},
 ) {
   const owner = Symbol();
+  const remoteHeld = new Map<string, RemoteTask>();
   const interests = new Set<Set<symbol>>();
   const loaded = new Set<string>();
   const settled = new Set<string>();
@@ -114,8 +142,7 @@ export function createDefaultFontPainter(
         ?? fonts.resolveBundledFamilyFace(fontFamily, bold, italic);
       if (!face) {
         const provider = options.remoteFonts ?? 'bunny';
-        return provider !== 'off' && await loadRemoteFace(fontFamily, bold, italic, provider,
-          () => { if (!disposed) repaint(); });
+        return provider !== 'off' && await loadRemoteFace(fontFamily, bold, italic, provider, owner, remoteHeld, () => !disposed);
       }
       const fontSet = document.fonts;
       if (activeFontSet !== fontSet) {
@@ -227,6 +254,8 @@ export function createDefaultFontPainter(
     },
     dispose(): void {
       disposed = true;
+      for (const [key, task] of remoteHeld) releaseRemote(key, task, owner);
+      remoteHeld.clear();
       for (const owners of interests) owners.delete(owner);
       interests.clear();
       pending.clear();

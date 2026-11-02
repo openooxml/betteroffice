@@ -69,9 +69,12 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
     createFontProvider: create,
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>;
   const imported = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue(module);
+  const remoteGate = { wait: Promise.resolve() as Promise<void> };
   const remoteLoads = mock(async (family: string, alias: string, face: { weight: number; style: string }, fontSet: FontFaceSet,
-    options: { provider?: unknown; onLateLoad?: () => void }) => {
+    options: { provider?: unknown; signal?: AbortSignal }) => {
     if (family !== 'Tahoma') return [];
+    await remoteGate.wait;
+    options.signal?.throwIfAborted();
     const font = { family: alias, remote: 'Open Sans', weight: face.weight, style: face.style, provider: options.provider };
     fontSet.add(font as unknown as FontFace);
     return [font as unknown as FontFace];
@@ -82,7 +85,7 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.loadRemote>>;
   const remoteImported = spyOn(xlsxDefaultFontManager, 'loadRemote').mockResolvedValue(remote);
   restorers.push(() => imported.mockRestore(), () => remoteImported.mockRestore());
-  return { imported, create, metric, bundled, module, remoteImported, remoteLoads };
+  return { imported, create, metric, bundled, module, remoteImported, remoteLoads, remoteGate };
 }
 
 function decoder() { return mock<FontDecoder>(async () => ({ font: new Uint8Array([0, 1, 0, 0]).buffer })); }
@@ -235,6 +238,25 @@ test('a family without a bundled face loads its look-alike from the remote provi
   expect(repaint).toHaveBeenCalledTimes(1);
   await createDefaultFontPainter(decoder(), repaint, { remoteFonts: 'google' }).load(display({ family: 'Tahoma', bold: true }));
   expect(remoteLoads.mock.calls.map((call) => call[4].provider)).toEqual(['bunny', 'google']);
+});
+
+test('disposing the painter, as switching remote fonts off does, aborts its remote load before anything registers', async () => {
+  const { added } = browser();
+  const { remoteLoads, remoteGate } = provider();
+  const gate = deferred<void>();
+  remoteGate.wait = gate.promise;
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const loading = painter.load(display({ family: 'Tahoma' }));
+  for (let tick = 0; tick < 20 && remoteLoads.mock.calls.length === 0; tick++) await Promise.resolve();
+  expect(remoteLoads).toHaveBeenCalledTimes(1);
+  const signal = remoteLoads.mock.calls[0]![4].signal!;
+  painter.dispose();
+  expect(signal.aborted).toBe(true);
+  gate.resolve();
+  await loading;
+  expect(added).toEqual([]);
+  expect(repaint).not.toHaveBeenCalled();
 });
 
 test('remote fonts off, bundled faces and locally installed families never reach the provider', async () => {

@@ -128,44 +128,79 @@ describe('provider stylesheets', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  test('registers the look-alike under the document family and loads only the Latin slice eagerly', async () => {
-    const created: { family: string; source: string; descriptors: FontFaceDescriptors; loads: number }[] = [];
+  test('registers every slice of the look-alike from bytes fetched without credentials or referrer', async () => {
+    const created: { family: string; source: ArrayBuffer; descriptors: FontFaceDescriptors; loads: number }[] = [];
     class FakeFontFace {
       readonly record: (typeof created)[number];
-      constructor(family: string, source: string, descriptors: FontFaceDescriptors) {
+      constructor(family: string, source: ArrayBuffer, descriptors: FontFaceDescriptors) {
         this.record = { family, source, descriptors, loads: 0 };
         created.push(this.record);
       }
       async load() { this.record.loads += 1; return this; }
-      get loaded() { return new Promise<this>(() => {}); }
     }
     const original = globalThis.FontFace;
     globalThis.FontFace = FakeFontFace as unknown as typeof FontFace;
     try {
       const added: unknown[] = [];
       const fontSet = { add: (face: unknown) => { added.push(face); } } as unknown as FontFaceSet;
-      const fetch = mock(async (_url: string | URL | Request) => new Response(BUNNY_CSS));
+      const fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        expect(init).toMatchObject({ credentials: 'omit', referrerPolicy: 'no-referrer' });
+        return String(url).includes('/css?') ? new Response(BUNNY_CSS) : new Response(new Uint8Array([1, 2, 3]));
+      });
       const faces = await loadRemoteFontFaces('Tahoma', 'Tahoma', { weight: 400, style: 'normal' }, fontSet,
         { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.eu/css' } });
-      expect(String(fetch.mock.calls[0]![0])).toBe('https://fonts.example.eu/css?family=Open+Sans:400&display=swap');
+      expect(fetch.mock.calls.map((call) => String(call[0]))).toEqual([
+        'https://fonts.example.eu/css?family=Open+Sans:400&display=swap',
+        'https://fonts.bunny.net/open-sans/files/open-sans-latin-ext-400-normal.woff2',
+        'https://fonts.bunny.net/open-sans/files/open-sans-latin-400-normal.woff2',
+      ]);
       expect(faces).toHaveLength(2);
       expect(added).toEqual(faces);
-      expect(created.map((face) => [face.family, face.descriptors.unicodeRange, face.loads])).toEqual([
-        ['Tahoma', 'U+0100-02AF,U+0304,U+0308', 0],
-        ['Tahoma', 'U+0000-00FF,U+0131,U+0152-0153', 1],
+      expect(created.map((face) => [face.family, face.descriptors.unicodeRange, face.loads, face.source.byteLength])).toEqual([
+        ['Tahoma', 'U+0100-02AF,U+0304,U+0308', 1, 3],
+        ['Tahoma', 'U+0000-00FF,U+0131,U+0152-0153', 1, 3],
       ]);
-      expect(created[1]!.source).toBe('url("https://fonts.bunny.net/open-sans/files/open-sans-latin-400-normal.woff2") format("woff2"), '
-        + 'url("https://fonts.bunny.net/open-sans/files/open-sans-latin-400-normal.woff") format("woff")');
       const regularOnly = `@font-face { font-family: 'Anton'; font-style: normal; font-weight: 400; src: url(https://fonts.bunny.net/anton/files/anton-latin-400-normal.woff2) format('woff2'); unicode-range: U+0000-00FF; }`;
-      const sparse = mock(async (url: string | URL | Request) => new Response(String(url).includes(':700') ? '' : regularOnly));
+      const sparse = mock(async (url: string | URL | Request) => String(url).includes('/css?')
+        ? new Response(String(url).includes(':700') ? '' : regularOnly) : new Response(new Uint8Array([4])));
       const bold = await loadRemoteFontFaces('Impact', 'Impact', { weight: 700, style: 'normal' }, fontSet,
         { fetch: sparse as unknown as typeof globalThis.fetch });
       expect(sparse.mock.calls.map((call) => String(call[0]))).toEqual([
-        'https://fonts.bunny.net/css?family=Anton:700&display=swap', 'https://fonts.bunny.net/css?family=Anton:400&display=swap']);
+        'https://fonts.bunny.net/css?family=Anton:700&display=swap', 'https://fonts.bunny.net/css?family=Anton:400&display=swap',
+        'https://fonts.bunny.net/anton/files/anton-latin-400-normal.woff2']);
       expect(bold).toHaveLength(1);
       expect(created[created.length - 1]).toMatchObject({ family: 'Impact', descriptors: { weight: '400', style: 'normal' }, loads: 1 });
       expect(await loadRemoteFontFaces('Unknown Family', 'Unknown Family', { weight: 400, style: 'normal' }, fontSet)).toEqual([]);
       expect(await loadRemoteFontFaces('Tahoma', 'Tahoma', { weight: 400, style: 'normal' }, fontSet, { provider: 'off' })).toEqual([]);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
+  test('registers nothing when aborted, when a font file fails, or when the face has too many slices', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const added: unknown[] = [];
+      const fontSet = { add: (face: unknown) => { added.push(face); } } as unknown as FontFaceSet;
+      const controller = new AbortController();
+      const aborting = mock(async (url: string | URL | Request) => {
+        if (String(url).includes('/css?')) return new Response(BUNNY_CSS);
+        controller.abort();
+        return new Response(new Uint8Array([1]));
+      });
+      await expect(loadRemoteFontFaces('Lucida Sans', 'Lucida Sans', { weight: 400, style: 'normal' }, fontSet,
+        { fetch: aborting as unknown as typeof globalThis.fetch, signal: controller.signal })).rejects.toThrow();
+      const failing = mock(async (url: string | URL | Request) =>
+        String(url).includes('/css?') ? new Response(BUNNY_CSS) : new Response('', { status: 404 }));
+      await expect(loadRemoteFontFaces('Segoe UI', 'Segoe UI', { weight: 400, style: 'normal' }, fontSet,
+        { fetch: failing as unknown as typeof globalThis.fetch, provider: 'google' })).rejects.toThrow('404');
+      const sliced = Array.from({ length: 13 }, (_, index) => `@font-face { font-family: 'Noto Sans JP'; font-style: normal; font-weight: 400; src: url(https://fonts.bunny.net/n/${index}.woff2) format('woff2'); unicode-range: U+${(0x4e00 + index * 16).toString(16)}-${(0x4e0f + index * 16).toString(16)}; }`).join('\n');
+      const cjk = mock(async () => new Response(sliced));
+      expect(await loadRemoteFontFaces('MS Gothic', 'MS Gothic', { weight: 400, style: 'normal' }, fontSet,
+        { fetch: cjk as unknown as typeof globalThis.fetch })).toEqual([]);
+      expect(cjk).toHaveBeenCalledTimes(1);
+      expect(added).toEqual([]);
     } finally {
       globalThis.FontFace = original;
     }

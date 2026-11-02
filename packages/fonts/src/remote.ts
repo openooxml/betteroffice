@@ -152,35 +152,30 @@ export function fetchRemoteFontRules(
   return pending;
 }
 
-function cssSource(source: RemoteFontSource): string {
-  return `url(${JSON.stringify(source.url)})${source.format ? ` format(${JSON.stringify(source.format)})` : ''}`;
-}
+const MAX_FONT_BYTES = 8 * 1024 * 1024;
+const MAX_FACES = 12;
+const PREFERRED_FORMATS = ['woff2', 'woff', 'truetype', 'opentype'];
 
-const LATIN = 0x41;
-
-function coversLatin(range: string | null): boolean {
-  if (!range) return true;
-  return range.split(',').some((part) => {
-    const [start, end = start] = part.trim().replace(/^u\+/i, '').split('-');
-    if (start === undefined || start === '') return false;
-    const low = parseInt(start.replace(/\?/g, '0'), 16);
-    const high = parseInt((end ?? start).replace(/^u\+/i, '').replace(/\?/g, 'f'), 16);
-    return low <= LATIN && LATIN <= high;
-  });
+function preferredSource(rule: RemoteFontFaceRule): RemoteFontSource {
+  for (const format of PREFERRED_FORMATS) {
+    const source = rule.sources.find((entry) => entry.format === format);
+    if (source) return source;
+  }
+  return rule.sources[0]!;
 }
 
 /**
  * Registers the provider's look-alike for an Office family under the document's own family name
- * (`alias`) in `fontSet`, and resolves once the face covering basic Latin has loaded. Other
- * unicode-range slices stay registered and load when text needs them; `onLateLoad` fires for each.
- * A look-alike without the requested weight or style registers its regular face, which the
- * browser then emboldens or slants.
- * Resolves to the registered faces, or an empty list when the table has no look-alike or the
- * provider is off.
+ * (`alias`) in `fontSet`, once every unicode-range slice of the requested face has loaded. The
+ * font files are fetched without credentials or referrer, like the stylesheet. A look-alike
+ * served in more than 12 slices (the CJK families) is not loaded. A look-alike without the
+ * requested weight or style registers its regular face, which the browser emboldens or slants.
+ * Resolves to the registered faces, or an empty list when the table has no look-alike, the
+ * provider is off or the face is too large; nothing is registered once `signal` aborts.
  */
 export async function loadRemoteFontFaces(
   family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet,
-  options: RemoteFontLoadOptions & { onLateLoad?: () => void } = {},
+  options: RemoteFontLoadOptions = {},
 ): Promise<FontFace[]> {
   const remote = resolveWordFamilySubstitute(family)?.remote;
   if (!remote || (options.provider ?? DEFAULT_REMOTE_FONT_PROVIDER) === 'off') return [];
@@ -192,19 +187,20 @@ export async function loadRemoteFontFaces(
     rules = matching(await fetchRemoteFontRules(remote, [regular], options), regular);
   }
   options.signal?.throwIfAborted();
-  const faces = rules.map((rule) => ({
-    rule,
-    font: new FontFace(alias, rule.sources.map(cssSource).join(', '), {
-      weight: rule.weight, style: rule.style, ...(rule.unicodeRange ? { unicodeRange: rule.unicodeRange } : {}),
-    }),
-  }));
-  const eager = faces.filter(({ rule }) => coversLatin(rule.unicodeRange));
+  if (rules.length === 0 || rules.length > MAX_FACES) return [];
   const signal = deadline(options);
-  await within(Promise.all(eager.map(({ font }) => font.load())), signal);
+  const request = options.fetch ?? globalThis.fetch;
+  const fonts = await within(Promise.all(rules.map(async (rule) => {
+    const response = await request(preferredSource(rule).url,
+      { credentials: 'omit', referrerPolicy: 'no-referrer', signal });
+    if (!response.ok) throw new Error(`Remote font failed: ${response.status} ${response.url}`);
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength > MAX_FONT_BYTES) throw new Error(`Remote font too large: ${response.url}`);
+    return new FontFace(alias, bytes, {
+      weight: rule.weight, style: rule.style, ...(rule.unicodeRange ? { unicodeRange: rule.unicodeRange } : {}),
+    }).load();
+  })), signal);
   options.signal?.throwIfAborted();
-  for (const { font, rule } of faces) {
-    fontSet.add(font);
-    if (!eager.some((entry) => entry.rule === rule)) void font.loaded.then(() => options.onLateLoad?.(), () => {});
-  }
-  return faces.map(({ font }) => font);
+  for (const font of fonts) fontSet.add(font);
+  return fonts;
 }

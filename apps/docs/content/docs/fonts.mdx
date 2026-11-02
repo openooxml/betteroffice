@@ -47,10 +47,11 @@ document editor reads it from `setRemoteFontProvider` in `@betteroffice/docx`.
 | `{ cssUrl }` | your endpoint | Any Google-compatible CSS endpoint, for example your own Bunny pull zone restricted to EU routing, or a self-hosted mirror. |
 | `'off'` | nowhere | No remote font requests; the generic family is used. |
 
-The stylesheet request carries only the look-alike's family name and the requested weight and
-style, plus what every browser request carries (IP address, user agent); it sends no cookies and
-no referrer. The browser then loads the font files it names like any web font: with the viewer's IP
-address and the page's referrer policy (the page origin by default). No document content is sent. A family installed on the viewer's machine
+The editor fetches the stylesheet and the font files it names itself, without cookies and without a
+referrer. The requests carry only the look-alike's family name and the requested weight and style,
+plus what every browser request carries (IP address, user agent); no document content is sent.
+Chinese, Japanese and Korean look-alikes are split into too many files to fetch this way; install
+`@betteroffice/fonts-cjk` for those families instead. A family installed on the viewer's machine
 is used directly and never fetched.
 
 A fetched face is used for both measuring and painting, so layout always matches what is drawn.
