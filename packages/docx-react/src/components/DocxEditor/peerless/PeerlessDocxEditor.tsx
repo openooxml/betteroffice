@@ -805,11 +805,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const result = current.binding.commands.submit({ kind: 'setFontEnvironment', payload }, { fence: true, onSubmitted: ticket => {
         void ticket.ack.then(outcome => {
           payload.faces.length = 0;
+          const accepted = outcome.status !== 'refused' && outcome.status !== 'cancelled';
+          if (accepted && active.current === current && fontSource.current === opened && worker.current === client) {
+            opened.signature = signature; opened.provider = provider; opened.requirements = requirements; opened.covers = covers; opened.initial.faces.length = 0;
+          }
           if (!isCurrent()) return;
           if (outcome.status === 'refused' || outcome.status === 'cancelled') {
             reportRecoverableError(new Error(`DOCX font environment was rejected: ${outcome.reason}`));
-          } else {
-            opened.signature = signature; opened.provider = provider; opened.requirements = requirements; opened.covers = covers; opened.initial.faces.length = 0;
           }
           settle();
         }, (error: unknown) => {
