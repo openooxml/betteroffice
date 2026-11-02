@@ -16,6 +16,7 @@ import {
   type PresentationHandle, type PresentationPeerHandle,
 } from '../wasm/loader';
 import { frameAssetIds } from './frame';
+import { createMetafileSvg } from './metafileSvg';
 import { registerPresentationCommandHandlers } from './commandHost';
 import type { PresentationCommandEvents, PresentationCommandMethods } from './commandProtocol';
 import type { PresentationSharedMethods } from './commandSharedAdapter';
@@ -74,6 +75,22 @@ export function createPresentationSessionHost(
   let metadataCache: { version: string; value: ReturnType<typeof presentationMetadata> } | undefined;
   const encoder = new TextEncoder();
   const sentMedia = new Set<string>();
+  const metafiles = engineKind === 'native' ? {
+    start: async () => {}, ready: () => true,
+    convert: (assetId: string, _bytes: Uint8Array) => presentation().metafileSvg(assetId),
+  } : createMetafileSvg();
+
+  async function loadMetafiles(): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        metafiles.start(),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, 3000); }),
+      ]);
+    } catch {} finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
 
   function presentation(): PresentationHandle | PresentationPeerHandle {
     if (disposed) throw new Error('Presentation session is disposed');
@@ -159,7 +176,7 @@ export function createPresentationSessionHost(
       }
       return result;
     },
-    frame(_, slideIndex) {
+    async frame(_, slideIndex) {
       const opened = presentation();
       const frameVersion = opened.version();
       const slideCount = metadata(opened, frameVersion).slides.length;
@@ -170,6 +187,8 @@ export function createPresentationSessionHost(
         : presentationDisplayListJson(opened as PresentationHandle, slideIndex);
       const displayList = encoder.encode(json).buffer;
       const media: PresentationWireFrame['media'] = [];
+      const sources = new Map<string, Uint8Array>();
+      let needsMetafiles = false;
       for (const assetId of frameAssetIds(JSON.parse(json) as SlideDisplayList)) {
         if (sentMedia.has(assetId)) continue;
         let bytes: Uint8Array;
@@ -177,11 +196,26 @@ export function createPresentationSessionHost(
         if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
           try { bytes = decodeTiffImage(bytes); } catch {}
         }
-        bytes = metafileImageBytes(bytes, () => opened.metafileSvg(assetId));
+        sources.set(assetId, bytes);
+        if (!metafiles.ready() && !needsMetafiles) {
+          metafileImageBytes(bytes, () => { needsMetafiles = true; return undefined; });
+        }
+      }
+      if (needsMetafiles) {
+        await loadMetafiles();
+        presentation();
+      }
+      const pendingMetafiles = new Set<string>();
+      for (const [assetId, source] of sources) {
+        const bytes = metafileImageBytes(source, () => {
+          if (metafiles.ready()) return metafiles.convert(assetId, source);
+          pendingMetafiles.add(assetId);
+          return undefined;
+        });
         media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
       }
       epoch += 1;
-      for (const { assetId } of media) sentMedia.add(assetId);
+      for (const { assetId } of media) if (!pendingMetafiles.has(assetId)) sentMedia.add(assetId);
       return transferable({ displayList, version: frameVersion, epoch, slideIndex, media },
         [displayList, ...media.map(({ bytes }) => bytes)]);
     },
@@ -256,11 +290,12 @@ export function createPresentationSessionHost(
       }
     },
     flush: (_, expectedSequence, expectedVersion) => position(expectedSequence, expectedVersion),
-    editorFrame(_, slideId) {
+    async editorFrame(_, slideId) {
       editorPresentation(false);
       const index = metadata().slides.findIndex((slide) => slide.id === slideId);
-      const frame = handlers.frame(null, index) as TransferResult<PresentationWireFrame>;
-      return transferable({ ...frame.value, slideId, sequence }, frame.transfer);
+      const frameSequence = sequence;
+      const frame = await handlers.frame(null, index) as TransferResult<PresentationWireFrame>;
+      return transferable({ ...frame.value, slideId, sequence: frameSequence }, frame.transfer);
     },
     editorSave(_, expectedSequence, expectedVersion) {
       position(expectedSequence, expectedVersion);

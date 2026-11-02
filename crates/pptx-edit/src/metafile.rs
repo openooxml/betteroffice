@@ -5,32 +5,12 @@ use std::sync::Arc;
 use crate::DeckSession;
 
 #[doc(hidden)]
-#[cfg_attr(not(feature = "metafile-svg"), derive(Default))]
+#[derive(Default)]
 pub struct MetafileSvgCache {
     #[cfg(feature = "metafile-svg")]
     entries: HashMap<String, Option<Arc<[u8]>>>,
     #[cfg(feature = "metafile-svg")]
-    source_bytes: usize,
-    #[cfg(feature = "metafile-svg")]
-    svg_bytes: usize,
-    #[cfg(feature = "metafile-svg")]
-    replay: ooxml_metafile::ReplayBudget,
-}
-
-#[cfg(feature = "metafile-svg")]
-impl Default for MetafileSvgCache {
-    fn default() -> Self {
-        let picture = ooxml_metafile::ReplayBudget::default();
-        Self {
-            entries: HashMap::new(),
-            source_bytes: 64 * 1024 * 1024,
-            svg_bytes: 64 * 1024 * 1024,
-            replay: ooxml_metafile::ReplayBudget {
-                work: 4 * picture.work,
-                pixels: 4 * picture.pixels,
-            },
-        }
-    }
+    session: ooxml_metafile::SvgSession,
 }
 
 impl MetafileSvgCache {
@@ -47,18 +27,7 @@ impl MetafileSvgCache {
         if !ooxml_metafile::is_metafile(bytes) {
             return None;
         }
-        let svg = if bytes.len() > 16 * 1024 * 1024
-            || bytes.len() > self.source_bytes
-            || self.svg_bytes == 0
-            || self.replay.work == 0
-        {
-            None
-        } else {
-            self.source_bytes -= bytes.len();
-            ooxml_metafile::to_svg_with_limits(bytes, &mut self.replay, &mut self.svg_bytes)
-                .ok()
-                .map(|svg| Arc::from(svg.markup.into_bytes()))
-        };
+        let svg = self.session.convert(bytes).map(Arc::from);
         self.entries.insert(key.to_owned(), svg.clone());
         svg
     }
@@ -93,45 +62,27 @@ mod tests {
     #[test]
     fn replay_is_lazy_and_caches_successes_and_refusals() {
         let mut cache = MetafileSvgCache::default();
-        let initial = cache.replay;
+        let initial = cache.session.clone();
         assert!(cache.entries.is_empty());
         for (key, bytes) in [("text", TEXT), ("bitmap", BITMAP)] {
             assert!(ooxml_metafile::decode(bytes).is_none());
             let svg = cache.resolve(key, bytes).unwrap();
             assert!(std::str::from_utf8(&svg).unwrap().contains("<svg"));
-            let remaining = (cache.replay, cache.svg_bytes, cache.source_bytes);
+            let remaining = cache.session.clone();
             assert!(Arc::ptr_eq(&svg, &cache.resolve(key, bytes).unwrap()));
-            assert_eq!(
-                remaining,
-                (cache.replay, cache.svg_bytes, cache.source_bytes)
-            );
+            assert_eq!(remaining, cache.session);
         }
-        assert!(cache.replay.work < initial.work);
+        assert_ne!(cache.session, initial);
         let mut refused = TEXT.to_vec();
         refused.truncate(44);
         assert!(cache.resolve("refused", &refused).is_none());
-        let remaining = (cache.replay, cache.svg_bytes, cache.source_bytes);
+        let remaining = cache.session.clone();
         assert!(cache.resolve("refused", &refused).is_none());
-        assert_eq!(
-            remaining,
-            (cache.replay, cache.svg_bytes, cache.source_bytes)
-        );
+        assert_eq!(remaining, cache.session);
     }
 
     #[test]
-    fn replay_and_output_exhaustion_draw_nothing() {
-        for limit in ["work", "pixels", "output", "source"] {
-            let mut cache = MetafileSvgCache::default();
-            match limit {
-                "work" => cache.replay.work = 0,
-                "pixels" => cache.replay.pixels = 0,
-                "output" => cache.svg_bytes = 1,
-                _ => cache.source_bytes = 0,
-            }
-            let bytes = if limit == "pixels" { BITMAP } else { TEXT };
-            assert!(cache.resolve(limit, bytes).is_none(), "{limit}");
-            assert!(cache.resolve(limit, bytes).is_none(), "{limit}");
-        }
+    fn oversized_sources_draw_nothing() {
         let mut oversized = TEXT.to_vec();
         oversized.resize(16 * 1024 * 1024 + 1, 0);
         assert!(

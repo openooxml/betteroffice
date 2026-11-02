@@ -163,3 +163,16 @@ test('metafile relationship scans keep the part size limit', async () => {
   declareSize(bytes, 'ppt/slides/_rels/slide1.xml.rels', 4 * 1024 * 1024 + 1);
   expect(await activeSlideMetafileFlags(bytes)).toEqual({ openingSlideMetafile: false, packageMetafile: false });
 });
+
+for (const holder of ['layout', 'master'] as const) test(`a metafile the opening slide shows through its ${holder} is found`, async () => {
+  const layoutType = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout';
+  const masterType = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster';
+  const zip = await JSZip.loadAsync(await deck([slide(run('English')), slide(run('English'))], [1, 2]));
+  zip.file('ppt/slides/_rels/slide1.xml.rels', `<Relationships><Relationship Id="rId1" Type="${layoutType}" Target="../slideLayouts/slideLayout1.xml"/></Relationships>`);
+  zip.file('ppt/slideLayouts/_rels/slideLayout1.xml.rels', `<Relationships><Relationship Id="rId1" Type="${masterType}" Target="../slideMasters/slideMaster1.xml"/>${holder === 'layout' ? '<Relationship Id="rId2" Target="../media/logo.emf"/>' : ''}</Relationships>`);
+  zip.file('ppt/slideMasters/_rels/slideMaster1.xml.rels', `<Relationships>${holder === 'master' ? '<Relationship Id="rId9" Target="../media/logo.emf"/>' : ''}</Relationships>`);
+  zip.file('ppt/media/logo.emf', new Uint8Array([1]));
+  const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  expect(await activeSlideMetafileFlags(bytes)).toEqual({ openingSlideMetafile: true, packageMetafile: true });
+  expect(await activeSlideMetafileFlags(bytes, 1)).toEqual({ openingSlideMetafile: false, packageMetafile: true });
+});

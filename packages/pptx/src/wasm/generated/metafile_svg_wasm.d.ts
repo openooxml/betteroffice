@@ -1,17 +1,24 @@
 /* tslint:disable */
 /* eslint-disable */
 
-export function metafileToSvg(bytes: Uint8Array): Uint8Array | undefined;
+export class MetafileConverter {
+    free(): void;
+    [Symbol.dispose](): void;
+    constructor();
+    toSvg(bytes: Uint8Array): Uint8Array | undefined;
+}
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
+    readonly __wbg_metafileconverter_free: (a: number, b: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_start: () => void;
     readonly memory: WebAssembly.Memory;
-    readonly metafileToSvg: (a: number, b: number) => [number, number];
+    readonly metafileconverter_new: () => number;
+    readonly metafileconverter_toSvg: (a: number, b: number, c: number) => [number, number];
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

@@ -210,6 +210,33 @@ function metafileTarget(target: string): boolean {
   return lower.endsWith('.emf') || lower.endsWith('.wmf');
 }
 
+function resolvePart(from: string, target: string): string {
+  if (target.startsWith('/')) return target.slice(1);
+  const parts = from.split('/');
+  parts.pop();
+  for (const segment of target.split('/')) {
+    if (segment === '..') parts.pop();
+    else if (segment && segment !== '.') parts.push(segment);
+  }
+  return parts.join('/');
+}
+
+/** Whether a part's rels reference a metafile, and the part its `kind` relationship points to. */
+async function partRels(
+  bytes: Uint8Array, entries: Map<string, ZipEntry>, path: string, kind: string, budget: { left: number },
+): Promise<{ metafile: boolean; next?: string }> {
+  const slash = path.lastIndexOf('/');
+  const rels = await readPart(bytes, entries, `${path.slice(0, slash)}/_rels/${path.slice(slash + 1)}.rels`, budget);
+  const found: { metafile: boolean; next?: string } = { metafile: false };
+  if (rels) eachTag(rels, 0, rels.length, (tag) => {
+    if (!isTag(tag, 'Relationship')) return;
+    const target = attribute(tag, 'Target') ?? '';
+    if (metafileTarget(target)) found.metafile = true;
+    if (found.next === undefined && (attribute(tag, 'Type') ?? '').endsWith(`/${kind}`)) found.next = resolvePart(path, target);
+  });
+  return found;
+}
+
 export async function scanOpeningSlide(source: ArrayBuffer | Uint8Array, activeSlideIndex = 0): Promise<OpeningSlideScan> {
   const result: OpeningSlideScan = { scripts: [], openingSlideMetafile: false, packageMetafile: false };
   try {
@@ -227,11 +254,10 @@ export async function scanOpeningSlide(source: ArrayBuffer | Uint8Array, activeS
     if (!target) return result;
     const relative = target.startsWith('./') ? target.slice(2) : target;
     const path = target.startsWith('/') ? target.slice(1) : `ppt/${relative}`;
-    const slash = path.lastIndexOf('/');
-    const slideRels = await readPart(bytes, entries, `${path.slice(0, slash)}/_rels/${path.slice(slash + 1)}.rels`, budget);
-    if (slideRels) eachTag(slideRels, 0, slideRels.length, (tag) => {
-      if (isTag(tag, 'Relationship') && metafileTarget(attribute(tag, 'Target') ?? '')) result.openingSlideMetafile = true;
-    });
+    const slide = await partRels(bytes, entries, path, 'slideLayout', budget);
+    const layout = slide.next ? await partRels(bytes, entries, slide.next, 'slideMaster', budget) : undefined;
+    const master = layout?.next ? await partRels(bytes, entries, layout.next, '', budget) : undefined;
+    result.openingSlideMetafile = slide.metafile || Boolean(layout?.metafile) || Boolean(master?.metafile);
     const xml = await readPart(bytes, entries, path, budget);
     if (xml) result.scripts = slideCoverageScripts(xml);
     return result;
