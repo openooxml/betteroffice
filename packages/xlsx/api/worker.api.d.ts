@@ -2985,6 +2985,10 @@ export class XlsxDocument {
     rangePngDisplayListJson(args: string): string;
     readCellsJson(request: string): string;
     /**
+     * Recalculate every formula; the next save writes the recalculated values.
+     */
+    recalculateJson(): string;
+    /**
      * Checkpoints are only restorable by the same engine version and codec.
      */
     recoveryCheckpoint(through_seq: number, preserve_history?: boolean | null): Uint8Array;
@@ -3153,6 +3157,7 @@ export interface InitOutput {
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangePngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_recalculateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3612,6 +3617,12 @@ export interface WorkbookHandle extends CollaborationReplica {
     /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
     sheetInfoFor(sheet: number): SheetInfo;
     calculationStatus(): CalculationStatus;
+    /**
+     * Recalculate every formula with the handle's calculation context (or the host clock).
+     * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+     * keeps the result the file stored.
+     */
+    recalculate(): CalculationStatus;
     /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
     displayList(viewport: Viewport): DisplayList;
     /** `displayList` with build and encode time measured inside the core. */

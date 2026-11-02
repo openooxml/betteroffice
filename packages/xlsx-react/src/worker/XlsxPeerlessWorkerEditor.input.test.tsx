@@ -9,6 +9,7 @@ import { createTestWorkbookSession } from '../../../xlsx/src/session/testHelpers
 import { XlsxWorkerEditor } from './XlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 import type { XlsxAsyncEditorApi } from './createAsyncEditorApi';
+import { MOUNTED } from '../__fixtures__/mounted';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -86,7 +87,7 @@ async function mount(protectedSheet: boolean, formatCells = false, i18n?: Transl
       for (const callback of callbacks) callback(0);
     });
     expect(ready).toHaveBeenCalledTimes(1);
-  });
+  }, MOUNTED);
   return { view, session, api: ready.mock.calls[0][0] };
 }
 

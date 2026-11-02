@@ -10,8 +10,9 @@ import {
 } from './parse';
 import { residentEngine } from './residentEngine';
 import { routingDocxEntries } from './__fixtures__/routingDocx';
+import { engineKind } from './engineEdit';
 
-test('parse-only calls use light modules with no engine or an idle engine', async () => {
+test.skipIf(engineKind === 'native')('parse-only calls use light modules with no engine or an idle engine', async () => {
   expect(residentEngine()).toBeUndefined();
   expect(wasmModuleMemories()).toEqual([]);
   expect(paragraphPatchWriterVersionWire()).toBeNull();

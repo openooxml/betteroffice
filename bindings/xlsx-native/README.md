@@ -3,6 +3,8 @@
 The `@betteroffice/xlsx` API on the native Rust engine, for Node.js, Bun and Deno.
 Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
 
+Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed.
+
 ```sh
 npm install @betteroffice/xlsx-native
 ```

@@ -309,6 +309,7 @@ dependencies = [
 name = "betteroffice-ooxml-font-preflight"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-ooxml-text",
  "miniz_oxide 0.8.9",
  "quick-xml",
  "serde_json",

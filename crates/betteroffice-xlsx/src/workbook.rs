@@ -49,7 +49,9 @@ use xlsx_ops::{
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     insertion_keeps_chart_anchor_on_grid,
 };
-use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
+use xlsx_parse::{
+    ChartRefresh, ChartRefreshPlan, DefinedFunctionNames, FormulaNames, display_formula, saves_as,
+};
 use xlsx_render::chart::chart_regions_with_geometry;
 use xlsx_render::region::{
     viewport_for_range_with_geometry, viewport_for_used_range_with_geometry,
@@ -1268,6 +1270,12 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
+                let recalculated =
+                    self.recalculated_since_open
+                        && package.requests_full_calculation()
+                        && self.model.sheets.iter().any(|sheet| {
+                            sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
+                        });
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -1275,7 +1283,7 @@ impl Workbook {
                     &self.preserved.shared_string_cells,
                     &self.preserved.axes,
                     xlsx_parse::SaveEdits {
-                        changed: self.edited_since_open,
+                        changed: self.edited_since_open || recalculated,
                         moved_references: self.moved_references_since_open,
                     },
                     self.active_sheet,
@@ -1482,11 +1490,21 @@ impl Workbook {
     }
 
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        self.cell_shown(sheet, cell, names.visible_from(Some(sheet)))
+    }
+
+    fn cell_shown(
+        &self,
+        sheet: SheetId,
+        cell: CellRef,
+        names: FormulaNames<'_>,
+    ) -> Result<CellEdit> {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
         let (input, is_formula) = match sheet_ref.cell(cell) {
             Some(stored) => match &stored.formula {
-                Some(formula) => (format!("={formula}"), true),
+                Some(formula) => (format!("={}", display_formula(formula, names)), true),
                 None => (
                     value_to_input(&self.model, sheet, cell, &stored.value),
                     false,
@@ -1542,11 +1560,13 @@ impl Workbook {
 
     pub fn range_cells(&self, sheet: SheetId, range: CellRange) -> Result<Vec<Vec<CellEdit>>> {
         let (rows, cols) = self.validate_bounded_range(sheet, range)?;
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        let names = names.visible_from(Some(sheet));
         let mut cells = Vec::with_capacity(rows as usize);
         for row in range.start.row..=range.end.row {
             let mut row_cells = Vec::with_capacity(cols as usize);
             for col in range.start.col..=range.end.col {
-                row_cells.push(self.cell(sheet, CellRef::new(row, col))?);
+                row_cells.push(self.cell_shown(sheet, CellRef::new(row, col), names)?);
             }
             cells.push(row_cells);
         }
@@ -1799,7 +1819,9 @@ impl Workbook {
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
-        let (state, format) = edit_cell_state(&self.model, sheet, cell, input, options.now_serial);
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        let (state, format) =
+            edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
         validate_cell_state(&state)?;
         if format.is_none()
             && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
@@ -1849,11 +1871,18 @@ impl Workbook {
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
         for edit in edits {
             self.validate_cell(edit.cell)?;
-            let (state, format) =
-                edit_cell_state(&preview, sheet, edit.cell, &edit.input, options.now_serial);
+            let (state, format) = edit_cell_state(
+                &preview,
+                &names,
+                sheet,
+                edit.cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             let old = current_cell_state(&preview, sheet, edit.cell);
             if format.is_none() && cell_states_semantically_equal(&old, &state) {
@@ -1985,7 +2014,7 @@ impl Workbook {
 
     fn apply_ops_marked(
         &mut self,
-        ops: Vec<Op>,
+        mut ops: Vec<Op>,
         options: CalculationOptions,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
@@ -2004,7 +2033,9 @@ impl Workbook {
         let mut origins = self.preserved.origins.clone();
         let mut names = self.sheet_names();
         let mut per_op = Vec::with_capacity(ops.len());
-        for op in &ops {
+        let defined = DefinedFunctionNames::new(&preview.defined_names);
+        for op in &mut ops {
+            keep_stored_formula(&preview, &defined, op);
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet_in(&preview, &origins, sheet)?;
             }
@@ -2082,7 +2113,10 @@ impl Workbook {
     /// or, on the first calculation, formulas the file stored no result for. One that moves
     /// none of these leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
-    /// the recalculated values; the recalculation at open does not.
+    /// the recalculated values. The recalculation at open does not, except that a file
+    /// asking for a full calculation on load (`calcPr` `fullCalcOnLoad` or `forceFullCalc`)
+    /// saves the values it produced when it holds any formula; formulas the engine
+    /// cannot evaluate keep their cached results either way.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
         let result = self.recalculate(options);
         self.edited_since_open = true;
@@ -2327,10 +2361,12 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<Proposal> {
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
             let (state, format) = edit_cell_state(
                 &preview,
+                &names,
                 edit.sheet,
                 edit.cell,
                 &edit.input,
@@ -2422,12 +2458,19 @@ impl Workbook {
         let mut ops = Vec::with_capacity(proposal.edits.len());
         let mut per_op = Vec::with_capacity(proposal.edits.len());
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            let (state, format) =
-                edit_cell_state(&preview, sheet, cell, &edit.input, options.now_serial);
+            let (state, format) = edit_cell_state(
+                &preview,
+                &names,
+                sheet,
+                cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 touched.push((sheet, cell, state.formula.clone()));
@@ -4706,6 +4749,7 @@ fn written_cell_style(
 
 fn edit_cell_state(
     workbook: &WorkbookModel,
+    names: &DefinedFunctionNames,
     sheet: SheetId,
     cell: CellRef,
     input: &str,
@@ -4721,6 +4765,13 @@ fn edit_cell_state(
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
     let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    state.formula = state.formula.map(|typed| {
+        committed_formula(
+            typed,
+            stored_formula(workbook, sheet, cell),
+            names.visible_from(Some(sheet)),
+        )
+    });
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     let format = inferred.map(|id| {
         let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));
@@ -4743,6 +4794,56 @@ fn edit_cell_state(
         }
     });
     (state, format)
+}
+
+fn stored_formula(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> Option<&str> {
+    workbook.sheet(sheet)?.cell(cell)?.formula.as_deref()
+}
+
+/// `typed`, or `stored` when `typed` saves as exactly that text with the
+/// defined `names` in its scope, so committing shown formula text unchanged
+/// leaves the stored text as it was.
+fn committed_formula(typed: String, stored: Option<&str>, names: FormulaNames<'_>) -> String {
+    match stored {
+        Some(stored) if typed != stored && saves_as(&typed, stored, names) => stored.to_owned(),
+        _ => typed,
+    }
+}
+
+/// An op that re-commits a cell formula or defined name in a form that saves
+/// as exactly the stored text keeps the stored text.
+fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, op: &mut Op) {
+    match op {
+        Op::SetCell { sheet, at, cell } => {
+            cell.formula = cell.formula.take().map(|typed| {
+                committed_formula(
+                    typed,
+                    stored_formula(workbook, *sheet, *at),
+                    names.visible_from(Some(*sheet)),
+                )
+            });
+        }
+        Op::SetDefinedName {
+            name,
+            refers_to,
+            scope,
+            ..
+        } => {
+            let stored = workbook
+                .defined_names
+                .iter()
+                .find(|defined| {
+                    defined.local_sheet == *scope && defined.name.eq_ignore_ascii_case(name)
+                })
+                .map(|defined| defined.formula.as_str());
+            *refers_to = committed_formula(
+                std::mem::take(refers_to),
+                stored,
+                names.visible_from(*scope),
+            );
+        }
+        _ => {}
+    }
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {

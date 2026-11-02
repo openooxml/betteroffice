@@ -10,10 +10,13 @@ export default defineConfig((options) => ({
     worker: 'src/worker.ts',
     collaboration: 'src/collaboration/index.ts',
     pptxSessionWorker: 'src/session/worker.ts',
+    'sessionWorker.browser': 'src/session/sessionWorker.browser.ts',
+    'sessionWorker.node': 'src/session/sessionWorker.node.ts',
   },
   format: ['esm'],
   dts: true,
   splitting: true,
+  external: ['#session-worker'],
   sourcemap: false,
   clean: true,
   treeshake: true,
@@ -27,5 +30,6 @@ export default defineConfig((options) => ({
     await rename(join(out, 'pptxSessionWorker.js'), join(out, 'pptxSessionWorker.mjs'));
     await mkdir('dist/generated', { recursive: true });
     await copyFile('src/wasm/generated/pptx_wasm_bg.wasm', 'dist/generated/pptx_wasm_bg.wasm');
+    await copyFile('src/wasm/generated/pptx_wasm_lean_bg.wasm', 'dist/generated/pptx_wasm_lean_bg.wasm');
   },
 }));

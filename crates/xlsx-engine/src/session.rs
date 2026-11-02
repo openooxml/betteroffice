@@ -646,6 +646,15 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// Recalculate every formula with the handle clock (or `now_serial`), counting it as an
+    /// edit so the next save writes the recalculated values, and report the calculation
+    /// status.
+    pub fn recalculate_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
+        let options = self.calculation_options(now_serial);
+        self.workbook.recalculate_all(options);
+        self.calculation_status_json()
+    }
+
     pub fn calculation_status_json(&self) -> Result<String, String> {
         self.workbook
             .calculation_status_json()
