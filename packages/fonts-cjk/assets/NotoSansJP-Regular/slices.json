@@ -1,0 +1,726 @@
+{
+  "format": 1,
+  "skeleton": {
+    "file": "NotoSansJP-Regular/skeleton.zst",
+    "encodedLength": 168193,
+    "byteLength": 515568,
+    "sha256": "139f469e337de6bcba9f35d1def067df7af73ba82d7fb4979910b1cf0fda3881"
+  },
+  "core": {
+    "file": "NotoSansJP-Regular/core.zst",
+    "encodedLength": 307232,
+    "byteLength": 439539,
+    "sha256": "fe0635d3ad3775f9c1a18775e436c4bfcb9337ba15c34fd4d7f0f9f04940b4c1"
+  },
+  "chunks": [
+    {
+      "id": 1,
+      "file": "NotoSansJP-Regular/c001.zst",
+      "encodedLength": 15145,
+      "byteLength": 19012,
+      "sha256": "1b7e405731ceaba1d58f65fe53ce21831b1109375220f975da4a16cc191cfe0e"
+    },
+    {
+      "id": 2,
+      "file": "NotoSansJP-Regular/c002.zst",
+      "encodedLength": 13311,
+      "byteLength": 15234,
+      "sha256": "f8dee9313343832a9606628b47f6031e261ddea0279f2802d2ec500388dc8f40"
+    },
+    {
+      "id": 3,
+      "file": "NotoSansJP-Regular/c003.zst",
+      "encodedLength": 14563,
+      "byteLength": 17397,
+      "sha256": "cd08276bbe2774a2de787ee034c1b4bdd4f7d77a886548a3d210da458437b8bc"
+    },
+    {
+      "id": 4,
+      "file": "NotoSansJP-Regular/c004.zst",
+      "encodedLength": 15448,
+      "byteLength": 18490,
+      "sha256": "012db666c0677e257119f31533e71b18471d4b3f9f8e3f6a9d16a9c959e169b2"
+    },
+    {
+      "id": 5,
+      "file": "NotoSansJP-Regular/c005.zst",
+      "encodedLength": 14969,
+      "byteLength": 17800,
+      "sha256": "e2b7db2eba55768545411f54383feb427c31cd8499f8007a2751ae32a931d7fb"
+    },
+    {
+      "id": 6,
+      "file": "NotoSansJP-Regular/c006.zst",
+      "encodedLength": 14139,
+      "byteLength": 16816,
+      "sha256": "96242f9f3802ee65747456e061d2559548dacf0957c28096906e79fda068b650"
+    },
+    {
+      "id": 7,
+      "file": "NotoSansJP-Regular/c007.zst",
+      "encodedLength": 15719,
+      "byteLength": 21696,
+      "sha256": "766ed5d0af8150bb8fd1cd1d67ceef62aeda1568ea7d1f3176f7ebc9742b3552"
+    },
+    {
+      "id": 8,
+      "file": "NotoSansJP-Regular/c008.zst",
+      "encodedLength": 14861,
+      "byteLength": 17948,
+      "sha256": "26eae604d5a5d525aa84c9b679e7332e9f0d39700a0c40283203b39f427ade2e"
+    },
+    {
+      "id": 9,
+      "file": "NotoSansJP-Regular/c009.zst",
+      "encodedLength": 15069,
+      "byteLength": 17404,
+      "sha256": "98a2e8346704122420eed893faf7b81239a8cb52134c3c198780e167e7c9e572"
+    },
+    {
+      "id": 10,
+      "file": "NotoSansJP-Regular/c010.zst",
+      "encodedLength": 13832,
+      "byteLength": 15987,
+      "sha256": "ab226a010528152c2c4862873b9ac57a17b39f87b4492d55001fa8feb98e4151"
+    },
+    {
+      "id": 11,
+      "file": "NotoSansJP-Regular/c011.zst",
+      "encodedLength": 18608,
+      "byteLength": 22898,
+      "sha256": "cc8e2c8b690ef4d0caf76cd846890e871272d52373c7e45cf54bb6d864d6c9d1"
+    },
+    {
+      "id": 12,
+      "file": "NotoSansJP-Regular/c012.zst",
+      "encodedLength": 13051,
+      "byteLength": 15354,
+      "sha256": "0ba42613571521c1bd58c9b104dfdb07eeb30d2570df541ccff005e7530aa238"
+    },
+    {
+      "id": 13,
+      "file": "NotoSansJP-Regular/c013.zst",
+      "encodedLength": 14310,
+      "byteLength": 16522,
+      "sha256": "818f0ca9c39a72ff46c161f2d34c648e1408258fe3684e12e5aaab3e04f95ed7"
+    },
+    {
+      "id": 14,
+      "file": "NotoSansJP-Regular/c014.zst",
+      "encodedLength": 15058,
+      "byteLength": 18232,
+      "sha256": "6d713adf27dd58751c6ba688760a54a69dacef4ea26724b1796c79ada0524ce2"
+    },
+    {
+      "id": 15,
+      "file": "NotoSansJP-Regular/c015.zst",
+      "encodedLength": 13033,
+      "byteLength": 16330,
+      "sha256": "75e4925b5f1b766aef697882eef38f2271d6b4569c1aa3e9ce77e065edc9e234"
+    },
+    {
+      "id": 16,
+      "file": "NotoSansJP-Regular/c016.zst",
+      "encodedLength": 16659,
+      "byteLength": 20527,
+      "sha256": "305c1c4950488f6c4a43b661971dba078341d30d44c34fe634ce1e3ed4b8b8be"
+    },
+    {
+      "id": 17,
+      "file": "NotoSansJP-Regular/c017.zst",
+      "encodedLength": 13461,
+      "byteLength": 15693,
+      "sha256": "dd2b4c817c88ea95d5567ee550d38ab1ba29786ae32e4cdb12234f848046f014"
+    },
+    {
+      "id": 18,
+      "file": "NotoSansJP-Regular/c018.zst",
+      "encodedLength": 16362,
+      "byteLength": 19437,
+      "sha256": "7e923237f6362ac04332312460a9cd1f3cd4d76fe00fd359c9cb96dde38d959a"
+    },
+    {
+      "id": 19,
+      "file": "NotoSansJP-Regular/c019.zst",
+      "encodedLength": 13043,
+      "byteLength": 15069,
+      "sha256": "f43d758bc0186590829d3837b688a5de5d26cac75c76e093934185568d1c8f60"
+    },
+    {
+      "id": 20,
+      "file": "NotoSansJP-Regular/c020.zst",
+      "encodedLength": 14238,
+      "byteLength": 16665,
+      "sha256": "cb7934248449f29a8d31c02043a39366f36fafb3f59ced50d7fdfec46b0c1b77"
+    },
+    {
+      "id": 21,
+      "file": "NotoSansJP-Regular/c021.zst",
+      "encodedLength": 15033,
+      "byteLength": 17065,
+      "sha256": "d2d0c9fb42c0e4a73c90799ea74862299973b863cd7c87b184c8879e2e1a3549"
+    },
+    {
+      "id": 22,
+      "file": "NotoSansJP-Regular/c022.zst",
+      "encodedLength": 17327,
+      "byteLength": 20759,
+      "sha256": "f7c4dd56248e02600f5efbd2155dbcf5eddb551ba2d0998a37aad86f638ff12f"
+    },
+    {
+      "id": 23,
+      "file": "NotoSansJP-Regular/c023.zst",
+      "encodedLength": 14343,
+      "byteLength": 16167,
+      "sha256": "b2a0be793a3d9c0882b0b41e95ef8400d24f39f06c0d3068d291abf686a389b6"
+    },
+    {
+      "id": 24,
+      "file": "NotoSansJP-Regular/c024.zst",
+      "encodedLength": 13738,
+      "byteLength": 16479,
+      "sha256": "602cf481c14a2e3ab1b088fb3d29260f21c602cfdbfffea431308e852796bc91"
+    },
+    {
+      "id": 25,
+      "file": "NotoSansJP-Regular/c025.zst",
+      "encodedLength": 13788,
+      "byteLength": 16259,
+      "sha256": "17e16fd720d366df12471efc2c3e831373efc6fe4abdeb6d2cdea758cea24f58"
+    },
+    {
+      "id": 26,
+      "file": "NotoSansJP-Regular/c026.zst",
+      "encodedLength": 13006,
+      "byteLength": 15012,
+      "sha256": "2a1d1c36b59360c638efe27bf2ecf304043dffd86c12ee5200dc4e82bc3261ba"
+    },
+    {
+      "id": 27,
+      "file": "NotoSansJP-Regular/c027.zst",
+      "encodedLength": 14376,
+      "byteLength": 16334,
+      "sha256": "3ebdbe2b82d9b62568fdf308e0f3e7f6b84d04dbbfbfadee58452af77c7e6eb4"
+    },
+    {
+      "id": 28,
+      "file": "NotoSansJP-Regular/c028.zst",
+      "encodedLength": 14538,
+      "byteLength": 16524,
+      "sha256": "f1d22195dfa5e6aab8382a0d8e10fb16ffabfb38558f5273ec9405b33f4bdcb1"
+    },
+    {
+      "id": 29,
+      "file": "NotoSansJP-Regular/c029.zst",
+      "encodedLength": 15444,
+      "byteLength": 18343,
+      "sha256": "c8ca878deab79fa1e7a9e594deab3a929f5800929889d5f84ab51e6354b06f0e"
+    },
+    {
+      "id": 30,
+      "file": "NotoSansJP-Regular/c030.zst",
+      "encodedLength": 13939,
+      "byteLength": 16039,
+      "sha256": "3e6cd7f5d25b2c6692c3824a91d3144d9aa140be15644a6722bdc267c00bc7a2"
+    },
+    {
+      "id": 31,
+      "file": "NotoSansJP-Regular/c031.zst",
+      "encodedLength": 13606,
+      "byteLength": 16017,
+      "sha256": "38582c53c329d87972dd64556c0cb6dc183d9f6b8a41157a50ff473f7b2cc6db"
+    },
+    {
+      "id": 32,
+      "file": "NotoSansJP-Regular/c032.zst",
+      "encodedLength": 15295,
+      "byteLength": 17549,
+      "sha256": "ecc32dfbd8de63010ab0d1604f2480c680ccb610e8b367d5a36a68463354374a"
+    },
+    {
+      "id": 33,
+      "file": "NotoSansJP-Regular/c033.zst",
+      "encodedLength": 12954,
+      "byteLength": 14813,
+      "sha256": "1a2ec5b56508d7a7b9e020ed28d1e8f74cdeec07ed718d81f0b5da8230fffa8d"
+    },
+    {
+      "id": 34,
+      "file": "NotoSansJP-Regular/c034.zst",
+      "encodedLength": 14786,
+      "byteLength": 19467,
+      "sha256": "a0a859d468ac5bea4a6e9cf6598b411e57e0365bb82d7b7606fb0b90e7e4c645"
+    },
+    {
+      "id": 35,
+      "file": "NotoSansJP-Regular/c035.zst",
+      "encodedLength": 14928,
+      "byteLength": 17076,
+      "sha256": "0435cd02356449b1f62a44bb431b79372b9a89e8aa9c42882c7fac9d2f2e64fa"
+    },
+    {
+      "id": 36,
+      "file": "NotoSansJP-Regular/c036.zst",
+      "encodedLength": 20292,
+      "byteLength": 26154,
+      "sha256": "0dd860d6949e28ee450c7c5e9f7ee5f4dfb23fb683d4f1cafffda2e38be9b9eb"
+    },
+    {
+      "id": 37,
+      "file": "NotoSansJP-Regular/c037.zst",
+      "encodedLength": 14117,
+      "byteLength": 16642,
+      "sha256": "e8535154e1fee6cbdfca9c309b61a8812ac8d781d32bf7ecb9188b1ef1da8b92"
+    },
+    {
+      "id": 38,
+      "file": "NotoSansJP-Regular/c038.zst",
+      "encodedLength": 13916,
+      "byteLength": 16539,
+      "sha256": "a7ba6242a058b40637bf023fd0c62aad058a2876a60a4b16ab42d5a179813f86"
+    },
+    {
+      "id": 39,
+      "file": "NotoSansJP-Regular/c039.zst",
+      "encodedLength": 15303,
+      "byteLength": 17988,
+      "sha256": "331cfe5d01639b2c4469dfed91c79b7a8f23907d755995eaea504831317fef38"
+    },
+    {
+      "id": 40,
+      "file": "NotoSansJP-Regular/c040.zst",
+      "encodedLength": 17210,
+      "byteLength": 20821,
+      "sha256": "34ef483ed70d4c1e464eef73f1568386270c0e72f77882fbbad733caf21cf140"
+    },
+    {
+      "id": 41,
+      "file": "NotoSansJP-Regular/c041.zst",
+      "encodedLength": 12193,
+      "byteLength": 27549,
+      "sha256": "ce857a87a802d904450c88a48a6bb8bf09e2ccdd8a02d89611da46b1a1a6a488"
+    },
+    {
+      "id": 42,
+      "file": "NotoSansJP-Regular/c042.zst",
+      "encodedLength": 17786,
+      "byteLength": 31825,
+      "sha256": "b1cbea44406f18580997b9df5ef4d87d317cf80fb6901833e1e9fdc9094296bf"
+    },
+    {
+      "id": 43,
+      "file": "NotoSansJP-Regular/c043.zst",
+      "encodedLength": 7633,
+      "byteLength": 17454,
+      "sha256": "29fbfa97d1b9acd8808d5eedaad7d720b95330a0d7ee04f8a0e2c7304c9218b7"
+    },
+    {
+      "id": 44,
+      "file": "NotoSansJP-Regular/c044.zst",
+      "encodedLength": 26936,
+      "byteLength": 32440,
+      "sha256": "cfe4899df1a13b7b64c9276c2297037197db018ef11a12aaf5b18b37844fc650"
+    },
+    {
+      "id": 45,
+      "file": "NotoSansJP-Regular/c045.zst",
+      "encodedLength": 33032,
+      "byteLength": 43647,
+      "sha256": "9fa02883f0b4c8869743739a3dca43b93e35158231f881b4aea738216e5c1c19"
+    },
+    {
+      "id": 46,
+      "file": "NotoSansJP-Regular/c046.zst",
+      "encodedLength": 18347,
+      "byteLength": 22720,
+      "sha256": "406d5d27a904939d5f90458e230525cc695a155f94fa00bea93a3164968d3b4f"
+    },
+    {
+      "id": 47,
+      "file": "NotoSansJP-Regular/c047.zst",
+      "encodedLength": 25397,
+      "byteLength": 44373,
+      "sha256": "b4d407da0c9ec9f36d55abdaca178e1a914b59fd6bef980e3ab6bcadf6f13e8b"
+    },
+    {
+      "id": 48,
+      "file": "NotoSansJP-Regular/c048.zst",
+      "encodedLength": 46354,
+      "byteLength": 91395,
+      "sha256": "7e077bdacb2e2d86aa304d663f2a6748bb4836278661940e04fb1e420ca725c1"
+    },
+    {
+      "id": 49,
+      "file": "NotoSansJP-Regular/c049.zst",
+      "encodedLength": 40204,
+      "byteLength": 52952,
+      "sha256": "262dcee0963751dfa3389dc3c6ab326c520b44593c2b729660c6e7398927efaf"
+    },
+    {
+      "id": 50,
+      "file": "NotoSansJP-Regular/c050.zst",
+      "encodedLength": 41193,
+      "byteLength": 48116,
+      "sha256": "4d0bbec4651d1dd1d19e92f39757f27dd1bd93a97978f82be4e276d8eb4d4d2d"
+    },
+    {
+      "id": 51,
+      "file": "NotoSansJP-Regular/c051.zst",
+      "encodedLength": 43031,
+      "byteLength": 55236,
+      "sha256": "b4a74ab8a07407abbf980d0277c603f5678fd4380a2edbbedd0b87d3083687fd"
+    },
+    {
+      "id": 52,
+      "file": "NotoSansJP-Regular/c052.zst",
+      "encodedLength": 52251,
+      "byteLength": 61784,
+      "sha256": "2f6561a761af895cb72ff3e042872494d800e4fde6c573ce3009e4ce8efd9f5c"
+    },
+    {
+      "id": 53,
+      "file": "NotoSansJP-Regular/c053.zst",
+      "encodedLength": 49447,
+      "byteLength": 58301,
+      "sha256": "c387187ab470b7e177cdbb676d0fcbd00bf90c71379c6cced58d0c48e227dfea"
+    },
+    {
+      "id": 54,
+      "file": "NotoSansJP-Regular/c054.zst",
+      "encodedLength": 44076,
+      "byteLength": 51648,
+      "sha256": "15868772ed849d35e1a49685e3b9a82a3d38c5d4747b2d506d5b27feaec7e691"
+    },
+    {
+      "id": 55,
+      "file": "NotoSansJP-Regular/c055.zst",
+      "encodedLength": 52670,
+      "byteLength": 60628,
+      "sha256": "8f776bd095785171d06c971a643d45c8ec2220892b565ce23de67331ac0d131e"
+    },
+    {
+      "id": 56,
+      "file": "NotoSansJP-Regular/c056.zst",
+      "encodedLength": 55618,
+      "byteLength": 64583,
+      "sha256": "5a2862551ed5291f36ec0081fbf26ff23c4b0bf7c7206e5acf99aa36abe67616"
+    },
+    {
+      "id": 57,
+      "file": "NotoSansJP-Regular/c057.zst",
+      "encodedLength": 53985,
+      "byteLength": 71139,
+      "sha256": "3986f29e243c06804846f149d0e5259d1b5c8cb3efe1ef2c1a282314436f7a47"
+    },
+    {
+      "id": 58,
+      "file": "NotoSansJP-Regular/c058.zst",
+      "encodedLength": 48000,
+      "byteLength": 55134,
+      "sha256": "1e92a0f42c8c68179a41e4aeb7b514dcba650f89cd23fa49c86bb1abf834c3a3"
+    },
+    {
+      "id": 59,
+      "file": "NotoSansJP-Regular/c059.zst",
+      "encodedLength": 56987,
+      "byteLength": 68297,
+      "sha256": "663673d964639811cb9de0ae2d43c79258a24e75903229f894f35cf699b5973c"
+    },
+    {
+      "id": 60,
+      "file": "NotoSansJP-Regular/c060.zst",
+      "encodedLength": 44587,
+      "byteLength": 57379,
+      "sha256": "6aca267dd94bee310bbbae4cf33bdbea70e210bffbb12a44dde9038ea44d83b3"
+    },
+    {
+      "id": 61,
+      "file": "NotoSansJP-Regular/c061.zst",
+      "encodedLength": 55269,
+      "byteLength": 69132,
+      "sha256": "7fb74969739ebacc4e83a95297aeebaf3d598ea41020b159eae2e616db6500a5"
+    },
+    {
+      "id": 62,
+      "file": "NotoSansJP-Regular/c062.zst",
+      "encodedLength": 53149,
+      "byteLength": 73043,
+      "sha256": "8352cd2be5c306ceaa0d1c0fe7bafff2b3039ad3212e801e5b6173338e1f7a7c"
+    },
+    {
+      "id": 63,
+      "file": "NotoSansJP-Regular/c063.zst",
+      "encodedLength": 56451,
+      "byteLength": 69011,
+      "sha256": "b7e887bd1390852f0c407e96510229977be12ad31e6dd365554164957e88953e"
+    },
+    {
+      "id": 64,
+      "file": "NotoSansJP-Regular/c064.zst",
+      "encodedLength": 45732,
+      "byteLength": 56857,
+      "sha256": "da1087cc1ce164d0dc8624d4101eb2fa7bf65e1e92d9f5bdeffd464d72fc99fb"
+    },
+    {
+      "id": 65,
+      "file": "NotoSansJP-Regular/c065.zst",
+      "encodedLength": 52197,
+      "byteLength": 66101,
+      "sha256": "a8d2593e8689381eceac4c28d46971a86acb5506c28838d5cfd370dfbf45bf8e"
+    },
+    {
+      "id": 66,
+      "file": "NotoSansJP-Regular/c066.zst",
+      "encodedLength": 64932,
+      "byteLength": 78804,
+      "sha256": "a49b18f0ae3f4452f3e7048eaa740cbffe37eca8ea175d9d98cbe7081f9fceb5"
+    },
+    {
+      "id": 67,
+      "file": "NotoSansJP-Regular/c067.zst",
+      "encodedLength": 45053,
+      "byteLength": 57145,
+      "sha256": "0c483ff904956dd5fb5d8090e18217311e94681931d26d6eceb673af2afaca69"
+    },
+    {
+      "id": 68,
+      "file": "NotoSansJP-Regular/c068.zst",
+      "encodedLength": 52883,
+      "byteLength": 67395,
+      "sha256": "37dcedbcf86244de4bbd7a4b3376c6e45dfcd07f525c0990c4274ae5d3d8416b"
+    },
+    {
+      "id": 69,
+      "file": "NotoSansJP-Regular/c069.zst",
+      "encodedLength": 64081,
+      "byteLength": 78412,
+      "sha256": "92983005a67e1a5234ab4e1bbdf2d3147de9099b85935db9b312334f0b9beddc"
+    },
+    {
+      "id": 70,
+      "file": "NotoSansJP-Regular/c070.zst",
+      "encodedLength": 59472,
+      "byteLength": 76511,
+      "sha256": "b5ab9ad41a2efb7bf262c4c254b026c4b9239630888f14abc6a2dc9a613dcb45"
+    },
+    {
+      "id": 71,
+      "file": "NotoSansJP-Regular/c071.zst",
+      "encodedLength": 58566,
+      "byteLength": 69548,
+      "sha256": "95059d31ec943d28152ebece6c877a8927a58b5eee28fda58174b1331cd89325"
+    },
+    {
+      "id": 72,
+      "file": "NotoSansJP-Regular/c072.zst",
+      "encodedLength": 52962,
+      "byteLength": 66126,
+      "sha256": "7481563681f005c6df29418ba3ba046ba4b7192aeb08377584d3cd7854fcad5d"
+    },
+    {
+      "id": 73,
+      "file": "NotoSansJP-Regular/c073.zst",
+      "encodedLength": 49242,
+      "byteLength": 59813,
+      "sha256": "87257f42881dde8759225c33a00cff2deba595d59ab6522425cd3f78dffd7c54"
+    },
+    {
+      "id": 74,
+      "file": "NotoSansJP-Regular/c074.zst",
+      "encodedLength": 52682,
+      "byteLength": 67062,
+      "sha256": "68628b3eeb7ec369eab21905aa7578367c41bf4e18c31775ce3e262afb168647"
+    },
+    {
+      "id": 75,
+      "file": "NotoSansJP-Regular/c075.zst",
+      "encodedLength": 57306,
+      "byteLength": 71710,
+      "sha256": "64a9dfd557839c53a83d49ec9cb20781b0745f65e03957647b7119c09eced0a4"
+    },
+    {
+      "id": 76,
+      "file": "NotoSansJP-Regular/c076.zst",
+      "encodedLength": 63457,
+      "byteLength": 84228,
+      "sha256": "8a208c5b2ca0250ce10c562599f1acf4744430c6d48b3eddf17788939c72d2c3"
+    },
+    {
+      "id": 77,
+      "file": "NotoSansJP-Regular/c077.zst",
+      "encodedLength": 61383,
+      "byteLength": 91771,
+      "sha256": "bbef4f450f98225ce9db18b9ce0760ad3a9080678199b30f48059160fcdc2d63"
+    },
+    {
+      "id": 78,
+      "file": "NotoSansJP-Regular/c078.zst",
+      "encodedLength": 58118,
+      "byteLength": 72988,
+      "sha256": "d86f8d715ab5e4a574e5207f92095cb7beb99513b1908d6c10e87ecea15372cc"
+    },
+    {
+      "id": 79,
+      "file": "NotoSansJP-Regular/c079.zst",
+      "encodedLength": 56239,
+      "byteLength": 71719,
+      "sha256": "d4912bd577d934bcdb6900402c25783ca77f3b860f9cda7cbdb617e02b6945ce"
+    },
+    {
+      "id": 80,
+      "file": "NotoSansJP-Regular/c080.zst",
+      "encodedLength": 47286,
+      "byteLength": 55050,
+      "sha256": "9c0b9ac35f6ec7984e4a7ee0b7926bc029912629ab128ba543478bbea84a3fd2"
+    },
+    {
+      "id": 81,
+      "file": "NotoSansJP-Regular/c081.zst",
+      "encodedLength": 69037,
+      "byteLength": 80328,
+      "sha256": "f3db103f9e780cdfeeb4bcef8b0f653c66bd59c98354861dd66d23e1b95eda17"
+    },
+    {
+      "id": 82,
+      "file": "NotoSansJP-Regular/c082.zst",
+      "encodedLength": 62258,
+      "byteLength": 75081,
+      "sha256": "94b7a8749bc6d5c897ce7ac8bd17eaf70d638881fca491f3fd73462e6beffda0"
+    },
+    {
+      "id": 83,
+      "file": "NotoSansJP-Regular/c083.zst",
+      "encodedLength": 63193,
+      "byteLength": 79402,
+      "sha256": "1a9f2e0543d8f52fe32a8137d07395444bc52da9a59212e5f813e1b8d153c695"
+    },
+    {
+      "id": 84,
+      "file": "NotoSansJP-Regular/c084.zst",
+      "encodedLength": 54597,
+      "byteLength": 70262,
+      "sha256": "d1d1b544b6b1e0f569d1d527e7ec08deb883de76f848645cb91f63ea26152483"
+    },
+    {
+      "id": 85,
+      "file": "NotoSansJP-Regular/c085.zst",
+      "encodedLength": 62642,
+      "byteLength": 78232,
+      "sha256": "52b642f834bf9c0ef4cb9d9c516414ee710c40c94f34741013e0635b69c0dfe2"
+    },
+    {
+      "id": 86,
+      "file": "NotoSansJP-Regular/c086.zst",
+      "encodedLength": 60380,
+      "byteLength": 74878,
+      "sha256": "c3af33acbb345e283ddc3af6e634314b077e92611562b6b040e11322905de907"
+    },
+    {
+      "id": 87,
+      "file": "NotoSansJP-Regular/c087.zst",
+      "encodedLength": 54484,
+      "byteLength": 75627,
+      "sha256": "695a63d4f6f7a04e1ac96b0cd0866d3ba82c26c7778a914c82ac90c08642f1d0"
+    },
+    {
+      "id": 88,
+      "file": "NotoSansJP-Regular/c088.zst",
+      "encodedLength": 53992,
+      "byteLength": 78566,
+      "sha256": "4e78f9a128f0e51c480da927193d70d1c7775e874c3f1a8a4e67f020eeec5a90"
+    },
+    {
+      "id": 89,
+      "file": "NotoSansJP-Regular/c089.zst",
+      "encodedLength": 60789,
+      "byteLength": 86511,
+      "sha256": "be6cd3ae83e5bfd7f733b1af58b0215eaa17cf470144f36a4698820988b8842f"
+    },
+    {
+      "id": 90,
+      "file": "NotoSansJP-Regular/c090.zst",
+      "encodedLength": 59122,
+      "byteLength": 75340,
+      "sha256": "23da170d47ffc1d4a990c157d1c163ad111a74530c1a8dd1bfcb012f26b4527c"
+    },
+    {
+      "id": 91,
+      "file": "NotoSansJP-Regular/c091.zst",
+      "encodedLength": 64023,
+      "byteLength": 80259,
+      "sha256": "0c8064e53bfa70cbc48c8620bedc933aa63a8b05d8b192fc149ddbe4817cc327"
+    },
+    {
+      "id": 92,
+      "file": "NotoSansJP-Regular/c092.zst",
+      "encodedLength": 65961,
+      "byteLength": 91838,
+      "sha256": "2842772a3f97021e9a99fc55630fc4aa71e4d7df31a4d1dfa71750ac8a17bdb9"
+    },
+    {
+      "id": 93,
+      "file": "NotoSansJP-Regular/c093.zst",
+      "encodedLength": 66859,
+      "byteLength": 96612,
+      "sha256": "25ce7821a48009a86ef3c8b5c0740b4934bc9a5b2b8925ba5415d512f0074944"
+    },
+    {
+      "id": 94,
+      "file": "NotoSansJP-Regular/c094.zst",
+      "encodedLength": 73783,
+      "byteLength": 103481,
+      "sha256": "9cbc6690d378dff85835e2cad86e1a5f6de86964f7e035d196c515aa9dc56248"
+    },
+    {
+      "id": 95,
+      "file": "NotoSansJP-Regular/c095.zst",
+      "encodedLength": 71004,
+      "byteLength": 92204,
+      "sha256": "687bb49e606f05498f0c397ed2cedccf1f2439a1cb470640c835202be3407e27"
+    },
+    {
+      "id": 96,
+      "file": "NotoSansJP-Regular/c096.zst",
+      "encodedLength": 58435,
+      "byteLength": 66479,
+      "sha256": "7f439bdef254f4ed6e32912346a06121778f7f2505cfa9c4b664b5ee295c0c71"
+    },
+    {
+      "id": 97,
+      "file": "NotoSansJP-Regular/c097.zst",
+      "encodedLength": 31301,
+      "byteLength": 37610,
+      "sha256": "419e529afd4f7540600a398b48856231bb754ff4688f2f114c9b9619bd7782db"
+    },
+    {
+      "id": 98,
+      "file": "NotoSansJP-Regular/c098.zst",
+      "encodedLength": 22066,
+      "byteLength": 35390,
+      "sha256": "eb0f816c4c6b2c83770c48019d94417cbfda46fcad7c18a72f6ece490d40e3a7"
+    },
+    {
+      "id": 99,
+      "file": "NotoSansJP-Regular/c099.zst",
+      "encodedLength": 50649,
+      "byteLength": 58459,
+      "sha256": "a2578c424fb437d082a0f058d70cd922fae4f170b676f1c09d9789ce812f208b"
+    },
+    {
+      "id": 100,
+      "file": "NotoSansJP-Regular/c100.zst",
+      "encodedLength": 60734,
+      "byteLength": 70021,
+      "sha256": "f1b2ce60378560f9115d0003869c16e84e5d296e010807010007552df251a31f"
+    },
+    {
+      "id": 101,
+      "file": "NotoSansJP-Regular/c101.zst",
+      "encodedLength": 12068,
+      "byteLength": 17186,
+      "sha256": "bea9abc3678a4b0d29cafba0a3da30a4d3f01354e6c2b8832b5c759dcb6afc21"
+    }
+  ],
+  "byteLength": 5024904,
+  "sha256": "f80a0ad869bb0b0ac2cdc13ceb0f755c257640a89bfd0e833bdfb4844f192dc4"
+}

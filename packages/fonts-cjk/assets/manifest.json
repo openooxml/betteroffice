@@ -12,7 +12,14 @@
       "encodedLength": 3595531,
       "byteLength": 4533028,
       "sha256": "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansJP-Regular/slices.json",
+        "indexSha256": "a4d6446c8e571574447cc2e535e4ee56cdfc10ecb18d163851760ab61df2d01f",
+        "byteLength": 5024904,
+        "sha256": "f80a0ad869bb0b0ac2cdc13ceb0f755c257640a89bfd0e833bdfb4844f192dc4"
+      }
     },
     {
       "file": "NotoSansKR-Regular.otf.zst",
@@ -22,7 +29,14 @@
       "encodedLength": 3420953,
       "byteLength": 4644748,
       "sha256": "69975a0ac8472717870aefeab0a4d52739308d90856b9955313b2ad5e0148d68",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansKR-Regular/slices.json",
+        "indexSha256": "c50b8a3eb8d8adbe640a5273c0cb90232213ca872046cb2921abb79c48795b1b",
+        "byteLength": 5339492,
+        "sha256": "1b3839acec71a913bd53e5381f3fde6dc4aa8516ae312df8a1d1c1ded049205b"
+      }
     },
     {
       "file": "NotoSansSC-Regular.otf.zst",
@@ -32,7 +46,14 @@
       "encodedLength": 6444964,
       "byteLength": 8331336,
       "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansSC-Regular/slices.json",
+        "indexSha256": "42bd88e79481b10f369f42042506992cece7a9d35972cd1cbb1b6fec53213370",
+        "byteLength": 9001336,
+        "sha256": "c8400b6933325ce1f423f396bc3dc6c9fa45b3435244131e0cb2b3cb81703786"
+      }
     },
     {
       "file": "NotoSansTC-Regular.otf.zst",
@@ -42,7 +63,14 @@
       "encodedLength": 4456580,
       "byteLength": 5683368,
       "sha256": "5bab0cb3c1cf89dde07c4a95a4054b195afbcfe784d69d75c340780712237537",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansTC-Regular/slices.json",
+        "indexSha256": "784824cf26a950cc2db9c9b93fe5d3ebdaf056445fd559293574d5fc64126895",
+        "byteLength": 6117384,
+        "sha256": "5ca9befce33c85fd912197e4a26dc1a1a7143435e3e9260d43569ebbe2d1e086"
+      }
     },
     {
       "file": "NotoSerifSC-Regular.otf.zst",
@@ -52,7 +80,14 @@
       "encodedLength": 8743526,
       "byteLength": 11625800,
       "sha256": "e8f396decc1f0963a016a989c3d8852e863d1350996f573860a80767c83a1cd3",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSerifSC-Regular/slices.json",
+        "indexSha256": "1fee6dbfc965d431f7a2ac7cd9301086f92af29588995e82ff71d7135a02075b",
+        "byteLength": 13204816,
+        "sha256": "b6381733af10fb9d2acd6018a9b7b0cf7724317b36f955ed551f257dcd10aaeb"
+      }
     }
   ]
 }
