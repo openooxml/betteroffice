@@ -1,0 +1,5 @@
+disallowed-methods = [
+  { path = "zip::read::ZipArchive::extract", reason = "archives are read in memory; extraction is exposed to zip advisories (RUSTSEC-2026-0429)", allow-invalid = true },
+  { path = "zip::read::ZipArchive::extract_unwrapped_root_dir", reason = "archives are read in memory; extraction is exposed to zip advisories (RUSTSEC-2026-0429)", allow-invalid = true },
+  { path = "zip::read::ZipArchive::extract_with_options", reason = "archives are read in memory; extraction is exposed to zip advisories (RUSTSEC-2026-0429)", allow-invalid = true },
+]
