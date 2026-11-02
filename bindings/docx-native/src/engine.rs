@@ -831,7 +831,8 @@ impl EditSession {
 
     #[napi(js_name = "apply_local_update")]
     pub fn apply_local_update(&self, env: Env, update: Uint8Array) -> Result<()> {
-        self.document_unclocked()?
+        let update = update.to_vec();
+        self.document()?
             .apply_local_update(&update)
             .map_err(|error| map_error(env, error))
     }
@@ -1148,7 +1149,7 @@ impl EditSession {
         max_chunk_bytes: u32,
     ) -> Result<Array<'_>> {
         let chunks = self
-            .document()?
+            .document_unclocked()?
             .encode_diff_chunks(&remote_state_vector, max_chunk_bytes)
             .map_err(|error| map_error(env, error))?;
         let chunks = chunks

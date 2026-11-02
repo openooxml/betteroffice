@@ -185,6 +185,39 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('worker updates applied as local edits group by the JavaScript clock, as wasm does', () => {
+    let time = 1_000;
+    const clock = spyOn(Date, 'now').mockImplementation(() => time);
+    const texts = (engine: Engine) => {
+      const source = new wasm.EditSession(21);
+      const target = new engine.EditSession(23);
+      try {
+        source.seed_from_docx(fixture, 'opening');
+        target.load(source.encode_state());
+        target.track_undo();
+        for (const [at, text] of [[1_000, 'A'], [1_100, 'B'], [2_000, 'C']] as const) {
+          source.insert_text('body', paragraphId(source), 0, text);
+          const update = source.encode_diff(target.encode_state_vector());
+          time = at;
+          target.apply_local_update(update);
+        }
+        const steps = [read(target).paragraphs[0].text];
+        while (target.undo()) steps.push(read(target).paragraphs[0].text);
+        return steps;
+      } finally {
+        target.free();
+        source.free();
+      }
+    };
+    try {
+      const expected = texts(wasm);
+      expect(expected).toEqual(['CBAEngine text', 'BAEngine text', 'Engine text']);
+      expect(texts(native)).toEqual(expected);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   test('native calls that borrow typed arrays never run the JavaScript clock', () => {
     const session = new native.EditSession(19);
     const bytes = new Uint8Array(fontBytes);
@@ -198,6 +231,16 @@ describe('docx native engine parity', () => {
       expect(session.register_measure_font(bytes)).toBe(0);
       expect(reads).toBe(0);
       expect(bytes.byteLength).toBe(fontBytes.byteLength);
+      session.seed_from_docx(fixture, 'opening');
+      const vector = new Uint8Array(new Uint8Array([0]));
+      clock.mockImplementation(() => {
+        reads += 1;
+        vector.buffer.transfer(0);
+        return 1_000;
+      });
+      expect(session.encode_diff_chunks(vector, 1 << 20).length).toBeGreaterThan(0);
+      expect(reads).toBe(0);
+      expect(vector.byteLength).toBe(1);
     } finally {
       clock.mockRestore();
       session.free();
