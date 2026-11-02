@@ -135,9 +135,12 @@ function samePaintRequest(painted: WorkerPaintResult, request: WorkerPaintReques
 }
 
 const NEIGHBOR_FRAME_DELAY_MS = 400;
+const NEIGHBOR_FRAME_EDIT_DELAY_MS = 1500;
+const NEIGHBOR_FRAME_BUDGET_MS = 24;
 
 interface NeighborFrame {
   sheetId: string;
+  proposals: string;
   request: WorkerPaintRequest;
   paint: WorkerFramePaint;
 }
@@ -246,6 +249,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const neighborFrames = useMemo(() => new Map<number, NeighborFrame>(), [run]);
   const neighborTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const neighborRevision = useRef(0);
+  const neighborVersion = useRef<string | undefined>(undefined);
+  const costlyNeighbors = useMemo(() => new Set<string>(), [run]);
   const scheduleNeighborFrames = useRef(() => {});
   const sheetId = (sheet: number) => (ownerRef.current?.session.editState.sheets ??
     ownerRef.current?.session.state.sheets)?.find((entry) => entry.index === sheet)?.id;
@@ -1028,6 +1033,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     };
   }, [run, coordinator, draftController, capture]);
   useEffect(() => {
+    neighborFrames.clear();
+    neighborRevision.current += 1;
+  }, [proposals, neighborFrames]);
+  useEffect(() => {
     const source = sourceRef.current;
     if (!run || !source) return;
     const unregister = source.registerPaintTransaction((painted, publish) => {
@@ -1209,10 +1218,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const settledFor = (owner: NonNullable<typeof run>) => ownerRef.current === owner && owner.ready && owner.current &&
     !owner.retiring && !owner.failure && !coordinator.pending && !draftController.ownsFocus &&
     owner.session.throughSeq >= coordinator.submittedThroughSeq;
+  const proposalState = () => `${proposalsRevision.current}:${proposalsMutation.current}`;
   const prefetchNeighborFrames = async (owner: NonNullable<typeof run>, revision: number) => {
     const version = owner.session.confirmedBasis.version;
+    const proposalsAt = proposalState();
+    neighborVersion.current = version;
     const live = () => revision === neighborRevision.current && settledFor(owner) &&
-      owner.session.confirmedBasis.version === version;
+      owner.session.confirmedBasis.version === version && proposalState() === proposalsAt;
     const sheets = catalogRef.current;
     const at = sheets.findIndex((entry) => entry.index === activeRef.current);
     const neighbors = at < 0 ? [] : [sheets[at + 1], sheets[at - 1]].filter(
@@ -1223,9 +1235,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     for (const neighbor of neighbors) {
       const current = capture();
       if (!current || !live()) return;
+      if (costlyNeighbors.has(neighbor.id)) continue;
       const cached = neighborFrames.get(neighbor.index);
       const position = sheetScrolls.get(neighbor.id);
-      if (cached && cached.sheetId === neighbor.id && cached.paint.version === version &&
+      if (cached && cached.sheetId === neighbor.id && cached.paint.version === version && cached.proposals === proposalsAt &&
         (!position || position.x === cached.request.viewport.x && position.y === cached.request.viewport.y) &&
         cached.request.generation === current.generation && cached.request.zoom === current.zoom &&
         cached.request.dpr === current.dpr && cached.request.width === current.width &&
@@ -1233,11 +1246,16 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       neighborFrames.delete(neighbor.index);
       const view = await owner.session.call.sheetView(neighbor.index);
       if (!live() || view.sheet !== neighbor.index) return;
+      const started = performance.now();
       const frame = await owner.session.call.frame({ x: position?.x ?? view.initialScrollX,
         y: position?.y ?? view.initialScrollY, width: current.viewport.width, height: current.viewport.height },
       { sheet: neighbor.index });
+      if (performance.now() - started > NEIGHBOR_FRAME_BUDGET_MS) {
+        costlyNeighbors.add(neighbor.id);
+        continue;
+      }
       if (!live() || frame.version !== version || frame.sheet !== neighbor.index) return;
-      neighborFrames.set(neighbor.index, { sheetId: neighbor.id,
+      neighborFrames.set(neighbor.index, { sheetId: neighbor.id, proposals: proposalsAt,
         request: { ...current, sheet: neighbor.index, viewport: { ...frame.viewport } },
         paint: { displayList: frame.displayList, mergedRanges: frame.mergedRanges ?? [], version: frame.version } });
     }
@@ -1253,14 +1271,15 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (revision === neighborRevision.current && settledFor(owner)) {
         void prefetchNeighborFrames(owner, revision).catch(() => {});
       }
-    }, NEIGHBOR_FRAME_DELAY_MS);
+    }, neighborVersion.current === undefined || neighborVersion.current === owner.session.confirmedBasis.version
+      ? NEIGHBOR_FRAME_DELAY_MS : NEIGHBOR_FRAME_EDIT_DELAY_MS);
   };
   const paintNeighborFrame = (sheet: number) => {
     const owner = ownerRef.current;
     const source = sourceRef.current;
     const entry = neighborFrames.get(sheet);
     if (!owner || !source || !entry || entry.sheetId !== sheetId(sheet) || !settledFor(owner) ||
-      entry.paint.version !== owner.session.confirmedBasis.version) return;
+      entry.paint.version !== owner.session.confirmedBasis.version || entry.proposals !== proposalState()) return;
     const request = capture();
     if (request && sameFrameRequest(entry.request, request)) source.installProvisional(entry.paint, request);
   };
