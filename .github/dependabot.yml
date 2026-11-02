@@ -17,7 +17,11 @@ updates:
           - "patch"
 
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "/bindings"
+      - "/fuzz"
+      - "/apps/native-viewer"
     schedule:
       interval: "weekly"
     cooldown:
@@ -28,6 +32,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      cargo-major:
+        update-types:
+          - "major"
+        group-by: dependency-name
 
   - package-ecosystem: "github-actions"
     directories:
