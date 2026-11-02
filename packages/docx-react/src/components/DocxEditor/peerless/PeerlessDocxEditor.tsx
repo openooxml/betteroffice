@@ -388,7 +388,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const prepared = useRef(new WeakMap<DocxCommandFrame, PeerlessFrameGeometry>());
   const renderEnvironment = useRef({ theme: null as DocxEditorProps['theme'], requested: '' });
   const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: DocxFontEnvironment;
-    requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
+    requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'];
+    covers?: (requirements: ResidentFontRequirement[]) => boolean } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; pick: AbortSignal | null; read: number }>(
@@ -666,7 +667,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       fontSource.current = { document: metadata, layoutInput: JSON.stringify(layout), families, requirements,
         initial: fontEnvironmentForRegistrations(fonts, config.fontChains, requirements, families, fontStyles),
         signature: settings.current.fonts === undefined && !settings.current.reportFonts ? '[]' : null,
-        provider: settings.current.measurementFontProvider };
+        provider: settings.current.measurementFontProvider,
+        covers: next => measurement?.measurementConfigForRequirements(next) !== undefined };
       controller.fontChoices(families);
       identity.current = {
         session: connection.initial.session,
@@ -783,7 +785,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         if (requirementsChanged) fontRefresh.current.read = performance.now();
         const next = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];
         if (!isCurrent()) return;
-        const uncovered = requirementsChanged ? uncoveredFontRequirements(opened.requirements, next) : next;
+        const uncovered = requirementsChanged ? uncoveredFontRequirements(opened.requirements, next,
+          opened.signature === signature && opened.provider === provider ? opened.covers : undefined) : next;
         if (!uncovered) { settle(); return; }
         requirements = uncovered;
         const embedded = await extractEmbeddedFontFaces(opened.document);

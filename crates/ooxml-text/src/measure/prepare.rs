@@ -710,15 +710,11 @@ fn language_for_slot(run: &RunIn, slot: FontSlot) -> Option<&str> {
 }
 
 fn scan_base_latin_coverage(store: &FontStore, input: &MeasureRequest<'_>) {
-    let mut remaining = 256usize;
     for run in &input.block.runs {
-        if remaining == 0 {
-            break;
-        }
-        remaining -= 1;
         if run.kind != "text" || run.hidden {
             continue;
         }
+        let mut seen = [[0u32; 64]; 4];
         let mut previous = FontSlot::HAnsi;
         let hint = run
             .font_slots
@@ -726,10 +722,13 @@ fn scan_base_latin_coverage(store: &FontStore, input: &MeasureRequest<'_>) {
             .and_then(|slots| slots.hint.as_deref())
             == Some("eastAsia");
         let mut chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
-        for ch in run.text.as_deref().unwrap_or("").chars().take(remaining) {
-            remaining -= 1;
+        for ch in run.text.as_deref().unwrap_or("").chars() {
             let slot = char_slot(ch, run.complex_script, hint, previous);
             previous = slot;
+            let caps = run.all_caps || (run.small_caps && ch.is_lowercase());
+            if !caps && crate::font_store::base_latin_character_index(ch).is_none() {
+                continue;
+            }
             let family = family_for_slot(run, slot, &input.defaults.font_family);
             let bold = if slot == FontSlot::Cs {
                 run.bold_cs.unwrap_or(run.bold)
@@ -758,16 +757,22 @@ fn scan_base_latin_coverage(store: &FontStore, input: &MeasureRequest<'_>) {
             if chain.len() > MAX_KEPT_CHAIN_IDS {
                 continue;
             }
-            let characters = if run.all_caps || (run.small_caps && ch.is_lowercase()) {
+            let characters = if caps {
                 uppercase_for_language(ch, language_for_slot(run, slot))
             } else {
                 vec![ch]
             };
             for character in characters {
-                if crate::font_store::base_latin_character_index(character).is_some() {
-                    let _ = store
-                        .resolve_with_family_tracking(chain, character, bold, italic, family, true);
+                let Some(index) = crate::font_store::base_latin_character_index(character) else {
+                    continue;
+                };
+                let word = &mut seen[slot.index()][index / 32];
+                if *word & (1 << (index % 32)) != 0 {
+                    continue;
                 }
+                *word |= 1 << (index % 32);
+                let _ = store
+                    .resolve_with_family_tracking(chain, character, bold, italic, family, true);
             }
         }
     }
@@ -1317,6 +1322,8 @@ mod tests {
             assert!(prepare_runs(&store, &input.as_request()).is_err());
             assert!(store.take_base_latin_miss());
             input.block.runs[1].text = Some(format!("{}B", "A".repeat(1000)));
+            assert!(prepare_runs(&store, &input.as_request()).is_err());
+            assert!(store.take_base_latin_miss());
             assert!(prepare_runs(&store, &input.as_request()).is_err());
             assert!(!store.take_base_latin_miss());
         }

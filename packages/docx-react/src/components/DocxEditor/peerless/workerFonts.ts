@@ -35,24 +35,30 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
 /**
  * `prepared` extended by every requirement of `next` it does not cover, or null when it covers all.
  * A requirement covers one with its key only with the same scripts in the same order: they fix the chain.
+ * New characters alone count only when `covers` cannot place them in the fonts already registered.
  */
 export function uncoveredFontRequirements(prepared: readonly ResidentFontRequirement[],
-  next: readonly ResidentFontRequirement[]): ResidentFontRequirement[] | null {
+  next: readonly ResidentFontRequirement[],
+  covers?: (requirements: ResidentFontRequirement[]) => boolean): ResidentFontRequirement[] | null {
   const byKey = new Map(prepared.map(requirement => [requirement.key, requirement]));
   let uncovered = false;
+  let chainsChanged = false;
   for (const requirement of next) {
     const known = byKey.get(requirement.key);
     const characters = fontRequirementCharacters(requirement);
     const knownCharacters = known ? fontRequirementCharacters(known) : [];
     const covered = new Set(knownCharacters);
-    if (known && (known.scripts ?? []).join() === (requirement.scripts ?? []).join() &&
-      characters.every(character => covered.has(character))) continue;
+    const sameChain = !!known && (known.scripts ?? []).join() === (requirement.scripts ?? []).join();
+    if (sameChain && characters.every(character => covered.has(character))) continue;
     byKey.set(requirement.key, known ? {
       ...requirement, characters: [...new Set([...knownCharacters, ...characters])].sort(),
     } : requirement);
     uncovered = true;
+    chainsChanged ||= !sameChain;
   }
-  return uncovered ? [...byKey.values()] : null;
+  if (!uncovered) return null;
+  const merged = [...byKey.values()];
+  return !chainsChanged && covers?.(merged) ? null : merged;
 }
 
 export async function prepareWorkerFontEnvironment(options: {

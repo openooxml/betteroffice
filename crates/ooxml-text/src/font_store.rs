@@ -24,6 +24,7 @@ const MAX_CHAR_CACHE_ENTRIES: usize = 8_192;
 
 const MAX_CACHED_SHAPE_FEATURES: usize = 64;
 const BASE_LATIN_ID_START: u32 = u32::MAX - 4;
+const MAX_BASE_LATIN_MISSES: usize = 4_096;
 /// Bytes from each end of a font that key the identical-bytes lookup; the
 /// table directory up front carries every table's checksum.
 const FACE_KEY_SPAN: usize = 4 * 1024;
@@ -913,13 +914,14 @@ impl FontStore {
         italic: bool,
         family: &str,
     ) {
-        if base_latin_character_index(ch).is_some()
-            && crate::measure::needs_glyph(ch)
-            && self
-                .missing_base_latin
-                .borrow_mut()
-                .insert(miss_key(chain, family, bold, italic, ch))
-        {
+        if !(base_latin_character_index(ch).is_some() && crate::measure::needs_glyph(ch)) {
+            return;
+        }
+        let mut missing = self.missing_base_latin.borrow_mut();
+        if missing.len() >= MAX_BASE_LATIN_MISSES {
+            missing.clear();
+        }
+        if missing.insert(miss_key(chain, family, bold, italic, ch)) {
             self.new_base_latin_miss.set(true);
         }
     }
@@ -969,6 +971,27 @@ mod tests {
     use crate::shape::ShapedGlyph;
 
     const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn base_latin_miss_history_stays_bounded() {
+        let store = FontStore::new();
+        for index in 0..MAX_BASE_LATIN_MISSES * 2 {
+            store.record_base_latin_miss(
+                &[FontId(0)],
+                'A',
+                false,
+                false,
+                &format!("family {index}"),
+            );
+            assert!(store.missing_base_latin.borrow().len() <= MAX_BASE_LATIN_MISSES);
+        }
+        assert!(store.take_base_latin_miss());
+        store.record_base_latin_miss(&[FontId(0)], 'A', false, false, "family 0");
+        store.record_base_latin_miss(&[FontId(0)], 'A', false, false, "family 0");
+        assert!(store.take_base_latin_miss());
+        store.record_base_latin_miss(&[FontId(0)], 'A', false, false, "family 0");
+        assert!(!store.take_base_latin_miss());
+    }
 
     fn key(text: String) -> ShapeCacheKey {
         ShapeCacheKey {

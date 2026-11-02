@@ -25,6 +25,20 @@ test('new characters refresh an existing family and retain earlier coverage requ
     .toEqual([{ ...requirement, characters: ['A', 'Ω'] }]);
 });
 
+test('new characters the registered fonts already cover do not rebuild the font environment', () => {
+  const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false };
+  const prepared = [{ ...requirement, characters: ['A'] }];
+  const typed = [{ ...requirement, characters: ['B', 'Ω'] }];
+  const asked: unknown[] = [];
+  expect(uncoveredFontRequirements(prepared, typed, (requirements) => { asked.push(requirements); return true; })).toBeNull();
+  expect(asked).toEqual([[{ ...requirement, characters: ['A', 'B', 'Ω'] }]]);
+  expect(uncoveredFontRequirements(prepared, typed, () => false)).toEqual([{ ...requirement, characters: ['A', 'B', 'Ω'] }]);
+  const scripted = [{ ...requirement, characters: ['A'], scripts: ['arabic' as const] }];
+  expect(uncoveredFontRequirements(prepared, scripted, () => true)).toEqual(scripted);
+  const added = [...typed, { key: 'other|0|0', family: 'Other', bold: false, italic: false }];
+  expect(uncoveredFontRequirements(prepared, added, () => true)?.map(item => item.key)).toEqual(['requested|0|0', 'other|0|0']);
+});
+
 test('compact requirement refreshes compare decoded candidates and settle', () => {
   const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false };
   const prepared = [{ ...requirement, characterBits: '0000000000000002' }];
