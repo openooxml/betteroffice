@@ -14,6 +14,7 @@ interface RemoteTask {
 }
 
 const remoteFaces = new Map<string, RemoteTask>();
+const localFamilies = new Map<string, boolean>();
 let remoteFontSet: FontFaceSet | undefined;
 
 function installedLocally(family: string): boolean {
@@ -44,6 +45,7 @@ async function loadRemoteFace(
   if (remoteFontSet !== fontSet) {
     for (const task of remoteFaces.values()) task.controller.abort();
     remoteFaces.clear();
+    localFamilies.clear();
     remoteFontSet = fontSet;
   }
   const key = JSON.stringify([provider, fontFamily.trim().toLowerCase(), bold, italic, text]);
@@ -54,7 +56,10 @@ async function loadRemoteFace(
       const remote = await xlsxDefaultFontManager.loadRemote();
       controller.signal.throwIfAborted();
       if (!remote.resolveWordFamilySubstitute(fontFamily)?.remote) return false;
-      if (installedLocally(fontFamily.trim())) return false;
+      const family = fontFamily.trim().toLowerCase();
+      let local = localFamilies.get(family);
+      if (local === undefined) localFamilies.set(family, local = installedLocally(fontFamily.trim()));
+      if (local) return false;
       await remote.loadRemoteFontFaces(fontFamily, fontFamily,
         { weight: bold ? 700 : 400, style: italic ? 'italic' : 'normal' }, fontSet,
         { provider, signal: controller.signal, text });
@@ -63,7 +68,7 @@ async function loadRemoteFace(
     const created: RemoteTask = { done, owners: new Set(), controller };
     task = created;
     remoteFaces.set(key, created);
-    void done.then((success) => { if (!success && remoteFaces.get(key) === created) remoteFaces.delete(key); });
+    void done.then(() => { if (remoteFaces.get(key) === created) remoteFaces.delete(key); });
   }
   const current = task;
   current.owners.add(owner);

@@ -329,6 +329,57 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a caller that aborts stops waiting while the shared fetch completes for the others', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const faces = new Set<unknown>();
+      const fontSet = { add: (face: unknown) => { faces.add(face); }, has: (face: unknown) => faces.has(face) } as unknown as FontFaceSet;
+      let release!: () => void;
+      let started!: () => void;
+      const downloading = new Promise<void>((resolve) => { started = resolve; });
+      const fetch = mock(async (url: string | URL | Request) => {
+        if (String(url).includes('/css?')) return new Response(BUNNY_CSS);
+        started();
+        return new Promise<Response>((resolve) => { release = () => resolve(new Response(new Uint8Array([1]))); });
+      });
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/abort/css' } };
+      const face = { weight: 400, style: 'normal' } as const;
+      const leaving = new AbortController();
+      const first = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A', signal: leaving.signal });
+      await downloading;
+      const second = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'B' });
+      leaving.abort();
+      await expect(first).rejects.toThrow();
+      release();
+      expect(await second).toHaveLength(1);
+      expect(faces.size).toBe(1);
+      expect(fetch.mock.calls.filter((call) => !String(call[0]).includes('/css?'))).toHaveLength(1);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
+  test('slices sharing a file but not a range register separately', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { constructor(readonly family: string, readonly source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}
+      async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const added: { descriptors: FontFaceDescriptors }[] = [];
+      const fontSet = { add: (face: { descriptors: FontFaceDescriptors }) => { added.push(face); } } as unknown as FontFaceSet;
+      const css = ['U+0000-00FF', 'U+0100-02AF'].map((range) => `@font-face { font-family: 'Open Sans'; font-style: normal; font-weight: 400; src: url(https://fonts.bunny.net/open-sans/all.woff2) format('woff2'); unicode-range: ${range}; }`).join('\n');
+      const fetch = mock(async (url: string | URL | Request) =>
+        String(url).includes('/css?') ? new Response(css) : new Response(new Uint8Array([1])));
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/same-file/css' } };
+      const face = { weight: 400, style: 'normal' } as const;
+      await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A' });
+      await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Ł' });
+      expect(added.map((face) => face.descriptors.unicodeRange)).toEqual(['U+0000-00FF', 'U+0100-02AF']);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
   test('a face in many slices loads only the slices its text touches', async () => {
     const original = globalThis.FontFace;
     globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;

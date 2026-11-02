@@ -256,6 +256,26 @@ test('remote look-alikes load for the painted characters and again only for newl
   expect(repaint).toHaveBeenCalledTimes(2);
 });
 
+test('a registered look-alike does not count as a locally installed family for later characters', async () => {
+  const { added } = browser();
+  const { fonts } = (globalThis as unknown as { document: { fonts: FontFaceSet } }).document;
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts, createElement: () => ({ getContext: () => {
+    let font = '';
+    return { set font(value: string) { font = value; }, get font() { return font; },
+      measureText: () => ({ width: font.includes('"Tahoma"') && added.some((face) => face.family === 'Tahoma') ? 2 : 1 }) };
+  } }) } });
+  const { remoteLoads } = provider();
+  const painter = createDefaultFontPainter(decoder(), mock(() => {}));
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('A'));
+  await painter.load(cell('AŁ'));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł']);
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(true);
+  await createDefaultFontPainter(decoder(), mock(() => {})).load(cell('A'));
+  expect(remoteLoads).toHaveBeenCalledTimes(3);
+});
+
 test('disposing the painter, as switching remote fonts off does, aborts its remote load before anything registers', async () => {
   const { added } = browser();
   const { remoteLoads, remoteGate } = provider();
