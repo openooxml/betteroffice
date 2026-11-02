@@ -316,7 +316,8 @@ export async function loadRemoteFontFaces(
   for (const rule of fresh) {
     const key = keyOf(rule);
     const waiting = new Set<AbortSignal | null>();
-    const entry: RegisteredSlice = { waiting, font: fetchSlice(rule, options, deadline(options, true))
+    const signal = deadline(options, true);
+    const entry: RegisteredSlice = { waiting, font: within(fetchSlice(rule, options, signal), signal)
       .then((bytes) => remoteFace(alias, rule, bytes))
       .then((font) => {
         const live = [...waiting].some((signal) => signal === null || !signal.aborted);

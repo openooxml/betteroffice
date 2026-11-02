@@ -492,6 +492,27 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a slice whose file never finishes fails at the timeout and is fetched again later', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const fontSet = { add: () => {} } as unknown as FontFaceSet;
+      let stalled = true;
+      const fetch = mock(async (url: string | URL | Request) => {
+        if (String(url).includes('/css?')) return new Response(BUNNY_CSS);
+        return stalled ? new Response(new ReadableStream({ start() {} })) : new Response(new Uint8Array([1]));
+      });
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/stalled/css' }, timeoutMs: 20 };
+      const face = { weight: 400, style: 'normal' } as const;
+      await expect(loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A' })).rejects.toThrow();
+      stalled = false;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A' })).toHaveLength(1);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
   test('slices sharing a file but not a range register separately', async () => {
     const original = globalThis.FontFace;
     globalThis.FontFace = class { constructor(readonly family: string, readonly source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}
