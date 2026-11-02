@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
 import { createElement, memo } from 'react';
 import type { ComponentProps } from 'react';
-import type { AsyncCollaborationReplica, CollaborationReplica, PresentationHandle } from '@betteroffice/pptx';
+import type { AsyncCollaborationReplica, CollaborationReplica, PptxFontFace, PresentationHandle } from '@betteroffice/pptx';
 import { PptxEditor } from './PptxEditor';
 import { definePptxPlugin } from './plugins/definePptxPlugin';
 import type { PptxAsyncEditorProps, PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from './PptxEditor';
 import type { PptxAsyncEditorAccess, PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
-import type { PptxCommandAdmissionCode } from './index';
+import type { BundledFontFace, PptxBundledFont, PptxCommandAdmissionCode, PptxInThreadEditorProps } from './index';
 import type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
@@ -137,5 +137,20 @@ test('async editor parity types', () => {
   assertType<Equal<PptxAsyncEditorApi['exportStructured'], PptxAsyncEditorAccess['exportStructured']>>();
   assertType<Equal<PptxCommandAdmissionCode, 'input-failed' | 'document-replaced' | 'target-changed' | 'gesture-active'
     | 'editor-unavailable' | 'read-only' | 'invalid-arguments'>>();
+  expect(check).toBeFunction();
+});
+
+test('public editor prop types accept byte faces and bundled descriptors', () => {
+  type Fonts = ReadonlyArray<PptxFontFace | PptxBundledFont>;
+  assertType<Equal<PptxAsyncEditorProps['fonts'], Fonts>>();
+  assertType<Equal<PptxInThreadEditorProps['fonts'], Fonts>>();
+  assertType<Equal<import('./worker/PptxWorkerEditor').PptxWorkerEditorProps['fonts'], Fonts>>();
+  assertType<Equal<PptxBundledFont['face'], BundledFontFace>>();
+  const face: BundledFontFace = { family: 'Noto Sans JP', file: 'NotoSansJP-Regular.ttf.zst',
+    weight: 400, style: 'normal', byteLength: 1 };
+  const fonts: Fonts = [{ face, baseUrl: new URL('https://example.test/fonts/') },
+    { family: 'Host Sans', bytes: new Uint8Array() }];
+  const check = () => [<PptxEditor fonts={fonts} />, <PptxEditor fonts={fonts} experimentalWorkerOpen={false} />,
+    <PptxEditor legacySyncApi fonts={fonts} />, <PptxEditor legacySyncApi fonts={fonts} experimentalWorkerOpen />];
   expect(check).toBeFunction();
 });

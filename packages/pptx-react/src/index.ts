@@ -1,9 +1,12 @@
+export type { BundledFontFace } from '@betteroffice/fonts';
+export type { PptxBundledFont } from './bundledFonts';
 export { PptxEditor, PptxWorkerEditorChunkLoadError } from './PptxEditor';
 export type { PptxAsyncEditorApi, PptxAsyncEditorAccess } from './worker/createPeerlessEditorApi';
 export type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
 export type { PptxWorkerEditorProps } from './worker/PptxWorkerEditor';
 export type {
   PptxEditorApi,
+  PptxInThreadEditorProps,
   PptxAsyncEditorProps,
   PptxDocumentChange,
   PptxAsyncCollaborationOptions,

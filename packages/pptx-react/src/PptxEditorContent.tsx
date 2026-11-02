@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from './bundledFonts';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
   initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
@@ -374,7 +375,7 @@ export function PptxEditorContent({
   onPluginError,
   backend,
   onWorkerReady,
-}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'> & PptxAsyncPresentationProps & {
+}: ResolvedFontProps<Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'>> & PptxAsyncPresentationProps & {
   collaboration?: PptxContentCollaborationOptions;
   collaborationIdentity?: object;
   backend?: (changed: () => void) => EditablePresentation;

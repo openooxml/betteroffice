@@ -50,6 +50,14 @@ export async function renderFirstSlide(
 below. The React editor in [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react)
 manages rendering and user input.
 
+Hosts loading bundled bytes themselves can import `preparePresentationFontDecoder` from
+`@betteroffice/pptx/worker` to decode in a worker; the editor session for the same `file` object
+then reuses that worker. Call `release()` on the prepared decoder if no session adopts it.
+
+```ts
+const { decoder, release } = preparePresentationFontDecoder(file); const bytes = await loadBundledFontBytes(face, { baseUrl }, { decoder });
+```
+
 ## Entry points
 
 All entry points below are exported from `@betteroffice/pptx`.
