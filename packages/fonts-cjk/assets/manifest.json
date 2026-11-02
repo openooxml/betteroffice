@@ -16,9 +16,9 @@
       "slices": {
         "format": 1,
         "index": "NotoSansJP-Regular/slices.json",
-        "indexSha256": "a4d6446c8e571574447cc2e535e4ee56cdfc10ecb18d163851760ab61df2d01f",
-        "byteLength": 5024904,
-        "sha256": "f80a0ad869bb0b0ac2cdc13ceb0f755c257640a89bfd0e833bdfb4844f192dc4"
+        "indexSha256": "9fd53a1857302a7d9b3dc2b9f3e8039b6d13c64e0a79d416ddbca8a692bc415d",
+        "byteLength": 5022464,
+        "sha256": "d0134b6ee52cc4a3bfee82673dae0b17749e1a58102729540228ffc16ef7b70d"
       }
     },
     {
@@ -33,9 +33,9 @@
       "slices": {
         "format": 1,
         "index": "NotoSansKR-Regular/slices.json",
-        "indexSha256": "c50b8a3eb8d8adbe640a5273c0cb90232213ca872046cb2921abb79c48795b1b",
-        "byteLength": 5339492,
-        "sha256": "1b3839acec71a913bd53e5381f3fde6dc4aa8516ae312df8a1d1c1ded049205b"
+        "indexSha256": "309e142311ef7c1b73b6052ba4ddb09f77a06d2ebc20243fbbed55cb872ce47d",
+        "byteLength": 5332528,
+        "sha256": "531a8102777356f09ae85eb357736bf6ec3d21ffa2c9535f9be4c67621dde820"
       }
     },
     {
@@ -50,9 +50,9 @@
       "slices": {
         "format": 1,
         "index": "NotoSansSC-Regular/slices.json",
-        "indexSha256": "42bd88e79481b10f369f42042506992cece7a9d35972cd1cbb1b6fec53213370",
-        "byteLength": 9001336,
-        "sha256": "c8400b6933325ce1f423f396bc3dc6c9fa45b3435244131e0cb2b3cb81703786"
+        "indexSha256": "73a0d2d52944be3db939ec12c1331521429d7ad2f7bff5b9342f6942fc671d90",
+        "byteLength": 8988332,
+        "sha256": "4224997d741712dcf1c7cadd96ce2378c7957e3c971d1f56717fe34ed55b089c"
       }
     },
     {
@@ -67,9 +67,9 @@
       "slices": {
         "format": 1,
         "index": "NotoSansTC-Regular/slices.json",
-        "indexSha256": "784824cf26a950cc2db9c9b93fe5d3ebdaf056445fd559293574d5fc64126895",
-        "byteLength": 6117384,
-        "sha256": "5ca9befce33c85fd912197e4a26dc1a1a7143435e3e9260d43569ebbe2d1e086"
+        "indexSha256": "e246aab5dbca74d596959ca46a6693733b137bacc0bda47e8dd6f3d02aeeb857",
+        "byteLength": 6114008,
+        "sha256": "1845c31c1c0b92bbfeacf0ab46dabfdf835257046de1bfdaabe2735841175932"
       }
     },
     {
@@ -84,9 +84,9 @@
       "slices": {
         "format": 1,
         "index": "NotoSerifSC-Regular/slices.json",
-        "indexSha256": "1fee6dbfc965d431f7a2ac7cd9301086f92af29588995e82ff71d7135a02075b",
-        "byteLength": 13204816,
-        "sha256": "b6381733af10fb9d2acd6018a9b7b0cf7724317b36f955ed551f257dcd10aaeb"
+        "indexSha256": "7e1cf89eaa36520084c6b74bb3fd6bcbe595bc674fed4d834db967abde54b675",
+        "byteLength": 13191940,
+        "sha256": "3a59d57d6390a334dd3e38db5cf1164bfeacda5a8705de607f37e7f3a63f1ccd"
       }
     }
   ]

@@ -2,9 +2,9 @@
   "format": 1,
   "skeleton": {
     "file": "NotoSerifSC-Regular/skeleton.zst",
-    "encodedLength": 137395,
-    "byteLength": 602208,
-    "sha256": "917961a1daf7220cee17022c4250038024e083991d7231e26b0b8e5d977cf2d7"
+    "encodedLength": 148470,
+    "byteLength": 589333,
+    "sha256": "a9c7088f13e24feda358c5a62ee04d14b2f75f1597a51905eaac060dfd7e3a32"
   },
   "core": {
     "file": "NotoSerifSC-Regular/core.zst",
@@ -1106,6 +1106,6 @@
       "sha256": "c25cfc458f17a4e659ca8a0af11a54b82dc9cd2d9d9691f2f37513acd5fac154"
     }
   ],
-  "byteLength": 13204816,
-  "sha256": "b6381733af10fb9d2acd6018a9b7b0cf7724317b36f955ed551f257dcd10aaeb"
+  "byteLength": 13191940,
+  "sha256": "3a59d57d6390a334dd3e38db5cf1164bfeacda5a8705de607f37e7f3a63f1ccd"
 }

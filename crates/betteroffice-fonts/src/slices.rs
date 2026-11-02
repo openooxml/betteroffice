@@ -164,12 +164,18 @@ impl<'a> Skeleton<'a> {
                 *slot = Some(outline);
             }
         }
-        let data_length: usize = outlines
-            .iter()
-            .map(|outline| outline.unwrap_or(ENDCHAR).len())
-            .sum();
-        let index_length = 3 + (self.num_glyphs + 1) * 4 + data_length;
-        let mut font = Vec::with_capacity(self.prefix.len() + index_length + 3);
+        let data_length = outlines.iter().try_fold(0usize, |total, outline| {
+            total.checked_add(outline.unwrap_or(ENDCHAR).len())
+        });
+        let capacity = data_length
+            .and_then(|length| length.checked_add(3))
+            .and_then(|length| length.checked_add((self.num_glyphs + 1) * 4))
+            .and_then(|length| length.checked_add(self.prefix.len() + 3))
+            .filter(|&length| length <= crate::MAX_OUTPUT_LIMIT)
+            .ok_or(SliceError::TooLarge)?;
+        let mut font = Vec::new();
+        font.try_reserve_exact(capacity)
+            .map_err(|_| SliceError::TooLarge)?;
         font.extend_from_slice(self.prefix);
         let count = u16::try_from(self.num_glyphs).map_err(|_| SliceError::TooLarge)?;
         font.extend_from_slice(&count.to_be_bytes());
@@ -333,6 +339,30 @@ mod tests {
         bytes[12..16].copy_from_slice(&0u32.to_be_bytes());
         bytes[20..24].copy_from_slice(&0xffff_fffcu32.to_be_bytes());
         assert_eq!(Skeleton::parse(&bytes).unwrap_err(), SliceError::Format);
+    }
+
+    #[test]
+    fn rejects_overlapping_chunk_views_whose_outlines_exceed_the_output_limit() {
+        let glyphs = 32_769u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&SKELETON_MAGIC);
+        bytes.extend_from_slice(&SLICES_FORMAT.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        for value in [glyphs, 0, 0, 0, 16, 0] {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        bytes.extend_from_slice(&vec![0u8; 2 * glyphs as usize + 16]);
+        let skeleton = Skeleton::parse(&bytes).unwrap();
+        let mut entries = Vec::new();
+        for glyph in 0..glyphs {
+            entries.extend_from_slice(&1u32.to_be_bytes());
+            entries.extend_from_slice(&glyph.to_be_bytes());
+            entries.extend_from_slice(&(12 * (glyphs - glyph - 1)).to_be_bytes());
+        }
+        let chunks: Vec<&[u8]> = (0..glyphs as usize)
+            .map(|glyph| &entries[12 * glyph..])
+            .collect();
+        assert_eq!(skeleton.reassemble(&chunks), Err(SliceError::TooLarge));
     }
 
     #[test]

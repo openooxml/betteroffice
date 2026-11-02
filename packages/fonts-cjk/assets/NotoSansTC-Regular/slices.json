@@ -2,9 +2,9 @@
   "format": 1,
   "skeleton": {
     "file": "NotoSansTC-Regular/skeleton.zst",
-    "encodedLength": 163796,
-    "byteLength": 567789,
-    "sha256": "a02d6dbfd47faccfaaa594f0abe5727b902907264b9ddb88f264f9246d8a360b"
+    "encodedLength": 156718,
+    "byteLength": 564412,
+    "sha256": "f61be775ead28cef8e7c2e1ef92f7803953375d02ba180a06f8e741343621ef2"
   },
   "core": {
     "file": "NotoSansTC-Regular/core.zst",
@@ -861,6 +861,6 @@
       "sha256": "b95bba9121945dc223b52fc0f66ef5ac065ae31641d1e5d4a76acbb4a96ac85c"
     }
   ],
-  "byteLength": 6117384,
-  "sha256": "5ca9befce33c85fd912197e4a26dc1a1a7143435e3e9260d43569ebbe2d1e086"
+  "byteLength": 6114008,
+  "sha256": "1845c31c1c0b92bbfeacf0ab46dabfdf835257046de1bfdaabe2735841175932"
 }

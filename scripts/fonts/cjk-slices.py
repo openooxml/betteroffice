@@ -210,8 +210,8 @@ def dict_with_offsets(data, start, end, offsets):
     out = b""
     for operator, operands in read_dict(data, start, end):
         if operator in offsets and operator == 18:
-            size = operands[0]
-            out += data[size[1]:size[1] + size[2]] + int5(offsets[operator])
+            size, value = offsets[operator]
+            out += int5(size) + int5(value)
         elif operator in offsets:
             out += int5(offsets[operator])
         else:
@@ -233,39 +233,73 @@ def build_index(items):
             + b"".join(value.to_bytes(size, "big") for value in offsets) + b"".join(items))
 
 
+def charset_length(data, offset, num_glyphs):
+    kind = data[offset]
+    if kind == 0:
+        return 1 + 2 * (num_glyphs - 1)
+    covered, at, size = 1, offset + 1, 3 if kind == 1 else 4
+    while covered < num_glyphs:
+        left = data[at + 2] if kind == 1 else struct.unpack(">H", data[at + 2:at + 4])[0]
+        covered += left + 1
+        at += size
+    return at - offset
+
+
+def fd_select_length(data, offset, num_glyphs):
+    kind = data[offset]
+    if kind == 0:
+        return 1 + num_glyphs
+    if kind == 3:
+        return 1 + 2 + 3 * struct.unpack(">H", data[offset + 1:offset + 3])[0] + 2
+    raise ValueError(f"unsupported FDSelect format {kind}")
+
+
+def private_without_subrs(data, start, end):
+    return b"".join(
+        b"".join(data[position:position + size] for _, position, size in operands) + operator_bytes(operator)
+        for operator, operands in read_dict(data, start, end) if operator != 19)
+
+
 def cff_prefix(cff):
-    """The CFF table laid out with its CharStrings INDEX last, cut off; the INDEX start."""
+    """The original CFF table with no subroutines and its CharStrings INDEX last, cut off.
+
+    Every DICT, the names, strings, charset and FDSelect are copied from `cff`
+    byte for byte; offsets become 5-byte operands, the global subroutines are
+    emptied and each Private DICT loses its local `Subrs`, since the chunks hold
+    desubroutinized charstrings.
+    """
     data = bytes(cff)
     header = data[:data[2]]
-    names, after_names = read_index(data, len(header))
+    _, after_names = read_index(data, len(header))
     tops, after_tops = read_index(data, after_names)
     _, after_strings = read_index(data, after_tops)
-    _, after_gsubrs = read_index(data, after_strings)
     top_start, top_end = tops[0]
     top = dict(read_dict(data, top_start, top_end))
     if (12, 30) not in top:
         raise ValueError("expected a CID-keyed CFF")
+    charstrings, _ = read_index(data, top[17][0][0])
+    num_glyphs = len(charstrings)
     charset = top[15][0][0]
     fd_select = top[(12, 37)][0][0]
-    charstrings = top[17][0][0]
-    fd_array = top[(12, 36)][0][0]
-    _, charstrings_end = read_index(data, charstrings)
-    fd_dicts, fd_end = read_index(data, fd_array)
-    privates = [dict(read_dict(data, start, end))[18] for start, end in fd_dicts]
-    if not (after_gsubrs <= charset < fd_select < charstrings < charstrings_end <= fd_array):
-        raise ValueError("unexpected CFF structure order")
-    charset_bytes = data[charset:fd_select]
-    fd_select_bytes = data[fd_select:charstrings]
-    private_bytes = [data[offset[0]:offset[0] + size[0]] for size, offset in privates]
+    charset_bytes = data[charset:charset + charset_length(data, charset, num_glyphs)]
+    fd_select_bytes = data[fd_select:fd_select + fd_select_length(data, fd_select, num_glyphs)]
+    fd_dicts, _ = read_index(data, top[(12, 36)][0][0])
+    private_bytes = []
+    for start, end in fd_dicts:
+        size, offset = dict(read_dict(data, start, end))[18]
+        private_bytes.append(private_without_subrs(data, offset[0], offset[0] + size[0]))
+
+    def private_operands(index, value):
+        return {18: (len(private_bytes[index]), value)}
 
     def layout(offsets):
         top_dict = dict_with_offsets(data, top_start, top_end, offsets["top"])
-        fds = [dict_with_offsets(data, start, end, {18: value}) for (start, end), value in zip(fd_dicts, offsets["private"])]
-        head = header + data[len(header):after_names] + build_index([top_dict]) + data[after_tops:after_gsubrs]
+        fds = [dict_with_offsets(data, start, end, private_operands(index, value))
+               for index, ((start, end), value) in enumerate(zip(fd_dicts, offsets["private"]))]
+        head = header + data[len(header):after_names] + build_index([top_dict]) + data[after_tops:after_strings] + b"\0\0"
         out = head + charset_bytes + fd_select_bytes
-        fd_index = build_index(fds)
         positions = {15: len(head), (12, 37): len(head) + len(charset_bytes), (12, 36): len(out)}
-        out += fd_index
+        out += build_index(fds)
         private_positions = []
         for block in private_bytes:
             private_positions.append(len(out))
@@ -273,7 +307,7 @@ def cff_prefix(cff):
         positions[17] = len(out)
         return out, positions, private_positions
 
-    zero = {"top": {operator: 0 for operator in OFFSET_OPERATORS}, "private": [0] * len(privates)}
+    zero = {"top": {operator: 0 for operator in OFFSET_OPERATORS}, "private": [0] * len(private_bytes)}
     _, positions, private_positions = layout(zero)
     prefix, check, check_private = layout({"top": positions, "private": private_positions})
     if check != positions or check_private != private_positions:
@@ -360,12 +394,12 @@ def chunk_file(outlines, gids):
 
 def cut(path, order):
     source = path.read_bytes()
-    font = TTFont(io.BytesIO(source), lazy=False)
+    font = TTFont(io.BytesIO(source), lazy=False, recalcBBoxes=False)
     order_glyphs = font.getGlyphOrder()
     gid_of = {name: gid for gid, name in enumerate(order_glyphs)}
     num_glyphs = len(order_glyphs)
 
-    desub = TTFont(io.BytesIO(source), lazy=False)
+    desub = TTFont(io.BytesIO(source), lazy=False, recalcBBoxes=False)
     cff_set = desub["CFF "].cff
     cff_set.desubroutinize()
     charstrings = cff_set.topDictIndex[0].CharStrings
@@ -391,14 +425,7 @@ def cut(path, order):
             if gid_map[gid] == NO_CHUNK:
                 gid_map[gid] = index
 
-    skeleton_font = TTFont(io.BytesIO(source), lazy=False)
-    skeleton_cff = skeleton_font["CFF "].cff
-    skeleton_cff.desubroutinize()
-    for name in order_glyphs:
-        skeleton_cff.topDictIndex[0].CharStrings[name].program = ["endchar"]
-    buffer = io.BytesIO()
-    skeleton_cff.compile(buffer, skeleton_font)
-    prefix, cff_record, cff_offset, head_offset = skeleton_sfnt(source, buffer.getvalue())
+    prefix, cff_record, cff_offset, head_offset = skeleton_sfnt(source, font.reader["CFF "])
 
     runs = []
     chunk_of_cp = {cp: index for index, codepoints in enumerate(chunks) for cp in codepoints}
@@ -433,6 +460,28 @@ def verify(source, font, outlines, glyph_sets, files, edges, cp_glyphs, chunks, 
             raise ValueError(f"table {tag} differs after reassembly")
     if full.reader["head"][:8] + full.reader["head"][12:] != font.reader["head"][:8] + font.reader["head"][12:]:
         raise ValueError("head differs after reassembly beyond checkSumAdjustment")
+    original_cff = TTFont(io.BytesIO(source), lazy=False, recalcBBoxes=False)["CFF "].cff
+    rebuilt_cff = full["CFF "].cff
+    original_top, rebuilt_top = original_cff.topDictIndex[0], rebuilt_cff.topDictIndex[0]
+    offsets = {"charset", "CharStrings", "FDSelect", "FDArray", "Private", "Subrs", "Encoding"}
+    if {k: v for k, v in original_top.rawDict.items() if k not in offsets} != {
+            k: v for k, v in rebuilt_top.rawDict.items() if k not in offsets}:
+        raise ValueError("CFF Top DICT differs after reassembly")
+    if original_cff.fontNames != rebuilt_cff.fontNames or list(original_cff.strings.strings) != list(rebuilt_cff.strings.strings):
+        raise ValueError("CFF names or strings differ after reassembly")
+    for original_fd, rebuilt_fd in zip(original_top.FDArray, rebuilt_top.FDArray, strict=True):
+        if {k: v for k, v in original_fd.rawDict.items() if k not in offsets} != {
+                k: v for k, v in rebuilt_fd.rawDict.items() if k not in offsets}:
+            raise ValueError("CFF Font DICT differs after reassembly")
+        original_private = {k: v for k, v in original_fd.Private.rawDict.items() if k not in offsets}
+        rebuilt_private = {k: v for k, v in rebuilt_fd.Private.rawDict.items() if k not in offsets}
+        if original_private != rebuilt_private:
+            raise ValueError("CFF Private DICT differs after reassembly")
+    if [original_top.FDSelect[i] for i in range(len(original_top.CharStrings))] != [
+            rebuilt_top.FDSelect[i] for i in range(len(rebuilt_top.CharStrings))]:
+        raise ValueError("CFF FDSelect differs after reassembly")
+    if original_top.charset != rebuilt_top.charset:
+        raise ValueError("CFF charset differs after reassembly")
     included = set().union(*glyph_sets)
     reassembled = full["CFF "].cff.topDictIndex[0].CharStrings
     for name, gid in gid_of.items():
