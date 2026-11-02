@@ -194,6 +194,8 @@ let commandFrameChanges: {
     provisional: boolean; parts: ReturnType<ResidentEngineSession['partGeometry']>;
   };
   selectionContext?: boolean;
+  /** The first frame went out without its echo context and object geometry; a follow-up frame carries them. */
+  echoDeferred?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
   layoutStale?: boolean;
   viewport?: DocxCommandViewportRequest;
@@ -736,6 +738,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const causes = changes.causes;
         changes.causes = new Set();
         const publishedGeometry = changes.publishedGeometry;
+        const deferred = full && publishedGeometry === undefined;
         const selectionFrames = changes.selectionFrames?.splice(0) ?? [];
         const selectionDeltas = selectionFrames.map(bytes => decodeFrameDelta(bytes));
         let selectionEpoch = publishedGeometry?.frameEpoch;
@@ -973,7 +976,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const echoRaster = changes.echoRaster;
         if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
         const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
-        const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
+        const projectedEcho = deferred || hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(), layout,
           glyphs: echoGlyphs.provider(pixelRatio),
         });
@@ -1086,7 +1089,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             ? readDocxSelectionFocus(engine, selected, layout) ?? undefined : undefined,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
           parts,
-          geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
+          geometry: deferred || hooks.editState().readOnly || shown.layoutProvisional ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
           ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
           ...(laidOutReservations ? { reservations: laidOutReservations } : {}),
@@ -1099,6 +1102,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           provisional: prefix !== null, parts,
         };
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
+        changes.echoDeferred = deferred;
         pendingUpdates = [];
         return built;
       },
@@ -1720,6 +1724,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     unsubscribe = null;
     pendingUpdates = [];
     replyCommand(request.id, 'commandInitial', await bindResidentCommands(init).initial());
+    scheduleEchoFollowUp();
     return;
   }
   if (request.type === 'edit') {
@@ -1940,6 +1945,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
         ...(provisional ? { layoutProvisional: true } : {}),
       }, [...(isTransferResult(initial) ? initial.transfer : []),
         ...(layoutMeta ? [layoutMeta.pageSizes.buffer as ArrayBuffer] : [])]);
+      scheduleEchoFollowUp();
       return;
     }
     subscribe();
@@ -3221,6 +3227,27 @@ async function backgroundPageSlice(build: BackgroundPageBuild, budgetMs: number)
   build.frameEpoch = retainedFrame!.frameEpoch;
   build.frames.push(bytes);
   return false;
+}
+
+/**
+ * Sends the echo context and object geometry the first frame left out, as a
+ * selection frame that rebuilds no page; any frame before it carries them instead.
+ */
+function scheduleEchoFollowUp(): void {
+  const host = commandHost;
+  if (!host || !commandFrameChanges?.echoDeferred || commandLayout?.certifiedPages() != null || slicedCompletion || incompleteLayout) return;
+  scheduler.schedule({
+    kind: 'echoFollowUp', version: scheduler.version, generation: scheduler.generation,
+    onStale: () => 'continue',
+    run: () => {
+      const changes = commandFrameChanges;
+      if (commandHost !== host || !changes?.echoDeferred || commandLayout?.certifiedPages() != null || slicedCompletion || incompleteLayout) return 'done';
+      (changes.causes ??= new Set()).add('selection');
+      changes.selectionContext = true;
+      postCommandFrame(0);
+      return 'done';
+    },
+  });
 }
 
 function scheduleCompletion(completion: SlicedCompletion): void {
