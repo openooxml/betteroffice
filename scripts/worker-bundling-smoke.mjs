@@ -54,6 +54,8 @@ try {
     const manifest = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'));
     assert.match(manifest.imports['#session-worker'].default, /sessionWorker\.browser\.(?:js|mjs)$/);
     assert.match(manifest.imports['#session-worker'].node, /sessionWorker\.node\.(?:js|mjs)$/);
+    assert.match(manifest.imports['#session-scope'].default, /sessionScope\.browser\.(?:js|mjs)$/);
+    assert.match(manifest.imports['#session-scope'].node, /sessionScope\.node\.(?:js|mjs)$/);
     workers[worker] = join(target, 'dist', `${worker}.mjs`);
   }
   const entry = join(directory, 'app.mjs');
@@ -71,7 +73,17 @@ try {
     assert.ok(Object.keys(bundled.metafile.inputs).some(path => resolve(root, path).startsWith(browser)),
       `esbuild did not select the ${format} browser variant`);
   }
-  assert.ok(Object.keys(bundled.metafile.inputs).every(path => !/sessionWorker\.node|nodeSessionWorker/.test(path)));
+  assert.ok(Object.keys(bundled.metafile.inputs).every(path => !/session(?:Worker|Scope)\.node|nodeSession(?:Worker|Scope)/.test(path)));
+  for (const [worker, path] of Object.entries(workers)) {
+    const alone = await esbuild({
+      absWorkingDir: root, entryPoints: [path], write: false,
+      platform: 'browser', conditions: ['browser', 'default'],
+      bundle: true, format: 'esm', metafile: true, logLevel: 'silent',
+    });
+    const inputs = Object.keys(alone.metafile.inputs);
+    assert.ok(inputs.some(input => /sessionScope\.browser/.test(input)), `${worker} does not take its scope from the browser variant`);
+    assert.ok(inputs.every(input => !/sessionWorker\./.test(input)), `${worker} bundles a module that constructs its own worker`);
+  }
   await checkOutput(esbuildDirectory);
 
   await writeFile(join(directory, 'index.html'), '<script type="module" src="./app.mjs"></script>');

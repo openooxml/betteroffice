@@ -1824,7 +1824,7 @@ fn replace_if_changed(
     value: CellValue,
     budget: &EvaluationBudget,
 ) -> Option<CellValue> {
-    let value = precision_as_displayed(wb, u, value);
+    let value = precision_as_displayed(wb, u, stored(value));
     let previous = wb.value_cow(u.0, cell_of(u));
     let negative_zero = !wb.full_precision
         && matches!(previous.as_ref(), CellValue::Number { value } if *value == 0.0 && value.is_sign_negative())
@@ -1836,6 +1836,17 @@ fn replace_if_changed(
     Some(wb.sheet_mut(u.0).map_or(CellValue::Empty, |sheet| {
         sheet.set_calculated_value(cell_of(u), value)
     }))
+}
+
+/// a result as excel stores it: below the smallest normal double it is 0,
+/// while the math that produced it kept every bit.
+fn stored(value: CellValue) -> CellValue {
+    match value {
+        CellValue::Number { value } if value != 0.0 && value.abs() < f64::MIN_POSITIVE => {
+            CellValue::Number { value: 0.0 }
+        }
+        value => value,
+    }
 }
 
 fn precision_as_displayed(wb: &Workbook, u: Key, value: CellValue) -> CellValue {

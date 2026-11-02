@@ -411,10 +411,17 @@ fn degrees_of_freedom(args: &[Expr], ctx: &EvalContext<'_>, i: usize) -> Result<
 /// the chi-square functions reject more than 10^10 degrees of freedom.
 const CHISQ_MAX_DF: f64 = 1e10;
 
-/// the right-tailed and legacy f functions reject 10^10 or more degrees of
-/// freedom in either argument.
+/// the f functions reject more than 10^10 degrees of freedom in either
+/// argument, like the chi-square ones.
 fn f_df_out_of_range(d1: f64, d2: f64) -> bool {
-    d1 >= 1e10 || d2 >= 1e10
+    d1 > F_MAX_DF || d2 > F_MAX_DF
+}
+
+const F_MAX_DF: f64 = 1e10;
+
+/// the t distribution functions are `#NUM!` once `x` squared overflows.
+fn t_out_of_range(x: f64) -> bool {
+    !(x * x).is_finite()
 }
 
 /// CHISQ.DIST(x, deg_freedom, cumulative).
@@ -521,7 +528,7 @@ pub(crate) fn t_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(b) => b,
         Err(e) => return err(e),
     };
-    if df < 1.0 {
+    if df < 1.0 || t_out_of_range(x) {
         return err(ErrorValue::Num);
     }
     finish(
@@ -547,7 +554,7 @@ pub(crate) fn t_dist_rt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if df < 1.0 {
+    if df < 1.0 || t_out_of_range(x) {
         return err(ErrorValue::Num);
     }
     finish(ctx, special::t_right(x, df))
@@ -566,7 +573,7 @@ pub(crate) fn t_dist_2t(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if x < 0.0 || df < 1.0 {
+    if x < 0.0 || df < 1.0 || t_out_of_range(x) {
         return err(ErrorValue::Num);
     }
     finish(ctx, 2.0 * special::t_tail(x, df))
@@ -589,7 +596,7 @@ pub(crate) fn tdist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if x < 0.0 || df < 1.0 || (tails != 1 && tails != 2) {
+    if x < 0.0 || df < 1.0 || (tails != 1 && tails != 2) || t_out_of_range(x) {
         return err(ErrorValue::Num);
     }
     let rt = special::t_tail(x, df);
@@ -666,7 +673,7 @@ pub(crate) fn f_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(b) => b,
         Err(e) => return err(e),
     };
-    if x < 0.0 || d1 < 1.0 || d2 < 1.0 {
+    if x < 0.0 || d1 < 1.0 || d2 < 1.0 || f_df_out_of_range(d1, d2) {
         return err(ErrorValue::Num);
     }
     finish(
@@ -719,7 +726,7 @@ pub(crate) fn f_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    if !(0.0..=1.0).contains(&p) || d1 < 1.0 || d2 < 1.0 || p == 1.0 {
+    if !(0.0..=1.0).contains(&p) || d1 < 1.0 || d2 < 1.0 || f_df_out_of_range(d1, d2) || p == 1.0 {
         return err(ErrorValue::Num);
     }
     finish(ctx, special::f_quantile(p, 1.0 - p, d1, d2))

@@ -1,5 +1,5 @@
 import { createScopeTransport, type SessionScope } from '../../../../shared/office-session/transport';
-import { sessionWorkerScope, compileSessionWasm } from '#session-worker';
+import { sessionWorkerScope, compileSessionWasm } from '#session-scope';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { createWorkerWasmInitializer } from '../../../../shared/office-session/wasm';
 import { wasmAssetUrl } from '../wasm/asset';

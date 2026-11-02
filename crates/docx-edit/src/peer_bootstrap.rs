@@ -319,7 +319,7 @@ fn canonical(value: Value) -> Value {
     match value {
         Value::Object(object) => {
             let mut entries: Vec<_> = object.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            crate::sort::sort_by(&mut entries, &|a, b| a.0.cmp(&b.0));
             Value::Object(
                 entries
                     .into_iter()
@@ -479,7 +479,7 @@ pub(crate) mod sorted_map {
         V: Serialize,
     {
         let mut entries: Vec<_> = map.iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
+        crate::sort::sort_by(&mut entries, &|a, b| a.0.cmp(b.0));
         entries.serialize(serializer)
     }
 
@@ -509,7 +509,7 @@ pub(crate) mod sorted_set {
         T: Ord + Serialize,
     {
         let mut values: Vec<_> = set.iter().collect();
-        values.sort();
+        crate::sort::sort(&mut values);
         values.serialize(serializer)
     }
 
@@ -540,7 +540,7 @@ pub(crate) mod optional_map {
     {
         let entries = map.as_ref().map(|map| {
             let mut entries: Vec<_> = map.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
+            crate::sort::sort_by(&mut entries, &|a, b| a.0.cmp(b.0));
             entries
         });
         entries.serialize(serializer)
@@ -2135,7 +2135,7 @@ mod tests {
             collect_docx(&root.join(directory), &mut paths);
             assert!(paths.len() > start, "empty corpus root {directory}");
         }
-        paths.sort();
+        crate::sort::sort(&mut paths);
         let mut supported = 0;
         for path in paths {
             let source: PackageBytes = std::fs::read(&path).unwrap().into();
@@ -2445,7 +2445,7 @@ mod tests {
             collect_docx(&root.join(directory), &mut paths);
             assert!(paths.len() > start, "empty corpus root {directory}");
         }
-        paths.sort();
+        crate::sort::sort(&mut paths);
         let mut supported = 0;
         for path in paths {
             let bytes: PackageBytes = std::fs::read(&path).unwrap().into();
