@@ -1571,8 +1571,25 @@ enum Stacked {
     Lambdas(Value),
 }
 
-fn stack_lambdas(values: Vec<Value>, by_col: bool) -> Result<Value, ErrorValue> {
-    let mut out = Vec::with_capacity(values.len());
+/// the functions of `values` laid side by side or stacked, one flat vector;
+/// it is paid for and held to the array limit before it is built.
+fn stack_lambdas(
+    values: Vec<Value>,
+    by_col: bool,
+    ctx: &EvalContext<'_>,
+) -> Result<Value, ErrorValue> {
+    let mut total: usize = 0;
+    for value in &values {
+        let len = match value {
+            Value::Lambda(lambda) => lambda.vector.as_ref().map_or(1, |(_, list)| list.len()),
+            _ => 1,
+        };
+        total = total.checked_add(len).ok_or(ErrorValue::Num)?;
+    }
+    if total > MAX_ARRAY_CELLS || !ctx.consume_cells(total as u64) {
+        return Err(ErrorValue::Num);
+    }
+    let mut out = Vec::with_capacity(total);
     for value in values {
         match value {
             Value::Lambda(lambda) => match &lambda.vector {
@@ -1606,7 +1623,7 @@ fn stack_arguments(
     }
     let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
     if values.iter().any(|v| matches!(v, Value::Lambda(_))) {
-        return stack_lambdas(values, by_col).map(Stacked::Lambdas);
+        return stack_lambdas(values, by_col, ctx).map(Stacked::Lambdas);
     }
     let mut blocks = Vec::with_capacity(values.len());
     for value in values {

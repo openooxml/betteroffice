@@ -1737,17 +1737,87 @@ fn groupby_and_trimrange_over_whole_columns_and_the_whole_sheet() {
     );
 }
 
-/// more distinct keys than the engine's largest array block holds is #NUM!
-/// before any group is aggregated.
+/// more distinct keys than the engine's largest array block holds is #NUM!:
+/// 1024 stacked functions leave room for 512 groups, and there are 600.
 #[test]
 fn groupby_with_more_distinct_keys_than_an_output_block_holds_is_num() {
     let workbook = sales_workbook();
+    for formula in [
+        "LET(f,REDUCE(SUM,SEQUENCE(10),LAMBDA(a,i,VSTACK(a,a))),k,SEQUENCE(600),GROUPBY(k,k,f,0,0))",
+        "LET(f,REDUCE(SUM,SEQUENCE(10),LAMBDA(a,i,VSTACK(a,a))),k,SEQUENCE(600),PIVOTBY(k,,k,f,0,0))",
+    ] {
+        assert_eq!(
+            values(formula, &workbook),
+            error(ErrorValue::Num),
+            "{formula}"
+        );
+    }
+}
+
+/// a vector of functions that doubles on every step is stopped at the array
+/// limit and charged as it grows, instead of growing without bound.
+#[test]
+fn function_vectors_past_the_array_limit_are_num() {
+    let workbook = sales_workbook();
+    for formula in [
+        "REDUCE(HSTACK(SUM,SUM),SEQUENCE(21),LAMBDA(acc,i,HSTACK(acc,acc)))",
+        "REDUCE(VSTACK(SUM,SUM),SEQUENCE(21),LAMBDA(acc,i,VSTACK(acc,acc)))",
+    ] {
+        assert_eq!(
+            values(formula, &workbook),
+            error(ErrorValue::Num),
+            "{formula}"
+        );
+    }
+}
+
+/// each group's copy of a text column is charged to the text budget, so 300
+/// cells of 32,767 characters copied once per group stop at the budget.
+#[test]
+fn groupby_copies_of_long_text_are_charged_to_the_text_budget() {
+    let mut workbook = Workbook::default();
+    let mut sheet = Sheet::new("Data");
+    let long = "x".repeat(32_767);
+    for row in 1..=300 {
+        put(&mut sheet, &format!("A{row}"), n(row as f64));
+        put(&mut sheet, &format!("B{row}"), t(&long));
+    }
+    workbook.sheets.push(sheet);
     assert_eq!(
-        values("LET(s,SEQUENCE(600000),GROUPBY(s,s,SUM,0,0))", &workbook),
+        values("GROUPBY(A1:A300,B1:B300,LAMBDA(x,all,1),0,0)", &workbook),
         error(ErrorValue::Num)
     );
     assert_eq!(
-        values("LET(s,SEQUENCE(600000),PIVOTBY(s,,s,SUM,0,0))", &workbook),
-        error(ErrorValue::Num)
+        values("ROWS(GROUPBY(A1:A3,B1:B3,LAMBDA(x,all,1),0,0))", &workbook),
+        vec![n(3.0)]
+    );
+}
+
+/// field values holding the key separator still group apart.
+#[test]
+fn groupby_composite_keys_with_separator_characters_stay_apart() {
+    let mut workbook = Workbook::default();
+    let mut sheet = Sheet::new("Data");
+    put(&mut sheet, "A1", t("a\u{1f}t:b"));
+    put(&mut sheet, "B1", t("c"));
+    put(&mut sheet, "C1", n(1.0));
+    put(&mut sheet, "A2", t("a"));
+    put(&mut sheet, "B2", t("b\u{1f}t:c"));
+    put(&mut sheet, "C2", n(2.0));
+    workbook.sheets.push(sheet);
+    assert_eq!(
+        arrayed("GROUPBY(A1:B2,C1:C2,SUM,0,0)", &workbook),
+        (
+            2,
+            3,
+            vec![
+                t("a"),
+                t("b\u{1f}t:c"),
+                n(2.0),
+                t("a\u{1f}t:b"),
+                t("c"),
+                n(1.0),
+            ]
+        )
     );
 }

@@ -37,7 +37,7 @@ fn callbacks(
 }
 
 /// a key under which equal field values group: text ignores case, as in
-/// Excel.
+/// Excel, and carries its length, so no text can run into the next field.
 fn group_identity(slice: &[CellValue]) -> String {
     let mut key = String::with_capacity(slice.len() * 8);
     for value in slice {
@@ -48,8 +48,11 @@ fn group_identity(slice: &[CellValue]) -> String {
                 key.push_str(&crate::eval::format_number(*value + 0.0));
             }
             CellValue::Text { value } => {
-                key.push_str("t:");
-                key.push_str(&value.to_lowercase());
+                let lower = value.to_lowercase();
+                key.push('t');
+                key.push_str(&lower.len().to_string());
+                key.push(':');
+                key.push_str(&lower);
             }
             CellValue::Bool { value } => key.push_str(if *value { "b:1" } else { "b:0" }),
             CellValue::Error { value } => {
@@ -239,11 +242,21 @@ fn parse_sort_specs(
     Ok(specs)
 }
 
-/// one value column restricted to `rows`, as a column block.
-fn slice_column(values: &Array, rows: &[usize], col: usize) -> Result<Value, ErrorValue> {
+/// one value column restricted to `rows`, as a column block; the text of
+/// each copied cell is paid for before it is copied.
+fn slice_column(
+    ctx: &EvalContext<'_>,
+    values: &Array,
+    rows: &[usize],
+    col: usize,
+) -> Result<Value, ErrorValue> {
     let mut out = Vec::with_capacity(rows.len());
     for &row in rows {
-        out.push(values.at(row, col));
+        let cell = &values.values[row * values.cols + col];
+        if !ctx.keep_text(cell) {
+            return Err(ErrorValue::Num);
+        }
+        out.push(copied(cell));
     }
     Ok(Value::Array(Array::new(rows.len(), 1, out)?))
 }
@@ -326,14 +339,14 @@ impl GroupAggregator<'_> {
     ) -> Result<CellValue, ErrorValue> {
         step();
         charge_steps(self.ctx, (subset_rows.len() as u64).max(STEPS_PER_UNIT))?;
-        let subset = slice_column(self.values, subset_rows, col)?;
+        let subset = slice_column(self.ctx, self.values, subset_rows, col)?;
         let argv = match lambda.params.len() {
             1 => vec![plain(subset)],
             2 => {
                 charge_steps(self.ctx, (total_rows.len() as u64).max(STEPS_PER_UNIT))?;
                 vec![
                     plain(subset),
-                    plain(slice_column(self.values, total_rows, col)?),
+                    plain(slice_column(self.ctx, self.values, total_rows, col)?),
                 ]
             }
             _ => return Err(ErrorValue::Value),
@@ -1124,4 +1137,36 @@ pub(crate) fn trim_leading(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// `range:.range`, stored as `_xlfn._TRO_TRAILING(range)`.
 pub(crate) fn trim_trailing(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     trim("_TRO_TRAILING", args, ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use xlsx_model::{CellValue, ErrorValue, Sheet, SheetId, Workbook};
+
+    use crate::array::{STEPS, evaluate_array};
+    use crate::eval::EvalContext;
+    use crate::parser::parse_formula;
+
+    /// 1024 stacked functions leave room for 512 groups; 600 distinct keys
+    /// are #NUM! before a single group is aggregated.
+    #[test]
+    fn too_many_distinct_keys_stop_before_any_group_is_aggregated() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        let formula = parse_formula(
+            "LET(f,REDUCE(SUM,SEQUENCE(10),LAMBDA(a,i,VSTACK(a,a))),k,SEQUENCE(600),GROUPBY(k,k,f,0,0))",
+        )
+        .unwrap();
+        let context = EvalContext::new(&workbook, SheetId(0));
+        STEPS.with(|steps| steps.set(0));
+        let value = evaluate_array(&formula, &context).into_scalar();
+        let steps = STEPS.with(|steps| steps.get());
+        assert_eq!(
+            value,
+            CellValue::Error {
+                value: ErrorValue::Num
+            }
+        );
+        assert!(steps < 5_000, "{steps} steps");
+    }
 }

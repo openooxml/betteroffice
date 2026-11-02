@@ -134,3 +134,26 @@ fn euroconvert_invalid_arguments_are_value_errors() {
         }
     );
 }
+
+/// amounts too large to carry the rounding's decimals are already whole at
+/// that precision, so rounding them keeps the finite result.
+#[test]
+fn euroconvert_rounding_of_huge_amounts_stays_finite() {
+    close("EUROCONVERT(1E307,\"DEM\",\"EUR\",TRUE,3)", 1e307 / 1.95583);
+    close(
+        "EUROCONVERT(1E307,\"DEM\",\"EUR\",FALSE,3)",
+        1e307 / 1.95583,
+    );
+    close("EUROCONVERT(1E307,\"DEM\",\"EUR\")", 1e307 / 1.95583);
+    close("EUROCONVERT(1E307,\"EUR\",\"DEM\")", 1e307 * 1.95583);
+    close(
+        "EUROCONVERT(-1E307,\"FRF\",\"DEM\",FALSE,15)",
+        -1e307 / 6.55957 * 1.95583,
+    );
+    assert_eq!(
+        eval("EUROCONVERT(1E308,\"EUR\",\"DEM\")"),
+        CellValue::Error {
+            value: ErrorValue::Num
+        }
+    );
+}

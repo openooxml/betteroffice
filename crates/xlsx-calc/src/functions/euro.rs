@@ -4,6 +4,7 @@
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{EvalContext, err, evaluate, to_bool, to_text};
+use crate::fmath;
 use crate::parser::Expr;
 
 use super::math::round_number;
@@ -30,6 +31,18 @@ const CURRENCIES: [(&str, f64, i32); 14] = [
 
 /// the most decimals a triangulation rounds to, about all a double holds.
 const MAX_TRIANGULATION: f64 = 15.0;
+
+/// `value` rounded to `digits` decimals. a value too large to carry that many
+/// decimals is already whole at that precision and is kept as it is, so the
+/// rounding cannot overflow.
+fn rounded(value: f64, digits: i32) -> f64 {
+    let scaled = value * fmath::powi(10.0, digits);
+    if scaled.is_finite() && scaled.abs() < 9_007_199_254_740_992.0 {
+        round_number(value, digits)
+    } else {
+        value
+    }
+}
 
 /// the table row of an iso code, in any letter case; anything else is
 /// #VALUE!.
@@ -77,13 +90,13 @@ pub(crate) fn euroconvert(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             number * to_rate
         } else {
             let euros = number / from_rate;
-            let euros = triangulation.map_or(euros, |digits| round_number(euros, digits));
+            let euros = triangulation.map_or(euros, |digits| rounded(euros, digits));
             euros * to_rate
         };
         Ok(finite(if full {
             converted
         } else {
-            round_number(converted, to_precision)
+            rounded(converted, to_precision)
         }))
     };
     compute().unwrap_or_else(err)
