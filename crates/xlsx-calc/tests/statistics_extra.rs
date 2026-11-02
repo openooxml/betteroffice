@@ -793,7 +793,7 @@ fn relative(src: &str, want: f64, tol: f64) {
 fn huge_arguments_terminate() {
     // mpmath 30 digits: 1 / sqrt(2 pi 1e308), the stirling term below f64
     relative(
-        "POISSON.DIST(1E308,1E308,FALSE)",
+        "POISSON.DIST(1E307*10,1E307*10,FALSE)",
         3.989422804014327e-155,
         1e-12,
     );
@@ -824,12 +824,12 @@ fn huge_arguments_terminate() {
     relative("PERMUT(1E16,1)", 1e16, 1e-15);
     // mpmath 30 digits
     relative("PERMUT(2E16,4)", 1.5999999999999996e65, 1e-12);
-    approx("BINOM.INV(10000000000000002,1,0.5)", 10000000000000002.0);
-    approx("BINOM.INV(10000000000000002,0,0.5)", 0.0);
+    approx("BINOM.INV(1E16+2,1,0.5)", 10000000000000002.0);
+    approx("BINOM.INV(1E16+2,0,0.5)", 0.0);
     check(&[
-        ("BINOM.DIST(1E308,1.05E308,0.95,FALSE)", n(0.0)),
-        ("POISSON.DIST(1E308,1E308,TRUE)", e(ErrorValue::Num)),
-        ("BINOM.INV(1E308,0.9,0.9)", e(ErrorValue::Num)),
+        ("BINOM.DIST(1E307*10,1.05E307*10,0.95,FALSE)", n(0.0)),
+        ("POISSON.DIST(1E307*10,1E307*10,TRUE)", e(ErrorValue::Num)),
+        ("BINOM.INV(1E307*10,0.9,0.9)", e(ErrorValue::Num)),
         ("BINOM.INV(4E16,0.5,0.5)", e(ErrorValue::Num)),
         ("HYPGEOM.DIST(1E16,2E16,2E16,4E16,TRUE)", e(ErrorValue::Num)),
         ("BINOM.DIST(5E15,1E16,0.5,TRUE)", e(ErrorValue::Num)),

@@ -1227,9 +1227,54 @@ pub(crate) fn parse_clock(s: &str) -> Option<f64> {
     Some((hour * 3600.0 + minute * 60.0 + second) / 86400.0)
 }
 
-/// excel "general" number formatting, good enough for text coercion: integers
-/// print without a decimal, everything else uses rust's shortest round-trip.
-pub(crate) fn format_number(n: f64) -> String {
+/// the longest plain form, sign excluded, excel writes for a number in text;
+/// a longer one switches to scientific notation.
+const PLAIN_TEXT_CHARS: usize = 20;
+
+/// a number as excel writes it into text: rounded to 15 significant digits
+/// without trailing zeros, plain unless that takes more than
+/// [`PLAIN_TEXT_CHARS`] characters, then scientific with a signed exponent
+/// of at least two digits. so `0.1+0.2` reads as "0.3", 10^19 as
+/// "10000000000000000000", 10^20 as "1E+20" and 10^-19 as "1E-19".
+pub(crate) fn format_number(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return exact_number_text(x);
+    }
+    let scientific = format!("{:.14e}", x.abs());
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_end_matches('0');
+    let sign = if x < 0.0 { "-" } else { "" };
+    let magnitude = exponent.unsigned_abs() as usize;
+    let plain_chars = if exponent < 0 {
+        magnitude + 1 + digits.len()
+    } else if digits.len() <= magnitude + 1 {
+        magnitude + 1
+    } else {
+        digits.len() + 1
+    };
+    if plain_chars > PLAIN_TEXT_CHARS {
+        let (head, tail) = digits.split_at(1);
+        let point = if tail.is_empty() { "" } else { "." };
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!("{sign}{head}{point}{tail}E{exponent_sign}{magnitude:02}");
+    }
+    if exponent < 0 {
+        let zeros = "0".repeat(magnitude - 1);
+        return format!("{sign}0.{zeros}{digits}");
+    }
+    let whole = magnitude + 1;
+    if digits.len() <= whole {
+        format!("{sign}{digits:0<whole$}")
+    } else {
+        format!("{sign}{}.{}", &digits[..whole], &digits[whole..])
+    }
+}
+
+/// a number as the shortest text that reads back as the same double, for
+/// keys and formula text that must not merge distinct values.
+pub(crate) fn exact_number_text(n: f64) -> String {
     if n == 0.0 {
         return "0".to_string();
     }
@@ -2272,7 +2317,7 @@ mod tests {
     fn non_finite_arithmetic_becomes_num_error() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
-        for formula in ["MEDIAN(1e308*1e308,1)", "SMALL(1e308*1e308,1)"] {
+        for formula in ["MEDIAN(1e307*1e307,1)", "SMALL(1e307*1e307,1)"] {
             let expression = parse_formula(formula).unwrap();
             let context = EvalContext::new(&workbook, SheetId(0));
             assert_eq!(

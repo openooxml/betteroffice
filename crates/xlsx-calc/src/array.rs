@@ -669,7 +669,7 @@ fn identity(slice: &[CellValue]) -> String {
             CellValue::Empty => key.push_str("n:0"),
             CellValue::Number { value } => {
                 key.push_str("n:");
-                key.push_str(&crate::eval::format_number(*value + 0.0));
+                key.push_str(&crate::eval::exact_number_text(*value + 0.0));
             }
             CellValue::Text { value } => {
                 key.push_str("t:");
