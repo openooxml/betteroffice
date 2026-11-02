@@ -1,7 +1,10 @@
 export type GenericFontFamily = 'serif' | 'sans-serif' | 'monospace' | 'cursive' | 'fantasy';
 
 export interface WordFamilySubstitute {
-  /** Look-alike family on a Google-compatible font CSS service, or null when none is close enough. */
+  /**
+   * Look-alike family on a Google-compatible font CSS service, or null when none is close enough.
+   * Only used when no bundled face resolves for the family.
+   */
   remote: string | null;
   generic: GenericFontFamily;
 }

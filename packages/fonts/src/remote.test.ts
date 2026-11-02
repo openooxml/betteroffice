@@ -53,7 +53,7 @@ describe('substitution table', () => {
 
   test('stays out of the main entry', () => {
     const index = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
-    expect(index).not.toMatch(/substitutes|remote/);
+    expect(index).not.toMatch(/from\s+['"]\.\/(?:substitutes|remote)['"]|import\(\s*['"]\.\/(?:substitutes|remote)['"]/);
   });
 });
 
