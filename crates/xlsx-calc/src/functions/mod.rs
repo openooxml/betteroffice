@@ -463,6 +463,67 @@ pub(crate) fn bare_name(name: &str) -> &str {
     }
 }
 
+/// excel built-ins whose result needs a live service, data connection, add-in
+/// or host, so no offline engine can compute them.
+const UNCOMPUTABLE: [&str; 18] = [
+    "CALL",
+    "COPILOT",
+    "CUBEKPIMEMBER",
+    "CUBEMEMBER",
+    "CUBEMEMBERPROPERTY",
+    "CUBERANKEDMEMBER",
+    "CUBESET",
+    "CUBESETCOUNT",
+    "CUBEVALUE",
+    "DETECTLANGUAGE",
+    "FIELDVALUE",
+    "IMAGE",
+    "PY",
+    "REGISTER.ID",
+    "RTD",
+    "STOCKHISTORY",
+    "TRANSLATE",
+    "WEBSERVICE",
+];
+
+/// the name to report for a call no offline engine can compute: one of
+/// [`UNCOMPUTABLE`], or an add-in (`_xll.`) or user-defined (`_xludf.`)
+/// function as written. `None` for any other name.
+pub(crate) fn uncomputable(name: &str) -> Option<String> {
+    let mut bare = bare_name(name);
+    if ["_xll.", "_xludf."]
+        .iter()
+        .any(|prefix| strip_ascii_prefix(bare, prefix).is_some())
+    {
+        return Some(bare.to_owned());
+    }
+    while let Some((_, rest)) =
+        strip_ascii_prefix(bare, "_xl").and_then(|rest| rest.split_once('.'))
+    {
+        bare = rest;
+    }
+    UNCOMPUTABLE
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(bare))
+        .map(|known| (*known).to_owned())
+}
+
+/// whether a formula's text may call a function [`uncomputable`] names: a
+/// cheap filter that can say yes for text that does not. the parser lets
+/// whitespace stand between a name and its `(`, so this does too.
+pub fn may_call_uncomputable(formula: &str) -> bool {
+    let upper = formula.to_ascii_uppercase();
+    upper.contains("_XLL.")
+        || upper.contains("_XLUDF.")
+        || UNCOMPUTABLE.iter().any(|name| {
+            upper.match_indices(name).any(|(at, _)| {
+                upper[at + name.len()..]
+                    .trim_start_matches([' ', '\t', '\n', '\r'])
+                    .starts_with('(')
+            })
+        })
+}
+
 fn strip_ascii_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     name.as_bytes()
         .get(..prefix.len())
@@ -1542,7 +1603,45 @@ pub(crate) fn finite(x: f64) -> CellValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{Func, UNION_NAME, resolve};
+    use super::{Func, UNCOMPUTABLE, UNION_NAME, may_call_uncomputable, resolve, uncomputable};
+
+    #[test]
+    fn formula_text_filters_for_uncomputable_calls() {
+        for formula in [
+            "IFERROR(_xlfn.WEBSERVICE(A1),0)",
+            "cubevalue(\"c\",A1)",
+            "_xll.Quote(1)",
+            "_XLUDF.mine()",
+            "_xlfn.WEBSERVICE (\"x\")",
+            "RTD\t\r\n(\"x\",,\"y\")",
+        ] {
+            assert!(may_call_uncomputable(formula), "{formula}");
+        }
+        for formula in ["SUM(A1:A3)", "WEBSERVICES", "A1&\"RTD\""] {
+            assert!(!may_call_uncomputable(formula), "{formula}");
+        }
+    }
+
+    #[test]
+    fn uncomputable_names_resolve_through_their_stored_prefixes() {
+        for name in UNCOMPUTABLE {
+            assert!(resolve(name).is_none(), "{name}");
+            assert_eq!(uncomputable(name).as_deref(), Some(name));
+        }
+        for (stored, reported) in [
+            ("_xlfn.WEBSERVICE", "WEBSERVICE"),
+            ("_xlfn._xlws.PY", "PY"),
+            ("cubevalue", "CUBEVALUE"),
+            ("register.id", "REGISTER.ID"),
+            ("_xll.Quote", "_xll.Quote"),
+            ("_xludf.MyFn", "_xludf.MyFn"),
+        ] {
+            assert_eq!(uncomputable(stored).as_deref(), Some(reported), "{stored}");
+        }
+        for name in ["SUM", "REPRO_UNKNOWN_FUNCTION", "_xlfn.SUM", "REGISTER"] {
+            assert_eq!(uncomputable(name), None, "{name}");
+        }
+    }
 
     #[test]
     fn every_builtin_name_and_alias_resolves_to_its_variant() {
