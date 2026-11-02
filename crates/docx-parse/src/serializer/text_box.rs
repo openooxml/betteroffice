@@ -21,6 +21,13 @@ fn drawing_path(element: &XmlElement) -> Option<Vec<u32>> {
         })
 }
 
+fn element_at<'a>(element: &'a XmlElement, path: &[u32]) -> Option<&'a XmlElement> {
+    let Some((&index, rest)) = path.split_first() else {
+        return Some(element);
+    };
+    element_at(element.child_elements().nth(index as usize)?, rest)
+}
+
 fn at_path<'a>(element: &'a mut XmlElement, path: &[u32]) -> Option<&'a mut XmlElement> {
     let Some((&index, rest)) = path.split_first() else {
         return Some(element);
@@ -48,6 +55,135 @@ fn content_paths(element: &XmlElement, path: &mut Vec<u32>, paths: &mut Vec<Vec<
     }
 }
 
+/// Replays a group or canvas from the part's source drawing with the same `wp:docPr` id,
+/// while the model matches that source apart from its frame and text-box text.
+pub(super) fn replay_group(
+    shape: &Shape,
+    context: &mut SerializerContext,
+) -> Result<Option<String>, ParseError> {
+    if shape.children.is_none() || shape.drawing_xml.is_some() || shape.drawing_run_xml.is_some() {
+        return Ok(None);
+    }
+    let Some(source) = shape
+        .id
+        .as_deref()
+        .and_then(|id| context.group_drawing(id))
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
+    let limits = ParseLimits::default();
+    let Ok(parsed) = parse_xml(
+        source.as_bytes(),
+        "group source",
+        &mut ParseBudget::new(&limits),
+    ) else {
+        return Ok(None);
+    };
+    let Some(drawing) = parsed
+        .roots
+        .first()
+        .filter(|root| root.local_name() == "drawing")
+    else {
+        return Ok(None);
+    };
+    let Some(mut baseline) = crate::shape::parse_shape_from_drawing(drawing) else {
+        return Ok(None);
+    };
+    crate::paragraph::apply_shape_metadata(&mut baseline, drawing);
+    let mut containers = Vec::new();
+    content_paths(drawing, &mut Vec::new(), &mut containers);
+    let bodies = crate::text_box::shape_text_bodies(shape);
+    let baseline_bodies = crate::text_box::shape_text_bodies(&baseline);
+    if bodies.len() != baseline_bodies.len() {
+        return Ok(None);
+    }
+    let mask: Vec<bool> = baseline_bodies
+        .iter()
+        .map(|body| !body.content.is_empty())
+        .collect();
+    let mapped = mask.iter().filter(|kept| **kept).count() == containers.len();
+    let mut kept = 0;
+    let mut hashes = Vec::with_capacity(bodies.len());
+    for (body, has_box) in bodies.iter().zip(&mask) {
+        let current = crate::text_box::content_sha256(&body.content);
+        let unchanged = !*has_box
+            || (mapped
+                && element_at(drawing, &containers[kept])
+                    .is_some_and(|container| same_text(container, &body.content, context)));
+        if *has_box {
+            kept += 1;
+        }
+        hashes.push(if unchanged { current } else { String::new() });
+    }
+    let mut replayed = shape.clone();
+    replayed.drawing_xml = Some(source);
+    replayed.drawing_run_xml = None;
+    replayed.drawing_model = Some(serde_json::json!({
+        "frame": crate::smart_art::frame_model(&baseline),
+        "otherSha256": crate::smart_art::other_model_sha256(&baseline),
+        "textBoxContentSha256": hashes,
+        "textBoxBodies": mapped.then_some(mask),
+        "groupSha256": crate::text_box::group_model_sha256(&baseline),
+    }));
+    replay(&replayed, context, false)
+}
+
+/// Whether the model text of one text box writes the same XML as its source paragraphs.
+fn same_text(
+    container: &XmlElement,
+    content: &[serde_json::Value],
+    context: &SerializerContext,
+) -> bool {
+    let mut scratch = context.clone();
+    let mut model = String::new();
+    for value in content {
+        let Ok(block) = serde_json::from_value::<BlockContent>(value.clone()) else {
+            return false;
+        };
+        let Ok(xml) = serialize_block_content(&block, &mut scratch) else {
+            return false;
+        };
+        model.push_str(&xml);
+    }
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let Ok(mut ids) = crate::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)) else {
+        return false;
+    };
+    let mut scratch = context.clone();
+    let mut source = String::new();
+    for child in container.child_elements() {
+        if child.local_name() != "p" {
+            return false;
+        }
+        let Ok(paragraph) = crate::paragraph::parse_paragraph(
+            child,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "group source",
+            &mut budget,
+            &mut ids,
+            None,
+            false,
+            0,
+        ) else {
+            return false;
+        };
+        let Ok(xml) = serialize_block_content(
+            &BlockContent::Paragraph(std::sync::Arc::new(paragraph)),
+            &mut scratch,
+        ) else {
+            return false;
+        };
+        source.push_str(&xml);
+    }
+    model == source
+}
+
 pub(super) fn replay(
     shape: &Shape,
     context: &mut SerializerContext,
@@ -62,6 +198,10 @@ pub(super) fn replay(
     else {
         return Ok(None);
     };
+    let group = model.get("groupSha256").and_then(serde_json::Value::as_str);
+    if group.is_some_and(|before| before != crate::text_box::group_model_sha256(shape)) {
+        return Ok(None);
+    }
     let Some(source) = shape
         .drawing_run_xml
         .as_deref()
@@ -92,12 +232,47 @@ pub(super) fn replay(
         &mut drawing.clone(),
         &mut paths,
     );
-    let bodies = crate::text_box::shape_text_bodies(shape);
+    let mut mapped = false;
+    let mut bodies = crate::text_box::shape_text_bodies(shape);
+    let mut baseline: Vec<&serde_json::Value> = baseline.iter().collect();
+    if let Some(mask) = model
+        .get("textBoxBodies")
+        .and_then(serde_json::Value::as_array)
+        .filter(|mask| mask.len() == bodies.len() && mask.len() == baseline.len())
+    {
+        mapped = true;
+        let kept = |index: &usize| mask[*index].as_bool() == Some(true);
+        if bodies
+            .iter()
+            .enumerate()
+            .any(|(index, body)| !kept(&index) && !body.content.is_empty())
+        {
+            return Ok(None);
+        }
+        bodies = bodies
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| kept(index))
+            .map(|(_, body)| body)
+            .collect();
+        baseline = baseline
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| kept(index))
+            .map(|(_, before)| before)
+            .collect();
+    }
     let unchanged = baseline.len() == bodies.len()
-        && bodies.iter().zip(baseline).all(|(body, before)| {
+        && bodies.iter().zip(&baseline).all(|(body, before)| {
             before.as_str() == Some(crate::text_box::content_sha256(&body.content).as_str())
         });
+    if group.is_some() && !unchanged && !mapped {
+        return Ok(None);
+    }
     if baseline.len() != bodies.len() || (paths.len() != bodies.len() && !unchanged) {
+        if group.is_some() {
+            return Ok(None);
+        }
         return Err(ParseError::Canonical(
             "text box source content mismatch".to_owned(),
         ));

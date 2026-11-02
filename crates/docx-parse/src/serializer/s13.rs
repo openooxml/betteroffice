@@ -301,6 +301,9 @@ fn write_docx_s13_parts_with_warnings(
         context.set_chart_drawings(chart_drawings_in_part(
             &package.text("word/document.xml").unwrap_or_default(),
         ));
+        context.set_group_drawings(group_drawings_in_part(
+            &package.text("word/document.xml").unwrap_or_default(),
+        ));
         let patched =
             build_source_patched_document_xml(&request.document, original, sources, &mut context)?;
         package.set_text("word/document.xml", patched);
@@ -436,6 +439,9 @@ fn write_docx_s13_parts_with_warnings(
             .and_then(|bytes| std::str::from_utf8(bytes).ok()),
     );
     context.set_chart_drawings(chart_drawings_in_part(
+        &package.text(&package.document_path).unwrap_or_default(),
+    ));
+    context.set_group_drawings(group_drawings_in_part(
         &package.text(&package.document_path).unwrap_or_default(),
     ));
     let document_xml = if let Some(patched) = patched_parts.remove(&package.document_path) {
@@ -652,6 +658,76 @@ fn write_docx_s13_parts_with_warnings(
 }
 
 /// Authored chart placements in one story part, keyed by relationship id.
+/// The part's `w:drawing` elements whose graphic is a group or canvas, keyed by `wp:docPr` id.
+fn group_drawings_in_part(xml: &str) -> HashMap<String, String> {
+    let mut drawings = HashMap::new();
+    if !xml.contains("/wordprocessingGroup\"") && !xml.contains("/wordprocessingCanvas\"") {
+        return drawings;
+    }
+    let mut repeated = HashSet::new();
+    let Some(tags) = crate::paragraph_identity::tags(xml) else {
+        return drawings;
+    };
+    let local = |name: &str| {
+        name.rsplit_once(':')
+            .map_or(name, |(_, local)| local)
+            .to_owned()
+    };
+    let mut depth = 0usize;
+    let mut open: Vec<(usize, usize, usize)> = Vec::new();
+    for (index, tag) in tags.iter().enumerate() {
+        if tag.end {
+            depth = depth.saturating_sub(1);
+            if local(tag.name) == "drawing"
+                && let Some(&(at, start, first)) = open.last()
+                && at == depth
+            {
+                open.pop();
+                let inner = &tags[first..index];
+                let group = inner
+                    .iter()
+                    .find(|tag| !tag.end && local(tag.name) == "graphicData")
+                    .and_then(|tag| {
+                        tag.attributes
+                            .iter()
+                            .find(|(name, _)| *name == "uri")
+                            .map(|(_, range)| &xml[range.clone()])
+                    })
+                    .is_some_and(|uri| {
+                        uri.ends_with("/wordprocessingGroup")
+                            || uri.ends_with("/wordprocessingCanvas")
+                    });
+                let id = inner
+                    .iter()
+                    .find(|tag| !tag.end && local(tag.name) == "docPr")
+                    .and_then(|tag| {
+                        tag.attributes
+                            .iter()
+                            .find(|(name, _)| *name == "id")
+                            .map(|(_, range)| xml[range.clone()].to_owned())
+                    });
+                if group && let Some(id) = id {
+                    if drawings
+                        .insert(id.clone(), xml[start..tag.range.end].to_owned())
+                        .is_some()
+                    {
+                        repeated.insert(id);
+                    }
+                }
+            }
+            continue;
+        }
+        if local(tag.name) == "drawing" && !tag.empty {
+            open.push((depth, tag.range.start, index + 1));
+        }
+        if !tag.empty {
+            depth += 1;
+        }
+    }
+    drawings.retain(|id, _| !repeated.contains(id));
+    drawings
+}
+
 fn chart_drawings_in_part(xml: &str) -> HashMap<String, String> {
     let drawing_prefix = declared_prefix(xml, &WORDPROCESSINGML_URIS, "w");
     let chart_prefix = declared_prefix(xml, &CHART_URIS, "c");
@@ -1252,6 +1328,9 @@ impl StoryParts<'_> {
     ) -> Result<String, ParseError> {
         let path = package.resolve_path(path);
         context.set_chart_drawings(chart_drawings_in_part(
+            &package.text(path).unwrap_or_default(),
+        ));
+        context.set_group_drawings(group_drawings_in_part(
             &package.text(path).unwrap_or_default(),
         ));
         let Some(part) = self.spliced.get(path) else {
