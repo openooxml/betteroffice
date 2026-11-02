@@ -1412,6 +1412,9 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
         Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
             crate::functions::lookups::index_area(args, ctx).ok()
         }
+        Expr::FuncCall { name, args, .. } if crate::functions::grouping::trims(name) => {
+            crate::functions::grouping::trim_area(name, args, ctx).and_then(Result::ok)
+        }
         Expr::Ref { sheet, cell } => Some(Area {
             sheet: resolve_sheet(sheet, ctx)?,
             start: *cell,
@@ -1467,6 +1470,9 @@ pub(crate) fn resolve_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Result<A
         {
             let area = resolve_area(&args[0], ctx)?;
             Some(area.and_then(|area| crate::functions::lookups::index_within(area, args, ctx)))
+        }
+        Expr::FuncCall { name, args, .. } if crate::functions::grouping::trims(name) => {
+            crate::functions::grouping::trim_area(name, args, ctx)
         }
         Expr::RangeJoin { start, end } => Some(range_join_area(start, end, ctx)),
         Expr::TableRef { table, spec } => Some(table_area(table, spec, ctx)),

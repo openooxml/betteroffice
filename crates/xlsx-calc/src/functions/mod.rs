@@ -15,7 +15,9 @@ pub mod database;
 pub mod datetime;
 pub mod distributions;
 pub mod engineering;
+pub(crate) mod euro;
 pub mod financial;
+pub(crate) mod grouping;
 pub mod info;
 pub mod info_extra;
 pub mod logical;
@@ -111,6 +113,7 @@ pub enum Func {
     Randbetween,
     Rand,
     Forecast,
+    EuroConvert,
     Gcd,
     Lcm,
     Even,
@@ -463,7 +466,7 @@ pub(crate) fn bare_name(name: &str) -> &str {
     }
 }
 
-fn strip_ascii_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+pub(crate) fn strip_ascii_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     name.as_bytes()
         .get(..prefix.len())
         .filter(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
@@ -564,6 +567,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "RANDBETWEEN" => Func::Randbetween,
         "RAND" => Func::Rand,
         "FORECAST" | "FORECAST.LINEAR" => Func::Forecast,
+        "EUROCONVERT" => Func::EuroConvert,
         "GCD" => Func::Gcd,
         "LCM" => Func::Lcm,
         "EVEN" => Func::Even,
@@ -987,6 +991,7 @@ impl Func {
             Func::Randbetween => math::randbetween(args, ctx),
             Func::Rand => math::rand(args, ctx),
             Func::Forecast => stats::forecast(args, ctx),
+            Func::EuroConvert => euro::euroconvert(args, ctx),
             Func::Gcd => math::gcd(args, ctx),
             Func::Lcm => math::lcm(args, ctx),
             Func::Even => math::even(args, ctx),
@@ -1342,11 +1347,14 @@ pub(crate) fn argument_cells(
     if let Some(area) = as_area(arg, ctx) {
         return Ok((area_cells(&[area], ctx)?, true));
     }
-    let cells = crate::array::evaluate_array(arg, ctx)
-        .into_array()
-        .into_values();
-    let from_sheet = cells.len() > 1;
-    Ok((cells, from_sheet))
+    match crate::array::evaluate_array(arg, ctx) {
+        crate::array::Value::Array(array) => Ok((array.into_values(), true)),
+        value => {
+            let cells = value.into_array().into_values();
+            let from_sheet = cells.len() > 1;
+            Ok((cells, from_sheet))
+        }
+    }
 }
 
 fn area_cells(areas: &[Area], ctx: &EvalContext<'_>) -> Result<Vec<CellValue>, ErrorValue> {
@@ -1606,6 +1614,7 @@ mod tests {
             (Func::Randbetween, "RANDBETWEEN"),
             (Func::Rand, "RAND"),
             (Func::Forecast, "FORECAST"),
+            (Func::EuroConvert, "EUROCONVERT"),
             (Func::Gcd, "GCD"),
             (Func::Lcm, "LCM"),
             (Func::Even, "EVEN"),
