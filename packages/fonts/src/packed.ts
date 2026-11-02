@@ -145,6 +145,7 @@ export function loadProgressiveFace(
   timeoutMs?: number,
   wasmUrl?: URL,
   runtime?: { decoder?: FontDecoder },
+  readFile: typeof readFontBytes = readFontBytes,
 ): Promise<ProgressiveFontFace> {
   const ref = sliceRefOf(face.file);
   if (ref === undefined) return Promise.reject(new Error(`Bundled font ${face.file} is not sliced`));
@@ -158,7 +159,7 @@ export function loadProgressiveFace(
   let pending = cache.get(key);
   if (pending === undefined) {
     pending = openProgressiveFace(ref, {
-      read: async (file) => readFontBytes(file, await resolveFile(file), timeoutMs),
+      read: async (file) => readFile(file, await resolveFile(file), timeoutMs),
       decode: async (encoded, maxOutput) => (decoder === undefined
         ? await (await import('./decode')).decodeFontFace(encoded, undefined, { codec: 'zstd', maxOutput, wasmUrl })
         : await decoder(encoded, { codec: 'zstd', maxOutput })).font,

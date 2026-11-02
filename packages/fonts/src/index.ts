@@ -6,6 +6,7 @@ export type { ProgressiveFontFace } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
+import { readFontAsset } from './asset';
 import { loadPackedFontBytes, loadProgressiveFace, isLatinFont, sliceRefOf } from './packed';
 import type { ProgressiveFontFace } from './progressive';
 
@@ -231,6 +232,7 @@ function progressiveLoader(
     undefined,
     baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
     runtime,
+    readFontAsset,
   );
 }
 
