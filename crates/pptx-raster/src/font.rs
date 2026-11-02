@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 
 use ooxml_text::{FontId, FontStore, PathCmd, shape};
 use pptx_render::{PositionedTextLine, PositionedTextRun};
-use tiny_skia::{Color, FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
+use tiny_skia::{Color, FillRule, Mask, Paint, Path, Pixmap, Rect, Transform};
 
 use crate::{RenderResources, parse_color};
 
@@ -253,27 +253,7 @@ fn cached_glyph<'a>(
 }
 
 fn outline_path(commands: &[PathCmd]) -> Result<Option<Path>, String> {
-    if commands.is_empty() {
-        return Ok(None);
-    }
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => builder.move_to(x, y),
-            PathCmd::LineTo { x, y } => builder.line_to(x, y),
-            PathCmd::QuadTo { cx, cy, x, y } => builder.quad_to(cx, cy, x, y),
-            PathCmd::CubicTo {
-                c1x,
-                c1y,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => builder.cubic_to(c1x, c1y, c2x, c2y, x, y),
-            PathCmd::Close => builder.close(),
-        }
-    }
-    Ok(builder.finish())
+    Ok(ooxml_raster::outline_path(commands))
 }
 
 #[cfg(test)]
@@ -316,5 +296,20 @@ mod tests {
         let error = cached_glyph(&mut cache, &second, other, u32::from(glyph))
             .expect_err("refuse a foreign store");
         assert!(error.contains("bound to another font store"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn outline_keeps_empty_and_undrawable_results() {
+        assert!(outline_path(&[]).unwrap().is_none());
+        assert!(
+            outline_path(&[PathCmd::MoveTo { x: 0.0, y: 0.0 }])
+                .unwrap()
+                .is_none()
+        );
     }
 }
