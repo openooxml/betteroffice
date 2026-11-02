@@ -299,7 +299,10 @@ mod tests {
         assert_eq!(field.scripts, ["cjk-jp", "arabic"]);
         let marker = text_requirement(&run("١.", &["cjk-jp"])).unwrap();
         assert_eq!(marker.scripts, ["cjk-jp", "arabic"]);
-        assert_eq!(text_requirement(&run("骨", &["cjk-jp"])).unwrap().scripts, ["cjk-jp"]);
+        assert_eq!(
+            text_requirement(&run("骨", &["cjk-jp"])).unwrap().scripts,
+            ["cjk-jp"]
+        );
         assert_eq!(
             text_requirement(&run("骨", &["cjk-sc"])).unwrap().scripts,
             ["cjk-sc"]
