@@ -2345,10 +2345,17 @@ impl Workbook {
                 options.now_serial,
             );
             validate_cell_state(&state)?;
-            preview
-                .sheet_mut(edit.sheet)
-                .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                .set_cell(edit.cell, state.into());
+            if format.is_some()
+                || !cell_states_semantically_equal(
+                    &current_cell_state(&preview, edit.sheet, edit.cell),
+                    &state,
+                )
+            {
+                preview
+                    .sheet_mut(edit.sheet)
+                    .ok_or(Error::SheetOutOfRange(edit.sheet))?
+                    .set_cell(edit.cell, state.into());
+            }
             if let Some(format) = format {
                 xlsx_ops::apply_in_place(&mut preview, &format)?;
             }
@@ -4673,7 +4680,15 @@ fn edit_cell_state(
         .number_format;
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
-    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    let mut state = match parsed {
+        xlsx_ops::ParsedInput::Formula(text) if stores_formula(workbook, sheet, cell, &text) => {
+            CellState {
+                formula: Some(text),
+                ..CellState::default()
+            }
+        }
+        parsed => xlsx_ops::cell_state_from_parsed(input, parsed),
+    };
     state.formula = state.formula.map(|typed| {
         committed_formula(
             typed,
@@ -4753,6 +4768,16 @@ fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, o
         }
         _ => {}
     }
+}
+
+/// Whether `cell` holds exactly `formula`, which re-committing keeps even when the engine
+/// cannot parse it.
+fn stores_formula(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef, formula: &str) -> bool {
+    workbook
+        .sheet(sheet)
+        .and_then(|sheet| sheet.cell(cell))
+        .and_then(|cell| cell.formula.as_deref())
+        == Some(formula)
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {
