@@ -6482,6 +6482,7 @@ pub(crate) fn emit_paragraph_fragment(
 
     let mut line_top = origin_y;
     let mut last_line: Option<LinePaintMetrics> = None;
+    let scripts = paragraph_scripts(&block.runs);
     for idx in frag.from_line..frag.to_line.min(total_lines) {
         let line = &measure.lines[idx];
         // lead skip reserves vertical space above the line (float push-down)
@@ -6513,6 +6514,7 @@ pub(crate) fn emit_paragraph_fragment(
             },
             &block_ref,
             ctx,
+            &scripts,
         );
         for primitive in &mut prims[line_stamp_from..] {
             if let Some(attrs) = doc_attrs_mut(primitive) {
@@ -6834,10 +6836,10 @@ fn emit_line(
     geom: LineGeom,
     block_ref: &BlockRef,
     ctx: &RenderCtx<'_>,
+    scripts: &[String],
 ) -> Option<LinePaintMetrics> {
     let echo_start = prims.len();
     let segments = resolve_line_segments(&block.runs, line);
-    let scripts = paragraph_scripts(&block.runs);
     let attrs = block.attrs.as_ref();
     let auto_space = ooxml_text::AutoSpace::from_options(
         attrs.and_then(|attrs| attrs.auto_space_de),
@@ -7016,7 +7018,7 @@ fn emit_line(
             width: px(slot_width),
             paint_clip: None,
             font: css_font(&marker_format),
-            scripts: boxed_scripts(&scripts),
+            scripts: boxed_scripts(scripts),
             color: color.to_owned(),
             letter_spacing: None,
             word_spacing: None,
@@ -7280,7 +7282,7 @@ fn emit_line(
                     ctx.shape,
                     auto_space,
                     item.field,
-                    &scripts,
+                    scripts,
                 );
                 if item.pm_start.is_some() {
                     emitted_positioned_text = true;
