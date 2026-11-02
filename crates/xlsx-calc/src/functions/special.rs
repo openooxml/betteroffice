@@ -794,15 +794,23 @@ pub(crate) fn f_tails(x: f64, d1: f64, d2: f64) -> (f64, f64) {
     if x <= 0.0 {
         return (0.0, 1.0);
     }
+    if x == 1.0 && d1 == d2 {
+        return (0.5, 0.5);
+    }
     let (u, v) = f_parts(x, d1, d2);
     beta_pq(0.5 * d1, 0.5 * d2, u, v)
 }
 
 /// the f quantile: x with cdf p, where q = 1 - p is passed exactly; the
-/// smaller tail is inverted.
+/// smaller tail is inverted. with equal degrees of freedom F and 1/F share a
+/// distribution, so the median is exactly 1, as Excel gives at 10^9 and
+/// 10^10 degrees of freedom.
 pub(crate) fn f_quantile(p: f64, q: f64, d1: f64, d2: f64) -> f64 {
     if p <= 0.0 {
         return 0.0;
+    }
+    if p == q && d1 == d2 {
+        return 1.0;
     }
     let f = |x: f64| {
         let (lower, upper) = f_tails(x, d1, d2);
