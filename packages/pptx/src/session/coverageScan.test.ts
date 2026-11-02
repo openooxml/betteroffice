@@ -77,12 +77,17 @@ test('a part that inflates past its declared size is abandoned at the scan limit
   declareSize(bytes, 'ppt/presentation.xml', 100);
   const native = globalThis.DecompressionStream;
   let inflated = 0;
+  let largestInput = 0;
   globalThis.DecompressionStream = class {
     readonly writable: WritableStream<BufferSource>;
     readonly readable: ReadableStream<Uint8Array>;
     constructor(format: CompressionFormat) {
       const inner = new native(format);
-      this.writable = inner.writable;
+      const input = new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) { largestInput = Math.max(largestInput, chunk.byteLength); controller.enqueue(chunk); },
+      });
+      input.readable.pipeTo(inner.writable).catch(() => {});
+      this.writable = input.writable as unknown as WritableStream<BufferSource>;
       this.readable = inner.readable.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) { inflated += chunk.byteLength; controller.enqueue(chunk); },
       }));
@@ -94,6 +99,15 @@ test('a part that inflates past its declared size is abandoned at the scan limit
     globalThis.DecompressionStream = native;
   }
   expect(inflated).toBeLessThan(6 * 1024 * 1024);
+  expect(largestInput).toBeGreaterThan(0);
+  expect(largestInput).toBeLessThanOrEqual(1024);
+}, 60_000);
+
+test('a long language tag is read once per run, not once per character', () => {
+  const language = `ja-x-${'a-'.repeat(10_000)}b`;
+  const started = performance.now();
+  expect(slideCoverageScripts(slide(run('漢'.repeat(10_000), language)))).toEqual(['cjk-jp']);
+  expect(performance.now() - started).toBeLessThan(250);
 }, 60_000);
 
 test('stored parts must match their declared size', async () => {

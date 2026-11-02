@@ -1,6 +1,7 @@
 const MAX_PART_BYTES = 4 * 1024 * 1024;
 const MAX_SCAN_BYTES = 8 * 1024 * 1024;
 const MAX_ENTRIES = 5000;
+const INFLATE_INPUT_BYTES = 1024;
 
 interface ZipEntry {
   method: number;
@@ -38,9 +39,22 @@ function centralDirectory(bytes: Uint8Array): Map<string, ZipEntry> | undefined 
   return entries;
 }
 
-/** Inflates `data`, giving up as soon as the output passes `limit` bytes, whatever the entry declared. */
+/**
+ * Inflates `data`, giving up as soon as the output passes `limit` bytes, whatever the entry declared. Input goes
+ * in small slices under backpressure, so one slice expands to at most about a megabyte before the count sees it.
+ */
 async function inflate(data: Uint8Array<ArrayBuffer>, limit: number): Promise<Uint8Array | undefined> {
-  const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+  const stream = new DecompressionStream('deflate-raw');
+  const writer = stream.writable.getWriter();
+  const reader = stream.readable.getReader();
+  let stopped = false;
+  void (async () => {
+    for (let at = 0; at < data.byteLength && !stopped; at += INFLATE_INPUT_BYTES) {
+      await writer.ready;
+      if (!stopped) await writer.write(data.subarray(at, at + INFLATE_INPUT_BYTES));
+    }
+    if (!stopped) await writer.close();
+  })().catch(() => {});
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
@@ -49,12 +63,16 @@ async function inflate(data: Uint8Array<ArrayBuffer>, limit: number): Promise<Ui
       if (done) break;
       total += value.byteLength;
       if (total > limit) {
+        stopped = true;
         void reader.cancel().catch(() => {});
+        void writer.abort().catch(() => {});
         return undefined;
       }
       chunks.push(value);
     }
   } catch {
+    stopped = true;
+    void writer.abort().catch(() => {});
     return undefined;
   }
   const out = new Uint8Array(total);
@@ -125,7 +143,7 @@ function hanScript(language: string | undefined): string | undefined {
   return rest.some((part) => part === 'hant' || part === 'tw' || part === 'hk' || part === 'mo') ? 'cjk-tc' : 'cjk-sc';
 }
 
-function addScripts(text: string, language: string | undefined, scripts: Set<string>): void {
+function addScripts(text: string, han: string | undefined, scripts: Set<string>): void {
   for (const character of text) {
     const point = character.codePointAt(0)!;
     if ((point >= 0x3040 && point <= 0x30ff) || (point >= 0x31f0 && point <= 0x31ff) || (point >= 0xff66 && point <= 0xff9f)) {
@@ -133,8 +151,7 @@ function addScripts(text: string, language: string | undefined, scripts: Set<str
     } else if ((point >= 0xac00 && point <= 0xd7ff) || (point >= 0x1100 && point <= 0x11ff) || (point >= 0x3130 && point <= 0x318f)) {
       scripts.add('cjk-kr');
     } else if ((point >= 0x4e00 && point <= 0x9fff) || (point >= 0x3400 && point <= 0x4dbf) || (point >= 0xf900 && point <= 0xfaff) || point >= 0x20000) {
-      const script = hanScript(language);
-      if (script) scripts.add(script);
+      if (han) scripts.add(han);
     }
   }
 }
@@ -142,16 +159,16 @@ function addScripts(text: string, language: string | undefined, scripts: Set<str
 /** CJK coverage scripts the slide's text certainly needs: kana, hangul, or Han in a run tagged ja, ko or zh. */
 export function slideCoverageScripts(xml: string): string[] {
   const scripts = new Set<string>();
-  let language: string | undefined;
+  let han: string | undefined;
   eachTag(xml, 0, xml.length, (tag, end) => {
     if (isTag(tag, 'a:rPr') || isTag(tag, 'a:endParaRPr')) {
-      language = attribute(tag, 'lang');
+      han = hanScript(attribute(tag, 'lang'));
     } else if (tag === '/a:r') {
-      language = undefined;
+      han = undefined;
     } else if (isTag(tag, 'a:t') && !tag.endsWith('/')) {
       const close = xml.indexOf('<', end);
       const stop = close < 0 ? xml.length : close;
-      addScripts(xml.slice(end, stop), language, scripts);
+      addScripts(xml.slice(end, stop), han, scripts);
       return stop;
     }
   });
