@@ -813,10 +813,11 @@ export function createPluginGeometry(
       return anchorFailure('stale-version', 'The document changed after that version');
     }
     const current = live.reservations?.();
-    if (!current || (reservationsKeyOf(queries) !== current.key && !sameReservationOwner(reservationsOf(queries), current, owner))) return unavailable();
+    if (!current) return unavailable();
     const entry = current.resolved?.[JSON.stringify([owner, id])];
     const item = current.payload?.sets.find((set) => set.owner === owner)?.items.find((item) => item.id === id);
     if (!entry && !item) return anchorFailure('missing-target', 'The reservation did not resolve');
+    if (reservationsKeyOf(queries) !== current.key && !sameReservationOwner(reservationsOf(queries), current, owner)) return unavailable();
     if (item?.kind === 'hide') return anchorGeometry(item.anchor, undefined, true, true);
     if (entry?.kind === 'hide') {
       const lead = paragraphInlineStart(live.session, layout.version, entry.story, entry.paraId);

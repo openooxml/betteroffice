@@ -21,6 +21,8 @@
  * package established the pattern).
  */
 
+import { readWasmSync as readAssetSync } from '#session-scope';
+
 export type WasmSyncInput = BufferSource | WebAssembly.Module;
 export type WasmAsyncInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -53,40 +55,9 @@ export async function compileWasm(input: WasmAsyncInput): Promise<WebAssembly.Mo
   return WebAssembly.compile(input as BufferSource);
 }
 
-interface NodeFsLike {
-  readFileSync(path: string): Uint8Array;
-}
-interface NodeUrlLike {
-  fileURLToPath(url: string): string;
-}
-
-function builtinModule<T>(name: string): T | undefined {
-  const proc = (
-    globalThis as {
-      process?: { getBuiltinModule?: (id: string) => unknown };
-    }
-  ).process;
-  if (typeof proc?.getBuiltinModule !== 'function') return undefined;
-  try {
-    return proc.getBuiltinModule(name) as T;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Read a `file:` wasm asset synchronously from disk; undefined off-Node. */
 export function readWasmSync(url: URL): Uint8Array | undefined {
-  if (url.protocol !== 'file:') return undefined;
-  const fs = builtinModule<NodeFsLike>('node:fs');
-  const nodeUrl = builtinModule<NodeUrlLike>('node:url');
-  if (!fs || !nodeUrl) return undefined;
-  try {
-    // `.href` and not the URL object: fileURLToPath brand-checks its argument,
-    // so a shim supplying a non-native URL would otherwise fail the read.
-    return fs.readFileSync(nodeUrl.fileURLToPath(url.href));
-  } catch {
-    return undefined;
-  }
+  return readAssetSync(url);
 }
 
 /**
@@ -182,6 +153,7 @@ export function createWasmModuleState(options: {
   label: string;
   preloadName: string;
   assetUrl: () => URL;
+  engineKind?: 'wasm' | 'native';
   initAsync: (input: { module_or_path: WasmAsyncInput | Promise<WasmAsyncInput> }) => Promise<unknown>;
   initSync: (input: { module: WasmSyncInput }) => unknown;
   shareModule?: boolean;
@@ -199,6 +171,9 @@ export function createWasmModuleState(options: {
   });
 
   function module(): Promise<WebAssembly.Module> {
+    if (options.engineKind === 'native') {
+      return Promise.reject(new Error('Native engines have no WebAssembly module'));
+    }
     if (!compiled) {
       const compiling = compileWasm(defaultAsyncInput(options.assetUrl())).catch((error) => {
         if (compiled === compiling) compiled = undefined;
@@ -230,11 +205,16 @@ export function createWasmModuleState(options: {
     },
     module,
     sharedModule(): Promise<WebAssembly.Module | null> {
+      if (options.engineKind === 'native') return Promise.resolve(null);
       if (compiled) return compiled;
       if (initialized || pending) return Promise.resolve(null);
       return module();
     },
     preload(input?: WasmAsyncInput): Promise<void> {
+      if (options.engineKind === 'native') {
+        initialized = true;
+        return Promise.resolve();
+      }
       if (initialized) return Promise.resolve();
       if (pending) return pending;
       if (typeof WebAssembly !== 'undefined' && input instanceof WebAssembly.Module) {
@@ -245,6 +225,11 @@ export function createWasmModuleState(options: {
       );
     },
     preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
+      if (options.engineKind === 'native') {
+        initialized = true;
+        void source.catch(() => {});
+        return Promise.resolve();
+      }
       if (initialized) return Promise.resolve();
       if (pending) return pending;
       return initialize(
@@ -259,6 +244,10 @@ export function createWasmModuleState(options: {
     },
     ensure(): void {
       if (initialized) return;
+      if (options.engineKind === 'native') {
+        initialized = true;
+        return;
+      }
       const bytes = readWasmSync(options.assetUrl());
       if (bytes) {
         memory = exportedMemory(options.initSync({ module: bytes }));

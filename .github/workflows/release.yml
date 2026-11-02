@@ -191,8 +191,9 @@ jobs:
     needs: python-bindings
     if: needs.python-bindings.outputs.publish != '[]'
     runs-on: ubuntu-latest
-    # Covers the dispatched workflow's own worst case: 45 (wheels) + 5 + 15 (publish).
-    timeout-minutes: 75
+    # Covers the font packs' worst case, 15 (wheel) + 5 + 15 (publish), then the
+    # bindings': 45 (wheels) + 5 + 15 (publish).
+    timeout-minutes: 110
     permissions:
       actions: write # dispatch publish-python-binding.yml
     steps:
@@ -204,29 +205,41 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           status=0
-          runs=""
-          for binding in $(echo "$PUBLISH" | jq -r '.[]'); do
-            # From API version 2026-03-10 the dispatch returns the created run's id,
-            # so the wait below watches exactly the runs this job started.
-            if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
-              "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
-              -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
-              -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
-              runs="$runs $binding:$run"
-            else
-              echo "::error::Dispatching the publish of betteroffice-$binding failed."
-              status=1
-            fi
-          done
+          publish() {
+            runs=""
+            for binding in "$@"; do
+              # From API version 2026-03-10 the dispatch returns the created run's id,
+              # so the wait below watches exactly the runs this job started.
+              if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+                "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
+                -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+                -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+                runs="$runs $binding:$run"
+              else
+                echo "::error::Dispatching the publish of betteroffice-$binding failed."
+                status=1
+              fi
+            done
 
-          for entry in $runs; do
-            binding=${entry%%:*}
-            run=${entry#*:}
-            if ! gh run watch "$run" --exit-status; then
-              echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
-              status=1
-            fi
-          done
+            for entry in $runs; do
+              binding=${entry%%:*}
+              run=${entry#*:}
+              if ! gh run watch "$run" --exit-status; then
+                echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+                status=1
+              fi
+            done
+          }
+
+          packs=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-"))')
+          formats=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-") | not)')
+          publish $packs
+          if [ $status -ne 0 ] && [ -n "$formats" ]; then
+            echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
+            echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
+            exit 1
+          fi
+          publish $formats
           exit $status
 
   # npm Trusted Publishers name publish-native.yml, so dispatch it with this run's

@@ -486,6 +486,31 @@ describe('loading', () => {
     }
   });
 
+  test.skipIf(!existsSync(new URL('./decoder/fontpack.wasm', import.meta.url)))(
+    'a baseUrl holding only font assets decodes packed faces with the decoder shipped in the package',
+    async () => {
+      const realFetch = globalThis.fetch;
+      const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
+      const original = host.getBuiltinModule;
+      const face = resolveMetricCompatFace('Calibri', false, false)!;
+      const decoderRequests: string[] = [];
+      host.getBuiltinModule = (id: string) => id === 'node:zlib' ? {} : original?.call(host, id);
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (!String(input).endsWith('.wasm')) return fontAssetResponse(input);
+        decoderRequests.push(String(input));
+        return new Response('missing', { status: 404 });
+      }) as unknown as typeof fetch;
+      try {
+        const bytes = await loadBundledFontBytes(face, { baseUrl: 'https://fonts-only.example/assets/' });
+        expect(bytes.byteLength).toBe(face.byteLength);
+        expect(decoderRequests).toEqual(['https://fonts-only.example/assets/decoder/fontpack.wasm']);
+      } finally {
+        globalThis.fetch = realFetch;
+        host.getBuiltinModule = original;
+      }
+    },
+  );
+
   test('explains that server-side provider bases must be absolute', () => {
     expect(() => createFontProvider({ baseUrl: 'fonts/' })).toThrow(
       'baseUrl must be absolute when no browser location exists'

@@ -163,7 +163,7 @@ fn escape_table_name(name: &str) -> String {
 fn literal(value: &xlsx_model::CellValue) -> String {
     match value {
         xlsx_model::CellValue::Empty => "\"\"".to_string(),
-        xlsx_model::CellValue::Number { value } => crate::eval::format_number(*value),
+        xlsx_model::CellValue::Number { value } => crate::eval::exact_number_text(*value),
         xlsx_model::CellValue::Text { value } => format!("\"{}\"", value.replace('"', "\"\"")),
         xlsx_model::CellValue::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
         xlsx_model::CellValue::Error { value } => value.as_str().to_string(),

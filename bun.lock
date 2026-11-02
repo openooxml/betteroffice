@@ -28,6 +28,8 @@
         "@betteroffice/vsdx-react": "workspace:*",
         "@betteroffice/xlsx": "workspace:*",
         "@betteroffice/xlsx-react": "workspace:*",
+        "@fontsource-variable/geist": "^5.3.0",
+        "@fontsource-variable/geist-mono": "^5.3.0",
         "@tailwindcss/postcss": "^4.3.2",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
@@ -83,6 +85,7 @@
       "name": "@betteroffice/docs",
       "version": "0.0.1",
       "dependencies": {
+        "@fontsource-variable/inter": "^5.2.8",
         "cnfast": "^0.0.8",
         "fumadocs-core": "16.10.7",
         "fumadocs-mdx": "15.0.13",
@@ -161,6 +164,8 @@
       "name": "@betteroffice/web",
       "version": "0.0.1",
       "dependencies": {
+        "@fontsource-variable/geist": "^5.3.0",
+        "@fontsource-variable/geist-mono": "^5.3.0",
         "@tailwindcss/postcss": "^4.3.2",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
@@ -215,16 +220,30 @@
     "bindings/docx-native": {
       "name": "@betteroffice/docx-native",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^0",
+        "@betteroffice/fonts-cjk": "workspace:^0",
+        "@betteroffice/fonts-intl": "workspace:^0",
+        "@betteroffice/fonts-latin": "workspace:^0",
+      },
       "devDependencies": {
         "@types/node": "^26.0.0",
+        "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
     },
     "bindings/pptx-native": {
       "name": "@betteroffice/pptx-native",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
+        "@betteroffice/fonts-cjk": "workspace:^",
+        "@betteroffice/fonts-intl": "workspace:^",
+        "@betteroffice/fonts-latin": "workspace:^",
+      },
       "devDependencies": {
         "@types/node": "^26.0.0",
+        "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
     },
@@ -249,6 +268,7 @@
       "version": "0.5.1",
       "devDependencies": {
         "@types/node": "^26.0.0",
+        "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
     },
@@ -279,26 +299,19 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "optionalDependencies": {
-        "@betteroffice/xlsx-native": "workspace:^",
-      },
     },
     "packages/docx": {
       "name": "@betteroffice/docx",
       "version": "0.5.1",
+      "dependencies": {
+        "@betteroffice/fonts": "workspace:^0",
+      },
       "devDependencies": {
-        "@betteroffice/fonts": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/fonts": "workspace:^0",
-      },
-      "optionalPeers": [
-        "@betteroffice/fonts",
-      ],
     },
     "packages/docx-i18n": {
       "name": "@betteroffice/docx-i18n",
@@ -403,12 +416,6 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/pptx-native": "workspace:^",
-      },
-      "optionalPeers": [
-        "@betteroffice/pptx-native",
-      ],
     },
     "packages/pptx-i18n": {
       "name": "@betteroffice/pptx-i18n",
@@ -492,12 +499,6 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
-      "peerDependencies": {
-        "@betteroffice/xlsx-native": "workspace:^",
-      },
-      "optionalPeers": [
-        "@betteroffice/xlsx-native",
-      ],
     },
     "packages/xlsx-i18n": {
       "name": "@betteroffice/xlsx-i18n",
@@ -511,6 +512,7 @@
       "name": "@betteroffice/xlsx-react",
       "version": "0.5.1",
       "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
         "@betteroffice/xlsx": "workspace:*",
         "@betteroffice/xlsx-i18n": "workspace:*",
       },
@@ -922,6 +924,8 @@
     "@fontsource-variable/geist": ["@fontsource-variable/geist@5.3.0", "", {}, "sha512-j0m+vLQuG5XAYoHtGCVu0spvlGreR3EzpECUVzkFmI1mTVnAO38l/NEPDCFgZ177JxzYJCLSmTQibIiYPilGrA=="],
 
     "@fontsource-variable/geist-mono": ["@fontsource-variable/geist-mono@5.3.0", "", {}, "sha512-vBbuwDEo9AkrqADMXOrlAR3DFcJi4/JxeuU43FoiQERnNwsfXNnvxvReZG02cQKmyk4DZkZdBZX3oTDvy2zBAw=="],
+
+    "@fontsource-variable/inter": ["@fontsource-variable/inter@5.3.0", "", {}, "sha512-OupL48va4JNofb97w6NYeF9S7W/kHNKM0Er8Dem5nqi4jeOLrVJDoE8tZEpnMJmtkvNbB1EIPPwHcdkF6b1oUA=="],
 
     "@fuma-translate/react": ["@fuma-translate/react@1.0.2", "", { "peerDependencies": { "@types/react": "*", "react": "^19.2.0", "react-dom": "^19.2.0" }, "optionalPeers": ["@types/react"] }, "sha512-uOiOtBx3nRXR8Nu1GzBf1tApgF1FErDBTHxRIAQeyQdyOoZbrNRN6H4kDCWObY4qyGeGbHydG0DHzgeUgFDMIw=="],
 

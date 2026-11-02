@@ -25,6 +25,7 @@ async function initializeFonts(
     export async function initialize(session, request, bindResidentCommands) {
       let fontsRevision = -1;
       let glyphCache;
+      const OffscreenCanvas = class OffscreenCanvas {};
       const activeOffscreenPageIds = [], pendingOffscreenPageIds = new Set(), intactBackBuffers = new Map();
     const openedDocument = true, previewing = false, commandHost = null, commandHooksFactory = true, openedViaSource = false;
     let sourcePreviewing = false;
@@ -72,8 +73,10 @@ async function initializeFonts(
 }
 
 test('registration_slots_remap_substitute_aliases', async () => {
-  const fontChains = { base: [0], alias: [1, 2, 3], nested: [4, 1], duplicate: [0, 1, 2] };
-  const remapped = { base: [40], alias: [40, 41, 42], nested: [43, 40], duplicate: [40, 41] };
+  const fontChains = { base: [0], alias: [1, 2, 3], nested: [4, 1], duplicate: [0, 1, 2],
+    '@betteroffice/fonts/coverage': [0, 1, 2, 3, 4] };
+  const remapped = { base: [40], alias: [40, 41, 42], nested: [43, 40], duplicate: [40, 41],
+    '@betteroffice/fonts/coverage': [40, 41, 42, 43] };
   for (const useSlotChains of [false, true]) {
     const init: DocxCommandInitRequest & { fontRegistrationSlots: true | { fontChains: Record<string, number[]> } } = {
       session: 'fonts', incarnation: 1, epoch: 1, readOnly: false,

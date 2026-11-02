@@ -38,7 +38,7 @@ beforeAll(async () => {
     process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'
   ))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false): Uint8Array {
   const parts = new Map<string, Uint8Array>();
@@ -3906,4 +3906,9 @@ test('showing hidden text in a script without a fallback face hints, and require
   } finally {
     client.destroy();
   }
+}, TIMEOUT);
+
+test('worker command sessions name OffscreenCanvas when the runtime lacks it', async () => {
+  const factory = await residentWorkerFactory({ offscreenCanvas: undefined });
+  await expect(openWorker({ factory })).rejects.toThrow('DOCX worker editing paints frames and needs OffscreenCanvas');
 }, TIMEOUT);

@@ -363,7 +363,7 @@ fn calculation_status_formats_limited_addresses_and_omits_an_unspent_budget() {
     assert!(!workbook.calculation_status().budget_exhausted);
     assert_eq!(
         serde_json::to_string(&workbook.calculation_status()).unwrap(),
-        r#"{"limitedCells":["A1"]}"#
+        r#"{"limitedCells":["A1"],"unevaluatedCells":[]}"#
     );
     workbook.set_active_sheet(SheetId(1)).unwrap();
     assert_eq!(workbook.calculation_status().limited_cells, vec!["Data!A1"]);

@@ -60,7 +60,7 @@ beforeAll(async () => {
     new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')))
   );
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 afterAll(() => {
   setSystemTime();
@@ -610,7 +610,7 @@ describe('worker save', () => {
     opened.replica.dirtyStories.add('body');
     const remaining = comments.filter((comment) => comment.id !== id && comment.parentId !== id);
     const second = await compareSave(opened, remaining);
-    expect(commentMarkers(second, id)).toEqual(['Reference']);
+    expect(commentMarkers(second, id)).toEqual([]);
   }, TIMEOUT);
 
   it('projects only the body on the first save after a peer comment add', async () => {

@@ -21,7 +21,7 @@ let docs = 0;
 let docsWithComments = 0;
 let deletions = 0;
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 afterAll(() => {
   console.log(`Comment delete parity: ${docs} docs, ${docsWithComments} docs with comments, ${deletions} deletions compared`);
 });

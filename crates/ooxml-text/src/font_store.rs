@@ -260,6 +260,25 @@ pub struct FontStore {
 
 static NEXT_FONT_STORE_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Covered glyph character, including nonbreaking-hyphen stand-ins.
+pub fn covered_character(
+    store: &FontStore,
+    font: FontId,
+    ch: char,
+) -> Result<Option<char>, FontError> {
+    if store.covers(font, ch)? {
+        return Ok(Some(ch));
+    }
+    if ch == '\u{2011}' {
+        for stand_in in ['\u{2010}', '-'] {
+            if store.covers(font, stand_in)? {
+                return Ok(Some(stand_in));
+            }
+        }
+    }
+    Ok(None)
+}
+
 impl Default for FontStore {
     fn default() -> Self {
         Self::new()
@@ -673,7 +692,7 @@ impl FontStore {
         chain
             .iter()
             .copied()
-            .find(|&id| self.covers(id, ch).unwrap_or(false))
+            .find(|&id| covered_character(self, id, ch).ok().flatten().is_some())
     }
 
     fn entry(&self, id: FontId) -> Result<&FontEntry, FontError> {

@@ -2,9 +2,15 @@
 
 /// The font pack decoder shared by every engine.
 pub use betteroffice_fonts as fonts;
+#[cfg(feature = "fonts")]
+pub use fonts::OpenOptions;
+#[cfg(not(feature = "fonts"))]
+pub use open_options::OpenOptions;
 
 mod authority;
 mod error;
+#[cfg(all(feature = "fonts", feature = "raster"))]
+mod font;
 mod move_range;
 mod sheet_json;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -12,6 +18,12 @@ mod snapshot;
 mod structured;
 mod types;
 mod workbook;
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::workbook::recovery::decode as recovery_decode;
+}
 
 pub use error::Error;
 pub use snapshot::{
@@ -37,7 +49,7 @@ pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
-    TextSearchMatch, UpdateEvent, UpdateOrigin,
+    TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
 #[doc(hidden)]
 pub use workbook::PeerHydration;
@@ -51,13 +63,13 @@ pub use workbook::batch::{
 pub use workbook::reads::SheetInfoWire;
 pub use workbook::reads::{
     CalculationStatus, ConditionalFormatInfo, DefinedNameInfo, DefinedNamesRequest,
-    DefinedNamesResult,
+    DefinedNamesResult, UnevaluatedStatus,
 };
 pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,
     RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome, ReadRequest, SheetEntry,
-    TextFound,
+    TextFound, UnevaluatedTarget,
 };
 pub use workbook::{
     DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
@@ -93,3 +105,6 @@ pub use xlsx_render::{
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(not(feature = "fonts"))]
+mod open_options;

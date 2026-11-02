@@ -1,7 +1,6 @@
-import { createCollaborationPipeHost } from '../../../../shared/collaboration-pipe/worker';
+import type { CollaborationPipeHost } from '../../../../shared/collaboration-pipe/worker';
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
-import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
-import { CollaborationError, type AwarenessCursor, type AwarenessPeer } from '../collaboration/types';
+import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { deferReply, isHostMessage, transferable } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
@@ -16,6 +15,7 @@ import {
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
   type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
+import { workbookPngDisplayListJson, workbookRangePngDisplayListJson } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
@@ -44,7 +44,7 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } &
   collaborationPipe: PipeOutputBatch<AwarenessPeer>[];
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
-type WorkerCollaborationProvider = CollaborationProvider & { onPeers: CollaborationProvider['onAwareness'] };
+export const workbookCollaborationHostLoader = { load: () => import('./collaborationHost') };
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
@@ -60,10 +60,12 @@ export function createWorkbookSessionHost(
   options: {
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module, options?: WasmInitOptions) => Promise<void>;
     wasmModule?(): WebAssembly.Module | undefined;
+    renderPng?(displayListJson: string): Promise<Uint8Array>;
   } = {}
 ): SessionHost<Events> {
   let handle: WorkbookHandle | undefined;
   let disposed = false;
+  let enginePng: boolean | undefined;
   let version = 0;
   let dirty = false;
   let epoch = 0;
@@ -76,7 +78,7 @@ export function createWorkbookSessionHost(
   let commandHost: ReturnType<typeof createWorkbookCommandHost> | undefined;
   let collaborative = false;
   let offUpdates = () => {};
-  let pipe: ReturnType<typeof createCollaborationPipeHost<WorkerCollaborationProvider, AwarenessCursor, AwarenessPeer>> | undefined;
+  let pipe: CollaborationPipeHost<AwarenessCursor, AwarenessPeer> | undefined;
   let pipeOutputTimer: ReturnType<typeof setTimeout> | undefined;
   let previewSource: { bytes: Uint8Array; hydration: string } | undefined;
   let peerSnapshot: {
@@ -153,14 +155,23 @@ export function createWorkbookSessionHost(
       mergedRanges: opened.visibleMergedRanges(sheet, viewport) };
   }
 
-  function renderPng(sheet: number, render: (opened: WorkbookHandle) => Uint8Array) {
+  function pngExportAvailable() {
+    return isPngExportAvailable() || options.renderPng !== undefined;
+  }
+
+  function renderPng(
+    sheet: number, render: (opened: WorkbookHandle) => Uint8Array,
+    displayList: (opened: WorkbookHandle) => string
+  ) {
     const opened = workbook();
-    if (!isPngExportAvailable()) throw new WorkbookPngUnavailableError();
+    if (!pngExportAvailable()) throw new WorkbookPngUnavailableError();
     checkSheet(opened, sheet);
     const active = opened.sheetInfo().activeSheet;
     try {
       if (sheet !== active) opened.setActiveSheet(sheet);
-      return transferBytes(render(opened));
+      if (isPngExportAvailable()) return transferBytes(render(opened));
+      const json = displayList(opened);
+      return deferReply(options.renderPng!(json).then(transferBytes));
     } finally {
       if (sheet !== active) opened.setActiveSheet(active);
     }
@@ -364,7 +375,7 @@ export function createWorkbookSessionHost(
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
     async decodeFontFace(_, bytes, input, wasm) {
       if (disposed) throw new Error('Workbook session is disposed');
-      await (options.initWasm ?? initWasm)(wasm);
+      await (options.initWasm ?? initWasm)(wasm, enginePng === undefined ? undefined : { png: enginePng });
       if (disposed) throw new Error('Workbook session is disposed');
       const face = await decodeFontFace(bytes, input);
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
@@ -376,6 +387,7 @@ export function createWorkbookSessionHost(
       if (checkpoint.epoch !== recovery.epoch || checkpoint.version !== recovery.revision ||
         checkpoint.throughSeq !== recovery.throughSeq) throw new TypeError('Workbook recovery envelope mismatch');
       if (isCollaborativeWorkbookRecovery(recovery.engine)) throw new Error('Recovery is unavailable for collaborative workbooks');
+      enginePng = input.png;
       await (options.initWasm ?? initWasm)(input.wasm, { png: input.png });
       if (disposed) throw new Error('Workbook session is disposed');
       const opened = openWorkbookRecoveryCheckpoint(recovery.engine, recovery.throughSeq);
@@ -391,7 +403,7 @@ export function createWorkbookSessionHost(
           sheets: commands.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] })),
           activeSheet: info.activeSheet, commandContext: { ...commandIdentity,
             basis: { epoch: commands.epoch, version: opened.version() } },
-          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: isPngExportAvailable(),
+          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: pngExportAvailable(),
           selection: commands.selection, editState: commands.editState };
       } catch (error) {
         handle = undefined;
@@ -414,8 +426,12 @@ export function createWorkbookSessionHost(
       retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
+      enginePng = input.png;
       await (options.initWasm ?? initWasm)(wasm, { png: input.png });
       wasm ??= options.wasmModule?.();
+      if (disposed) throw new Error('Workbook session is disposed');
+      const collaboration = input.collaborative && !retainPeerHydration
+        ? await workbookCollaborationHostLoader.load() : undefined;
       if (disposed) throw new Error('Workbook session is disposed');
       const calculation = input.calculation ?? (retainPeerHydration && !input.collaborative ? {
         nowSerial: localNowSerial(Date.now()),
@@ -461,32 +477,7 @@ export function createWorkbookSessionHost(
           host.emit('collaborationUpdate', { update, origin });
         });
         if (collaborative && !retainPeerHydration) {
-          pipe = createCollaborationPipeHost<WorkerCollaborationProvider, AwarenessCursor, AwarenessPeer>({
-            clientId: opened.clientId,
-            read: { encodeStateVector: () => opened.encodeStateVector(),
-              encodeStateAsUpdate: (vector) => opened.encodeStateAsUpdate(vector) },
-            onUpdate: (listener) => opened.onUpdate(listener),
-            merge(updates) {
-              for (const update of updates) {
-                const before = opened.version();
-                try { opened.applyUpdate(update); }
-                catch (error) {
-                  if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || opened.version() !== before) throw error;
-                  return { failed: error };
-                }
-              }
-              return { applied: null };
-            },
-            createProvider: (replica, transport, providerOptions) => {
-              const provider = new CollaborationProvider(replica, transport, providerOptions);
-              return Object.assign(provider, { onPeers: (listener: Parameters<CollaborationProvider['onAwareness']>[0]) =>
-                provider.onAwareness(listener) });
-            },
-            arrive: providerArrival,
-            leave: providerLeave,
-            transportError: (error) => new CollaborationError(error.code, error.message),
-            onOutput: schedulePipeOutput,
-          });
+          pipe = collaboration!.createWorkbookCollaborationHost(opened, schedulePipeOutput);
         }
         commands = createWorkbookCommandState(commandIdentity, { epoch: 1, version: opened.version() },
           { sheetId: info.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } }, info.sheetIds, calculation ?? null);
@@ -496,7 +487,7 @@ export function createWorkbookSessionHost(
         if (initial || !retainPeerHydration && input.includeEditState) projectEditState(opened, projection);
         const state = { format: 'xlsx' as const, stage: 'ready' as const, version, dirty,
           ...(collaborative && !retainPeerHydration ? { clientId: opened.clientId } : {}),
-          sheets: summaries, activeSheet: info.activeSheet, pngExport: isPngExportAvailable(),
+          sheets: summaries, activeSheet: info.activeSheet, pngExport: pngExportAvailable(),
           commandContext: { ...commandIdentity, basis: { epoch: commands.epoch, version: opened.version() } },
           ...(!retainPeerHydration && projection.editState ? { editState: projection.editState, selection: commands.selection } : {}) };
         if (!initial) return state;
@@ -609,10 +600,12 @@ export function createWorkbookSessionHost(
       ...(commands?.throughSeq ? { sheetIds: commands.sheetIds } : {}) }),
     calculationStatus: () => workbook().calculationStatus(),
     renderPng(_, viewport, options = {}) {
-      return renderPng(options.sheet ?? workbook().sheetInfo().activeSheet, (opened) => opened.renderPng(viewport));
+      return renderPng(options.sheet ?? workbook().sheetInfo().activeSheet,
+        (opened) => opened.renderPng(viewport), (opened) => workbookPngDisplayListJson(opened, viewport));
     },
     renderRangePng(_, options, frameOptions = {}) {
-      return renderPng(frameOptions.sheet ?? workbook().sheetInfo().activeSheet, (opened) => opened.renderRangePng(options));
+      return renderPng(frameOptions.sheet ?? workbook().sheetInfo().activeSheet,
+        (opened) => opened.renderRangePng(options), (opened) => workbookRangePngDisplayListJson(opened, options));
     },
     exportStructured: (_, options) => exported(options),
     exportMarkdown(_, options, markdownOptions) {

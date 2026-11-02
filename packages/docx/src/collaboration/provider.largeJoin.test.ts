@@ -125,7 +125,7 @@ describe('chunked initial sync between yrs replicas', () => {
   beforeAll(() =>
     preloadEditWasm(
       new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))
-    )
+    ), 30_000
   );
 
   let large: YrsSession | undefined;

@@ -58,7 +58,7 @@ const Preview = memo(function Preview({ frame, run, fit, previewFit, current }: 
       return Boolean(token && token.scale === fit.scale && token.dpr === fit.dpr && latest.current.current(token, run));
     };
     if (!canvas.current) return;
-    const painter = peerlessPainterFactories.frame(canvas.current, { ...fit, images: run.images, current: valid });
+    const painter = peerlessPainterFactories.frame(canvas.current, { ...fit, images: run.thumbnailImages ?? run.images, current: valid });
     const view: PeerlessViewSnapshot = { confirmed: frame, selection: null, focused: false, caret: null,
       selectionRects: [], composition: null, echo: null, activeLine: null, activeContextBytes: 0,
       pending: [], waitingInputCount: 0, appliedThroughSeq: frame.frame.coversThroughSeq,

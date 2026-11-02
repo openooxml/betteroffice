@@ -135,6 +135,7 @@
       "unsupportedCommand": "غير مدعوم بعد.",
       "invalidArguments": "هذه القيمة غير صالحة.",
       "inputFailed": "تعذر حفظ إدخال الخلية قبل هذا.",
+      "sheetProtected": "هذه الخلية في ورقة محمية.",
       "documentReplaced": "تم فتح مصنف آخر.",
       "targetChanged": "تغيّر التحديد.",
       "gestureActive": "أنهِ نقل المخطط أولًا.",

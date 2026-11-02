@@ -6554,11 +6554,12 @@ impl EngineSession {
                 .note_separator_state()?
                 .map_or(0, |state| hash_bytes(&state));
             let fingerprint = hash_bytes(
-                &[
-                    font_requirements_fingerprint(request)?.to_le_bytes(),
-                    separators.to_le_bytes(),
-                ]
-                .concat(),
+                &serde_json::to_vec(&(
+                    font_requirements_fingerprint(request)?,
+                    separators,
+                    crate::bridge::source_font_theme(&self.doc).map(|theme| theme.font_scheme),
+                ))
+                .map_err(|error| format!("fingerprint font requirements: {error}"))?,
             );
             let epoch = self.doc_epoch();
             let cached = self
@@ -8569,6 +8570,14 @@ impl EngineSession {
             self.note_separators.borrow_mut().take();
             return Ok(None);
         };
+        let sourced_env = RenderEnv {
+            font_theme: render_env
+                .font_theme
+                .clone()
+                .or_else(|| crate::bridge::source_font_theme(&self.doc)),
+            ..render_env.clone()
+        };
+        let render_env = &sourced_env;
         let mut cache = self.note_separators.borrow_mut();
         if cache
             .as_ref()
@@ -8619,7 +8628,7 @@ impl EngineSession {
         let (_, _, revealable, _) = crate::bridge::preview::lower_recorded(
             &cached.doc,
             kind,
-            render_env,
+            &cached.env,
             &mut local,
             false,
         )
@@ -12901,6 +12910,69 @@ mod tests {
 
         assert_eq!(engine.stats().lower_cache_hits, 0);
         assert_eq!(engine.stats().lower_cache_misses, 2);
+    }
+
+    #[test]
+    fn retained_font_theme_participates_in_lowering_and_preflight_cache_identity() {
+        let package = |latin: &str| {
+            crate::seed::fixture::Package::new(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr><w:t>Title</w:t></w:r></w:p>"#,
+            )
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                &format!(
+                    r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="{latin}"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#
+                ),
+            )
+            .bytes()
+        };
+        let engine = EngineSession::new(1371);
+        crate::seed_from_docx(engine.doc(), &package("Calibri")).unwrap();
+        let original = engine.doc().encode_state_as_update_v1();
+        let epoch = engine.doc_epoch();
+        let source = engine.doc().source_metadata().unwrap();
+        let env = RenderEnv::default();
+        let request = r#"{"bodyStory":"body","renderEnv":{"revisionPreview":{"1":"accepted"}}}"#;
+        let first = engine.lower_story_json("body", &env).unwrap();
+        let blocks: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(blocks[0]["runs"][0]["fontFamily"], "Calibri");
+        let first_requirements = engine.layout_font_requirements_json(request).unwrap();
+        let before = engine.stats();
+
+        engine.doc().retain_source_docx(package("Times New Roman"));
+        assert_eq!(engine.doc_epoch(), epoch);
+        assert!(Arc::ptr_eq(
+            &engine.doc().source_metadata().unwrap(),
+            &source
+        ));
+        let second = engine.lower_story_json("body", &env).unwrap();
+        let blocks: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(blocks[0]["runs"][0]["fontFamily"], "Times New Roman");
+        assert_ne!(second, first);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
+        let requirements = engine.layout_font_requirements_json(request).unwrap();
+        assert_ne!(requirements, first_requirements);
+        let fonts: Vec<serde_json::Value> = serde_json::from_str(&requirements).unwrap();
+        assert!(
+            fonts
+                .iter()
+                .any(|font| font["key"] == "times new roman|0|0")
+        );
+        let before = engine.stats();
+        assert_eq!(engine.lower_story_json("body", &env).unwrap(), second);
+        assert_eq!(
+            engine.layout_font_requirements_json(request).unwrap(),
+            requirements
+        );
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+        assert_eq!(engine.stats().lower_cache_hits, before.lower_cache_hits + 1);
+        assert_eq!(engine.doc().encode_state_as_update_v1(), original);
     }
 
     #[test]
@@ -26978,6 +27050,135 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         check(&ooxml_opc::rezip_parts(&parts).unwrap());
     }
 
+    #[test]
+    fn raw_docx_font_preflight_matches_engine_cjk_faces_by_language() {
+        let normal = |language: &str| {
+            format!(
+                r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:lang w:val="en-US" w:eastAsia="{language}"/></w:rPr></w:style><w:style w:type="character" w:styleId="Traditional"><w:rPr><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style>"#
+            )
+        };
+        let paragraph = |mark: &str, properties: &str, text: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:rPr>{mark}</w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:eastAsia="CJK"/>{properties}</w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let korean = r#"<w:lang w:eastAsia="ko-KR"/>"#;
+        let cases: [(String, String, Option<&[&str]>); 12] = [
+            (
+                normal("ja-JP"),
+                paragraph("", "", "漢字"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                normal("ja-JP"),
+                paragraph("", r#"<w:lang w:val="en-US"/>"#, "漢字"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                normal("ja-JP"),
+                paragraph(korean, "", "漢字"),
+                Some(&["cjk-kr"]),
+            ),
+            (
+                normal("zh-CN"),
+                paragraph("", "", "漢字かな"),
+                Some(&["cjk-jp", "cjk-sc"]),
+            ),
+            (String::new(), paragraph("", "", "漢字"), Some(&["cjk-sc"])),
+            (
+                String::new(),
+                paragraph("", "", "漢字かな"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                String::new(),
+                paragraph(r#"<w:lang w:eastAsia="zh-HK"/>"#, "", "漢字"),
+                Some(&["cjk-tc"]),
+            ),
+            (
+                normal("ja-JP"),
+                paragraph(r#"<w:lang w:eastAsia=" "/>"#, "", "漢字"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                String::new(),
+                paragraph(r#"<w:lang w:eastAsia="ja_JP"/>"#, "", "漢字"),
+                Some(&["cjk-sc"]),
+            ),
+            (
+                String::new(),
+                format!(
+                    r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:synthetic:vml" id="shape1" style="width:100pt;height:40pt"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+                    paragraph("", r#"<w:lang w:eastAsia="ja-JP"/>"#, "漢字")
+                ),
+                Some(&["cjk-jp"]),
+            ),
+            (normal("ja-JP"), paragraph("", korean, "漢字"), None),
+            (
+                normal("ja-JP"),
+                paragraph("", r#"<w:rStyle w:val="Traditional"/>"#, "繁體"),
+                None,
+            ),
+        ];
+        for (styles, body, expected) in cases {
+            let bytes = docx_bytes(&styles, &body);
+            let preflight = ooxml_font_preflight::docx_font_preflight(&bytes).unwrap();
+            let engine = EngineSession::new(1702);
+            crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+            let requirements: Vec<serde_json::Value> = serde_json::from_str(
+                &engine
+                    .layout_font_requirements_json(r#"{"bodyStory":"body","renderEnv":{}}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+            let cjk = |scripts: Vec<&str>| -> Vec<String> {
+                let mut scripts: Vec<String> = scripts
+                    .into_iter()
+                    .filter(|script| script.starts_with("cjk-"))
+                    .map(str::to_owned)
+                    .collect();
+                scripts.sort();
+                scripts
+            };
+            let mut checked = 0;
+            for requirement in &requirements {
+                let scripts = cjk(requirement["scripts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|script| script.as_str().unwrap())
+                    .collect());
+                if scripts.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                if let Some(expected) = expected {
+                    assert_eq!(
+                        scripts,
+                        cjk(expected.to_vec()),
+                        "engine {body} {requirement}"
+                    );
+                }
+                let face = preflight
+                    .faces
+                    .iter()
+                    .find(|face| {
+                        face.family
+                            .eq_ignore_ascii_case(requirement["family"].as_str().unwrap())
+                            && face.bold == requirement["bold"].as_bool().unwrap()
+                            && face.italic == requirement["italic"].as_bool().unwrap()
+                    })
+                    .unwrap_or_else(|| panic!("preflight misses {requirement}"));
+                assert_eq!(
+                    cjk(face.scripts.iter().map(String::as_str).collect()),
+                    scripts,
+                    "preflight {body} {face:?}"
+                );
+            }
+            assert!(checked > 0, "{body}: {requirements:?}");
+        }
+    }
+
     fn layout_with_note_separator(
         kind: &str,
         separator: Option<&str>,
@@ -27210,6 +27411,39 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 }
             }
         }
+    }
+
+    #[test]
+    fn note_separator_layout_uses_the_retained_package_theme() {
+        let notes = format!(
+            r#"<w:footnotes {}><w:footnote w:id="-1" w:type="separator"><w:p><w:r><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr><w:separator/></w:r></w:p></w:footnote></w:footnotes>"#,
+            crate::seed::fixture::NS
+        );
+        let bytes = crate::seed::fixture::Package::new("<w:p/>")
+            .part("footnotes.xml", "fn", "footnotes", "footnotes", &notes)
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#,
+            )
+            .bytes();
+        let engine = EngineSession::new(314);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let original = engine.doc().encode_state_as_update_v1();
+        let blocks = engine
+            .lower_note_separator("footnote", &RenderEnv::default())
+            .unwrap()
+            .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("missing separator paragraph");
+        };
+        let Run::Text(run) = &paragraph.runs[0] else {
+            panic!("missing separator run");
+        };
+        assert_eq!(run.fmt.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(engine.doc().encode_state_as_update_v1(), original);
     }
 
     #[test]

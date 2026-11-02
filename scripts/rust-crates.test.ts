@@ -40,7 +40,13 @@ test('font preflight remains an unpublished path-only development dependency', (
   expect(preflight.package.publish).toBe(false);
 });
 
-test('the shared font decoder publishes before every engine', () => {
-  expect(RUST_CRATES[0]).toEqual({ name: 'betteroffice-fonts', dependency: 'betteroffice-fonts' });
-  expect(RUST_PUBLISH_CRATES[0]!.name).toBe('betteroffice-fonts');
+test('font byte crates publish before the manager and every engine', () => {
+  const positions = new Map(RUST_PUBLISH_CRATES.map((crate, index) => [crate.name, index]));
+  const manager = positions.get('betteroffice-fonts')!;
+  for (const name of ['latin', 'intl', 'cjk', 'cjk-sc', 'cjk-tc', 'cjk-jp', 'cjk-kr', 'cjk-serif-sc']) {
+    expect(positions.get(`betteroffice-fonts-${name}`)!).toBeLessThan(manager);
+  }
+  expect(manager).toBeLessThan(positions.get('betteroffice-xlsx')!);
+  expect(manager).toBeLessThan(positions.get('betteroffice-docx')!);
+  expect(manager).toBeLessThan(positions.get('betteroffice-pptx')!);
 });

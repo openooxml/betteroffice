@@ -27,6 +27,7 @@ import type { XlsxCommandStore } from '../commands/types';
 import { defineXlsxPlugin } from '../plugins/defineXlsxPlugin';
 import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
+import { defaultFontPainterModule } from '../useDefaultFonts';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
 import { XlsxWorkerEditor, xlsxPeerlessEditorLoader } from './XlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
@@ -2100,7 +2101,7 @@ describe('XlsxEditor async API', () => {
     }
   }
 
-  it('downloads viewport PNG from the worker and resolves the export API', async () => {
+  it('opens the worker lean, downloads viewport PNG and resolves the export API', async () => {
     const host = peerlessHarness(true);
     const png = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10);
     const renderPng = mock(async (_viewport: xlsx.Viewport, _options?: { sheet?: number }) => png);
@@ -2139,6 +2140,7 @@ describe('XlsxEditor async API', () => {
     const view = render(host.asyncEditor({ onReady: ready, fileName: 'Report.XLSX' }));
     await opened();
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    expect(host.open.mock.calls[0]![1]?.png).toBe(false);
     const api = ready.mock.calls[0]![0];
     expect(api.commands.getState('exportPng').enabled).toBe(true);
     await act(async () => fireEvent.click(view.getByTestId('xlsx-export-png')));
@@ -4761,7 +4763,7 @@ describe('workbook worker editor', () => {
       const ready = mock((_api: XlsxWorkerEditorApi) => {});
       const view = render(<XlsxEditor legacySyncApi file={file} {...props} onReady={ready} showToolbar={false} />);
       await opened();
-      expect(host.open).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), retainPeerHydration: true });
+      expect(host.open).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: true, retainPeerHydration: true });
       expect(painted.length).toBeGreaterThan(0);
       expect(ready).toHaveBeenCalledTimes(1);
       expect(host.hydrate).toHaveBeenCalledTimes(1);
@@ -7849,6 +7851,126 @@ it('replaces a cold speculative bitmap with visible ready text until adoption', 
       await act(async () => { hydration.resolve(host.peer); adoption.resolve(); });
       await advance();
     } finally { writing.mockRestore(); }
+  }
+});
+
+it('holds the commit preview until its default fonts settle and repaints it with them', async () => {
+  const host = harness(true);
+  Object.assign(host.sessionMethods, { decodeFontFace: mock(async () => new ArrayBuffer(0)) });
+  const painterModule = deferred<void>();
+  let facesSettled = false;
+  let repaint = () => {};
+  const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(async () => {
+    await painterModule.promise;
+    return { createDefaultFontPainter: (_decoder: unknown, onRepaint: () => void) => {
+      repaint = onRepaint;
+      return { load: async () => {}, adopt: () => {}, dispose: () => {},
+        paint: (_list: DisplayList, paint: () => void) => { paint(); return facesSettled; } };
+    } } as unknown as Awaited<ReturnType<typeof defaultFontPainterModule.load>>;
+  });
+  const hydration = deferred<WorkbookHandle>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+  await opened();
+  const adoption = deferred<void>();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  host.sessionMethods.frame.mockImplementation(async (...args) => {
+    await adoption.promise;
+    return frame(...args);
+  });
+  const previewPaints = () => painted.filter((list) =>
+    list.commands.some((command) => command.op === 'text' && command.text === 'preview:held')).length;
+  try {
+    reviewEdit(view, 'held');
+    await advance();
+    const canvas = view.getByTestId('xlsx-commit-preview') as HTMLCanvasElement;
+    const first = previewPaints();
+    expect(first).toBeGreaterThan(0);
+    expect(canvas.dataset.previewReady).not.toBe('true');
+    await act(async () => painterModule.resolve());
+    await advance();
+    expect(canvas.dataset.previewReady).not.toBe('true');
+    facesSettled = true;
+    await act(async () => repaint());
+    await advance();
+    expect(canvas.dataset.previewReady).toBe('true');
+    expect(previewPaints()).toBeGreaterThan(first);
+  } finally {
+    try {
+      await act(async () => { painterModule.resolve(); hydration.resolve(host.peer); adoption.resolve(); });
+      await advance();
+    } finally { load.mockRestore(); }
+  }
+});
+
+it('a commit preview held for default fonts settles when the font painter cannot load', async () => {
+  const host = harness(true);
+  Object.assign(host.sessionMethods, { decodeFontFace: mock(async () => new ArrayBuffer(0)) });
+  const painterModule = deferred<void>();
+  const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(async () => {
+    await painterModule.promise;
+    throw new Error('Font painter unavailable');
+  });
+  const hydration = deferred<WorkbookHandle>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+  await opened();
+  const adoption = deferred<void>();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  host.sessionMethods.frame.mockImplementation(async (...args) => {
+    await adoption.promise;
+    return frame(...args);
+  });
+  try {
+    reviewEdit(view, 'held');
+    await advance();
+    const canvas = view.getByTestId('xlsx-commit-preview') as HTMLCanvasElement;
+    expect(canvas.dataset.previewReady).not.toBe('true');
+    await act(async () => painterModule.resolve());
+    await advance();
+    expect(canvas.dataset.previewReady).toBe('true');
+  } finally {
+    try {
+      await act(async () => { painterModule.resolve(); hydration.resolve(host.peer); adoption.resolve(); });
+      await advance();
+    } finally { load.mockRestore(); }
+  }
+});
+
+it('a commit preview held for default fonts settles when default fonts are turned off', async () => {
+  const host = harness(true);
+  Object.assign(host.sessionMethods, { decodeFontFace: mock(async () => new ArrayBuffer(0)) });
+  const painterModule = deferred<void>();
+  const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(async () => {
+    await painterModule.promise;
+    return { createDefaultFontPainter: () => ({ load: async () => {}, adopt: () => {}, dispose: () => {},
+      paint: (_list: DisplayList, paint: () => void) => { paint(); return false; } }) } as unknown as
+      Awaited<ReturnType<typeof defaultFontPainterModule.load>>;
+  });
+  const hydration = deferred<WorkbookHandle>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+  await opened();
+  const adoption = deferred<void>();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  host.sessionMethods.frame.mockImplementation(async (...args) => {
+    await adoption.promise;
+    return frame(...args);
+  });
+  try {
+    reviewEdit(view, 'held');
+    await act(async () => painterModule.resolve());
+    await advance();
+    const canvas = view.getByTestId('xlsx-commit-preview') as HTMLCanvasElement;
+    expect(canvas.dataset.previewReady).not.toBe('true');
+    view.rerender(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} defaultFonts={false} />);
+    await advance();
+    expect((view.getByTestId('xlsx-commit-preview') as HTMLCanvasElement).dataset.previewReady).toBe('true');
+  } finally {
+    try {
+      await act(async () => { painterModule.resolve(); hydration.resolve(host.peer); adoption.resolve(); });
+      await advance();
+    } finally { load.mockRestore(); }
   }
 });
 

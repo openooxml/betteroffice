@@ -24,13 +24,15 @@ function commentContent(body: unknown, fallback: Comment['content']): Comment['c
  * ID, and any other comment keeps its own ID when that is a free OOXML comment ID and takes the next
  * free one after the source IDs otherwise.
  */
-export function savedCommentIds(sourceIds: readonly number[], native: readonly Pick<YrsCommentInfo, 'id'>[]): Map<string, number> {
-  const used = new Set(sourceIds);
+export function savedCommentIds(sourceIds: readonly number[], native: readonly Pick<YrsCommentInfo, 'id'>[], previous: ReadonlyMap<string, number> = new Map()): Map<string, number> {
+  const used = new Set([...sourceIds, ...previous.values()]);
   const keys = new Set(sourceIds.map(String));
   const ids = new Map(native.filter(comment => keys.has(comment.id)).map(comment => [comment.id, Number(comment.id)]));
   let next = Math.max(0, ...used) + 1;
   for (const comment of native) {
     if (ids.has(comment.id)) continue;
+    const saved = previous.get(comment.id);
+    if (saved !== undefined) { ids.set(comment.id, saved); continue; }
     let id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
     if (!Number.isSafeInteger(id) || used.has(id)) {
       while (used.has(next)) next += 1;

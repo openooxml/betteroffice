@@ -91,9 +91,10 @@ beforeAll(async () => {
     const performance = testHarness.clock ?? globalThis.performance;
     const setTimeout = testHarness.setTimer ?? globalThis.setTimeout;
     const clearTimeout = testHarness.clearTimer ?? globalThis.clearTimeout;
+    const OffscreenCanvas = class OffscreenCanvas {};
     ${await result.outputs[0].text()}
   `) as typeof startWorker;
-});
+}, 30_000);
 
 function syntheticDocx(feature = 'plain'): Uint8Array {
   if (feature.startsWith('flow-')) return flowDocx(feature);

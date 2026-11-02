@@ -32,6 +32,7 @@
     "ariaLabel": "格式工具栏",
     "file": "文件",
     "format": "格式",
+    "layout": "版式",
     "insert": "插入",
     "open": "打开",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "当前"
     }
+  },
+  "layout": {
+    "margins": "页边距",
+    "normal": "普通",
+    "narrow": "窄",
+    "moderate": "适中",
+    "wide": "宽",
+    "customMargins": "自定义页边距...",
+    "morePaperSizes": "其他纸张大小...",
+    "indent": "缩进"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "单倍行距",
     "double": "双倍行距",
     "lineSpacingTitle": "行距: {label}",
-    "paragraphSpacing": "段间距"
+    "paragraphSpacing": "段间距",
+    "addBefore": "增加段前间距",
+    "removeBefore": "删除段前间距",
+    "addAfter": "增加段后间距",
+    "removeAfter": "删除段后间距",
+    "options": "行距选项..."
   },
   "styles": {
     "selectAriaLabel": "选择段落样式",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "为所选文本添加删除线",
         "subscript": "下标",
         "subscriptDescription": "将所选文本设置为下标",
+        "clearFormatting": "清除格式",
+        "clearFormattingDescription": "清除文本格式",
         "superscript": "上标",
         "superscriptDescription": "将所选文本设置为上标",
         "alignLeft": "左对齐",
@@ -478,6 +496,11 @@
       "top": "顶部(px)",
       "width": "宽度(px)",
       "height": "高度(px)"
+    },
+    "paragraphSpacing": {
+      "before": "段前间距",
+      "after": "段后间距",
+      "multiple": "多倍行距"
     }
   },
   "comments": {
@@ -753,7 +776,11 @@
     "leftIndent": "左缩进",
     "rightIndent": "右缩进",
     "topMargin": "上边距",
-    "bottomMargin": "下边距"
+    "bottomMargin": "下边距",
+    "leftMargin": "左边距",
+    "rightMargin": "右边距",
+    "hangingIndent": "悬挂缩进",
+    "markerValue": "{name}：{value}"
   },
   "print": {
     "label": "打印",

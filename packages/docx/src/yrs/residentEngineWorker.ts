@@ -54,6 +54,7 @@ import {
 } from './residentEngineSession';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
+import { shipsWasmAsset } from '../wasm/assetEdit';
 import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
 import {
   createProposalRegistry,
@@ -130,7 +131,9 @@ import {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 
-const scope = self as unknown as DedicatedWorkerGlobalScope;
+import { sessionWorkerScope } from '#session-scope';
+
+let scope: DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
@@ -1288,10 +1291,13 @@ const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
 const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
 const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
+const SAVE_SEED_MAX_PARAGRAPHS = 4096;
+const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
+let saveSeedStatesPrimed = false;
 class SaveUnavailableError extends Error {}
 class SourceCutKeptError extends Error {}
 let openedVersion: string | null | undefined;
@@ -1416,27 +1422,32 @@ function reportProgress(): void {
 }
 Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
 
-scope.onmessage = (
-  event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
-) => {
-  const message = event.data;
-  interruptSaveWarmup(message.type);
-  if (message.type === 'editModule') {
-    // The queued warm waits for this message.
-    resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
+function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
+  scope = workerScope;
+  scope.onmessage = (
+    event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
+  ) => {
+    const message = event.data;
+    interruptSaveWarmup(message.type);
+    if (message.type === 'editModule') {
+      resolveHostEditModule(shipsWasmAsset && message.module instanceof WebAssembly.Module ? message.module : null);
+      scheduleSaveWarmup();
+      return;
+    }
+    if (message.type === 'prepare-save') {
+      scheduleSaveWasmPreload();
+      return;
+    }
+    scheduler.submit(classify(message));
     scheduleSaveWarmup();
-    return;
-  }
-  if (message.type === 'prepare-save') {
-    scheduleSaveWasmPreload();
-    return;
-  }
-  scheduler.submit(classify(message));
-  scheduleSaveWarmup();
-};
-scope.onmessageerror = () => resolveHostEditModule(null);
+  };
+  scope.onmessageerror = () => resolveHostEditModule(null);
+}
+
+startWorker(sessionWorkerScope() as unknown as DedicatedWorkerGlobalScope);
 
 function nextHostEditModule(): Promise<WebAssembly.Module | null> {
+  if (!shipsWasmAsset) return Promise.resolve(null);
   return new Promise((resolve) => {
     resolveHostEditModule = resolve;
   });
@@ -1552,6 +1563,7 @@ async function runRequest(request: ScheduledRequest): Promise<void> {
       request.type !== 'decodeFontFace') {
       await commandHost.withFrameWork(() => handle(request));
     } else await handle(request);
+    primeSaveSeedStatesOnce();
   } catch (error) {
     replyFailure(request.id, error);
   } finally {
@@ -1645,7 +1657,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
   ) supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
-      if (request.hostModule) {
+      if (request.hostModule && shipsWasmAsset) {
         const timer = setTimeout(() => resolveHostEditModule(null), RESIDENT_HOST_MODULE_WAIT_MS);
         await preloadEditWasmFrom(
           hostEditModule.then((module) => {
@@ -1678,6 +1690,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
     return;
   }
   if (request.type === 'commandInit') {
+    if (typeof OffscreenCanvas !== 'function') {
+      throw new Error('DOCX worker editing paints frames and needs OffscreenCanvas, which this runtime lacks; edit documents headless with the in-thread edit session');
+    }
     if (!session || !openedDocument || previewing) {
       throw new Error('Worker commands require a whole opened document');
     }
@@ -1813,6 +1828,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     if (session) destroySession(true);
     openedSource = null;
     editorSaves = { full: false };
+    saveSeedStatesPrimed = false;
     const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
@@ -3228,7 +3244,9 @@ function scheduleCompletion(completion: SlicedCompletion): void {
       const owner = completion.commandOwner;
       if (owner) await owner.withFrameWork(() => completionSlice(completion, budgetMs));
       else await completionSlice(completion, budgetMs);
-      return slicedCompletion === completion ? 'yield' : 'done';
+      if (slicedCompletion === completion) return 'yield';
+      primeSaveSeedStatesOnce();
+      return 'done';
     },
   });
 }
@@ -3424,6 +3442,7 @@ function destroySession(keepSurfaces = false): void {
   openedParsedToolbar = null;
   sourcePreviewing = false;
   editorSaves = { full: false };
+  saveSeedStatesPrimed = false;
   openedVersion = undefined;
   previewing = false;
   cutPartial = false;
@@ -3589,6 +3608,7 @@ function adoptResidentSource(
   openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
+  saveSeedStatesPrimed = false;
   return { document, hostJson, embeddedFontFaces };
 }
 
@@ -3904,6 +3924,23 @@ function preloadSaveWasm(): Promise<void> {
 function canPreloadSaveWasm(): boolean {
   return !!session && !previewing && !sourcePreviewing && commandInit?.readOnly !== true &&
     (!!openedSource || openedParsed) && !trap && !projectionFailure;
+}
+
+/**
+ * Records save seed states once per editable command document, as soon as its
+ * layout is complete: one bounded wasm call after a request or completion
+ * step, so the first save after an edit need not reseed.
+ */
+function primeSaveSeedStatesOnce(): void {
+  if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
+    incompleteLayout || commandLayout?.certifiedPages() != null) return;
+  saveSeedStatesPrimed = true;
+  if (!saveWarmupHasHeadroom()) return;
+  try {
+    session.primeSaveSeedStates(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+  }
 }
 
 function scheduleSaveWasmPreload(): void {

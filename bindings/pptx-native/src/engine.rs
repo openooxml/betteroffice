@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use napi::bindgen_prelude::{ArrayBuffer, JsObjectValue, Uint8Array, Uint8ArraySlice};
+use napi::bindgen_prelude::{
+    ArrayBuffer, Either, JsObjectValue, Uint8Array, Uint8ArraySlice, Undefined,
+};
 use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 use pptx_engine::{Document, EngineError, ErrorKind, Host, Renderer};
@@ -20,6 +22,7 @@ pub struct DecodedFontFace {
     ts_return_type = "DecodedFontFace"
 )]
 pub fn decode_font_face(
+    env: Env,
     bytes: Uint8Array,
     codec: String,
     dict: Option<Uint8Array>,
@@ -27,7 +30,7 @@ pub fn decode_font_face(
 ) -> Result<DecodedFontFace> {
     let decoded =
         betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+            .map_err(|error| throw_error(&env, &error.to_string()))?;
     Ok(DecodedFontFace {
         font: Uint8Array::new(decoded.font),
         payload: decoded.payload.map(Uint8Array::new),
@@ -68,6 +71,18 @@ fn native_host() -> Host {
     Host {
         entropy: native_entropy,
         timer_ms: native_timer_ms,
+    }
+}
+
+fn throw_error(env: &Env, message: &str) -> Error {
+    let result = (|| -> Result<()> {
+        let mut exception = env.create_error(Error::from_reason(message))?;
+        exception.delete_named_property("code")?;
+        env.throw(exception)
+    })();
+    match result {
+        Ok(()) => Error::new(Status::PendingException, message.to_owned()),
+        Err(error) => error,
     }
 }
 
@@ -374,6 +389,18 @@ impl PptxDocument {
             .media_bytes(&part_path)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi]
+    pub fn metafile_svg(
+        &self,
+        env: Env,
+        part_path: String,
+    ) -> Result<Either<Uint8Array, Undefined>> {
+        match self.document()?.session().metafile_svg(&part_path) {
+            Some(svg) => byte_result(env, svg.to_vec()).map(Either::A),
+            None => Ok(Either::B(())),
+        }
     }
 
     #[napi]
@@ -947,6 +974,7 @@ impl PptxRenderer {
         Ok(())
     }
 
+    /// Requested faces with optional script coverage buckets, before layout.
     #[napi(js_name = "requestedFontFacesJson")]
     pub fn requested_font_faces_json(
         &self,

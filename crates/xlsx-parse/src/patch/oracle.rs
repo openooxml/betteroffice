@@ -105,6 +105,7 @@ impl SheetPatch<'_> {
             self.retained,
             self.plan,
             None,
+            self.names,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -345,6 +346,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             None,
             None,
+            self.names,
         )
         .map_err(xml_err)?;
         let written = writer.into_inner();
@@ -463,6 +465,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             retained,
             self.sheet.array_formula(at),
+            self.names,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();

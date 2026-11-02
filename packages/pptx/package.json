@@ -32,6 +32,16 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "imports": {
+    "#session-worker": {
+      "node": "./dist/sessionWorker.node.js",
+      "default": "./dist/sessionWorker.browser.js"
+    },
+    "#session-scope": {
+      "node": "./dist/sessionScope.node.js",
+      "default": "./dist/sessionScope.browser.js"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -63,14 +73,6 @@
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3"
-  },
-  "peerDependencies": {
-    "@betteroffice/pptx-native": "workspace:^"
-  },
-  "peerDependenciesMeta": {
-    "@betteroffice/pptx-native": {
-      "optional": true
-    }
   },
   "license": "Apache-2.0",
   "homepage": "https://betteroffice.dev/",

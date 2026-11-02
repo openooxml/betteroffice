@@ -19,7 +19,6 @@ import type { TranslationKey } from '@betteroffice/docx-i18n';
 import {
   CATEGORY_LABEL_KEYS,
   CATEGORY_ORDER,
-  DEFAULT_SHORTCUTS,
   getDefaultShortcuts,
   getShortcutsByCategory,
   getCommonShortcuts,
@@ -134,7 +133,7 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
 
   // Merge custom shortcuts with defaults
   const allShortcuts = useMemo(() => {
-    const merged = [...DEFAULT_SHORTCUTS];
+    const merged = getDefaultShortcuts();
     for (const custom of customShortcuts) {
       const existingIndex = merged.findIndex((s) => s.id === custom.id);
       if (existingIndex >= 0) {

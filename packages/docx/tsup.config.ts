@@ -36,6 +36,10 @@ export default defineConfig([
       'collaboration/index': 'src/collaboration/index.ts',
       // Dedicated browser worker loaded relative to the yrs facade bundle.
       'yrs/docxWorker': 'src/yrs/residentEngineWorker.ts',
+      'sessionWorker.browser': 'src/yrs/sessionWorker.browser.ts',
+      'sessionScope.browser': 'src/yrs/sessionScope.browser.ts',
+      'sessionWorker.node': 'src/yrs/sessionWorker.node.ts',
+      'sessionScope.node': 'src/yrs/sessionScope.node.ts',
       // The wasm loaders are ROOT-NAMED entries on purpose: their
       // `new URL('./generated/…', import.meta.url)` literals must resolve
       // against a root-level chunk next to dist/generated/ (copy-assets puts
@@ -52,6 +56,7 @@ export default defineConfig([
     shims: true,
     dts: true,
     splitting: true,
+    external: ['@betteroffice/fonts', '#session-worker', '#session-scope'],
     sourcemap: false,
     clean: true,
     treeshake: true,

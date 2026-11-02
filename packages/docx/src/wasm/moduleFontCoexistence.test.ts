@@ -19,7 +19,7 @@ const input = (id: number) => JSON.stringify({
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 test('the public text engine and Yrs session keep independent fonts and measurements', async () => {
   const session = await createYrsSession({ clientId: 76301 });

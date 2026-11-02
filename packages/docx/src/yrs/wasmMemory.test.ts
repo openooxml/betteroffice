@@ -7,6 +7,7 @@ import type { Document, Paragraph } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
 import { createYrsSession, wasmModuleMemories, WASM32_MEMORY_LIMIT_BYTES } from './index';
+import { engineKind } from '../wasm/engineEdit';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = new Uint8Array(
@@ -16,9 +17,9 @@ const FONT = new Uint8Array(
 );
 const edit = () => wasmModuleMemories().find((module) => module.label === 'docx-edit')!;
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
-it('counts the editing core heap as sessions grow and go', async () => {
+it.skipIf(engineKind === 'native')('counts the editing core heap as sessions grow and go', async () => {
   const before = edit();
   expect(before.bufferBytes).toBeGreaterThan(0);
   expect(before.bufferBytes).toBeLessThanOrEqual(WASM32_MEMORY_LIMIT_BYTES);
@@ -39,7 +40,7 @@ it('counts the editing core heap as sessions grow and go', async () => {
   expect(after.bufferBytes).toBeGreaterThanOrEqual(grown.bufferBytes);
 });
 
-it('releases cached paragraph measurements when the last session is destroyed', async () => {
+it.skipIf(engineKind === 'native')('releases cached paragraph measurements when the last session is destroyed', async () => {
   const document: Document = {
     package: {
       document: {

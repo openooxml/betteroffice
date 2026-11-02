@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use xlsx_model::workbook::ColumnDefaults;
 use xlsx_model::{CellRange, CellRef, CellValue, MAX_COLS, MAX_ROWS, Sheet, SheetId};
+use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
 use xlsx_render::display_text;
 
 use super::Workbook;
@@ -106,14 +107,31 @@ pub struct RangeRead {
     pub cells: Vec<Vec<CellRead>>,
 }
 
-/// Cells the last calculation settled by cycle or left at an evaluation limit.
+/// Cells the last calculation settled by cycle, left at an evaluation limit,
+/// or could not compute.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadCalculation {
     pub cycle_cells: Vec<CellTarget>,
     pub limited_cells: Vec<CellTarget>,
+    /// Formula cells the engine could not compute: they keep Excel's saved
+    /// value, or stay blank when the file saved none, unless only an engine
+    /// gap was involved, which shows its error.
+    #[serde(default)]
+    pub unevaluated_cells: Vec<UnevaluatedTarget>,
     /// Whether a list stopped at 10,000 cells.
     pub truncated: bool,
+}
+
+/// A formula cell the engine could not compute.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnevaluatedTarget {
+    #[serde(flatten)]
+    pub cell: CellTarget,
+    /// The uncomputable functions involved, sorted; empty when only gaps of
+    /// the engine were.
+    pub functions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -427,13 +445,15 @@ impl Workbook {
         }
         let mut text_bytes = 0_usize;
         let mut ranges = Vec::with_capacity(resolved.len());
+        let defined = DefinedFunctionNames::new(&self.model.defined_names);
         for range in resolved {
             let sheet = &self.model.sheets[range.sheet.0 as usize];
+            let names = defined.visible_from(Some(range.sheet));
             let mut rows = Vec::with_capacity(range.rows());
             for row in range.range.start.row..=range.range.end.row {
                 let mut read_row = Vec::with_capacity(range.cols());
                 for col in range.range.start.col..=range.range.end.col {
-                    let read = self.read_cell(sheet, CellRef::new(row, col));
+                    let read = self.read_cell(sheet, CellRef::new(row, col), names);
                     text_bytes += read.display_text.len()
                         + read.formula.as_ref().map_or(0, String::len)
                         + match &read.value {
@@ -489,10 +509,21 @@ impl Workbook {
             capped_cell_targets(&keys, &self.last_calculation.cycle_cells);
         let (limited_cells, limited_cut) =
             capped_cell_targets(&keys, &self.last_calculation.limited_cells);
+        let unevaluated = &self.last_calculation.unevaluated_cells;
+        let unevaluated_cells = unevaluated
+            .iter()
+            .filter(|cell| (cell.address.sheet.0 as usize) < keys.len())
+            .take(MAX_DIAGNOSTIC_CELLS)
+            .map(|cell| UnevaluatedTarget {
+                cell: cell_target(&keys, cell.address.sheet, cell.address.cell),
+                functions: cell.functions.clone(),
+            })
+            .collect();
         let calculation = ReadCalculation {
             cycle_cells,
             limited_cells,
-            truncated: cycles_cut || limited_cut,
+            unevaluated_cells,
+            truncated: cycles_cut || limited_cut || unevaluated.len() > MAX_DIAGNOSTIC_CELLS,
         };
         Ok(Ok(CellsRead {
             version,
@@ -502,12 +533,15 @@ impl Workbook {
         }))
     }
 
-    fn read_cell(&self, sheet: &Sheet, at: CellRef) -> CellRead {
+    fn read_cell(&self, sheet: &Sheet, at: CellRef, names: FormulaNames<'_>) -> CellRead {
         match sheet.cell(at) {
             Some(cell) => CellRead {
                 a1: at.to_a1(),
                 value: cell.value.clone(),
-                formula: cell.formula.clone(),
+                formula: cell
+                    .formula
+                    .as_deref()
+                    .map(|formula| display_formula(formula, names).into_owned()),
                 display_text: display_text(&self.model.styles, self.model.date_system, cell),
             },
             None => CellRead {

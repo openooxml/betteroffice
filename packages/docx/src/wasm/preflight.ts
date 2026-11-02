@@ -1,10 +1,12 @@
-import wasmInit, { font_preflight, initSync } from './generated/preflight/docx_preflight.js';
+import wasmInit, { font_preflight, initSync, engineKind } from './enginePreflight';
+import { wasmAssetUrl } from './assetPreflight';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 
 export const preflightWasmState = createWasmModuleState({
   label: 'docx-preflight',
   preloadName: 'preloadPreflightWasm',
-  assetUrl: () => new URL('./generated/preflight/docx_preflight_bg.wasm', import.meta.url),
+  assetUrl: wasmAssetUrl,
+  engineKind,
   initAsync: wasmInit,
   initSync,
 });

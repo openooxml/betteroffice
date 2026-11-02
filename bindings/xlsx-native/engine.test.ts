@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
-import initWasm, { XlsxDocument as WasmDocument, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
+import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 
 const native = require('./index.js');
@@ -22,6 +22,7 @@ type EngineDocument = {
   displayListJson(viewportJson: string): string;
   editCellJson(args: string): string;
   setCalculationContextJson(context: string): void;
+  recalculateJson(): string;
   encodeStateVector(): Uint8Array;
   encodeStateAsUpdate(): Uint8Array;
   encodeDiff(stateVector: Uint8Array): Uint8Array;
@@ -32,6 +33,7 @@ type EngineDocument = {
   drainUpdateEvent(): Uint8Array;
   undoJson(): string;
   readCellsJson(request: string): string;
+  calculationStatusJson(): string;
   exportStructuredJson(options: string): string;
   saveBytes(): Uint8Array;
   free(): void;
@@ -63,6 +65,7 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
     .toBe(expected instanceof Error ? expected.name : undefined);
   expect(actual instanceof Error ? actual.message : String(actual))
     .toBe(expected instanceof Error ? expected.message : String(expected));
+  expect(actual instanceof Error && 'code' in actual).toBe(expected instanceof Error && 'code' in expected);
   return actual;
 }
 
@@ -326,6 +329,70 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('recalculation reports and saves the same on both engines', () => {
+    const wasmDoc = WasmDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    try {
+      expect(nativeDoc.recalculateJson()).toBe(wasmDoc.recalculateJson());
+      expect(new Uint8Array(nativeDoc.saveBytes())).toEqual(new Uint8Array(wasmDoc.saveBytes()));
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
+  test('a flagged workbook with a stale array-formula cache saves the same calculated values on both engines', async () => {
+    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><calcPr fullCalcOnLoad="1"/></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row></sheetData></worksheet>`);
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const opens: Array<[string, (engine: typeof WasmDocument) => EngineDocument]> = [
+      ['open', engine => engine.open(source) as EngineDocument],
+      ['openWithCalculationJson', engine => engine.openWithCalculationJson(source, context) as EngineDocument],
+    ];
+    for (const [name, open] of opens) {
+      const wasmDoc = open(WasmDocument);
+      const nativeDoc = open(native.XlsxDocument);
+      try {
+        const wasmSaved = new Uint8Array(wasmDoc.saveBytes());
+        const nativeSaved = new Uint8Array(nativeDoc.saveBytes());
+        expect(nativeSaved, name).toEqual(wasmSaved);
+        for (const saved of [wasmSaved, nativeSaved]) {
+          const sheet = await (await JSZip.loadAsync(saved)).file('xl/worksheets/sheet1.xml')!.async('string');
+          expect(sheet.match(/<c r="C3"[^>]*>.*?<\/c>/)?.[0], name).toContain('<v>1</v>');
+        }
+      } finally {
+        wasmDoc.free();
+        nativeDoc.free();
+      }
+    }
+  });
+
+  test('PNG display lists are identical on both engines', () => {
+    const charts = readFileSync(new URL('../../packages/xlsx/test-fixtures/charts.xlsx', import.meta.url));
+    for (const bytes of [fixture, charts]) {
+      const wasmDoc = WasmDocument.openWithCalculationJson(new Uint8Array(bytes), context);
+      const nativeDoc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(bytes), context);
+      try {
+        for (const view of [viewport, JSON.stringify({ x: 12.5, y: 40.25, width: 640, height: 360 })]) {
+          expect(nativeDoc.pngDisplayListJson(view)).toBe(wasmDoc.pngDisplayListJson(view));
+        }
+        for (const args of [{}, { range: 'A1:D8', scale: 2 }]) {
+          const json = JSON.stringify(args);
+          expect(nativeDoc.rangePngDisplayListJson(json)).toBe(wasmDoc.rangePngDisplayListJson(json));
+        }
+      } finally {
+        wasmDoc.free();
+        nativeDoc.free();
+      }
+    }
+  });
+
   test('collaborative documents with the same client id encode identical updates', () => {
     const wasmDoc = WasmDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;
     const nativeDoc = native.XlsxDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;
@@ -399,12 +466,55 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('both engines keep and report a formula no offline engine can compute', async () => {
+    const zip = await JSZip.loadAsync(fixture);
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+      + '<c r="A1" t="str"><f>IFERROR(_xlfn.WEBSERVICE("http://x"),"fallback")</f><v>live</v></c>'
+      + '<c r="B1"><f>LEN(A1)*2</f><v>9</v></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const read = (doc: EngineDocument) => [
+      doc.calculationStatusJson(),
+      withoutVersion(doc.readCellsJson(JSON.stringify({
+        ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B1' } }],
+      }))),
+    ];
+    const wasmDoc = WasmDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    try {
+      const [status, cells] = read(wasmDoc);
+      expect(JSON.parse(status).unevaluatedCells).toEqual([
+        { address: 'A1', functions: ['WEBSERVICE'] },
+        { address: 'B1', functions: ['WEBSERVICE'] },
+      ]);
+      expect(cells).toContain('"live"');
+      expect(read(nativeDoc)).toEqual([status, cells]);
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
   test('free drops the native document and later calls throw', () => {
     const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
     doc.free();
     expect(() => doc.sheetInfoJson()).toThrow('XlsxDocument was freed');
     doc.free();
     expect(() => doc.sheetInfoJson()).toThrow('XlsxDocument was freed');
+  });
+
+  test('snapshot builder errors have the wasm error shape', () => {
+    const wasmBuilder = new WasmSnapshotBuilder();
+    const nativeBuilder = new native.XlsxSnapshotBuilder();
+    try {
+      const error = expectThrownParity(
+        () => wasmBuilder.push(new Uint8Array([1, 2, 3])),
+        () => nativeBuilder.push(new Uint8Array([1, 2, 3])),
+      );
+      expect(error).toBeInstanceOf(Error);
+    } finally {
+      wasmBuilder.free();
+      nativeBuilder.free();
+    }
   });
 
   test('free drops the native snapshot builder and later calls throw', () => {

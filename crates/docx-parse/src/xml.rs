@@ -415,6 +415,9 @@ pub struct XmlElement {
     /// [`crate::paragraph_identity::word_para_id_name`].
     pub para_id_attribute: Option<String>,
     pub bookmark_xml: Option<String>,
+    /// For a block-level bookmark, its source slice plus the namespace
+    /// bindings it needs when replayed outside its source ancestors.
+    pub bookmark_replay_xml: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -600,7 +603,13 @@ impl XmlElement {
 
     pub fn to_raw_inline_xml(&self) -> String {
         let mut output = String::new();
-        self.write_raw_inline_xml(&mut output);
+        self.write_raw_inline_xml(&mut output, false);
+        output
+    }
+
+    pub(crate) fn to_bookmarked_raw_inline_xml(&self) -> String {
+        let mut output = String::new();
+        self.write_raw_inline_xml(&mut output, true);
         output
     }
 
@@ -636,7 +645,11 @@ impl XmlElement {
         output.push('>');
     }
 
-    fn write_raw_inline_xml(&self, output: &mut String) {
+    fn write_raw_inline_xml(&self, output: &mut String, retain_bookmarks: bool) {
+        if retain_bookmarks && let Some(xml) = &self.bookmark_xml {
+            output.push_str(xml);
+            return;
+        }
         output.push('<');
         output.push_str(&self.name);
         for (name, value) in &self.attributes {
@@ -661,7 +674,7 @@ impl XmlElement {
         output.push('>');
         for child in &self.children {
             match child {
-                XmlNode::Element(element) => element.write_raw_inline_xml(output),
+                XmlNode::Element(element) => element.write_raw_inline_xml(output, retain_bookmarks),
                 XmlNode::Text(text) => escape_text(text, output),
                 XmlNode::CData(text) => {
                     output.push_str("<![CDATA[");
@@ -1269,6 +1282,9 @@ pub(crate) fn parse_xml_strict(
     budget: &mut ParseBudget<'_>,
 ) -> Result<XmlDocument, ParseError> {
     budget.charge_xml_bytes(xml.len(), part)?;
+    // The reader skips a UTF-8 byte order mark without counting it, so its offsets index the
+    // bytes after it; slice retained source XML from those same bytes.
+    let xml = xml.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(xml);
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     reader.config_mut().check_end_names = true;
@@ -1432,6 +1448,16 @@ fn retain_replayed_namespace_aliases(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
+    if ancestors
+        .iter()
+        .rev()
+        .find(|ancestor| {
+            !ancestor.matches_name("w", "customXml") && !ancestor.matches_name("w", "smartTag")
+        })
+        .is_some_and(|parent| crate::block::is_block_bookmark(parent, element))
+    {
+        return retain_bookmark_bindings(element, ancestors, part, budget);
+    }
     let row = element.name == "w:tr" && !element.attributes.is_empty();
     let smart_art =
         element.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(element);
@@ -1439,7 +1465,17 @@ fn retain_replayed_namespace_aliases(
         && element.child_elements().any(|child| {
             child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
         });
-    if !row && !smart_art && !smart_art_run && !matches!(element.local_name(), "pict" | "object") {
+    let drawing = matches!(element.local_name(), "drawing" | "AlternateContent");
+    let bookmarked_drawing = drawing && crate::text_box::has_bookmarked_text_box(element);
+    let text_box_drawing =
+        drawing && !bookmarked_drawing && crate::text_box::contains_text_box(element);
+    if !row
+        && !smart_art
+        && !smart_art_run
+        && !bookmarked_drawing
+        && !text_box_drawing
+        && !matches!(element.local_name(), "pict" | "object")
+    {
         return Ok(());
     }
     let mut bindings = IndexMap::new();
@@ -1455,7 +1491,7 @@ fn retain_replayed_namespace_aliases(
             }
         }
     }
-    if row
+    if (row || text_box_drawing)
         && let Some(root) = ancestors.first()
         && matches!(root.name.as_str(), "w:document" | "w:hdr" | "w:ftr")
     {
@@ -1530,6 +1566,88 @@ fn retain_replayed_namespace_aliases(
         budget.charge_text(name.len() + value.len(), part)?;
         element.attributes.insert(name.to_owned(), value.to_owned());
     }
+    Ok(())
+}
+
+/// Records, beside the exact source slice, the bindings a block bookmark needs
+/// when it is replayed on its own: every prefix it uses whose in-scope binding
+/// is not that prefix's standard namespace.
+fn retain_bookmark_bindings(
+    element: &mut XmlElement,
+    ancestors: &[XmlElement],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), ParseError> {
+    let Some(source) = &element.bookmark_xml else {
+        return Ok(());
+    };
+    let mut prefixes = Vec::new();
+    for name in
+        std::iter::once(element.name.as_str()).chain(element.attributes.keys().map(String::as_str))
+    {
+        if let Some((prefix, _)) = name.split_once(':')
+            && !matches!(prefix, "xml" | "xmlns")
+            && !element.attributes.contains_key(&format!("xmlns:{prefix}"))
+            && !prefixes.contains(&prefix)
+        {
+            prefixes.push(prefix);
+        }
+    }
+    let story_root = ancestors
+        .first()
+        .filter(|root| matches!(root.name.as_str(), "w:document" | "w:hdr" | "w:ftr"));
+    let mut bindings = String::new();
+    for prefix in prefixes {
+        let declaration = format!("xmlns:{prefix}");
+        let Some((depth, namespace)) =
+            ancestors
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(depth, ancestor)| {
+                    ancestor
+                        .attributes
+                        .get(&declaration)
+                        .map(|value| (depth, value))
+                })
+        else {
+            continue;
+        };
+        let identity = element.attributes.keys().any(|name| {
+            name.split_once(':')
+                .is_some_and(|(used, local)| used == prefix && matches!(local, "id" | "name"))
+        });
+        if canonical_namespace(prefix) == Some(namespace.as_str())
+            || (depth == 0
+                && story_root.is_some()
+                && !identity
+                && !crate::serializer::parts::is_story_root_prefix(prefix))
+        {
+            continue;
+        }
+        budget.charge_text(declaration.len() + namespace.len(), part)?;
+        bindings.push(' ');
+        bindings.push_str(&declaration);
+        bindings.push_str("=\"");
+        escape_attribute(namespace, &mut bindings);
+        bindings.push('"');
+    }
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    if element.attributes.len() >= budget.limits.max_attributes_per_element {
+        return Err(ParseError::ResourceLimit {
+            kind: "bookmarkNamespaceAliases",
+            part: part.to_owned(),
+        });
+    }
+    let tag = crate::serializer::splice::root_tag(source)
+        .ok_or_else(|| ParseError::Canonical("invalid block bookmark".to_owned()))?;
+    let mut replay = source.clone();
+    let close = tag.range.end - if tag.empty { 2 } else { 1 };
+    let at = replay[..close].trim_end().len();
+    replay.insert_str(at, &bindings);
+    element.bookmark_replay_xml = Some(replay);
     Ok(())
 }
 
@@ -1611,6 +1729,7 @@ fn decode_element(
         paragraph_ordinal: None,
         para_id_attribute: None,
         bookmark_xml: None,
+        bookmark_replay_xml: None,
     })
 }
 
@@ -1961,6 +2080,27 @@ mod tests {
             parse_twips_measure(&format!("{}in", "9".repeat(310)), true),
             None
         );
+    }
+
+    #[test]
+    fn retained_bookmark_xml_after_a_byte_order_mark_is_the_source_element() {
+        let start = "<w:bookmarkStart w:id=\"0\" w:name=\"_Toc1\"/>";
+        let end = "<w:bookmarkEnd w:id=\"0\"/>";
+        let part = format!(
+            "<w:document xmlns:w=\"urn:w\"><w:body>{start}<w:p/>{end}</w:body></w:document>"
+        );
+        for input in [part.clone(), format!("\u{feff}{part}")] {
+            let document = parse(&input).unwrap();
+            let retained: Vec<_> = document
+                .root()
+                .unwrap()
+                .child_by_local_name("body")
+                .unwrap()
+                .child_elements()
+                .filter_map(|element| element.bookmark_xml.as_deref())
+                .collect();
+            assert_eq!(retained, [start, end], "{input:?}");
+        }
     }
 
     fn parse(input: &str) -> Result<XmlDocument, ParseError> {

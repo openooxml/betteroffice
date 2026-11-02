@@ -29,6 +29,10 @@ function bindingInputsHash(): string {
       'Cargo.lock',
       'crates',
       'bindings',
+      'scripts/python_font_packs.py',
+      'packages/fonts-latin/assets/manifest.json',
+      'packages/fonts-intl/assets/manifest.json',
+      'packages/fonts-cjk/assets/manifest.json',
     ],
     { cwd: ROOT }
   );
@@ -43,6 +47,7 @@ function bindingInputsHash(): string {
         name.endsWith('.rs') ||
         name.endsWith('.py') ||
         name.endsWith('pyproject.toml') ||
+        name.endsWith('manifest.json') ||
         name.endsWith('Cargo.toml') ||
         name.endsWith('Cargo.lock')
     )
@@ -114,6 +119,26 @@ if (import.meta.main) {
   const dir = venvDir();
   if (!fs.existsSync(venvPython(dir)))
     run(['uv', 'venv', '--python', '3.13', dir]);
+  const packs = path.join(dir, 'font-packs');
+  fs.rmSync(packs, { recursive: true, force: true });
+  run([
+    venvPython(dir),
+    '-I',
+    path.join(ROOT, 'scripts', 'python_font_packs.py'),
+    '--out',
+    packs,
+  ]);
+  run([
+    'uv',
+    'pip',
+    'install',
+    '--python',
+    venvPython(dir),
+    ...fs
+      .readdirSync(packs)
+      .filter((name) => name.endsWith('.whl'))
+      .map((name) => path.join(packs, name)),
+  ]);
   const target =
     process.env.CARGO_TARGET_DIR ?? path.join(ROOT, 'bindings', 'target');
   for (const binding of BINDINGS) {
@@ -127,7 +152,7 @@ if (import.meta.main) {
         '--manifest-path',
         path.join(ROOT, 'bindings', `python-${binding}`, 'Cargo.toml'),
       ],
-      { VIRTUAL_ENV: dir, CARGO_TARGET_DIR: target }
+      { VIRTUAL_ENV: dir, CARGO_TARGET_DIR: target, UV_FIND_LINKS: packs }
     );
   }
   fs.writeFileSync(

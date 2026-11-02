@@ -39,7 +39,6 @@ export {
   openPresentation,
   renderPptxMarkdown,
   wasmVersion,
-  engineBackend,
 } from './wasm/loader';
 export { PptxExportError } from './structuredExport';
 export type {
@@ -83,7 +82,6 @@ export type {
   PresentationHandle,
   UndoCaptureMode,
   WasmInitInput,
-  EngineBackend,
 } from './wasm/loader';
 export type {
   EditSuccess,
@@ -191,6 +189,8 @@ export type {
   TableReceipt,
   UpdateEvent,
 } from './types';
+/** @internal */
+export { metafileImageBytes } from './render/image';
 // Static editor paths import these four here so bundlers keep the command core out of the default editor's static chunk.
 /** @internal */
 export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/peerHydrationError';

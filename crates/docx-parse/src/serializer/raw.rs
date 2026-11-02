@@ -37,10 +37,21 @@ pub(crate) fn validate_replayed_fragment(xml: &str) -> Result<(), ParseError> {
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
     let document = parse_xml_strict(xml.as_bytes(), "replayed-fragment", &mut budget)?;
-    if document.root().is_none() {
-        return Err(ParseError::Canonical(
-            "replayed fragment must contain exactly one element".to_owned(),
-        ));
+    let root = document.root().ok_or_else(|| {
+        ParseError::Canonical("replayed fragment must contain exactly one element".to_owned())
+    })?;
+    if matches!(root.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd") {
+        for name in root.attributes.keys() {
+            if let Some((prefix, local)) = name.split_once(':')
+                && !matches!(prefix, "w" | "xml" | "xmlns")
+                && matches!(local, "id" | "name")
+                && !root.attributes.contains_key(&format!("xmlns:{prefix}"))
+            {
+                return Err(ParseError::Canonical(format!(
+                    "unbound block bookmark attribute {name}"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -138,6 +149,20 @@ mod tests {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn replayed_bookmark_identities_require_bound_aliases() {
+        for xml in [
+            r#"<w:bookmarkStart b:id="7" w:name="Range"/>"#,
+            r#"<w:bookmarkEnd b:id="7"/>"#,
+            r#"<w:bookmarkStart w:id="7" b:name="Range"/>"#,
+        ] {
+            assert!(validate_replayed_fragment(xml).is_err(), "{xml}");
+        }
+        validate_replayed_fragment(
+            r#"<w:bookmarkStart xmlns:b="http://schemas.openxmlformats.org/wordprocessingml/2006/main" b:id="7" b:name="Range"/>"#,
+        ).unwrap();
+    }
 
     #[test]
     fn replay_validation_rejects_unescaped_emitted_values() {

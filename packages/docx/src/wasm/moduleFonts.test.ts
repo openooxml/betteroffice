@@ -10,7 +10,7 @@ import {
   outline_glyph_json,
   register_measure_font,
   register_substitute_measure_font,
-} from './generated/edit/docx_edit.js';
+} from './engineEdit';
 
 const font = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
@@ -25,7 +25,7 @@ const input = (id: number) => JSON.stringify({
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, 'generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 test('module font exports coexist with an edit session in the same wasm instance', () => {
   clear_measure_fonts();

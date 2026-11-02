@@ -5,7 +5,7 @@ import {
   createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
   isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
 } from 'typescript';
-import { engineBackend } from '../wasm/engine';
+import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
@@ -33,8 +33,8 @@ function compileRequests(worker: WasmTestWorker) {
 }
 
 test('keeps worker URLs and options statically evaluable', () => {
-  const source = createSourceFile('client.ts',
-    readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);
+  const source = createSourceFile('sessionWorker.browser.ts',
+    readFileSync(resolve(import.meta.dir, 'sessionWorker.browser.ts'), 'utf8'), ScriptTarget.Latest);
   const workers: Array<Record<string, string>> = [];
   function visit(node: Node): void {
     if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
@@ -56,7 +56,7 @@ test('keeps worker URLs and options statically evaluable', () => {
   expect(workers).toEqual([{ type: 'module' }]);
 });
 
-describe.skipIf(engineBackend() === 'native')('presentation session wasm reuse', () => {
+describe.skipIf(engineKind === 'native')('presentation session wasm reuse', () => {
   test('starts before open delivery and reuses the first worker module after disposal', async () => {
     const h = factory();
     const spies = mainThreadWasmSpies();
@@ -285,6 +285,23 @@ describe.skipIf(engineBackend() === 'native')('presentation session wasm reuse',
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     } finally {
       release();
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  test('session workers fetch and cache the editor-core asset', async () => {
+    const h = factory();
+    const spies = mainThreadWasmSpies();
+    try {
+      const first = await h.client.openPresentationSession(new Uint8Array());
+      expect(h.workers[0].urls).toEqual(['https://example.test/session_editor.wasm']);
+      await first.dispose();
+      const second = await h.client.openPresentationSession(new Uint8Array());
+      expect(h.workers[1].urls).toEqual([]);
+      expect(input(h.workers[1]).wasm).toBe(h.workers[0].modules[0]);
+      await second.dispose();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
       for (const spy of spies) spy.mockRestore();
     }
   });

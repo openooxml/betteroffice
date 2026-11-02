@@ -1,12 +1,274 @@
 mod coverage_regressions {
     use super::*;
 
+    fn latin_renderer() -> SlideRenderer {
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font(
+                "Arial",
+                false,
+                false,
+                include_bytes!("../../betteroffice-fonts/tests/fixtures/Synthetic-Regular.ttf"),
+            )
+            .unwrap();
+        renderer
+    }
+
     fn split(renderer: &SlideRenderer, text: &str) -> Vec<ResolvedRun> {
         let mut run = paragraph(renderer, "l", text).runs.remove(0);
         run.start = 7;
         let mut result = Vec::new();
         renderer.split_by_coverage(run, &mut result);
         result
+    }
+
+    #[test]
+    fn browser_coverage_skips_registered_faces_of_other_families() {
+        for registered_primary in [false, true] {
+            let mut renderer = latin_renderer();
+            if registered_primary {
+                let other = renderer
+                    .register_font("Trebuchet MS", false, false, FONT)
+                    .unwrap();
+                assert_eq!(
+                    renderer.fonts.covers(FontId::from_u32(other), 'Б'),
+                    Ok(true)
+                );
+            }
+            renderer.set_browser_coverage_fallback(true);
+            let own = renderer.fallback_font().unwrap().to_u32();
+            let pieces = split(&renderer, "AБB");
+            let actual: Vec<_> = pieces
+                .iter()
+                .map(|piece| (piece.text.as_str(), piece.style.face.id.to_u32()))
+                .collect();
+            assert_eq!(actual, [("A", own), ("Б", BROWSER_FONT_ID), ("B", own)]);
+        }
+    }
+
+    #[test]
+    fn coverage_faces_keep_emoji_presentation_on_the_browser() {
+        let mut renderer = SlideRenderer::new();
+        let own = renderer
+            .register_font(
+                "Segoe UI",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Selawik-Regular.ttf"),
+            )
+            .unwrap();
+        let coverage = renderer
+            .register_fallback_font(
+                "Noto Sans JP",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf"),
+            )
+            .unwrap();
+        renderer.set_browser_coverage_fallback(true);
+        let face = renderer
+            .resolve_face("Segoe UI", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(renderer.fonts.covers(FontId::from_u32(own), '☀'), Ok(false));
+        assert_eq!(
+            renderer.fonts.covers(FontId::from_u32(coverage), '☀'),
+            Ok(true)
+        );
+        for (cluster, expected) in [
+            ("☀️", BROWSER_FONT_ID),
+            ("☀", coverage),
+            ("☀\u{FE0E}", coverage),
+        ] {
+            let pieces = renderer.browser_coverage_pieces(&face, cluster, false, false);
+            assert_eq!(pieces.len(), 1, "{cluster:?}");
+            assert_eq!(
+                pieces[0].1.as_ref().unwrap().id.to_u32(),
+                expected,
+                "{cluster:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_only_runs_keep_emoji_presentation_on_the_browser() {
+        let mut renderer = SlideRenderer::new();
+        let coverage = renderer
+            .register_fallback_font(
+                "Noto Sans JP",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf"),
+            )
+            .unwrap();
+        renderer.set_browser_coverage_fallback(true);
+        let face = renderer
+            .resolve_face("BIZ UD明朝", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(face.id.to_u32(), coverage);
+        for text in ["☀️", "A☀️B"] {
+            let pieces = renderer.browser_coverage_pieces(&face, text, false, false);
+            let emoji = pieces
+                .iter()
+                .find(|(index, _)| text[*index..].starts_with('☀'))
+                .unwrap();
+            assert_eq!(
+                emoji.1.as_ref().map(|face| face.id.to_u32()),
+                Some(BROWSER_FONT_ID),
+                "{text:?}"
+            );
+        }
+        for text in ["☀", "☀\u{FE0E}", "AB"] {
+            let pieces = renderer.browser_coverage_pieces(&face, text, false, false);
+            assert!(pieces.iter().all(|(_, piece)| piece.is_none()), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn text_presentation_selector_lets_coverage_faces_cover_default_emoji() {
+        let mut renderer = SlideRenderer::new();
+        let own = renderer
+            .register_font(
+                "Segoe UI",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Selawik-Regular.ttf"),
+            )
+            .unwrap();
+        let covering = renderer
+            .register_fallback_font(
+                "Inter",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Inter-Regular.ttf"),
+            )
+            .unwrap();
+        renderer.set_browser_coverage_fallback(true);
+        let face = renderer
+            .resolve_face("Segoe UI", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(renderer.fonts.covers(FontId::from_u32(own), '⬜'), Ok(false));
+        assert_eq!(
+            renderer.fonts.covers(FontId::from_u32(covering), '⬜'),
+            Ok(true)
+        );
+        for (cluster, expected) in [
+            ("⬜", BROWSER_FONT_ID),
+            ("⬜\u{FE0F}", BROWSER_FONT_ID),
+            ("⬜\u{FE0E}", covering),
+        ] {
+            let pieces = renderer.browser_coverage_pieces(&face, cluster, false, false);
+            assert_eq!(pieces.len(), 1, "{cluster:?}");
+            assert_eq!(
+                pieces[0].1.as_ref().unwrap().id.to_u32(),
+                expected,
+                "{cluster:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn emoji_presentation_detection_keeps_text_and_indic_joiners() {
+        for cluster in [
+            "☀️",
+            "👨‍👩‍👧‍👦",
+            "👍🏽",
+            "1\u{20E3}",
+            "🇩🇪",
+            "⌚",
+            "⬜",
+            "☀‍☀",
+            "\u{1F02C}\u{200D}\u{1F02C}",
+        ] {
+            assert!(emoji_presentation_cluster(cluster), "{cluster:?}");
+        }
+        for cluster in ["☀", "☀\u{FE0E}", "⬜\u{FE0E}", "Б", "क्‍ष"] {
+            assert!(!emoji_presentation_cluster(cluster), "{cluster:?}");
+        }
+    }
+
+    #[test]
+    fn coverage_requires_the_whole_grapheme() {
+        let mut renderer = latin_renderer();
+        renderer.set_browser_coverage_fallback(true);
+        let partial = renderer
+            .register_fallback_font("Partial coverage", false, false, FONT)
+            .unwrap();
+        assert_eq!(
+            renderer.fonts.covers(FontId::from_u32(partial), 'Б'),
+            Ok(true)
+        );
+        assert_eq!(
+            renderer.fonts.covers(FontId::from_u32(partial), '\u{20DD}'),
+            Ok(false)
+        );
+        let pieces = split(&renderer, "AБ\u{20DD}B");
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[1].text, "Б\u{20DD}");
+        assert_eq!(pieces[1].style.face.id.to_u32(), BROWSER_FONT_ID);
+
+        let covering = renderer
+            .register_fallback_font(
+                "Carlito",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf"),
+            )
+            .unwrap();
+        for character in "Б\u{20DD}".chars() {
+            assert_eq!(
+                renderer.fonts.covers(FontId::from_u32(covering), character),
+                Ok(true)
+            );
+        }
+        let pieces = split(&renderer, "AБ\u{20DD}B");
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[1].text, "Б\u{20DD}");
+        assert_eq!(pieces[1].style.face.id.to_u32(), covering);
+    }
+
+    #[test]
+    fn coverage_prefers_style_then_registration_order() {
+        for (bold, italic) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut renderer = latin_renderer();
+            let face = renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            let selected = |renderer: &SlideRenderer| {
+                renderer
+                    .browser_coverage_face(&face, "Б", bold, italic)
+                    .unwrap()
+                    .id
+                    .to_u32()
+            };
+            let first_any = renderer
+                .register_fallback_font("First any", !bold, !italic, FONT)
+                .unwrap();
+            renderer
+                .register_fallback_font("Second any", !bold, italic, FONT)
+                .unwrap();
+            assert_eq!(selected(&renderer), first_any);
+
+            let first_bold = renderer
+                .register_fallback_font("First bold", bold, !italic, FONT)
+                .unwrap();
+            renderer
+                .register_fallback_font("Second bold", bold, !italic, FONT)
+                .unwrap();
+            assert_eq!(selected(&renderer), first_bold);
+
+            let first_exact = renderer
+                .register_fallback_font("First exact", bold, italic, FONT)
+                .unwrap();
+            renderer
+                .register_fallback_font("Second exact", bold, italic, FONT)
+                .unwrap();
+            assert_eq!(selected(&renderer), first_exact);
+
+            renderer
+                .register_font("Registered exact", bold, italic, FONT)
+                .unwrap();
+            assert_eq!(selected(&renderer), first_exact);
+        }
     }
 
     #[test]

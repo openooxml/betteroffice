@@ -8,7 +8,7 @@ The `open` operation takes `{ "fixture": "path/from/repo/root.xlsx" }` to replac
 Normalization spec: Visit steps in script order, arrays in index order and object keys in ascending order. Replace each entire string matching the format's version token pattern (xlsx: 32 lowercase hex digits, pptx: 16 lowercase hex digits, each followed by `-` and a decimal epoch) with `<version:N>`, assigning N from 1 on first sight and reusing it for equal tokens across the run. Leave every other value unchanged. In arguments, resolve `<version:N>` to the previously observed token, failing on unknown references. The `save` op records `{ "sha256", "byteLength" }` from the exact saved bytes.
 
 To add a step, edit the script and map its op in TS and each selected runner.
-Regenerate with `BETTEROFFICE_ENGINE=wasm bun scripts/parity/harness.ts xlsx --write`.
+Regenerate with `bun scripts/parity/harness.ts xlsx --write` (the wasm engine); add `--preload scripts/native-engine-preload.ts` to run the TS target on the native engine.
 `BETTEROFFICE_PARITY_WRITE=1` also enables golden writing in the TS runner.
 All selected targets must pass before accepting a golden.
 

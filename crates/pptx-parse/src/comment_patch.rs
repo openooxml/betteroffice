@@ -11,11 +11,11 @@ use crate::comments::{
 };
 use crate::xml::{ParseBudget, XmlElement, parse_xml, serialize_xml_fragment};
 
-struct Span {
-    range: Range<usize>,
-    opening_end: usize,
-    closing_start: usize,
-    children: Vec<Span>,
+pub(crate) struct Span {
+    pub(crate) range: Range<usize>,
+    pub(crate) opening_end: usize,
+    pub(crate) closing_start: usize,
+    pub(crate) children: Vec<Span>,
 }
 
 struct Patch {
@@ -104,7 +104,7 @@ impl Source<'_> {
     }
 }
 
-fn spans(bytes: &[u8], part: &str) -> Result<Span, PptxError> {
+pub(crate) fn spans(bytes: &[u8], part: &str) -> Result<Span, PptxError> {
     let mut reader = Reader::from_reader(bytes);
     let mut stack: Vec<Span> = Vec::new();
     loop {

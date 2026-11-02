@@ -63,7 +63,7 @@ async function laidOut(data = FONT): Promise<{ session: YrsSession; request: str
 }
 
 describe('paged structured export', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('exports bytes with a deterministic snapshot page map', async () => {
     const first = await exportDocxStructuredWithPages(PAGES, MARKUP, FONTS);

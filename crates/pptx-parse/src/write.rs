@@ -280,9 +280,13 @@ pub fn write_pptx_with_edits(
                 if root != original_root {
                     let xml = if layout_part_path.is_some() || has_placeholder_patch(shapes) {
                         crate::attribute_patch::patch_attributes(bytes, &original_root, &root)
+                            .or_else(|| {
+                                crate::slide_splice::splice_slide(bytes, &original_root, &root)
+                            })
                             .unwrap_or_else(|| serialize_xml(&root))
                     } else {
-                        serialize_xml(&root)
+                        crate::slide_splice::splice_slide(bytes, &original_root, &root)
+                            .unwrap_or_else(|| serialize_xml(&root))
                     };
                     sink.store(part_path, xml);
                 }

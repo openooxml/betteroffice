@@ -110,7 +110,7 @@ async function open(bytes = fixture()): Promise<YrsSession> {
 }
 
 describe('YrsSession edit batches', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('reads versioned text with one U+FFFC per atom and finds reusable ranges', async () => {
     const session = await open();

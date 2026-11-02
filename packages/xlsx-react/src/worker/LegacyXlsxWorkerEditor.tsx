@@ -12,10 +12,11 @@ import {
   workbookSessionInternals,
 } from '@betteroffice/xlsx/worker';
 import type {
-  CapturedFormat, CellAddr, CellEdit, CellInputEdit, CellRange, Direction, EditResult, Proposal, Rect, Selection,
-  WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxEditResult,
+  CapturedFormat, CellAddr, CellEdit, CellInputEdit, CellRange, Direction, DisplayList, EditResult, Proposal, Rect,
+  Selection, WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
 import type { WorkbookReplayOp } from '@betteroffice/xlsx/worker';
+import { useDefaultFonts } from '../useDefaultFonts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
@@ -197,6 +198,38 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     canNavigateSync: () => apiBridgeRef.current?.canNavigateSync?.() ?? false,
   }));
   const { run, error, loading } = useLegacySessionWorkbook(props, commands.store, apiBridge);
+  const heldPreview = useRef<{ canvas: HTMLCanvasElement; displayList: DisplayList; request: WorkerPaintRequest } | null>(null);
+  const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
+    () => {
+      if (run?.current && !run.failure) sourceRef.current?.schedule();
+      repaintHeldPreview();
+    },
+    () => {
+      if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled';
+      repaintHeldPreview();
+    });
+  const paintPreview = (canvas: HTMLCanvasElement, displayList: DisplayList, request: WorkerPaintRequest) => {
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Preview canvas context is unavailable');
+    canvas.width = Math.round(request.width * request.dpr);
+    canvas.height = Math.round(request.height * request.dpr);
+    canvas.style.width = `${request.width}px`;
+    canvas.style.height = `${request.height}px`;
+    const settled = paintWithDefaultFonts(displayList, () => paintDisplayList(context, displayList, request.dpr * request.zoom));
+    heldPreview.current = settled ? null : { canvas, displayList, request };
+    canvas.dataset.previewReady = settled ? 'true' : 'pending';
+  };
+  function repaintHeldPreview() {
+    const held = heldPreview.current;
+    if (!held) return;
+    if (previewCanvasRef.current !== held.canvas || held.canvas.dataset.previewReady !== 'pending') {
+      heldPreview.current = null;
+      return;
+    }
+    paintPreview(held.canvas, held.displayList, held.request);
+  }
+  useEffect(() => () => { heldPreview.current = null; }, [run]);
+  useEffect(() => { repaintHeldPreview(); }, [props.defaultFonts]);
   runRef.current = run;
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
@@ -389,14 +422,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         flushSync(() => setPreviewDraft(draft));
         if (run.ready) return;
         const canvas = previewCanvasRef.current;
-        const context = canvas?.getContext('2d');
-        if (!canvas || !context) throw new Error('Preview canvas context is unavailable');
-        canvas.width = Math.round(request.width * request.dpr);
-        canvas.height = Math.round(request.height * request.dpr);
-        canvas.style.width = `${request.width}px`;
-        canvas.style.height = `${request.height}px`;
-        paintDisplayList(context, frame.displayList, request.dpr * request.zoom);
-        canvas.dataset.previewReady = 'true';
+        if (!canvas) throw new Error('Preview canvas context is unavailable');
+        paintPreview(canvas, frame.displayList, request);
       }
     }
     await boundary();
@@ -720,7 +747,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`;
         canvas.style.height = `${request.height}px`;
-        paintDisplayList(context, painted.displayList, request.dpr * request.zoom);
+        canvas.dataset.defaultFonts = paintWithDefaultFonts(painted.displayList,
+          () => paintDisplayList(context, painted.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
         canvas.dataset.workerSequence = String(painted.sequence);
         canvas.dataset.paintSource = painted.source;
         canvas.dataset.workerZoom = String(request.zoom);
@@ -1010,6 +1038,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!coordinator.submit(draft)) return;
     if ((draft as WorkerCellDraft).modified !== false && !unpreviewedOps.size) {
       previewState.sequence = Infinity;
+      heldPreview.current = null;
       if (previewCanvasRef.current) previewCanvasRef.current.dataset.previewReady = 'false';
       setPreviewDraft(draft);
     }

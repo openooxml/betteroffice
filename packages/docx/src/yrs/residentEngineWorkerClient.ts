@@ -37,8 +37,10 @@ import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
+import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
 import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { createSessionWorker } from '#session-worker';
 
 /** @internal */
 export interface ResidentProposalReply
@@ -172,10 +174,7 @@ export interface ResidentEngineWorkerPort {
 }
 
 function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
-  return new Worker(new URL('./docxWorker.mjs', import.meta.url), {
-    type: 'module',
-    name: 'betteroffice-docx-worker',
-  });
+  return createSessionWorker();
 }
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
@@ -808,7 +807,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   }
 
   async warm(hostModule = false): Promise<void> {
-    if (!hostModule) {
+    if (!hostModule || !shipsWasmAsset) {
       await this.request({ type: 'warm' });
       return;
     }

@@ -10,9 +10,9 @@
  * Requires a CSP that permits wasm compilation (`wasm-unsafe-eval`).
  */
 
-import * as editGlue from './generated/edit/docx_edit.js';
-import * as parseGlue from './generated/parse/docx_parse.js';
-import * as queryGlue from './generated/query/docx_query.js';
+import * as editGlue from './engineEdit';
+import * as parseGlue from './engineParse';
+import * as queryGlue from './engineQuery';
 import { editWasmState } from './edit';
 import type { WasmAsyncInput, WasmModuleState } from './loadWasmAsset';
 import { parseWasmState } from './parse';

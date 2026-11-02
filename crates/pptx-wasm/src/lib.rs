@@ -4,6 +4,11 @@ use wasm_bindgen::prelude::*;
 
 pub use pptx_edit::wasm::PptxDocument;
 
+#[cfg(all(target_arch = "wasm32", not(feature = "oneshot")))]
+#[used]
+#[unsafe(link_section = "betteroffice.pptx.editor-core")]
+static EDITOR_CORE: [u8; 1] = [1];
+
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
     r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
@@ -108,7 +113,7 @@ impl PptxRenderer {
         self.inner.set_browser_coverage_fallback(enabled);
     }
 
-    /// requested font faces before layout, for one slide or the whole deck.
+    /// Requested faces with optional script coverage buckets, before layout.
     #[wasm_bindgen(js_name = requestedFontFacesJson)]
     pub fn requested_font_faces_json(
         &self,
@@ -235,12 +240,28 @@ pub fn export_pptx_markdown_json(data: &[u8], options: &str) -> Result<String, J
 /// Renders schema-version-1 structured content as Markdown; `options` is `{"maxBytes"?}`.
 #[wasm_bindgen(js_name = renderPptxMarkdownJson)]
 pub fn render_pptx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    pptx_engine::render_pptx_markdown_json(content, options).map_err(js_error)
+    #[cfg(feature = "oneshot")]
+    {
+        pptx_engine::render_pptx_markdown_json(content, options).map_err(js_error)
+    }
+    #[cfg(not(feature = "oneshot"))]
+    {
+        let _ = (content, options);
+        Err(JsValue::from_str(EDITOR_CORE_UNAVAILABLE))
+    }
 }
 
 #[wasm_bindgen(js_name = compileSlideJson)]
 pub fn compile_slide_json(slide_json: &str) -> Result<String, JsValue> {
-    pptx_engine::compile_slide_json(slide_json).map_err(js_error)
+    #[cfg(feature = "oneshot")]
+    {
+        pptx_engine::compile_slide_json(slide_json).map_err(js_error)
+    }
+    #[cfg(not(feature = "oneshot"))]
+    {
+        let _ = slide_json;
+        Err(JsValue::from_str(EDITOR_CORE_UNAVAILABLE))
+    }
 }
 
 #[wasm_bindgen(js_name = rendererVersion)]
@@ -252,6 +273,9 @@ pub fn renderer_version() -> String {
 pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
     pptx_engine::decode_tiff_png(data).map_err(js_error)
 }
+
+#[cfg(not(feature = "oneshot"))]
+const EDITOR_CORE_UNAVAILABLE: &str = "not available in the editor core";
 
 fn js_error(error: pptx_engine::EngineError) -> JsValue {
     pptx_edit::wasm::to_js(error)

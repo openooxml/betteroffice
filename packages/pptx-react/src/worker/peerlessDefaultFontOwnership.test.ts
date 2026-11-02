@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import '../fontTraits';
 import { installDefaultFonts, installFonts } from './peerlessFonts';
 
 test('app ownership suppresses defaults both before and after browser loading', async () => {

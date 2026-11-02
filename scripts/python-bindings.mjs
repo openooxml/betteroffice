@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   REGISTRY,
+  FONT_PACK_NAMES,
   PYPI_DISTRIBUTIONS,
   PYTHON_BINDINGS,
   PYTHON_BINDING_NAMES,
@@ -10,7 +11,7 @@ import {
   bindingName
 } from './python-binding-names.mjs';
 
-export { PYPI_DISTRIBUTIONS, PYTHON_BINDINGS, PYTHON_BINDING_NAMES, PYTHON_PUBLISH_NAMES };
+export { FONT_PACK_NAMES, PYPI_DISTRIBUTIONS, PYTHON_BINDINGS, PYTHON_BINDING_NAMES, PYTHON_PUBLISH_NAMES };
 
 /** The crate version maturin stamps on the wheel; bindings version independently of the workspace. */
 export function bindingVersion(path) {
@@ -21,19 +22,36 @@ export function bindingVersion(path) {
   return version[1];
 }
 
-/** Publish-enabled bindings whose crate version PyPI does not serve yet. */
+/** The font pack version a wheel carries: its manifest's, which the Rust font catalog reads too. */
+export function fontPackVersion(name) {
+  const manifest = JSON.parse(
+    readFileSync(new URL(`../packages/${name}/assets/manifest.json`, import.meta.url), 'utf8')
+  );
+  if (typeof manifest.version !== 'string') {
+    throw new Error(`packages/${name}/assets/manifest.json declares no version`);
+  }
+  return manifest.version;
+}
+
+/** Font packs, then publish-enabled bindings, whose version PyPI does not serve yet. */
 export async function pendingPublishNames({
   fetchImpl = fetch,
   attempts = 3,
   retryDelayMs = 2000
 } = {}) {
   const pending = [];
-  for (const entry of REGISTRY) {
-    if (!entry.publish) continue;
-    const name = bindingName(entry.path);
+  const candidates = [
+    ...FONT_PACK_NAMES.map((name) => ({ name, version: () => fontPackVersion(name) })),
+    ...REGISTRY.filter((entry) => entry.publish).map((entry) => ({
+      name: bindingName(entry.path),
+      version: () => bindingVersion(entry.path)
+    }))
+  ];
+  for (const candidate of candidates) {
+    const name = candidate.name;
     const project = `betteroffice-${name}`;
     const releases = await pypiReleases(project, { fetchImpl, attempts, retryDelayMs });
-    const version = bindingVersion(entry.path);
+    const version = candidate.version();
     const files = releases?.[version];
     if (releases === null || files === undefined) {
       pending.push(name);

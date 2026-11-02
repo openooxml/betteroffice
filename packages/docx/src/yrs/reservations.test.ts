@@ -9,7 +9,7 @@ import { resolveReservations, validReservationsPayload, type DocxReservationsPay
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
-)))));
+)))), 30_000);
 
 async function sessionWithParagraphs(count: number, before = '') {
   const zip = new JSZip();

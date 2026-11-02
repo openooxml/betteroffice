@@ -41,7 +41,7 @@ pub fn measure_text(text: &str, font_size_pt: f32) -> f32 {
     let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
     total as f32 * scale
 }
-
+#[cfg(not(feature = "fonts"))]
 /// a single-line text run; `x`/`y` are the align anchor and alphabetic baseline.
 pub struct TextRun<'a> {
     pub x: f32,
@@ -58,7 +58,7 @@ pub struct TextRun<'a> {
     pub highlight: Option<Color>,
     pub dashed_underline: bool,
 }
-
+#[cfg(not(feature = "fonts"))]
 /// paint one shaped, single-line run, clipped strictly to the run's clip rect.
 pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 {
@@ -261,7 +261,7 @@ fn paint_decorations(
         }
     }
 }
-
+#[cfg(not(feature = "fonts"))]
 pub fn paint_rotated_text(
     pixmap: &mut Pixmap,
     run: &TextRun,
@@ -426,7 +426,7 @@ pub fn paint_rotated_text(
         None,
     );
 }
-
+#[cfg(not(feature = "fonts"))]
 pub fn paint_stacked_text(pixmap: &mut Pixmap, run: &TextRun, cell: &DlRect, valign: TextValign) {
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 {
         return;
@@ -537,3 +537,11 @@ mod tests {
         assert!(measure_text("mmmm", 11.0) > measure_text("ii", 11.0));
     }
 }
+
+#[cfg(feature = "fonts")]
+#[path = "font_native.rs"]
+mod native;
+#[cfg(feature = "fonts")]
+pub(crate) use native::{FontFace, measure_text_with_fonts};
+#[cfg(feature = "fonts")]
+pub use native::{TextRun, paint_rotated_text, paint_stacked_text, paint_text};

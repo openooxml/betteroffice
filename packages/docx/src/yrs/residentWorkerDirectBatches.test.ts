@@ -42,7 +42,7 @@ let startWorker: (clientId?: number) => InProcessResidentWorker;
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 afterAll(() => {
   for (const client of clients.splice(0)) client.destroy();

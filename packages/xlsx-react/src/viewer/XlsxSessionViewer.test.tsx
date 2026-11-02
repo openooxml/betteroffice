@@ -61,6 +61,7 @@ function session() {
   const sheets = [{ id: 'sheet:0', index: 0, name: 'First' }, { id: 'sheet:1', index: 1, name: 'Second' }];
   let failure: Parameters<WorkbookSession['onFailure']>[0] | undefined;
   const call = {
+    decodeFontFace: mock<WorkbookSession['call']['decodeFontFace']>(async () => { throw new Error('Unexpected font decode'); }),
     command: mock<WorkbookSession['call']['command']>(async () => { throw new Error('Unexpected command'); }),
     captureFormat: mock<WorkbookSession['call']['captureFormat']>(async () => { throw new Error('Unexpected format capture'); }),
     frame: mock(async (viewport: Viewport, options?: { sheet?: number }) => frame(options?.sheet ?? 0, viewport)),

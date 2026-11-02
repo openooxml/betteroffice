@@ -1,12 +1,14 @@
+import { metafileImageBytes } from '../render/browserImage';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { createCommandFontInstallation } from './commandFontInstallation';
 import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { MethodHandlers } from '../../../../shared/office-session/types';
-import { compileWasm } from '../../../../shared/office-session/wasm';
+import { compileSessionWasm } from '#session-scope';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import { wasmAssetUrl } from '../wasm/asset';
+import { engineKind } from '../wasm/engine';
 import {
   decodeTiffImage, initWasm, openPresentation, presentationDisplayListJson, presentationMetadata,
   openPresentationReplayBaseline, presentationPeerHydration, presentationPeerMetadata,
@@ -41,8 +43,12 @@ function fonts(faces?: readonly PresentationSessionFont[]): PptxFontFace[] | und
 }
 
 export async function initializePresentationEditorWasm(source?: ArrayBuffer | WebAssembly.Module) {
+  if (engineKind === 'native') {
+    await initWasm(source);
+    return undefined;
+  }
   const module = source instanceof WebAssembly.Module ? source : source === undefined
-    ? await compileWasm(wasmAssetUrl()) : await WebAssembly.compile(source);
+    ? await compileSessionWasm(wasmAssetUrl()) : await WebAssembly.compile(source);
   await initWasm(module);
   return module;
 }
@@ -52,7 +58,7 @@ export function createPresentationSessionHost(
   transport: SessionTransport,
   options: {
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
-    initEditorWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<WebAssembly.Module>;
+    initEditorWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<WebAssembly.Module | undefined>;
   } = {}
 ): SessionHost<Events> {
   let handle: PresentationHandle | PresentationPeerHandle | undefined;
@@ -171,6 +177,7 @@ export function createPresentationSessionHost(
         if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
           try { bytes = decodeTiffImage(bytes); } catch {}
         }
+        bytes = metafileImageBytes(bytes, () => opened.metafileSvg(assetId));
         media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
       }
       epoch += 1;

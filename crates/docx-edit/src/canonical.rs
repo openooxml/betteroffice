@@ -42,6 +42,7 @@
 //! emits one.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use serde_json::{Map as JsonMap, Value};
 use yrs::types::{ToJson, text::YChange};
@@ -87,10 +88,56 @@ pub enum CanonicalItem {
 ///
 /// Errors only when `story_id` is not a story of `doc`.
 pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalItem>, OpError> {
+    let mut items = Vec::new();
+    visit_story(doc, story_id, &mut items)?;
+    Ok(items)
+}
+
+/// Receives a story's canonical content in order: each text run whole, with its
+/// marks and first story unit, and every other item as built.
+trait StorySink {
+    fn text(
+        &mut self,
+        text: &str,
+        marks: BTreeMap<String, Value>,
+        unit: u32,
+        comments: &[Vec<(u32, u32)>],
+    );
+    fn item(&mut self, item: CanonicalItem);
+}
+
+impl StorySink for Vec<CanonicalItem> {
+    fn text(
+        &mut self,
+        text: &str,
+        marks: BTreeMap<String, Value>,
+        mut unit: u32,
+        comments: &[Vec<(u32, u32)>],
+    ) {
+        for ch in text.chars() {
+            let width = ch.len_utf16() as u32;
+            self.push(CanonicalItem::CharItem {
+                ch: ch.to_string(),
+                marks: marks.clone(),
+                comment_ids: covering_ordinals(comments, unit, width),
+            });
+            unit += width;
+        }
+    }
+
+    fn item(&mut self, item: CanonicalItem) {
+        self.push(item);
+    }
+}
+
+fn visit_story(
+    doc: &EditingDoc,
+    story_id: &str,
+    items: &mut impl StorySink,
+) -> Result<(), OpError> {
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, story_id)?;
     let comment_groups = story_comment_groups(&txn, story_id);
-    let mut items = Vec::new();
     // The running UTF-16 story-unit index (every embed, pilcrows included, = 1),
     // used to test each scalar against the resolved comment intervals.
     let mut unit = 0_u32;
@@ -99,18 +146,11 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
         match diff.insert {
             Out::Any(Any::String(text)) => {
                 let marks = canonical_attrs(diff.attributes.as_deref());
-                for ch in text.chars() {
-                    let width = ch.len_utf16() as u32;
-                    items.push(CanonicalItem::CharItem {
-                        ch: ch.to_string(),
-                        marks: marks.clone(),
-                        comment_ids: covering_ordinals(&comment_groups, unit, width),
-                    });
-                    unit += width;
-                }
+                items.text(&text, marks, unit, &comment_groups);
+                unit += text.encode_utf16().count() as u32;
             }
             Out::YMap(map) if is_pilcrow(&map, &txn) => {
-                items.push(CanonicalItem::ParaMark {
+                items.item(CanonicalItem::ParaMark {
                     ppr: canonical_shared_map(
                         &map,
                         &txn,
@@ -126,20 +166,20 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                 unit += 1;
             }
             Out::YMap(map) if map_string(&map, &txn, KIND_KEY).as_deref() == Some("table") => {
-                items.push(canonical_table(&map, &txn));
+                items.item(canonical_table(&map, &txn));
                 unit += 1;
             }
             Out::YMap(map) if map_string(&map, &txn, KIND_KEY).as_deref() == Some("blockSdt") => {
                 // The child-story key is stable plumbing identity, not authored
                 // content (same rule as table-cell story references).
-                items.push(CanonicalItem::Embed {
+                items.item(CanonicalItem::Embed {
                     kind: "blockSdt".to_owned(),
                     payload: canonical_shared_map(&map, &txn, &[KIND_KEY, "story"]),
                 });
                 unit += 1;
             }
             Out::YMap(map) => {
-                items.push(canonical_embed(
+                items.item(canonical_embed(
                     map_string(&map, &txn, KIND_KEY).unwrap_or_default(),
                     canonical_shared_map(&map, &txn, &[KIND_KEY]),
                 ));
@@ -150,7 +190,7 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                     Some(Any::String(value)) => value.to_string(),
                     _ => String::new(),
                 };
-                items.push(canonical_embed(kind, canonical_any_map(&map, &[KIND_KEY])));
+                items.item(canonical_embed(kind, canonical_any_map(&map, &[KIND_KEY])));
                 unit += 1;
             }
             other => {
@@ -159,7 +199,7 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                 if let Some(value) = canonical_out(other, &txn) {
                     payload.insert("value".to_owned(), value);
                 }
-                items.push(CanonicalItem::Embed {
+                items.item(CanonicalItem::Embed {
                     kind: String::new(),
                     payload,
                 });
@@ -168,7 +208,7 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
         }
     }
 
-    Ok(items)
+    Ok(())
 }
 
 fn canonical_embed(kind: String, mut payload: BTreeMap<String, Value>) -> CanonicalItem {
@@ -345,32 +385,107 @@ fn covering_ordinals(groups: &[Vec<(u32, u32)>], unit: u32, width: u32) -> Vec<u
 /// documented at the top of this module.
 pub fn to_canonical_bytes(items: &[CanonicalItem]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(VERSION.as_bytes());
-    bytes.push(b'\n');
-    for item in items {
-        let encoded = serde_json::to_vec(&canonical_item_value(item))
-            .expect("canonical items contain only JSON values");
-        bytes.extend_from_slice(&encoded);
-        bytes.push(b'\n');
-    }
+    write_stream(&mut bytes, items);
     bytes
+}
+
+fn write_stream(out: &mut impl Write, items: &[CanonicalItem]) {
+    write_bytes(out, VERSION.as_bytes());
+    write_bytes(out, b"\n");
+    for item in items {
+        write_item(out, item);
+    }
+}
+
+fn write_item(out: &mut impl Write, item: &CanonicalItem) {
+    serde_json::to_writer(&mut *out, &canonical_item_value(item))
+        .expect("canonical items contain only JSON values");
+    write_bytes(out, b"\n");
+}
+
+fn write_bytes(out: &mut impl Write, bytes: &[u8]) {
+    out.write_all(bytes)
+        .expect("canonical stream sinks do not fail");
+}
+
+/// 64-bit FNV-1a, fed the stream bytes as they are produced.
+struct Fnv(u64);
+
+impl Fnv {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+}
+
+impl Write for Fnv {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        for &byte in bytes {
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(Self::PRIME);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Stable 64-bit FNV-1a over [`to_canonical_bytes`].
 pub fn checksum(items: &[CanonicalItem]) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = Fnv::new();
+    write_stream(&mut hash, items);
+    hash.0
+}
 
-    to_canonical_bytes(items)
-        .into_iter()
-        .fold(OFFSET_BASIS, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
-        })
+/// Hashes the stream of one story as it is projected: a text run's marks are
+/// serialized once and its character lines go straight into the hash, so
+/// memory stays flat in the story's length.
+struct ChecksumSink(Fnv);
+
+impl StorySink for ChecksumSink {
+    fn text(
+        &mut self,
+        text: &str,
+        marks: BTreeMap<String, Value>,
+        mut unit: u32,
+        comments: &[Vec<(u32, u32)>],
+    ) {
+        let marks = serde_json::to_vec(&canonical_map(&marks))
+            .expect("canonical marks contain only JSON values");
+        let mut scalar = [0_u8; 4];
+        for ch in text.chars() {
+            let width = ch.len_utf16() as u32;
+            let out = &mut self.0;
+            write_bytes(out, b"{\"CharItem\":{\"ch\":");
+            serde_json::to_writer(&mut *out, &*ch.encode_utf8(&mut scalar))
+                .expect("a scalar serializes to JSON");
+            let ids = covering_ordinals(comments, unit, width);
+            if !ids.is_empty() {
+                write_bytes(out, b",\"commentIds\":");
+                serde_json::to_writer(&mut *out, &ids).expect("ordinals serialize to JSON");
+            }
+            write_bytes(out, b",\"marks\":");
+            write_bytes(out, &marks);
+            write_bytes(out, b"}}\n");
+            unit += width;
+        }
+    }
+
+    fn item(&mut self, item: CanonicalItem) {
+        write_item(&mut self.0, &item);
+    }
 }
 
 /// Projects and checksums one story in a single convenience call.
 pub fn story_checksum(doc: &EditingDoc, story_id: &str) -> Result<u64, OpError> {
-    Ok(checksum(&project_story(doc, story_id)?))
+    let mut sink = ChecksumSink(Fnv::new());
+    write_bytes(&mut sink.0, VERSION.as_bytes());
+    write_bytes(&mut sink.0, b"\n");
+    visit_story(doc, story_id, &mut sink)?;
+    Ok((sink.0).0)
 }
 
 fn canonical_attrs(attrs: Option<&yrs::types::Attrs>) -> BTreeMap<String, Value> {
@@ -809,6 +924,11 @@ mod tests {
             "{\"ParaMark\":{\"ppr\":{\"alignment\":\"left\",\"pStyle\":\"Heading1\"}}}\n",
         );
         assert_eq!(to_canonical_bytes(&items), EXPECTED.as_bytes());
+        assert_eq!(checksum(&items), 17_861_917_747_005_997_278);
+        assert_eq!(
+            story_checksum(&doc, "body").unwrap(),
+            17_861_917_747_005_997_278
+        );
     }
 
     #[test]
@@ -917,6 +1037,11 @@ mod tests {
             "{\"ParaMark\":{\"ppr\":{\"alignment\":\"left\",\"pStyle\":\"Normal\"}}}\n",
         );
         assert_eq!(to_canonical_bytes(&items), EXPECTED.as_bytes());
+        assert_eq!(checksum(&items), 18_396_494_270_826_384_770);
+        assert_eq!(
+            story_checksum(&doc, "body").unwrap(),
+            18_396_494_270_826_384_770
+        );
     }
 
     #[test]

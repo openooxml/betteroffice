@@ -147,7 +147,7 @@ describe('CDN font provider', () => {
     host.getBuiltinModule = (id: string) => id === 'node:zlib' ? {} : original?.call(host, id);
     const frame = await Bun.file(new URL('../../fonts-intl/assets/NotoSansThai-Regular.ttf.zst', import.meta.url)).arrayBuffer();
     try {
-      for (const baseUrl of [undefined, 'https://custom.example/fonts/', 'http://127.0.0.1:4178/fonts/']) {
+      for (const [index, baseUrl] of [undefined, 'https://custom.example/fonts/', 'http://127.0.0.1:4178/fonts/'].entries()) {
         const pack = `${baseUrl ?? `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-intl@${fontsIntlVersion}/assets/`}NotoSansThai-Regular.ttf.zst`;
         const decoder = baseUrl === undefined
           ? `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`
@@ -164,9 +164,10 @@ describe('CDN font provider', () => {
             : new Response('missing decoder', { status: 404 });
         }) as typeof fetch;
         const provider = entry.createFontProvider({ baseUrl });
+        const bundled = 'https://consumer.example/dist/decoder/fontpack.wasm';
         await expect(provider.resolveScriptFallback('thai', false, false)())
-          .rejects.toThrow('Cannot load font decoder wasm: HTTP 404');
-        expect(requested).toEqual([pack, decoder]);
+          .rejects.toThrow(`Font decoder wasm not found: ${decoder} (HTTP 404), ${bundled} (HTTP 404)`);
+        expect(requested).toEqual(index === 0 ? [pack, decoder, bundled] : [pack, decoder]);
       }
     } finally {
       host.getBuiltinModule = original;

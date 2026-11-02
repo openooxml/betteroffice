@@ -1,14 +1,35 @@
-#[cfg(feature = "raster")]
-use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
     CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
     PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SelectionDirection, SheetId,
-    SheetInfoWire as SheetInfo, SnapshotBudget, StylePatch, UpdateEvent, UpdateSubscription,
-    Viewport, Workbook, WorkbookSnapshotEncoder,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, RenderOptions,
+    SelectionDirection, SheetId, SheetInfoWire as SheetInfo, SnapshotBudget, StylePatch,
+    UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
+
+fn range_png_options(args: &str) -> Result<RenderOptions, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        range: Option<String>,
+        scale: Option<f32>,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+    }
+
+    let args: Args = serde_json::from_str(args).map_err(|error| format!("bad args: {error}"))?;
+    let range = args
+        .range
+        .map(|range| CellRange::parse_a1(&range).map_err(|error| format!("bad range: {error}")))
+        .transpose()?;
+    Ok(RenderOptions {
+        range,
+        scale: args.scale.unwrap_or(1.0),
+        max_width: args.max_width,
+        max_height: args.max_height,
+    })
+}
 
 pub struct Session {
     workbook: Workbook,
@@ -249,6 +270,7 @@ struct AcceptResult {
 }
 
 impl Session {
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: u64,
@@ -263,6 +285,7 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn open_recovery_checkpoint(bytes: &[u8], expected_seq: u64) -> Result<Self, String> {
         let (workbook, through_seq, calculation_context, _) =
             Workbook::restore_recovery_checkpoint(bytes).map_err(|error| error.to_string())?;
@@ -553,29 +576,30 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let (display_list, _, _) = self
+            .workbook
+            .png_display_list_for(self.workbook.active_sheet(), &viewport)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, String> {
+        let options = range_png_options(args)?;
+        let (display_list, _, _) = self
+            .workbook
+            .range_png_display_list_for(self.workbook.active_sheet(), &options)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
     #[cfg(feature = "raster")]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, String> {
-        #[derive(Deserialize)]
-        struct Args {
-            range: Option<String>,
-            scale: Option<f32>,
-        }
-
-        let args: Args =
-            serde_json::from_str(args).map_err(|error| format!("bad args: {error}"))?;
-        let range = args
-            .range
-            .map(|range| CellRange::parse_a1(&range).map_err(|error| format!("bad range: {error}")))
-            .transpose()?;
+        let options = range_png_options(args)?;
         self.workbook
-            .render_sheet(
-                self.workbook.active_sheet(),
-                &RenderOptions {
-                    range,
-                    scale: args.scale.unwrap_or(1.0),
-                    ..RenderOptions::default()
-                },
-            )
+            .render_sheet(self.workbook.active_sheet(), &options)
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
@@ -620,6 +644,15 @@ impl Session {
         self.workbook
             .conditional_formats_json(SheetId(sheet))
             .map_err(|error| error.to_string())
+    }
+
+    /// Recalculate every formula with the handle clock (or `now_serial`), counting it as an
+    /// edit so the next save writes the recalculated values, and report the calculation
+    /// status.
+    pub fn recalculate_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
+        let options = self.calculation_options(now_serial);
+        self.workbook.recalculate_all(options);
+        self.calculation_status_json()
     }
 
     pub fn calculation_status_json(&self) -> Result<String, String> {
@@ -1673,7 +1706,7 @@ mod tests {
         assert!(position["y"].as_f64().unwrap() > 0.0);
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
         session.set_active_sheet(1).unwrap();
         assert!(
@@ -2363,7 +2396,7 @@ mod tests {
         assert!(result.contains(r#""limitedCells":["A3"]"#), "{result}");
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":["A3"]}"#
+            r#"{"limitedCells":["A3"],"unevaluatedCells":[]}"#
         );
     }
 
@@ -2392,7 +2425,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
     }
 
@@ -2834,6 +2867,46 @@ mod tests {
                 .contains("frozen workbook structure")
         );
         assert_eq!(target.encode_state_as_update(), target_state);
+    }
+
+    #[test]
+    fn png_display_lists_validate_viewports_ranges_and_scales() {
+        let session = Session::open(&sample_xlsx(), None).unwrap();
+        let viewport = r#"{"x":13.37,"y":21.125,"width":300.3,"height":180.7}"#;
+        let list: serde_json::Value =
+            serde_json::from_str(&session.png_display_list_json(viewport).unwrap()).unwrap();
+        assert!(!list["commands"].as_array().unwrap().is_empty());
+        let list: serde_json::Value = serde_json::from_str(
+            &session
+                .range_png_display_list_json(
+                    r#"{"range":"A1:B2","scale":1.3,"maxWidth":100,"maxHeight":50}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(list["width"].as_f64().unwrap() <= 100.0001);
+        assert!(list["height"].as_f64().unwrap() <= 50.0001);
+        for viewport in [
+            "not json",
+            r#"{"x":0,"y":0,"width":-1,"height":120}"#,
+            r#"{"x":0,"y":0,"width":17000,"height":120}"#,
+        ] {
+            let error = session.png_display_list_json(viewport).unwrap_err();
+            assert!(!error.is_empty());
+            #[cfg(feature = "raster")]
+            assert_eq!(error, session.render_png(viewport).unwrap_err());
+        }
+        for args in [
+            "not json",
+            r#"{"range":"nope"}"#,
+            r#"{"range":"A1:B2","scale":0}"#,
+            r#"{"range":"A1:B2","scale":-1}"#,
+        ] {
+            let error = session.range_png_display_list_json(args).unwrap_err();
+            assert!(!error.is_empty());
+            #[cfg(feature = "raster")]
+            assert_eq!(error, session.render_range_png(args).unwrap_err());
+        }
     }
 
     #[cfg(feature = "raster")]

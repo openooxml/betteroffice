@@ -1,5 +1,4 @@
 import initWasmModule, {
-  backend,
   decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
   exportPptxMarkdownJson,
@@ -187,6 +186,7 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  metafileSvg(partPath: string): Uint8Array | undefined;
   /**
    * serialize the presentation back to .pptx bytes, edits included. Normal
    * autofit text the edits changed is fitted with the registered faces, or
@@ -364,7 +364,7 @@ export type PresentationPeerHandle = Pick<PresentationHandle,
   'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
   'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
   'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' |
-  'mediaBytes' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
+  'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
 >;
 
 type PeerMode = { kind: 'baseline' } | { kind: 'peer'; identity: string };
@@ -503,13 +503,6 @@ export function initWasm(
 
 export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
-}
-
-export type EngineBackend = 'wasm' | 'native';
-
-/** Which engine runs this presentation code ('native' when @betteroffice/pptx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export function engineBackend(): EngineBackend {
-  return backend;
 }
 
 export function wasmVersion(): string {
@@ -867,6 +860,9 @@ function openPresentationInternal(
     },
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath));
+    },
+    metafileSvg(partPath: string): Uint8Array | undefined {
+      return wasmCall(() => doc.metafileSvg(partPath));
     },
     save(options?: SavePresentationOptions): Uint8Array {
       if (!options) return wasmCall(() => renderer.saveBytes(doc));

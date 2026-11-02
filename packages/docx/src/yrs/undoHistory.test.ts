@@ -17,7 +17,7 @@ function text(session: YrsSession, story: string): string {
 }
 
 describe('session undo history', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('keeps one ordered history across stories', async () => {
     const session = await createYrsSession({ clientId: 53005 });

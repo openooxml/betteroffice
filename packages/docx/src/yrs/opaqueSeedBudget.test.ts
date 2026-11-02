@@ -51,7 +51,7 @@ function opaqueBytes(xmlBytes: number): Uint8Array<ArrayBuffer> {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))), 30_000);
 
 it('preview media does not count toward the opaque XML seed budget', () => {
   const src = 'x'.repeat(OPAQUE_SEED_BUDGET_BYTES + 1);

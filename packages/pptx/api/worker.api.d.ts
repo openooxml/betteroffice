@@ -404,7 +404,9 @@ export declare class StaleProposalError extends Error {
 
 // ---- render/browserFrameImages.d.ts ----
 import type { CanvasImageResolver } from './canvas';
-export declare function browserFrameImages(): {
+export declare function browserFrameImages(options?: {
+    maxDimension?: number;
+}): {
     resolve(frame: {
         media: ReadonlyMap<string, Uint8Array>;
     }): CanvasImageResolver & {
@@ -1108,7 +1110,7 @@ import { type PresentationHandle, type PresentationPeerHandle } from '../wasm/lo
 import { PptxWorkerEditorFailedError } from './peerHydrationError';
 import { type PptxWorkerEditorOperation, type PptxWorkerEditorReply } from './replay';
 import type { PresentationSessionState } from './methods';
-declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
+declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "metafileSvg", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
 export interface PptxWorkerEditorInteractionAccess {
     snapshot(): {
         snapshot: DeckSnapshot;
@@ -1356,7 +1358,7 @@ export type EditorPosition = {
 export type EditorBaseline = EditorPosition & {
     state: PresentationSessionState;
     hydration: string;
-    module: WebAssembly.Module;
+    module: WebAssembly.Module | undefined;
 };
 export type EditorReplayReply = PresentationReplayReply & {
     projection: PresentationSessionState;
@@ -3626,6 +3628,7 @@ export class PptxDocument {
     insertTextProfiledJson(args: string): string;
     listProposalsJson(): string;
     mediaBytes(part_path: string): Uint8Array;
+    metafileSvg(part_path: string): Uint8Array | undefined;
     moveShapeJson(args: string): string;
     moveShapeProfiledJson(args: string): string;
     moveSlideJson(args: string): string;
@@ -3724,7 +3727,7 @@ export class PptxRenderer {
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
-     * requested font faces before layout, for one slide or the whole deck.
+     * Requested faces with optional script coverage buckets, before layout.
      */
     requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
@@ -3835,6 +3838,7 @@ export interface InitOutput {
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveShapeProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -4055,6 +4059,7 @@ export interface PresentationHandle extends CollaborationReplica {
     layoutSlideProfiled(slideIndex: number): ProfiledLayout;
     hitTest(x: number, y: number): HitTestResult | null;
     mediaBytes(partPath: string): Uint8Array;
+    metafileSvg(partPath: string): Uint8Array | undefined;
     /**
      * serialize the presentation back to .pptx bytes, edits included. Normal
      * autofit text the edits changed is fitted with the registered faces, or
@@ -4187,7 +4192,7 @@ export interface PresentationReplayReply {
     outcome: PresentationReplayOutcome;
 }
 /** @internal */
-export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
+export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
 /** @internal */
 export declare function openPresentationReplayBaseline(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationPeerHandle;
 /** @internal */
@@ -4229,9 +4234,6 @@ export declare function presentationDisplayListJson(handle: PresentationHandle, 
 export declare function isProposalsAvailable(): boolean;
 export declare function initWasm(input?: WasmInitInput): Promise<void>;
 export declare function isWasmAvailable(): boolean;
-export type EngineBackend = 'wasm' | 'native';
-/** Which engine runs this presentation code ('native' when @betteroffice/pptx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export declare function engineBackend(): EngineBackend;
 export declare function wasmVersion(): string;
 export declare function inspectPresentation(bytes: Uint8Array, options?: InspectPresentationOptions): unknown;
 /**

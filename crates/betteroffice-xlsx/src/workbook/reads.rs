@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use xlsx_parse::{DefinedFunctionNames, display_formula};
 
 use crate::{
     CellEdit, CellRange, CellRef, DifferentialFormat, Error, Result, SheetId, SheetInfo, Viewport,
@@ -152,6 +153,21 @@ pub struct CalculationStatus {
     /// Whether recalculation exhausted its shared budget, omitted when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub budget_exhausted: bool,
+    /// Formula cells the engine could not compute, at most 10,000.
+    pub unevaluated_cells: Vec<UnevaluatedStatus>,
+}
+
+/// A formula cell the engine could not compute: it keeps Excel's saved value,
+/// or stays blank when the file saved none, unless only an engine gap was
+/// involved, which shows its error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnevaluatedStatus {
+    /// The cell formatted relative to the active sheet.
+    pub address: String,
+    /// The uncomputable functions involved, sorted; empty when only gaps of
+    /// the engine were.
+    pub functions: Vec<String>,
 }
 
 impl Workbook {
@@ -292,13 +308,15 @@ impl Workbook {
                 .is_none_or(|scope| scope == name.local_sheet.map(|sheet| sheet.0))
         });
         let total = names.clone().count();
+        let defined = DefinedFunctionNames::new(&self.model().defined_names);
         let items = names
             .skip(offset)
             .take(limit)
             .map(|name| DefinedNameInfo {
                 hidden: name.hidden,
                 name: name.name.clone(),
-                refers_to: name.formula.clone(),
+                refers_to: display_formula(&name.formula, defined.visible_from(name.local_sheet))
+                    .into_owned(),
                 scope: name.local_sheet.map(|sheet| sheet.0),
             })
             .collect::<Vec<_>>();
@@ -327,6 +345,8 @@ impl Workbook {
             .model()
             .sheet(sheet)
             .ok_or_else(|| Error::InvalidOperation(format!("sheet {} not found", sheet.0)))?;
+        let defined = DefinedFunctionNames::new(&self.model().defined_names);
+        let names = defined.visible_from(Some(sheet));
         Ok(sheet_ref
             .conditional_formats
             .iter()
@@ -335,7 +355,11 @@ impl Workbook {
                     dxf_id: rule.dxf_id,
                     editable: rule.editable(),
                     format: rule.format.clone(),
-                    formulas: rule.formulas.clone(),
+                    formulas: rule
+                        .formulas
+                        .iter()
+                        .map(|formula| display_formula(formula, names).into_owned())
+                        .collect(),
                     id: rule.id.clone(),
                     operator: rule.operator.clone(),
                     priority: rule.priority,
@@ -364,6 +388,15 @@ impl Workbook {
                 .map(|address| self.format_address(*address))
                 .collect(),
             budget_exhausted: calculation.budget_exhausted,
+            unevaluated_cells: calculation
+                .unevaluated_cells
+                .iter()
+                .take(super::batch::MAX_DIAGNOSTIC_CELLS)
+                .map(|cell| UnevaluatedStatus {
+                    address: self.format_address(cell.address),
+                    functions: cell.functions.clone(),
+                })
+                .collect(),
         }
     }
 }

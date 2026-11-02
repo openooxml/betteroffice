@@ -40,13 +40,30 @@ pub struct BlockSdt {
 /// Block payloads live behind `Arc` so derived views (section content,
 /// structured field caches) share the parsed allocation instead of
 /// deep-cloning it. Mutation goes through `Arc::make_mut` copy-on-write.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum BlockContent {
     Paragraph(Arc<Paragraph>),
     Table(Arc<Table>),
     BlockSdt(Arc<BlockSdt>),
     RawXml(Arc<crate::inline::RawInlineXml>),
+}
+
+impl<'de> Deserialize<'de> for BlockContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let decoded = match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("paragraph") => Deserialize::deserialize(&value).map(Self::Paragraph),
+            Some("table") => Deserialize::deserialize(&value).map(Self::Table),
+            Some("blockSdt") => Deserialize::deserialize(&value).map(Self::BlockSdt),
+            Some("rawXml") => Deserialize::deserialize(&value).map(Self::RawXml),
+            _ => return Err(serde::de::Error::custom("invalid block type")),
+        };
+        decoded.map_err(serde::de::Error::custom)
+    }
 }
 
 impl BlockContent {
@@ -240,13 +257,10 @@ impl StoryParser<'_, '_> {
             }
             let paragraphs_before = self.budget.paragraph_count();
             if !typed_block(child) {
-                let raw = if is_body_bookmark(parent, child) {
+                let raw = if is_block_bookmark(parent, child) {
                     Some(crate::inline::RawInlineXml {
                         node_type: crate::inline::RawInlineXmlType::RawXml,
-                        xml: child
-                            .bookmark_xml
-                            .clone()
-                            .unwrap_or_else(|| child.to_raw_inline_xml()),
+                        xml: bookmark_source(child),
                         source_ordinal: None,
                     })
                 } else {
@@ -400,16 +414,20 @@ impl StoryParser<'_, '_> {
             formatting,
             column_widths: parse_table_grid(element.child("w", "tblGrid")),
             rows: Vec::new(),
+            trailing_bookmarks: None,
         };
-        for row in transparent_children(element, true)
-            .into_iter()
-            .filter(|row| row.matches_name("w", "tr"))
-        {
-            self.budget.charge_table_row(self.part)?;
-            table
-                .rows
-                .push(self.parse_table_row(row, depth, in_header_footer)?);
+        let mut pending = Vec::new();
+        for child in transparent_children(element, true) {
+            if is_block_bookmark(element, child) {
+                pending.push(bookmark_source(child));
+            } else if child.matches_name("w", "tr") {
+                self.budget.charge_table_row(self.part)?;
+                let mut row = self.parse_table_row(child, depth, in_header_footer)?;
+                row.leading_bookmarks = take_bookmarks(&mut pending);
+                table.rows.push(row);
+            }
         }
+        table.trailing_bookmarks = take_bookmarks(&mut pending);
         infer_implicit_single_cell_row_spans(&mut table);
         Ok(table)
     }
@@ -438,15 +456,21 @@ impl StoryParser<'_, '_> {
             structural_change: parse_table_row_structural_change(properties),
             formatting,
             cells: Vec::new(),
+            leading_bookmarks: None,
+            trailing_bookmarks: None,
         };
-        for cell in transparent_children(element, true)
-            .into_iter()
-            .filter(|cell| cell.matches_name("w", "tc"))
-        {
-            self.budget.charge_table_cell(self.part)?;
-            row.cells
-                .push(self.parse_table_cell(cell, depth, in_header_footer)?);
+        let mut pending = Vec::new();
+        for child in transparent_children(element, true) {
+            if is_block_bookmark(element, child) {
+                pending.push(bookmark_source(child));
+            } else if child.matches_name("w", "tc") {
+                self.budget.charge_table_cell(self.part)?;
+                let mut cell = self.parse_table_cell(child, depth, in_header_footer)?;
+                cell.leading_bookmarks = take_bookmarks(&mut pending);
+                row.cells.push(cell);
+            }
         }
+        row.trailing_bookmarks = take_bookmarks(&mut pending);
         Ok(row)
     }
 
@@ -461,7 +485,7 @@ impl StoryParser<'_, '_> {
         let cell_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(cell_depth, self.part)?;
         let mut content = self.parse_blocks(element, cell_depth, in_header_footer)?;
-        if content.is_empty() {
+        if content.iter().all(is_bookmark_block) {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
             content.push(BlockContent::Paragraph(Arc::new(empty_paragraph())));
@@ -472,6 +496,7 @@ impl StoryParser<'_, '_> {
             structural_change: parse_table_cell_structural_change(properties),
             formatting,
             content,
+            leading_bookmarks: None,
         })
     }
 
@@ -492,7 +517,7 @@ impl StoryParser<'_, '_> {
             for child in run.child_elements() {
                 match child.local_name() {
                     "drawing" => {
-                        self.enrich_text_box_drawing(paragraph, child, run_index, depth)?
+                        self.enrich_text_box_drawing(paragraph, child, child, run_index, depth)?
                     }
                     "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
                     "AlternateContent" => {
@@ -505,12 +530,12 @@ impl StoryParser<'_, '_> {
                                     .find(|branch| branch.local_name() == "Fallback")
                             });
                         if let Some(branch) = branch {
-                            for child in branch.child_elements() {
-                                match child.local_name() {
+                            for item in branch.child_elements() {
+                                match item.local_name() {
                                     "drawing" => self.enrich_text_box_drawing(
-                                        paragraph, child, run_index, depth,
+                                        paragraph, item, child, run_index, depth,
                                     )?,
-                                    "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
+                                    "pict" => self.enrich_vml_text_box(paragraph, item, depth)?,
                                     _ => {}
                                 }
                             }
@@ -528,6 +553,7 @@ impl StoryParser<'_, '_> {
         &mut self,
         paragraph: &mut Paragraph,
         drawing: &XmlElement,
+        source: &XmlElement,
         run_index: usize,
         depth: usize,
     ) -> Result<(), ParseError> {
@@ -572,6 +598,7 @@ impl StoryParser<'_, '_> {
             content,
         });
         shape.text_body_properties = shape.text_body_properties.or(body);
+        crate::text_box::capture_bookmark_source(&mut shape, source);
         let mut target = run_index;
         if target >= paragraph.content.len() {
             let Some(last_run) = paragraph.content.iter().rposition(|content| {
@@ -616,7 +643,7 @@ impl StoryParser<'_, '_> {
         let Some(container) = crate::vml::vml_text_box_content_element(pict) else {
             return Ok(());
         };
-        let pict_xml = pict.to_raw_inline_xml();
+        let pict_xml = crate::text_box::source_xml(pict);
         let slot = paragraph
             .content
             .iter_mut()
@@ -742,8 +769,74 @@ pub(crate) fn typed_block_name(name: &str) -> bool {
     )
 }
 
-fn is_body_bookmark(parent: &XmlElement, element: &XmlElement) -> bool {
-    parent.name == "w:body" && matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd")
+pub(crate) fn is_bookmark_block(block: &BlockContent) -> bool {
+    let BlockContent::RawXml(raw) = block else {
+        return false;
+    };
+    let name = raw
+        .xml
+        .trim_start()
+        .strip_prefix('<')
+        .unwrap_or_default()
+        .split(|character: char| character.is_ascii_whitespace() || matches!(character, '/' | '>'))
+        .next()
+        .unwrap_or_default();
+    matches!(name, "w:bookmarkStart" | "w:bookmarkEnd")
+}
+
+/// A bookmark boundary's XML for replay outside its source ancestors.
+pub(crate) fn bookmark_source(element: &XmlElement) -> String {
+    element
+        .bookmark_replay_xml
+        .clone()
+        .or_else(|| element.bookmark_xml.clone())
+        .unwrap_or_else(|| element.to_raw_inline_xml())
+}
+
+fn take_bookmarks(pending: &mut Vec<String>) -> Option<Vec<String>> {
+    (!pending.is_empty()).then(|| std::mem::take(pending))
+}
+
+/// Whether `parent` holds a block bookmark directly or through `w:customXml` / `w:smartTag`.
+pub(crate) fn has_direct_block_bookmark(parent: &XmlElement) -> bool {
+    transparent_children(parent, false)
+        .into_iter()
+        .any(|child| is_block_bookmark(parent, child))
+}
+
+pub(crate) fn contains_bookmark_block(block: &BlockContent) -> bool {
+    match block {
+        BlockContent::BlockSdt(control) => control.content.iter().any(contains_bookmark_block),
+        BlockContent::Table(table) => {
+            table.trailing_bookmarks.is_some()
+                || table.rows.iter().any(|row| {
+                    row.leading_bookmarks.is_some()
+                        || row.trailing_bookmarks.is_some()
+                        || row.cells.iter().any(|cell| {
+                            cell.leading_bookmarks.is_some()
+                                || cell.content.iter().any(contains_bookmark_block)
+                        })
+                })
+        }
+        _ => is_bookmark_block(block),
+    }
+}
+
+pub(crate) fn is_block_bookmark(parent: &XmlElement, element: &XmlElement) -> bool {
+    matches!(
+        parent.name.as_str(),
+        "w:body"
+            | "w:tbl"
+            | "w:tr"
+            | "w:tc"
+            | "w:sdtContent"
+            | "w:hdr"
+            | "w:ftr"
+            | "w:footnote"
+            | "w:endnote"
+            | "w:comment"
+            | "w:txbxContent"
+    ) && matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd")
 }
 
 /// Whether the story dispatcher reads `element` as a block: a typed one, or foreign markup it
@@ -761,7 +854,7 @@ fn is_story_block_name(name: &str) -> bool {
 pub fn story_block_elements(parent: &XmlElement) -> Vec<(Vec<u32>, &XmlElement)> {
     let mut blocks = Vec::new();
     visit_transparent_children(parent, false, &mut Vec::new(), &mut |path, child| {
-        if is_story_block(child) || is_body_bookmark(parent, child) {
+        if is_story_block(child) || is_block_bookmark(parent, child) {
             blocks.push((path.to_vec(), child));
         }
     });

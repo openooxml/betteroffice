@@ -21,7 +21,7 @@ import { buildCommandFrame } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
-import type { DefaultFontFace, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
+import type { DefaultFontFace, DefaultFontLanding, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
   type PresentationSharedAck, type PresentationSharedMethods } from './commandSharedAdapter';
 import { findLine, hitGeometry, indexHitGeometry, navigateGeometry, transformedRect,
@@ -42,6 +42,8 @@ import {
   type PresentationCommandObjectSelection,
   type PresentationCommandObjectTarget,
 } from './commandProtocol';
+
+type FontModule = typeof import('./commandDefaultFonts');
 
 const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
@@ -126,8 +128,10 @@ export function registerPresentationCommandHandlers(
   let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
   let cancelDefaultFontImport: (() => void) | undefined;
   let gatingFonts = false;
-  const gatedDefaultFonts: DefaultFontFace[] = [];
-  let requestedFonts: ((slideId?: string) => Omit<DefaultFontFace, 'bytes'>[]) | undefined;
+  const gatedDefaultFonts: DefaultFontLanding[] = [];
+  let fontProvider: ReturnType<FontModule['commandFontProvider']['load']> | undefined;
+  const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load());
+  let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
   const fontSlides = new Set<string>();
@@ -176,12 +180,12 @@ export function registerPresentationCommandHandlers(
     if (disposed || !requestedFonts) return false;
     if (defaultFonts) return defaultFonts.hasPending(slideId);
     try {
-      return requestedFonts(slideId).some((face) => !suppliedFonts.some((font) =>
+      return requestedFonts(slideId).some((face) => face.scripts?.length || !suppliedFonts.some((font) =>
         font.family.trim().toLowerCase() === face.family.trim().toLowerCase()));
     } catch { return false; }
   }
 
-  function requestDefaultFonts(slideId?: string): DefaultFontFace[] | Promise<DefaultFontFace[]> {
+  function requestDefaultFonts(slideId?: string): DefaultFontLanding[] | Promise<DefaultFontLanding[]> {
     if (!hasDefaultFonts(slideId)) return [];
     if (defaultFonts) return defaultFonts.load(slideId);
     creatingDefaultFonts ??= new Promise<ReturnType<typeof createCommandDefaultFonts> | undefined>((resolve) => {
@@ -202,10 +206,14 @@ export function registerPresentationCommandHandlers(
       };
       const timer = setTimeout(() => finish(), 5000);
       cancelDefaultFontImport = () => finish();
-      void commandDefaultFontModule.load().then(({ createCommandDefaultFonts }) => {
+      void commandDefaultFontModule.load().then((fonts) => {
         if (finished || disposed || !requestedFonts) { finish(); return; }
-        defaultFonts = createCommandDefaultFonts(suppliedFonts, requestedFonts,
-          (face) => presentation().registerFont({ ...face, bytes: new Uint8Array(face.bytes) }),
+        defaultFonts = fonts.createCommandDefaultFonts(suppliedFonts, requestedFonts,
+          (face) => {
+            const font = { ...face, bytes: new Uint8Array(face.bytes) };
+            if (face.kind === 'coverage') presentation().registerFallbackFont(font);
+            else presentation().registerFont(font);
+          },
           (faces) => {
             if (!faces.length || disposed) return;
             layouts.clear();
@@ -214,10 +222,10 @@ export function registerPresentationCommandHandlers(
             if (gatingFonts) { gatedDefaultFonts.push(...faces); return; }
             if (!opening && options.onDefaultFonts) {
               const result = ack([], [...revisions.keys()]);
-              options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces },
-                [...result.transfer, ...faces.map((face) => face.bytes)]));
+              options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces }, result.transfer));
             }
-          }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()));
+          }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()),
+          sessionFontProvider(fonts));
         finish(defaultFonts);
       }).catch(() => finish());
     });
@@ -1479,8 +1487,7 @@ export function registerPresentationCommandHandlers(
           admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
           admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
         if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
-        return faces.length ? transferable({ ...result.value, defaultFonts: faces },
-          [...result.transfer, ...faces.map((face) => face.bytes)]) : result;
+        return faces.length ? transferable({ ...result.value, defaultFonts: faces }, result.transfer) : result;
       };
       if (activeSlideId !== previous.activeSlideId && activeSlideId !== null && hasDefaultFonts(activeSlideId)) {
         gatingFonts = true;
@@ -1525,7 +1532,16 @@ export function registerPresentationCommandHandlers(
       }
       opening = true;
       try {
-        await (options.initWasm ?? initWasm)(input.wasm);
+        const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
+        if (input.defaultFonts !== false) {
+          void import('./coverageScan').then(async (scan) => {
+            const scripts = await scan.activeSlideCoverageScripts(bytes, input.activeSlideIndex ?? 0);
+            if (!scripts.length || disposed) return;
+            const fonts = await commandDefaultFontModule.load();
+            if (!disposed) fonts.prefetchCoverageFaces(scripts, wasmReady, sessionFontProvider(fonts));
+          }).catch(() => {});
+        }
+        await wasmReady;
         if (disposed) throw new Error('Presentation command session is disposed');
         handle = openPresentation(new Uint8Array(bytes), { clientId: input.clientId,
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
@@ -1533,7 +1549,8 @@ export function registerPresentationCommandHandlers(
           initialUpdate: input.initialUpdate, retainSource: false });
         if (input.defaultFonts !== false) {
           for (const face of input.fonts ?? []) suppliedFonts.push({ family: face.family });
-          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId);
+          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId).map((face) => face.scripts
+            ? { ...face, scripts: face.scripts.filter((script) => script.startsWith('cjk-')) } : face);
         }
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
@@ -1570,7 +1587,7 @@ export function registerPresentationCommandHandlers(
           activeSlideId, frame: result.value.frame ?? null, recoveryBaseline: sourceBaseline ? 'source' : 'update',
           recoveryEngine: engineVersion(), ...(recoveryUpdate ? { recoveryUpdate } : {}),
           ...(fonts ? { defaultFonts: fonts } : {}) },
-          [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : []), ...(fonts ?? []).map((face) => face.bytes)]);
+          [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : [])]);
       } catch (error) {
         dispose();
         throw error;

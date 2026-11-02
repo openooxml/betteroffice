@@ -1,9 +1,10 @@
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { createSessionWorker } from '#session-worker';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { requestWasmCompile } from '../../../../shared/office-session/client';
-import { wasmAssetUrl } from '../wasm/asset';
+import { sessionWasmAssetUrl, shipsWasmAsset } from '../wasm/asset';
 import { takePresentationFontWorker } from './fontWorker';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
@@ -54,11 +55,11 @@ export function createPptxWorkerSession(
   bytes: Uint8Array | ArrayBuffer, options: PptxWorkerSessionOptions = {},
 ): PptxWorkerSession {
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
-  const cacheUrl = !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
+  const cacheUrl = shipsWasmAsset && !options.worker && options.wasm === undefined ? sessionWasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
   const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
   const transport = createWorkerTransport(options.worker ? options.worker() :
-    preparedWorker ?? new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
+    preparedWorker ?? createSessionWorker());
   if (cacheUrl && !wasm) requestWasmCompile(transport);
   const input = {
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
