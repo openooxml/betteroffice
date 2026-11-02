@@ -315,6 +315,16 @@ test('a failed load of newly painted characters settles and is retried only by a
   expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł', 'Ł']);
 });
 
+test('number format fill and padding characters count as painted characters', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [{
+    op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
+    numberFormat: { left: 0, width: 80, parts: [{ offset: 0, kind: 'fill', character: 'Ł' }] },
+  } as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['7Ł']);
+});
+
 test('a face the host registered under the family keeps the remote provider away', async () => {
   const { added } = browser();
   const { remoteLoads } = provider();

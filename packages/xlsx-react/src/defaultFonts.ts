@@ -213,6 +213,7 @@ export function createDefaultFontPainter(
       let face = faces.get(key);
       if (!face) faces.set(key, face = { fontFamily, bold, italic, characters: new Set() });
       for (const character of command.text ?? '') face.characters.add(character);
+      for (const part of command.numberFormat?.parts ?? []) for (const character of part.character) face.characters.add(character);
     }
     return faces;
   }
