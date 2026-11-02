@@ -5,6 +5,7 @@ export const xlsxDefaultFontManager = {
   load: () => import('@betteroffice/fonts'),
 };
 
+const PRELOAD_MAX_BYTES = 1.5 * 1024 * 1024;
 const registeredFaces = new Map<string, Promise<boolean>>();
 const pendingFaces = new Map<string, Set<symbol>>();
 const absentFaces = new Set<string>();
@@ -52,7 +53,9 @@ export function createDefaultFontPainter(
     source: ReturnType<Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>['createFontProvider']>;
   }> | undefined;
 
-  async function loadFace(fontFamily: string, bold: boolean, italic: boolean, retryShared = true): Promise<boolean> {
+  async function loadFace(
+    fontFamily: string, bold: boolean, italic: boolean, retryShared = true, maxBytes = Infinity,
+  ): Promise<boolean> {
     let owners: Set<symbol> | undefined;
     try {
       if (!provider) {
@@ -66,7 +69,7 @@ export function createDefaultFontPainter(
       if (disposed || typeof document === 'undefined' || !document.fonts) return false;
       const face = fonts.resolveMetricCompatFace(fontFamily, bold, italic)
         ?? fonts.resolveBundledFamilyFace(fontFamily, bold, italic);
-      if (!face) return false;
+      if (!face || face.byteLength > maxBytes) return false;
       const fontSet = document.fonts;
       if (activeFontSet !== fontSet) {
         registeredFaces.clear();
@@ -98,7 +101,7 @@ export function createDefaultFontPainter(
         interests.add(owners);
       }
       const success = await registration;
-      if (!success && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, false);
+      if (!success && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, false, maxBytes);
       return success;
     } catch { return false; }
     finally {
@@ -126,13 +129,13 @@ export function createDefaultFontPainter(
     return true;
   }
 
-  const paintedNeeds = (key: string) => {
+  const paintedPending = () => {
     if (!lastPainted) return false;
-    for (const face of faceKeys(lastPainted)) if (face.key === key) return true;
+    for (const face of faceKeys(lastPainted)) if (pending.has(face.key)) return true;
     return false;
   };
 
-  async function load(displayList: DisplayList, quiet = false): Promise<void> {
+  async function load(displayList: DisplayList): Promise<void> {
     if (inactive()) return;
     const batch: Promise<boolean>[] = [];
     for (const { fontFamily, bold, italic, key } of faceKeys(displayList)) {
@@ -142,13 +145,13 @@ export function createDefaultFontPainter(
         settled.add(key);
         if (success) {
           loaded.add(key);
-          if (!quiet || paintedNeeds(key)) changed = true;
+          changed = true;
         }
-        if (!disposed && !pending.size && changed) {
+        if (!disposed && !paintedPending() && changed) {
           changed = false;
           unsettledPaint = false;
           repaint();
-        } else if (!disposed && !pending.size && unsettledPaint && lastPainted && isSettled(lastPainted)) {
+        } else if (!disposed && !paintedPending() && unsettledPaint && lastPainted && isSettled(lastPainted)) {
           unsettledPaint = false;
           options.onSettled?.();
         }
@@ -162,9 +165,21 @@ export function createDefaultFontPainter(
 
   return {
     load,
-    /** Loads the faces of a frame that is not painted yet, without repainting the current one. */
-    preload(displayList: DisplayList): void {
-      void load(displayList, true).catch(() => {});
+    /**
+     * Loads the faces of a frame that is not painted yet, one at a time and only while
+     * `idle()` holds, skipping faces larger than 1.5 MB. The current frame is not repainted.
+     */
+    preload(displayList: DisplayList, idle: () => boolean): void {
+      void (async () => {
+        for (const { fontFamily, bold, italic, key } of faceKeys(displayList)) {
+          if (inactive() || !idle()) return;
+          if (loaded.has(key) || pending.has(key) || settled.has(key)) continue;
+          if (await loadFace(fontFamily, bold, italic, true, PRELOAD_MAX_BYTES)) {
+            loaded.add(key);
+            settled.add(key);
+          }
+        }
+      })().catch(() => {});
     },
     /** Takes over a frame painted before this painter existed. */
     adopt(displayList: DisplayList): void {

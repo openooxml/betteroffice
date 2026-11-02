@@ -37,6 +37,6 @@ export function useDefaultFonts(
     return false;
   }, []);
   return useMemo(() => Object.assign(paintWithFonts, {
-    preload: (displayList: DisplayList) => { state.current?.painter?.preload(displayList); },
+    preload: (displayList: DisplayList, idle: () => boolean) => { state.current?.painter?.preload(displayList, idle); },
   }), [paintWithFonts]);
 }

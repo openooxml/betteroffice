@@ -113,12 +113,29 @@ test('preloading a frame that is not painted registers its faces without repaint
   for (let tick = 0; tick < 50 && repaint.mock.calls.length === 0; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
   expect(repaint).toHaveBeenCalledTimes(1);
   const neighbour = display({ family: 'Calibri' });
-  fonts.preload(neighbour);
+  fonts.preload(neighbour, () => true);
   for (let tick = 0; tick < 50 && added.length < 2; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
   expect(added.map((face) => face.family)).toEqual(['Carlito', 'Calibri']);
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(repaint).toHaveBeenCalledTimes(1);
   expect(fonts.paint(neighbour, () => {})).toBe(true);
+  fonts.dispose();
+});
+
+test('preloading loads one face at a time and stops once the editor is busy', async () => {
+  const { added } = browser();
+  provider();
+  const decode = decoder();
+  const fonts = createDefaultFontPainter(decode, mock(() => {}));
+  fonts.preload(display({ family: 'Calibri' }, { family: 'Carlito', bold: true }), () => false);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(added).toEqual([]);
+  expect(decode).not.toHaveBeenCalled();
+  let budget = 1;
+  fonts.preload(display({ family: 'Calibri' }, { family: 'Carlito', bold: true }), () => budget-- > 0);
+  for (let tick = 0; tick < 50 && added.length < 1; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(added.map((face) => face.family)).toEqual(['Calibri']);
   fonts.dispose();
 });
 
