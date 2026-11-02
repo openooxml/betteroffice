@@ -1682,10 +1682,11 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
   } finally { client.destroy(); }
 }, TIMEOUT);
 
-test('the first frame leaves echo context and object geometry to a follow-up frame that rebuilds no page', async () => {
+test('the first frame carries the echo context and leaves object geometry to a follow-up frame that rebuilds no page', async () => {
   const { client, initial, settled } = await openWorker();
   try {
-    expect(initial.frame.payload.echoContext).toBeUndefined();
+    expect(initial.frame.payload.echoContext?.glyphs).toBeDefined();
+    expect(initial.frame.payload.echoGlyphSets?.length).toBeGreaterThan(0);
     expect(initial.frame.payload.geometry).toBeUndefined();
     expect(initial.frame.payload.stagedPresentation?.pages.length).toBeGreaterThan(0);
     expect(settled.revision).toBeGreaterThan(initial.frame.revision);

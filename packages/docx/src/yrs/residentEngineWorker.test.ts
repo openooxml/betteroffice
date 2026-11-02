@@ -822,7 +822,7 @@ test('command echo refreshes its scale when rounded page dimensions stay equal',
     const { initial, followUp } = await settledCommandInit(client, { ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.25 });
     const original = initial.frame.payload.stagedPresentation!.pages[0]!;
     expect([original.bitmap.width, original.bitmap.height]).toEqual([1020, 1320]);
-    expect(initial.frame.payload.echoContext).toBeUndefined();
+    expect(initial.frame.payload.echoContext!.glyphs!.pixelRatio).toBe(1.25);
     expect(followUp.payload.echoContext!.glyphs!.pixelRatio).toBe(1.25);
     const frames: DocxCommandFrame[] = [];
     client.onFrame((candidate) => frames.push(candidate));

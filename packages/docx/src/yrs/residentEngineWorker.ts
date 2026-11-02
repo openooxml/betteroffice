@@ -194,7 +194,7 @@ let commandFrameChanges: {
     provisional: boolean; parts: ReturnType<ResidentEngineSession['partGeometry']>;
   };
   selectionContext?: boolean;
-  /** The first frame went out without its echo context and object geometry; a follow-up frame carries them. */
+  /** The first frame went out without its object geometry; a follow-up frame carries it. */
   echoDeferred?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
   layoutStale?: boolean;
@@ -976,7 +976,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const echoRaster = changes.echoRaster;
         if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
         const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
-        const projectedEcho = deferred || hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
+        const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(), layout,
           glyphs: echoGlyphs.provider(pixelRatio),
         });
@@ -3230,8 +3230,8 @@ async function backgroundPageSlice(build: BackgroundPageBuild, budgetMs: number)
 }
 
 /**
- * Sends the echo context and object geometry the first frame left out, as a
- * selection frame that rebuilds no page; any frame before it carries them instead.
+ * Sends the object geometry the first frame left out, as a selection frame that
+ * rebuilds no page; any frame before it carries the geometry instead.
  */
 function scheduleEchoFollowUp(): void {
   const host = commandHost;
