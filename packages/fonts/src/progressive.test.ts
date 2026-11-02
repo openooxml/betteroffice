@@ -101,6 +101,42 @@ test('a progressive face loads index, skeleton and core, then only the chunks of
   expect(sha(face.bytes())).toBe(jpRef.sha256);
 });
 
+test('a glyph whose chunk loaded during another pending request resolves with a revision that draws it', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const slow = index.chunks[41]!.file;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fast: string[] = [];
+  const base = transport([]);
+  const face = await openProgressiveFace(jpRef, {
+    read: async (file) => {
+      if (file === slow) await gate;
+      const bytes = await base.read(file);
+      if (file === index.chunks[40]!.file) fast.push(file);
+      return bytes;
+    },
+    decode: base.decode,
+  });
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  const glyphIn = (chunk: number) => {
+    let glyph = 0;
+    while (skeleton.chunkOfGlyph(glyph) !== chunk) glyph += 1;
+    return glyph;
+  };
+  const coreOnly = face.bytes();
+  const both = face.ensureGlyphs([glyphIn(41), glyphIn(42)]);
+  for (let tick = 0; tick < 200 && fast.length === 0; tick += 1) await new Promise((resolve) => setTimeout(resolve, 1));
+  for (let tick = 0; tick < 20; tick += 1) await new Promise((resolve) => setTimeout(resolve, 1));
+  const revision = await face.ensureGlyphs([glyphIn(41)]);
+  expect(revision).toBeGreaterThan(1);
+  expect(face.revision).toBe(revision);
+  expect(face.bytes()).not.toEqual(coreOnly);
+  release();
+  expect(await both).toBe(face.revision);
+});
+
 test('a chunk that fails its checks rejects and loads on a later request', async () => {
   const reads: string[] = [];
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;

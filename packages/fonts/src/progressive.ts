@@ -122,7 +122,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
 
   const ensure = async (chunks: Iterable<number>): Promise<number> => {
     const wanted = [...new Set(chunks)].filter((chunk) => !loaded.has(chunk));
-    if (wanted.length === 0) return revision;
+    if (wanted.length === 0) return publish();
     const results = await Promise.allSettled(wanted.map(load));
     const failure = results.find((result) => result.status === 'rejected');
     const next = publish();
