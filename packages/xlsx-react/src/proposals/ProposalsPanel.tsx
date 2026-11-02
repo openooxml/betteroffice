@@ -108,7 +108,8 @@ export function ProposalsPanel({ proposals, staleFor, style }: ProposalsPanelPro
       ) : (
         proposals.map((proposal) => {
           const color = proposalColor(proposal.agentId);
-          const stale = staleFor[proposal.id];
+          const reportedStale = proposal.cells.filter((cell) => cell.stale).map((cell) => cell.a1);
+          const stale = reportedStale.length > 0 ? reportedStale : staleFor[proposal.id];
           return (
             <div
               key={proposal.id}

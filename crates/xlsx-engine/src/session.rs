@@ -230,8 +230,8 @@ struct IdArgs {
 }
 
 #[derive(Serialize)]
-struct ProposalList<'a> {
-    proposals: &'a [Proposal],
+struct ProposalList {
+    proposals: Vec<Proposal>,
 }
 
 #[derive(Serialize)]
@@ -1012,7 +1012,25 @@ impl Session {
 
     pub fn list_proposals_json(&self) -> Result<String, String> {
         serde_json::to_string(&ProposalList {
-            proposals: self.workbook.proposals(),
+            proposals: self
+                .workbook
+                .proposals()
+                .iter()
+                .cloned()
+                .map(|mut proposal| {
+                    for edit in &mut proposal.edits {
+                        let sheet = self.workbook.model().sheet(SheetId(edit.sheet));
+                        let state = sheet
+                            .and_then(|sheet| sheet.cell(CellRef::new(edit.row, edit.col)))
+                            .map(betteroffice_xlsx::CellState::from)
+                            .unwrap_or_default();
+                        if edit.stale == Some(true) || sheet.is_none() || state != edit.old_state {
+                            edit.stale = Some(true);
+                        }
+                    }
+                    proposal
+                })
+                .collect(),
         })
         .map_err(|error| error.to_string())
     }

@@ -689,6 +689,28 @@ describe('wasm loader — proposals', () => {
     }
   });
 
+  it.skipIf(!available)('lists rebased proposals after insertRows and stale proposals after deletion', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      const proposal = handle.propose('agent', null, [
+        { sheet: 0, row: 6, col: 4, input: '42' },
+      ]);
+      handle.applyOps([{ type: 'insertRows', sheet: 0, at: 5, count: 2 }]);
+      expect(handle.listProposals()[0]).toMatchObject({
+        id: proposal.id, cells: [{ sheet: 0, row: 8, col: 4, a1: 'E9' }],
+      });
+      handle.applyOps([{ type: 'deleteRows', sheet: 0, at: 8, count: 1 }]);
+      expect(handle.listProposals()[0]?.cells[0]).toMatchObject({ a1: 'E9', stale: true });
+      expect(() => handle.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      expect(() => handle.acceptProposal(proposal.id, { force: true })).toThrow(StaleProposalError);
+      handle.undo();
+      handle.acceptProposal(proposal.id);
+      expect(handle.cell(0, 8, 4).input).toBe('42');
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it.skipIf(!available)('rejects a proposal without applying it', () => {
     const handle = openWorkbook(sampleBytes());
     try {

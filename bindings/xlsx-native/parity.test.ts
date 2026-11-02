@@ -90,6 +90,21 @@ describe('xlsx native/wasm package parity', () => {
     });
   });
 
+  test('structural edits retain rebased and stale proposals', async () => {
+    await compare((workbook) => {
+      const proposal = workbook.propose('agent', null, [{ sheet: 0, row: 6, col: 4, input: '42' }]);
+      workbook.applyOps([{ type: 'insertRows', sheet: 0, at: 5, count: 2 }]);
+      expect(workbook.listProposals()[0]?.cells[0]?.a1).toBe('E9');
+      workbook.applyOps([{ type: 'deleteRows', sheet: 0, at: 8, count: 1 }]);
+      expect(workbook.listProposals()[0]?.cells[0]).toMatchObject({ a1: 'E9', stale: true });
+      expect(() => workbook.acceptProposal(proposal.id)).toThrow();
+      workbook.undo();
+      const restored = workbook.listProposals();
+      workbook.acceptProposal(proposal.id);
+      return [restored, workbook.cell(0, 8, 4), workbook.listProposals()];
+    });
+  });
+
   test('cell reads, markdown and structured exports', async () => {
     await compare((workbook) => {
       const read = workbook.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:D4' } }] });

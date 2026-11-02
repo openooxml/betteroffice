@@ -255,6 +255,30 @@ describe('workbook commands', () => {
     } finally { await session.dispose(); }
   });
 
+  test('worker proposal refresh retains targets deleted by structural commands', async () => {
+    const { session, handle } = await trackedSession();
+    try {
+      await session.submit(command(session, 1, 'propose', {
+        args: ['agent', null, [{ sheet: 0, row: 20, col: 4, input: '7' }]],
+      }));
+      await session.submit(command(session, 2, 'applyOps', {
+        args: [[{ type: 'insertRows', sheet: 0, at: 20, count: 2 }]],
+      }));
+      expect(handle.listProposals()[0]?.cells[0]?.a1).toBe('E23');
+      await session.submit(command(session, 3, 'applyOps', {
+        args: [[{ type: 'deleteRows', sheet: 0, at: 22, count: 1 }]],
+      }));
+      const refreshed = await session.submit(command(session, 4, 'applyOps', {
+        toolbar: { id: 'refreshProposals', args: null },
+      }));
+      expect(refreshed).toMatchObject({ status: 'applied', result: {
+        proposals: [{ cells: [{ a1: 'E23', stale: true }] }],
+      } });
+      const proposal = handle.listProposals()[0]!;
+      expect(() => handle.acceptProposal(proposal.id, { force: true })).toThrow(wasm.StaleProposalError);
+    } finally { await session.dispose(); }
+  });
+
   test('refresh proposals returns proposals in read-only sessions without mutation', async () => {
     const { session, handle } = await trackedSession();
     try {

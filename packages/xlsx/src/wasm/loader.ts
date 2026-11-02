@@ -433,6 +433,7 @@ export interface ProposalCell {
   a1: string;
   oldText: string;
   newText: string;
+  stale?: boolean;
 }
 
 /**

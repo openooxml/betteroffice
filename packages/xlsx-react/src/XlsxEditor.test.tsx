@@ -2573,6 +2573,27 @@ describe('XlsxEditor commands', () => {
     expect(workbook.cell(0, 6, 4).input).toBe('42');
   });
 
+  it('shows a deleted proposal as stale before acceptance and retains it through undo', async () => {
+    const editor = await mountCommands();
+    const workbook = editor.api().handle;
+    let id = '';
+    await act(async () => {
+      id = workbook.propose('Audit agent', null, [{ sheet: 0, row: 6, col: 4, input: '42' }]).id;
+      workbook.applyOps([{ type: 'deleteRows', sheet: 0, at: 6, count: 1 }]);
+      editor.api().refreshProposals();
+    });
+    await editor.execute('proposalsPanel', null);
+    await waitFor(() => expect(editor.view.getByTestId('xlsx-proposal-stale').textContent).toContain('E7'));
+    expect(editor.view.getByTestId('xlsx-proposal').textContent).toContain('Audit agent');
+    await act(async () => {
+      workbook.undo();
+      editor.api().refreshProposals();
+    });
+    await waitFor(() => expect(editor.view.queryByTestId('xlsx-proposal-stale')).toBeNull());
+    expect(await editor.execute('proposalAccept', { proposalId: id })).toEqual({ ok: true, status: 'executed' });
+    expect(workbook.cell(0, 6, 4).input).toBe('42');
+  });
+
   it('places host chrome by the toolbar and showToolbar props', async () => {
     const host = (
       <EditorToolbar mode="commands">
