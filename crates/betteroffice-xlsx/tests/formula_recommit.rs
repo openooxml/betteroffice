@@ -422,7 +422,7 @@ fn formulas_stored_with_a_leading_equals_show_one_and_recommit_unchanged() {
     }
     apply(&mut workbook, json!([set_formula("B1", "A1*2")]));
     apply(&mut workbook, json!([set_input("B1", "=A1*2")]));
-    assert_eq!(stored(&workbook, "B1"), (Some("A1*2".into()), number(0.0)));
+    assert_eq!(stored(&workbook, "B1"), (Some("=A1*2".into()), number(0.0)));
     assert_eq!(workbook.version(), version);
     assert_eq!(workbook.save().unwrap(), source);
 }
@@ -441,9 +441,15 @@ fn formulas_stored_with_a_leading_equals_evaluate_as_the_formula() {
     workbook
         .edit_cell(SheetId(0), cell("A1"), "5", options())
         .unwrap();
-    assert_eq!(stored(&workbook, "B1"), (Some("A1*2".into()), number(10.0)));
+    assert_eq!(
+        stored(&workbook, "B1"),
+        (Some("=A1*2".into()), number(10.0))
+    );
     let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-    assert_eq!(stored(&reopened, "B1"), (Some("A1*2".into()), number(10.0)));
+    assert_eq!(
+        stored(&reopened, "B1"),
+        (Some("=A1*2".into()), number(10.0))
+    );
     assert_eq!(shown(&reopened, "B1"), "=A1*2");
 }
 

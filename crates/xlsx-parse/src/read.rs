@@ -727,7 +727,7 @@ fn parse_worksheet(
                     }
                 }
                 b"f" => {
-                    let text = formula_body(collect_text(&mut reader, &mut buf, &mut depth)?);
+                    let text = collect_text(&mut reader, &mut buf, &mut depth)?;
                     let array_ref = array_formula_range(&e)?;
                     if let Some(c) = cur.as_mut() {
                         if let Some(origin) = c.addr {
@@ -968,15 +968,6 @@ fn parse_conditional_formats(
         }
     }
     Ok(groups)
-}
-
-/// a cell formula as Excel stores it: some writers keep the `=` the formula bar
-/// shows, which Excel leaves out of the file.
-fn formula_body(text: String) -> String {
-    match text.strip_prefix('=') {
-        Some(body) => body.to_owned(),
-        None => text,
-    }
 }
 
 /// the rectangle an `<f t="array" ref="...">` fills. anything malformed or

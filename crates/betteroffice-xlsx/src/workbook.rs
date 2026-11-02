@@ -4680,14 +4680,16 @@ fn edit_cell_state(
         .number_format;
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
-    let mut state = match parsed {
-        xlsx_ops::ParsedInput::Formula(text) if stores_formula(workbook, sheet, cell, &text) => {
-            CellState {
-                formula: Some(text),
-                ..CellState::default()
-            }
-        }
-        parsed => xlsx_ops::cell_state_from_parsed(input, parsed),
+    let kept = match &parsed {
+        xlsx_ops::ParsedInput::Formula(text) => kept_formula(workbook, sheet, cell, text),
+        _ => None,
+    };
+    let mut state = match kept {
+        Some(stored) => CellState {
+            formula: Some(stored.to_owned()),
+            ..CellState::default()
+        },
+        None => xlsx_ops::cell_state_from_parsed(input, parsed),
     };
     state.formula = state.formula.map(|typed| {
         committed_formula(
@@ -4770,14 +4772,16 @@ fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, o
     }
 }
 
-/// Whether `cell` holds exactly `formula`, which re-committing keeps even when the engine
-/// cannot parse it.
-fn stores_formula(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef, formula: &str) -> bool {
-    workbook
-        .sheet(sheet)
-        .and_then(|sheet| sheet.cell(cell))
-        .and_then(|cell| cell.formula.as_deref())
-        == Some(formula)
+/// The formula `cell` stores when `typed` is that text, or that text without the leading `=`
+/// some producers store; re-committing keeps it even when the engine cannot parse it.
+fn kept_formula<'a>(
+    workbook: &'a WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    typed: &str,
+) -> Option<&'a str> {
+    stored_formula(workbook, sheet, cell)
+        .filter(|stored| *stored == typed || stored.strip_prefix('=') == Some(typed))
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {
