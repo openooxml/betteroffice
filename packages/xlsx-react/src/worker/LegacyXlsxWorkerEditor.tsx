@@ -200,7 +200,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const { run, error, loading } = useLegacySessionWorkbook(props, commands.store, apiBridge);
   const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
     () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); },
-    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; }, props.remoteFonts);
   runRef.current = run;
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);

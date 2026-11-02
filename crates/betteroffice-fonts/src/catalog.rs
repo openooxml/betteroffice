@@ -29,6 +29,12 @@ pub struct WidthMatchedSubstitute {
     pub digit_advances: BTreeMap<String, f64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct WordFamilySubstitute {
+    pub remote: Option<String>,
+    pub generic: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LastResortFamilies {
     pub sans: String,
@@ -41,6 +47,7 @@ pub struct LastResortFamilies {
 pub struct Catalog {
     pub faces: Vec<BundledFontFace>,
     pub word_family_aliases: BTreeMap<String, String>,
+    pub word_family_substitutes: BTreeMap<String, WordFamilySubstitute>,
     pub unvendored_noto_serif: BTreeMap<String, String>,
     pub lighter_than_regular: Vec<String>,
     pub heavier_than_regular: Vec<String>,

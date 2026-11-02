@@ -131,6 +131,8 @@ export {
   preloadCommonFonts,
   setGoogleFontsEnabled,
   isGoogleFontsEnabled,
+  setRemoteFontProvider,
+  getRemoteFontProvider,
 } from './utils/fontLoader';
 export { decodeFontFace } from './wasm/fontDecoder';
 

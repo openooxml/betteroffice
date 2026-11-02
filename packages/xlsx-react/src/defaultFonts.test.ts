@@ -69,8 +69,20 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
     createFontProvider: create,
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>;
   const imported = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue(module);
-  restorers.push(() => imported.mockRestore());
-  return { imported, create, metric, bundled, module };
+  const remoteLoads = mock(async (family: string, alias: string, face: { weight: number; style: string }, fontSet: FontFaceSet,
+    options: { provider?: unknown; onLateLoad?: () => void }) => {
+    if (family !== 'Tahoma') return [];
+    const font = { family: alias, remote: 'Open Sans', weight: face.weight, style: face.style, provider: options.provider };
+    fontSet.add(font as unknown as FontFace);
+    return [font as unknown as FontFace];
+  });
+  const remote = {
+    resolveWordFamilySubstitute: (family: string) => family === 'Tahoma' ? { remote: 'Open Sans', generic: 'sans-serif' } : undefined,
+    loadRemoteFontFaces: remoteLoads,
+  } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.loadRemote>>;
+  const remoteImported = spyOn(xlsxDefaultFontManager, 'loadRemote').mockResolvedValue(remote);
+  restorers.push(() => imported.mockRestore(), () => remoteImported.mockRestore());
+  return { imported, create, metric, bundled, module, remoteImported, remoteLoads };
 }
 
 function decoder() { return mock<FontDecoder>(async () => ({ font: new Uint8Array([0, 1, 0, 0]).buffer })); }
@@ -212,6 +224,37 @@ test('unknown families register nothing', async () => {
   expect(added).toHaveLength(0);
   expect(decode).not.toHaveBeenCalled();
   expect(repaint).not.toHaveBeenCalled();
+});
+
+test('a family without a bundled face loads its look-alike from the remote provider under its own name', async () => {
+  const { added } = browser();
+  const { remoteLoads } = provider();
+  const repaint = mock(() => {});
+  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'Tahoma', bold: true }));
+  expect(added).toEqual([expect.objectContaining({ family: 'Tahoma', remote: 'Open Sans', weight: 700, style: 'normal', provider: 'bunny' })]);
+  expect(repaint).toHaveBeenCalledTimes(1);
+  await createDefaultFontPainter(decoder(), repaint, { remoteFonts: 'google' }).load(display({ family: 'Tahoma', bold: true }));
+  expect(remoteLoads.mock.calls.map((call) => call[4].provider)).toEqual(['bunny', 'google']);
+});
+
+test('remote fonts off, bundled faces and locally installed families never reach the provider', async () => {
+  const { added } = browser();
+  const { remoteLoads, remoteImported } = provider();
+  const repaint = mock(() => {});
+  await createDefaultFontPainter(decoder(), repaint, { remoteFonts: 'off' }).load(display({ family: 'Tahoma' }));
+  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'Calibri' }));
+  expect(remoteImported).not.toHaveBeenCalled();
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+    fonts: (globalThis.document as Document).fonts,
+    createElement: () => ({ getContext: () => {
+      let font = '';
+      return { set font(value: string) { font = value; }, get font() { return font; },
+        measureText: () => ({ width: font.includes('Tahoma') ? 2 : 1 }) };
+    } }),
+  } });
+  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'Tahoma', italic: true }));
+  expect(remoteLoads).not.toHaveBeenCalled();
+  expect(added.map((face) => (face as unknown as { family: string }).family)).toEqual(['Calibri']);
 });
 
 test('a missing CJK pack cannot install its Latin fallback under MS Gothic', async () => {

@@ -16,6 +16,10 @@
     "./cdn": {
       "types": "./dist/cdn.d.ts",
       "import": "./dist/cdn.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "import": "./dist/remote.js"
     }
   },
   "files": [
