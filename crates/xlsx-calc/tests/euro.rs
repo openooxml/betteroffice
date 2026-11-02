@@ -151,7 +151,7 @@ fn euroconvert_rounding_of_huge_amounts_stays_finite() {
         -1e307 / 6.55957 * 1.95583,
     );
     assert_eq!(
-        eval("EUROCONVERT(1E308,\"EUR\",\"DEM\")"),
+        eval("EUROCONVERT(1E307*10,\"EUR\",\"DEM\")"),
         CellValue::Error {
             value: ErrorValue::Num
         }

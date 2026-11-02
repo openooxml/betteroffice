@@ -45,7 +45,7 @@ fn group_identity(slice: &[CellValue]) -> String {
             CellValue::Empty => key.push_str("z:"),
             CellValue::Number { value } => {
                 key.push_str("n:");
-                key.push_str(&crate::eval::format_number(*value + 0.0));
+                key.push_str(&crate::eval::exact_number_text(*value + 0.0));
             }
             CellValue::Text { value } => {
                 let lower = value.to_lowercase();

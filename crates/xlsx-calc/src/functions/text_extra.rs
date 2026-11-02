@@ -10,7 +10,6 @@ use crate::eval::{
 };
 use crate::parser::Expr;
 
-use super::engineering::significant;
 use super::text::fixed_text;
 use super::{nth_int, nth_number, omitted};
 
@@ -147,7 +146,6 @@ fn format_flag(args: &[Expr], ctx: &EvalContext<'_>) -> Result<bool, ErrorValue>
 fn written(value: &CellValue, strict: bool) -> String {
     match value {
         CellValue::Error { value } => value.as_str().to_string(),
-        CellValue::Number { value } => significant(*value),
         CellValue::Text { value } if strict => format!("\"{}\"", value.replace('"', "\"\"")),
         other => to_text(other).unwrap_or_default(),
     }
