@@ -794,6 +794,9 @@ pub struct TextRunPrimitive {
     pub paint_clip: Option<ClipRect>,
     /// CSS font shorthand.
     pub font: String,
+    /// East Asian language of Han text whose face that language chooses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asia_language: Option<String>,
     pub color: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub letter_spacing: Option<Number>,
@@ -3740,6 +3743,12 @@ fn row_parent_revision_id(row: &TableRowIn) -> Option<i64> {
 }
 
 /// Returns CSS font shorthand for a run.
+fn han_language(text: &str, fmt: &RunFormattingIn) -> Option<String> {
+    let language = fmt.language.as_ref()?.east_asia.as_deref()?;
+    (ooxml_text::han_script_for_language(language).is_some() && ooxml_text::contains_han(text))
+        .then(|| language.to_owned())
+}
+
 fn css_font(fmt: &RunFormattingIn) -> String {
     let size = px(effective_font_px_of(fmt));
     let weight = if fmt.bold == Some(true) { 700 } else { 400 };
@@ -3948,6 +3957,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         width: px(width),
         paint_clip: None,
         font,
+        east_asia_language: None,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
         word_spacing: None,
@@ -6513,6 +6523,7 @@ pub(crate) fn emit_paragraph_fragment(
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
             paint_clip: None,
             font: css_font(&RunFormattingIn::default()),
+            east_asia_language: None,
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
             word_spacing: None,
@@ -6988,6 +6999,7 @@ fn emit_line(
             width: px(slot_width),
             paint_clip: None,
             font: css_font(&marker_format),
+            east_asia_language: None,
             color: color.to_owned(),
             letter_spacing: None,
             word_spacing: None,
@@ -7486,6 +7498,7 @@ fn emit_line(
                 width: px(0.0),
                 paint_clip: None,
                 font: css_font(&RunFormattingIn::default()),
+                east_asia_language: None,
                 color: "#000000".to_string(),
                 letter_spacing: None,
                 word_spacing: None,
@@ -7630,6 +7643,7 @@ fn emit_tab_leader(
             width: px(width),
             paint_clip: None,
             font: css_font(&fmt),
+            east_asia_language: None,
             color: run_color(&fmt),
             letter_spacing: None,
             word_spacing: None,
@@ -7944,6 +7958,7 @@ fn emit_text_segment(
             width: px(width),
             paint_clip,
             font: css_font(fmt),
+            east_asia_language: han_language(text, fmt),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
             word_spacing,
@@ -9969,6 +9984,7 @@ impl PlotSink for PrimitiveSink<'_> {
                     letter_spacing: (font.letter_spacing_px != 0.0)
                         .then(|| px(font.letter_spacing_px)),
                     font: font.css(),
+                    east_asia_language: None,
                     color,
                     word_spacing: None,
                     rtl: None,

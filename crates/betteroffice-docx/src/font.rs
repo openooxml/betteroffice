@@ -218,35 +218,10 @@ impl Document {
         };
         let mut requests = Vec::new();
         let mut collect = |primitives: &[Primitive]| {
-            for primitive in primitives {
-                if let Primitive::Text(run) = primitive
-                    && let Some((style, family)) = run.font.split_once("px")
-                {
-                    let family = family
-                        .trim()
-                        .split(',')
-                        .next()
-                        .unwrap_or_default()
-                        .trim_matches(['\'', '"']);
-                    let bold = style.split_whitespace().any(|word| {
-                        matches!(word, "bold" | "bolder")
-                            || word.parse::<u16>().is_ok_and(|weight| weight >= 600)
-                    });
-                    let italic = style
-                        .split_whitespace()
-                        .any(|word| matches!(word, "italic" | "oblique"));
-                    requests.push(FontRequirement {
-                        key: chain_key(family, bold, italic),
-                        family: family.to_owned(),
-                        bold,
-                        italic,
-                        scripts: ooxml_text::paragraph_scripts_with_han_fallback(
-                            [run.text.as_str()],
-                            false,
-                        ),
-                    });
-                }
-            }
+            requests.extend(primitives.iter().filter_map(|primitive| match primitive {
+                Primitive::Text(run) => text_requirement(run),
+                _ => None,
+            }));
         };
         collect(&page.primitives);
         for parts in [&page.header, &page.footer].into_iter().flatten() {
@@ -259,5 +234,58 @@ impl Document {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .resolve(&self.font_manager, &requests)
+    }
+}
+
+#[cfg(all(feature = "fonts", feature = "raster"))]
+fn text_requirement(run: &docx_layout::display_list::TextRunPrimitive) -> Option<FontRequirement> {
+    let (style, family) = run.font.split_once("px")?;
+    let family = family
+        .trim()
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim_matches(['\'', '"']);
+    let bold = style.split_whitespace().any(|word| {
+        matches!(word, "bold" | "bolder") || word.parse::<u16>().is_ok_and(|weight| weight >= 600)
+    });
+    let italic = style
+        .split_whitespace()
+        .any(|word| matches!(word, "italic" | "oblique"));
+    Some(FontRequirement {
+        key: chain_key(family, bold, italic),
+        family: family.to_owned(),
+        bold,
+        italic,
+        scripts: ooxml_text::paragraph_scripts_with_languages(
+            [(run.text.as_str(), run.east_asia_language.as_deref())],
+            false,
+        ),
+    })
+}
+
+#[cfg(all(test, feature = "fonts", feature = "raster"))]
+mod tests {
+    use super::text_requirement;
+    use docx_layout::display_list::TextRunPrimitive;
+
+    fn run(text: &str, language: Option<&str>) -> TextRunPrimitive {
+        let mut value = serde_json::json!({
+            "text": text, "x": 0.0, "baselineY": 0.0, "width": 10.0,
+            "font": "bold 16px 'MS Mincho', serif", "color": "#000000"
+        });
+        if let Some(language) = language {
+            value["eastAsiaLanguage"] = serde_json::json!(language);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn text_requirements_choose_han_faces_by_language() {
+        let japanese = text_requirement(&run("漢字", Some("ja-JP"))).unwrap();
+        assert_eq!((japanese.family.as_str(), japanese.bold), ("MS Mincho", true));
+        assert_eq!(japanese.scripts, ["cjk-jp"]);
+        assert_eq!(text_requirement(&run("漢字", Some("zh-TW"))).unwrap().scripts, ["cjk-tc"]);
+        assert_eq!(text_requirement(&run("漢字", None)).unwrap().scripts, ["cjk-sc"]);
     }
 }

@@ -1391,3 +1391,36 @@ fn painted_pen_honors_the_kerning_threshold() {
         pen(Some(14.0))
     );
 }
+
+#[test]
+fn text_runs_carry_the_east_asian_language_only_for_han_it_decides() {
+    let store = FontStore::new();
+    let cases = [
+        ("漢字", Some("ja-JP"), Some("ja-JP")),
+        ("漢字", Some("zh-TW"), Some("zh-TW")),
+        ("漢字", Some("en-US"), None),
+        ("Latin", Some("ja-JP"), None),
+        ("漢字", None, None),
+    ];
+    for (text, language, expected) in cases {
+        let mut input: serde_json::Value =
+            serde_json::from_str(&build_input(text, 40.0, None, false, None)).unwrap();
+        if let Some(language) = language {
+            input["measured"][0]["block"]["runs"][0]["language"] =
+                serde_json::json!({"latin": "en-US", "eastAsia": language});
+        }
+        let output = build_display_list_json_with_fonts(&input.to_string(), &store).unwrap();
+        let list: DisplayList = serde_json::from_str(&output).unwrap();
+        let run = list.pages[0]
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Text(run) if run.text == text => Some(run.clone()),
+                _ => None,
+            })
+            .expect("text run");
+        assert_eq!(run.east_asia_language.as_deref(), expected, "{text} {language:?}");
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json.get("eastAsiaLanguage").and_then(|value| value.as_str()), expected);
+    }
+}

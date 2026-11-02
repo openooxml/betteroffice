@@ -85,7 +85,8 @@ pub use measure::{
 pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};
 pub use scripts::{
-    han_script_for_language, paragraph_scripts_with_han_fallback, paragraph_scripts_with_languages,
+    contains_han, han_script_for_language, paragraph_scripts_with_han_fallback,
+    paragraph_scripts_with_languages,
 };
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
 pub use symbol_font::SymbolFont;
