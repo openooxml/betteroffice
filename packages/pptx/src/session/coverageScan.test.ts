@@ -86,7 +86,7 @@ test('a part that inflates past its declared size is abandoned at the scan limit
       const input = new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) { largestInput = Math.max(largestInput, chunk.byteLength); controller.enqueue(chunk); },
       });
-      input.readable.pipeTo(inner.writable).catch(() => {});
+      input.readable.pipeTo(inner.writable as unknown as WritableStream<Uint8Array>).catch(() => {});
       this.writable = input.writable as unknown as WritableStream<BufferSource>;
       this.readable = inner.readable.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) { inflated += chunk.byteLength; controller.enqueue(chunk); },
