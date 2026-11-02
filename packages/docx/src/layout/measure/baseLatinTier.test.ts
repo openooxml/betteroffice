@@ -100,6 +100,22 @@ test('characters the coverage check was taken with stay settled although no face
   expect(covers([{ ...requirement, characters: [first!, second!] }])).toBe(false);
 });
 
+test('a character whose backstop failed to load stays unsettled in the coverage check', async () => {
+  let next = 0;
+  let fail = true;
+  const source = createRustMeasureSource({ engine: { registerFont: () => next++, clearFonts() {} },
+    bundled: { resolve: () => async () => hebrew, resolveBaseLatin: () => async () => {
+      if (fail) throw new Error('offline');
+      return regular;
+    } } });
+  const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false, characters: ['Ω'] };
+  await source.prepareFontRequirements([requirement]);
+  const covers = source.coverageCheck([requirement]);
+  source.clear();
+  fail = false;
+  expect(covers([{ ...requirement, characters: ['Ω', ' '] }])).toBe(false);
+});
+
 test('aliased requirement keys settle with independent character sets', async () => {
   let next = 0;
   const source = createRustMeasureSource({

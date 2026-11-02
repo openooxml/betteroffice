@@ -184,7 +184,7 @@ export class TextMeasureFontRegistry {
   private coverage = new Map<number, FontCoverage>();
   /** Ids whose coverage is a known lower bound, with the loader that yields their exact coverage. */
   private inexact = new Map<number, () => Promise<FontCoverage | undefined>>();
-  private baseLatinResults = new Map<string, { ids: number[]; characters: Set<string>; earlier: string }>();
+  private baseLatinResults = new Map<string, { ids: number[]; characters: Set<string>; earlier: string; failed?: Set<string> }>();
   private readonly baseLatinSource: BundledFontProviderSource | undefined;
   private baseLatinLoaders = new WeakMap<BundledFontLoader, BundledFontLoader>();
   private readonly sink: TextEngineFontSink;
@@ -328,6 +328,12 @@ export class TextMeasureFontRegistry {
     return this.coverage.get(id);
   }
 
+  /** Characters the base Latin tier settled for `key`, without those whose face failed to load. */
+  settledBaseLatinCharacters(key: string): Set<string> {
+    const result = this.baseLatinResults.get(key);
+    return new Set([...(result?.characters ?? [])].filter(character => !result?.failed?.has(character)));
+  }
+
   getCachedBaseLatinIds(
     family: string,
     bold: boolean,
@@ -370,6 +376,7 @@ export class TextMeasureFontRegistry {
       missing = uncovered();
     }
     const ids: number[] = [];
+    let failed: Set<string> | undefined;
     if (missing.length > 0) {
       try {
         const { loadBaseLatinFaces } = await import('./baseLatinFaces');
@@ -387,12 +394,13 @@ export class TextMeasureFontRegistry {
           candidate: baseLatinCandidate,
         });
       } catch {
+        failed = new Set(missing);
         this.warnFailure(`[fontRegistry] base Latin face for "${family}" failed to load; falling back`);
       }
     }
     if (generation !== this.generation) return false;
     const previous = this.baseLatinResults.get(key)?.ids ?? [];
-    this.baseLatinResults.set(key, { ids, characters: new Set(characters), earlier: earlier.join(',') });
+    this.baseLatinResults.set(key, { ids, characters: new Set(characters), earlier: earlier.join(','), failed });
     return previous.length !== ids.length || previous.some((id, index) => ids[index] !== id);
   }
 

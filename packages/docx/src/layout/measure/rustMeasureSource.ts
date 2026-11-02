@@ -77,7 +77,7 @@ export interface RustMeasureSource {
   measurementConfigForRequirements(
     requirements: ResidentFontRequirement[],
   ): ResidentMeasurementConfig | undefined;
-  /** @internal Whether later requirements need no face the prepared chains lack (characters prepared here count as settled); holds no font bytes, so it outlives `clear()`. */
+  /** @internal Whether later requirements need no face the prepared chains lack (characters the base Latin tier settled count as covered); holds no font bytes, so it outlives `clear()`. */
   coverageCheck(
     requirements: ResidentFontRequirement[],
   ): (next: ResidentFontRequirement[]) => boolean;
@@ -264,7 +264,7 @@ export function createRustMeasureSource(options: {
       const chains = new Map<string, FontCoverage[] | null>();
       const settled = new Map<string, Set<string>>();
       for (const requirement of mergeRequirements(requirements)) {
-        settled.set(requirement.key, new Set(requirement.characters));
+        settled.set(requirement.key, registry.settledBaseLatinCharacters(requirement.key));
         const familyIds = registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false);
         const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
           registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false);
