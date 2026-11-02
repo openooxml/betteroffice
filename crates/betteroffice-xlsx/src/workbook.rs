@@ -2345,10 +2345,17 @@ impl Workbook {
                 options.now_serial,
             );
             validate_cell_state(&state)?;
-            preview
-                .sheet_mut(edit.sheet)
-                .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                .set_cell(edit.cell, state.into());
+            if format.is_some()
+                || !cell_states_semantically_equal(
+                    &current_cell_state(&preview, edit.sheet, edit.cell),
+                    &state,
+                )
+            {
+                preview
+                    .sheet_mut(edit.sheet)
+                    .ok_or(Error::SheetOutOfRange(edit.sheet))?
+                    .set_cell(edit.cell, state.into());
+            }
             if let Some(format) = format {
                 xlsx_ops::apply_in_place(&mut preview, &format)?;
             }
@@ -4673,7 +4680,17 @@ fn edit_cell_state(
         .number_format;
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
-    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    let kept = match &parsed {
+        xlsx_ops::ParsedInput::Formula(text) => kept_formula(workbook, sheet, cell, text),
+        _ => None,
+    };
+    let mut state = match kept {
+        Some(stored) => CellState {
+            formula: Some(stored.to_owned()),
+            ..CellState::default()
+        },
+        None => xlsx_ops::cell_state_from_parsed(input, parsed),
+    };
     state.formula = state.formula.map(|typed| {
         committed_formula(
             typed,
@@ -4753,6 +4770,18 @@ fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, o
         }
         _ => {}
     }
+}
+
+/// The formula `cell` stores when `typed` is that text, or that text without the leading `=`
+/// some producers store; re-committing keeps it even when the engine cannot parse it.
+fn kept_formula<'a>(
+    workbook: &'a WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    typed: &str,
+) -> Option<&'a str> {
+    stored_formula(workbook, sheet, cell)
+        .filter(|stored| *stored == typed || stored.strip_prefix('=') == Some(typed))
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {
