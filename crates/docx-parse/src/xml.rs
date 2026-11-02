@@ -1465,12 +1465,15 @@ fn retain_replayed_namespace_aliases(
         && element.child_elements().any(|child| {
             child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
         });
-    let bookmarked_drawing = matches!(element.local_name(), "drawing" | "AlternateContent")
-        && crate::text_box::has_bookmarked_text_box(element);
+    let drawing = matches!(element.local_name(), "drawing" | "AlternateContent");
+    let bookmarked_drawing = drawing && crate::text_box::has_bookmarked_text_box(element);
+    let text_box_drawing =
+        drawing && !bookmarked_drawing && crate::text_box::contains_text_box(element);
     if !row
         && !smart_art
         && !smart_art_run
         && !bookmarked_drawing
+        && !text_box_drawing
         && !matches!(element.local_name(), "pict" | "object")
     {
         return Ok(());
@@ -1488,7 +1491,7 @@ fn retain_replayed_namespace_aliases(
             }
         }
     }
-    if row
+    if (row || text_box_drawing)
         && let Some(root) = ancestors.first()
         && matches!(root.name.as_str(), "w:document" | "w:hdr" | "w:ftr")
     {

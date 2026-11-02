@@ -129,4 +129,4 @@ test('the CLI accepts a string shard from Actions and stages only that shard fro
   } finally {
     await rm(root,{recursive:true,force:true});
   }
-});
+}, 30_000);

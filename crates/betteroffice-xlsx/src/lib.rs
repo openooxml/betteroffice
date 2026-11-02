@@ -49,7 +49,7 @@ pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
-    TextSearchMatch, UpdateEvent, UpdateOrigin,
+    TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
 #[doc(hidden)]
 pub use workbook::PeerHydration;
@@ -63,13 +63,13 @@ pub use workbook::batch::{
 pub use workbook::reads::SheetInfoWire;
 pub use workbook::reads::{
     CalculationStatus, ConditionalFormatInfo, DefinedNameInfo, DefinedNamesRequest,
-    DefinedNamesResult,
+    DefinedNamesResult, UnevaluatedStatus,
 };
 pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,
     RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome, ReadRequest, SheetEntry,
-    TextFound,
+    TextFound, UnevaluatedTarget,
 };
 pub use workbook::{
     DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,

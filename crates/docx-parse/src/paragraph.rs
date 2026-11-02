@@ -569,7 +569,7 @@ fn parse_paragraph_contents(
                     doc_defaults,
                     budget,
                     drawing.as_deref_mut(),
-                    in_control,
+                    in_control || !element.matches_name("w", "p"),
                     in_header_footer,
                 )?;
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
@@ -941,7 +941,7 @@ fn parse_hyperlink_composed(
                 doc_defaults,
                 budget,
                 drawing.as_deref_mut(),
-                in_control,
+                true,
                 in_header_footer,
             )?)),
             "bookmarkStart" => has_bookmark_id(child)
@@ -1091,6 +1091,14 @@ pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
             .children
             .iter()
             .map(|node| match node {
+                XmlNode::Element(child)
+                    if matches!(
+                        child.local_name(),
+                        "drawing" | "pict" | "object" | "AlternateContent"
+                    ) =>
+                {
+                    node.clone()
+                }
                 XmlNode::Element(child) => XmlNode::Element(normalize_deletion_element(child)),
                 _ => node.clone(),
             })
@@ -1213,8 +1221,9 @@ fn parse_run_with_context(
                     _ => true,
                 });
                 let has_text_box = alternate_content_has_text_box(child);
-                let control_text_box =
-                    in_control && branch.and_then(single_text_box_drawing).is_some();
+                let control_text_box = in_control
+                    && (branch.and_then(single_text_box_drawing).is_some()
+                        || (has_text_box && !modeled));
                 if control_text_box || (!modeled && !has_text_box) {
                     let fallback_properties = if control_text_box {
                         branch

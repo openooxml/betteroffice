@@ -103,6 +103,19 @@ impl EvaluationBudget {
         }
     }
 
+    /// a budget taking up where one that [`EvaluationBudget::left`] read
+    /// stopped.
+    pub(crate) fn resumed(cells: u64, text: u64, refused: bool) -> Self {
+        let budget = Self::with_text(cells, text);
+        budget.refused.set(refused);
+        budget
+    }
+
+    /// the cell visits and text bytes left, and whether work was turned away.
+    pub(crate) fn left(&self) -> (u64, u64, bool) {
+        (self.remaining.get(), self.text.get(), self.refused.get())
+    }
+
     pub(crate) fn consume(&self, count: u64) -> bool {
         self.granted(take(&self.remaining, count))
     }
@@ -177,6 +190,9 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
+    /// names of the uncomputable functions this evaluation called, in call
+    /// order; no handler answers for them.
+    uncomputable: Rc<RefCell<Vec<String>>>,
     other_workbook: Rc<Cell<bool>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<DefinedNameValues>>,
@@ -192,6 +208,16 @@ pub struct EvalContext<'a> {
     /// a graph whose names match the provider's, looked up instead of
     /// scanning them; `None` reads names through the provider.
     pub(crate) name_index: Option<&'a DepGraph>,
+    /// the cells an uncomputable call keeps unevaluated, consulted on every
+    /// read of a formula whose reads the graph cannot know ahead.
+    pub(crate) held_cells: Option<&'a dyn HeldCells>,
+}
+
+/// what a read tells a formula about the cell it reads.
+pub(crate) trait HeldCells {
+    /// the uncomputable functions keeping the cell at `at` unevaluated, if
+    /// any do.
+    fn held(&self, sheet: SheetId, at: CellRef) -> Option<Vec<String>>;
 }
 
 impl<'a> EvalContext<'a> {
@@ -243,6 +269,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
@@ -258,6 +285,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: None,
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -288,6 +316,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
@@ -303,6 +332,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: None,
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -326,6 +356,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
@@ -338,6 +369,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: None,
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -355,6 +387,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
+            uncomputable: Rc::clone(&self.uncomputable),
             other_workbook: Rc::clone(&self.other_workbook),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
@@ -367,6 +400,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: self.parse_cache,
             name_index: self.name_index,
             spill_index: self.spill_index,
+            held_cells: self.held_cells,
         }
     }
 
@@ -376,6 +410,7 @@ impl<'a> EvalContext<'a> {
         let exhausted = self.exhausted.get();
         let errors = self.unhandled_budget_errors.get();
         let unsupported = self.unsupported_functions.get();
+        let uncomputable = self.uncomputable_checkpoint();
         let random = self.random_state.get();
         let names = self.defined_name_values.borrow().insertions.len();
         let cache = self.criteria_cache.borrow().checkpoint();
@@ -393,6 +428,7 @@ impl<'a> EvalContext<'a> {
             self.exhausted.set(exhausted);
             self.unhandled_budget_errors.set(errors);
             self.unsupported_functions.set(unsupported);
+            self.discard_uncomputable_since(uncomputable);
             self.random_state.set(random);
             self.defined_name_values.borrow_mut().restore(names);
             self.criteria_cache.borrow_mut().restore(cache);
@@ -524,9 +560,55 @@ impl<'a> EvalContext<'a> {
     }
 
     /// whether a function the engine does not implement reached this
-    /// evaluation's result, rather than being answered by a handler.
+    /// evaluation's result, rather than being answered by a handler, or an
+    /// uncomputable one was called at all.
     pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
-        self.unsupported_functions.get() != 0
+        self.unsupported_functions.get() != 0 || !self.uncomputable.borrow().is_empty()
+    }
+
+    /// notes a call no offline engine can compute. unlike other gaps it
+    /// survives `IFERROR` and every other handler: what excel returned for the
+    /// call is unknown, so no handler's answer is known either.
+    pub(crate) fn record_uncomputable(&self, name: String) {
+        self.uncomputable.borrow_mut().push(name);
+    }
+
+    /// notes a read of the cell at `at`: an uncomputable call keeping that
+    /// cell unevaluated reaches this evaluation too.
+    pub(crate) fn note_read(&self, sheet: SheetId, at: CellRef) {
+        let Some(functions) = self.held_cells.and_then(|held| held.held(sheet, at)) else {
+            return;
+        };
+        let mut called = self.uncomputable.borrow_mut();
+        for name in functions {
+            if !called.contains(&name) {
+                called.push(name);
+            }
+        }
+    }
+
+    /// whether every read must pass through [`EvalContext::note_read`], so no
+    /// index built for other formulas may answer for one.
+    pub(crate) fn watches_reads(&self) -> bool {
+        self.held_cells.is_some()
+    }
+
+    pub(crate) fn uncomputable_checkpoint(&self) -> usize {
+        self.uncomputable.borrow().len()
+    }
+
+    /// forgets the uncomputable calls since `checkpoint`, for an evaluation
+    /// whose value never reaches the result.
+    pub(crate) fn discard_uncomputable_since(&self, checkpoint: usize) {
+        self.uncomputable.borrow_mut().truncate(checkpoint);
+    }
+
+    /// the distinct uncomputable functions called, sorted.
+    pub(crate) fn uncomputable_functions(&self) -> Vec<String> {
+        let mut names = self.uncomputable.borrow().clone();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     /// whether this evaluation read another workbook, directly or through a
@@ -733,11 +815,25 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             }
             Some(f) => f.call(args, ctx),
             None if crate::array::is_array_builtin(name) => evaluate_array(expr, ctx).into_scalar(),
-            None => {
-                ctx.record_unsupported_function();
-                err(ErrorValue::Name)
-            }
+            None => err(unimplemented_call(name, ctx)),
         },
+    }
+}
+
+/// a call to a function the engine has no implementation for. one no
+/// offline engine can compute is `#VALUE!`, what excel shows without the
+/// service it needs; any other name is excel's own `#NAME?`, an engine gap a
+/// handler may answer.
+pub(crate) fn unimplemented_call(name: &str, ctx: &EvalContext<'_>) -> ErrorValue {
+    match crate::functions::uncomputable(name) {
+        Some(name) => {
+            ctx.record_uncomputable(name);
+            ErrorValue::Value
+        }
+        None => {
+            ctx.record_unsupported_function();
+            ErrorValue::Name
+        }
     }
 }
 
@@ -763,11 +859,11 @@ fn intersect(area: Area, ctx: &EvalContext<'_>) -> CellValue {
 /// a defined name identified by the sheet its lookup resolved against.
 type DefinedNameKey = (SheetId, String);
 
-/// each name's value and whether it reached an engine gap, per intersection
-/// mode.
+/// each name's value, whether it reached an engine gap, and the uncomputable
+/// functions it called, per intersection mode.
 #[derive(Default)]
 struct DefinedNameValues {
-    values: HashMap<(DefinedNameKey, bool), (CellValue, bool)>,
+    values: HashMap<(DefinedNameKey, bool), (CellValue, bool, Vec<String>)>,
     insertions: Vec<(DefinedNameKey, bool)>,
 }
 
@@ -799,9 +895,12 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let memo = (key, ctx.intersects());
-    if let Some((cached, gap)) = ctx.defined_name_values.borrow().values.get(&memo) {
+    if let Some((cached, gap, uncomputable)) = ctx.defined_name_values.borrow().values.get(&memo) {
         if *gap {
             ctx.record_unsupported_function();
+        }
+        for name in uncomputable {
+            ctx.record_uncomputable(name.clone());
         }
         return cached.clone();
     }
@@ -811,12 +910,21 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let checkpoint = ctx.unsupported_checkpoint();
+    let called = ctx.uncomputable_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
+    let uncomputable = ctx
+        .uncomputable
+        .borrow()
+        .get(called..)
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
     let mut names = ctx.defined_name_values.borrow_mut();
     let memo = (binding.key, intersects);
     names.insertions.push(memo.clone());
-    names.values.insert(memo, (value.clone(), gap));
+    names
+        .values
+        .insert(memo, (value.clone(), gap, uncomputable));
     value
 }
 
@@ -902,6 +1010,7 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
+    ctx.note_read(sid, cell);
     kept(
         ctx,
         normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned(),
@@ -1378,6 +1487,7 @@ impl Area {
         col: usize,
     ) -> Cow<'p, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
+        ctx.note_read(self.sheet, cell);
         normalize_cow(ctx.provider.value_cow(self.sheet, cell))
     }
 
