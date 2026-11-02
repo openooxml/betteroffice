@@ -218,7 +218,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, reportRecoverableError]);
   const prepareFontFamily = useRef<(family: string) => Promise<DocxFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
-  const pickedFonts = useRef(new WeakMap<DocxFontEnvironment, { source: object; requirements: ResidentFontRequirement[] }>());
+  const pickedFonts = useRef(new WeakMap<DocxFontEnvironment, { source: object; requirements: ResidentFontRequirement[];
+    covers?: (requirements: ResidentFontRequirement[]) => boolean }>());
   const [commentsOpen, setCommentsOpen] = useControllableBoolean(props.commentsSidebarOpen, props.onCommentsSidebarOpenChange);
   const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
   const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
@@ -237,7 +238,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     fontEnvironmentApplied: (environment: DocxFontEnvironment) => {
       const picked = pickedFonts.current.get(environment);
       const opened = fontSource.current;
-      if (picked && opened === picked.source) opened.requirements = picked.requirements;
+      if (picked && opened === picked.source) { opened.requirements = picked.requirements; opened.covers = picked.covers; }
     } };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
@@ -844,13 +845,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         if (!requirements.some(entry => entry.key === key)) requirements.push({ key, family, bold, italic });
       }
       const embedded = await extractEmbeddedFontFaces(opened.document);
+      let covers: ((requirements: ResidentFontRequirement[]) => boolean) | undefined;
       const payload = await prepareWorkerFontEnvironment({ fonts: settings.current.fonts,
         runtime: client.fontRuntime,
         provider: settings.current.measurementFontProvider, embedded, requirements, families: [...opened.families, family],
-        compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
+        compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal, onCoverage: check => { covers = check; } });
       if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');
       abort.signal.throwIfAborted();
-      pickedFonts.current.set(payload, { source: opened, requirements });
+      pickedFonts.current.set(payload, { source: opened, requirements, covers });
       return payload;
     } finally {
       if (refresh.pick === abort.signal) {
