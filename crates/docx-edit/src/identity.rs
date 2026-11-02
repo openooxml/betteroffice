@@ -443,6 +443,10 @@ pub(crate) struct SourceIndex {
     run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
     #[serde(skip)]
     run_size_seeded: OnceLock<SeededUnitDigests>,
+    /// Seeded digests of paragraphs read from the session while it was unchanged since seeding,
+    /// keyed like [`Self::run_size_seeded`].
+    #[serde(skip)]
+    run_size_unchanged: Mutex<BTreeMap<String, (String, [u8; 32])>>,
 }
 
 type SeededUnitDigests = BTreeMap<String, Option<(String, [u8; 32])>>;
@@ -558,35 +562,66 @@ impl SourceIndex {
             return None;
         }
         self.view_of(key)?;
-        let seeded = self.run_size_seeded.get_or_init(|| {
-            #[cfg(test)]
-            RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
-            let mut units = BTreeMap::new();
-            for (story, state) in self.seed_states() {
-                for unit in &state.units {
-                    if let Some(key) = &unit.key {
-                        match units.entry(key.clone()) {
-                            std::collections::btree_map::Entry::Vacant(entry) => {
-                                entry.insert(Some((story.clone(), unit.digest)));
-                            }
-                            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                                entry.insert(None);
+        let unchanged = self.run_size_unchanged.lock().unwrap().get(key).cloned();
+        let (seed_story, fingerprint) = match unchanged {
+            Some(seeded) => seeded,
+            None => {
+                let seeded = self.run_size_seeded.get_or_init(|| {
+                    #[cfg(test)]
+                    RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
+                    let mut units = BTreeMap::new();
+                    for (story, state) in self.seed_states() {
+                        for unit in &state.units {
+                            if let Some(key) = &unit.key {
+                                match units.entry(key.clone()) {
+                                    std::collections::btree_map::Entry::Vacant(entry) => {
+                                        entry.insert(Some((story.clone(), unit.digest)));
+                                    }
+                                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                                        entry.insert(None);
+                                    }
+                                }
                             }
                         }
                     }
-                }
+                    units
+                });
+                seeded.get(key)?.clone()?
             }
-            units
-        });
-        let (seed_story, fingerprint) = seeded.get(key)?.as_ref()?;
+        };
         if seed_story != story {
             return None;
         }
         let mut cache = self.run_size_sources.lock().unwrap();
         cache
             .entry(key.to_owned())
-            .or_insert_with(|| self.collect_run_sizes(key, *fingerprint).map(Arc::new))
+            .or_insert_with(|| self.collect_run_sizes(key, fingerprint).map(Arc::new))
             .clone()
+    }
+
+    /// Whether a paragraph read from the session now is what seeding recorded: no commit has
+    /// landed since seeding, seed states are not yet known, and the package was opened under
+    /// its own digest, so the session's stories are those a reseed would give.
+    pub(crate) fn reads_as_seeded(&self, doc: &EditingDoc) -> bool {
+        doc.unchanged_since_seeded()
+            && !self.seed_states_initialized()
+            && self.opened_under_own_digest()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reseed_for_tests(&self) {
+        self.seed_states();
+    }
+
+    /// Records the seeded digest of the paragraph `key` closes in `story`, read from a session
+    /// for which [`Self::reads_as_seeded`] holds, where `key` closes no other paragraph, so a
+    /// run size proof for it needs no seed states.
+    pub(crate) fn note_seeded_run_size(&self, key: &str, story: &str, fingerprint: [u8; 32]) {
+        self.run_size_unchanged
+            .lock()
+            .unwrap()
+            .entry(key.to_owned())
+            .or_insert_with(|| (story.to_owned(), fingerprint));
     }
 
     fn collect_run_sizes(&self, key: &str, fingerprint: [u8; 32]) -> Option<ParagraphSizes> {
@@ -705,6 +740,7 @@ impl SourceIndex {
             run_size_sources: Mutex::new(BTreeMap::new()),
             run_size_paragraphs: Mutex::new(BTreeMap::new()),
             run_size_seeded: OnceLock::new(),
+            run_size_unchanged: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1977,6 +2013,15 @@ impl Pilcrow {
                 valid(source?.seeded.get(&self.key)?.source_para_id.clone()).map(|id| (id, true))
             })
     }
+}
+
+/// How many paragraphs each session key closes across every story.
+pub(crate) fn paragraph_key_counts<T: ReadTxn>(txn: &T) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for pilcrow in Scan::new(txn).pilcrows {
+        *counts.entry(pilcrow.key).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// Every story and pilcrow, stories in sorted order, plus each nested story's parent.
