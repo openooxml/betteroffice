@@ -124,6 +124,7 @@ export function createDefaultFontPainter(
   const pending = new Map<string, Promise<boolean>>();
   const remote = new Set<string>();
   const requested = new Map<string, Set<string>>();
+  const attempted = new Map<string, Set<string>>();
   let disposed = false;
   let changed = false;
   let unsettledPaint = false;
@@ -213,8 +214,8 @@ export function createDefaultFontPainter(
     return faces;
   }
 
-  function unrequested(key: string, characters: Set<string>): string {
-    const known = requested.get(key);
+  function missing(record: Map<string, Set<string>>, key: string, characters: Set<string>): string {
+    const known = record.get(key);
     let text = '';
     for (const character of characters) if (!known?.has(character)) text += character;
     return text;
@@ -223,7 +224,7 @@ export function createDefaultFontPainter(
   function isSettled(displayList: DisplayList): boolean {
     if (inactive()) return true;
     for (const [key, { characters }] of faceKeys(displayList)) {
-      if (!settled.has(key) || (remote.has(key) && (pending.has(key) || (loaded.has(key) && unrequested(key, characters))))) return false;
+      if (!settled.has(key) || (remote.has(key) && missing(attempted, key, characters))) return false;
     }
     return true;
   }
@@ -233,13 +234,13 @@ export function createDefaultFontPainter(
     const batch: Promise<boolean>[] = [];
     for (const [key, { fontFamily, bold, italic, characters }] of faceKeys(displayList)) {
       if (pending.has(key)) continue;
-      const text = loaded.has(key) ? unrequested(key, characters) : [...characters].join('');
+      const text = loaded.has(key) ? missing(requested, key, characters) : [...characters].join('');
       if (loaded.has(key) && !(remote.has(key) && text)) continue;
       const task = loadFace(fontFamily, bold, italic, text, () => { remote.add(key); }).then((success) => {
         pending.delete(key);
-        if (success) {
-          let known = requested.get(key);
-          if (!known) requested.set(key, known = new Set());
+        for (const record of success ? [attempted, requested] : [attempted]) {
+          let known = record.get(key);
+          if (!known) record.set(key, known = new Set());
           for (const character of text) known.add(character);
         }
         settled.add(key);
@@ -248,7 +249,7 @@ export function createDefaultFontPainter(
           changed = true;
         }
         const latest = !disposed && remote.has(key) && lastPainted ? faceKeys(lastPainted).get(key) : undefined;
-        if (latest && [...latest.characters].some((character) => !text.includes(character))) void load(lastPainted!).catch(() => {});
+        if (latest && missing(attempted, key, latest.characters)) void load(lastPainted!).catch(() => {});
         if (!disposed && !pending.size && changed) {
           changed = false;
           unsettledPaint = false;

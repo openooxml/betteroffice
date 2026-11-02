@@ -294,26 +294,29 @@ export async function loadRemoteFontFaces(
   let registered = registeredSlices.get(fontSet);
   if (!registered) registeredSlices.set(fontSet, registered = new Map());
   const keyOf = (rule: RemoteFontFaceRule) => JSON.stringify([alias, rule.weight, rule.style, rule.unicodeRange, preferredSource(rule).url]);
+  const present = (entry: RegisteredSlice) => !entry.loaded || typeof fontSet.has !== 'function' || fontSet.has(entry.loaded);
   for (const rule of slices) {
     const entry = registered.get(keyOf(rule));
-    if (entry?.loaded && typeof fontSet.has === 'function' && !fontSet.has(entry.loaded)) registered.delete(keyOf(rule));
+    if (entry && !present(entry)) registered.delete(keyOf(rule));
+  }
+  if (registered.size >= MAX_REGISTERED_SLICES) {
+    for (const [key, entry] of registered) if (!present(entry)) registered.delete(key);
   }
   const capacity = Math.max(0, MAX_REGISTERED_SLICES - registered.size);
   const fresh = slices.filter((rule) => !registered.has(keyOf(rule))).slice(0, capacity);
   if (fresh.length > 0) {
-    const waiting = new Set<AbortSignal | null>();
     const batch = fetchRemoteFontSlices(fresh, { ...options, signal: deadline(options, true) })
-      .then((bytes) => Promise.all(fresh.map((rule, index) => remoteFace(alias, rule, bytes[index]!))))
-      .then((fonts) => {
-        const live = [...waiting].some((signal) => signal === null || !signal.aborted);
-        waiting.clear();
-        if (!live) throw new Error('Remote font load abandoned by every caller');
-        for (const font of fonts) fontSet.add(font);
-        return fonts;
-      });
+      .then((bytes) => Promise.all(fresh.map((rule, index) => remoteFace(alias, rule, bytes[index]!))));
     fresh.forEach((rule, index) => {
       const key = keyOf(rule);
-      const entry: RegisteredSlice = { font: batch.then((fonts) => fonts[index]!), waiting };
+      const waiting = new Set<AbortSignal | null>();
+      const entry: RegisteredSlice = { waiting, font: batch.then((fonts) => {
+        const live = [...waiting].some((signal) => signal === null || !signal.aborted);
+        waiting.clear();
+        if (!live) throw new Error('Remote font slice abandoned by every caller');
+        fontSet.add(fonts[index]!);
+        return fonts[index]!;
+      }) };
       registered.set(key, entry);
       void entry.font.then((font) => { entry.loaded = font; }, () => { if (registered.get(key) === entry) registered.delete(key); });
     });

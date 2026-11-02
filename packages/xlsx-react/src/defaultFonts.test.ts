@@ -296,6 +296,24 @@ test('characters painted while a failing remote load is pending are requested on
   expect(painter.paint(cell('AŁ'), () => {})).toBe(true);
 });
 
+test('a failed load of newly painted characters settles and is retried only by a later paint', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  const settled = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), mock(() => {}), { onSettled: settled });
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('A'));
+  remoteLoads.mockImplementationOnce(async () => { throw new Error('404'); });
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(false);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł']);
+  expect(settled).toHaveBeenCalledTimes(1);
+  expect(painter.paint(cell('Ł'), () => {})).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł', 'Ł']);
+});
+
 test('disposing the painter, as switching remote fonts off does, aborts its remote load before anything registers', async () => {
   const { added } = browser();
   const { remoteLoads, remoteGate } = provider();
