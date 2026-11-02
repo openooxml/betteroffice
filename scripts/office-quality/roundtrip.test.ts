@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createPlan } from './plan.mjs';
 import { writeCachedAsset } from './asset-cache.mjs';
-import { mergeRoundtrips, METHOD, roundtripSummary, roundtripShards, SHARD_SIZE, PARALLELISM, ENGINE_TIMEOUT, HELPER_TIMEOUT } from './roundtrip.mjs';
+import { mergeRoundtrips, METHOD, roundtripSummary, roundtripShards, SHARD_SIZE, PARALLELISM, ENGINE_TIMEOUT, HELPER_TIMEOUT, MAX_MATRIX_JOBS } from './roundtrip.mjs';
 import { renderSection } from './readme.mjs';
 
 const hash = 'a'.repeat(64);
@@ -81,6 +81,13 @@ test('LibreOffice parse/preservation is measured and stale results are rejected'
 });
 
 
+test('plans that exceed one workflow matrix fail before the matrix expands', () => {
+  const fits = {...plan(), samples:Array.from({length:MAX_MATRIX_JOBS * SHARD_SIZE}, (_, i) => ({...samples[0],id:`file-${i}`}))};
+  expect(roundtripShards(fits).length).toBe(MAX_MATRIX_JOBS);
+  const over = {...fits, samples:[...fits.samples, {...samples[0],id:'file-over'}]};
+  expect(() => roundtripShards(over)).toThrow(`one workflow matrix holds at most ${MAX_MATRIX_JOBS}`);
+});
+
 test('even 1000 files fit bounded shards and leave time for setup and artifact upload', () => {
   const many = {...plan(), samples:Array.from({length:1000}, (_, i) => ({...samples[0],id:`file-${i}`}))};
   const shards = roundtripShards(many);
@@ -119,7 +126,7 @@ test('the CLI accepts a string shard from Actions and stages only that shard fro
     const planPath = join(root,'plan.json');
     await writeFile(planPath,JSON.stringify(fixture));
     await writeCachedAsset(join(root,'cache'),source,bytes);
-    await promisify(execFile)('node',[fileURLToPath(new URL('./roundtrip.mjs',import.meta.url))],{env:{...process.env,
+    await promisify(execFile)('node',[fileURLToPath(new URL('./roundtrip.mjs',import.meta.url))],{env:{...process.env,QUALITY_CORPUS_ORIGIN:'',
       QUALITY_PLAN:planPath,QUALITY_FORMAT:'docx',QUALITY_SHARD:'0',QUALITY_OUTPUT:join(root,'output'),QUALITY_ASSET_CACHE:join(root,'cache'),
     }});
     const job = JSON.parse(await readFile(join(root,'output/job.json'),'utf8'));
