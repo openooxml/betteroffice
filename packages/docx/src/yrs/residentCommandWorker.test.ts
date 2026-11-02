@@ -640,12 +640,14 @@ test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', 
 }, TIMEOUT);
 
 test('worker scheduler turns go through the turn channel the worker was given', async () => {
-  const { client, worker } = await openWorker();
+  const { client, worker, engine } = await openWorker();
   try {
-    for (let turn = 0; turn < 200 && worker.turnPosts === 0; turn += 1) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    }
-    expect(worker.turnPosts).toBeGreaterThan(0);
+    const before = worker.turnPosts;
+    const version = engine.proposalEngine.version();
+    const reads = await Promise.all([0, 1, 2].map(() =>
+      client.documentReadAt({ kind: 'rangeHighlights', ranges: [], expectVersion: version }, version)));
+    expect(reads.map(read => read.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(worker.turnPosts).toBeGreaterThan(before);
   } finally {
     client.destroy();
   }

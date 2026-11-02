@@ -3414,6 +3414,7 @@ function asciiProposalFontsUnchanged(
 function destroySession(keepSurfaces = false): void {
   cancelSaveWasmPreload();
   cancelSaveWarmup();
+  scheduler.cancel((task) => task.kind === 'saveSeedPrime');
   saveWarmupOwner = null;
   collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
