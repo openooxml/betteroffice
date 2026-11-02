@@ -404,7 +404,7 @@ test('keep text only applies the typing settings the caret had before the paste'
 }, TIMEOUT);
 
 test('keep text only over several lines matches a plain paste with the same typing settings', async () => {
-  const lines = async (useOptions: boolean) => {
+  const lines = async (useOptions: boolean, between: boolean) => {
     const { client, engine } = await openTableWorker();
     try {
       let version = 0;
@@ -413,7 +413,13 @@ test('keep text only over several lines matches a plain paste with the same typi
       const last = paragraphs[paragraphs.length - 1]!;
       const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
       const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
-      const at = { story: 'body', paraId: split.secondParaId, offset: 0 };
+      let at = { story: 'body', paraId: split.secondParaId, offset: 0 };
+      if (between) {
+        const typed = await client.edit(intent(++seq, version, 'insertText', { selection: { anchor: at, focus: at }, text: 'AB' }));
+        expect(typed.outcomes[0]?.status).toBe('applied');
+        version = typed.version;
+        at = { ...at, offset: 1 };
+      }
       const toggled = await client.edit(intent(++seq, version, 'toggleMark', { selection: { anchor: at, focus: at }, mark: { type: 'bold' } }));
       version = toggled.version;
       if (useOptions) {
@@ -451,9 +457,11 @@ test('keep text only over several lines matches a plain paste with the same typi
       client.destroy();
     }
   };
-  const plain = await lines(false);
-  expect(plain.map((line) => line[0])).toEqual(['Alpha', 'Beta']);
-  expect(await lines(true)).toEqual(plain);
+  for (const between of [false, true]) {
+    const plain = await lines(false, between);
+    expect(plain.map((line) => line[0])).toEqual(['Alpha', 'Beta']);
+    expect(await lines(true, between)).toEqual(plain);
+  }
 }, TIMEOUT);
 
 test('paste replays text, tables and splits across paragraphs', async () => {
