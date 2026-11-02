@@ -1,4 +1,4 @@
-import { compileSessionWasm } from '#session-worker';
+import { compileSessionWasm } from '#session-scope';
 import { metafileWasmAssetUrl } from '../wasm/asset';
 import { metafileSvgBindings } from '../wasm/engine';
 
