@@ -160,6 +160,8 @@ export function loadProgressiveFace(
   if (pending === undefined) {
     pending = openProgressiveFace(ref, {
       read: async (file) => readFile(file, await resolveFile(file), timeoutMs),
+      url: resolveFile,
+      timeoutMs,
       decode: async (encoded, maxOutput) => (decoder === undefined
         ? await (await import('./decode')).decodeFontFace(encoded, undefined, { codec: 'zstd', maxOutput, wasmUrl })
         : await decoder(encoded, { codec: 'zstd', maxOutput })).font,

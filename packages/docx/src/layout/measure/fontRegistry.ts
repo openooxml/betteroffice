@@ -1,4 +1,5 @@
 /** Builds deterministic embedded, bundled, script, and last-resort font chains. */
+import type { ProgressiveFontFace } from '@betteroffice/fonts/progressive';
 
 /** A lazy face loader with measurement and fallback options. */
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
@@ -6,6 +7,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   measureAs?: string;
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
+  /** Opens a sliced face whose outlines load as they are needed. */
+  progressive?: () => Promise<ProgressiveFontFace>;
 };
 
 /** Byte sink of the wasm text engine (`crates/docx-text` FontStore). */
@@ -208,9 +211,20 @@ export class TextMeasureFontRegistry {
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
 
-  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProviderSource }) {
+  /** Script-fallback faces registered from their skeleton and core, by font id. */
+  private progressiveIds = new Map<number, ProgressiveFontFace>();
+  private readonly progressive: boolean;
+
+  /** `progressive` registers sliced script-fallback faces from their skeleton and core. */
+  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProviderSource; progressive?: boolean }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
+    this.progressive = opts?.progressive === true;
+  }
+
+  /** The sliced faces registered from their skeleton and core, by font id. */
+  progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace> {
+    return this.progressiveIds;
   }
 
   /** Shares in-flight resolution but evicts misses for retry. */
@@ -348,6 +362,7 @@ export class TextMeasureFontRegistry {
     this.lastResortIds = new Map();
     this.bufferIds = new WeakMap();
     this.loaderIds = new WeakMap();
+    this.progressiveIds = new Map();
     this.scriptIds = new Map();
     this.scriptResults = new Map();
     this.chains = new Map();
@@ -517,6 +532,35 @@ export class TextMeasureFontRegistry {
     return pending;
   }
 
+  /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
+  private registerFaceLoader(loader: () => Promise<ArrayBuffer>, label: string): Promise<number> {
+    const open = this.progressive ? (loader as BundledFontLoader).progressive : undefined;
+    if (open === undefined) return this.registerLoader(loader);
+    let pending = this.loaderIds.get(loader);
+    if (!pending) {
+      const ids = this.loaderIds;
+      const generation = this.generation;
+      pending = (async () => {
+        let face: ProgressiveFontFace;
+        try {
+          face = await open();
+        } catch (error) {
+          this.warnFailure(
+            `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
+              `${error instanceof Error ? error.message : String(error)}`
+          );
+          return this.registerBuffer(await loader());
+        }
+        const id = await this.registerBuffer(face.bytes());
+        if (generation === this.generation) this.progressiveIds.set(id, face);
+        return id;
+      })();
+      evictFailedPromise(ids, loader, pending, () => false);
+      ids.set(loader, pending);
+    }
+    return pending;
+  }
+
   private registerLoader(loader: () => Promise<ArrayBuffer>): Promise<number> {
     let pending = this.loaderIds.get(loader);
     if (!pending) {
@@ -563,7 +607,7 @@ export class TextMeasureFontRegistry {
       const ids = this.bundledIds;
       pending = (async () => {
         try {
-          const base = await this.registerLoader(loader);
+          const base = await this.registerFaceLoader(loader, family);
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
           this.warnFailure(
@@ -630,7 +674,7 @@ export class TextMeasureFontRegistry {
         }
         if (loader) {
           try {
-            id = await this.registerLoader(loader);
+            id = await this.registerFaceLoader(loader, script);
           } catch (error) {
             retryable = true;
             this.warnFailure(

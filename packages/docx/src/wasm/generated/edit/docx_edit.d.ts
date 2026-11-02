@@ -1363,6 +1363,12 @@ export class EditSession {
     undo(): boolean;
     update_comment_metadata_json(comment_id: string, patch_json: string): void;
     /**
+     * Replaces the outlines of measurement font `font_id` with `bytes`, a face
+     * whose every table but `CFF ` is unchanged. Errors, leaving the font as
+     * it was, for other bytes.
+     */
+    update_measure_font_outlines(font_id: number, bytes: Uint8Array): void;
+    /**
      * Runs every check of [`EditSession::apply_edits_json`], staging included,
      * without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
      */
@@ -1980,6 +1986,7 @@ export interface InitOutput {
     readonly editsession_undo: (a: number) => number;
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly editsession_update_measure_font_outlines: (a: number, b: number, c: number, d: number) => [number, number];
     readonly editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_validate_table_fragment: (a: number, b: number, c: number) => [number, number];
     readonly editsession_version: (a: number) => [number, number];

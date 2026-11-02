@@ -129,6 +129,30 @@ impl FontId {
     }
 }
 
+/// Why [`FontStore::update_outlines`] refused new bytes for a face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutlineUpdateError {
+    /// The [`FontId`] does not belong to this store.
+    UnknownFont,
+    /// The new bytes are not a parseable sfnt font.
+    Parse(String),
+    /// A table other than `CFF ` (or `head`'s checksum adjustment) differs,
+    /// so shaping, metrics or layout could change.
+    TablesDiffer,
+}
+
+impl std::fmt::Display for OutlineUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownFont => f.write_str("unknown font id"),
+            Self::Parse(message) => write!(f, "font parse error: {message}"),
+            Self::TablesDiffer => f.write_str("new outlines change a table other than CFF"),
+        }
+    }
+}
+
+impl std::error::Error for OutlineUpdateError {}
+
 /// Errors produced when registering or querying fonts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FontError {
@@ -233,10 +257,12 @@ struct FontEntry {
     //
     // SAFETY invariants for the `'static` lifetimes below: both views borrow
     // `data`'s heap allocation. `data` is a `Box<[u8]>` that is never
-    // reassigned, never mutated, and dropped only when the whole entry drops
-    // (entries are never removed individually — the store only grows or drops
-    // wholesale). Moving `FontEntry` (e.g. a `Vec` realloc) moves the box
-    // pointer, not the heap bytes, so the views stay valid.
+    // mutated in place and dropped only when the whole entry drops (entries
+    // are never removed individually — the store only grows or drops
+    // wholesale) or when `FontStore::update_outlines` replaces it, which takes
+    // `&mut FontStore` and drops `face` before `data`. Moving `FontEntry`
+    // (e.g. a `Vec` realloc) moves the box pointer, not the heap bytes, so the
+    // views stay valid.
     face: Option<Box<rustybuzz::Face<'static>>>,
     data: Box<[u8]>,
     metrics: FontMetrics,
@@ -252,6 +278,7 @@ struct FontEntry {
 /// Registering bytes it already holds adds an alias sharing them.
 pub struct FontStore {
     id: u64,
+    outline_revision: u64,
     fonts: Vec<FontEntry>,
     faces: HashMap<u64, Vec<usize>>,
     face_count: usize,
@@ -289,6 +316,7 @@ impl FontStore {
     pub fn new() -> Self {
         Self {
             id: NEXT_FONT_STORE_ID.fetch_add(1, Ordering::Relaxed),
+            outline_revision: 0,
             fonts: Vec::new(),
             faces: HashMap::new(),
             face_count: 0,
@@ -301,6 +329,13 @@ impl FontStore {
     /// this value instead of silently reusing another store's outlines.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Advances on every [`FontStore::update_outlines`]: outline caches keyed by
+    /// [`FontId`] drop what they hold when it changes. Metrics and shaping never
+    /// change with it.
+    pub fn outline_revision(&self) -> u64 {
+        self.outline_revision
     }
 
     /// How many fonts the store holds. Fonts are only ever added, so a store with the same id
@@ -589,6 +624,54 @@ impl FontStore {
         .collect())
     }
 
+    /// Replaces the outlines of the face holding `id`'s bytes with `bytes`,
+    /// a face whose every table except `CFF ` is byte-identical (`head` may
+    /// differ only in its checksum adjustment), such as a sliced face
+    /// reassembled with more outline chunks. Every id sharing those bytes
+    /// (aliases and measurement views) draws the new outlines; ids, metrics,
+    /// cmap and shaping caches stay, since layout tables are unchanged.
+    pub fn update_outlines(
+        &mut self,
+        id: FontId,
+        bytes: Vec<u8>,
+    ) -> Result<(), OutlineUpdateError> {
+        let owner = self
+            .fonts
+            .get(id.0 as usize)
+            .ok_or(OutlineUpdateError::UnknownFont)?
+            .bytes_of
+            .unwrap_or(id.0 as usize);
+        let current = &self
+            .fonts
+            .get(owner)
+            .ok_or(OutlineUpdateError::UnknownFont)?
+            .data;
+        if !same_layout_tables(current, &bytes)? {
+            return Err(OutlineUpdateError::TablesDiffer);
+        }
+        let old_key = face_key(current);
+        let new_key = face_key(&bytes);
+        let data: Box<[u8]> = bytes.into_boxed_slice();
+        // SAFETY: see the `FontEntry` field invariants; the old face is
+        // dropped before the bytes it borrows.
+        let pinned: &'static [u8] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
+        let face = rustybuzz::Face::from_slice(pinned, 0).map(Box::new);
+        let entry = &mut self.fonts[owner];
+        entry.face = None;
+        entry.data = data;
+        entry.face = face;
+        if let Some(indices) = self.faces.get_mut(&old_key) {
+            indices.retain(|&index| index != owner);
+            if indices.is_empty() {
+                self.faces.remove(&old_key);
+            }
+        }
+        self.faces.entry(new_key).or_default().push(owner);
+        self.outline_revision += 1;
+        Ok(())
+    }
+
     /// The registered face owning this id's unscaled font bytes.
     pub fn byte_owner(&self, id: FontId) -> Result<FontId, FontError> {
         let entry = self.entry(id)?;
@@ -712,6 +795,51 @@ impl FontStore {
     fn font_ref(entry: &FontEntry) -> FontRef<'_> {
         FontRef::new(&entry.data).expect("bytes validated at register()")
     }
+}
+
+fn sfnt_tables(
+    bytes: &[u8],
+) -> Result<std::collections::BTreeMap<[u8; 4], &[u8]>, OutlineUpdateError> {
+    let parse = || OutlineUpdateError::Parse("truncated sfnt table directory".to_owned());
+    let count = usize::from(u16::from_be_bytes(
+        bytes
+            .get(4..6)
+            .ok_or_else(parse)?
+            .try_into()
+            .map_err(|_| parse())?,
+    ));
+    let mut tables = std::collections::BTreeMap::new();
+    for index in 0..count {
+        let record = bytes
+            .get(12 + index * 16..28 + index * 16)
+            .ok_or_else(parse)?;
+        let offset = u32::from_be_bytes(record[8..12].try_into().map_err(|_| parse())?) as usize;
+        let length = u32::from_be_bytes(record[12..16].try_into().map_err(|_| parse())?) as usize;
+        let end = offset.checked_add(length).ok_or_else(parse)?;
+        let tag: [u8; 4] = record[..4].try_into().map_err(|_| parse())?;
+        tables.insert(tag, bytes.get(offset..end).ok_or_else(parse)?);
+    }
+    Ok(tables)
+}
+
+/// Whether two faces differ at most in `CFF ` and `head`'s checksum adjustment.
+fn same_layout_tables(current: &[u8], next: &[u8]) -> Result<bool, OutlineUpdateError> {
+    FontRef::new(next).map_err(|error| OutlineUpdateError::Parse(error.to_string()))?;
+    let (current, next) = (sfnt_tables(current)?, sfnt_tables(next)?);
+    if current.keys().ne(next.keys()) || !current.contains_key(b"CFF ") {
+        return Ok(false);
+    }
+    Ok(current.iter().all(|(tag, table)| match tag {
+        b"CFF " => true,
+        b"head" => {
+            let other = next[tag];
+            table.len() == other.len()
+                && table.len() >= 12
+                && table[..8] == other[..8]
+                && table[12..] == other[12..]
+        }
+        _ => *table == next[tag],
+    }))
 }
 
 fn face_key(bytes: &[u8]) -> u64 {

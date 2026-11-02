@@ -23,6 +23,14 @@ impl EditSessionCore {
             .map_err(EngineError::message)
     }
 
+    /// Replaces the outlines of measurement font `font_id` with `bytes`, a face
+    /// whose every table but `CFF ` is unchanged (a sliced face reassembled
+    /// with more chunks). Errors, leaving the font as it was, for other bytes.
+    pub fn update_measure_font_outlines(&self, font_id: u32, bytes: &[u8]) -> EngineResult<()> {
+        let _fonts = self.fonts.enter();
+        docx_layout::update_measure_font_outlines(font_id, bytes).map_err(EngineError::message)
+    }
+
     /// The outline of one glyph as JSON in font units, y-up. Errors when the
     /// glyph cannot be extracted.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> EngineResult<String> {

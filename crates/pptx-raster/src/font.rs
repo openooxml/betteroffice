@@ -19,9 +19,24 @@ pub struct GlyphCache {
     entries: HashMap<(u32, u32), CachedGlyph>,
     order: VecDeque<(u32, u32)>,
     store: Option<u64>,
+    outlines: u64,
 }
 
 impl GlyphCache {
+    /// Binds to `store`, refusing another one, and drops every path cached
+    /// under an earlier outline revision of it.
+    fn bind(&mut self, store: u64, outlines: u64) -> Result<(), String> {
+        if self.store.is_some_and(|bound| bound != store) {
+            return Err("glyph cache is bound to another font store".to_string());
+        }
+        if self.outlines != outlines {
+            self.entries.clear();
+            self.order.clear();
+            self.outlines = outlines;
+        }
+        Ok(())
+    }
+
     fn remember(&mut self, key: (u32, u32), glyph: CachedGlyph) {
         if self.entries.insert(key, glyph).is_none() {
             self.order.push_back(key);
@@ -226,9 +241,7 @@ fn cached_glyph<'a>(
     font: FontId,
     glyph_id: u32,
 ) -> Result<&'a CachedGlyph, String> {
-    if cache.store.is_some_and(|bound| bound != fonts.id()) {
-        return Err("glyph cache is bound to another font store".to_string());
-    }
+    cache.bind(fonts.id(), fonts.outline_revision())?;
     let key = (font.to_u32(), glyph_id);
     if !cache.entries.contains_key(&key) {
         let id = u16::try_from(glyph_id)

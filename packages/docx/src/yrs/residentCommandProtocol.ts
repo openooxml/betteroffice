@@ -456,6 +456,8 @@ export interface DocxCommandInitRequest {
   selection?: DocxCommandSelection | null;
   fonts: YrsResidentFontRegistration[];
   fontRegistrationSlots?: boolean | { fontChains: Record<string, number[]> };
+  /** Slots registered from a sliced face's skeleton and core, whose outlines the worker loads before painting. */
+  progressiveFonts?: readonly import('./residentProgressiveFonts').ProgressiveFontSpec[];
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;

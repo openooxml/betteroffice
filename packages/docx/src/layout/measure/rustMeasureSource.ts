@@ -1,3 +1,5 @@
+import { sliceSourceOf } from '@betteroffice/fonts/progressive';
+import type { ProgressiveFontSpec } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
 import {
@@ -55,6 +57,8 @@ export interface RustMeasureSource {
     requirements: ResidentFontRequirement[],
   ): ResidentMeasurementConfig | undefined;
   clear(): void;
+  /** The script-fallback slots registered from a sliced face's skeleton and core, with their files. */
+  progressiveFonts?(): Promise<ProgressiveFontSpec[]>;
 }
 
 let enginePromise: Promise<RustTextEngine> | null = null;
@@ -76,6 +80,8 @@ export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
   runtime?: { decoder?: FontDecoder };
+  /** Register sliced script-fallback faces from their skeleton and core. */
+  progressive?: boolean;
 }): RustMeasureSource {
   const engine = options.engine;
   const hosted = hostedFontFamilies(options.bundled);
@@ -94,11 +100,20 @@ export function createRustMeasureSource(options: {
       const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
-    }) },
+    }), progressive: options.progressive },
   );
   let compat: CompatibilityFlags | undefined;
 
   return {
+    async progressiveFonts() {
+      const specs: ProgressiveFontSpec[] = [];
+      for (const [slot, face] of registry.progressiveFaces()) {
+        const source = await sliceSourceOf(face);
+        if (source) specs.push({ slot, source });
+      }
+      return specs;
+    },
+
     setEmbeddedFaces(faces): void {
       registry.setEmbeddedFaces(faces);
     },

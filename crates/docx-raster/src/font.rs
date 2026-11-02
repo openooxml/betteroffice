@@ -43,9 +43,24 @@ pub struct GlyphCache {
     entries: HashMap<(u32, u32), CachedGlyph>,
     order: VecDeque<(u32, u32)>,
     store: Option<u64>,
+    outlines: u64,
 }
 
 impl GlyphCache {
+    /// Binds to `store`, refusing another one, and drops every path cached
+    /// under an earlier outline revision of it.
+    fn bind(&mut self, store: u64, outlines: u64) -> Result<(), String> {
+        if self.store.is_some_and(|bound| bound != store) {
+            return Err("glyph cache is bound to another font store".to_string());
+        }
+        if self.outlines != outlines {
+            self.entries.clear();
+            self.order.clear();
+            self.outlines = outlines;
+        }
+        Ok(())
+    }
+
     fn remember(&mut self, key: (u32, u32), glyph: CachedGlyph) {
         if self.entries.insert(key, glyph).is_none() {
             self.order.push_back(key);
@@ -725,9 +740,7 @@ fn cached_glyph<'a>(
     font: FontId,
     glyph_id: u32,
 ) -> Result<&'a CachedGlyph, String> {
-    if cache.store.is_some_and(|bound| bound != fonts.id()) {
-        return Err("glyph cache is bound to another font store".to_string());
-    }
+    cache.bind(fonts.id(), fonts.outline_revision())?;
     let key = (font.to_u32(), glyph_id);
     if !cache.entries.contains_key(&key) {
         let id = u16::try_from(glyph_id)
@@ -1042,5 +1055,24 @@ mod tests {
         let upem = fonts.metrics(ids[0]).expect("metrics").units_per_em;
         assert_eq!(refilled.upem, f32::from(upem));
         assert!(cache.entries.contains_key(&(ids[0].to_u32(), 0)));
+    }
+
+    /// A new outline revision of the bound store drops every cached path, so
+    /// a glyph cached blank before its outline arrived is extracted again; a
+    /// different store is still refused.
+    #[test]
+    fn a_new_outline_revision_drops_cached_paths() {
+        let mut fonts = FontStore::new();
+        let font = fonts.register(CARLITO.to_vec()).expect("font");
+        let mut cache = GlyphCache::default();
+        for gid in [36, 37] {
+            cached_glyph(&mut cache, &fonts, font, gid).expect("outline");
+        }
+        assert_eq!(cache.entries.len(), 2);
+        cache.bind(fonts.id(), 0).expect("same revision");
+        assert_eq!(cache.entries.len(), 2);
+        cache.bind(fonts.id(), 1).expect("bound store");
+        assert!(cache.entries.is_empty() && cache.order.is_empty());
+        assert!(cache.bind(fonts.id() + 1, 1).is_err());
     }
 }

@@ -1,4 +1,5 @@
 import type { YrsResidentFontRegistration } from './index';
+import type { ProgressiveFontSpec } from './residentProgressiveFonts';
 
 export type DocxFontFace =
   | { family: string; data: Uint8Array; weight?: string | number; style?: 'normal' | 'italic' | 'oblique' }
@@ -8,6 +9,8 @@ export interface DocxFontEnvironment {
   faces: DocxFontFace[];
   chains: Record<string, number[]>;
   families: string[];
+  /** Faces registered from a sliced face's skeleton and core, whose outlines the worker loads as pages need them. */
+  progressive?: ProgressiveFontSpec[];
 }
 
 export interface DocxFontEnvironmentSnapshot {
@@ -25,6 +28,28 @@ interface PreparedFonts {
   css: FontFace[];
   chains: Record<string, number[]>;
   families: string[];
+  progressive?: ProgressiveFontSpec[];
+}
+
+const text = (value: unknown, max = 4096): value is string => typeof value === 'string' && value.length > 0 && value.length <= max;
+const hex = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+
+function validProgressiveSpecs(specs: unknown, faces: readonly DocxFontFace[]): specs is ProgressiveFontSpec[] {
+  if (!Array.isArray(specs) || specs.length > faces.length) return false;
+  const slots = new Set<number>();
+  return specs.every((spec: ProgressiveFontSpec) => {
+    if (!spec || typeof spec !== 'object' || !Number.isSafeInteger(spec.slot) || spec.slot < 0 || spec.slot >= faces.length ||
+      slots.has(spec.slot) || 'substituteOf' in faces[spec.slot]!) return false;
+    slots.add(spec.slot);
+    const source = spec.source;
+    if (!source || typeof source !== 'object' || !source.ref || typeof source.ref !== 'object') return false;
+    const { ref, urls, timeoutMs } = source;
+    return Number.isSafeInteger(ref.format) && text(ref.index) && hex(ref.indexSha256) && hex(ref.sha256) &&
+      Number.isSafeInteger(ref.byteLength) && ref.byteLength > 0 &&
+      !!urls && typeof urls === 'object' && !Array.isArray(urls) && Object.keys(urls).length <= 4096 &&
+      Object.entries(urls).every(([file, url]) => text(file) && text(url, 8192)) &&
+      (timeoutMs === undefined || (Number.isSafeInteger(timeoutMs) && timeoutMs > 0));
+  });
 }
 
 export function validFontEnvironment(value: unknown): value is DocxFontEnvironment {
@@ -32,7 +57,7 @@ export function validFontEnvironment(value: unknown): value is DocxFontEnvironme
   const env = value as DocxFontEnvironment;
   const name = (family: unknown): family is string => typeof family === 'string' && !!family.trim() &&
     !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(family);
-  return Object.keys(env).every(key => ['faces', 'chains', 'families'].includes(key)) &&
+  return Object.keys(env).every(key => ['faces', 'chains', 'families', 'progressive'].includes(key)) &&
     Array.isArray(env.faces) && env.faces.length <= 256 && env.faces.every((face, index) => {
       if (!face || typeof face !== 'object' || !name(face.family)) return false;
       if ('substituteOf' in face) return Object.keys(face).every(key => ['family', 'substituteOf'].includes(key)) &&
@@ -44,7 +69,8 @@ export function validFontEnvironment(value: unknown): value is DocxFontEnvironme
     }) && !!env.chains && typeof env.chains === 'object' && !Array.isArray(env.chains) &&
     Object.entries(env.chains).every(([key, chain]) => name(key) && Array.isArray(chain) &&
       chain.every(slot => Number.isSafeInteger(slot) && slot >= 0 && slot < env.faces.length)) &&
-    Array.isArray(env.families) && env.families.every(name);
+    Array.isArray(env.families) && env.families.every(name) &&
+    (env.progressive === undefined || validProgressiveSpecs(env.progressive, env.faces));
 }
 
 /** The characters docx-layout's `paragraph_scripts` gives a script fallback face. */
@@ -94,27 +120,30 @@ export class ResidentSessionFonts {
     if (!validFontEnvironment(environment)) throw new Error('Invalid worker font environment');
     const fonts: YrsResidentFontRegistration[] = [];
     const css: FontFace[] = [];
-    for (const face of environment.faces) {
+    const sliced = new Set(environment.progressive?.map(spec => spec.slot));
+    for (const [slot, face] of environment.faces.entries()) {
       if ('substituteOf' in face) fonts.push({ substituteOf: face.substituteOf, family: face.family });
       else {
         const bytes = this.engine.decodeFont(face.data);
         fonts.push(bytes);
-        if (this.createFace && this.fontSet) css.push(this.createFace(face.family, bytes, {
+        if (this.createFace && this.fontSet && !sliced.has(slot)) css.push(this.createFace(face.family, bytes, {
           weight: String(face.weight ?? 'normal'), style: face.style ?? 'normal',
         }));
       }
     }
     await Promise.all(css.map(face => face.load()));
     if (this.disposed) throw new Error('Worker font session is disposed');
-    return { fonts, css, chains: structuredClone(environment.chains), families: [...environment.families] };
+    return { fonts, css, chains: structuredClone(environment.chains), families: [...environment.families],
+      ...(environment.progressive?.length ? { progressive: structuredClone(environment.progressive) } : {}) };
   }
 
-  commit(prepared: PreparedFonts, register: (fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>) => void): DocxFontEnvironmentSnapshot {
+  commit(prepared: PreparedFonts, register: (fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>,
+    progressive: ProgressiveFontSpec[] | undefined) => void): DocxFontEnvironmentSnapshot {
     if (this.disposed) throw new Error('Worker font session is disposed');
     const added: FontFace[] = [];
     try {
       for (const face of prepared.css) { this.fontSet?.add(face); added.push(face); }
-      register(prepared.fonts, prepared.chains);
+      register(prepared.fonts, prepared.chains, prepared.progressive);
     } catch (error) {
       for (const face of added) this.fontSet?.delete(face);
       throw error;

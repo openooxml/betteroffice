@@ -47,3 +47,30 @@ test('font publication failures discard prepared faces and retain the old faces'
   expect(s.faces.size).toBe(1);
   s.first.dispose();
 });
+
+test('sliced faces reach registration with their files and get no CSS face; malformed slices are refused', async () => {
+  const s = setup();
+  const source = {
+    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64), byteLength: 100, sha256: 'b'.repeat(64) },
+    urls: { 'face/slices.json': 'https://fonts.example/face/slices.json' },
+    timeoutMs: 30_000,
+  };
+  const environment = {
+    faces: [{ family: 'Sliced', data: new Uint8Array(12) }, { family: 'Shared', data: new Uint8Array(12) }],
+    chains: { 'sliced|0|0': [0], 'shared|0|0': [1] }, families: ['Sliced', 'Shared'],
+    progressive: [{ slot: 0, source }],
+  };
+  let registered: unknown;
+  s.first.commit(await s.first.prepare(environment), (_fonts, _chains, progressive) => { registered = progressive; });
+  expect(registered).toEqual([{ slot: 0, source }]);
+  expect(s.faces.size).toBe(1);
+  for (const progressive of [
+    [{ slot: 2, source }],
+    [{ slot: 0, source }, { slot: 0, source }],
+    [{ slot: 0, source: { ...source, urls: { 'face/slices.json': 7 } } }],
+    [{ slot: 0, source: { ...source, ref: { ...source.ref, sha256: 'not hex' } } }],
+  ]) {
+    await expect(s.first.prepare({ ...environment, progressive } as typeof environment)).rejects.toThrow('Invalid worker font environment');
+  }
+  s.first.dispose();
+});

@@ -154,6 +154,7 @@ export type ResidentEngineSession = Pick<
   | 'onUpdate'
   | 'outlineGlyphJson'
   | 'registerFont'
+  | 'updateFontOutlines'
   | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
   | 'residentDeletedUnits'
@@ -1070,6 +1071,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
         (revision) => !excluding?.has(revision.revisionId)
       ).length,
     registerFont: (bytes) => session.register_measure_font(bytes),
+    updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),

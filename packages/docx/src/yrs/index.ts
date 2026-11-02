@@ -1037,6 +1037,8 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Register raw sfnt bytes in the session's measurement/display font store. */
   registerFont(bytes: Uint8Array): number;
+  /** Replaces a registered font's outlines with a face whose other tables are unchanged; throws, leaving it as it was, for other bytes. */
+  updateFontOutlines(fontId: number, bytes: Uint8Array): void;
   /**
    * Register a measurement view of `base` carrying the vertical metrics Word
    * measures `family` with, for a face the host substituted; `base` when the

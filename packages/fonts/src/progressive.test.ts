@@ -4,7 +4,7 @@ import pack from '../../fonts-cjk/assets/manifest.json';
 import { createFontProvider as cdn } from './cdn';
 import { decodeFontFace, type FontDecoder } from './decode';
 import { createFontProvider } from './index';
-import { openProgressiveFace, type SliceRef, type SliceTransport } from './progressive';
+import { openProgressiveFace, sliceSourceOf, type SliceRef, type SliceTransport } from './progressive';
 import { chunkEntries, parseSkeleton } from './slices';
 
 const assets = new URL('../../fonts-cjk/assets/', import.meta.url);
@@ -174,4 +174,21 @@ test('providers add a progressive opener only to sliced faces and keep whole-fac
   const face = await loader.progressive();
   expect(face.revision).toBeGreaterThanOrEqual(1);
   expect(await loader.progressive()).toBe(face);
+});
+
+test('a face opened with file URLs names every slice file and the fetch timeout for another realm', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const resolved = (file: string) => new URL(file, 'https://fonts.example/cjk/');
+  const face = await openProgressiveFace(jpRef, { ...transport([]), url: async (file) => resolved(file), timeoutMs: 30_000 });
+  const source = await sliceSourceOf(face)!;
+  expect(source.ref).toEqual(jpRef);
+  expect(source.timeoutMs).toBe(30_000);
+  const files = [jpRef.index, index.skeleton.file, index.core.file, ...index.chunks.map((chunk) => chunk.file)];
+  expect(Object.keys(source.urls).sort()).toEqual(files.sort());
+  expect(source.urls[index.chunks[0]!.file]).toBe(resolved(index.chunks[0]!.file).href);
+  expect(sliceSourceOf(face)).toBe(sliceSourceOf(face));
+  const copy = await import(`./progressive.ts?entry=${Date.now()}`) as typeof import('./progressive');
+  expect(copy.sliceSourceOf).not.toBe(sliceSourceOf);
+  expect((await copy.sliceSourceOf(face)!).urls).toEqual(source.urls);
+  expect(sliceSourceOf(await openProgressiveFace(jpRef, transport([])))).toBeUndefined();
 });

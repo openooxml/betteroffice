@@ -52,8 +52,44 @@ interface SliceIndex {
 export interface SliceTransport {
   /** The bytes of a pack file by its manifest path. */
   read(file: string): Promise<ArrayBuffer>;
+  /** Where `read` fetches a pack file from, for another realm to fetch the same files. */
+  url?(file: string): Promise<URL>;
+  /** The fetch timeout `read` uses, which another realm reading the same files keeps. */
+  timeoutMs?: number;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
   decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
+}
+
+/** @internal Where a progressive face's files are, so a worker can open the same face. */
+export interface SliceSource {
+  ref: SliceRef;
+  /** Absolute URL of the index, skeleton, core and every chunk by manifest path. */
+  urls: Record<string, string>;
+  /** The fetch timeout of the realm that opened the face. */
+  timeoutMs?: number;
+}
+
+/** Each package entry bundles its own copy of this module, so the opened files travel on the face. */
+const OPENED = Symbol.for('betteroffice.slices');
+type Opened = { [OPENED]?: [SliceRef, SliceIndex, SliceTransport] };
+const sources = new WeakMap<ProgressiveFontFace, Promise<SliceSource>>();
+
+/** @internal The files of a face `openProgressiveFace` opened with a transport that names URLs. */
+export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> | undefined {
+  const entry = (face as Opened)[OPENED];
+  const url = entry?.[2].url;
+  if (!entry || !url) return undefined;
+  const [ref, index, { timeoutMs }] = entry;
+  let source = sources.get(face);
+  if (source === undefined) {
+    source = (async () => {
+      const urls: Record<string, string> = {};
+      for (const { file } of [{ file: ref.index }, index.skeleton, index.core, ...index.chunks]) urls[file] = (await url(file)).href;
+      return { ref, urls, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
+    })();
+    sources.set(face, source);
+  }
+  return source;
 }
 
 async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Array> {
@@ -75,7 +111,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
   const indexBytes = await transport.read(ref.index);
   if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
   const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
-  if (index.format !== 1 || index.sha256 !== ref.sha256) throw new Error(`Font slice index ${ref.index} does not match its face`);
+  if (index.format !== 1 || index.sha256 !== ref.sha256) throw new Error(`Font slice index ${ref.index} mismatch`);
   const [skeletonBytes, core] = await Promise.all([readFile(transport, index.skeleton), readFile(transport, index.core)]);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));
@@ -96,7 +132,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     let promise = pending.get(chunk);
     if (promise === undefined) {
       const entry = files.get(chunk);
-      if (entry === undefined) return Promise.reject(new Error(`Unknown font slice chunk ${chunk} in ${ref.index}`));
+      if (entry === undefined) return Promise.reject(new Error(`Unknown font slice chunk ${chunk}`));
       promise = readFile(transport, entry).then((bytes) => {
         install(bytes);
         loaded.add(chunk);
@@ -130,7 +166,8 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     return next;
   };
 
-  return {
+  const face: ProgressiveFontFace & Opened = {
+    [OPENED]: [ref, index, transport],
     get revision() {
       return revision;
     },
@@ -164,4 +201,5 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       return loaded.size === files.size + 1;
     },
   };
+  return face;
 }

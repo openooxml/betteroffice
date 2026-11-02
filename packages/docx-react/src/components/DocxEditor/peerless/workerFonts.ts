@@ -16,7 +16,7 @@ export async function customWorkerFontFaces(fonts: ReadonlyArray<FontDefinition>
 }
 
 export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>,
-  requirements: ResidentFontRequirement[], families: string[]): DocxFontEnvironment {
+  requirements: ResidentFontRequirement[], families: string[], progressive: DocxFontEnvironment['progressive'] = []): DocxFontEnvironment {
   const styles = new Map<number, ResidentFontRequirement>();
   for (const [key, slots] of Object.entries(chains)) {
     const [family, bold, italic] = key.split('|');
@@ -28,7 +28,8 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
     const style = styles.get(index);
     return { family: style?.family ?? 'Liberation Sans', data: font.slice(),
       weight: style?.bold ? 'bold' : 'normal', style: style?.italic ? 'italic' : 'normal' };
-  }), chains: structuredClone(chains), families: [...new Set(families)] };
+  }), chains: structuredClone(chains), families: [...new Set(families)],
+  ...(progressive.length ? { progressive: structuredClone(progressive) } : {}) };
 }
 
 /**
@@ -57,9 +58,12 @@ export async function prepareWorkerFontEnvironment(options: {
   runtime?: Parameters<typeof createRustMeasureSource>[0]['runtime'];
   compat: Parameters<ReturnType<typeof createRustMeasureSource>['setCompat']>[0];
   signal: AbortSignal;
+  /** Register sliced script-fallback faces from their skeleton and core; the worker loads their outlines. */
+  progressive?: boolean;
 }): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
-  const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime, engine: {
+  const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime,
+    progressive: options.progressive, engine: {
     registerFont(bytes) { options.signal.throwIfAborted(); return fonts.push(bytes.slice()) - 1; },
     registerSubstituteFont(substituteOf, family) { return fonts.push({ substituteOf, family }) - 1; },
     clearFonts() { fonts.length = 0; },
@@ -76,7 +80,9 @@ export async function prepareWorkerFontEnvironment(options: {
     options.signal.throwIfAborted();
     const config = measurement.measurementConfigForRequirements(requirements);
     if (!config) throw new Error('DOCX worker fonts are not ready');
+    const progressive = await measurement.progressiveFonts?.() ?? [];
+    options.signal.throwIfAborted();
     return fontEnvironmentForRegistrations(fonts, config.fontChains, requirements,
-      [...options.families, ...custom.map(face => face.family)]);
+      [...options.families, ...custom.map(face => face.family)], progressive);
   } finally { measurement.setEmbeddedFaces([]); measurement.clear(); }
 }
