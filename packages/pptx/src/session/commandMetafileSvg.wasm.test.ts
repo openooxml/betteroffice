@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { initWasm } from '../wasm/loader';
+import { engineKind } from '../wasm/engine';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { commandFontProvider } from './commandDefaultFonts';
 import { openPresentationSession, type PresentationSession } from './client';
@@ -81,6 +82,9 @@ function loader(load: () => Promise<MetafileSvgModule>) {
 }
 
 const options = { session: 'metafiles', incarnation: 'metafiles-worker', defaultFonts: false };
+const wasmTest = test.skipIf(engineKind === 'native');
+const isSvg = (bytes: ArrayBuffer | Uint8Array | undefined) =>
+  bytes !== undefined && /^\s*<svg[\s>]/.test(new TextDecoder().decode(new Uint8Array(bytes).subarray(0, 256)));
 
 beforeAll(async () => {
   await initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_lean_bg.wasm', import.meta.url)));
@@ -91,7 +95,7 @@ afterEach(async () => {
   for (const restore of restorers.splice(0).reverse()) restore();
 });
 
-test('openPresentationSession frames await lazy SVG media on the lean core', async () => {
+wasmTest('openPresentationSession frames await lazy SVG media on the lean core', async () => {
   const pending = deferred<MetafileSvgModule>();
   const requested = deferred<void>();
   const load = loader(() => { requested.resolve(); return pending.promise; });
@@ -106,7 +110,7 @@ test('openPresentationSession frames await lazy SVG media on the lean core', asy
   expect(load).toHaveBeenCalledTimes(1);
 });
 
-test('openPresentationSession retries a failed converter load on the next frame', async () => {
+wasmTest('openPresentationSession retries a failed converter load on the next frame', async () => {
   let attempts = 0;
   const load = loader(async () => {
     if (++attempts === 1) throw new Error('unavailable');
@@ -120,7 +124,7 @@ test('openPresentationSession retries a failed converter load on the next frame'
   expect(load).toHaveBeenCalledTimes(2);
 });
 
-test('openPresentationSession holds a frame until a slow converter load settles', async () => {
+wasmTest('openPresentationSession holds a frame until a slow converter load settles', async () => {
   const pending = deferred<MetafileSvgModule>();
   const load = loader(() => pending.promise);
   const client = await openPresentationSession(await deck(1), { worker: sessionWorker });
@@ -143,7 +147,7 @@ test('a package without metafiles never loads the converter', async () => {
   expect(load).not.toHaveBeenCalled();
 });
 
-test('opening metafiles are converted before the first reply with default fonts disabled', async () => {
+wasmTest('opening metafiles are converted before the first reply with default fonts disabled', async () => {
   const pending = deferred<MetafileSvgModule>();
   const requested = deferred<void>();
   loader(() => { requested.resolve(); return pending.promise; });
@@ -157,7 +161,7 @@ test('opening metafiles are converted before the first reply with default fonts 
   expect(client.state.frame?.media).toEqual([{ assetId: 'ppt/media/picture.emf', bytes: svg.buffer }]);
 });
 
-test('metafiles only on slide two load at idle after the first reply', async () => {
+wasmTest('metafiles only on slide two load at idle after the first reply', async () => {
   const requested = deferred<void>();
   const wire = connection();
   loader(async () => {
@@ -171,7 +175,7 @@ test('metafiles only on slide two load at idle after the first reply', async () 
   await requested.promise;
 });
 
-for (const shared of [false, true]) test(`fallback loading sends a worker repaint with fresh SVG media (${shared ? 'shared' : 'direct'})`, async () => {
+for (const shared of [false, true]) wasmTest(`fallback loading sends a worker repaint with fresh SVG media (${shared ? 'shared' : 'direct'})`, async () => {
   const pending = deferred<MetafileSvgModule>();
   const requested = deferred<void>();
   loader(() => { requested.resolve(); return pending.promise; });
@@ -196,7 +200,7 @@ for (const shared of [false, true]) test(`fallback loading sends a worker repain
   expect(wire.messages.some((message) => isHostMessage(message) && message.kind === 'event' && message.name === 'defaultFonts')).toBe(true);
 });
 
-test('shared navigation folds a metafile repaint into its font-gated reply', async () => {
+wasmTest('shared navigation folds a metafile repaint into its font-gated reply', async () => {
   const converter = deferred<MetafileSvgModule>();
   const converterRequested = deferred<void>();
   const load = loader(() => { converterRequested.resolve(); return converter.promise; });
@@ -266,7 +270,7 @@ test('shared navigation folds a metafile repaint into its font-gated reply', asy
   expect(load).toHaveBeenCalledTimes(1);
 });
 
-test('disposal during a converter load sends no later messages', async () => {
+wasmTest('disposal during a converter load sends no later messages', async () => {
   const pending = deferred<MetafileSvgModule>();
   const requested = deferred<void>();
   loader(() => { requested.resolve(); return pending.promise; });
@@ -281,7 +285,7 @@ test('disposal during a converter load sends no later messages', async () => {
   expect(wire.messages).toHaveLength(count);
 });
 
-test('a failed opening load retries after the first frame and repaints', async () => {
+wasmTest('a failed opening load retries after the first frame and repaints', async () => {
   const pending = deferred<MetafileSvgModule>();
   const requested = deferred<void>();
   let attempts = 0;
@@ -302,7 +306,7 @@ test('a failed opening load retries after the first frame and repaints', async (
   expect(new Uint8Array(client.state.frame!.media[0]!.bytes)).toEqual(svg);
 });
 
-test('an opening load times out and later repaints without another client request', async () => {
+wasmTest('an opening load times out and later repaints without another client request', async () => {
   const pending = deferred<MetafileSvgModule>();
   const load = loader(() => pending.promise);
   const wire = connection();
@@ -316,3 +320,17 @@ test('an opening load times out and later repaints without another client reques
   await repainted.promise;
   expect(new Uint8Array(client.state.frame!.media[0]!.bytes)).toEqual(svg);
 }, 10_000);
+
+test('an opening-slide metafile reaches the first editor frame as SVG on every engine', async () => {
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(1), options, wire.transport);
+  clients.push(client);
+  const picture = client.state.frame?.media.find(({ assetId }) => assetId === 'ppt/media/picture.emf');
+  expect(isSvg(picture?.bytes)).toBe(true);
+});
+
+test('a public session frame carries a metafile picture as SVG on every engine', async () => {
+  const client = await openPresentationSession(await deck(1), { worker: sessionWorker });
+  clients.push(client);
+  expect(isSvg((await client.call.frame(0)).media.get('ppt/media/picture.emf'))).toBe(true);
+});
