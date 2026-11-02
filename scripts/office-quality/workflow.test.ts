@@ -82,10 +82,9 @@ test('artifact directories remain stable when a run selects only one format', ()
       const matches = downloads.filter((step: any) => step.with.name === name);
       expect(matches).toHaveLength(1);
       expect(matches[0].with.path).toBe(`\${{ runner.temp }}/fidelity-parts/${name}`);
-      expect(matches[0].if).toBe(
-        (kind === 'renders' ? "inputs.publish_renders && inputs.corpus_origin == '' && " : '') +
-          `contains(fromJSON(needs.prepare.outputs.formats), '${format}')`
-      );
+      expect(matches[0].if).toBe(kind === 'renders'
+        ? `inputs.publish_renders && inputs.corpus_origin == '' && contains(fromJSON(needs.prepare.outputs.formats), '${format}')`
+        : `\${{ !inputs.private_corpus && contains(fromJSON(needs.prepare.outputs.formats), '${format}') }}`);
     }
   }
 });
@@ -192,7 +191,7 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
 const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
   (definition.steps ?? []).map((step: any) => ({ job, step })));
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
-  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs']);
+  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
 const PRIVATE_OFF = /(^|&& )!inputs\.private_corpus( &&|$)|^\$\{\{ !inputs\.private_corpus \}\}$/;
 
@@ -205,7 +204,12 @@ test('private corpus runs are an explicit input that refuses sample lists and re
   const guard = prepare.steps.find((step: any) => step.name === 'Keep private runs aggregate-only');
   expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
   expect(guard.if).toBe('inputs.private_corpus');
-  expect(guard.env).toEqual({ SAMPLES_GIVEN: "${{ inputs.samples != '' }}", PUBLISH_RENDERS: '${{ inputs.publish_renders }}' });
+  expect(guard.env).toEqual({
+    SAMPLES_GIVEN: "${{ inputs.samples != '' }}",
+    PUBLISH_RENDERS: '${{ inputs.publish_renders }}',
+    ORIGIN_GIVEN: "${{ inputs.corpus_origin != '' }}",
+  });
+  expect(guard.run).toContain('[ "$ORIGIN_GIVEN" != false ]');
   expect(guard.run).toContain('exit 1');
 });
 
@@ -245,4 +249,79 @@ test('private runs upload no per-document artifact and touch no asset cache, ren
   const mint = publish.steps.find((step: any) => step.name === 'Mint the bot token');
   const commit = publish.steps.find((step: any) => step.name === 'Commit only the generated README');
   expect([mint.if, commit.if]).toEqual(["steps.changed.outputs.value == 'true'", "steps.changed.outputs.value == 'true'"]);
+});
+
+const ENVIRONMENT = { name: "${{ inputs.private_corpus && 'private-corpus' || '' }}", deployment: false };
+const READ = {
+  PRIVATE_R2_ENDPOINT: '${{ secrets.PRIVATE_R2_ENDPOINT }}',
+  PRIVATE_R2_READ_KEY_ID: '${{ secrets.PRIVATE_R2_READ_KEY_ID }}',
+  PRIVATE_R2_READ_SECRET: '${{ secrets.PRIVATE_R2_READ_SECRET }}',
+};
+const WRITE = {
+  PRIVATE_R2_ENDPOINT: '${{ secrets.PRIVATE_R2_ENDPOINT }}',
+  PRIVATE_R2_WRITE_KEY_ID: '${{ secrets.PRIVATE_R2_WRITE_KEY_ID }}',
+  PRIVATE_R2_WRITE_SECRET: '${{ secrets.PRIVATE_R2_WRITE_SECRET }}',
+};
+const PRIVATE_ON = /^(always\(\) && )?inputs\.private_corpus$/;
+const privateKeys = (env: any) => Object.fromEntries(Object.entries(env ?? {}).filter(([key]) => key.startsWith('PRIVATE_R2_')));
+const stores = steps.flatMap(({ job, step }) => [...String(step.run ?? '').matchAll(/(?:private-store\.mjs"?|"\$store") (put|get) (?:--optional )?('[^']+'|(?:[a-z0-9-]|\$\{\{ [a-z.]+ \}\})+)(?: "([^"]+)")?/g)]
+  .map((match) => ({ job, step, mode: match[1], name: match[2].replace(/'/g, ''), path: match[3] })));
+
+test('private runs take their secrets from a main-only environment without deployment records', () => {
+  const corpusJobs = Object.entries<any>(workflow.jobs).filter(([, job]) =>
+    (job.steps ?? []).some((step: any) => /private-(step|store)\.mjs/.test(String(step.run ?? ''))));
+  expect(corpusJobs.map(([name]) => name).sort()).toEqual(
+    ['docx-benchmark', 'measure', 'prepare', 'publish', 'pptx-benchmark', 'roundtrip-a', 'roundtrip-b', 'xlsx-benchmark', 'xlsx-fidelity'].sort());
+  for (const [, job] of corpusJobs) expect(job.environment).toEqual(ENVIRONMENT);
+  for (const [name, job] of Object.entries<any>(workflow.jobs))
+    if (!corpusJobs.some(([corpus]) => corpus === name)) expect({ name, environment: job.environment }).toEqual({ name, environment: undefined });
+  expect(prepare.if).toBe("github.ref == 'refs/heads/main'");
+  expect(JSON.stringify(workflow.env)).not.toContain('PRIVATE_R2');
+  for (const job of Object.values<any>(workflow.jobs)) expect(JSON.stringify(job.env ?? {})).not.toContain('PRIVATE_R2');
+});
+
+test('read keys reach only corpus readers and bucket reads, write keys only bucket writes', () => {
+  let readers = 0;
+  for (const { job, step } of steps) {
+    const keys = privateKeys(step.env);
+    const run = String(step.run ?? '');
+    const label = { job, name: step.name ?? step.uses };
+    if (!Object.keys(keys).length) {
+      expect({ ...label, store: run.includes('private-store.mjs') }).toEqual({ ...label, store: false });
+      continue;
+    }
+    if (run.includes('private-store.mjs')) {
+      expect({ ...label, if: step.if }).toEqual({ ...label, if: expect.stringMatching(PRIVATE_ON) });
+      const modes = new Set(stores.filter((store) => store.step === step).map((store) => store.mode));
+      expect([...modes]).toHaveLength(1);
+      expect(keys).toEqual(modes.has('put') ? WRITE : READ);
+    } else {
+      expect({ ...label, run }).toEqual({ ...label, run: expect.stringMatching(/private-step\.mjs (plan|measure|[a-z-]+-stage) -- node /) });
+      expect(keys).toEqual(READ);
+      readers += 1;
+    }
+  }
+  expect(readers).toBe(8);
+  const checks = measure.steps.find((step: any) => step.name === 'Check benchmark scripts');
+  expect(checks.env).toEqual({ QUALITY_PRIVATE: 'false' });
+});
+
+test('every per-document artifact has a private bundle of the same name and directory', () => {
+  const normalize = (path: string) => path.replace('${{ runner.temp }}', '$RUNNER_TEMP').replace('$parts', '$RUNNER_TEMP/fidelity-parts');
+  for (const { job, step } of steps) {
+    const uses = String(step.uses ?? '');
+    if (uses.startsWith('actions/upload-artifact@') && PRIVATE_OFF.test(step.if ?? '') && !step.with.name.startsWith('visual-fidelity-renders-'))
+      expect({ job, name: step.with.name, put: stores.some((store) => store.job === job && store.mode === 'put' && store.name === step.with.name) })
+        .toEqual({ job, name: step.with.name, put: true });
+    if (uses.startsWith('actions/download-artifact@') && PRIVATE_OFF.test(step.if ?? '') && !String(step.with.name ?? '').startsWith('visual-fidelity-renders-')) {
+      const name = step.with.name ?? step.with.pattern;
+      const matches = stores.filter((store) => store.job === job && store.mode === 'get' && store.name === name);
+      expect({ job, name, paths: matches.map((store) => normalize(store.path!)) }).toEqual({ job, name, paths: [normalize(step.with.path)] });
+    }
+  }
+  const puts = stores.filter((store) => store.mode === 'put').map((store) => `${store.job}/${store.name}`);
+  expect(new Set(puts).size).toBe(puts.length);
+  for (const job of ['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'publish'])
+    expect(stores.some((store) => store.job === job && store.mode === 'put' && store.name.startsWith('logs-') &&
+      store.step.if === 'always() && inputs.private_corpus')).toBe(true);
 });
