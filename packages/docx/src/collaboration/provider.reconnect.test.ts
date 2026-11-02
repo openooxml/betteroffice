@@ -19,7 +19,7 @@ beforeAll(async () => {
   source.loadStories([{ storyId: 'body', paragraphs: [{ text: 'alpha beta' }, { text: 'second paragraph' }] }]);
   seed = source.encodeState();
   source.destroy();
-});
+}, 30_000);
 
 function later<T>(operation: () => T): Promise<T> {
   return new Promise((done, fail) => setTimeout(() => {

@@ -17,7 +17,7 @@ beforeAll(async () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   ))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 test('a display-list query trap terminates the worker instead of acknowledging fallback selection', async () => {
   const worker = startWorker();

@@ -57,6 +57,7 @@ All entry points below are exported from `@betteroffice/pptx`.
 | entry point | description |
 | --- | --- |
 | `initWasm(input?)` | Initialize WebAssembly before opening or inspecting a file. Browsers can omit the input; Node hosts can pass WASM bytes. |
+| `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `openPresentation(bytes, options?)` | Open a synchronous `PresentationHandle` for reads, edits, layout, and saving. |
 | `inspectPresentation(bytes, options?)` | Inspect parsed content without opening an editing handle; `includeMedia: false` omits media. |
 | `sizeCanvasForSlide(canvas, frame, dpr, scale?)` | Set canvas backing dimensions and CSS size for a slide. |
@@ -66,15 +67,19 @@ All entry points below are exported from `@betteroffice/pptx`.
 | `exportPptxMarkdown(bytes, options?)` | Export Markdown and source anchors asynchronously. |
 | `renderPptxMarkdown(content, options?)` | Render structured content as Markdown asynchronously. |
 
-`openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an asynchronous
-worker session; its API can change in minor releases.
-
 `openPresentation` accepts `fonts`, `fallbackFonts`, `clientId`, and `initialUpdate`. Fallback fonts
 supply glyphs missing from a run's own face. When opening from a collaboration update, retain the
 source file bytes used to seed it so the handle can save.
 
 The core's directly owned handle is synchronous. The React editor runs its engine in a Web Worker
 by default and exposes promise-returning reads and exports.
+
+## Worker sessions
+
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed.
+
+`openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an asynchronous
+worker session; its API can change in minor releases.
 
 ## Layout and rendering
 

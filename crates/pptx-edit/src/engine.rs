@@ -16,6 +16,75 @@ use crate::{
     UpdateEvent, UpdateOrigin, outcome_json, oversized_request,
 };
 
+pub fn parse_pptx_json(data: &[u8]) -> Result<String, EngineError> {
+    let package =
+        pptx_parse::parse_pptx(data).map_err(|error| EngineError::message(error.to_string()))?;
+    serde_json::to_string(&package).map_err(|error| EngineError::message(error.to_string()))
+}
+
+pub fn parse_pptx_json_without_media(data: &[u8]) -> Result<String, EngineError> {
+    let package =
+        pptx_parse::parse_pptx(data).map_err(|error| EngineError::message(error.to_string()))?;
+    let metadata = PptxPackageWithoutMedia {
+        presentation: &package.presentation,
+        slides: &package.slides,
+        layouts: &package.layouts,
+        masters: &package.masters,
+        themes: &package.themes,
+        charts: &package.charts,
+        diagram_drawings: &package.diagram_drawings,
+        media: package
+            .media
+            .iter()
+            .map(|part| MediaSummary {
+                part_path: &part.part_path,
+                content_type: &part.content_type,
+                byte_length: part.bytes.len(),
+            })
+            .collect(),
+        table_styles: &package.table_styles,
+        comment_authors: &package.comment_authors,
+        comments: &package.comments,
+        comment_flavor: &package.comment_flavor,
+        relationships: &package.relationships,
+        shape_elements: package.models_connectors().then_some("withConnectors"),
+    };
+    serde_json::to_string(&metadata).map_err(|error| EngineError::message(error.to_string()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PptxPackageWithoutMedia<'a> {
+    presentation: &'a pptx_parse::Presentation,
+    slides: &'a [pptx_parse::Slide],
+    layouts: &'a [pptx_parse::SlideLayout],
+    masters: &'a [pptx_parse::SlideMaster],
+    themes: &'a [pptx_parse::ThemePart],
+    charts: &'a [pptx_parse::ChartPart],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagram_drawings: &'a Vec<pptx_parse::DiagramDrawing>,
+    media: Vec<MediaSummary<'a>>,
+    #[serde(skip_serializing_if = "ooxml_drawingml::TableStyleList::is_empty")]
+    table_styles: &'a ooxml_drawingml::TableStyleList,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    comment_authors: &'a Vec<pptx_parse::CommentAuthor>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    comments: &'a Vec<pptx_parse::Comment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comment_flavor: &'a Option<pptx_parse::CommentFlavor>,
+    relationships: &'a BTreeMap<String, Vec<pptx_parse::Relationship>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shape_elements: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaSummary<'a> {
+    part_path: &'a str,
+    content_type: &'a str,
+    byte_length: usize,
+}
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -34,6 +103,8 @@ pub enum ErrorKind {
     Peer { code: String },
     /// thrown as an Error named "PptxEditDecodeError" (today: validateEditsJson decode failure)
     Decode,
+    /// thrown as an Error named "PptxResourceLimitError" (a font, image or text budget refused)
+    ResourceLimit,
 }
 
 impl EngineError {
@@ -54,6 +125,13 @@ impl EngineError {
     pub fn decode(message: String) -> Self {
         Self {
             kind: ErrorKind::Decode,
+            message,
+        }
+    }
+
+    pub fn resource_limit(message: String) -> Self {
+        Self {
+            kind: ErrorKind::ResourceLimit,
             message,
         }
     }

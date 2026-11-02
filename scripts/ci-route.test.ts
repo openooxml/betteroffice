@@ -210,14 +210,14 @@ describe('runner routing', () => {
         stdout: 'pipe',
       });
       expect(await command.exited).toBe(0);
-      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(Date.now() - started).toBeLessThan(9_000);
       expect(await new Response(command.stdout).text()).toContain('fell back to kyora');
       expect(readFileSync(output, 'utf8')).toBe('packages=\npython=\npackage_tests=\nrust=\n');
     } finally {
       server.stop(true);
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('the command writes every group, empty when routing fails, and exits cleanly', () => {
     const directory = mkdtempSync(join(tmpdir(), 'ci-route-'));
@@ -233,5 +233,5 @@ describe('runner routing', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

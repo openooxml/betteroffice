@@ -414,12 +414,18 @@ fn autofit_rows(
     inset: TextInset,
     fit: RowFit,
 ) -> BTreeMap<RowId, f64> {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("style_autofit");
+    }
     let mut fitted = BTreeMap::new();
     if sheet.format.custom_height {
         return fitted;
     }
     let cached_default = fit == RowFit::Screen && sheet.format.default_row_height_pt.is_some();
     for &row in sheet.row_styles.keys() {
+        xlsx_model::open_timing! {
+            xlsx_model::open_timing::count("style_autofit_rows", 1);
+        }
         if !sheet.row_heights.contains_key(&row)
             && let Some(style) = missing_row_style(sheet, row)
             && let Some(height) =
@@ -431,6 +437,9 @@ fn autofit_rows(
     let spanned = merge_anchors(sheet, true);
     let anchors = merge_anchors(sheet, false);
     for (at, cell) in sheet.iter_cells() {
+        xlsx_model::open_timing! {
+            xlsx_model::open_timing::count("style_autofit_cells", 1);
+        }
         #[cfg(feature = "test-counters")]
         AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
@@ -469,6 +478,9 @@ fn missing_row_style(sheet: &Sheet, row: RowId) -> Option<u32> {
     }
     let mut col = 0;
     for (at, _) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
+        xlsx_model::open_timing! {
+            xlsx_model::open_timing::count("style_missing_row_cells", 1);
+        }
         if at.col != col {
             break;
         }

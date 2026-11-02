@@ -144,6 +144,13 @@ impl Writer {
         }
     }
 
+    pub(crate) fn bounded(max: usize) -> Self {
+        Self {
+            window: Some((0, max)),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn window(start: usize, length: usize) -> Self {
         Self {
             buf: Vec::with_capacity(length),

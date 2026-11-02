@@ -338,7 +338,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
         }
         if (error.status.reason === 'read-only') return fail('read-only');
         if (id === 'proposalReject' && error.status.reason === 'missing-target') return fail('proposal-not-found');
-        return fail('input-failed');
+        return fail(error.code);
       }
       if (error instanceof XlsxCommandAdmissionError) return fail(error.code);
       if (error instanceof Error && error.name === 'WorkbookPngUnavailableError') return fail('png-unavailable');

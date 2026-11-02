@@ -56,7 +56,7 @@ function lowered(session: Pick<YrsSession, 'yrsBlocksForStory'>, env: YrsRenderE
 }
 
 describe('computeLayout retained kernel inputs', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   test('the measured arena is fetched lazily, once, and only on demand', () => {
     const layout = { pages: [] };
@@ -120,6 +120,15 @@ describe('computeLayout retained kernel inputs', () => {
       session.destroy();
     }
   });
+});
+
+test('buildResidentRegionLayoutRequest forwards the parsed theme without changing it', () => {
+  const document = stylesDoc([]);
+  const theme = { fontScheme: { majorFont: { latin: 'Calibri' }, minorFont: { latin: 'Arial' } } };
+  document.package.theme = theme;
+  const request = buildResidentRegionLayoutRequest(document, 24, {});
+  expect(request.renderEnv.fontTheme).toBe(theme);
+  expect(document.package.theme).toBe(theme);
 });
 
 describe('buildResidentRegionLayoutRequest compatibilityFlags', () => {

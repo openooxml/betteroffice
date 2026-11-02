@@ -41,6 +41,9 @@ import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount 
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
+import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
+import { recoverGroupedStorySeeds } from './groupedStorySeed';
+import { sessionMaterializedSource } from './sessionInternals';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -843,7 +846,7 @@ function runContentToUnits(
     case 'horizontalRule':
       return [embedUnit('horizontalRule', { rule: content.rule }, marks)];
     case 'shape':
-      return [embedUnit('shape', { ...shapePayload(content.shape), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
+      return [embedUnit('shape', { ...shapePayload(content.shape), ...(content.drawing ? { docPr: content.drawing } : {}) }, content.shape.drawingRunXml || content.shape.drawingXml ? drawingMarks(marks) : trackedMarks(marks))];
     case 'chart':
       return [embedUnit('chart', { ...chartPayload(content.chart), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
     case 'opaqueDrawing':
@@ -872,7 +875,27 @@ function runToUnits(
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences));
+  return run.content.flatMap((content) => replayedRunContentToUnits(run, content, marks, opaqueSequences));
+}
+
+function replayedRunContentToUnits(
+  run: Run,
+  content: RunContent,
+  marks: readonly MarkDescriptor[],
+  opaqueSequences: string[]
+): InlineUnit[] {
+  const units = runContentToUnits(content, marks, opaqueSequences);
+  if ((content.type === 'shape' && content.shape.drawingRunXml) ||
+    (content.type === 'opaqueDrawing' && content.kind === 'drawingRun')) {
+    for (const unit of units) {
+      if (unit.kind === 'embed') unit.payload.sourceRun = {
+        formatting: run.formatting ?? {},
+        attributes: { ...unit.attrs },
+        propertyChanges: run.propertyChanges ?? null,
+      };
+    }
+  }
+  return units;
 }
 
 function hyperlinkToUnits(
@@ -887,7 +910,7 @@ function hyperlinkToUnits(
   for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
     if (child.type === 'run') {
       const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
-      for (const content of child.content) units.push(...runContentToUnits(content, marks, opaqueSequences));
+      for (const content of child.content) units.push(...replayedRunContentToUnits(child, content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);
@@ -1426,48 +1449,6 @@ function paragraphHasNonLeadingPageBreak(paragraph: Paragraph): boolean {
   return false;
 }
 
-type RowSpanInfo = { rowSpan: number; skip: boolean };
-
-function calculateRowSpans(table: Table): Map<string, RowSpanInfo> {
-  const result = new Map<string, RowSpanInfo>();
-  const active = new Map<number, number>();
-  table.rows.forEach((row, rowIndex) => {
-    let column = row.formatting?.gridBefore ?? 0;
-    const cells = row.cells.map((cell) => {
-      const current = column;
-      column += cell.formatting?.gridSpan ?? 1;
-      return { column: current, vMerge: cell.formatting?.vMerge, key: `${rowIndex}-${current}` };
-    });
-    const empty =
-      cells.length > 0 &&
-      cells.every((cell) => cell.vMerge === 'continue' && active.has(cell.column));
-    if (empty) {
-      for (const cell of cells) {
-        active.delete(cell.column);
-        result.set(cell.key, { rowSpan: 1, skip: false });
-      }
-      return;
-    }
-    for (const cell of cells) {
-      if (cell.vMerge === 'restart') {
-        active.set(cell.column, rowIndex);
-        result.set(cell.key, { rowSpan: 1, skip: false });
-      } else if (cell.vMerge === 'continue') {
-        const start = active.get(cell.column);
-        if (start === undefined) result.set(cell.key, { rowSpan: 1, skip: false });
-        else {
-          const owner = result.get(`${start}-${cell.column}`);
-          if (owner) owner.rowSpan += 1;
-          result.set(cell.key, { rowSpan: 1, skip: true });
-        }
-      } else {
-        active.delete(cell.column);
-        result.set(cell.key, { rowSpan: 1, skip: false });
-      }
-    }
-  });
-  return result;
-}
 
 function revisionAttrs(info: TrackedChangeInfo): Attrs {
   return { revisionId: info.id, author: info.author, date: info.date ?? null };
@@ -2171,9 +2152,10 @@ export function documentToYrs(
   document: Document,
   options: YrsOpeningOptions = {}
 ): void {
+  const restoreGroups = recoverGroupedStorySeeds(document, () => sessionMaterializedSource(session));
   const restore = seedFontNames(document);
   try { seedDocument(session, document, options); }
-  finally { restore(); }
+  finally { restore(); restoreGroups(); }
 }
 
 function seedDocument(

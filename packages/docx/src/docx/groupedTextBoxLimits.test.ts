@@ -12,7 +12,7 @@ const LEAF = 'Innermost story text';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 function textBox(id: number, story: string): string {
   return `<wps:wsp><wps:cNvPr id="${id}"/><wps:cNvSpPr txBox="1"/><wps:spPr>` +

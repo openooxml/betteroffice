@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use xlsx_model::{CellValue, DateSystem, ErrorValue};
+use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
     EvalContext, MAX_CELL_TEXT_CHARS, as_area, boolean, err, evaluate, num, text, text_unmetered,
@@ -556,17 +556,7 @@ fn text_number(raw: &str, ctx: &EvalContext<'_>) -> Option<f64> {
     if raw.contains(':') {
         return None;
     }
-    let serial = super::datetime::parse_date_text(raw, ctx)?;
-    match ctx.date_system {
-        DateSystem::V1900 => Some(serial as f64),
-        DateSystem::V1904 => {
-            // the same epoch shift `parse_entry_date` applies to a parsed
-            // date: through unix days, so the phantom 1900-02-29 has none.
-            let unix = DateSystem::V1900.serial_to_unix_days(serial as f64)?;
-            let epoch = DateSystem::V1904.serial_to_unix_days(0.0)?;
-            (unix >= epoch).then_some((unix - epoch) as f64)
-        }
-    }
+    super::datetime::parse_date_text(raw, ctx).map(|serial| serial as f64)
 }
 
 /// FIXED(number, [decimals], [no_commas]): round half away from zero to
@@ -603,7 +593,7 @@ pub(crate) fn fixed(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// `x` rounded at `decimals` and written out. the rounding works on the 15
 /// significant digits excel keeps, so 2.675 rounds up to 2.68 as it displays.
-fn fixed_text(x: f64, decimals: i32, commas: bool) -> String {
+pub(crate) fn fixed_text(x: f64, decimals: i32, commas: bool) -> String {
     let scientific = format!("{:.14e}", x.abs());
     let (mantissa, exponent) = scientific
         .split_once('e')

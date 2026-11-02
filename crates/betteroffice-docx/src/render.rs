@@ -4,62 +4,16 @@ use std::sync::{Mutex, PoisonError};
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, RenderResources, RenderedPage,
-    scoped_image_key,
+    ImageCache, ImageMap, ImageScope, RenderResources, RenderedPage, scoped_image_key,
 };
-use ooxml_text::FontStore;
 use serde_json::Number;
 
 use crate::{Document, Error, Result};
 
-const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_FONTS: usize = 256;
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
 pub const MAX_PIXMAP_DIM: u32 = docx_raster::MAX_PAGE_DIM;
 pub const MAX_PIXMAP_PIXELS: u64 = docx_raster::MAX_PAGE_PIXELS;
-
-/// Registered faces plus the `family|bold|italic` chains the raster backend
-/// resolves runs against. The store and glyph cache sit behind a `Mutex` so a
-/// [`Document`] holding one stays `Send + Sync`.
-#[derive(Default)]
-pub(crate) struct FontRegistry {
-    store: Mutex<FontStore>,
-    chains: FontChains,
-    faces: usize,
-    glyphs: Mutex<GlyphCache>,
-}
-
-impl FontRegistry {
-    fn register(&mut self, family: &str, bold: bool, italic: bool, bytes: &[u8]) -> Result<u32> {
-        if bytes.len() > MAX_FONT_BYTES {
-            return Err(Error::ResourceLimit(format!(
-                "font exceeds {MAX_FONT_BYTES} bytes"
-            )));
-        }
-        if self.faces >= MAX_FONTS {
-            return Err(Error::ResourceLimit(format!(
-                "more than {MAX_FONTS} font faces"
-            )));
-        }
-        let family = family.trim();
-        if family.is_empty() {
-            return Err(Error::Font("font family is empty".to_owned()));
-        }
-        let id = self
-            .store
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .register(bytes.to_vec())
-            .map_err(|error| Error::Font(error.to_string()))?;
-        self.chains
-            .entry(chain_key(family, bold, italic))
-            .or_default()
-            .push(id);
-        self.faces += 1;
-        Ok(id.to_u32())
-    }
-}
 
 /// Caller-supplied bytes for relationship ids the display list did not already
 /// carry as `data:` URLs, keyed by owning part, plus the decoded images a page
@@ -119,29 +73,7 @@ fn page_pixels(number: &Number) -> Option<u32> {
     Some(value.ceil().min(f64::from(u32::MAX)) as u32)
 }
 
-fn chain_key(family: &str, bold: bool, italic: bool) -> String {
-    format!(
-        "{}|{}|{}",
-        family.to_lowercase(),
-        u8::from(bold),
-        u8::from(italic)
-    )
-}
-
 impl Document {
-    /// Registers one font face for rendering, returning its font id. Faces are
-    /// capped at 256 and each font at 32 MiB; either budget is a
-    /// [`Error::ResourceLimit`] rather than a truncated accept.
-    pub fn register_font(
-        &mut self,
-        family: &str,
-        bold: bool,
-        italic: bool,
-        bytes: &[u8],
-    ) -> Result<u32> {
-        self.fonts.register(family, bold, italic, bytes)
-    }
-
     /// Supplies bytes for one relationship id the display list left
     /// unresolved, scoped to the part that owns the id. Images are capped at
     /// 256 and each at 32 MiB.
@@ -171,29 +103,22 @@ impl Document {
         {
             validate_render_size(width, height)?;
         }
-        let store = self
-            .fonts
-            .store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let mut glyphs = self
-            .fonts
-            .glyphs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        #[cfg(feature = "fonts")]
+        self.prepare_display_fonts(display_list, page_ordinal)?;
+        let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         let mut images = self
             .images
             .cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let resources = RenderResources::new(&store, &self.fonts.chains, &self.images.entries);
-        docx_raster::render_page_cached(
-            display_list,
-            page_ordinal,
-            &resources,
-            &mut glyphs,
-            &mut images,
-        )
-        .map_err(Error::Render)
+        let crate::font::FontRegistry {
+            store,
+            chains,
+            glyphs,
+            ..
+        } = &mut *fonts;
+        let resources = RenderResources::new(store, chains, &self.images.entries);
+        docx_raster::render_page_cached(display_list, page_ordinal, &resources, glyphs, &mut images)
+            .map_err(Error::Render)
     }
 }

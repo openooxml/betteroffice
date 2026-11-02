@@ -1,3 +1,4 @@
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -87,6 +88,7 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
   wasm?: ArrayBuffer | WebAssembly.Module;
+  png?: boolean;
   initialViewport?: WorkbookInitialPaintRequest;
   includeEditState?: boolean;
   initialUpdate?: Uint8Array;
@@ -158,9 +160,10 @@ export interface WorkbookSessionEvents {
  * Workbook RPC methods; engine version tokens remain strings.
  * @experimental
  */
-export type WorkbookSessionMethods = {
+export type WorkbookSessionMethods = FontDecoderMethods & {
   open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
-  openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm'>): WorkbookSessionOpenReply;
+  /** Checkpoints are only restorable by the same engine version and codec. */
+  openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
   version(): string;
   collaborationStateVector(): Uint8Array;
   collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -171,6 +174,7 @@ export type WorkbookSessionMethods = {
   applyEdits(request: XlsxEditRequest): XlsxEditResult;
   command(command: WorkbookCommand): WorkbookWireAck;
   edit(command: WorkbookSharedCommand): WorkbookSharedWireAck;
+  /** Checkpoints are only restorable by the same engine version and codec. */
   checkpoint(preserveHistory?: boolean): WorkbookCheckpoint;
   commandFrame(request?: WorkbookCommandFrameRequest): FrameEnvelope<WorkbookCommandWireFrame> | undefined;
   frame(viewport: Viewport, options?: WorkbookFrameOptions): WorkbookWireFrame;
@@ -191,6 +195,7 @@ export type WorkbookSessionMethods = {
 };
 
 export const WORKBOOK_SESSION_METHODS = {
+  decodeFontFace: true,
   open: true,
   openRecovery: true,
   version: true,
@@ -223,6 +228,7 @@ export const WORKBOOK_SESSION_METHODS = {
 } satisfies { readonly [K in keyof WorkbookSessionMethods]-?: true };
 
 export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> = {
+  decodeFontFace: { lane: 'interactive' },
   open: { lane: 'interactive' },
   openRecovery: { lane: 'input', reorderable: false },
   version: { lane: 'interactive' },

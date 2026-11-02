@@ -32,6 +32,7 @@
     "ariaLabel": "סרגל כלים לעיצוב",
     "file": "קובץ",
     "format": "עיצוב",
+    "layout": "פריסה",
     "insert": "הוספה",
     "open": "פתיחה",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "נוכחי"
     }
+  },
+  "layout": {
+    "margins": "שוליים",
+    "normal": "רגיל",
+    "narrow": "צר",
+    "moderate": "בינוני",
+    "wide": "רחב",
+    "customMargins": "שוליים מותאמים אישית...",
+    "morePaperSizes": "גדלי נייר נוספים...",
+    "indent": "כניסה"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "יחיד",
     "double": "כפול",
     "lineSpacingTitle": "מרווח בין שורות: {label}",
-    "paragraphSpacing": "מרווח בין פסקאות"
+    "paragraphSpacing": "מרווח בין פסקאות",
+    "addBefore": "הוסף רווח לפני פיסקה",
+    "removeBefore": "הסר רווח לפני פיסקה",
+    "addAfter": "הוסף רווח אחרי פיסקה",
+    "removeAfter": "הסר רווח אחרי פיסקה",
+    "options": "אפשרויות מרווח בין שורות..."
   },
   "styles": {
     "selectAriaLabel": "בחר סגנון פסקה",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "הפעל/כבה קו חוצה",
         "subscript": "כתב תחתי",
         "subscriptDescription": "הפעל/כבה כתב תחתי",
+        "clearFormatting": "נקה עיצוב",
+        "clearFormattingDescription": "ניקוי עיצוב הטקסט",
         "superscript": "כתב עילי",
         "superscriptDescription": "הפעל/כבה כתב עילי",
         "alignLeft": "יישור לשמאל",
@@ -478,6 +496,11 @@
       "top": "למעלה (px)",
       "width": "רוחב (px)",
       "height": "גובה (px)"
+    },
+    "paragraphSpacing": {
+      "before": "מרווח לפני",
+      "after": "מרווח אחרי",
+      "multiple": "מרובה"
     }
   },
   "comments": {
@@ -753,7 +776,11 @@
     "leftIndent": "כניסה שמאלית",
     "rightIndent": "כניסה ימנית",
     "topMargin": "שוליים עליונים",
-    "bottomMargin": "שוליים תחתונים"
+    "bottomMargin": "שוליים תחתונים",
+    "leftMargin": "שוליים שמאליים",
+    "rightMargin": "שוליים ימניים",
+    "hangingIndent": "כניסה תלויה",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "הדפסה",

@@ -128,7 +128,10 @@ export interface XlsxEditRequest {
   /** Defaults to `separate`. */
   history?: XlsxEditHistory;
   /** Overrides the handle clock for this request; without either clock, NOW() has no clock. */
-  calculation?: { nowSerial?: number };
+  calculation?: {
+    /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
+    nowSerial?: number;
+  };
   steps: readonly XlsxEditStep[];
 }
 
@@ -244,9 +247,21 @@ export interface XlsxRangeRead {
   cells: XlsxCellRead[][];
 }
 
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value,
+ * or stays blank when the file saved none, unless only an engine gap was
+ * involved, which shows its error.
+ */
+export interface XlsxUnevaluatedCell extends XlsxCellAddress {
+  /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+  functions: string[];
+}
+
 export interface XlsxReadCalculation {
   cycleCells: XlsxCellAddress[];
   limitedCells: XlsxCellAddress[];
+  /** Formula cells the engine could not compute; omitted by cores built before the list. */
+  unevaluatedCells?: XlsxUnevaluatedCell[];
   /** Whether a list stopped at 10,000 cells. */
   truncated: boolean;
 }

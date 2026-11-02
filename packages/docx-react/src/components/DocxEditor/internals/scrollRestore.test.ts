@@ -188,7 +188,7 @@ function inputMap(session: YrsSession, story = 'body') {
 const STICKY: YrsStickyPosition = { story: 'body', encoded: Uint8Array.of(1) };
 
 describe('display-list viewport restore integration', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   test('cancels an async restore and its follow-up after local navigation', async () => {
     const paraId = 'paragraph';

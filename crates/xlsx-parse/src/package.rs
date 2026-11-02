@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
+use xlsx_model::sort::sort_by_shared;
 use xlsx_model::{CellRef, SheetId, Workbook};
 
 use crate::read::{SharedStringCells, SourceCellFacts};
@@ -217,6 +218,17 @@ impl PreservedPackage {
     #[doc(hidden)]
     pub fn source_sheet_count(&self) -> usize {
         self.sheets.len()
+    }
+
+    /// Whether the source asks spreadsheet applications to recalculate every formula on
+    /// open (`calcPr` `fullCalcOnLoad` or `forceFullCalc`), so its cached results are not
+    /// meant to be kept.
+    #[doc(hidden)]
+    pub fn requests_full_calculation(&self) -> bool {
+        self.calc_pr_attributes.iter().flatten().any(|attribute| {
+            matches!(attribute.local_name(), "fullCalcOnLoad" | "forceFullCalc")
+                && matches!(attribute.value.trim(), "1" | "true")
+        })
     }
 
     /// Every preserved part whose references cannot be patched, with the cells
@@ -950,7 +962,10 @@ impl XmlTemplate {
         let mut replacements = replacements
             .into_iter()
             .map(|(name, bytes)| (name.to_owned(), bytes))
-            .collect::<BTreeMap<_, _>>();
+            .fold(BTreeMap::new(), |mut replacements, (name, bytes)| {
+                replacements.insert(name, bytes);
+                replacements
+            });
         for bytes in replacements.values_mut().flatten() {
             *bytes = self.qualify_fragment(bytes)?;
         }
@@ -1001,7 +1016,9 @@ impl XmlTemplate {
                             && rank(name) < child_rank
                     })
                     .collect::<Vec<_>>();
-                pending.sort_by_key(|(name, _)| rank(name));
+                sort_by_shared(&mut pending, |(left, _), (right, _)| {
+                    rank(left).cmp(&rank(right))
+                });
                 for (name, bytes) in pending {
                     emitted.insert(name.clone());
                     if let Some(bytes) = bytes {
@@ -1302,7 +1319,9 @@ fn emit_pending(
         .iter()
         .filter(|(name, _)| !emitted.contains(name.as_str()))
         .collect::<Vec<_>>();
-    pending.sort_by_key(|(name, _)| rank(name));
+    sort_by_shared(&mut pending, |(left, _), (right, _)| {
+        rank(left).cmp(&rank(right))
+    });
     for (name, bytes) in pending {
         emitted.insert(name.clone());
         if let Some(bytes) = bytes {

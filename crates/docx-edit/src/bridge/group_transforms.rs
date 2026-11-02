@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use crate::fmath;
+
 #[derive(Clone, Copy)]
 struct Matrix {
     a: f64,
@@ -48,7 +50,7 @@ impl Matrix {
     }
 
     fn orientation(rotation: f64, flip_h: bool, flip_v: bool) -> Self {
-        let (sin, cos) = rotation.to_radians().sin_cos();
+        let (sin, cos) = fmath::sin_cos(rotation.to_radians());
         Self {
             a: cos,
             b: sin,
@@ -74,11 +76,11 @@ impl Matrix {
     }
 
     fn scale_x(self) -> f64 {
-        self.a.hypot(self.b).max(f64::MIN_POSITIVE)
+        fmath::hypot(self.a, self.b).max(f64::MIN_POSITIVE)
     }
 
     fn scale_y(self) -> f64 {
-        self.c.hypot(self.d).max(f64::MIN_POSITIVE)
+        fmath::hypot(self.c, self.d).max(f64::MIN_POSITIVE)
     }
 
     fn flipped(self) -> bool {
@@ -117,7 +119,8 @@ fn project_node(
     }
     let group = matches!(scene["kind"].as_str(), Some("group" | "canvas"));
     let transform = &shape["transform"];
-    let rotation = number(transform, "rotation", 0.0) - parent.b.atan2(parent.a).to_degrees();
+    let rotation =
+        number(transform, "rotation", 0.0) - fmath::atan2(parent.b, parent.a).to_degrees();
     let orientation = Matrix::orientation(
         rotation,
         transform["flipH"].as_bool().unwrap_or(false) != parent.flipped(),
@@ -200,7 +203,8 @@ fn project_node(
         shape["offset"] = json!({"x": origin.0 - parent_origin.0, "y": origin.1 - parent_origin.1});
         shape["size"] = json!({"width": rendered_width, "height": rendered_height});
         let sign = if axes.flipped() { -1.0 } else { 1.0 };
-        shape["transform"] = json!({"rotation": (sign * axes.b).atan2(sign * axes.a).to_degrees()});
+        shape["transform"] =
+            json!({"rotation": fmath::atan2(sign * axes.b, sign * axes.a).to_degrees()});
         if axes.flipped() {
             shape["transform"]["flipH"] = json!(true);
         }

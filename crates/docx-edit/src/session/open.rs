@@ -110,7 +110,6 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 
 impl EditSessionCore {
     /// The source package's style cascade, built on first use and cached until the source changes.
-    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn paragraph_style_resolver(
         &self,
     ) -> EngineResult<std::cell::RefMut<'_, Option<crate::seed::StyleResolver>>> {

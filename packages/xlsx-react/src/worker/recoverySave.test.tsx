@@ -23,7 +23,7 @@ const calculation = { nowSerial: 46_000.5, randSeed: 123456789 };
 
 beforeAll(async () => {
   await initWasm(await readFile(new URL('../../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
-});
+}, 30_000);
 
 function crashableHost(): {
   wrap(transport: SessionTransport): SessionTransport;

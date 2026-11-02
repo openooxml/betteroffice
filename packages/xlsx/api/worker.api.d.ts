@@ -558,6 +558,7 @@ export interface XlsxEditRequest {
     history?: XlsxEditHistory;
     /** Overrides the handle clock for this request; without either clock, NOW() has no clock. */
     calculation?: {
+        /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
         nowSerial?: number;
     };
     steps: readonly XlsxEditStep[];
@@ -648,9 +649,20 @@ export interface XlsxRangeRead {
     /** Row-major. */
     cells: XlsxCellRead[][];
 }
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value,
+ * or stays blank when the file saved none, unless only an engine gap was
+ * involved, which shows its error.
+ */
+export interface XlsxUnevaluatedCell extends XlsxCellAddress {
+    /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+    functions: string[];
+}
 export interface XlsxReadCalculation {
     cycleCells: XlsxCellAddress[];
     limitedCells: XlsxCellAddress[];
+    /** Formula cells the engine could not compute; omitted by cores built before the list. */
+    unevaluatedCells?: XlsxUnevaluatedCell[];
     /** Whether a list stopped at 10,000 cells. */
     truncated: boolean;
 }
@@ -1022,6 +1034,7 @@ import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPain
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
 import { type WorkbookEditSession } from './editSession';
 import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
 /**
  * Options for opening a workbook in a dedicated worker.
  * @experimental
@@ -1029,6 +1042,7 @@ import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
     worker?: () => Worker;
     wasm?: ArrayBuffer | WebAssembly.Module;
+    png?: boolean;
     /** Retain source bytes and a compiled module for edit peer hydration. */
     retainPeerHydration?: boolean;
     /** Aborting closes the session worker while the open is still in flight. */
@@ -1058,7 +1072,8 @@ export interface WorkbookSession {
     onAck(listener: (ack: WorkbookAck) => void): () => void;
     markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
     whenPresented(seq: number): Promise<void>;
-    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+        decodeFontFace: FontDecoder;
         renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
         renderRangePng(options?: {
             range?: string;
@@ -1116,8 +1131,10 @@ interface RecoverySession {
 /** @experimental */
 export declare const workbookSessionRecovery: WeakMap<WorkbookSession, WorkbookSessionRecovery>;
 export declare const workbookRecoveryBackend: {
+    /** Checkpoints are only restorable by the same engine version and codec. */
     open(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession>;
 };
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function createWorkbookRecoverySession(bytes: Uint8Array, options: OpenWorkbookSessionOptions, transport: SessionTransport, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession>;
 export declare function createWorkbookSessionRecovery(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint: (allowed: () => boolean) => Promise<WorkbookCheckpoint | undefined>, epoch: number, liveCalculation?: boolean, version?: string, fail?: (error: unknown) => void): {
     recovery: WorkbookSessionRecovery;
@@ -1383,6 +1400,7 @@ export declare function createWorkbookEditSession<X = unknown>(options: Omit<Ses
 export {};
 
 // ---- session/methods.d.ts ----
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -1450,6 +1468,7 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
     wasm?: ArrayBuffer | WebAssembly.Module;
+    png?: boolean;
     initialViewport?: WorkbookInitialPaintRequest;
     includeEditState?: boolean;
     initialUpdate?: Uint8Array;
@@ -1520,9 +1539,10 @@ export interface WorkbookSessionEvents {
  * Workbook RPC methods; engine version tokens remain strings.
  * @experimental
  */
-export type WorkbookSessionMethods = {
+export type WorkbookSessionMethods = FontDecoderMethods & {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
-    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm'>): WorkbookSessionOpenReply;
+    /** Checkpoints are only restorable by the same engine version and codec. */
+    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
     collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -1533,6 +1553,7 @@ export type WorkbookSessionMethods = {
     applyEdits(request: XlsxEditRequest): XlsxEditResult;
     command(command: WorkbookCommand): WorkbookWireAck;
     edit(command: WorkbookSharedCommand): WorkbookSharedWireAck;
+    /** Checkpoints are only restorable by the same engine version and codec. */
     checkpoint(preserveHistory?: boolean): WorkbookCheckpoint;
     commandFrame(request?: WorkbookCommandFrameRequest): FrameEnvelope<WorkbookCommandWireFrame> | undefined;
     frame(viewport: Viewport, options?: WorkbookFrameOptions): WorkbookWireFrame;
@@ -1555,6 +1576,7 @@ export type WorkbookSessionMethods = {
     dispose(): void;
 };
 export declare const WORKBOOK_SESSION_METHODS: {
+    decodeFontFace: true;
     open: true;
     openRecovery: true;
     version: true;
@@ -2571,6 +2593,26 @@ export declare function isCommandAck(value: unknown): value is CommandAck<unknow
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
 
+// ---- shared/office-session/fontDecoder.d.ts ----
+export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
+    codec: string;
+    dict?: ArrayBuffer | Uint8Array;
+    maxOutput?: number;
+}) => Promise<{
+    font: ArrayBuffer;
+    payload?: ArrayBuffer;
+}>;
+export type FontDecodeResult = Awaited<ReturnType<FontDecoder>>;
+export type FontDecoderMethods = {
+    decodeFontFace(bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], wasm?: ArrayBuffer | WebAssembly.Module): FontDecodeResult;
+};
+export declare function rpcFontDecoder(call: (bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], transfer: Transferable[]) => Promise<FontDecodeResult>): FontDecoder;
+export declare function fontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer>;
+export declare function copyDecodedFace(face: {
+    font: Uint8Array;
+    payload?: Uint8Array;
+}): FontDecodeResult;
+
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
 import type { SessionTransport } from './transport';
@@ -2619,6 +2661,7 @@ export type ClientMessage = {
 export interface ReplyError {
     name: string;
     message: string;
+    code?: string;
     refusal?: unknown;
 }
 export type HostMessage = {
@@ -2817,6 +2860,8 @@ export declare class SessionFailure extends Error {
 // ---- wasm/generated/xlsx_wasm.d.ts ----
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 /**
  * a workbook handle exposed to js; wraps the pure `Session`.
@@ -2915,6 +2960,9 @@ export class XlsxDocument {
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     static openRecoveryCheckpoint(bytes: Uint8Array, through_seq: number): XlsxDocument;
     static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
     static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument;
@@ -2924,6 +2972,7 @@ export class XlsxDocument {
     static open(bytes: Uint8Array): XlsxDocument;
     patchRangeStyleJson(args: string): string;
     peerHydrationJson(): string;
+    pngDisplayListJson(viewport_json: string): string;
     printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
@@ -2933,7 +2982,15 @@ export class XlsxDocument {
      * a rectangular block of cells for clipboard copy.
      */
     rangeCellsJson(args: string): string;
+    rangePngDisplayListJson(args: string): string;
     readCellsJson(request: string): string;
+    /**
+     * Recalculate every formula; the next save writes the recalculated values.
+     */
+    recalculateJson(): string;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     recoveryCheckpoint(through_seq: number, preserve_history?: boolean | null): Uint8Array;
     /**
      * redo the last undone transaction; same shape as `undoJson`.
@@ -3001,6 +3058,13 @@ export class XlsxSnapshotBuilder {
  */
 export function allocationFailure(): number;
 
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
 export function displayListCellLimit(): number;
 
 export function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdown_options: string): string;
@@ -3032,6 +3096,7 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly allocationFailure: () => number;
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly displayListCellLimit: () => number;
     readonly exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -3086,10 +3151,13 @@ export interface InitOutput {
     readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_peerHydrationJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_pngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_rangePngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_recalculateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3150,6 +3218,8 @@ import type { ChartInfo, ChartMutation } from '../charts';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+export declare const decodeFontFace: FontDecoder;
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type { XlsxCellAddress, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
@@ -3236,6 +3306,19 @@ export interface CalculationStatus {
     limitedCells: string[];
     /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
     budgetExhausted?: boolean;
+    /** Formula cells the engine could not compute, at most 10,000; omitted by cores built before the list. */
+    unevaluatedCells?: UnevaluatedCellStatus[];
+}
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value,
+ * or stays blank when the file saved none, unless only an engine gap was
+ * involved, which shows its error.
+ */
+export interface UnevaluatedCellStatus {
+    /** The cell, qualified by its sheet when that is not the active one. */
+    address: string;
+    /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+    functions: string[];
 }
 export type NumberFormat = 'automatic' | 'plainText' | 'number' | 'percent' | 'scientific' | 'currency' | 'date' | 'time' | 'custom';
 export type BorderPreset = 'all' | 'inner' | 'horizontal' | 'vertical' | 'outer' | 'left' | 'top' | 'right' | 'bottom' | 'none';
@@ -3412,6 +3495,7 @@ export interface WorkbookUpdateInfo {
 }
 export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin, info: WorkbookUpdateInfo) => void;
 export interface WorkbookCalculationContext {
+    /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
     nowSerial: number;
     randSeed: number;
 }
@@ -3533,6 +3617,12 @@ export interface WorkbookHandle extends CollaborationReplica {
     /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
     sheetInfoFor(sheet: number): SheetInfo;
     calculationStatus(): CalculationStatus;
+    /**
+     * Recalculate every formula with the handle's calculation context (or the host clock).
+     * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+     * keeps the result the file stored.
+     */
+    recalculate(): CalculationStatus;
     /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
     displayList(viewport: Viewport): DisplayList;
     /** `displayList` with build and encode time measured inside the core. */
@@ -3669,8 +3759,11 @@ export interface WorkbookHandle extends CollaborationReplica {
 /** @experimental */
 export declare function workbookDisplayListJson(handle: WorkbookHandle, viewport: Viewport, sheet?: number): string;
 export type WasmInitInput = InitInput | Promise<InitInput>;
+export interface WasmInitOptions {
+    png?: boolean;
+}
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
-export declare function initWasm(input?: WasmInitInput): Promise<void>;
+export declare function initWasm(input?: WasmInitInput, options?: WasmInitOptions): Promise<void>;
 /**
  * The allocation the engine could not get, if any. The core aborts when an
  * allocation fails, so a trap after one means the engine ran out of memory.
@@ -3685,9 +3778,6 @@ export declare function getDisplayListCellLimit(): number;
  * Whether this environment exposes the WebAssembly runtime required by the core.
  */
 export declare function isWasmAvailable(): boolean;
-export type EngineBackend = 'wasm' | 'native';
-/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export declare function engineBackend(): EngineBackend;
 /**
  * Whether the embedded wasm core was built with png export (the `raster` cargo
  * feature). The wasm-bindgen method only exists on the class when compiled in,
@@ -3705,7 +3795,9 @@ export declare function isProposalsAvailable(): boolean;
  * Throws an `Error` if the bytes are not a readable workbook.
  */
 export declare function openWorkbook(bytes: Uint8Array, options?: OpenWorkbookOptions): WorkbookHandle;
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory?: boolean): Uint8Array;
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number, options?: OpenWorkbookOptions): WorkbookHandle;
 export declare function workbookPeerSnapshot(handle: WorkbookHandle): {
     begin(records: number, bytes: number): void;

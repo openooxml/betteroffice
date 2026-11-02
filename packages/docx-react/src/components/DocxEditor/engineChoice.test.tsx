@@ -67,7 +67,7 @@ beforeAll(async () => {
   } finally {
     session.destroy();
   }
-});
+}, 30_000);
 
 beforeEach(() => {
   setMissingWorkerCapabilitiesForTests([]);

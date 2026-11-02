@@ -5,7 +5,7 @@
  * in a single column with shared collision avoidance and positioning.
  */
 
-import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react';
 import type { ReactSidebarItem, RenderedDomContext } from '../plugin-api/types';
 import { SIDEBAR_WIDTH, SIDEBAR_PAGE_GAP, SIDEBAR_DOCUMENT_SHIFT } from './sidebar/constants';
 import { resolveItemPositions } from './sidebar/resolveItemPositions';
@@ -51,6 +51,7 @@ export function UnifiedSidebar({
   const [initialPositionsDone, setInitialPositionsDone] = useState(false);
   const cardHeightsRef = useRef<Map<string, number>>(new Map());
   const lastKnownRef = useRef<Map<string, number>>(new Map());
+  const lastAnchorsRef = useRef<Map<string, number>>(new Map());
   const knownCardsRef = useRef<Set<string>>(new Set());
   const sidebarRef = useRef<HTMLDivElement>(null);
   const cardElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -74,6 +75,10 @@ export function UnifiedSidebar({
   );
 
   const hasPositions = resolved.length > 0;
+  const anchorsMoved = resolved.some(({ item }) => {
+    const previous = lastAnchorsRef.current.get(item.id);
+    return previous !== undefined && previous !== lastKnownRef.current.get(item.id);
+  });
 
   // Build position map for O(1) lookup by item ID
   const positionMap = useMemo(() => {
@@ -85,17 +90,18 @@ export function UnifiedSidebar({
   }, [resolved]);
 
   // Track newly positioned cards in an effect (not during render); a hidden card fades back in.
-  useEffect(() => {
+  useLayoutEffect(() => {
     for (const r of resolved) {
       knownCardsRef.current.add(r.item.id);
     }
+    lastAnchorsRef.current = new Map(lastKnownRef.current);
     for (const item of items) if (item.hidden) knownCardsRef.current.delete(item.id);
   }, [items, resolved]);
 
   // Forget removed items, so a card that returns is placed afresh instead of at a stale Y.
   useEffect(() => {
     const live = new Set(items.map((item) => item.id));
-    for (const cache of [lastKnownRef.current, cardHeightsRef.current, measureRefsRef.current]) {
+    for (const cache of [lastKnownRef.current, lastAnchorsRef.current, cardHeightsRef.current, measureRefsRef.current]) {
       for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
     }
     for (const id of knownCardsRef.current) if (!live.has(id)) knownCardsRef.current.delete(id);
@@ -265,7 +271,7 @@ export function UnifiedSidebar({
             ? 'none'
             : isNewCard || item.isTemporary
               ? 'opacity 0.2s ease'
-              : initialPositionsDone
+              : initialPositionsDone && !anchorsMoved
                 ? 'opacity 0.2s ease, top 0.15s ease'
                 : 'none';
 

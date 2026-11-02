@@ -2,9 +2,10 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { createSessionWorker } from '#session-worker';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { PptxFontFace } from '../types';
-import { wasmAssetUrl } from '../wasm/asset';
+import { sessionWasmAssetUrl, shipsWasmAsset } from '../wasm/asset';
 import type { OpenPresentationOptions } from '../wasm/loader';
 import { frameAssetIds } from './frame';
 import { PptxWorkerEditorDisposedError } from './peerHydrationError';
@@ -106,7 +107,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenPresentationS
     input.wasm = options.wasm.slice(0);
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
-  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
+  else if (shipsWasmAsset && !options.worker) input.wasm = wasmModules.get(sessionWasmAssetUrl().href);
   return { document, input, transfer };
 }
 
@@ -163,10 +164,9 @@ export async function openPresentationSession(
   options: OpenPresentationSessionOptions = {}
 ): Promise<PresentationSession> {
   const transport = createWorkerTransport(
-    options.worker ? options.worker() :
-      new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' })
+    options.worker ? options.worker() : createSessionWorker()
   );
-  if (!options.worker && options.wasm === undefined && !wasmModules.has(wasmAssetUrl().href)) {
+  if (shipsWasmAsset && !options.worker && options.wasm === undefined && !wasmModules.has(sessionWasmAssetUrl().href)) {
     requestWasmCompile(transport);
   }
   return createPresentationSession(bytes, options, transport);
@@ -186,8 +186,8 @@ export async function createPresentationSession(
     ({ document, input, transfer } = prepareOpen(bytes, options));
     client = createSessionClient<PresentationSessionMethods, Events>(transport, {
       methods: PRESENTATION_SESSION_METHODS,
-      onWasmModule: options.wasm === undefined && !options.worker ? (url, module) => {
-        if (url === wasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
+      onWasmModule: shipsWasmAsset && options.wasm === undefined && !options.worker ? (url, module) => {
+        if (url === sessionWasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
       } : undefined,
     });
   } catch (error) {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PptxEditorContent, type PptxAsyncEditorInternalProps, type PptxEditorApi } from './PptxEditor';
+import type { PptxAsyncEditorInternalProps, PptxEditorApi } from './PptxEditor';
+import { PptxEditorContent } from './PptxEditorContent';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import { createInThreadAsyncEditorApi, asyncCollaboration } from './createInThreadAsyncEditorApi';
 

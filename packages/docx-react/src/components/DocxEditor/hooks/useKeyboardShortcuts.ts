@@ -1,6 +1,11 @@
 import { useEffect, useRef } from 'react';
 import type { useTableSelection } from '../../../hooks/useTableSelection';
-import { DOCX_COMMAND_DESCRIPTORS, matchesChord } from '../../../commands/descriptors';
+import {
+  DOCX_COMMAND_DESCRIPTORS,
+  isMacPlatform,
+  matchesChord,
+  shortcutMatchesPlatform,
+} from '../../../commands/descriptors';
 import type { DocxCommandController } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandId, DocxCommandShortcut } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -64,11 +69,15 @@ export function useKeyboardShortcuts({
         }
         return;
       }
-      const binding = BINDINGS.find(({ shortcut }) => matchesChord(shortcut.chord, event));
+      const mac = isMacPlatform();
+      const binding = BINDINGS.find(
+        ({ shortcut }) =>
+          shortcutMatchesPlatform(shortcut, mac) && matchesChord(shortcut.chord, event, mac)
+      );
       if (!binding) {
         const contributed = commands
           .pluginShortcuts()
-          .find(({ chord }) => matchesChord(chord, event));
+          .find(({ chord }) => matchesChord(chord, event, mac));
         if (!contributed || isForeignTextField(event.target)) return;
         event.preventDefault();
         if (!event.repeat) void commands.store.execute(contributed.id, null);

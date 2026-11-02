@@ -10,14 +10,36 @@
  * Requires a CSP that permits wasm compilation (`wasm-unsafe-eval`).
  */
 
-import * as editGlue from './generated/edit/docx_edit.js';
-import * as parseGlue from './generated/parse/docx_parse.js';
+import * as editGlue from './engineEdit';
+import * as parseGlue from './engineParse';
+import * as queryGlue from './engineQuery';
 import { editWasmState } from './edit';
 import type { WasmAsyncInput, WasmModuleState } from './loadWasmAsset';
 import { parseWasmState } from './parse';
+import { queryWasmState } from './query';
 import { residentEngine } from './residentEngine';
 
 let source: { state: WasmModuleState; glue: object } | undefined;
+let querySource: { state: WasmModuleState; glue: object } | undefined;
+
+function queryEngine() {
+  if (!querySource) {
+    const engine = residentEngine();
+    querySource = engine?.state.status() === 'ready' ? engine : { state: queryWasmState, glue: queryGlue };
+  }
+  return querySource;
+}
+
+function displayListQueryGlue(): typeof queryGlue {
+  const engine = queryEngine();
+  engine.state.ensure();
+  return engine.glue as typeof queryGlue;
+}
+
+/** Load the display-list query engine. */
+export function preloadDisplayListQueryWasm(): Promise<void> {
+  return queryEngine().state.preload();
+}
 
 function layoutEngine() {
   if (!source) {
@@ -36,7 +58,9 @@ function layoutGlue(): typeof parseGlue {
 /** Load + instantiate the engine wasm (browser path). Idempotent. */
 export function preloadLayoutWasm(input?: WasmAsyncInput): Promise<void> {
   if (input !== undefined && !source) source = { state: editWasmState, glue: editGlue };
-  return layoutEngine().state.preload(input);
+  const engine = layoutEngine();
+  if (input !== undefined) querySource ??= engine;
+  return engine.state.preload(input);
 }
 
 /**
@@ -52,7 +76,7 @@ export function hitTestRegionsJson(
   x: number,
   y: number
 ): string {
-  return layoutGlue().hit_test_regions_json(displayList, pageIndex, x, y);
+  return displayListQueryGlue().hit_test_regions_json(displayList, pageIndex, x, y);
 }
 
 /**
@@ -61,7 +85,7 @@ export function hitTestRegionsJson(
  * positions live in different docs and are never consulted.
  */
 export function rangeRectsJson(displayList: string, from: number, to: number): string {
-  return layoutGlue().range_rects_json(displayList, from, to);
+  return displayListQueryGlue().range_rects_json(displayList, from, to);
 }
 
 /** @internal */
@@ -138,7 +162,7 @@ type RangeRectsRegionByHandleExport = (
 ) => string;
 
 function glueExport<T>(name: string): T | undefined {
-  const fn = (layoutGlue() as unknown as Record<string, unknown>)[name];
+  const fn = (displayListQueryGlue() as unknown as Record<string, unknown>)[name];
   return typeof fn === 'function' ? (fn as T) : undefined;
 }
 

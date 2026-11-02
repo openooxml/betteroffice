@@ -9,7 +9,7 @@ import { resetPptxEngineWarningsForTests } from './engineWarnings';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, render, within } = await import('@testing-library/react');
+const { act, cleanup, render: renderEditor, within } = await import('@testing-library/react');
 const { PptxWorkerEditor: originalEditor } = await import('./worker/PptxWorkerEditor');
 const { PptxSessionViewer: originalViewer } = await import('./viewer/PptxSessionViewer');
 let editorMounts = 0;
@@ -43,7 +43,13 @@ function availableWorker(): void {
   Object.defineProperty(globalThis, 'Worker', { configurable: true, writable: true, value: class {} });
 }
 
-function expectInThread(view: ReturnType<typeof render>): void {
+async function render(ui: Parameters<typeof renderEditor>[0]) {
+  let view!: ReturnType<typeof renderEditor>;
+  await act(async () => { view = renderEditor(ui); });
+  return view;
+}
+
+function expectInThread(view: ReturnType<typeof renderEditor>): void {
   const content = within(view.container);
   expect(content.queryByTestId('worker-editor')).toBeNull();
   expect(content.queryByTestId('worker-viewer')).toBeNull();
@@ -77,16 +83,16 @@ afterAll(async () => {
   if (ownsDom && GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
 });
 
-test('selects the worker editor and viewer with experimentalWorkerOpen', () => {
-  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
+test('selects the worker editor and viewer with experimentalWorkerOpen', async () => {
+  const view = await render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
   expect(view.getByTestId('worker-editor').getAttribute('data-read-only')).toBe('false');
   view.rerender(<PptxEditor legacySyncApi file={new Uint8Array([2])} fonts={[]} readOnly experimentalWorkerOpen />);
   expect(view.getByTestId('worker-viewer').getAttribute('data-read-only')).toBe('true');
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
 });
 
-test('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', () => {
-  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} />);
+test('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', async () => {
+  const view = await render(<PptxEditor legacySyncApi file={file} fonts={[]} />);
   expectInThread(view);
   view.rerender(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly />);
   expectInThread(view);
@@ -94,27 +100,27 @@ test('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
 });
 
-test('warns once for the deprecated engine across mounts and rerenders', () => {
+test('warns once for the deprecated engine across mounts and rerenders', async () => {
   const editor = <PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen={false} />;
-  const first = render(editor);
+  const first = await render(editor);
   expectInThread(first);
   first.rerender(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen={false} readOnly />);
   expectInThread(first);
   first.unmount();
-  expectInThread(render(editor));
+  expectInThread(await render(editor));
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.deprecated]]);
 });
 
-test('warns once in StrictMode', () => {
-  const view = render(<StrictMode><PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen={false} /></StrictMode>);
+test('warns once in StrictMode', async () => {
+  const view = await render(<StrictMode><PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen={false} /></StrictMode>);
   expectInThread(view);
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.deprecated]]);
 });
 
-test('falls back for collaboration before checking Worker', () => {
+test('falls back for collaboration before checking Worker', async () => {
   Reflect.deleteProperty(globalThis, 'Worker');
   const collaboration = { clientId: 1 };
-  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} collaboration={collaboration} readOnly experimentalWorkerOpen />);
+  const view = await render(<PptxEditor legacySyncApi file={file} fonts={[]} collaboration={collaboration} readOnly experimentalWorkerOpen />);
   expectInThread(view);
   view.rerender(<PptxEditor legacySyncApi file={file} fonts={[]} collaboration={collaboration} experimentalWorkerOpen />);
   expectInThread(view);
@@ -124,9 +130,9 @@ test('falls back for collaboration before checking Worker', () => {
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.collaboration], [warnings.deprecated]]);
 });
 
-test('pins the missing-Worker fallback until the file changes', () => {
+test('pins the missing-Worker fallback until the file changes', async () => {
   Reflect.deleteProperty(globalThis, 'Worker');
-  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
+  const view = await render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
   expectInThread(view);
   availableWorker();
   view.rerender(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
@@ -136,8 +142,8 @@ test('pins the missing-Worker fallback until the file changes', () => {
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.worker]]);
 });
 
-test('pins the worker engine until the file changes', () => {
-  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
+test('pins the worker engine until the file changes', async () => {
+  const view = await render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
   Reflect.deleteProperty(globalThis, 'Worker');
   view.rerender(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
   expect(view.getByTestId('worker-editor')).toBeDefined();
@@ -148,9 +154,9 @@ test('pins the worker engine until the file changes', () => {
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.worker]]);
 });
 
-test('keeps the missing-Worker fallback across clientId and font changes', () => {
+test('keeps the missing-Worker fallback across clientId and font changes', async () => {
   Reflect.deleteProperty(globalThis, 'Worker');
-  const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={[]} clientId={1} />);
+  const view = await render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={[]} clientId={1} />);
   expectInThread(view);
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.worker]]);
   availableWorker();
@@ -166,8 +172,8 @@ test('keeps the missing-Worker fallback across clientId and font changes', () =>
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.worker]]);
 });
 
-test('hosts plugins in a read-only worker editor and promotes a viewer when plugins arrive', () => {
-  const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={[]} readOnly plugins={[plugin]} />);
+test('hosts plugins in a read-only worker editor and promotes a viewer when plugins arrive', async () => {
+  const view = await render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={[]} readOnly plugins={[plugin]} />);
   const marker = view.getByTestId('worker-editor');
   expect(marker.getAttribute('data-read-only')).toBe('true');
   expect(marker.getAttribute('data-plugins')).toBe('1');
@@ -182,9 +188,9 @@ test('hosts plugins in a read-only worker editor and promotes a viewer when plug
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
 });
 
-test('keeps read-only onChange in the worker editor and promotes a viewer when it arrives', () => {
+test('keeps read-only onChange in the worker editor and promotes a viewer when it arrives', async () => {
   const onChange = mock(() => {});
-  const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={[]} readOnly onChange={onChange} />);
+  const view = await render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={[]} readOnly onChange={onChange} />);
   expect(view.getByTestId('worker-editor').getAttribute('data-read-only')).toBe('true');
   expect(view.getByTestId('worker-editor').getAttribute('data-on-change')).toBe('true');
   const next = new Uint8Array([2]);
@@ -195,8 +201,8 @@ test('keeps read-only onChange in the worker editor and promotes a viewer when i
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
 });
 
-test('re-picks the engine when experimentalWorkerOpen is dropped on the same file', () => {
-  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
+test('re-picks the engine when experimentalWorkerOpen is dropped on the same file', async () => {
+  const view = await render(<PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen />);
   expect(view.getByTestId('worker-editor')).toBeDefined();
   view.rerender(<PptxEditor legacySyncApi file={file} fonts={[]} />);
   expectInThread(view);
@@ -206,9 +212,9 @@ test('re-picks the engine when experimentalWorkerOpen is dropped on the same fil
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
 });
 
-test('re-picks the engine when the false opt-out toggles on the same file', () => {
+test('re-picks the engine when the false opt-out toggles on the same file', async () => {
   const fonts: PptxWorkerEditorProps['fonts'] = [];
-  const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={fonts} />);
+  const view = await render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={fonts} />);
   expect(view.getByTestId('worker-editor')).toBeDefined();
   expect(editorMounts).toBe(1);
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
@@ -223,7 +229,7 @@ test('re-picks the engine when the false opt-out toggles on the same file', () =
 
 test('re-picks the engine when collaboration is added, replaced and removed on the same file', async () => {
   const fonts: PptxWorkerEditorProps['fonts'] = [];
-  const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={fonts} />);
+  const view = await render(<PptxEditor legacySyncApi experimentalWorkerOpen file={file} fonts={fonts} />);
   expect(view.getByTestId('worker-editor')).toBeDefined();
   expect(editorMounts).toBe(1);
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
@@ -251,12 +257,12 @@ test('re-picks the engine when collaboration is added, replaced and removed on t
   expect(warn.mock.calls).toEqual([[warnings.legacy], [warnings.collaboration]]);
 });
 
-test('legacy sync API warns once across hybrid mounts and StrictMode', () => {
+test('legacy sync API warns once across hybrid mounts and StrictMode', async () => {
   const editor = <StrictMode><PptxEditor legacySyncApi file={file} fonts={[]} /></StrictMode>;
-  const first = render(editor);
+  const first = await render(editor);
   expectInThread(first);
   first.rerender(editor);
   first.unmount();
-  expectInThread(render(editor));
+  expectInThread(await render(editor));
   expect(warn.mock.calls).toEqual([[warnings.legacy]]);
 });

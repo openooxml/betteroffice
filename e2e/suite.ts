@@ -58,6 +58,8 @@ export async function executeScenario<Ctx>(
     : recorder.finish();
 }
 
+const HOOK_TIMEOUT_MS = 60_000;
+
 export function defineSuite<Ctx>(
   format: Format,
   scenarios: Scenario<Ctx>[],
@@ -94,8 +96,8 @@ export function defineSuite<Ctx>(
             runs[i] = cases[i].recorder.failed(error);
           throw error;
         }
-      });
-    afterAll(() => finishFormat(format, runs));
+      }, HOOK_TIMEOUT_MS);
+    afterAll(() => finishFormat(format, runs), HOOK_TIMEOUT_MS);
     for (const [index, { scenario, sample, recorder }] of cases.entries()) {
       const reason = e2eEnabled() ? scenario.requires?.() : undefined;
       if (reason) {

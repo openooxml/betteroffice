@@ -32,6 +32,16 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "imports": {
+    "#session-worker": {
+      "node": "./dist/sessionWorker.node.js",
+      "default": "./dist/sessionWorker.browser.js"
+    },
+    "#session-scope": {
+      "node": "./dist/sessionScope.node.js",
+      "default": "./dist/sessionScope.browser.js"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -47,12 +57,16 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSES"
   ],
   "scripts": {
     "build": "bun run build:wasm && tsup",
     "build:wasm": "bun ../../scripts/build-pptx-wasm.ts",
     "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@betteroffice/fonts": "workspace:^"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

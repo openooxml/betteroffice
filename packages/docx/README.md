@@ -33,6 +33,7 @@ await writeFile('output.docx', new Uint8Array(bytes));
 | `parseDocx` | Read an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File` into a document model. |
 | `repackDocx`, `repackDocxWithWarnings` | Save a parsed model against its original package; the latter also returns save warnings. |
 | `createDocx` | Write a new document model without an original package. |
+| `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `createYrsSession` (from `@betteroffice/docx/yrs`) | Asynchronously create a CRDT editing session. |
 | `saveYrsDocx` (from `@betteroffice/docx/yrs`) | Save a session opened from DOCX bytes, returning bytes and persisted paragraph anchors. |
 
@@ -48,6 +49,10 @@ creating a session. Preserve the packaged asset URLs when bundling for a browser
 Core sessions expose synchronous editing and read methods after asynchronous creation. The React
 editor runs its engine in a Web Worker by default and exposes promise-returning document reads,
 edits, and exports. Release a direct session with `session.destroy()` when finished.
+
+## Worker sessions
+
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`openDocx` / `EditSession`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
 
 ## Undo grouping
 

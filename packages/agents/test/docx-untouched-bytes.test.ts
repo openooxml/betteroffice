@@ -1,18 +1,19 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx } from '../src';
-import { bodyMarkerBody, offsetTableBody, orphanTableMarkersBody, paragraphsOf, plainTableBody, textNodes, tocSdtBody, V, WPS } from '../../docx/src/yrs/__fixtures__/untouchedBytes';
+import { ALTERNATE_TEXTBOX_RUN, bodyMarkerBody, fieldLabelBody, offsetTableBody, orphanTableMarkersBody, paragraphsOf, plainTableBody, textNodes, tocSdtBody, V, WORD_2007_ROOTS, word2007Body, WPS } from '../../docx/src/yrs/__fixtures__/untouchedBytes';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
 const MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const OFFICE = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+const ROOT = `<w:document xmlns:w="${W}" xmlns:w14="${W14}" xmlns:mc="${MC}" xmlns:r="${R}" xmlns:v="${V}" xmlns:wps="${WPS}">`;
 
 const rich = (id: string, text: string) =>
   `<w:p w14:paraId="${id}" w:rsidR="00752A6D" w:rsidRDefault="00593C67"><w:pPr><w:rPr><w:lang w:val="en-US"/></w:rPr></w:pPr><w:proofErr w:type="spellStart"/><w:r w:rsidR="00761B10"><w:rPr><w:color w:val="auto"/><w:lang w:val="en-US"/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:br/></w:r><w:proofErr w:type="spellEnd"/></w:p>`;
 
-async function docx(body: string, extra: Record<string, string> = {}, rels = ''): Promise<{ bytes: Uint8Array; xml: string }> {
+async function docx(body: string, extra: Record<string, string> = {}, rels = '', root = ROOT): Promise<{ bytes: Uint8Array; xml: string }> {
   const zip = new JSZip();
   const overrides = Object.keys(extra).map(part => {
     const kind = part.includes('footnotes') ? 'footnotes+xml' : part.includes('comments') ? 'comments+xml' : 'styles+xml';
@@ -21,7 +22,7 @@ async function docx(body: string, extra: Record<string, string> = {}, rels = '')
   zip.file('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/>${overrides}</Types>`);
   zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   if (rels) zip.file('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`);
-  const xml = `<w:document xmlns:w="${W}" xmlns:w14="${W14}" xmlns:mc="${MC}" xmlns:r="${R}" xmlns:v="${V}" xmlns:wps="${WPS}"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`;
+  const xml = `${root}<w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`;
   zip.file('word/document.xml', xml);
   for (const [part, content] of Object.entries(extra)) zip.file(part, content);
   return { bytes: await zip.generateAsync({ type: 'uint8array' }), xml };
@@ -39,6 +40,112 @@ function expectUntouched(sourceXml: string, outputXml: string, edited: string[] 
     expect(outputXml).toContain(paragraph);
   }
 }
+
+test.each(WORD_2007_ROOTS)('Word 2007 $name text replacement keeps every untouched paragraph', async ({ root }) => {
+  const source = await docx(word2007Body(), {}, '', root);
+  const doc = await openDocx(source.bytes);
+  try {
+    const match = doc.grep({ query: 'target' }).matches[0]!;
+    const proposal = await doc.propose({ author: 'Test', edits: [{ match: match.match, newText: 'changed' }] });
+    await doc.accept(proposal.id, { tracked: false });
+    const bytes = await doc.export();
+    const xml = await exportedXml(bytes);
+    expectUntouched(source.xml, xml, [paragraphsOf(source.xml)[0]!]);
+    expect(paragraphsOf(xml)).toHaveLength(2);
+    expect(paragraphsOf(xml).map(paragraph => textNodes(paragraph).join(''))).toEqual(['Replace changed words', 'Retained paragraph words']);
+    const writtenRoot = xml.match(/<w:document\b[^>]*>/)![0];
+    for (const declaration of root.matchAll(/ xmlns(?::[^=]+)?="[^"]*"/g)) expect(writtenRoot).toContain(declaration[0]);
+    const reopened = await openDocx(bytes);
+    try { expect(reopened.grep({ query: 'Replace changed words' }).matches).toHaveLength(1); } finally { reopened.close(); }
+  } finally { doc.close(); }
+});
+
+test.each(WORD_2007_ROOTS)('Word 2007 $name paragraph insertion keeps every untouched paragraph across saves', async ({ root }) => {
+  const source = await docx(word2007Body(), {}, '', root);
+  let bytes = source.bytes;
+  let before = source.xml;
+  for (const text of ['Inserted paragraph.', 'Inserted again.']) {
+    const doc = await openDocx(bytes);
+    try {
+      const item = doc.list().items.find(entry => entry.text.startsWith('Replace target words'))!;
+      await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text }] }] });
+      bytes = await doc.export();
+      const xml = await exportedXml(bytes);
+      expectUntouched(before, xml);
+      expect(paragraphsOf(xml)).toHaveLength(paragraphsOf(before).length + 1);
+      expect(textNodes(xml)).toEqual(['Replace target words', text, ...textNodes(before).slice(1)]);
+      const writtenRoot = xml.match(/<w:document\b[^>]*>/)![0];
+      for (const declaration of root.matchAll(/ xmlns(?::[^=]+)?="[^"]*"/g)) expect(writtenRoot).toContain(declaration[0]);
+      expect(writtenRoot).toContain(root.includes('xmlns:mc=') ? 'mc:Ignorable="w14"' : root.includes('ve:Ignorable=') ? 've:Ignorable="draw legacy w14"' : 've:Ignorable="w14"');
+      before = xml;
+    } finally { doc.close(); }
+  }
+});
+
+test.each([1, 3])('editing %i TOC labels keeps PAGEREF fields and hyperlinks byte for byte', async (count) => {
+  const source = await docx(fieldLabelBody());
+  const doc = await openDocx(source.bytes);
+  try {
+    const matches = doc.grep({ query: 'Background' }).matches.slice(0, count);
+    expect(matches).toHaveLength(count);
+    const proposal = await doc.propose({ author: 'Test', edits: matches.map(match => ({ match: match.match, newText: 'Context' })) });
+    await doc.accept(proposal.id, { tracked: false });
+    const part = doc.session.paragraphSavePlan().splicedParts!.find(part => part.part === 'word/document.xml')!;
+    expect(part.legacyParagraphs ?? []).toEqual([]);
+    expect(part.paragraphPatches).toHaveLength(count);
+    const bytes = await doc.export();
+    const xml = await exportedXml(bytes);
+    let expected = source.xml;
+    for (let index = 1; index <= count; index++) expected = expected.replace(`Background ${index}`, `Context ${index}`);
+    expect(xml).toBe(expected);
+    for (const [tag, total] of [['w:fldChar', 12], ['w:instrText', 4], ['w:hyperlink', 3]] as const) {
+      expect(xml.match(new RegExp(`<${tag}\\b`, 'g'))).toHaveLength(total);
+    }
+    const reopened = await openDocx(bytes);
+    try { expect(reopened.grep({ query: 'Context' }).matches).toHaveLength(count); } finally { reopened.close(); }
+  } finally { doc.close(); }
+});
+
+test('editing beside AlternateContent keeps the complete text box run and VML fallback', async () => {
+  const edited = `<w:p w14:paraId="40000001"><w:r><w:t xml:space="preserve">Caption </w:t></w:r>${ALTERNATE_TEXTBOX_RUN}</w:p>`;
+  const source = await docx(`${edited}${rich('40000002', 'Untouched paragraph')}`);
+  const doc = await openDocx(source.bytes);
+  try {
+    const match = doc.grep({ query: 'Caption' }).matches[0]!;
+    const proposal = await doc.propose({ author: 'Test', edits: [{ match: match.match, newText: 'Title' }] });
+    await doc.accept(proposal.id, { tracked: false });
+    const part = doc.session.paragraphSavePlan().splicedParts!.find(part => part.part === 'word/document.xml')!;
+    expect(part.legacyParagraphs ?? []).toEqual([]);
+    expect(part.paragraphPatches).toHaveLength(1);
+    const bytes = await doc.export();
+    const xml = await exportedXml(bytes);
+    expect(xml).toBe(source.xml.replace('Caption', 'Title'));
+    expect(xml).toContain(ALTERNATE_TEXTBOX_RUN);
+    for (const [tag, total] of [['mc:AlternateContent', 1], ['mc:Fallback', 1], ['w:pict', 1], ['w:txbxContent', 2]] as const) {
+      expect(xml.match(new RegExp(`<${tag}\\b`, 'g'))).toHaveLength(total);
+    }
+    const reopened = await openDocx(bytes);
+    try { expect(reopened.grep({ query: 'Title' }).matches).toHaveLength(1); } finally { reopened.close(); }
+  } finally { doc.close(); }
+});
+
+test('ve root keeps ligature extensions in edited and untouched paragraphs', async () => {
+  const rpr = '<w:rPr><w14:ligatures w14:val="standardContextual"/></w:rPr>';
+  const untouched = `<w:p w14:paraId="50000001"><w:r>${rpr}<w:t>Untouched ligature paragraph.</w:t></w:r></w:p>`;
+  const edited = `<w:p w14:paraId="50000002"><w:r>${rpr}<w:t xml:space="preserve">Edited ligature </w:t></w:r><w:r>${rpr}<w:t>paragraph here.</w:t></w:r></w:p>`;
+  const root = `<w:document xmlns:w="${W}" xmlns:w14="${W14}" xmlns:ve="${MC}" ve:Ignorable="w14">`;
+  const source = await docx(`${untouched}${edited}`, {}, '', root);
+  const doc = await openDocx(source.bytes);
+  try {
+    const match = doc.grep({ query: 'Edited' }).matches[0]!;
+    const proposal = await doc.propose({ author: 'Test', edits: [{ match: match.match, newText: 'Changed' }] });
+    await doc.accept(proposal.id, { tracked: false });
+    const xml = await exportedXml(await doc.export());
+    expect(xml).toBe(source.xml.replace('Edited', 'Changed'));
+    expect(xml).toContain(untouched);
+    expect(xml.match(/<w14:ligatures\b/g)).toHaveLength(3);
+  } finally { doc.close(); }
+});
 
 test('comment range spanning table cells keeps untouched paragraphs byte for byte', async () => {
   const heading = rich('10000001', 'Title words here');

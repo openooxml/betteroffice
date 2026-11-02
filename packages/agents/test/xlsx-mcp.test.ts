@@ -7,13 +7,14 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import JSZip from 'jszip';
 import { xlsxFixture } from './format-fixtures';
 import { openXlsx } from '../src/xlsx';
+import { cliEnv } from './cli-env';
 
 const toolNames = ['xlsx_outline', 'xlsx_read_range', 'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_edit_defined_names', 'xlsx_list_defined_names', 'xlsx_format', 'xlsx_find_replace', 'xlsx_sort', 'xlsx_preview'];
 
 test('XLSX MCP discovers tight schemas and executes every spreadsheet tool through export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-mcp-'));
   const client = new Client({ name: 'xlsx-test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   let stderr = '';
   transport.stderr?.on('data', chunk => { stderr += String(chunk); });
   try {
@@ -79,14 +80,14 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
     const reopened = await openXlsx(await readFile(join(root, 'result.xlsx')));
     try { expect(reopened.listDefinedNames().items.find(name => name.name === 'Rate')).toMatchObject({ name: 'Rate', refersTo: '7' }); expect(reopened.readCells({ sheet: 'Budget', range: 'A101' }).cells[0].value).toEqual({ kind: 'text', value: 'alpha' }); }
     finally { reopened.close(); }
-    expect(stderr).toMatch(/^betteroffice-agents: xlsx engine (native|wasm)\n$/);
+    expect(stderr).toBe('');
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);
 
 test('XLSX MCP read-only mode removes writes and excludes replacement from its schema', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-mcp-readonly-'));
   const client = new Client({ name: 'xlsx-readonly', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, '--read-only'], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, '--read-only'], stderr: 'pipe', env: cliEnv() });
   try {
     await writeFile(join(root, 'book.xlsx'), await xlsxFixture());
     await client.connect(transport);
@@ -109,7 +110,7 @@ test('XLSX MCP read-only mode removes writes and excludes replacement from its s
 test('XLSX MCP rename exports current sheet and qualified app titles', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-app-titles-'));
   const client = new Client({ name: 'xlsx-titles', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const zip = new JSZip();
   const names = ['Instructions', 'Version', 'Models'];

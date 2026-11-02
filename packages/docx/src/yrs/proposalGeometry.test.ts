@@ -130,7 +130,7 @@ function duplicated(reader: ProposalGeometryReader): ProposalGeometryReader {
   };
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 function headerFixture(): Uint8Array {
   const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';

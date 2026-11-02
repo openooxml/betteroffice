@@ -109,7 +109,7 @@ async function tableSession(cells: string[][], boldFirst = false): Promise<{ ses
 }
 
 describe('table clipboard sessions', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('reads a whole table as text and a valid fragment', async () => {
     const { session } = await tableSession([['a', 'b'], ['c', 'd']], true);

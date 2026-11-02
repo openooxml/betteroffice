@@ -8,6 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { openWorkbook } from '@betteroffice/xlsx';
 import { attachXlsx, openXlsx } from '../src/xlsx';
 import { implicitFontWorkbook } from './format-fixtures';
+import { cliEnv } from './cli-env';
 
 const protection = '<sheetProtection password="CAFE" sheet="1" objects="1" scenarios="1" formatCells="1" sort="1"/>';
 
@@ -18,7 +19,7 @@ async function fixture() {
   const styles = await zip.file('xl/styles.xml')!.async('string');
   zip.file('xl/styles.xml', styles.replace('<cellXfs count="2">', '<cellXfs count="3">').replace('</cellXfs>', '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0" hidden="1"/></xf></cellXfs>').replace('applyNumberFormat="1"/>', 'applyNumberFormat="1" applyProtection="1"><protection locked="1" hidden="1"/></xf>'));
   const workbook = await zip.file('xl/workbook.xml')!.async('string');
-  zip.file('xl/workbook.xml', workbook.replace('<bookViews>', '<workbookProtection workbookPassword="BEEF" lockStructure="1"/><bookViews>').replace('</sheets>', '<sheet name="Other" sheetId="2" r:id="rId3"/><sheet name="Chart" sheetId="3" r:id="rId4"/></sheets>'));
+  zip.file('xl/workbook.xml', workbook.replace('<calcPr fullCalcOnLoad="1"/>', '').replace('<bookViews>', '<workbookProtection workbookPassword="BEEF" lockStructure="1"/><bookViews>').replace('</sheets>', '<sheet name="Other" sheetId="2" r:id="rId3"/><sheet name="Chart" sheetId="3" r:id="rId4"/></sheets>'));
   const rels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
   const ns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   zip.file('xl/_rels/workbook.xml.rels', rels.replace('</Relationships>', `<Relationship Id="rId3" Type="${ns}/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId4" Type="${ns}/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>`));
@@ -32,7 +33,7 @@ async function fixture() {
 test('XLSX tools explicitly write through protection and preserve it through save and reopen', async () => {
   const root = await mkdtemp(join(tmpdir(), 'protected-writes-'));
   const client = new Client({ name: 'protected-writes', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   try {
     const source = await fixture();
     await writeFile(join(root, 'book.xlsx'), source);
@@ -164,7 +165,7 @@ test('XLSX protected writes remain opt-in and unavailable on attached editor han
 test('XLSX read-only server refuses protected writes and omits the protection option', async () => {
   const root = await mkdtemp(join(tmpdir(), 'protected-readonly-'));
   const client = new Client({ name: 'protected-readonly', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, '--read-only'], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, '--read-only'], stderr: 'pipe', env: cliEnv() });
   try {
     await writeFile(join(root, 'book.xlsx'), await fixture());
     await client.connect(transport);

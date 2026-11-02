@@ -33,6 +33,53 @@ function target(a1: string, sheetId = 'sheet:0'): XlsxRangeTarget {
   return { sheetId, range: { kind: 'a1', a1 } };
 }
 
+test('font decoder RPC initializes without a workbook and propagates errors', async () => {
+  const pair = createInProcessPair();
+  createWorkbookSessionHost(pair.host, { initWasm: async source => initWasm(source ?? wasmBytes.buffer) });
+  const client = createSessionClient<WorkbookSessionMethods, {}>(pair.client, { methods: WORKBOOK_SESSION_METHODS });
+  const bytes = new Uint8Array([0, 1, 0, 0, 10]).buffer;
+  try {
+    expect(new Uint8Array((await client.call.decodeFontFace(bytes, { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array(bytes));
+    await expect(client.call.version()).rejects.toThrow('not open');
+    await expect(client.call.decodeFontFace(bytes, { codec: 'unsupported' }))
+      .rejects.toThrow('unsupported font face codec: unsupported');
+    expect(new Uint8Array((await client.call.decodeFontFace(bytes, { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array(bytes));
+  } finally { await client.dispose(); }
+});
+
+test('every engine-initializing handler of a lean session asks for the lean core', async () => {
+  const seen: (boolean | undefined)[] = [];
+  const host = () => {
+    const pair = createInProcessPair();
+    createWorkbookSessionHost(pair.host, { initWasm: async (source, options) => {
+      seen.push(options?.png);
+      await initWasm(source ?? wasmBytes.buffer);
+    } });
+    return createSessionClient<WorkbookSessionMethods, {}>(pair.client, { methods: WORKBOOK_SESSION_METHODS });
+  };
+  const original = host();
+  const replacement = host();
+  const font = () => new Uint8Array([0, 1, 0, 0, 10]).buffer;
+  try {
+    await original.call.open(fixture.slice().buffer, { includeEditState: true, png: false,
+      calculation: { nowSerial: 45000, randSeed: 19 } });
+    await original.call.decodeFontFace(font(), { codec: 'zstd' });
+    await original.call.frame(viewport);
+    await original.call.exportStructured();
+    await original.call.exportMarkdown();
+    await original.call.save();
+    const checkpoint = await original.call.checkpoint();
+    await replacement.call.openRecovery(checkpoint, { png: false });
+    await replacement.call.decodeFontFace(font(), { codec: 'zstd' });
+    expect(seen).toEqual([false, false, false, false]);
+  } finally {
+    await original.dispose();
+    await replacement.dispose();
+  }
+});
+
 function read(result: XlsxReadResult): Extract<XlsxReadResult, { ok: true }> {
   if (!result.ok) throw new Error(result.failure.message);
   return result;
@@ -88,6 +135,20 @@ async function matchingSheetView(
 }
 
 describe('workbook sessions', () => {
+  test('forwards PNG initialization options to the host', async () => {
+    const pair = createInProcessPair();
+    const received: Array<{ png?: boolean } | undefined> = [];
+    createWorkbookSessionHost(pair.host, { initWasm: async (source, options) => {
+      received.push(options);
+      await initWasm(source, options);
+    } });
+    const worker = await createWorkbookSession(fixture, { png: false }, pair.client);
+    try {
+      expect(received).toEqual([{ png: false }]);
+      expect((await worker.save()).length).toBeGreaterThan(0);
+    } finally { await worker.dispose(); }
+  });
+
   test('selection queries cross the worker protocol without changing the workbook', async () => {
     const worker = await session();
     try {

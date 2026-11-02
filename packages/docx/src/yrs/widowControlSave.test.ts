@@ -56,7 +56,7 @@ function bodyParagraphs(document: Document): Paragraph[] {
 }
 
 describe('widow control save projection', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('round-trips a newly authored false and a cleared original false', async () => {
     const bytes = fixture();

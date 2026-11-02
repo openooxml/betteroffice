@@ -577,7 +577,14 @@ export function e2eEnabled(): boolean {
   return process.env.BETTEROFFICE_E2E === '1';
 }
 
+let host: Environment | undefined;
+let checkout: { commit: string; dirty: boolean } | undefined;
+
 export function environment(): Environment {
+  return (host ??= probeEnvironment());
+}
+
+function probeEnvironment(): Environment {
   const rustc = Bun.spawnSync(['rustc', '--version']);
   const ready = pythonWithBindings();
   const python =
@@ -595,10 +602,7 @@ export function environment(): Environment {
   };
 }
 
-export function recordedRun(
-  format: Format,
-  scenarios: ScenarioRun[]
-): RecordedRun {
+function probeCheckout(): { commit: string; dirty: boolean } {
   const commit = Bun.spawnSync(['git', 'rev-parse', 'HEAD'], {
     cwd: import.meta.dir,
   });
@@ -606,10 +610,21 @@ export function recordedRun(
     cwd: import.meta.dir,
   });
   return {
+    commit: commit.success ? commit.stdout.toString().trim() : 'unknown',
+    dirty: !status.success || status.stdout.length > 0,
+  };
+}
+
+export function recordedRun(
+  format: Format,
+  scenarios: ScenarioRun[]
+): RecordedRun {
+  checkout ??= probeCheckout();
+  return {
     schemaVersion: 3,
     format,
-    dirty: !status.success || status.stdout.length > 0,
-    commit: commit.success ? commit.stdout.toString().trim() : 'unknown',
+    dirty: checkout.dirty,
+    commit: checkout.commit,
     recordedAt: new Date().toISOString(),
     environment: environment(),
     scenarios,

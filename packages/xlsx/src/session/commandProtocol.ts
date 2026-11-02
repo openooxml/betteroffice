@@ -1,6 +1,5 @@
 import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
-import { validAwarenessCursor } from '../collaboration/awareness';
-import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
+import { DEFAULT_MAX_FRAME_BYTES, validAwarenessCursor } from '../collaboration/validation';
 import type { AwarenessCursor } from '../collaboration/types';
 import type { XlsxRangeTarget } from '../edits';
 import type {

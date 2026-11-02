@@ -13,7 +13,7 @@ import { flushSync } from 'react-dom';
 import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
-import { installFonts, useStableFonts } from './peerlessFonts';
+import { installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
@@ -57,6 +57,7 @@ export interface PeerlessPresentation {
   readonly client: PresentationCommandClient;
   readonly store: PeerlessViewStore;
   readonly images: CommandFrameImages;
+  readonly thumbnailImages?: CommandFrameImages;
   readonly visual: PeerlessVisualStore;
   readonly ready: Promise<void>;
   readonly current: boolean;
@@ -74,6 +75,8 @@ export interface PeerlessPresentation {
   recover(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
 }
 
+const THUMBNAIL_IMAGE_DIMENSION = 512;
+
 export function usePeerlessPresentation(
   props: PptxAsyncEditorInternalProps, canvas: RefObject<HTMLCanvasElement | null>,
 ): { presentation: PeerlessPresentation | null; pending: PeerlessPresentation | null; failure: Error | null } {
@@ -85,7 +88,7 @@ export function usePeerlessPresentation(
     initialUpdate.current.length !== update.length || !initialUpdate.current.every((byte, index) => byte === update[index]))) {
     initialUpdate.current = update;
   }
-  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, Boolean(collaboration),
+  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.clientId, Boolean(collaboration),
     collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
   const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
@@ -119,6 +122,7 @@ export function usePeerlessPresentation(
     let displayedPainter: ReturnType<typeof createCommandFramePainter> | undefined;
     let echoPainter: ReturnType<typeof createLocalEchoPainter> | undefined;
     const images = createCommandFrameImages();
+    const thumbnailImages = createCommandFrameImages({ maxDimension: THUMBNAIL_IMAGE_DIMENSION, reuse: images });
     let activeImages: ReturnType<typeof images.pin> | undefined;
     let fatal: PptxWorkerEditorFailedError | undefined;
     let failedView: PeerlessViewSnapshot | undefined;
@@ -160,6 +164,7 @@ export function usePeerlessPresentation(
     const vanished = new Set<string>();
     const pendingMedia = new Map<string, ArrayBuffer>();
     const installedFonts: FontFace[] = [];
+    const suppliedFamilies = new Set(fonts.map((font) => font.family.trim().toLowerCase()));
     const disposers: (() => void)[] = [];
     const failureListeners = new Set<() => void>();
     const visualListeners = new Set<() => void>();
@@ -197,6 +202,7 @@ export function usePeerlessPresentation(
       echoPainter?.dispose(); echoPainter = undefined;
       activeImages?.release(); activeImages = undefined;
       images.dispose();
+      thumbnailImages.dispose();
       for (const face of installedFonts.splice(0)) document.fonts.delete(face);
       if (base) {
         const view = paintedView ?? base.getSnapshot();
@@ -379,11 +385,13 @@ export function usePeerlessPresentation(
     }
 
     try {
-      session = peerlessSessionOpener.open(props.file, {
-        fonts, clientId: props.clientId, collaboration: sessionCollaboration,
+      session = peerlessSessionOpener.open(props.file, Object.assign({
+        fonts, defaultFonts: props.defaultFonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
-      });
+      }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0], allowed?: (family: string) => boolean) =>
+        installDefaultFonts(faces, installedFonts, current, warnFonts,
+          (family) => !suppliedFamilies.has(family.trim().toLowerCase()) && (allowed?.(family) ?? true)) }));
       disposers.push(session.subscribeFailure(report));
       const owner = session;
       void owner.ready.then((client) => {
@@ -529,7 +537,7 @@ export function usePeerlessPresentation(
           return () => { visualListeners.delete(listener); };
         };
         run = {
-          fileGeneration, session: owner, client, store, images, collaborationClientId: sessionCollaboration?.clientId,
+          fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual, subscribeVisual,
           get ready() { return whenPainted(); },
@@ -560,7 +568,7 @@ export function usePeerlessPresentation(
             const journal = recovery.journal.slice();
             let source: Uint8Array | undefined = await readRecoveryBase();
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-            const recovering = peerlessSessionOpener.open(source, { fonts,
+            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             source = undefined;
             try {
@@ -584,6 +592,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
+            suppliedFamilies.add(face.family.trim().toLowerCase());
             await installFonts([face], installedFonts, current, warnFonts);
             require();
           },
@@ -671,6 +680,7 @@ export function usePeerlessPresentation(
       ctx?.clearRect(0, 0, surface.width, surface.height);
       activeImages?.release();
       images.dispose();
+      thumbnailImages.dispose();
       pendingMedia.clear();
       for (const face of installedFonts) document.fonts.delete(face);
       cancelCheckpoint?.();

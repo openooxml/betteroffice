@@ -32,6 +32,7 @@
     "ariaLabel": "서식 도구 모음",
     "file": "파일",
     "format": "서식",
+    "layout": "레이아웃",
     "insert": "삽입",
     "open": "열기",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "현재"
     }
+  },
+  "layout": {
+    "margins": "여백",
+    "normal": "기본",
+    "narrow": "좁게",
+    "moderate": "보통",
+    "wide": "넓게",
+    "customMargins": "사용자 지정 여백...",
+    "morePaperSizes": "기타 용지 크기...",
+    "indent": "들여쓰기"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "1줄",
     "double": "2줄",
     "lineSpacingTitle": "줄 간격: {label}",
-    "paragraphSpacing": "단락 간격"
+    "paragraphSpacing": "단락 간격",
+    "addBefore": "단락 앞에 공백 추가",
+    "removeBefore": "단락 앞 공백 제거",
+    "addAfter": "단락 뒤에 공백 추가",
+    "removeAfter": "단락 뒤 공백 제거",
+    "options": "줄 간격 옵션..."
   },
   "styles": {
     "selectAriaLabel": "단락 스타일 선택",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "취소선 설정/해제",
         "subscript": "아래 첨자",
         "subscriptDescription": "아래 첨자 설정/해제",
+        "clearFormatting": "서식 지우기",
+        "clearFormattingDescription": "텍스트 서식 지우기",
         "superscript": "위 첨자",
         "superscriptDescription": "위 첨자 설정/해제",
         "alignLeft": "왼쪽 맞춤",
@@ -478,6 +496,11 @@
       "top": "위쪽 (px)",
       "width": "너비 (px)",
       "height": "높이 (px)"
+    },
+    "paragraphSpacing": {
+      "before": "단락 앞 간격",
+      "after": "단락 뒤 간격",
+      "multiple": "배수"
     }
   },
   "comments": {
@@ -753,7 +776,11 @@
     "leftIndent": "왼쪽 들여쓰기",
     "rightIndent": "오른쪽 들여쓰기",
     "topMargin": "위쪽 여백",
-    "bottomMargin": "아래쪽 여백"
+    "bottomMargin": "아래쪽 여백",
+    "leftMargin": "왼쪽 여백",
+    "rightMargin": "오른쪽 여백",
+    "hangingIndent": "내어쓰기",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "인쇄",

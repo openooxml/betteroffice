@@ -21,6 +21,8 @@
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
     "@betteroffice/pptx": "workspace:*",
     "@betteroffice/pptx-react": "workspace:*",
     "@betteroffice/vsdx": "workspace:*",
@@ -42,7 +44,9 @@
     "@betteroffice/docx": "workspace:*",
     "@betteroffice/docx-react": "workspace:*",
     "@betteroffice/fonts": "workspace:*",
-    "@betteroffice/fonts-cjk": "workspace:*"
+    "@betteroffice/fonts-cjk": "workspace:*",
+    "@betteroffice/fonts-intl": "workspace:*",
+    "@betteroffice/fonts-latin": "workspace:*"
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.12",

@@ -83,6 +83,29 @@ fn single_glyph_scene() -> DisplayList {
 }
 
 #[test]
+fn native_nonbreaking_hyphen_paints_the_first_faces_ascii_hyphen() {
+    let (fonts, chains, images) = fallback_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = |text| {
+        list(
+            180.0,
+            48.0,
+            vec![json!({
+                "kind": "text", "text": text,
+                "x": 10, "baselineY": 34, "width": 160,
+                "font": "400 24px Carlito, sans-serif", "color": "#000000"
+            })],
+        )
+    };
+    let expected = render_png(&scene("co-operate"), 0, &resources).unwrap();
+    assert!(ink_bounds(&expected).is_some());
+    assert_eq!(
+        render_png(&scene("co\u{2011}operate"), 0, &resources).unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn native_text_ignores_the_canvas_substitute_scale() {
     let mut fonts = FontStore::new();
     let base = fonts.register(LIBERATION.to_vec()).unwrap();

@@ -567,7 +567,7 @@ pub(crate) fn nth_match(
     largest: bool,
     array: bool,
 ) -> Option<CellValue> {
-    if ctx.is_settling() || ctx.exhausted() || args.len() != 2 {
+    if ctx.is_settling() || ctx.watches_reads() || ctx.exhausted() || args.len() != 2 {
         return None;
     }
     #[cfg(test)]
@@ -703,7 +703,7 @@ pub(crate) fn nth_match(
 }
 
 pub(super) fn sumproduct(expr: &Expr, ctx: &EvalContext<'_>, array: bool) -> Option<CellValue> {
-    if ctx.is_settling() {
+    if ctx.is_settling() || ctx.watches_reads() {
         return None;
     }
     #[cfg(test)]

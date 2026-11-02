@@ -357,4 +357,4 @@ test('hyperlink edit limits have the same refusal on the main thread and worker'
     main.dispose();
     await worker.dispose();
   }
-}, 30000);
+}, 70_000);

@@ -46,8 +46,9 @@ impl Presentation {
             .map(|id| self.media_bytes(id).map(|bytes| (id, bytes)))
             .collect::<Result<_>>()?;
         images.extend(pending.iter().map(|(id, bytes)| (*id, bytes.as_slice())));
-        let resources = RenderResources::new(self.renderer().fonts(), &images)
-            .with_label_font(self.renderer().fallback_font());
+        let renderer = self.renderer();
+        let resources = RenderResources::new(renderer.fonts(), &images)
+            .with_label_font(renderer.fallback_font());
         let mut glyphs = self
             .caches()
             .glyphs

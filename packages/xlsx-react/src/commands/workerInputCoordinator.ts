@@ -1,6 +1,6 @@
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
-import { WorkerInputRefusal } from './workerInputErrors';
-export { WorkerInputRefusal } from './workerInputErrors';
+import { WorkerInputNotReadyError, WorkerInputRefusal } from './workerInputErrors';
+export { WorkerInputNotReadyError, WorkerInputRefusal } from './workerInputErrors';
 import type { InputCoordinatorHooks, InputDraft, InputSeal } from './inputCoordinator';
 
 export type WorkerInputKind =
@@ -71,13 +71,6 @@ export interface WorkerInputCoordinatorHooks
   acknowledgeEdits?(): Promise<void>;
   onError?(error: unknown): void;
   onRefusal?(error: unknown, draft?: InputDraft): void;
-}
-
-export class WorkerInputNotReadyError extends Error {
-  constructor() {
-    super('The edit peer and accepted input must be flushed before a synchronous mutation');
-    this.name = 'WorkerInputNotReadyError';
-  }
 }
 
 export interface WorkerInputCoordinator {

@@ -7,7 +7,7 @@ export type CollaborationStatus =
 export type CollaborationTransportEvent =
   | { type: "open" }
   | { type: "message"; data: Uint8Array }
-  | { type: "close"; reason?: string }
+  | { type: "close"; code?: number; reason?: string }
   | { type: "error"; error: unknown }
   | { type: "drain" };
 

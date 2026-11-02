@@ -42,7 +42,7 @@ test.describe('pptx font downloads', () => {
       let aborted = 0;
       if (blocked) {
         await page.route('https://cdn.jsdelivr.net/**', (route) => { aborted++; return route.abort(); });
-        await page.route(/\.(?:ttf|otf|woff2?)(?:\?.*)?$/, (route) => { aborted++; return route.abort(); });
+        await page.route(/\.(?:ttf|otf|woff2?|zst)(?:\?.*)?$/, (route) => { aborted++; return route.abort(); });
       }
       await page.goto('/?format=pptx');
       await page.locator('input[type=file]').last().setInputFiles({

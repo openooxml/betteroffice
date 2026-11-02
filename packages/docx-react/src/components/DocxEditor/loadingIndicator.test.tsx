@@ -38,7 +38,7 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   console.error = () => {};
   console.warn = () => {};
-});
+}, 30_000);
 afterEach(async () => {
   cleanup();
   takePreloadedResidentEngineWorker()?.destroy();

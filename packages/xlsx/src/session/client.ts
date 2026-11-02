@@ -6,8 +6,10 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { createSessionWorker } from '#session-worker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
+import { engineKind } from '../wasm/engine';
 import {
   createWorkbookSnapshotBuilder, initWasm, openWorkbookPeer,
   type OpenWorkbookOptions, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
@@ -41,9 +43,12 @@ import type {
   WorkbookSharedAck, WorkbookSharedWireAck,
 } from './commandProtocol';
 import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
-import { attachCollaborationPipe, createAsyncCollaborationReplica, type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import { runAfterEditsUntilPosted } from './postedReads';
+import { type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
+import { workbookCollaborationClientLoader } from './collaborationLoader';
+import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -61,6 +66,7 @@ const PEER_SNAPSHOT_SLICE_MS = 8;
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
   worker?: () => Worker;
   wasm?: ArrayBuffer | WebAssembly.Module;
+  png?: boolean;
   /** Retain source bytes and a compiled module for edit peer hydration. */
   retainPeerHydration?: boolean;
   /** Aborting closes the session worker while the open is still in flight. */
@@ -96,8 +102,9 @@ export interface WorkbookSession {
   markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
   whenPresented(seq: number): Promise<void>;
   readonly call: Promisified<Omit<WorkbookSessionMethods,
-    'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' |
+    'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' |
     'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    decodeFontFace: FontDecoder;
     renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
     renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
     printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
@@ -156,13 +163,14 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     initialViewport: options.initialViewport ? { ...options.initialViewport } : undefined,
     includeEditState: options.includeEditState,
     initialUpdate: options.initialUpdate?.slice(),
+    png: options.png,
   };
   if (options.wasm instanceof ArrayBuffer ||
     Object.prototype.toString.call(options.wasm) === '[object ArrayBuffer]') {
     input.wasm = copyBytes(options.wasm as ArrayBuffer).buffer;
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
-  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
+  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl(options.png !== false).href);
   return { document, input, transfer };
 }
 
@@ -251,10 +259,10 @@ export async function openWorkbookSession(
   options: OpenWorkbookSessionOptions = {}
 ): Promise<WorkbookSession> {
   const transport = createWorkerTransport(
-    options.worker ? options.worker() :
-      new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
+    options.worker ? options.worker() : createSessionWorker()
   );
-  if (!options.worker && options.wasm === undefined && !wasmModules.has(wasmAssetUrl().href)) {
+  if (engineKind !== 'native' && !options.worker && options.wasm === undefined && options.png !== false &&
+    !wasmModules.has(wasmAssetUrl().href)) {
     requestWasmCompile(transport);
   }
   return createWorkbookSession(bytes, options, transport);
@@ -313,7 +321,7 @@ export async function createWorkbookSession(
     client = createSessionClient<Methods, Events>(pipeTransport, {
       methods: { ...WORKBOOK_SESSION_METHODS, ...WORKBOOK_INTERNAL_SESSION_METHODS },
       onWasmModuleMessage: ({ url, module, hydration, version, sequence }) => {
-        if (url !== wasmAssetUrl().href) return;
+        if (url !== wasmAssetUrl(options.png !== false).href) return;
         if (peerSource) {
           if (hydration === undefined) {
             rejectHydration!(new WorkbookPeerHydrationError('missing-hydration',
@@ -348,6 +356,7 @@ export async function createWorkbookSession(
   let openedSelection: WorkbookCommandSelection | undefined;
   let pngExport = false;
   let clientId: number | undefined;
+  let collaboration: typeof import('./collaborationClient') | undefined;
   if (peerSource) client.on('peerOpened', (opened) => {
     initialVersion = opened.version;
     if (peerSource) peerSource.initialCalculation = opened.initialCalculation;
@@ -356,7 +365,9 @@ export async function createWorkbookSession(
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; losePipes('Collaboration worker failed'); });
   const signal = options.signal;
+  let rejectCollaborationLoad: ((error: SessionFailure) => void) | undefined;
   const abort = () => {
+    rejectCollaborationLoad?.(new SessionFailure('disposed', 'Session was disposed'));
     if (peerSource) peerSource.disposed = true;
     void client.dispose().catch(() => {});
     try { transport.close(); } catch {}
@@ -376,6 +387,14 @@ export async function createWorkbookSession(
     commandContext = openedCommands;
     initialVersion ??= openedCommands?.basis.version;
     state = projection;
+    if (client.failure) throw client.failure;
+    if (clientId !== undefined && !peerSource) {
+      const stopped = new Promise<never>((_, reject) => { rejectCollaborationLoad = reject; });
+      const offFailure = client.onFailure((error) => rejectCollaborationLoad?.(error));
+      try { collaboration = await Promise.race([workbookCollaborationClientLoader.load(), stopped]); }
+      finally { offFailure(); rejectCollaborationLoad = undefined; }
+    }
+    if (client.failure) throw client.failure;
     if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
     if (peerSource && !peerSource.module) {
       throw new WorkbookPeerHydrationError('missing-module',
@@ -420,6 +439,7 @@ export async function createWorkbookSession(
           args = structuredClone(args);
         }
       } catch (error) { return Promise.reject(error); }
+      if (method === 'renderPng' || method === 'renderRangePng') return runAfterEditsUntilPosted(edits, () => call(...args));
       return edits.runAfterEdits(() => call(...args));
     } });
   }
@@ -548,6 +568,7 @@ export async function createWorkbookSession(
       }
     },
     call: {
+      decodeFontFace: (bytes, options) => calls.decodeFontFace(bytes as ArrayBuffer, options),
       version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
       captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
       collaborationStateVector, collaborationStateAsUpdate,
@@ -568,6 +589,7 @@ export async function createWorkbookSession(
     },
   };
   if (clientId !== undefined && !peerSource) {
+    const { attachCollaborationPipe, createAsyncCollaborationReplica } = collaboration!;
     let applyRemote: ((update: Uint8Array) => Promise<unknown>) | undefined;
     let applyRemoteChunks: ((updates: Uint8Array[]) => Promise<unknown>) | undefined;
     let applyRemotePipe: ((payload: PipeCommandPayload<AwarenessCursor>) => Promise<unknown>) | undefined;

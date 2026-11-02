@@ -1321,7 +1321,7 @@ impl NodeIndex {
                         }
                     }
                     for texts in &mut node.texts {
-                        texts.sort_by_key(|entry| entry.start);
+                        crate::sort::sort_by_key(texts, &|entry| entry.start);
                     }
                     self.paragraphs
                         .insert((story.clone(), para_id.clone()), node);
@@ -1959,7 +1959,7 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 Geometry::Ranges(region.clone(), ranges),
             ));
         }
-        inlines.sort_by_key(|(position, ..)| *position);
+        crate::sort::sort_by_key(&mut inlines, &|(position, ..)| *position);
         for (_, id, anchor, slice, geometry) in inlines {
             self.fragment(
                 occurrence,

@@ -76,6 +76,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "betteroffice-docx"
 version = "0.5.1"
 dependencies = [
@@ -83,6 +89,7 @@ dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-docx-raster",
+ "betteroffice-fonts",
  "betteroffice-ooxml-text",
  "serde_json",
  "sha2",
@@ -94,10 +101,12 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-drawingml",
  "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "foldhash",
+ "libm",
  "ryu-js",
  "serde",
  "serde_json",
@@ -108,6 +117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-docx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-docx-edit",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
+ "betteroffice-opc",
+]
+
+[[package]]
 name = "betteroffice-docx-layout"
 version = "0.5.1"
 dependencies = [
@@ -115,6 +134,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "foldhash",
  "js-sys",
+ "libm",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -126,7 +146,10 @@ dependencies = [
 name = "betteroffice-docx-native"
 version = "0.5.1"
 dependencies = [
- "betteroffice-docx",
+ "betteroffice-docx-engine",
+ "betteroffice-fonts",
+ "betteroffice-ooxml-font-preflight",
+ "getrandom 0.3.4",
  "napi",
  "napi-build",
  "napi-derive",
@@ -137,10 +160,12 @@ dependencies = [
 name = "betteroffice-docx-parse"
 version = "0.5.1"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-opc",
  "indexmap",
+ "libm",
  "memchr",
  "quick-xml",
  "ryu-js",
@@ -165,7 +190,7 @@ dependencies = [
 name = "betteroffice-docx-raster"
 version = "0.5.1"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "betteroffice-docx-layout",
  "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
@@ -188,9 +213,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-fonts"
+version = "0.5.1"
+dependencies = [
+ "cc",
+ "quick-xml",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "wuff",
+]
+
+[[package]]
 name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
+ "base64 0.22.1",
  "betteroffice-drawingml",
  "libm",
 ]
@@ -198,6 +236,15 @@ dependencies = [
 [[package]]
 name = "betteroffice-ooxml-diff"
 version = "0.5.1"
+
+[[package]]
+name = "betteroffice-ooxml-font-preflight"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-ooxml-text",
+ "miniz_oxide",
+ "quick-xml",
+]
 
 [[package]]
 name = "betteroffice-ooxml-raster"
@@ -235,6 +282,7 @@ dependencies = [
 name = "betteroffice-pptx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
@@ -245,8 +293,9 @@ dependencies = [
 name = "betteroffice-pptx-edit"
 version = "0.5.1"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-ooxml-diff",
  "betteroffice-pptx-parse",
  "serde",
@@ -273,21 +322,19 @@ dependencies = [
 name = "betteroffice-pptx-native"
 version = "0.5.1"
 dependencies = [
- "betteroffice-pptx",
+ "betteroffice-fonts",
  "betteroffice-pptx-engine",
  "getrandom 0.3.4",
  "napi",
  "napi-build",
  "napi-derive",
- "serde",
- "serde_json",
 ]
 
 [[package]]
 name = "betteroffice-pptx-parse"
 version = "0.5.1"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "betteroffice-drawingml",
  "betteroffice-opc",
  "libm",
@@ -311,8 +358,10 @@ name = "betteroffice-pptx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
+ "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
  "resvg",
@@ -334,12 +383,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
+ "unicode-segmentation",
 ]
 
 [[package]]
 name = "betteroffice-python-common"
 version = "0.0.1"
 dependencies = [
+ "betteroffice-fonts",
  "getrandom 0.4.3",
  "pyo3",
 ]
@@ -348,6 +400,7 @@ dependencies = [
 name = "betteroffice-vsdx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
@@ -425,7 +478,7 @@ dependencies = [
 name = "betteroffice-vsdx-render"
 version = "0.5.1"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
  "betteroffice-vsdx-eval",
@@ -462,6 +515,8 @@ name = "betteroffice-xlsx"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -504,12 +559,11 @@ dependencies = [
 name = "betteroffice-xlsx-native"
 version = "0.5.1"
 dependencies = [
- "betteroffice-xlsx",
+ "betteroffice-fonts",
  "betteroffice-xlsx-engine",
  "napi",
  "napi-build",
  "napi-derive",
- "serde_json",
 ]
 
 [[package]]
@@ -520,6 +574,7 @@ dependencies = [
  "betteroffice-xlsx-model",
  "quick-xml",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -628,10 +683,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cc"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "color_quant"
@@ -812,6 +883,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "find-msvc-tools"
+version = "0.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -841,6 +918,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a7299a780854a6d391be2ae1c8521c9368471b559dbfd6a8dbd9f407eaff100"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "fontdb"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
+dependencies = [
+ "log",
+ "slotmap",
+ "tinyvec",
 ]
 
 [[package]]
@@ -985,6 +1073,18 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
+]
+
+[[package]]
+name = "harfrust"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
+dependencies = [
+ "bitflags",
+ "bytemuck",
+ "read-fonts",
+ "smallvec",
 ]
 
 [[package]]
@@ -1210,6 +1310,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nohash-hasher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1425,12 +1537,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67e3803f97b999e80cbf7c6ecdd07a8102204d92e1633cf48783720c521196bd"
 dependencies = [
  "bytemuck",
+ "gif",
+ "image-webp",
  "log",
  "pico-args",
  "rgb",
  "svgtypes",
  "tiny-skia",
  "usvg",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -1479,6 +1594,15 @@ dependencies = [
  "unicode-ccc",
  "unicode-properties",
  "unicode-script",
+]
+
+[[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]
@@ -1554,6 +1678,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1589,6 +1719,15 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slotmap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
+dependencies = [
+ "version_check",
+]
 
 [[package]]
 name = "smallstr"
@@ -1713,6 +1852,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1722,10 +1867,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "typed-path"
-version = "0.12.3"
+name = "twox-hash"
+version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
+
+[[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
 
 [[package]]
 name = "typenum"
@@ -1782,12 +1933,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
+name = "unicode-vo"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
+
+[[package]]
 name = "usvg"
 version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
 dependencies = [
+ "base64 0.23.1",
  "data-url",
+ "fontdb",
+ "harfrust",
  "imagesize",
  "kurbo",
  "log",
@@ -1795,9 +1955,14 @@ dependencies = [
  "roxmltree",
  "simplecss",
  "siphasher",
+ "skrifa",
  "strict-num",
  "svgtypes",
  "tiny-skia-path",
+ "unicode-bidi",
+ "unicode-script",
+ "unicode-vo",
+ "xmlwriter",
 ]
 
 [[package]]
@@ -1890,6 +2055,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "xmlwriter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
 name = "yrs"
 version = "0.27.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1929,14 +2100,15 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
 ]
 

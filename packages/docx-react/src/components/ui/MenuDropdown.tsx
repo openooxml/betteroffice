@@ -13,7 +13,10 @@ export interface MenuItem {
   icon?: string;
   label: string;
   shortcut?: string;
+  checked?: boolean;
   onClick?: () => void;
+  onPointerEnter?: () => void;
+  onFocus?: () => void;
   disabled?: boolean;
   /** Why the item is disabled. */
   description?: string;
@@ -40,9 +43,13 @@ interface MenuDropdownProps {
   disabled?: boolean;
   tabIndex?: number;
   onFocus?: () => void;
-  /** When true, the trigger renders a down-arrow caret next to the label.
-   *  Default `false` — every in-tree caller is a top-level menubar button. */
+  onOpen?: () => void;
+  /** Renders a down-arrow next to the trigger. */
   showChevron?: boolean;
+  trigger?: ReactNode;
+  triggerClassName?: string;
+  title?: string;
+  description?: string;
 }
 
 const triggerStyle: CSSProperties = {
@@ -114,7 +121,7 @@ const submenuPanelStyle: CSSProperties = {
 };
 
 function focusMenuItem(menu: HTMLElement, key: string) {
-  const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]')).filter(
+  const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"]')).filter(
     (item) => item.closest('[role="menu"]') === menu
   );
   if (items.length === 0) return;
@@ -136,10 +143,16 @@ export function MenuDropdown({
   disabled,
   tabIndex = 0,
   onFocus,
+  onOpen,
   showChevron = false,
+  trigger,
+  triggerClassName,
+  title,
+  description,
 }: MenuDropdownProps) {
   const menuId = useId();
   const [isOpen, setIsOpen] = useState(false);
+  const checkable = items.some((entry) => 'checked' in entry && entry.checked !== undefined);
   const [openSubmenuLabel, setOpenSubmenuLabel] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -159,7 +172,7 @@ export function MenuDropdown({
 
   const focusSubmenu = () => {
     submenuRef.current
-      ?.querySelector<HTMLElement>('[role="gridcell"][tabindex="0"], [role="menuitem"]')
+      ?.querySelector<HTMLElement>('[role="gridcell"][tabindex="0"], [role="menuitem"], [role="menuitemradio"]')
       ?.focus();
   };
 
@@ -168,6 +181,7 @@ export function MenuDropdown({
       focusMenuItem(dropdownRef.current, key);
     } else {
       pendingFocus.current = key;
+      onOpen?.();
       setIsOpen(true);
     }
   };
@@ -186,6 +200,15 @@ export function MenuDropdown({
     const rect = triggerRef.current.getBoundingClientRect();
     setDropdownPos({ top: rect.bottom + 2, left: rect.left });
   }, [isOpen]);
+
+  useLayoutEffect(() => {
+    const panel = dropdownRef.current;
+    if (!isOpen || !panel) return;
+    const overflow = panel.getBoundingClientRect().right - (window.innerWidth - 8);
+    if (overflow > 0) {
+      setDropdownPos((pos) => ({ ...pos, left: Math.max(8, pos.left - overflow) }));
+    }
+  }, [isOpen, dropdownPos.left]);
 
   useLayoutEffect(() => {
     const target = pendingFocus.current;
@@ -302,7 +325,11 @@ export function MenuDropdown({
       <button
         ref={triggerRef}
         type="button"
-        role="menuitem"
+        role={trigger ? undefined : 'menuitem'}
+        className={triggerClassName}
+        title={title}
+        aria-label={label}
+        aria-describedby={description ? `${menuId}-reason` : undefined}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         aria-controls={menuId}
@@ -328,17 +355,21 @@ export function MenuDropdown({
         onClick={() => {
           if (disabled) return;
           if (isOpen) closeMenu();
-          else setIsOpen(true);
+          else {
+            onOpen?.();
+            setIsOpen(true);
+          }
         }}
         onMouseDown={(e) => e.preventDefault()}
         aria-disabled={disabled || undefined}
         style={isOpen ? triggerOpenStyle : triggerStyle}
       >
-        {label}
+        {trigger ?? label}
         {showChevron && <MaterialSymbol name="arrow_drop_down" size={16} />}
       </button>
 
-      {isOpen && (
+      {description && <span id={`${menuId}-reason`} hidden>{description}</span>}
+      {isOpen && !disabled && (
         <div
           ref={dropdownRef}
           id={menuId}
@@ -399,14 +430,17 @@ export function MenuDropdown({
               >
                 <button
                   type="button"
-                  role="menuitem"
+                  role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}
+                  aria-checked={item.checked}
                   aria-haspopup={hasSubmenu ? item.submenuRole ?? 'menu' : undefined}
                   aria-expanded={hasSubmenu ? isSubmenuOpen : undefined}
                   aria-controls={hasSubmenu ? submenuId : undefined}
                   tabIndex={-1}
                   onFocus={() => {
+                    item.onFocus?.();
                     if (!isSubmenuOpen) setOpenSubmenuLabel(null);
                   }}
+                  onPointerEnter={item.onPointerEnter}
                   style={item.disabled ? menuItemDisabledStyle : menuItemStyle}
                   onKeyDown={(event) => {
                     if (
@@ -439,7 +473,11 @@ export function MenuDropdown({
                       {reason}
                     </span>
                   )}
-                  {item.icon && <MaterialSymbol name={item.icon} size={18} />}
+                  {item.icon ? (
+                    <MaterialSymbol name={item.icon} size={18} />
+                  ) : (
+                    checkable && <span aria-hidden="true" style={{ width: 18, flexShrink: 0 }} />
+                  )}
                   <span>{item.label}</span>
                   {item.shortcut && <span style={shortcutStyle}>{item.shortcut}</span>}
                   {hasSubmenu && (

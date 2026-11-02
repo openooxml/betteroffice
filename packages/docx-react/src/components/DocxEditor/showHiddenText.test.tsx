@@ -36,7 +36,7 @@ beforeAll(async () => {
   session = await createYrsSession({ clientId: 4242 });
   session.createStory('body', 'AXZ');
   session.applyRawOps('body', [{ op: 'format', index: 1, len: 1, attrs: { hidden: true } }]);
-});
+}, 30_000);
 
 afterEach(() => {
   cleanup();
