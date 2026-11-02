@@ -83,7 +83,7 @@ test('artifact directories remain stable when a run selects only one format', ()
       expect(matches).toHaveLength(1);
       expect(matches[0].with.path).toBe(`\${{ runner.temp }}/fidelity-parts/${name}`);
       expect(matches[0].if).toBe(
-        (kind === 'renders' ? 'inputs.publish_renders && ' : '') +
+        (kind === 'renders' ? "inputs.publish_renders && inputs.corpus_origin == '' && " : '') +
           `contains(fromJSON(needs.prepare.outputs.formats), '${format}')`
       );
     }
@@ -158,4 +158,20 @@ test('a shard of the slowest possible samples still finishes inside the job time
   expect(worstSeconds).toBe(44 * 60);
   expect(probe['timeout-minutes']).toBeGreaterThan(worstSeconds / 60);
   expect(worstSeconds).toBeLessThan(probe['timeout-minutes'] * 60 * 0.75);
+});
+
+test('a custom corpus origin never publishes renders, and a dispatch asking for both fails before planning', () => {
+  const RENDERS = "inputs.publish_renders && inputs.corpus_origin == ''";
+  const guard = prepare.steps.find((step: any) => step.name === 'Keep custom-origin runs off the public render viewer');
+  expect(guard.if).toBe("inputs.corpus_origin != '' && inputs.publish_renders");
+  expect(guard.run).toContain('exit 1');
+  expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
+  const gated = Object.values<any>(workflow.jobs).flatMap((job) => job.steps ?? [])
+    .filter((step: any) => step !== guard && String(step.if ?? '').includes('publish_renders'));
+  expect(gated.length).toBe(6);
+  for (const step of gated) expect(String(step.if).startsWith(RENDERS)).toBe(true);
+  const publishing = publish.steps.find((step: any) => String(step.run ?? '').includes('publish-renders.mjs'));
+  expect(publishing.if).toBe(`${RENDERS} && github.repository == 'openooxml/betteroffice'`);
+  const reconcile = publish.steps.find((step: any) => step.name === 'Reconcile the format reports');
+  expect(reconcile.env.QUALITY_REQUIRE_RENDERS).toBe(`\${{ ${RENDERS} }}`);
 });
