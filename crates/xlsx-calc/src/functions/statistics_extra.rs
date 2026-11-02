@@ -176,6 +176,47 @@ fn hypgeom_pmf(k: f64, n: f64, good: f64, total: f64) -> f64 {
 /// the longest walk one tail sum may take.
 const MAX_STEPS: u64 = 20_000_000;
 
+/// steps a [`Meter`] takes between charges to the recalculation budget.
+const CHARGE_EVERY: u64 = 4096;
+
+/// the inner steps of one call, charged to the shared recalculation budget
+/// every [`CHARGE_EVERY`] steps and settled at the end, so the work of many
+/// calls is bounded together and a refused charge stops the walk with `#NUM!`.
+struct Meter<'c, 'a> {
+    ctx: &'c EvalContext<'a>,
+    steps: u64,
+}
+
+impl<'c, 'a> Meter<'c, 'a> {
+    /// a meter for a call; `#NUM!` once this evaluation has run out of budget.
+    fn new(ctx: &'c EvalContext<'a>) -> Result<Self, ErrorValue> {
+        ctx.within_budget()?;
+        Ok(Self { ctx, steps: 0 })
+    }
+
+    fn step(&mut self) -> Result<(), ErrorValue> {
+        self.steps += 1;
+        if self.steps.is_multiple_of(CHARGE_EVERY) {
+            self.pay(CHARGE_EVERY)?;
+        }
+        Ok(())
+    }
+
+    fn pay(&self, steps: u64) -> Result<(), ErrorValue> {
+        if self.ctx.consume_cells(crate::array::step_units(steps)) {
+            Ok(())
+        } else {
+            Err(ErrorValue::Num)
+        }
+    }
+
+    /// charge the steps since the last full block and pass `value` on.
+    fn settle(self, value: f64) -> Result<f64, ErrorValue> {
+        self.pay(self.steps % CHARGE_EVERY)?;
+        Ok(value)
+    }
+}
+
 /// whether a tail can be summed term by term: a spread below 1e5 standard
 /// deviations keeps the walk short, and a mode below 1e15 keeps every whole
 /// number the walk visits exact in f64.
@@ -193,9 +234,19 @@ fn count(value: f64) -> Result<f64, ErrorValue> {
 }
 
 /// the mass on the whole numbers `a..=b`, term by term.
-fn mass_between(a: f64, b: f64, pmf: impl Fn(f64) -> f64) -> f64 {
+fn mass_between(
+    a: f64,
+    b: f64,
+    pmf: impl Fn(f64) -> f64,
+    meter: &mut Meter<'_, '_>,
+) -> Result<f64, ErrorValue> {
     let steps = (b - a) as u64;
-    (0..=steps).map(|i| pmf(a + i as f64)).sum()
+    let mut total = 0.0;
+    for i in 0..=steps {
+        meter.step()?;
+        total += pmf(a + i as f64);
+    }
+    Ok(total)
 }
 
 /// a unimodal probability mass on the whole numbers `lo..=hi`. `ratio(j,
@@ -213,23 +264,29 @@ impl<F: Fn(f64) -> f64, R: Fn(f64, bool) -> f64> Discrete<F, R> {
     /// the terms no longer move the total. terms come from the ratio, with an
     /// exact mass every 256 steps so rounding cannot drift, and a compensated
     /// total so a long walk keeps its last digits.
-    fn tail(&self, from: f64, to: f64) -> f64 {
+    fn tail(&self, from: f64, to: f64, meter: &mut Meter<'_, '_>) -> Result<f64, ErrorValue> {
         let down = to < from;
         let steps = (to - from).abs();
-        let mut j = from;
-        let mut term = (self.pmf)(j);
+        let at = |taken: u64| {
+            if down {
+                from - taken as f64
+            } else {
+                from + taken as f64
+            }
+        };
+        let mut term = (self.pmf)(from);
         let mut sum = term;
         let mut lost = 0.0;
         let mut taken: u64 = 0;
         while (taken as f64) < steps && taken < MAX_STEPS && term > sum * 1e-17 {
-            let next = if down { j - 1.0 } else { j + 1.0 };
+            meter.step()?;
+            let j = at(taken);
             taken += 1;
             term = if taken.is_multiple_of(256) {
-                (self.pmf)(next)
+                (self.pmf)(at(taken))
             } else {
                 term * (self.ratio)(j, down)
             };
-            j = next;
             let total = sum + term;
             lost += if sum >= term {
                 (sum - total) + term
@@ -238,42 +295,42 @@ impl<F: Fn(f64) -> f64, R: Fn(f64, bool) -> f64> Discrete<F, R> {
             };
             sum = total;
         }
-        sum + lost
+        Ok(sum + lost)
     }
 
     /// P(X <= k), summed over whichever side of the mode `k` falls on.
-    fn lower(&self, k: f64) -> f64 {
-        if k < self.lo {
+    fn lower(&self, k: f64, meter: &mut Meter<'_, '_>) -> Result<f64, ErrorValue> {
+        Ok(if k < self.lo {
             0.0
         } else if k >= self.hi {
             1.0
         } else if k <= self.mode {
-            self.tail(k, self.lo)
+            self.tail(k, self.lo, meter)?
         } else {
-            1.0 - self.tail(k + 1.0, self.hi)
-        }
+            1.0 - self.tail(k + 1.0, self.hi, meter)?
+        })
     }
 
     /// P(X >= k).
-    fn upper(&self, k: f64) -> f64 {
-        if k <= self.lo {
+    fn upper(&self, k: f64, meter: &mut Meter<'_, '_>) -> Result<f64, ErrorValue> {
+        Ok(if k <= self.lo {
             1.0
         } else if k > self.hi {
             0.0
         } else if k > self.mode {
-            self.tail(k, self.hi)
+            self.tail(k, self.hi, meter)?
         } else {
-            1.0 - self.tail(k - 1.0, self.lo)
-        }
+            1.0 - self.tail(k - 1.0, self.lo, meter)?
+        })
     }
 
     /// P(a <= X <= b) from the tails, for a range too wide to sum directly.
-    fn between(&self, a: f64, b: f64) -> f64 {
-        if a > self.mode {
-            self.upper(a) - self.upper(b + 1.0)
+    fn between(&self, a: f64, b: f64, meter: &mut Meter<'_, '_>) -> Result<f64, ErrorValue> {
+        Ok(if a > self.mode {
+            self.upper(a, meter)? - self.upper(b + 1.0, meter)?
         } else {
-            self.lower(b) - self.lower(a - 1.0)
-        }
+            self.lower(b, meter)? - self.lower(a - 1.0, meter)?
+        })
     }
 }
 
@@ -309,7 +366,7 @@ fn binomial_summable(n: f64, p: f64) -> Result<(), ErrorValue> {
 }
 
 /// P(X <= k) for X binomial over `n` trials.
-fn binomial_cdf(k: f64, n: f64, p: f64) -> Result<f64, ErrorValue> {
+fn binomial_cdf(k: f64, n: f64, p: f64, meter: &mut Meter<'_, '_>) -> Result<f64, ErrorValue> {
     if k < 0.0 {
         return Ok(0.0);
     }
@@ -320,7 +377,7 @@ fn binomial_cdf(k: f64, n: f64, p: f64) -> Result<f64, ErrorValue> {
         return Ok(0.0);
     }
     binomial_summable(n, p)?;
-    Ok(binomial(n, p).lower(k))
+    binomial(n, p).lower(k, meter)
 }
 
 /// trials and success probability, checked as every binomial function checks
@@ -344,7 +401,9 @@ pub(crate) fn binom_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             return Err(ErrorValue::Num);
         }
         if cumulative {
-            binomial_cdf(k, n, p)
+            let mut meter = Meter::new(ctx)?;
+            let value = binomial_cdf(k, n, p, &mut meter)?;
+            meter.settle(value)
         } else {
             Ok(binomial_pmf(k, n, p))
         }
@@ -368,19 +427,29 @@ pub(crate) fn binom_dist_range(args: &[Expr], ctx: &EvalContext<'_>) -> CellValu
         if a > n || b < a || b > n {
             return Err(ErrorValue::Num);
         }
-        if b - a <= 1e5 {
-            return Ok(mass_between(a, b, |j| binomial_pmf(j, n, p)));
-        }
-        if p == 0.0 || p == 1.0 {
-            return Ok(binomial_cdf(b, n, p)? - binomial_cdf(a - 1.0, n, p)?);
-        }
-        binomial_summable(n, p)?;
-        Ok(binomial(n, p).between(a, b))
+        let mut meter = Meter::new(ctx)?;
+        let value = if b - a <= 1e5 {
+            mass_between(a, b, |j| binomial_pmf(j, n, p), &mut meter)?
+        } else if p == 0.0 || p == 1.0 {
+            binomial_cdf(b, n, p, &mut meter)? - binomial_cdf(a - 1.0, n, p, &mut meter)?
+        } else {
+            binomial_summable(n, p)?;
+            binomial(n, p).between(a, b, &mut meter)?
+        };
+        meter.settle(value)
     })())
 }
 
+/// the largest count a BINOM.INV search visits: past every mode that can be
+/// summed, and exact in f64.
+const SEARCH_TOP: f64 = 9e15;
+
 /// BINOM.INV and CRITBINOM(trials, probability_s, alpha): the smallest
-/// number of successes whose cumulative probability reaches `alpha`.
+/// number of successes whose cumulative probability reaches `alpha`. an
+/// alpha of one is reached only by every trial; above one half the upper
+/// tail is compared with 1 - alpha, which is exact there, so a cumulative
+/// that rounds up to alpha does not end the search early. the search starts
+/// at the normal approximation and widens until it brackets the answer.
 pub(crate) fn binom_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     answer((|| {
         arity(args, 3, 3)?;
@@ -393,27 +462,74 @@ pub(crate) fn binom_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if alpha == 0.0 || p == 0.0 {
             return Ok(0.0);
         }
-        if p == 1.0 {
+        if alpha == 1.0 || p == 1.0 {
             return Ok(n);
         }
         binomial_summable(n, p)?;
-        let mode = binomial_mode(n, p);
-        let reach = 40.0 * (n * p * (1.0 - p)).sqrt() + 1.0;
-        let mut lo = (mode - reach).max(0.0) as u64;
-        let mut hi = (mode + reach).min(n) as u64;
+        let mut meter = Meter::new(ctx)?;
+        let dist = binomial(n, p);
+        let reaches = |k: u64, meter: &mut Meter<'_, '_>| -> Result<bool, ErrorValue> {
+            let k = k as f64;
+            Ok(if alpha > 0.5 {
+                dist.upper(k + 1.0, meter)? <= 1.0 - alpha
+            } else {
+                dist.lower(k, meter)? >= alpha
+            })
+        };
+        let q = 1.0 - p;
+        let z = if alpha > 0.5 {
+            -special::norm_inv_lower(1.0 - alpha)
+        } else {
+            special::norm_inv_lower(alpha)
+        };
+        meter.pay(special::take_steps())?;
+        let top = n.min(SEARCH_TOP) as u64;
+        let guess = (n * p + z * (n * p * q).sqrt() + (q - p) * (z * z - 1.0) / 6.0 - 0.5)
+            .round()
+            .clamp(0.0, top as f64) as u64;
+        let mut step: u64 = 1;
+        let (mut lo, mut hi);
+        if reaches(guess, &mut meter)? {
+            hi = guess;
+            lo = loop {
+                if hi == 0 {
+                    break 0;
+                }
+                let probe = hi.saturating_sub(step);
+                if !reaches(probe, &mut meter)? {
+                    break probe + 1;
+                }
+                hi = probe;
+                step = step.saturating_mul(2);
+            };
+        } else {
+            lo = guess + 1;
+            hi = loop {
+                let probe = lo.saturating_add(step - 1).min(top);
+                if reaches(probe, &mut meter)? {
+                    break probe;
+                }
+                if probe == top {
+                    return Err(ErrorValue::Num);
+                }
+                lo = probe + 1;
+                step = step.saturating_mul(2);
+            };
+        }
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if binomial_cdf(mid as f64, n, p)? >= alpha {
+            if reaches(mid, &mut meter)? {
                 hi = mid;
             } else {
                 lo = mid + 1;
             }
         }
-        Ok(lo as f64)
+        meter.settle(lo as f64)
     })())
 }
 
 fn negbinom_impl(
+    ctx: &EvalContext<'_>,
     failures: f64,
     successes: f64,
     p: f64,
@@ -449,7 +565,9 @@ fn negbinom_impl(
         hi: f64::INFINITY,
         mode,
     };
-    Ok(dist.lower(failures))
+    let mut meter = Meter::new(ctx)?;
+    let value = dist.lower(failures, &mut meter)?;
+    meter.settle(value)
 }
 
 /// NEGBINOM.DIST(number_f, number_s, probability_s, cumulative).
@@ -458,7 +576,7 @@ pub(crate) fn negbinom_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         arity(args, 4, 4)?;
         let v = numbers(args, ctx, 3)?;
         let cumulative = flag(args, ctx, 3)?;
-        negbinom_impl(count(v[0])?, count(v[1])?, v[2], cumulative)
+        negbinom_impl(ctx, count(v[0])?, count(v[1])?, v[2], cumulative)
     })())
 }
 
@@ -467,11 +585,12 @@ pub(crate) fn negbinomdist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     answer((|| {
         arity(args, 3, 3)?;
         let v = numbers(args, ctx, 3)?;
-        negbinom_impl(count(v[0])?, count(v[1])?, v[2], false)
+        negbinom_impl(ctx, count(v[0])?, count(v[1])?, v[2], false)
     })())
 }
 
 fn hypgeom_impl(
+    ctx: &EvalContext<'_>,
     k: f64,
     n: f64,
     good: f64,
@@ -513,7 +632,9 @@ fn hypgeom_impl(
         hi,
         mode,
     };
-    Ok(dist.lower(k))
+    let mut meter = Meter::new(ctx)?;
+    let value = dist.lower(k, &mut meter)?;
+    meter.settle(value)
 }
 
 /// HYPGEOM.DIST(sample_s, number_sample, population_s, number_pop,
@@ -524,6 +645,7 @@ pub(crate) fn hypgeom_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         let v = numbers(args, ctx, 4)?;
         let cumulative = flag(args, ctx, 4)?;
         hypgeom_impl(
+            ctx,
             count(v[0])?,
             count(v[1])?,
             count(v[2])?,
@@ -540,6 +662,7 @@ pub(crate) fn hypgeomdist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         arity(args, 4, 4)?;
         let v = numbers(args, ctx, 4)?;
         hypgeom_impl(
+            ctx,
             count(v[0])?,
             count(v[1])?,
             count(v[2])?,
@@ -572,7 +695,9 @@ pub(crate) fn poisson_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             hi: f64::INFINITY,
             mode: mean.floor(),
         };
-        Ok(dist.lower(k))
+        let mut meter = Meter::new(ctx)?;
+        let value = dist.lower(k, &mut meter)?;
+        meter.settle(value)
     })())
 }
 
@@ -594,7 +719,11 @@ pub(crate) fn expon_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     })())
 }
 
-/// WEIBULL.DIST and WEIBULL(x, alpha, beta, cumulative).
+/// WEIBULL.DIST and WEIBULL(x, alpha, beta, cumulative). when x / beta or
+/// the density leaves the normal range the terms are taken as logarithms, so
+/// a density that underflows is zero rather than infinity times zero; at
+/// x = 0 the density is infinite for alpha < 1 (`#NUM!`), 1 / beta for
+/// alpha = 1 and zero beyond.
 pub(crate) fn weibull_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     answer((|| {
         arity(args, 4, 4)?;
@@ -604,12 +733,33 @@ pub(crate) fn weibull_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if x < 0.0 || alpha <= 0.0 || beta <= 0.0 {
             return Err(ErrorValue::Num);
         }
-        let scaled = (x / beta).powf(alpha);
-        Ok(if cumulative {
-            -(-scaled).exp_m1()
-        } else {
-            alpha / beta * (x / beta).powf(alpha - 1.0) * (-scaled).exp()
-        })
+        let ratio = x / beta;
+        if ratio.is_normal() {
+            let scaled = ratio.powf(alpha);
+            if cumulative {
+                return Ok(-(-scaled).exp_m1());
+            }
+            let density = alpha / beta * ratio.powf(alpha - 1.0) * (-scaled).exp();
+            if density.is_normal() {
+                return Ok(density);
+            }
+        }
+        if x == 0.0 {
+            return match (cumulative, alpha.total_cmp(&1.0)) {
+                (true, _) | (false, std::cmp::Ordering::Greater) => Ok(0.0),
+                (false, std::cmp::Ordering::Equal) => Ok(1.0 / beta),
+                (false, std::cmp::Ordering::Less) => Err(ErrorValue::Num),
+            };
+        }
+        let log_ratio = x.ln() - beta.ln();
+        let scaled = (alpha * log_ratio).exp();
+        if cumulative {
+            return Ok(-(-scaled).exp_m1());
+        }
+        if scaled.is_infinite() {
+            return Ok(0.0);
+        }
+        Ok((alpha.ln() - beta.ln() + (alpha - 1.0) * log_ratio - scaled).exp())
     })())
 }
 
@@ -654,14 +804,16 @@ pub(crate) fn permut(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if n <= 0.0 || n < k {
             return Err(ErrorValue::Num);
         }
+        let mut meter = Meter::new(ctx)?;
         let mut product = 1.0_f64;
         for i in 0..k as u64 {
             if !product.is_finite() {
                 break;
             }
+            meter.step()?;
             product *= n - i as f64;
         }
-        Ok(product)
+        meter.settle(product)
     })())
 }
 
@@ -674,20 +826,46 @@ pub(crate) fn permutationa(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     })())
 }
 
+/// the largest power of two at or below the largest magnitude in `values`,
+/// so dividing by it is exact; one when every value is zero or subnormal.
+fn power_scale(values: &[f64]) -> f64 {
+    let largest = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    if largest.is_normal() {
+        f64::from_bits(largest.to_bits() & 0x7ff0_0000_0000_0000)
+    } else {
+        1.0
+    }
+}
+
 /// STEYX(known_y's, known_x's): the standard error of the predicted y,
 /// pairing the arguments as CORREL does; fewer than three pairs is
-/// `#DIV/0!`.
+/// `#DIV/0!`. the residuals are taken from the fitted line rather than as a
+/// difference of sums, so large nearly collinear values keep their error,
+/// and both samples are scaled by powers of two so squares neither overflow
+/// nor underflow.
 pub(crate) fn steyx(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     answer((|| {
         let (ys, xs) = stats::pairs(args, ctx)?;
         if ys.len() < 3 {
             return Err(ErrorValue::Div0);
         }
-        let (n, _, _, sxx, syy, sxy) = stats::moments(&ys, &xs);
-        if sxx == 0.0 {
+        let (sx, sy) = (power_scale(&xs), power_scale(&ys));
+        let us: Vec<f64> = xs.iter().map(|x| x / sx).collect();
+        let vs: Vec<f64> = ys.iter().map(|y| y / sy).collect();
+        let (n, mu, mv, suu, _, suv) = stats::moments(&vs, &us);
+        if suu == 0.0 {
             return Err(ErrorValue::Div0);
         }
-        Ok(((syy - sxy * sxy / sxx).max(0.0) / (n - 2.0)).sqrt())
+        let slope = suv / suu;
+        let residuals: f64 = us
+            .iter()
+            .zip(&vs)
+            .map(|(u, v)| {
+                let r = (v - mv) - slope * (u - mu);
+                r * r
+            })
+            .sum();
+        Ok(sy * (residuals / (n - 2.0)).sqrt())
     })())
 }
 

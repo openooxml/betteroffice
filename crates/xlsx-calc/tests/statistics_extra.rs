@@ -856,3 +856,140 @@ fn negative_fractional_counts_are_num_errors() {
     approx("BINOM.DIST(0.5,10,0.5,FALSE)", 0.0009765625);
     approx("POISSON.DIST(0.9,5,FALSE)", (-5.0f64).exp());
 }
+
+/// an alpha of one is reached only by every trial, and an alpha just below
+/// one compares the upper tail with 1 - alpha, so a cumulative that rounds
+/// up to alpha does not end the search early.
+#[test]
+fn binom_inv_at_full_probability() {
+    approx("BINOM.INV(1000,0.001,1)", 1000.0);
+    approx("CRITBINOM(1000,0.001,1)", 1000.0);
+    approx("BINOM.INV(6,0.5,1)", 6.0);
+    approx("BINOM.INV(1E200,0.5,1)", 1e200);
+    // mpmath 30 digits: P(X >= 18) = 1.557e-16 is above 1 - alpha = 2^-53
+    approx("BINOM.INV(20,0.1,0.9999999999999999)", 18.0);
+    // mpmath 30 digits: P(X >= 89) = 1.270e-16 is above 2^-53
+    approx("CRITBINOM(100,0.5,0.9999999999999999)", 89.0);
+    approx("BINOM.INV(6,0,1)", 0.0);
+}
+
+/// a skipped known_x fits against 1, 2, 3, ... as GROWTH does, and a skipped
+/// const keeps the intercept.
+#[test]
+fn logest_with_skipped_known_x() {
+    check_array("LOGEST({2,4,8},,FALSE)", 1, 2, &[n(2.0), n(1.0)], 1e-12);
+    check_array("LOGEST({2,4,8},,TRUE)", 1, 2, &[n(2.0), n(1.0)], 1e-12);
+    check_array("LOGEST({3,6,12},,,FALSE)", 1, 2, &[n(2.0), n(1.5)], 1e-12);
+    check_array("LINEST({3,5,7},,,FALSE)", 1, 2, &[n(2.0), n(1.0)], 1e-12);
+    check_array("LINEST({2,4,6},,FALSE)", 1, 2, &[n(2.0), n(0.0)], 1e-12);
+    check_array(
+        "LOGEST({1E200,1E201,1E202},,TRUE)",
+        1,
+        2,
+        &[n(10.0), n(1e199)],
+        1e-12,
+    );
+    check_array(
+        "LOGEST({1E-200;1E-199;1E-198})",
+        1,
+        2,
+        &[n(10.0), n(1e-201)],
+        1e-12,
+    );
+    relative("INDEX(LOGEST({1E-200;1E-199;1E-198}),1,2)", 1e-201, 1e-12);
+}
+
+/// the residuals come from the fitted line, so large nearly collinear values
+/// keep their error, and scaled samples neither overflow nor underflow.
+#[test]
+fn steyx_keeps_small_residuals_of_large_values() {
+    // mpmath 30 digits: sqrt(2/3)
+    approx(
+        "STEYX({100000000,200000001,300000000},{1,2,3})",
+        0.816496580927726,
+    );
+    // mpmath 30 digits
+    relative(
+        "STEYX({1E200,3E200,2E200,5E200},{1,2,3,4})",
+        1.1618950038622251e200,
+        1e-12,
+    );
+    // mpmath 30 digits
+    relative(
+        "STEYX({1E-200,3E-200,2E-200,5E-200},{1E-200,2E-200,3E-200,4E-200})",
+        1.161895003862225e-200,
+        1e-12,
+    );
+}
+
+/// a density that underflows is zero, not infinity times zero, and x / beta
+/// outside the normal range is taken through logarithms.
+#[test]
+fn weibull_density_underflows_to_zero() {
+    check(&[
+        ("WEIBULL.DIST(100,200,1,FALSE)", n(0.0)),
+        ("WEIBULL(100,200,1,FALSE)", n(0.0)),
+        ("WEIBULL.DIST(1E200,1E200,1,FALSE)", n(0.0)),
+        ("WEIBULL.DIST(100,200,1,TRUE)", n(1.0)),
+        ("WEIBULL.DIST(0,2,1,FALSE)", n(0.0)),
+        ("WEIBULL.DIST(0,2,1,TRUE)", n(0.0)),
+        ("WEIBULL.DIST(0,1,2,FALSE)", n(0.5)),
+        ("WEIBULL.DIST(0,0.5,1,FALSE)", e(ErrorValue::Num)),
+    ]);
+    // mpmath 30 digits
+    relative(
+        "WEIBULL.DIST(1E-200,0.001,1E200,FALSE)",
+        2.6736481423015296e196,
+        1e-12,
+    );
+    // mpmath 30 digits
+    relative(
+        "WEIBULL.DIST(1E-200,0.001,1E200,TRUE)",
+        0.32840995087219926,
+        1e-12,
+    );
+    // mpmath 30 digits
+    relative(
+        "WEIBULL.DIST(1E-200,2,1E-200,FALSE)",
+        7.357588823428846e199,
+        1e-12,
+    );
+    // mpmath 30 digits
+    relative(
+        "WEIBULL.DIST(1E200,1,1E200,FALSE)",
+        3.6787944117144235e-201,
+        1e-12,
+    );
+}
+
+/// the probability loops charge the recalculation budget per step, so many
+/// long sums in one array run out of budget with `#NUM!` instead of stalling,
+/// while one long search still fits: n is odd, so by symmetry the cdf at
+/// (n - 1) / 2 is exactly one half.
+#[test]
+fn probability_loops_are_charged_to_the_budget() {
+    let wb = data_workbook();
+    approx_in(&wb, "BINOM.DIST.RANGE(100000,0.5,0,100000)", 1.0, 1e-9);
+    approx_in(
+        &wb,
+        "BINOM.INV(39999999999,0.5,0.4999999)",
+        19999999999.0,
+        1e-15,
+    );
+    approx_in(
+        &wb,
+        "BINOM.INV(39999999999,0.5,0.5000001)",
+        20000000000.0,
+        1e-15,
+    );
+    for src in [
+        "BINOM.DIST.RANGE(100000,0.5,0,100000-SEQUENCE(1,200))",
+        "POISSON.DIST(1E9+SEQUENCE(1,100),1E9,TRUE)",
+        "BINOM.DIST(2E9+SEQUENCE(1,100),4E9,0.5,TRUE)",
+        "NEGBINOM.DIST(2E9+SEQUENCE(1,100),2E9,0.5,TRUE)",
+        "HYPGEOM.DIST(1E9+SEQUENCE(1,200),2E9,4E9,8E9,TRUE)",
+    ] {
+        let (_, _, values) = arrayed(&wb, src);
+        assert!(values.contains(&e(ErrorValue::Num)), "{src}: {values:?}");
+    }
+}

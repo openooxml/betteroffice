@@ -2513,38 +2513,13 @@ fn fit_array(args: &[Expr], ctx: &EvalContext<'_>, exponential: bool) -> Value {
         let ys = regression_ys(&ys_block, ctx, exponential)?;
         // predictors as columns; a y vector laid out in rows means x is too
         let down = ys_block.cols == 1 && ys_block.rows > 1;
-        let xs: Vec<Vec<f64>> = match args.get(1) {
-            Some(_) => {
-                let xb = argument(args, ctx, 1)?;
-                let (vars, obs) = if down {
-                    (xb.cols, xb.rows)
-                } else {
-                    (xb.rows, xb.cols)
-                };
-                if obs != ys.len() {
-                    return Err(ErrorValue::Ref);
-                }
-                let mut columns = Vec::with_capacity(vars);
-                for v in 0..vars {
-                    let mut column = Vec::with_capacity(obs);
-                    for o in 0..obs {
-                        let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
-                        column.push(ctx.number(&cell)?);
-                    }
-                    columns.push(column);
-                }
-                columns
-            }
-            None => vec![(1..=ys.len()).map(|i| i as f64).collect()],
+        let xs = known_x(args, ctx, ys.len(), down)?;
+        let flag = |index: usize, default: bool| match args.get(index) {
+            Some(arg) if !crate::functions::omitted(arg) => to_bool(&evaluate(arg, ctx)),
+            _ => Ok(default),
         };
-        let intercept = match args.get(2) {
-            Some(_) => to_bool(&evaluate(&args[2], ctx))?,
-            None => true,
-        };
-        let stats = match args.get(3) {
-            Some(_) => to_bool(&evaluate(&args[3], ctx))?,
-            None => false,
-        };
+        let intercept = flag(2, true)?;
+        let stats = flag(3, false)?;
         let vars = xs.len();
         let height = if stats { 5 } else { 1 };
         reserve(ctx, height, vars + 1)?;
