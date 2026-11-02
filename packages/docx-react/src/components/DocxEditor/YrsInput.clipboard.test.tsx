@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
+  applyClipboardFragment,
   createYrsInputPositionMap,
   createYrsSession,
   displayPositionToYrsLoc,
@@ -318,6 +319,24 @@ test('a paste option after the paste was undone elsewhere changes nothing', asyn
   } finally {
     host.remove();
   }
+});
+
+test('pasted runs keep their own formatting instead of the previous run\'s', async () => {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', '');
+  applyClipboardFragment(session, { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, {
+    paragraphs: [{ text: 'A b C d', runs: [
+      { text: 'A', format: { bold: true, fontSize: 20 } },
+      { text: ' b ' },
+      { text: 'C', format: { italic: true } },
+      { text: ' d' },
+    ] }],
+  });
+  const runs = session.storySegments('body')
+    .filter((segment) => segment.kind === 'text')
+    .map((segment) => segment.kind === 'text' ? [segment.text, segment.attributes.bold === true, segment.attributes.italic === true] : []);
+  expect(runs).toEqual([['A', true, false], [' b ', false, false], ['C', false, true], [' d', false, false]]);
 });
 
 test('suggesting mode pastes plain text', async () => {

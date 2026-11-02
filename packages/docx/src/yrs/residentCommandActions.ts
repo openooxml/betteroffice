@@ -35,6 +35,7 @@ import type {
   DocxCommandKind,
   DocxCommandPreflightResult,
   DocxCommandSelection,
+  DocxStoredMarks,
   PreparedDocxCommand,
   DocxCommandHooksFactory,
   DocxCommandHooksEnvironment,
@@ -214,7 +215,7 @@ const DOCX_COMMAND_POLICIES = {
   formatSelection: { keys: ['delta'] }, toggleStrike: { keys: [] }, toggleList: { keys: ['kind'] },
   changeIndent: { keys: ['direction', 'preserveNumbering'] },
   insertImage: { keys: ['image'] }, insertTable: { keys: ['rows', 'columns'] }, pasteFragment: { keys: ['fragment'] },
-  replacePasteFragment: { keys: ['fragment'] },
+  replacePasteFragment: { keys: ['fragment', 'plain'] },
   insertPageBreak: { keys: [] }, insertSectionBreak: { keys: ['type'] },
   insertTableRow: { keys: ['side'] }, insertTableColumn: { keys: ['side'] },
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
@@ -386,7 +387,7 @@ function validCommandIntent(
       if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
       break;
     case 'replacePasteFragment':
-      if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
+      if (!validClipboardFragment(payload.fragment) || (payload.plain !== undefined && payload.plain !== true)) return refuse('invalid-payload');
       break;
     case 'insertTableRow':
       if (!oneOf('above', 'below')(payload.side)) return refuse('invalid-payload');
@@ -1162,6 +1163,7 @@ function applyPreparedDocxCommand(
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
   let replacePasteRefused: 'nothing-to-undo' | 'paste-changed' | null = null;
   let pastedOver: YrsStoryRange | null = null;
+  let pastedMarks: DocxStoredMarks | null = null;
   switch (command.kind) {
     case 'setTabStops':
       engine.setParagraphAttrs(range, { tabs: command.payload.tabs });
@@ -1282,6 +1284,7 @@ function applyPreparedDocxCommand(
     }
     case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
     case 'pasteFragment': {
+      pastedMarks = state.storedMarks ? structuredClone(state.storedMarks) : null;
       state.storedMarks = null;
       pastedOver = structuredClone(range);
       caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
@@ -1299,7 +1302,14 @@ function applyPreparedDocxCommand(
         break;
       }
       pastedOver = structuredClone(last.range);
+      pastedMarks = last.storedMarks;
       caret(applyClipboardFragment(engine, last.range, command.payload.fragment, command.payload.suggesting));
+      const firstLine = command.payload.fragment.paragraphs[0]?.text.length ?? 0;
+      if (command.payload.plain && pastedMarks && firstLine > 0) {
+        const typed = { story, start, end: { paraId: start.paraId, offset: start.offset + firstLine } };
+        if (pastedMarks.clear) engine.clearFormatting(typed);
+        if (Object.keys(pastedMarks.delta).length) engine.formatRange(typed, pastedMarks.delta);
+      }
       break;
     }
     case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
@@ -1310,7 +1320,7 @@ function applyPreparedDocxCommand(
   }
   resetCellSelectionForEdit(engine, state, command.kind);
   if (discrete) engine.addUndoBoundary();
-  if (pastedOver) state.lastPaste = { range: pastedOver, version: engine.proposalEngine.version() };
+  if (pastedOver) state.lastPaste = { range: pastedOver, version: engine.proposalEngine.version(), storedMarks: pastedMarks };
   if (replacePasteRefused) {
     state.lastPaste = null;
     return { ...result('noop'), status: 'refused', reason: replacePasteRefused };

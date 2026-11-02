@@ -203,3 +203,20 @@ test('paste options are offered only for formatted text without pictures', () =>
   expect(pasteOptionsApply({ paragraphs: [{ text: 'Plain' }] }, 'Plain')).toBe(false);
   expect(pasteOptionsApply({ paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==' } }] }] }, 'x')).toBe(false);
 });
+
+test('explicit blank lines survive a formatted paste', () => {
+  expect(parseClipboardHtml('<p><b>A</b></p><p><br></p><p>B</p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A', '', 'B']);
+  expect(parseClipboardHtml('<p><b>A</b><br><br>B</p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A', '', 'B']);
+  expect(parseClipboardHtml('<p><b>A</b></p><p> </p><p>B</p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A', '', 'B']);
+  expect(parseClipboardHtml('<p><b>A</b><br></p><p>B</p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A', 'B']);
+});
+
+test('spaces collapse across text nodes as the browser shows them', () => {
+  expect(parseClipboardHtml('<p><b>A</b> <span> </span>B</p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A B']);
+  expect(parseClipboardHtml('<p><b>A </b> <i> B</i></p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A B']);
+});
+
+test('preformatted text keeps its lines and indentation', () => {
+  expect(parseClipboardHtml('<pre><b>if (x) {\n  y();\n}</b></pre>')?.paragraphs.map((paragraph) => paragraph.text))
+    .toEqual(['if (x) {', '  y();', '}']);
+});

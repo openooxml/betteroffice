@@ -11,6 +11,22 @@ const OPTIONS: Array<{ kind: PasteFormattingOption; labelKey: 'pasteOptions.keep
   { kind: 'text-only', labelKey: 'pasteOptions.textOnly' },
 ];
 
+/** @internal Where the open menu sits relative to the button so it stays inside the viewport. */
+export function menuPlacement(
+  button: { left: number; top: number; bottom: number },
+  menu: { width: number; height: number },
+  viewport: { width: number; height: number },
+  margin = 8
+): { left: number; top: number } {
+  const below = button.bottom + 4;
+  const top = below + menu.height <= viewport.height - margin || button.top - 4 - menu.height < margin
+    ? below - button.top
+    : -4 - menu.height;
+  const right = button.left + menu.width;
+  const left = right > viewport.width - margin ? Math.max(margin, viewport.width - margin - menu.width) - button.left : 0;
+  return { left, top };
+}
+
 function clamped(anchor: PasteOptionsAnchor): CSSProperties {
   const width = 36;
   const height = 28;
@@ -32,12 +48,28 @@ export function PasteOptionsControl(props: {
   const { anchor, menuOpen, selected, onMenuOpenChange, onChoose, onCloseMenu } = props;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [placement, setPlacement] = useState<{ left: number; top: number }>({ left: 0, top: 28 });
   const [style, setStyle] = useState<CSSProperties>(() => ({ position: 'fixed', left: anchor.left, top: anchor.top, zIndex: 80 }));
   const [focusIndex, setFocusIndex] = useState(0);
 
   useLayoutEffect(() => {
     setStyle(clamped(anchor));
   }, [anchor]);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const menu = menuRef.current;
+    if (!menuOpen || !root || !menu) return;
+    const button = root.getBoundingClientRect();
+    const size = menu.getBoundingClientRect();
+    const next = menuPlacement(
+      { left: button.left, top: button.top, bottom: button.top + 24 },
+      { width: size.width, height: size.height },
+      { width: window.innerWidth, height: window.innerHeight }
+    );
+    setPlacement((current) => (current.left === next.left && current.top === next.top ? current : next));
+  }, [menuOpen, style]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -91,12 +123,13 @@ export function PasteOptionsControl(props: {
       </button>
       {menuOpen && (
         <div
+          ref={menuRef}
           role="menu"
           aria-label={t('pasteOptions.button')}
           style={{
             position: 'absolute',
-            left: 0,
-            top: 28,
+            left: placement.left,
+            top: placement.top,
             minWidth: 220,
             padding: 4,
             borderRadius: 6,

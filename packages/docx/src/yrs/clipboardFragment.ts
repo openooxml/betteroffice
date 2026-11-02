@@ -270,6 +270,9 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
 /** @internal Sessions a table read needs: the raw payload plus story segments. */
 export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegments'> & { mediaDataUrl?(source: string): string | null | undefined };
 
+const RUN_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strike', 'color', 'highlight', 'fontSize', 'fontFamily'] as const;
+type RunFormatKey = typeof RUN_FORMAT_KEYS[number];
+
 /** @internal Engine surface a fragment paste needs. */
 export type ClipboardPasteEngine = Pick<
   YrsSession,
@@ -681,6 +684,14 @@ export function applyClipboardFragment(
     };
   }
   const paragraphProperties: Array<{ range: YrsStoryRange; pStyle?: string; list?: 'bullet' | 'numbered' }> = [];
+  const runKeys = new Set<RunFormatKey>();
+  let runLinks = false;
+  for (const paragraph of fragment.paragraphs) {
+    for (const run of paragraph.runs ?? []) {
+      for (const key of RUN_FORMAT_KEYS) if (run.format?.[key] !== undefined) runKeys.add(key);
+      if (run.href) runLinks = true;
+    }
+  }
   fragment.paragraphs.forEach((paragraph, index) => {
     if (index > 0) {
       const split = engine.splitParagraph(caret, suggesting);
@@ -698,8 +709,11 @@ export function applyClipboardFragment(
         if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
         const range = inserted.range;
         caret = { story: range.story, ...range.end };
-        if (run.format && Object.keys(run.format).length > 0) engine.formatRange(range, run.format);
+        const delta: YrsInlineFormatDelta = run.format?.other ? { other: run.format.other } : {};
+        for (const key of runKeys) Object.assign(delta, { [key]: run.format?.[key] ?? null });
+        if (Object.keys(delta).length > 0) engine.formatRange(range, delta);
         if (run.href) engine.setHyperlink(range, { href: run.href });
+        else if (runLinks) engine.setHyperlink(range, null);
       }
     } else {
       for (const inline of paragraph.inlines ?? (paragraph.text === '' ? [] : [{ text: paragraph.text }])) {

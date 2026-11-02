@@ -688,9 +688,9 @@ function parseTableElement(table: HTMLTableElement): DocxTableFragment {
   };
 }
 
-function finishRuns(runs: DocxClipboardRun[]): DocxClipboardRun[] {
+function finishRuns(runs: DocxClipboardRun[], preformatted = false): DocxClipboardRun[] {
   const finished = runs.filter(run => run.text !== '');
-  if (finished.length > 0) {
+  if (finished.length > 0 && !preformatted) {
     finished[0] = { ...finished[0]!, text: finished[0]!.text.replace(/^ +/, '') };
     const last = finished[finished.length - 1]!;
     finished[finished.length - 1] = { ...last, text: last.text.replace(/ +$/, '') };
@@ -710,11 +710,15 @@ function inlineParagraphs(
   const paragraphs: DocxClipboardParagraph[] = [];
   let runs: DocxClipboardRun[] = [];
   let blockProperties = extra;
-  const flush = () => {
-    const finished = finishRuns(runs);
+  let preformattedLine = false;
+  let nonBreakingLine = false;
+  const flush = (keepEmpty = nonBreakingLine) => {
+    const finished = finishRuns(runs, preformattedLine);
     runs = [];
+    preformattedLine = false;
+    nonBreakingLine = false;
     const text = finished.map(run => run.text).join('');
-    if (text === '') return;
+    if (text === '' && !keepEmpty) return;
     paragraphs.push({
       text,
       ...(runsHaveFormatting(finished) ? { runs: finished } : {}),
@@ -722,9 +726,21 @@ function inlineParagraphs(
     });
   };
   const pushText = (raw: string, chain: Element[]) => {
-    const parts = raw.split('\t').map(normalizeTextPart);
-    const text = parts.join('\t');
-    if (text === '' || (/^[ ]+$/.test(text) && runs.length === 0)) return;
+    if (chain.some(element => element.tagName.toUpperCase() === 'PRE')) {
+      raw.split(/\r\n|\r|\n/).forEach((line, index) => {
+        if (index > 0) flush(true);
+        preformattedLine = true;
+        if (line !== '') appendRun(line, chain);
+      });
+      return;
+    }
+    let text = raw.split('\t').map(normalizeTextPart).join('\t');
+    const previous = runs[runs.length - 1];
+    if (!previous || previous.text.endsWith(' ')) text = text.replace(/^ +/, '');
+    if (text === '') return;
+    appendRun(text, chain);
+  };
+  const appendRun = (text: string, chain: Element[]) => {
     const state = blankInlineFormat();
     for (const ancestor of chain) applyInlineElement(state, ancestor, false);
     const format = formatDelta(state);
@@ -740,6 +756,7 @@ function inlineParagraphs(
   const walk = (node: Node, chain: Element[]) => {
     if (node.nodeType === 8) return;
     if (node.nodeType === 3) {
+      if ((node as Text).data.includes(NBSP)) nonBreakingLine = true;
       pushText(textNodeText(node as Text), chain);
       return;
     }
@@ -747,7 +764,7 @@ function inlineParagraphs(
     const element = node as Element;
     const tag = element.tagName.toUpperCase();
     if (tag === 'BR') {
-      flush();
+      flush(true);
       return;
     }
     if (tag === 'TABLE' || SKIP_TAGS.has(tag) || tag === 'IMG') return;
@@ -911,7 +928,12 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
     flushPendingInline();
   };
   walkTop(Array.from(body.childNodes));
-  const cleaned = paragraphs.filter((paragraph) => (paragraph.tables ?? []).length > 0 || paragraph.text !== '');
+  const blank = (paragraph: DocxClipboardParagraph) => (paragraph.tables ?? []).length === 0 && paragraph.text === '';
+  let first = 0;
+  let end = paragraphs.length;
+  while (first < end && blank(paragraphs[first]!)) first += 1;
+  while (end > first && blank(paragraphs[end - 1]!)) end -= 1;
+  const cleaned = paragraphs.slice(first, end);
   const hasRichContent = cleaned.some((paragraph) =>
     (paragraph.tables ?? []).length > 0 || paragraph.runs !== undefined ||
     paragraph.pStyle !== undefined || paragraph.list !== undefined);

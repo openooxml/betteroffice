@@ -538,8 +538,8 @@ describe('applyClipboardFragment', () => {
       formatRange: (range: { start: { offset: number }; end: { offset: number } }, delta: unknown) => {
         calls.push(`format:${range.start.offset}-${range.end.offset}:${JSON.stringify(delta)}`);
       },
-      setHyperlink: (range: { start: { offset: number }; end: { offset: number } }, link: { href: string }) => {
-        calls.push(`link:${range.start.offset}-${range.end.offset}:${link.href}`);
+      setHyperlink: (range: { start: { offset: number }; end: { offset: number } }, link: { href: string } | null) => {
+        calls.push(`link:${range.start.offset}-${range.end.offset}:${link?.href ?? 'none'}`);
       },
       applyParagraphStyle: (_range: unknown, styleId: string) => { calls.push(`style:${styleId}`); },
     } as unknown as ClipboardPasteEngine;
@@ -560,7 +560,9 @@ describe('applyClipboardFragment', () => {
     expect(calls).toEqual([
       'text:Bold ',
       'format:0-5:{"bold":true}',
+      'link:0-5:none',
       'text:link',
+      'format:5-9:{"bold":null}',
       'link:5-9:https://example.com',
       'style:Heading1',
     ]);

@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { useState } from 'react';
 import type { PasteFormattingOption } from '@betteroffice/docx/yrs';
-import { PasteOptionsControl } from './PasteOptionsControl';
+import { PasteOptionsControl, menuPlacement } from './PasteOptionsControl';
 import { usePasteOptions } from './usePasteOptions';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -131,4 +131,12 @@ test('scroll keeps the control and resize hides it', () => {
   expect(screen.getByRole('button', { name: 'Paste Options (Ctrl)' })).toBeTruthy();
   fireEvent(window, new Event('resize'));
   expect(screen.queryByRole('button', { name: 'Paste Options (Ctrl)' })).toBeNull();
+});
+
+test('the menu opens below the button and flips above it or shifts left at the viewport edges', () => {
+  const viewport = { width: 1000, height: 800 };
+  const menu = { width: 220, height: 110 };
+  expect(menuPlacement({ left: 100, top: 100, bottom: 124 }, menu, viewport)).toEqual({ left: 0, top: 28 });
+  expect(menuPlacement({ left: 100, top: 740, bottom: 764 }, menu, viewport)).toEqual({ left: 0, top: -114 });
+  expect(menuPlacement({ left: 900, top: 100, bottom: 124 }, menu, viewport)).toEqual({ left: -128, top: 28 });
 });

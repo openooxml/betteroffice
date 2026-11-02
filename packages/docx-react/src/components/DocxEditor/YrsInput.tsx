@@ -70,6 +70,7 @@ interface PasteRecord {
   range: YrsStoryRange;
   end: YrsLoc;
   version: string;
+  stored: YrsStoredFormatting | undefined;
 }
 
 
@@ -738,6 +739,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i]!;
             if (piece || (i === 0 && hasSelection)) {
+              const insertedAt = caret;
               if (i === 0 && hasSelection) {
                 const receipt = session.replaceRange(range, piece, suggestingAuthor());
                 if (receipt.range) caret = { story: receipt.range.story, ...receipt.range.end };
@@ -745,6 +747,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               } else {
                 const landed = session.insertText(caret, piece, suggestingAuthor()).range;
                 caret = landed ? { story: landed.story, ...landed.end } : { ...caret, offset: caret.offset + piece.length };
+              }
+              if (i === 0 && piece && record.stored) {
+                const typed: YrsStoryRange = {
+                  story: insertedAt.story,
+                  start: { paraId: insertedAt.paraId, offset: insertedAt.offset },
+                  end: { paraId: caret.paraId, offset: caret.offset },
+                };
+                if (record.stored.clear) session.clearFormatting(typed);
+                if (Object.keys(record.stored.delta).length > 0) session.formatRange(typed, record.stored.delta);
               }
             }
             if (i < pieces.length - 1) {
@@ -1896,6 +1907,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           }
           session.addUndoBoundary();
           let recorded: PasteRecord | null = null;
+          const stored = storedFormattingByParagraphRef.current.get(`${current.head.story}\u0000${current.head.paraId}`);
           try {
             const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
             session.setSelection(caret);
@@ -1907,6 +1919,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
                 range,
                 end: caret,
                 version: '',
+                stored,
               };
               pasteRecordRef.current = recorded;
               pastePendingAnchorRef.current = true;

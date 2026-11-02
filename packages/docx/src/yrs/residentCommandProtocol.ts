@@ -328,7 +328,7 @@ export interface DocxCommandPayloads {
   setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
   setTableProperties: DocxSelectionIntent & { op: 'patch'; patch: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }; expectVersion?: string };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
-  replacePasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
+  replacePasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment; plain?: true };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &
@@ -628,7 +628,7 @@ export interface DocxWorkerCommandState {
   /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
   remoteMerges?: { from: number; to: number };
   /** The range the latest paste replaced and the document version right after it; any later edit makes it stale. */
-  lastPaste?: { range: YrsStoryRange; version: string } | null;
+  lastPaste?: { range: YrsStoryRange; version: string; storedMarks: DocxStoredMarks | null } | null;
 }
 
 export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession,
