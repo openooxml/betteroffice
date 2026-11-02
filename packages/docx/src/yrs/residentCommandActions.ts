@@ -1303,13 +1303,23 @@ function applyPreparedDocxCommand(
       }
       pastedOver = structuredClone(last.range);
       pastedMarks = last.storedMarks;
-      const after = applyClipboardFragment(engine, last.range, command.payload.fragment, command.payload.suggesting);
-      caret(after);
-      if (command.payload.plain && pastedMarks && (after.paraId !== start.paraId || after.offset !== start.offset)) {
+      const { fragment, suggesting } = command.payload;
+      const [firstLine, ...laterLines] = fragment.paragraphs;
+      if (!command.payload.plain || !pastedMarks || !firstLine) {
+        caret(applyClipboardFragment(engine, last.range, fragment, suggesting));
+        break;
+      }
+      let after = applyClipboardFragment(engine, last.range, { paragraphs: [firstLine] }, suggesting);
+      if (after.paraId !== start.paraId || after.offset !== start.offset) {
         const typed = { story, start, end: { paraId: after.paraId, offset: after.offset } };
         if (pastedMarks.clear) engine.clearFormatting(typed);
         if (Object.keys(pastedMarks.delta).length) engine.formatRange(typed, pastedMarks.delta);
       }
+      if (laterLines.length > 0) {
+        const at = { paraId: after.paraId, offset: after.offset };
+        after = applyClipboardFragment(engine, { story: after.story, start: at, end: at }, { paragraphs: [{ text: '' }, ...laterLines] }, suggesting);
+      }
+      caret(after);
       break;
     }
     case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;

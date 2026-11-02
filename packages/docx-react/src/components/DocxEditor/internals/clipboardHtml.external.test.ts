@@ -229,3 +229,9 @@ test('non-breaking spaces at a run boundary are both kept', () => {
     ] }],
   });
 });
+
+test('private-use characters in pasted text are kept', () => {
+  expect(parseClipboardHtml('<b>A\uE000B</b>')).toEqual({
+    paragraphs: [{ text: 'A\uE000B', runs: [{ text: 'A\uE000B', format: { bold: true } }] }],
+  });
+});

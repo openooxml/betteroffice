@@ -453,8 +453,6 @@ function normalizeTextPart(part: string): string {
   return part.replace(/[ \n\r\f\v\u00a0\u2028\u2029]+/g, ' ');
 }
 
-const KEPT_SPACE = '\uE000';
-
 function textNodeText(node: Text): string {
   return node.data.split(NBSP).join(' ');
 }
@@ -738,11 +736,11 @@ function inlineParagraphs(
       });
       return;
     }
-    let text = raw.split(NBSP).join(KEPT_SPACE).split('\t').map(normalizeTextPart).join('\t');
+    let text = raw.split('\t').map(part => part.split(NBSP).map(normalizeTextPart).join(NBSP)).join('\t');
     if (runs.length === 0 || collapsibleEnd) text = text.replace(/^ +/, '');
     if (text === '') return;
     collapsibleEnd = text.endsWith(' ');
-    appendRun(text.split(KEPT_SPACE).join(' '), chain);
+    appendRun(text.split(NBSP).join(' '), chain);
   };
   const appendRun = (text: string, chain: Element[]) => {
     const state = blankInlineFormat();
