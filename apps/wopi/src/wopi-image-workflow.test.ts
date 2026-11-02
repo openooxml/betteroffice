@@ -65,7 +65,7 @@ const EXPECTED_PATHS = [
   ".github/workflows/wopi-image.yml",
 ];
 const RELEASE_CONTEXT_IF =
-  "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository))";
+  "github.repository == 'openooxml/betteroffice' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository))";
 const PUBLISH_IF =
   "${{ inputs.publish && " + RELEASE_CONTEXT_IF + " && vars.WOPI_IMAGE_PUBLISH == 'true' }}";
 const RELEASE_WOPI_IF =
@@ -151,6 +151,7 @@ describe("wopi-image workflow", () => {
     const workflow = loadWorkflow(wopiWorkflowPath);
     const publish = workflow.jobs.publish!;
     expect(publish.if).toBe(PUBLISH_IF);
+    expect(publish.if).toContain("github.repository == 'openooxml/betteroffice'");
     expect(publish.if).not.toContain("||");
     const builds = buildPushSteps(publish);
     expect(builds).toHaveLength(1);

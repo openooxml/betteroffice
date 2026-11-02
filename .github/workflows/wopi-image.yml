@@ -116,7 +116,7 @@ jobs:
 
   publish:
     name: Publish WOPI image
-    if: ${{ inputs.publish && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true' }}
+    if: ${{ inputs.publish && github.repository == 'openooxml/betteroffice' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true' }}
     environment: ghcr-wopi-image
     runs-on: ubuntu-latest
     timeout-minutes: 120
