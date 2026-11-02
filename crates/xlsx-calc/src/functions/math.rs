@@ -1548,13 +1548,20 @@ pub(crate) fn power(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-/// MOD(n, d) = n - d*INT(n/d); sign follows the divisor. d = 0 -> #DIV/0!.
+/// the quotient at which excel's MOD gives up with `#NUM!`: `n >= d *
+/// 1125900000000`, as measured in Excel 2010 and later (older versions
+/// stopped at 2^27).
+const MOD_QUOTIENT_LIMIT: f64 = 1_125_900_000_000.0;
+
+/// MOD(n, d) = n - d*INT(n/d); sign follows the divisor. d = 0 -> #DIV/0!,
+/// and a quotient of [`MOD_QUOTIENT_LIMIT`] or more is `#NUM!`.
 pub(crate) fn mod_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
     match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
         (Ok(_), Ok(0.0)) => err(ErrorValue::Div0),
+        (Ok(n), Ok(d)) if (n / d).abs() >= MOD_QUOTIENT_LIMIT => err(ErrorValue::Num),
         (Ok(n), Ok(d)) => num(n - d * (n / d).floor()),
         (Err(e), _) | (_, Err(e)) => err(e),
     }

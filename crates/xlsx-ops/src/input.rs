@@ -732,6 +732,34 @@ mod tests {
         assert!(state.formula.is_none());
     }
 
+    /// Excel 365 for Mac result: a literal of 1E+308 or more cannot be
+    /// entered, so such input never becomes a formula.
+    #[test]
+    fn literals_past_excels_range_never_become_formulas() {
+        let wb = wb_with(&[]);
+        for input in ["=AVERAGE(1E308,1E308)", "=1E+308*0"] {
+            for state in [
+                cell_state_for_input(input, &wb, SheetId(0)),
+                cell_state_for_input_no_eval(input),
+            ] {
+                assert_eq!(
+                    state.value,
+                    CellValue::Text {
+                        value: input.into()
+                    }
+                );
+                assert!(state.formula.is_none(), "{input}");
+            }
+        }
+        let state = cell_state_for_input("=9.99999999999999E+307", &wb, SheetId(0));
+        assert_eq!(
+            state.value,
+            CellValue::Number {
+                value: 9.999_999_999_999_99e307
+            }
+        );
+    }
+
     #[test]
     fn empty_input_clears() {
         let wb = wb_with(&[]);

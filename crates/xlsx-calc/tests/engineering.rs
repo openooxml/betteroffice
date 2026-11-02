@@ -369,7 +369,7 @@ fn complex_text_keeps_fifteen_significant_digits() {
     says("COMPLEX(2/3,-2/3)", "0.666666666666667-0.666666666666667i");
     says("COMPLEX(123456789012345,1)", "123456789012345+i");
     says("COMPLEX(1E+15,0)", "1E+15");
-    says("COMPLEX(1234567890123456,0)", "1.23456789012346E+15");
+    says("COMPLEX(1234567890123450+6,0)", "1.23456789012346E+15");
     says("COMPLEX(0.0001,0)", "0.0001");
     says("COMPLEX(0.000012345,0)", "1.2345E-05");
     says("COMPLEX(1E-300,2.5E+100)", "1E-300+2.5E+100i");
@@ -959,7 +959,7 @@ fn besseli_keeps_large_orders_and_arguments_in_range() {
 fn besselk_reaches_the_smallest_arguments() {
     // mpmath 30 digits
     close("BESSELK(1E-307,1)", 1e307, 1e-12);
-    close("BESSELK(1E-308,0)", 709.312_140_157_824_5, 1e-12);
+    close("BESSELK(1E-300*1E-8,0)", 709.312_140_157_824_5, 1e-12);
     close("BESSELK(1E-10,1)", 1e10, 1e-12);
 }
 
@@ -1011,14 +1011,18 @@ fn complex_logarithms_and_roots_take_the_largest_operands() {
     fails(&format!("IMABS({z})"), ErrorValue::Num);
 }
 
+/// Excel 365 for Mac result: BESSELK(1000,1000) is 0. excel's K_0 and K_1
+/// carry e^-x, so once that underflows every order does; while e^-x is a
+/// normal double the scaled recurrence keeps the digits.
 #[test]
-fn besselk_keeps_its_seeds_scaled_past_exp_underflow() {
+fn besselk_underflows_with_its_seeds_as_excel_does() {
+    exact("BESSELK(1000,1000)", 0.0);
+    exact("BESSELK(746,1000)", 0.0);
     // mpmath 30 digits
-    close("BESSELK(1000,1000)", 1.298_180_251_466_701e-233, 1e-12);
     close("BESSELK(700,3)", 4.699_871_529_146_931e-306, 1e-12);
     exact("BESSELK(1000,0)", 0.0);
     exact("BESSELK(1E200,0)", 0.0);
-    exact("BESSELK(1E308,5)", 0.0);
+    exact("BESSELK(1E307*10,5)", 0.0);
 }
 
 #[test]
@@ -1045,11 +1049,11 @@ fn engineering_functions_at_extreme_operands() {
     fails("IMPRODUCT(\"1E200i\",\"1E200i\")", ErrorValue::Num);
     says("IMEXP(-1000)", "0");
     fails("IMEXP(710)", ErrorValue::Num);
-    says("COMPLEX(1E308,-1E308)", "1E+308-1E+308i");
-    says("COMPLEX(-0,1E-308)", "1E-308i");
-    close("BESSELY(1E-308,0)", -451.562_133_204_836_2, 1e-12);
-    close("BESSELY(1E-308,1)", -6.366_197_723_675_814e307, 1e-12);
-    exact("BESSELJ(1E-308,0)", 1.0);
-    exact("BESSELI(1E-308,0)", 1.0);
+    says("COMPLEX(1E307*10,-1E307*10)", "1E+308-1E+308i");
+    says("COMPLEX(-0,1E-300*1E-8)", "1E-308i");
+    close("BESSELY(1E-300*1E-8,0)", -451.562_133_204_836_2, 1e-12);
+    close("BESSELY(1E-300*1E-8,1)", -6.366_197_723_675_814e307, 1e-12);
+    exact("BESSELJ(1E-300*1E-8,0)", 1.0);
+    exact("BESSELI(1E-300*1E-8,0)", 1.0);
     fails("BESSELI(1E200,0)", ErrorValue::Num);
 }
