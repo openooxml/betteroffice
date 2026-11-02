@@ -322,7 +322,25 @@ test('number format fill and padding characters count as painted characters', as
     op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
     numberFormat: { left: 0, width: 80, parts: [{ offset: 0, kind: 'fill', character: 'Ł' }] },
   } as TextCmd] });
-  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['7Ł']);
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['7#Ł']);
+});
+
+test('a partly failed remote load repaints for the slices it registered and retries only on a later paint', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  remoteLoads.mockImplementationOnce(async () => {
+    throw Object.assign(new Error('Some remote font slices failed to load'), { faces: [{ family: 'Tahoma', remote: 'Open Sans' }] });
+  });
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('AŁ'));
+  expect(repaint).toHaveBeenCalledTimes(1);
+  remoteLoads.mockImplementationOnce(async () => { throw Object.assign(new Error('Some remote font slices failed to load'), { faces: [] }); });
+  await painter.load(cell('AŁ'));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['AŁ', 'AŁ']);
+  expect(repaint).toHaveBeenCalledTimes(1);
 });
 
 test('a face the host registered under the family keeps the remote provider away', async () => {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   DEFAULT_REMOTE_FONT_PROVIDER, WORD_FAMILY_SUBSTITUTES, fetchRemoteFontRules, fetchRemoteFontSlices, loadRemoteFontFaces,
-  isRemoteFontFace, parseRemoteFontCss, remoteFontSlices, remoteFontStylesheetUrl, resolveWordFamilySubstitute, unicodeRangeIncludes,
+  RemoteFontLoadError, isRemoteFontFace, parseRemoteFontCss, remoteFontSlices, remoteFontStylesheetUrl, resolveWordFamilySubstitute, unicodeRangeIncludes,
 } from './remote';
 
 const BUNNY_CSS = `/* latin-ext */
@@ -487,6 +487,12 @@ describe('provider stylesheets', () => {
       expect(await latin).toHaveLength(1);
       expect(added.map((face) => face.descriptors.unicodeRange)).toEqual(['U+0000-00FF,U+0131,U+0152-0153']);
       expect(isRemoteFontFace(added[0] as unknown as FontFace)).toBe(true);
+      const mixed = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'ÄŁ' });
+      for (let wait = 0; wait < 100 && releases.length < 3; wait++) await new Promise((resolve) => setTimeout(resolve, 5));
+      releases[2]!();
+      const error = await mixed.then(() => null, (reason: unknown) => reason);
+      expect(error).toBeInstanceOf(RemoteFontLoadError);
+      expect((error as RemoteFontLoadError).faces).toEqual([]);
     } finally {
       globalThis.FontFace = original;
     }
