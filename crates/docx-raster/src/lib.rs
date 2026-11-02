@@ -23,7 +23,7 @@ use docx_layout::display_list::{
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin,
+    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LineCap, LineJoin,
     LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
     RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
@@ -2488,7 +2488,14 @@ struct ClipSurface {
     size: (u32, u32),
     pixmap: Option<Pixmap>,
     mask: Option<Mask>,
+    dirty: Option<IntRect>,
+    columns: Vec<u8>,
 }
+
+/// past this many pixels f32 pixel centers and the tiler's rect translations
+/// stop being exact, so a cropped composite could shift; such targets
+/// composite the whole surface.
+const F32_EXACT_PIXELS: u32 = 1 << 23;
 
 impl ClipSurface {
     /// The surface to allocate for a clip this size, or `None` to keep the one
@@ -2540,6 +2547,7 @@ impl ClipSurface {
                         .ok_or_else(|| "invalid clip mask size".to_string())?,
                 );
                 self.size = size;
+                self.dirty = None;
             }
             let mask = self
                 .mask
@@ -2562,18 +2570,72 @@ impl ClipSurface {
             .pixmap
             .as_mut()
             .ok_or_else(|| "clip surface is unavailable".to_string())?;
-        pixmap.fill(Color::TRANSPARENT);
+        if let Some(dirty) = self.dirty.take() {
+            clear(pixmap, dirty);
+        }
+        let whole = IntRect::from_xywh(0, 0, pixmap.width(), pixmap.height());
+        self.dirty = whole;
         let transform = Transform::from_translate(-(self.origin.0 as f32), -(self.origin.1 as f32));
         painter(pixmap, scratch, transform, self.mask.as_ref())?;
-        target.draw_pixmap(
-            self.origin.0,
-            self.origin.1,
-            pixmap.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
+        if target.width().max(target.height()) <= F32_EXACT_PIXELS {
+            self.dirty = painted_rect(pixmap, &mut self.columns);
+        }
+        let Some(dirty) = self.dirty else {
+            return Ok(());
+        };
+        let rect = Rect::from_xywh(
+            (dirty.x() + self.origin.0) as f32,
+            (dirty.y() + self.origin.1) as f32,
+            dirty.width() as f32,
+            dirty.height() as f32,
+        )
+        .ok_or_else(|| "invalid clip composite".to_string())?;
+        let paint = Paint {
+            shader: tiny_skia::Pattern::new(
+                pixmap.as_ref(),
+                SpreadMode::Pad,
+                FilterQuality::Nearest,
+                1.0,
+                Transform::from_translate(self.origin.0 as f32, self.origin.1 as f32),
+            ),
+            anti_alias: false,
+            ..Paint::default()
+        };
+        target.fill_rect(rect, &paint, Transform::identity(), None);
         Ok(())
+    }
+}
+
+/// the smallest rect holding every non-transparent pixel of `pixmap`. Only
+/// that part is composited and later cleared: the transparent rest would
+/// composite as a no-op.
+fn painted_rect(pixmap: &Pixmap, columns: &mut Vec<u8>) -> Option<IntRect> {
+    let stride = pixmap.width() as usize * 4;
+    columns.clear();
+    columns.resize(stride, 0);
+    let (mut top, mut bottom) = (None, 0);
+    for (y, row) in pixmap.data().chunks_exact(stride).enumerate() {
+        if row.iter().fold(0, |acc, &byte| acc | byte) == 0 {
+            continue;
+        }
+        top.get_or_insert(y);
+        bottom = y + 1;
+        for (column, &byte) in columns.iter_mut().zip(row) {
+            *column |= byte;
+        }
+    }
+    let top = top?;
+    let left = columns.iter().position(|&byte| byte != 0)? / 4;
+    let right = columns.iter().rposition(|&byte| byte != 0)? / 4 + 1;
+    IntRect::from_ltrb(left as i32, top as i32, right as i32, bottom as i32)
+}
+
+fn clear(pixmap: &mut Pixmap, rect: IntRect) {
+    let stride = pixmap.width() as usize * 4;
+    let (left, right) = (rect.left() as usize * 4, rect.right() as usize * 4);
+    let data = pixmap.data_mut();
+    for row in rect.top() as usize..rect.bottom() as usize {
+        data[row * stride + left..row * stride + right].fill(0);
     }
 }
 
@@ -2881,6 +2943,82 @@ mod tests {
             renderer.scratch.budget.scratch,
             400 * 560 * CLIP_BYTES_PER_PIXEL
         );
+    }
+
+    fn half_black(target: &mut Pixmap, x: f32, transform: Transform, mask: Option<&Mask>) {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(0, 0, 0, 128);
+        let rect = Rect::from_xywh(x, 2.0, 6.0, 6.0).expect("rect");
+        target.fill_rect(rect, &paint, transform, mask);
+    }
+
+    #[test]
+    fn a_shared_clip_composites_each_primitive_once() {
+        let mut glyphs = GlyphCache::default();
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(40, 20, &mut glyphs, &mut images);
+        let mut alone = Pixmap::new(40, 20).expect("page");
+        alone.fill(Color::WHITE);
+        let mut pixmap = alone.clone();
+        let mut surface = ClipSurface::default();
+        surface
+            .paint(
+                &mut alone,
+                clip(0.0, 0.0, 40.0, 20.0),
+                &mut renderer.scratch,
+                |t, _, tr, m| {
+                    half_black(t, 2.0, tr, m);
+                    Ok(())
+                },
+            )
+            .expect("clipped paint");
+        let mut surface = ClipSurface::default();
+        for x in [2.0, 20.0, 30.0] {
+            surface
+                .paint(
+                    &mut pixmap,
+                    clip(0.0, 0.0, 40.0, 20.0),
+                    &mut renderer.scratch,
+                    |t, _, tr, m| {
+                        half_black(t, x, tr, m);
+                        Ok(())
+                    },
+                )
+                .expect("clipped paint");
+        }
+        assert!(alone.pixel(4, 4).unwrap().red() < 255);
+        for x in [4, 22, 32] {
+            assert_eq!(pixmap.pixel(x, 4), alone.pixel(4, 4), "at {x}");
+        }
+    }
+
+    #[test]
+    fn a_failed_clipped_paint_leaves_no_residue_for_the_next() {
+        let mut glyphs = GlyphCache::default();
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(40, 20, &mut glyphs, &mut images);
+        let mut pixmap = Pixmap::new(40, 20).expect("page");
+        pixmap.fill(Color::WHITE);
+        let mut surface = ClipSurface::default();
+        let failed = surface.paint(
+            &mut pixmap,
+            clip(0.0, 0.0, 40.0, 20.0),
+            &mut renderer.scratch,
+            |t, _, tr, m| {
+                half_black(t, 2.0, tr, m);
+                Err("refused".to_string())
+            },
+        );
+        assert!(failed.is_err());
+        surface
+            .paint(
+                &mut pixmap,
+                clip(0.0, 0.0, 40.0, 20.0),
+                &mut renderer.scratch,
+                |_, _, _, _| Ok(()),
+            )
+            .expect("clipped paint");
+        assert_eq!(pixmap.pixel(4, 4).unwrap().red(), 255);
     }
 
     /// One entry past the byte budget evicts the least recently resolved

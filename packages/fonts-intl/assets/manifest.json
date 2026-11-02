@@ -1,0 +1,457 @@
+{
+  "format": 1,
+  "pack": "intl",
+  "version": "0.4.2",
+  "faces": [
+    {
+      "file": "NotoSansArmenian-Bold.ttf.zst",
+      "source": "NotoSansArmenian-Bold.ttf",
+      "family": "NotoSansArmenian",
+      "codec": "zstd",
+      "encodedLength": 8822,
+      "byteLength": 30784,
+      "sha256": "58e4529f7f44d1fcfbd5d81d446b656f1230267ebfa96f8006956f18fbe4bbe2",
+      "dict": "NotoSansArmenian-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansArmenian-Regular.ttf.zst",
+      "source": "NotoSansArmenian-Regular.ttf",
+      "family": "NotoSansArmenian",
+      "codec": "zstd",
+      "encodedLength": 15648,
+      "byteLength": 30752,
+      "sha256": "720df88c332417a235b4d6209d14ec2e2bf4bfe2a954b7453d869ea593bfce1e",
+      "dict": null
+    },
+    {
+      "file": "NotoSansBengali-Bold.ttf.zst",
+      "source": "NotoSansBengali-Bold.ttf",
+      "family": "NotoSansBengali",
+      "codec": "zstd",
+      "encodedLength": 44599,
+      "byteLength": 144828,
+      "sha256": "923c6a4c2eb618a57ed83f4bca855b4f5287b87906a4d9df40a2ffa8ebd8c2e8",
+      "dict": "NotoSansBengali-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansBengali-Regular.ttf.zst",
+      "source": "NotoSansBengali-Regular.ttf",
+      "family": "NotoSansBengali",
+      "codec": "zstd",
+      "encodedLength": 66348,
+      "byteLength": 143072,
+      "sha256": "b55c62ee531e3214da6c0701daecea89a52ba42db7d8206b92e6b51f397a3193",
+      "dict": null
+    },
+    {
+      "file": "NotoSansCherokee-Bold.ttf.zst",
+      "source": "NotoSansCherokee-Bold.ttf",
+      "family": "NotoSansCherokee",
+      "codec": "zstd",
+      "encodedLength": 41795,
+      "byteLength": 108548,
+      "sha256": "5d60c5479b6e9af2f9fa6ede6ebeba471dd8c391333bcca91c2f9d0903279c6c",
+      "dict": "NotoSansCherokee-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansCherokee-Regular.ttf.zst",
+      "source": "NotoSansCherokee-Regular.ttf",
+      "family": "NotoSansCherokee",
+      "codec": "zstd",
+      "encodedLength": 44913,
+      "byteLength": 94732,
+      "sha256": "c052352137ae8d283840a0e2991a675d47859d8fdbae5726d373d4f0d97a8c87",
+      "dict": null
+    },
+    {
+      "file": "NotoSansDevanagari-Bold.ttf.zst",
+      "source": "NotoSansDevanagari-Bold.ttf",
+      "family": "NotoSansDevanagari",
+      "codec": "zstd",
+      "encodedLength": 56006,
+      "byteLength": 250176,
+      "sha256": "6a09c8d797cfc803d32cdc731e809424d74cbaff59f503de34ade421a08e5bc2",
+      "dict": "NotoSansDevanagari-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansDevanagari-Regular.ttf.zst",
+      "source": "NotoSansDevanagari-Regular.ttf",
+      "family": "NotoSansDevanagari",
+      "codec": "zstd",
+      "encodedLength": 89070,
+      "byteLength": 243520,
+      "sha256": "4e3c66638958c3e2ab5d37f47a8deb89fffeb7be9985c665a519bbc7ba762313",
+      "dict": null
+    },
+    {
+      "file": "NotoSansEthiopic-Bold.ttf.zst",
+      "source": "NotoSansEthiopic-Bold.ttf",
+      "family": "NotoSansEthiopic",
+      "codec": "zstd",
+      "encodedLength": 61195,
+      "byteLength": 375172,
+      "sha256": "b45f16db963a94ccb6590b65d3b0e48f55cde011f7c0d4f3c00531e6b8500d6f",
+      "dict": "NotoSansEthiopic-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansEthiopic-Regular.ttf.zst",
+      "source": "NotoSansEthiopic-Regular.ttf",
+      "family": "NotoSansEthiopic",
+      "codec": "zstd",
+      "encodedLength": 119123,
+      "byteLength": 376804,
+      "sha256": "f6f7fc379db9438959a2b0527e7a2cf36ea9c84626d56ec444fff37fc24c3c10",
+      "dict": null
+    },
+    {
+      "file": "NotoSansGeorgian-Bold.ttf.zst",
+      "source": "NotoSansGeorgian-Bold.ttf",
+      "family": "NotoSansGeorgian",
+      "codec": "zstd",
+      "encodedLength": 18204,
+      "byteLength": 54748,
+      "sha256": "a7f6bc365b7c33372e9ff0b0422f35dad52df501a8fcd4e8766cefa430508693",
+      "dict": "NotoSansGeorgian-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansGeorgian-Regular.ttf.zst",
+      "source": "NotoSansGeorgian-Regular.ttf",
+      "family": "NotoSansGeorgian",
+      "codec": "zstd",
+      "encodedLength": 27389,
+      "byteLength": 52888,
+      "sha256": "d3e33254b09e7bb2c5cf0f17e554b80462056c5a107097f258d495168c3a9346",
+      "dict": null
+    },
+    {
+      "file": "NotoSansGujarati-Bold.ttf.zst",
+      "source": "NotoSansGujarati-Bold.ttf",
+      "family": "NotoSansGujarati",
+      "codec": "zstd",
+      "encodedLength": 44632,
+      "byteLength": 201032,
+      "sha256": "7c1da9cad53f83804a330bad413b015987f4b6520da54263b0e39b7b8736525b",
+      "dict": "NotoSansGujarati-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansGujarati-Regular.ttf.zst",
+      "source": "NotoSansGujarati-Regular.ttf",
+      "family": "NotoSansGujarati",
+      "codec": "zstd",
+      "encodedLength": 69158,
+      "byteLength": 200704,
+      "sha256": "9b5a7aaeeb649a2e75a49d8b006a1f87db1b61c0df3b001609f4e0725d88dbf6",
+      "dict": null
+    },
+    {
+      "file": "NotoSansGurmukhi-Bold.ttf.zst",
+      "source": "NotoSansGurmukhi-Bold.ttf",
+      "family": "NotoSansGurmukhi",
+      "codec": "zstd",
+      "encodedLength": 15855,
+      "byteLength": 55088,
+      "sha256": "4f1bb4b1a05a0ebe1520678132a9448fce8f1741552c5292d7df7a7786d2c956",
+      "dict": "NotoSansGurmukhi-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansGurmukhi-Regular.ttf.zst",
+      "source": "NotoSansGurmukhi-Regular.ttf",
+      "family": "NotoSansGurmukhi",
+      "codec": "zstd",
+      "encodedLength": 27099,
+      "byteLength": 55172,
+      "sha256": "658d0207da305a1411c539a8b0bbeda64d4146e54fb4827facddb890b6b90d74",
+      "dict": null
+    },
+    {
+      "file": "NotoSansKannada-Bold.ttf.zst",
+      "source": "NotoSansKannada-Bold.ttf",
+      "family": "NotoSansKannada",
+      "codec": "zstd",
+      "encodedLength": 42864,
+      "byteLength": 187208,
+      "sha256": "3db1507b3f856185fc7c00dc0addfd4797a8ea6955b86d1d21fa659cc9d5e849",
+      "dict": "NotoSansKannada-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansKannada-Regular.ttf.zst",
+      "source": "NotoSansKannada-Regular.ttf",
+      "family": "NotoSansKannada",
+      "codec": "zstd",
+      "encodedLength": 64931,
+      "byteLength": 182416,
+      "sha256": "9ad74dc64838c6855b96f671fc08e425a58921b9d0c71712ea79c328a27e6e38",
+      "dict": null
+    },
+    {
+      "file": "NotoSansKhmer-Bold.ttf.zst",
+      "source": "NotoSansKhmer-Bold.ttf",
+      "family": "NotoSansKhmer",
+      "codec": "zstd",
+      "encodedLength": 27171,
+      "byteLength": 113740,
+      "sha256": "17e5bb518c0ea3d998d42bf920d0771a79dc6f3c12c5d9f3c122c7e6c8ce3076",
+      "dict": "NotoSansKhmer-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansKhmer-Regular.ttf.zst",
+      "source": "NotoSansKhmer-Regular.ttf",
+      "family": "NotoSansKhmer",
+      "codec": "zstd",
+      "encodedLength": 42214,
+      "byteLength": 114576,
+      "sha256": "e66675f2082788f0511a714bef5a1748928294b38c8e286a96ea73a864b5e605",
+      "dict": null
+    },
+    {
+      "file": "NotoSansLao-Bold.ttf.zst",
+      "source": "NotoSansLao-Bold.ttf",
+      "family": "NotoSansLao",
+      "codec": "zstd",
+      "encodedLength": 10216,
+      "byteLength": 37252,
+      "sha256": "18e3bf1443320fa807f9b85a9971d2bc3efe28b41bb96f75fde2096acb316709",
+      "dict": "NotoSansLao-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansLao-Regular.ttf.zst",
+      "source": "NotoSansLao-Regular.ttf",
+      "family": "NotoSansLao",
+      "codec": "zstd",
+      "encodedLength": 17035,
+      "byteLength": 35884,
+      "sha256": "0a86e5e1ccfe34ca78c43fac6829dc751b42bcc469272a9a55325aae587bfbe7",
+      "dict": null
+    },
+    {
+      "file": "NotoSansLaoLooped-Bold.ttf.zst",
+      "source": "NotoSansLaoLooped-Bold.ttf",
+      "family": "NotoSansLaoLooped",
+      "codec": "zstd",
+      "encodedLength": 17272,
+      "byteLength": 56240,
+      "sha256": "b686a828bb3eac6cf426c4673666d79447142fb7841d870ed37c68a7608965d6",
+      "dict": "NotoSansLaoLooped-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansLaoLooped-Regular.ttf.zst",
+      "source": "NotoSansLaoLooped-Regular.ttf",
+      "family": "NotoSansLaoLooped",
+      "codec": "zstd",
+      "encodedLength": 26737,
+      "byteLength": 56300,
+      "sha256": "fb41283aee26c91b93f3df6c11229054bf64407c494c4ee874b536b1330a06c8",
+      "dict": null
+    },
+    {
+      "file": "NotoSansMalayalam-Bold.ttf.zst",
+      "source": "NotoSansMalayalam-Bold.ttf",
+      "family": "NotoSansMalayalam",
+      "codec": "zstd",
+      "encodedLength": 34189,
+      "byteLength": 118480,
+      "sha256": "d5c52d4fdf019feb21cdb748573308fa5fdd94a81d5bc71c603c076207039590",
+      "dict": "NotoSansMalayalam-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansMalayalam-Regular.ttf.zst",
+      "source": "NotoSansMalayalam-Regular.ttf",
+      "family": "NotoSansMalayalam",
+      "codec": "zstd",
+      "encodedLength": 50562,
+      "byteLength": 112936,
+      "sha256": "c08de7fa8d032a5d6a4d120fb82c78cec60b362a4e73fa26360d89759ff2a7f9",
+      "dict": null
+    },
+    {
+      "file": "NotoSansMongolian-Regular.ttf.zst",
+      "source": "NotoSansMongolian-Regular.ttf",
+      "family": "NotoSansMongolian",
+      "codec": "zstd",
+      "encodedLength": 99547,
+      "byteLength": 360756,
+      "sha256": "10f9066fe5cedcaa41c17d471bcadc7fb22880ce81ff2c06578671768ff44fbb",
+      "dict": null
+    },
+    {
+      "file": "NotoSansMyanmar-Bold.ttf.zst",
+      "source": "NotoSansMyanmar-Bold.ttf",
+      "family": "NotoSansMyanmar",
+      "codec": "zstd",
+      "encodedLength": 52073,
+      "byteLength": 208760,
+      "sha256": "99a8c6768416747653232ded39292e789ca579f4272adfb2886f6aa219d20302",
+      "dict": "NotoSansMyanmar-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansMyanmar-Regular.ttf.zst",
+      "source": "NotoSansMyanmar-Regular.ttf",
+      "family": "NotoSansMyanmar",
+      "codec": "zstd",
+      "encodedLength": 81274,
+      "byteLength": 195088,
+      "sha256": "fafce4db400bc0b214907ccdbfb0ad2f18a57bfefd08c8a571830b84088cf2fc",
+      "dict": null
+    },
+    {
+      "file": "NotoSansOriya-Bold.ttf.zst",
+      "source": "NotoSansOriya-Bold.ttf",
+      "family": "NotoSansOriya",
+      "codec": "zstd",
+      "encodedLength": 36105,
+      "byteLength": 130104,
+      "sha256": "1c575e8aba40d6baf200e8abac534e9517f431d38cc8131715643037eec149da",
+      "dict": "NotoSansOriya-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansOriya-Regular.ttf.zst",
+      "source": "NotoSansOriya-Regular.ttf",
+      "family": "NotoSansOriya",
+      "codec": "zstd",
+      "encodedLength": 49661,
+      "byteLength": 131216,
+      "sha256": "a16645d056017927406546aa78e4ce15e782fd8783467267b75450453d007415",
+      "dict": null
+    },
+    {
+      "file": "NotoSansSinhala-Bold.ttf.zst",
+      "source": "NotoSansSinhala-Bold.ttf",
+      "family": "NotoSansSinhala",
+      "codec": "zstd",
+      "encodedLength": 51450,
+      "byteLength": 192976,
+      "sha256": "e1f8867effb18940b02173a120641e526e5aaa8efc176870e62b2d49b1e6fd3f",
+      "dict": "NotoSansSinhala-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansSinhala-Regular.ttf.zst",
+      "source": "NotoSansSinhala-Regular.ttf",
+      "family": "NotoSansSinhala",
+      "codec": "zstd",
+      "encodedLength": 61235,
+      "byteLength": 154912,
+      "sha256": "9e32612d47004552f3125e78648a9e2e7899a216ccd3cefbb93a9b5f4c809feb",
+      "dict": null
+    },
+    {
+      "file": "NotoSansSyriac-Regular.ttf.zst",
+      "source": "NotoSansSyriac-Regular.ttf",
+      "family": "NotoSansSyriac",
+      "codec": "zstd",
+      "encodedLength": 29056,
+      "byteLength": 73796,
+      "sha256": "4440929bf1a47bb50179e8d8495641d208c63d607355e451f29ea2d3e5343290",
+      "dict": null
+    },
+    {
+      "file": "NotoSansTamil-Bold.ttf.zst",
+      "source": "NotoSansTamil-Bold.ttf",
+      "family": "NotoSansTamil",
+      "codec": "zstd",
+      "encodedLength": 22566,
+      "byteLength": 77176,
+      "sha256": "683682d585698b8b44da066d4903762d8aaa471bdffb919ac869753689ba3950",
+      "dict": "NotoSansTamil-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansTamil-Regular.ttf.zst",
+      "source": "NotoSansTamil-Regular.ttf",
+      "family": "NotoSansTamil",
+      "codec": "zstd",
+      "encodedLength": 34612,
+      "byteLength": 73992,
+      "sha256": "3c0a186feb3c63c7f6d63e1511dcdc144e745ae09b98e217c83f3e317974f6f9",
+      "dict": null
+    },
+    {
+      "file": "NotoSansTelugu-Bold.ttf.zst",
+      "source": "NotoSansTelugu-Bold.ttf",
+      "family": "NotoSansTelugu",
+      "codec": "zstd",
+      "encodedLength": 63586,
+      "byteLength": 243412,
+      "sha256": "ec98c4f82abfe52ebe00be298d39c469deb86cf027929987759ba1eab361fbb4",
+      "dict": "NotoSansTelugu-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansTelugu-Regular.ttf.zst",
+      "source": "NotoSansTelugu-Regular.ttf",
+      "family": "NotoSansTelugu",
+      "codec": "zstd",
+      "encodedLength": 80967,
+      "byteLength": 235176,
+      "sha256": "b274780b69d1d23fe84b55e809a152cb2ac5306d33864b1f87622f6971871aae",
+      "dict": null
+    },
+    {
+      "file": "NotoSansThaana-Bold.ttf.zst",
+      "source": "NotoSansThaana-Bold.ttf",
+      "family": "NotoSansThaana",
+      "codec": "zstd",
+      "encodedLength": 8975,
+      "byteLength": 27000,
+      "sha256": "476597290f449013cb07477b1089219db333c6af9ec0e436a74139ea9b2c8536",
+      "dict": "NotoSansThaana-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansThaana-Regular.ttf.zst",
+      "source": "NotoSansThaana-Regular.ttf",
+      "family": "NotoSansThaana",
+      "codec": "zstd",
+      "encodedLength": 14841,
+      "byteLength": 27308,
+      "sha256": "7543935bdcef770c9d3dd54222651b29040e5ec82f3bc58542392b2c7a9cbd3c",
+      "dict": null
+    },
+    {
+      "file": "NotoSansThai-Bold.ttf.zst",
+      "source": "NotoSansThai-Bold.ttf",
+      "family": "NotoSansThai",
+      "codec": "zstd",
+      "encodedLength": 10184,
+      "byteLength": 37824,
+      "sha256": "2ac6c6e8a478e23b15f76e4894af1fa2210f8f350e4e6e54aad530bec03efbfb",
+      "dict": "NotoSansThai-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansThai-Regular.ttf.zst",
+      "source": "NotoSansThai-Regular.ttf",
+      "family": "NotoSansThai",
+      "codec": "zstd",
+      "encodedLength": 18343,
+      "byteLength": 37780,
+      "sha256": "61cf814eec46b294d6ea4401ac295d0cecd5207bd2331dcc5a15e7301d30ee44",
+      "dict": null
+    },
+    {
+      "file": "NotoSansTifinagh-Regular.ttf.zst",
+      "source": "NotoSansTifinagh-Regular.ttf",
+      "family": "NotoSansTifinagh",
+      "codec": "zstd",
+      "encodedLength": 32867,
+      "byteLength": 79376,
+      "sha256": "8058054786bc572007193988654d1ded342bc2538c2d91c50d1a7238ea1a99cc",
+      "dict": null
+    },
+    {
+      "file": "NotoSerifTibetan-Bold.ttf.zst",
+      "source": "NotoSerifTibetan-Bold.ttf",
+      "family": "NotoSerifTibetan",
+      "codec": "zstd",
+      "encodedLength": 180961,
+      "byteLength": 602368,
+      "sha256": "1e8ca12dff8bf6adee21f5b0a6ba827fc2f9b3c515655983438371d1275e1d53",
+      "dict": "NotoSerifTibetan-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSerifTibetan-Regular.ttf.zst",
+      "source": "NotoSerifTibetan-Regular.ttf",
+      "family": "NotoSerifTibetan",
+      "codec": "zstd",
+      "encodedLength": 196887,
+      "byteLength": 609688,
+      "sha256": "ee97bf3dc56e813651db734c9f35f8f1d41e7e31acf5f7d893e64ad22b292446",
+      "dict": null
+    }
+  ]
+}

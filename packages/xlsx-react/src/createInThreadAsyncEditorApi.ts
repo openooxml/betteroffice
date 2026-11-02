@@ -1,4 +1,5 @@
-import { XlsxSaveRefusedError, type XlsxEditorApi } from './XlsxEditor';
+import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
+import type { XlsxEditorApi } from './XlsxEditor.types';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import { guardAsyncEditorApi } from './worker/guardAsyncEditorApi';
 import { XlsxCommandAdmissionError, xlsxCommandController } from './commands/createXlsxCommandStore';

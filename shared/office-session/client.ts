@@ -134,6 +134,7 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
       else {
         const error = new Error(message.error.message);
         error.name = message.error.name;
+        if (hasOwn(message.error, 'code')) Object.assign(error, { code: message.error.code });
         if (hasOwn(message.error, 'refusal')) {
           Object.assign(error, { refusal: message.error.refusal });
         }

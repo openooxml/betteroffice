@@ -13,8 +13,15 @@ license-files = [
   "NOTICE",
   "THIRD-PARTY-NOTICES.md",
   "licenses/Carlito-OFL.txt",
+  "licenses/BSD-3-Clause-Zstandard.txt",
+  "licenses/MIT-wuff.txt",
 ]
 requires-python = ">=3.9"
+dependencies = [
+  "betteroffice-fonts-latin==0.4.2",
+  "betteroffice-fonts-intl==0.4.2",
+  "betteroffice-fonts-cjk==0.4.2",
+]
 authors = [{ name = "OpenOOXML" }]
 keywords = [
   "xlsx",

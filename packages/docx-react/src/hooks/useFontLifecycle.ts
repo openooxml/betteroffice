@@ -4,6 +4,7 @@ import {
   type FontDefinition,
   type FontLoadScope,
 } from '@betteroffice/docx/utils';
+import { setHostedFontFamilies } from './hostedFonts';
 
 /**
  * The editor instance's font load scope: its loads notify only its own
@@ -11,8 +12,9 @@ import {
  * remount revives the scope its cleanup disposed before the effects declared
  * after this hook, such as document loads, run again.
  */
-export function useFontLoadScope(): FontLoadScope {
+export function useFontLoadScope(fonts?: ReadonlyArray<FontDefinition>): FontLoadScope {
   const [scope] = useState(createFontLoadScope);
+  setHostedFontFamilies(scope, fonts);
   useEffect(() => {
     const unsubscribe = scope.onFontsLoaded(() => {});
     return () => {

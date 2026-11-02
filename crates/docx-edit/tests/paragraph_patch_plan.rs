@@ -1618,6 +1618,66 @@ fn repeated_text_alignment_is_legacy() {
 }
 
 #[test]
+fn ambiguous_replacements_across_unmodeled_source_run_properties_are_legacy() {
+    for properties in [
+        [
+            r#"<w:lang w:val="fr-FR"/>"#,
+            r#"<w:lang w:val="de-DE" w:eastAsia="ja-JP"/>"#,
+            "",
+        ],
+        [r#"<w:bCs w:val="0"/>"#, "<w:bCs/>", r#"<w:bCs w:val="0"/>"#],
+        ["<w:bCs/>", "<w:bCs />", "<w:bCs/>"],
+    ] {
+        let content: String = ["aaaa", "bbbb", "cccc"]
+            .into_iter()
+            .zip(properties)
+            .map(|(text, properties)| {
+                let rpr = if properties.is_empty() {
+                    String::new()
+                } else {
+                    format!("<w:rPr>{properties}</w:rPr>")
+                };
+                format!("<w:r>{rpr}<w:t>{text}</w:t></w:r>")
+            })
+            .collect();
+        let doc = open(&content);
+        replace(&doc, 0, 1, "A");
+        replace(&doc, 11, 12, "C");
+        assert_ambiguous(&doc, "ambiguous: nonunique content alignment");
+    }
+}
+
+#[test]
+fn ambiguous_replacements_keep_identical_source_run_properties() {
+    let properties = r#"<w:rPr><w:lang w:val="fr-FR"/><w:bCs/></w:rPr>"#;
+    let content: String = ["aaaa", "bbbb", "cccc"]
+        .into_iter()
+        .map(|text| format!("<w:r>{properties}<w:t>{text}</w:t></w:r>"))
+        .collect();
+    let doc = open(&content);
+    replace(&doc, 0, 1, "A");
+    replace(&doc, 11, 12, "C");
+    let patch = patch(&doc);
+    assert_eq!(patch.text_edits.len(), 1);
+    assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (0, 12));
+    assert_eq!(patch.text_edits[0].insert[0].text, "AaaabbbbcccC");
+}
+
+#[test]
+fn ambiguous_replacements_within_one_source_run_keep_other_run_properties() {
+    let content = concat!(
+        r#"<w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr><w:t xml:space="preserve">Caption </w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:lang w:val="de-DE"/></w:rPr><w:t>tail</w:t></w:r>"#,
+    );
+    let doc = open(content);
+    replace(&doc, 0, 7, "Title");
+    let patch = patch(&doc);
+    assert_eq!(patch.text_edits.len(), 1);
+    assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (0, 7));
+    assert_eq!(patch.text_edits[0].insert[0].text, "Title");
+}
+
+#[test]
 fn successive_save_plans_keep_the_opening_seed() {
     let doc = open(&text("abc"));
     replace(&doc, 1, 2, "X");
@@ -2208,10 +2268,6 @@ fn concrete_paragraph_property_change_still_patches() {
 fn unsupported_source_structures_have_typed_reason_prefixes() {
     for (content, prefix) in [
         (
-            r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect style="width:20pt;height:10pt"/></w:pict></w:r>"#,
-            "drawing:",
-        ),
-        (
             r#"<w:sdt><w:sdtPr><w:id w:val="1"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>x</w:t></w:r></w:sdtContent></w:sdt>"#,
             "sdt:",
         ),
@@ -2232,4 +2288,20 @@ fn unsupported_source_structures_have_typed_reason_prefixes() {
         replace(&doc, 1, 2, "X");
         assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, prefix);
     }
+}
+
+#[test]
+fn text_beside_a_retained_drawing_has_a_precise_patch() {
+    let drawing = r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect style="width:20pt;height:10pt"/></w:pict></w:r>"#;
+    let content = format!("{}{drawing}", text("abc"));
+    let doc = open(&content);
+    replace(&doc, 1, 2, "X");
+    let plan = patch(&doc);
+    assert!(matches!(plan.seed.units.last(), Some(UnitV1::Atom { .. })));
+    let (xml, warnings) = save_paragraph(&doc, &content, |paragraph| {
+        paragraph["content"][0]["content"][0]["text"] = json!("aXc");
+    });
+    assert!(xml.contains(drawing));
+    assert!(xml.contains("aXc"));
+    assert!(warnings.is_empty());
 }

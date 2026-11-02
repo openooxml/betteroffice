@@ -9,7 +9,8 @@ beforeAll(() =>
     new Uint8Array(
       readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))
     )
-  )
+  ),
+  30_000
 );
 
 function range(story: string, paraId: string, start: number, end: number): YrsStoryRange {

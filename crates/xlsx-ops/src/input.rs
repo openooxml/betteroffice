@@ -1,8 +1,8 @@
 //! turning raw editor input into a `CellState`, classified the way excel does:
 //! leading `=` is a formula, leading `'` forces text, numbers/booleans coerce.
 
-use xlsx_calc::{EvalContext, evaluate, parse_formula};
-use xlsx_model::{CellProvider, CellValue, DateSystem, FormatCode, SheetId};
+use xlsx_calc::{EvalContext, evaluate, parse_formula, reads_other_workbook};
+use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, FormatCode, SheetId};
 
 use crate::op::CellState;
 
@@ -292,14 +292,27 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
             ..Default::default()
         },
         ParsedInput::Formula(text) => match parse_formula(&text) {
+            Ok(expr) if reads_other_workbook(&expr) => CellState {
+                formula: Some(text),
+                ..Default::default()
+            },
             Ok(expr) => {
                 let ctx = EvalContext::new(provider, sheet);
+                let value = evaluate(&expr, &ctx);
                 CellState {
-                    value: evaluate(&expr, &ctx),
+                    value: if ctx.read_other_workbook() {
+                        CellValue::Empty
+                    } else {
+                        value
+                    },
                     formula: Some(text),
                     ..Default::default()
                 }
             }
+            Err(_) if references_other_workbooks(&text) => CellState {
+                formula: Some(text),
+                ..Default::default()
+            },
             Err(_) => CellState {
                 value: CellValue::Text {
                     value: input.to_string(),
@@ -331,20 +344,149 @@ pub fn cell_state_from_parsed(input: &str, parsed: ParsedInput) -> CellState {
             value: CellValue::Text { value },
             ..Default::default()
         },
-        ParsedInput::Formula(text) => match parse_formula(&text) {
-            Ok(_) => CellState {
-                value: CellValue::Empty,
-                formula: Some(text),
-                ..Default::default()
+        ParsedInput::Formula(text) if is_formula_source(&text) => CellState {
+            value: CellValue::Empty,
+            formula: Some(text),
+            ..Default::default()
+        },
+        ParsedInput::Formula(_) => CellState {
+            value: CellValue::Text {
+                value: input.to_string(),
             },
-            Err(_) => CellState {
-                value: CellValue::Text {
-                    value: input.to_string(),
-                },
-                ..Default::default()
-            },
+            ..Default::default()
         },
     }
+}
+
+/// whether `source`, a formula without its leading `=`, is one a cell can store:
+/// it parses, or it parses once its references to other workbooks are read as
+/// local ones. the engine keeps whatever value such a formula last had, as it
+/// does for one read from a file, and never opens the other workbook.
+pub fn is_formula_source(source: &str) -> bool {
+    parse_formula(source).is_ok() || references_other_workbooks(source)
+}
+
+fn references_other_workbooks(source: &str) -> bool {
+    without_workbook_indices(source).is_some_and(|local| parse_formula(&local).is_ok())
+}
+
+/// `source` without the external workbook index of each `[1]Sheet1!A1` or
+/// `[1]!Name` reference, the form Excel stores them in; `None` when it has none
+/// or a string, quoted name or structured reference in it is left open.
+fn without_workbook_indices(source: &str) -> Option<String> {
+    let mut local = String::with_capacity(source.len());
+    let mut found = false;
+    let mut rest = source;
+    while let Some(c) = rest.chars().next() {
+        let taken = match c {
+            '"' | '\'' => quoted_len(rest)?,
+            '[' if local.ends_with(is_name_char) => table_spec_len(rest)?,
+            '[' if !local.ends_with(']') => match workbook_index(rest) {
+                Some(index) => {
+                    found = true;
+                    rest = &rest[index..];
+                    continue;
+                }
+                None => 1,
+            },
+            _ => c.len_utf8(),
+        };
+        local.push_str(&rest[..taken]);
+        rest = &rest[taken..];
+    }
+    found.then_some(local)
+}
+
+/// the length of the `"..."` string or `'...'` name that opens `text`, where a
+/// doubled quote stands for one.
+fn quoted_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let quote = bytes[0];
+    let mut at = 1;
+    while at < bytes.len() {
+        if bytes[at] == quote {
+            if bytes.get(at + 1) != Some(&quote) {
+                return Some(at + 1);
+            }
+            at += 1;
+        }
+        at += 1;
+    }
+    None
+}
+
+/// the length of the `[...]` after a table name, read the way the formula
+/// lexer reads a structured reference: one item, or a list of `[item]`s.
+fn table_spec_len(text: &str) -> Option<usize> {
+    let whitespace = [' ', '\t', '\n', '\r'];
+    let inner = &text[1..];
+    if !inner.trim_start_matches(whitespace).starts_with('[') {
+        return Some(1 + table_item_len(inner)?);
+    }
+    let mut at = 1;
+    loop {
+        let rest = &text[at..];
+        let item = rest.trim_start_matches(whitespace);
+        at += rest.len() - item.len();
+        match item.chars().next()? {
+            '[' => at += 1 + table_item_len(&item[1..])?,
+            ',' | ':' => at += 1,
+            ']' => return Some(at + 1),
+            _ => return None,
+        }
+    }
+}
+
+/// the length of a structured reference item through its closing `]`; `'`
+/// escapes the character after it.
+fn table_item_len(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            ']' => return Some(at + 1),
+            '\'' => {
+                chars.next()?;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// the length of the `[n]` that opens `text` when a sheet name and `!` follow
+/// it, or of `[n]!` when a whole workbook-level name follows: one that is no
+/// cell reference and no sheet name before `!` or `:`.
+fn workbook_index(text: &str) -> Option<usize> {
+    let digits = text[1..].bytes().take_while(u8::is_ascii_digit).count();
+    let close = 1 + digits;
+    if digits == 0 || text.as_bytes().get(close) != Some(&b']') {
+        return None;
+    }
+    let after = &text[close + 1..];
+    let sheet: usize = after
+        .chars()
+        .take_while(|&c| is_name_char(c))
+        .map(char::len_utf8)
+        .sum();
+    if sheet > 0 {
+        return after[sheet..].starts_with('!').then_some(close + 1);
+    }
+    let name = after.strip_prefix('!')?;
+    if !name.starts_with(|c: char| c.is_alphabetic() || matches!(c, '_' | '\\')) {
+        return None;
+    }
+    let len: usize = name
+        .chars()
+        .take_while(|&c| is_name_char(c) || c == '\\')
+        .map(char::len_utf8)
+        .sum();
+    let (token, next) = name.split_at(len);
+    (!next.starts_with(['!', ':']) && CellRef::parse_a1(&token.to_ascii_uppercase()).is_err())
+        .then_some(close + 2)
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '.')
 }
 
 #[cfg(test)]
@@ -362,6 +504,51 @@ mod tests {
         assert_eq!(parse_input("'=danger"), ParsedInput::Text("=danger".into()));
         assert_eq!(parse_input("-"), ParsedInput::Text("-".into()));
         assert_eq!(parse_input("3.14.15"), ParsedInput::Text("3.14.15".into()));
+    }
+
+    #[test]
+    fn external_workbook_references_are_formula_sources() {
+        for source in [
+            "[1]Sheet1!A1",
+            "[12]Sheet1!$A$1:$B$2*2",
+            "[1]!Rate",
+            "[1]!Table1[Amount]",
+            "SUM([1]Prices!B2:B4,[2]Sheet1!A1)",
+            "'[1]Other sheet'!C3",
+            "IF(A1,\"[x]\",[1]Sheet1!A1)",
+        ] {
+            assert!(is_formula_source(source), "{source}");
+        }
+        for source in [
+            "Table1[Col'#]+[1]Sheet1!A1",
+            "[1]!Table1[Col'#]+[1]Sheet1!A1",
+            "Table1[[#This Row],[Col'#]]+[1]Sheet1!A1",
+            "[1]!_Rate*2",
+        ] {
+            assert!(is_formula_source(source), "{source}");
+        }
+        for source in [
+            "[1]!123",
+            "[1]!\"hello\"",
+            "[1]!(1+2)",
+            "[1]!+A1",
+            "[1]!Sheet1!A1",
+            "[1]!Sheet1:Sheet2!A1",
+            "[1]!'My sheet'!A1",
+            "[1]!A1",
+            "[1]![2]Sheet1!A1",
+            "Table1[[1]!a]",
+            "Table1[ [1]Sheet1!A1]",
+            "[1]Sheet1!",
+            "[]Sheet1!A1",
+            "[x]Sheet1!A1",
+            "[1]Sheet1",
+            "A1[1]Sheet1!A1",
+            "\"[1]Sheet1!A1",
+            "SUM(",
+        ] {
+            assert!(!is_formula_source(source), "{source}");
+        }
     }
 
     #[test]
@@ -553,7 +740,7 @@ mod tests {
                 "15/1",
                 FormatCode::Custom("d/m/yyyy"),
                 DateSystem::V1904,
-                Some(43844.0)
+                Some(45306.0)
             ),
             (ParsedInput::Number(43844.0), None)
         );
@@ -694,6 +881,14 @@ mod tests {
     }
 
     #[test]
+    fn formula_entry_evaluates_in_the_workbook_date_system() {
+        let mut wb = wb_with(&[]);
+        wb.date_system = DateSystem::V1904;
+        let state = cell_state_for_input("=DATE(2026,11,1)", &wb, SheetId(0));
+        assert_eq!(state.value, CellValue::Number { value: 44865.0 });
+    }
+
+    #[test]
     fn currency_formula_entry_matches_recalc() {
         let mut wb = wb_with(&[]);
         wb.styles.num_fmts.push((164, "£0.00".into()));
@@ -712,6 +907,29 @@ mod tests {
     }
 
     #[test]
+    fn formulas_reading_another_workbook_enter_without_a_value() {
+        let mut wb = wb_with(&[]);
+        for (name, formula) in [("Rate", "'[1]Other sheet'!$C$3"), ("Chain", "Rate*2")] {
+            wb.defined_names.push(xlsx_model::DefinedName {
+                name: name.into(),
+                formula: formula.into(),
+                local_sheet: None,
+                hidden: false,
+            });
+        }
+        for input in [
+            "='[1]Other sheet'!C3*2",
+            "=[1]Sheet1!A1",
+            "=IFERROR('[1]Data'!A1,0)",
+            "=IFERROR(Chain,0)",
+        ] {
+            let state = cell_state_for_input(input, &wb, SheetId(0));
+            assert_eq!(state.value, CellValue::Empty, "{input}");
+            assert_eq!(state.formula.as_deref(), input.strip_prefix('='));
+        }
+    }
+
+    #[test]
     fn unparseable_formula_degrades_to_raw_text() {
         let wb = wb_with(&[]);
         let state = cell_state_for_input("=SUM(", &wb, SheetId(0));
@@ -722,6 +940,34 @@ mod tests {
             }
         );
         assert!(state.formula.is_none());
+    }
+
+    /// Excel 365 for Mac result: a literal of 1E+308 or more cannot be
+    /// entered, so such input never becomes a formula.
+    #[test]
+    fn literals_past_excels_range_never_become_formulas() {
+        let wb = wb_with(&[]);
+        for input in ["=AVERAGE(1E308,1E308)", "=1E+308*0"] {
+            for state in [
+                cell_state_for_input(input, &wb, SheetId(0)),
+                cell_state_for_input_no_eval(input),
+            ] {
+                assert_eq!(
+                    state.value,
+                    CellValue::Text {
+                        value: input.into()
+                    }
+                );
+                assert!(state.formula.is_none(), "{input}");
+            }
+        }
+        let state = cell_state_for_input("=9.99999999999999E+307", &wb, SheetId(0));
+        assert_eq!(
+            state.value,
+            CellValue::Number {
+                value: 9.999_999_999_999_99e307
+            }
+        );
     }
 
     #[test]

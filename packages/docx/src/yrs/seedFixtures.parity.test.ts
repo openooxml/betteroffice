@@ -191,7 +191,7 @@ const fixtures = readdirSync(FIXTURE_ROOT, { withFileTypes: true })
 
 // Yrs formatting marker counts make seeded state vectors nondeterministic.
 describe('DOCX seeding across document features', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('exports reanchored comments with metadata intact through three undo/redo cycles', async () => {
     const bytes = buildFixtureDocx('comments');

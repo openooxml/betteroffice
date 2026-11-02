@@ -80,8 +80,18 @@ interface PinnedAsset {
   references: number;
 }
 
-export function createCommandFrameImages() {
-  const images = browserFrameImages();
+interface SharedFrameImages {
+  media: ReadonlyMap<string, { bytes: Uint8Array; version: number }>;
+  assets: ReadonlyMap<string, PinnedAsset>;
+  disposed(): boolean;
+  releaseAsset(key: string, asset: PinnedAsset): void;
+}
+
+const sharedFrameImages = new WeakMap<object, SharedFrameImages>();
+
+export function createCommandFrameImages(options: { maxDimension?: number; reuse?: object } = {}) {
+  const images = browserFrameImages({ maxDimension: options.maxDimension });
+  const reused = options.reuse ? sharedFrameImages.get(options.reuse) : undefined;
   const pool: RasterPool = { canvases: [], disposed: false };
   const media = new Map<string, { bytes: Uint8Array; version: number }>();
   const assets = new Map<string, PinnedAsset>();
@@ -93,6 +103,16 @@ export function createCommandFrameImages() {
   const finish = () => { if (disposed && !frames.size) media.clear(); };
   const releaseAsset = (key: string, asset: PinnedAsset) => {
     if (--asset.references === 0) { assets.delete(key); asset.resolve.release(); }
+  };
+  const pinnedElsewhere = (id: string, bytes: Uint8Array) => {
+    if (!reused || reused.disposed()) return undefined;
+    const value = reused.media.get(id);
+    if (!value) return undefined;
+    const key = JSON.stringify([id, value.version]);
+    const asset = reused.assets.get(key);
+    if (!asset || !(value.bytes.buffer === bytes.buffer || (value.bytes.length === bytes.length &&
+      value.bytes.every((byte, index) => byte === bytes[index])))) return undefined;
+    return { asset, release: () => reused.releaseAsset(key, asset) };
   };
   const result = {
     pin(frame: PeerlessConfirmedFrame, supplied: PresentationCommandFrame['media'] = []): MediaLease {
@@ -108,20 +128,23 @@ export function createCommandFrameImages() {
         } else previous.bytes = bytes;
       }
       if (!entry) {
-        const heldAssets = new Map<string, { key: string; asset: PinnedAsset }>();
+        const heldAssets = new Map<string, { asset: PinnedAsset; release(): void }>();
         const versions = new Map<string, number>();
         for (const id of frameAssetIds(frame.displayList)) {
           const value = media.get(id);
           if (!value) continue;
           const key = JSON.stringify([id, value.version]);
           let asset = assets.get(key);
-          if (!asset) {
+          const shared = asset ? undefined : pinnedElsewhere(id, value.bytes);
+          if (shared) asset = shared.asset;
+          else if (!asset) {
             const resolve = images.resolve({ media: new Map([[key, value.bytes]]) });
             asset = { resolve, source: Promise.resolve(resolve(key)), references: 0 };
             assets.set(key, asset);
           }
-          asset.references += 1;
-          heldAssets.set(id, { key, asset });
+          const pinned = asset;
+          pinned.references += 1;
+          heldAssets.set(id, { asset: pinned, release: shared?.release ?? (() => releaseAsset(key, pinned)) });
           versions.set(id, value.version);
         }
         entry = { resolve: (id) => heldAssets.get(id)?.asset.source ?? null, versions,
@@ -135,11 +158,11 @@ export function createCommandFrameImages() {
               release() {
                 if (released) return;
                 released = true;
-                if (value) releaseAsset(value.key, value.asset);
+                value?.release();
               } };
           },
           release() {
-            for (const { key, asset } of heldAssets.values()) releaseAsset(key, asset);
+            for (const { release } of heldAssets.values()) release();
             heldAssets.clear();
           },
           references: 0 };
@@ -167,6 +190,7 @@ export function createCommandFrameImages() {
     },
   };
   rasterPools.set(result, pool);
+  sharedFrameImages.set(result, { media, assets, disposed: () => disposed, releaseAsset });
   return result;
 }
 

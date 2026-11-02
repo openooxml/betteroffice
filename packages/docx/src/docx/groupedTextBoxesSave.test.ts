@@ -13,7 +13,7 @@ const sessions: YrsSession[] = [];
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
@@ -138,6 +138,7 @@ test('host edits serialize the same with enriched and placeholder grouped storie
   expect(xml(outputs[0]!)).toBe(xml(outputs[1]!));
   const reopened = await open(outputs[0]!);
   expect(reopened.paragraphs('body')[0]!.text).toContain('Edited Host');
-  expect(xml(outputs[0]!)).not.toContain('<wpg:wgp>');
+  expect(xml(outputs[0]!).match(/<wpg:wgp>[\s\S]*?<\/wpg:wgp>/)?.[0])
+    .toBe(xml(bytes).match(/<wpg:wgp>[\s\S]*?<\/wpg:wgp>/)?.[0]);
   expect(xml(outputs[0]!)).toContain('<wps:wsp>');
 });

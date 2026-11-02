@@ -546,6 +546,40 @@ fn formulas_bypass_text_format_coercion_and_inputs_parse_before_formatting() {
     }
 }
 
+/// Excel 365 for Mac result: a formula holding a literal of 1E+308 or more
+/// cannot be entered, and Excel drops one from a file it opens; the largest
+/// literal it takes is 9.99999999999999E+307.
+#[test]
+fn formulas_with_literals_past_excels_range_never_become_formulas() {
+    let mut workbook = standalone();
+    for source in ["AVERAGE(1E308,1E308)", "1E+308", "-1.5E308*2"] {
+        let refusal = refused(
+            &mut workbook,
+            json!([{ "op": "setFormulas", "target": target("sheet:0", "E2"), "formulas": [[source]] }]),
+        );
+        assert_eq!(
+            refusal.failure.code,
+            EditFailureCode::InvalidStep,
+            "{source:?}"
+        );
+    }
+    applied(
+        &mut workbook,
+        json!([inputs("sheet:0", "H2", json!([["=AVERAGE(1E308,1E308)"]]))]),
+    );
+    assert!(!workbook.cell(SheetId(0), cell("H2")).unwrap().is_formula);
+    assert_eq!(value(&workbook, 0, "H2"), text("=AVERAGE(1E308,1E308)"));
+    applied(
+        &mut workbook,
+        json!([{ "op": "setFormulas", "target": target("sheet:0", "E2"), "formulas": [["9.99999999999999E+307"]] }]),
+    );
+    assert_eq!(value(&workbook, 0, "E2"), number(9.999_999_999_999_99e307));
+    let saved =
+        String::from_utf8(part(&workbook.save().unwrap(), "xl/worksheets/sheet1.xml")).unwrap();
+    assert!(!saved.contains("<f>AVERAGE"));
+    assert!(saved.contains("<f>9.99999999999999E+307</f>"));
+}
+
 #[test]
 fn formatting_composes_with_content_on_the_same_cells() {
     let mut workbook = standalone();

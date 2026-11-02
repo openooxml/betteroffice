@@ -12,6 +12,7 @@ pub(crate) struct LocalLowering {
     pub(crate) deferred: bool,
     pub(crate) legacy: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
+    pub(super) source_font_scheme: Option<docx_parse::ThemeFontScheme>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     pub(super) chunks: Option<Rc<SeedChunks>>,
     pub(super) run_size_sources: run_size_provenance::Sources,
@@ -673,6 +674,7 @@ impl LocalLowering {
         let source = doc.source_metadata();
         self.source
             .ptr_eq(&source.as_ref().map(Arc::downgrade).unwrap_or_default())
+            && self.source_font_scheme == source_font_theme(doc).map(|theme| theme.font_scheme)
     }
 
     pub(crate) fn offset(&self, paragraph: &str, raw: u32) -> Option<u32> {

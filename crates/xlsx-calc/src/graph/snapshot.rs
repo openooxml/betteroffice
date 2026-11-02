@@ -449,7 +449,7 @@ impl SnapshotGraphBuilder {
                     let bytes = admit(cell.formula.as_ref().map_or(1, String::len), max_bytes)?;
                     self.last_cell = Some((at.row, at.col));
                     if let Some(source) = &cell.formula
-                        && let Some(ast) = parse_cached(&self.graph.asts, source)
+                        && let Some(ast) = parse_cached(&self.graph.asts, formula_source(source))
                     {
                         let key = NodeKey::new(SheetId(self.index as u32), at);
                         let mut formula = Formula {

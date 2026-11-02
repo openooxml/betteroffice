@@ -1,3 +1,9 @@
-export function wasmAssetUrl(): URL {
-  return new URL('./generated/xlsx_wasm_bg.wasm', import.meta.url);
+export function wasmAssetUrl(png = true): URL {
+  return png
+    ? new URL('./generated/xlsx_wasm_bg.wasm', import.meta.url)
+    : new URL('./generated/xlsx_wasm_lean_bg.wasm', import.meta.url);
+}
+
+export function rasterWasmAssetUrl(): URL {
+  return new URL('./generated/raster/xlsx_raster_bg.wasm', import.meta.url);
 }

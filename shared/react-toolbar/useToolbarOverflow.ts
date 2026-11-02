@@ -220,7 +220,7 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
     };
     row.addEventListener('focusin', onFocusIn);
     window.addEventListener('resize', measure);
-    void document.fonts?.ready.then(measure, () => undefined);
+    void document.fonts?.ready?.then(measure, () => undefined);
     return () => {
       observer?.disconnect();
       mutations?.disconnect();

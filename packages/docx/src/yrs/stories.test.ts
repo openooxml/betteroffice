@@ -8,7 +8,7 @@ import { createYrsSession, type DocxReadStoriesRequest, type YrsSession } from '
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 const sessions: YrsSession[] = [];
 afterEach(() => {

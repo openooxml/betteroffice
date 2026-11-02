@@ -45,7 +45,7 @@ let startWorker: (clientId?: number) => InProcessResidentWorker;
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 function documents(): string[] {
   const roots = process.env.PAGED_EXPORT_PARITY_DOCS

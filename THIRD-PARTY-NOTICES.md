@@ -45,15 +45,15 @@ License: SIL Open Font License, Version 1.1
 
 ---
 
-## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`)
+## Bundled font binaries (`packages/fonts`, `packages/fonts-latin`, `packages/fonts-cjk`, `packages/fonts-intl`)
 
-Seventy-five font binaries are vendored unmodified and redistributed in the published
-`@betteroffice/fonts` and `@betteroffice/fonts-cjk` packages. All are licensed
+Font binaries are vendored and redistributed in the published
+`@betteroffice/fonts-latin`, `@betteroffice/fonts-cjk`, and `@betteroffice/fonts-intl` packages. All are licensed
 under the SIL Open Font License, Version 1.1. Each package ships the applicable
 license texts, with the copyright notices they cover, under its `LICENSES/`
 directory; those files are the authoritative copies for redistribution.
 
-`packages/fonts/assets` - 70 faces:
+`packages/fonts/assets` sources and `packages/fonts-latin/assets` pack - 70 faces:
 
 - **Carlito** (4 faces) — Copyright 2013 The Carlito Project Authors, with
   Reserved Font Name "Carlito". From google/fonts `ofl/carlito`; upstream
@@ -111,6 +111,11 @@ directory; those files are the authoritative copies for redistribution.
 
 Both are static `SubsetOTF` Regulars from
 https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.
+
+`packages/fonts-intl/assets` contains hinted static Noto coverage faces for
+international scripts, stored with lossless Zstandard compression. Sources:
+https://github.com/notofonts/notofonts.github.io. The decoded fonts retain
+their copyright notices. `LICENSES/OFL-Noto.txt` contains the OFL 1.1 text.
 
 ---
 
@@ -173,15 +178,34 @@ It is used only by tests.
 
 ## Zstandard decoder
 
-`vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
+`crates/betteroffice-fonts/vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
 `facebook/zstd` v1.5.7, https://github.com/facebook/zstd/releases/tag/v1.5.7.
-It is compiled into the internal `fontpack` crate and its standalone wasm decoder.
+It is compiled into the `betteroffice-fonts` crate for native targets, so the
+native engines, the native npm bindings and the Python wheels link it; wasm
+builds decode zstd with `ruzstd` instead.
 
 Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
-License: BSD-3-Clause (`vendor/zstd/LICENSE`). The same upstream notice is
-included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt` for decoder
-redistribution.
+License: BSD-3-Clause (`crates/betteroffice-fonts/vendor/zstd/LICENSE`). The same
+upstream notice is included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt`,
+in each native platform package and in each Python wheel.
+
+---
+
+## ruzstd and twox-hash
+
+Wasm builds of the font decoder, the standalone `fontpack.wasm` and the docx,
+pptx, xlsx and vsdx wasm engines, link `ruzstd` 0.9.1, a zstd decoder in Rust,
+https://github.com/KillingSpark/zstd-rs, and `twox-hash` 2 for its frame
+checksums, https://github.com/shepmaster/twox-hash.
+
+Copyright (c) 2019 Moritz Borcherding
+Copyright (c) 2015 Jake Goulding
+
+License: MIT. The unmodified upstream licences are included under
+`packages/fonts/LICENSES/MIT-ruzstd.txt` and
+`packages/fonts/LICENSES/MIT-twox-hash.txt`, and in the docx, pptx, xlsx and vsdx
+packages, for decoder redistribution.
 
 ---
 
@@ -207,4 +231,6 @@ Copyright (c) 2013-2017 by the WOFF2 Authors.
 Copyright (c) 2025 by Nico Burns.
 
 License: MIT. The unmodified upstream licence is included under
-`packages/fonts/LICENSES/MIT-wuff.txt` for decoder redistribution.
+`packages/fonts/LICENSES/MIT-wuff.txt`, in the docx, pptx, xlsx and vsdx packages,
+in each native platform package and in each Python wheel, which link it through
+`betteroffice-fonts`.

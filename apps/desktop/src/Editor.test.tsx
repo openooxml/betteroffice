@@ -52,7 +52,7 @@ const DocxEditorMock = forwardRef<unknown, DocxProps>(function DocxEditor(props,
   docxProps = props;
   useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
   useEffect(() => {
-    if (props.legacySyncApi) return;
+    if (props.legacySyncApi) { props.onFirstPagePainted(); return; }
     const client = new ResidentEngineWorkerClient();
     let current = true;
     void client.openSource({ bytes: props.documentBuffer }).then(() => {

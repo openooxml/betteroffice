@@ -207,7 +207,7 @@ for (const format of selectedFormats) {
         ? roots
         : // The commit channel renders with the fonts this checkout ships,
           // which the pinned CDN only carries once they are published.
-          { QUALITY_FONT_ASSETS: resolve('packages/fonts/assets') }),
+          { QUALITY_FONT_ASSETS: resolve('packages/fonts-latin/assets') }),
     });
     try {
       await measureSamples(

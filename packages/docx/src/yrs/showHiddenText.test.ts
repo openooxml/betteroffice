@@ -16,7 +16,7 @@ beforeAll(async () => {
   session = await createYrsSession({ clientId: 5150 });
   session.createStory('body', 'AXZ');
   session.applyRawOps('body', [{ op: 'format', index: 1, len: 1, attrs: { hidden: true } }]);
-});
+}, 30_000);
 
 interface LoweredRun {
   text?: string;

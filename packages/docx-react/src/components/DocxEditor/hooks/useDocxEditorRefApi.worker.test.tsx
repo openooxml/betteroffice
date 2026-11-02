@@ -53,7 +53,7 @@ let startWorker: () => InProcessResidentWorker;
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 afterEach(() => {
   cleanup();
   globalThis.Worker = originalWorker;

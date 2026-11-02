@@ -9,11 +9,15 @@ export default defineConfig((options) => ({
     worker: 'src/worker.ts',
     collaboration: 'src/collaboration/index.ts',
     xlsxSessionWorker: 'src/session/worker.ts',
+    'sessionWorker.browser': 'src/session/sessionWorker.browser.ts',
+    'sessionScope.browser': 'src/session/sessionScope.browser.ts',
+    'sessionWorker.node': 'src/session/sessionWorker.node.ts',
+    'sessionScope.node': 'src/session/sessionScope.node.ts',
   },
   format: ['esm'],
-  external: ['@betteroffice/xlsx-native'],
   dts: true,
   splitting: true,
+  external: ['#session-worker', '#session-scope'],
   sourcemap: false,
   clean: true,
   treeshake: true,
@@ -24,10 +28,22 @@ export default defineConfig((options) => ({
   onSuccess: async () => {
     const out = options.outDir ?? 'dist';
     await rename(join(out, 'xlsxSessionWorker.js'), join(out, 'xlsxSessionWorker.mjs'));
-    await mkdir('dist/generated', { recursive: true });
+    await mkdir(join(out, 'generated/raster'), { recursive: true });
     await copyFile(
       'src/wasm/generated/xlsx_wasm_bg.wasm',
-      'dist/generated/xlsx_wasm_bg.wasm'
+      join(out, 'generated/xlsx_wasm_bg.wasm')
+    );
+    await copyFile(
+      'src/wasm/generated/xlsx_wasm_lean_bg.wasm',
+      join(out, 'generated/xlsx_wasm_lean_bg.wasm')
+    );
+    await copyFile(
+      'src/wasm/generated/raster/xlsx_raster_bg.wasm',
+      join(out, 'generated/raster/xlsx_raster_bg.wasm')
+    );
+    await copyFile(
+      'src/wasm/generated/xlsx_wasm_lean_bg.wasm',
+      'dist/generated/xlsx_wasm_lean_bg.wasm'
     );
   },
 }));

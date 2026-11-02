@@ -11,8 +11,11 @@ const CHILD = 'XLSX_REMOTE_UPDATE_ORDER_TEST';
 
 async function isolated(name: string): Promise<boolean> {
   if (process.env[CHILD] === name) return false;
-  const child = Bun.spawn([process.execPath, 'test', import.meta.path, '-t', name], {
-    env: { ...process.env, [CHILD]: name }, stdout: 'pipe', stderr: 'pipe',
+  const { BUN_OPTIONS, ...env } = process.env;
+  const preload = (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testPreload')];
+  const options = typeof preload === 'string' ? ['--preload', preload] : [];
+  const child = Bun.spawn([process.execPath, 'test', ...options, import.meta.path, '-t', name], {
+    env: { ...env, [CHILD]: name }, stdout: 'pipe', stderr: 'pipe',
   });
   const deadline = setTimeout(() => child.kill(), 20_000);
   const [status, stdout, stderr] = await Promise.all([

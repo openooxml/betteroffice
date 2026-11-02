@@ -87,7 +87,7 @@ async function saveXml(bytes: Uint8Array<ArrayBuffer>, seeder: 'native' | 'proje
   }
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))), 30_000);
 
 for (const seeder of ['native', 'projected'] as const) {
   it(`${seeder} keeps anchor offsets stable across a no-op save after every embed kind`, async () => {

@@ -32,6 +32,7 @@
     "ariaLabel": "Панель інструментів форматування",
     "file": "Файл",
     "format": "Формат",
+    "layout": "Макет",
     "insert": "Вставлення",
     "open": "Відкрити",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Поточний"
     }
+  },
+  "layout": {
+    "margins": "Поля",
+    "normal": "Звичайні",
+    "narrow": "Вузькі",
+    "moderate": "Помірні",
+    "wide": "Широкі",
+    "customMargins": "Настроювані поля...",
+    "morePaperSizes": "Інші розміри паперу...",
+    "indent": "Відступ"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Одинарний",
     "double": "Подвійний",
     "lineSpacingTitle": "Міжрядковий інтервал: {label}",
-    "paragraphSpacing": "Інтервал між абзацами"
+    "paragraphSpacing": "Інтервал між абзацами",
+    "addBefore": "Додати інтервал перед абзацом",
+    "removeBefore": "Видалити інтервал перед абзацом",
+    "addAfter": "Додати інтервал після абзацу",
+    "removeAfter": "Видалити інтервал після абзацу",
+    "options": "Параметри міжрядкового інтервалу..."
   },
   "styles": {
     "selectAriaLabel": "Вибрати стиль абзацу",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Увімкнути або вимкнути закреслення",
         "subscript": "Нижній індекс",
         "subscriptDescription": "Увімкнути або вимкнути нижній індекс",
+        "clearFormatting": "Очистити форматування",
+        "clearFormattingDescription": "Очистити форматування тексту",
         "superscript": "Верхній індекс",
         "superscriptDescription": "Увімкнути або вимкнути верхній індекс",
         "alignLeft": "Вирівняти ліворуч",
@@ -478,6 +496,11 @@
       "top": "Зверху (px)",
       "width": "Ширина (px)",
       "height": "Висота (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Інтервал перед",
+      "after": "Інтервал після",
+      "multiple": "Множник"
     }
   },
   "comments": {
@@ -753,7 +776,11 @@
     "leftIndent": "Відступ зліва",
     "rightIndent": "Відступ справа",
     "topMargin": "Верхнє поле",
-    "bottomMargin": "Нижнє поле"
+    "bottomMargin": "Нижнє поле",
+    "leftMargin": "Ліве поле",
+    "rightMargin": "Праве поле",
+    "hangingIndent": "Виступ",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Друк",

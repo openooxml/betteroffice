@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CollaborationProvider, initWasm, openDiagram, type CollaborationUser, type VsdxFontFace } from "@betteroffice/vsdx";
+import { CollaborationProvider, decodeFontFace, initWasm, openDiagram, type CollaborationUser, type VsdxFontFace } from "@betteroffice/vsdx";
 import type { VsdxEditorApi } from "@betteroffice/vsdx-react";
 import { loadBundledFontBytes, resolveLastResortFace, resolveMetricCompatFace } from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
@@ -217,6 +217,9 @@ async function loadDiagram(): Promise<Uint8Array> {
 }
 
 async function loadDiagramFonts(): Promise<VsdxFontFace[]> {
+  const runtime = { decoder: decodeFontFace };
+  const initialization = initWasm();
+  void initialization.catch(() => {});
   const styles = [
     { bold: false, italic: false },
     { bold: true, italic: false },
@@ -228,7 +231,7 @@ async function loadDiagramFonts(): Promise<VsdxFontFace[]> {
       const face =
         resolveMetricCompatFace("Arial", bold, italic) ??
         resolveLastResortFace("Arial", bold, italic);
-      const bytes = await loadBundledFontBytes(face);
+      const bytes = await loadBundledFontBytes(face, undefined, runtime);
       return {
         family: "Arial",
         bold,

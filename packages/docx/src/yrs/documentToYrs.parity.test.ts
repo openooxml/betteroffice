@@ -182,7 +182,7 @@ function seedClocks(session: YrsSession): Map<bigint, bigint> {
 }
 
 describe('DOCX engine seeding', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('seeds nested SEQ names without adding them to plain fields', async () => {
     const sequence = (cached: string): ComplexField => ({

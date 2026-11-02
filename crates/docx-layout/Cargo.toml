@@ -16,7 +16,9 @@ name = "docx_layout"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+font-registration = []
 test-support = []
+wasm-query = []
 
 # wasm-pack runs a wasm-opt post-pass after rustc/LLVM codegen. Pin it to -O3
 # (speed) here so the layout wasm — the per-keystroke display-list hot path — is
@@ -28,6 +30,7 @@ wasm-opt = ['-O3']
 
 [dependencies]
 foldhash = { version = "0.2", default-features = false }
+libm.workspace = true
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-text.workspace = true
 wasm-bindgen = "0.2"
@@ -40,6 +43,7 @@ zmij = "1"
 js-sys = "0.3"
 
 [dev-dependencies]
+betteroffice-fonts.workspace = true
 # the glyph-run emission tests build an explicit FontStore (register the
 # Liberation fixture) and drive build_display_list_json_with_fonts directly
 ooxml-text.workspace = true

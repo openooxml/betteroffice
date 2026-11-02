@@ -16,7 +16,11 @@
     "noFallthroughCasesInSwitch": true,
     "declaration": true,
     "declarationMap": true,
-    "types": ["bun", "node"]
+    "types": ["bun", "node"],
+    "paths": {
+      "#session-worker": ["./src/session/sessionWorker.node.ts"],
+      "#session-scope": ["./src/session/sessionScope.node.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

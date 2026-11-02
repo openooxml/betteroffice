@@ -142,6 +142,11 @@ pub(super) fn write(
             #[cfg(test)]
             super::work::add(1);
             if cell.from >= edit.from && cell.to <= edit.to {
+                if cell.retained {
+                    return Err(Failure::structure(
+                        "marker: formatting touches retained content",
+                    ));
+                }
                 let mut attrs = unit_attrs(&cell.unit).clone();
                 apply_deltas(&mut attrs, &edit.deltas)?;
                 if attrs != edit.target {
@@ -253,7 +258,7 @@ pub(super) fn write(
             .collect();
         if covered
             .iter()
-            .any(|(_, cell)| !matches!(cell.unit, UnitV1::Text { .. }))
+            .any(|(_, cell)| cell.retained || !matches!(cell.unit, UnitV1::Text { .. }))
         {
             return Err(Failure::structure("text edit changes an atom"));
         }
@@ -265,6 +270,9 @@ pub(super) fn write(
             return Err(Failure::structure("hyperlink: text edit crosses a wrapper"));
         }
         let donor = choose_donor(lowered, edit, &covered)?;
+        if donor.is_some_and(|cell| cell.retained) {
+            return Err(Failure::structure("field: insertion uses retained content"));
+        }
         let units = edit
             .insert
             .iter()

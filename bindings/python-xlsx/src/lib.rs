@@ -10,10 +10,10 @@ use pyo3::types::{PyBool, PyBytes, PyInt};
 use python_common::{generated_client_id, map_io_error};
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellAddress, CellInput, CellRange, CellRef, CellValue, Error as CoreError,
-    HorizontalAlignment, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MutationResult,
-    NumberFormatMutation, Proposal, ProposalEditInput, ProposalRequest, RenderOptions, SheetId,
-    StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
+    CalculationOptions, CalculationResult, CellAddress, CellInput, CellRange, CellRef, CellValue,
+    Error as CoreError, HorizontalAlignment, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MutationResult, NumberFormatMutation, Proposal, ProposalEditInput, ProposalRequest,
+    RenderOptions, SheetId, StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
 };
 use pyo3::types::PyDict;
 
@@ -219,6 +219,30 @@ pub struct PyCalculation {
     cycles: usize,
     #[pyo3(get)]
     limited: usize,
+    /// `(address, functions)` for each formula cell the engine could not
+    /// compute, which keeps Excel's saved value.
+    #[pyo3(get)]
+    unevaluated: Vec<(String, Vec<String>)>,
+}
+
+impl PyCalculation {
+    fn from_core(workbook: &CoreWorkbook, result: &CalculationResult) -> Self {
+        Self {
+            changed: result.changed.len(),
+            cycles: result.cycle_cells.len(),
+            limited: result.limited_cells.len(),
+            unevaluated: result
+                .unevaluated_cells
+                .iter()
+                .map(|cell| {
+                    (
+                        workbook.format_address(cell.address),
+                        cell.functions.clone(),
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 #[pymethods]
@@ -457,11 +481,7 @@ impl PyWorkbook {
             self.inner
                 .recalculate_all(CalculationOptions { now_serial })
         });
-        PyCalculation {
-            changed: result.changed.len(),
-            cycles: result.cycle_cells.len(),
-            limited: result.limited_cells.len(),
-        }
+        PyCalculation::from_core(&self.inner, &result)
     }
 
     #[getter]
@@ -520,8 +540,14 @@ impl PyWorkbook {
     fn formula(&self, sheet: &Bound<'_, PyAny>, address: &str) -> PyResult<Option<String>> {
         let sheet = self.resolve_sheet(sheet)?;
         let cell = parse_cell(address)?;
-        let sheet = self.inner.sheet(sheet).map_err(map_error)?;
-        Ok(sheet.cell(cell).and_then(|found| found.formula.clone()))
+        let shown = self.inner.cell(sheet, cell).map_err(map_error)?;
+        Ok(shown.is_formula.then(|| {
+            shown
+                .input
+                .strip_prefix('=')
+                .unwrap_or(&shown.input)
+                .to_owned()
+        }))
     }
 
     /// Takes what a user would type; returns whether anything changed.
@@ -801,6 +827,89 @@ impl PyWorkbook {
         self.inner.version().to_string()
     }
 
+    fn cell_json(&self, sheet: &Bound<'_, PyAny>, row: u32, col: u32) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        self.inner
+            .cell_json(sheet, CellRef::new(row, col))
+            .map_err(map_error)
+    }
+
+    fn range_cells_json(&self, sheet: &Bound<'_, PyAny>, range: &str) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        let range = parse_range(range)?;
+        self.inner.range_cells_json(sheet, range).map_err(map_error)
+    }
+
+    fn sheet_info_json(&self) -> PyResult<String> {
+        self.inner.sheet_info_json().map_err(map_error)
+    }
+
+    fn sheet_info_for_json(&self, sheet: &Bound<'_, PyAny>) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        self.inner.sheet_info_for_json(sheet).map_err(map_error)
+    }
+
+    fn calculation_status_json(&self) -> PyResult<String> {
+        self.inner.calculation_status_json().map_err(map_error)
+    }
+
+    fn list_defined_names_json(&self, request: &str) -> PyResult<String> {
+        self.inner
+            .list_defined_names_json(request)
+            .map_err(map_error)
+    }
+
+    fn conditional_formats_json(&self, sheet: &Bound<'_, PyAny>) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        self.inner
+            .conditional_formats_json(sheet)
+            .map_err(map_error)
+    }
+
+    #[pyo3(signature = (query, *, case_sensitive = false, limit = None))]
+    fn search_text_json(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<u32>,
+    ) -> PyResult<String> {
+        self.inner
+            .search_text_json(query, case_sensitive, limit)
+            .map_err(map_error)
+    }
+
+    fn selection_formatting_json(&self, sheet: &Bound<'_, PyAny>, range: &str) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        let range = parse_range(range)?;
+        self.inner
+            .selection_formatting_json(sheet, range)
+            .map_err(map_error)
+    }
+
+    fn merged_range_list_json(&self, sheet: &Bound<'_, PyAny>, range: &str) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        let range = parse_range(range)?;
+        self.inner
+            .merged_range_list_json(sheet, range)
+            .map_err(map_error)
+    }
+
+    fn visible_merged_ranges_json(
+        &self,
+        sheet: &Bound<'_, PyAny>,
+        viewport: &str,
+    ) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        self.inner
+            .visible_merged_ranges_json(sheet, viewport)
+            .map_err(map_error)
+    }
+
+    fn charts_json(&self, sheet: &Bound<'_, PyAny>) -> PyResult<String> {
+        let sheet = self.resolve_sheet(sheet)?;
+        self.inner.charts_json(sheet).map_err(map_error)
+    }
+
     fn read_cells_json(&self, request: &str) -> PyResult<String> {
         self.inner.read_cells_json(request).map_err(map_error)
     }
@@ -861,12 +970,7 @@ impl PyWorkbook {
     }
 
     fn last_calculation(&self) -> PyCalculation {
-        let result = self.inner.last_calculation();
-        PyCalculation {
-            changed: result.changed.len(),
-            cycles: result.cycle_cells.len(),
-            limited: result.limited_cells.len(),
-        }
+        PyCalculation::from_core(&self.inner, self.inner.last_calculation())
     }
 
     /// Set a number format over a range. `format` is one of automatic, text,
@@ -1021,7 +1125,10 @@ fn render_xlsx_markdown_json(py: Python<'_>, content: &str, options: &str) -> Py
 
 #[pymodule]
 fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
+    module.add_function(wrap_pyfunction!(python_common::font_packs, module)?)?;
     let py = module.py();
+    python_common::install_font_packs(py)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyWorkbook>()?;
     module.add_class::<PyCellError>()?;

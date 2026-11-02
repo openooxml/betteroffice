@@ -43,8 +43,9 @@ import {
   type XlsxPluginEvent,
   type XlsxPluginGeometry,
 } from '../index';
+import { MOUNTED } from '../__fixtures__/mounted';
 
-const { act: realAct, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
+const { act: realAct, cleanup, fireEvent, render, renderHook, waitFor, within } = await import('@testing-library/react');
 
 const { act, settle, until, guard } = testScope(realAct);
 
@@ -103,6 +104,7 @@ function stubContext(): CanvasRenderingContext2D {
       render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture}
         onReady={(ready) => { calibration.push(ready); }} />);
     });
+    await waitFor(() => expect(calibration).toHaveLength(1), MOUNTED);
     const ready = last(calibration);
     if (!ready) throw new Error('Calibration editor did not become ready');
     await realAct(async () => {

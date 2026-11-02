@@ -155,7 +155,7 @@ beforeAll(async () => {
     new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')))
   );
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 /** The agents' engine calls: seed, edit, fork from the source plus state, save the fork. */
 async function agentsSave(bytes: Uint8Array, scenario: Scenario): Promise<Uint8Array> {

@@ -32,6 +32,7 @@
     "ariaLabel": "Thanh công cụ định dạng",
     "file": "Tệp",
     "format": "Định dạng",
+    "layout": "Bố cục",
     "insert": "Chèn",
     "open": "Mở",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Hiện tại"
     }
+  },
+  "layout": {
+    "margins": "Căn lề",
+    "normal": "Bình thường",
+    "narrow": "Hẹp",
+    "moderate": "Vừa phải",
+    "wide": "Rộng",
+    "customMargins": "Lề tùy chỉnh...",
+    "morePaperSizes": "Khổ giấy khác...",
+    "indent": "Thụt lề"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Đơn",
     "double": "Đôi",
     "lineSpacingTitle": "Giãn cách dòng: {label}",
-    "paragraphSpacing": "Giãn cách đoạn văn"
+    "paragraphSpacing": "Giãn cách đoạn văn",
+    "addBefore": "Thêm khoảng cách trước đoạn văn",
+    "removeBefore": "Xóa khoảng cách trước đoạn văn",
+    "addAfter": "Thêm khoảng cách sau đoạn văn",
+    "removeAfter": "Xóa khoảng cách sau đoạn văn",
+    "options": "Tùy chọn giãn dòng..."
   },
   "styles": {
     "selectAriaLabel": "Chọn kiểu đoạn văn",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Bật/tắt gạch ngang",
         "subscript": "Chỉ số dưới",
         "subscriptDescription": "Bật/tắt chỉ số dưới",
+        "clearFormatting": "Xóa mọi định dạng",
+        "clearFormattingDescription": "Xóa định dạng văn bản",
         "superscript": "Chỉ số trên",
         "superscriptDescription": "Bật/tắt chỉ số trên",
         "alignLeft": "Căn trái",
@@ -478,6 +496,11 @@
       "top": "Trên (px)",
       "width": "Chiều rộng (px)",
       "height": "Chiều cao (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Khoảng cách trước",
+      "after": "Khoảng cách sau",
+      "multiple": "Bội số"
     }
   },
   "comments": {
@@ -753,7 +776,11 @@
     "leftIndent": "Thụt lề trái",
     "rightIndent": "Thụt lề phải",
     "topMargin": "Lề trên",
-    "bottomMargin": "Lề dưới"
+    "bottomMargin": "Lề dưới",
+    "leftMargin": "Lề trái",
+    "rightMargin": "Lề phải",
+    "hangingIndent": "Thụt lề treo",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "In",

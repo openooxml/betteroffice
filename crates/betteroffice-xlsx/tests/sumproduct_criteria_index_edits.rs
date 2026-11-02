@@ -403,6 +403,20 @@ fn criteria_index_budget_refusal_does_not_poison_the_next_pass() {
     assert_fresh_dashboard_rows(&workbook, 60_000);
     let result = workbook.recalculate_all(CalculationOptions::default());
     assert!(result.budget_exhausted);
+    let status = workbook.calculation_status();
+    assert!(status.budget_exhausted);
+    assert_eq!(
+        status.limited_cells,
+        result
+            .limited_cells
+            .iter()
+            .map(|address| workbook.format_address(*address))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        serde_json::to_value(status).unwrap()["budgetExhausted"],
+        true
+    );
     assert!(
         result
             .limited_cells
@@ -432,6 +446,7 @@ fn criteria_index_budget_refusal_does_not_poison_the_next_pass() {
         .edit_cells(SheetId(0), &recovery, CalculationOptions::default())
         .unwrap();
     assert!(!workbook.last_calculation().budget_exhausted);
+    assert!(!workbook.calculation_status().budget_exhausted);
     assert!(workbook.last_calculation().limited_cells.is_empty());
     assert_fresh_dashboard_rows(&workbook, 60_000);
     edit(&mut workbook, 0, "A2", "a2");

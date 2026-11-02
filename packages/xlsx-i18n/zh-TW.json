@@ -135,6 +135,7 @@
       "unsupportedCommand": "尚不支援。",
       "invalidArguments": "此值無效。",
       "inputFailed": "先前的儲存格輸入無法儲存。",
+      "sheetProtected": "此儲存格位於受保護的工作表上。",
       "documentReplaced": "已開啟另一本活頁簿。",
       "targetChanged": "選取範圍已變更。",
       "gestureActive": "請先完成圖表移動。",

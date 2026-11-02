@@ -9,6 +9,7 @@ export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatti
 export { browserFrameImages } from './render/browserFrameImages';
 /** @experimental */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { preparePresentationFontDecoder } from './session/fontWorker';
 /** @experimental */
 export type {
   PptxWorkerEditorOptions, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
@@ -48,7 +49,7 @@ export type { PptxWorkerSession, PptxWorkerSessionOptions } from './session/comm
 /** @internal */
 export { presentationSharedInputs } from './session/commandSharedInput';
 /** @internal */
-export { CommandOutcomeUnknown, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
+export { CommandOutcomeUnknown, PptxResourceLimitError, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
 /** @internal */
 export { frameAssetIds } from './session/frame';
 /** @internal */

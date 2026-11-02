@@ -16,6 +16,8 @@ use crate::xml::ParseError;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct S13ParagraphIds {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_comment_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_edits: Option<super::section_patch::SectionEdits>,
     /// IDs of source paragraphs by part and occurrence, applied to the parts

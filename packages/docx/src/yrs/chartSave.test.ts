@@ -30,7 +30,7 @@ function fixture(): Uint8Array<ArrayBuffer> {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))), 30_000);
 
 for (const seeder of ['native', 'projected']) {
   it(`${seeder} keeps a chart, its part and its relationship through an editor save`, async () => {

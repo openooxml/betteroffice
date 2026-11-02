@@ -1111,7 +1111,7 @@ impl Inventory {
                 .into_iter()
                 .map(|(category, story)| (category, story, None)),
         );
-        roots.sort_by_key(|(category, _, _)| *category);
+        crate::sort::sort_by_key(&mut roots, &|(category, _, _)| *category);
         let mut ranges: HashMap<&str, std::ops::Range<usize>> = HashMap::new();
         for (category, story, alias_of) in &roots {
             let start = builder.records.len();
@@ -1166,7 +1166,7 @@ impl Inventory {
                     && !ownership.owns(story)
             })
             .collect();
-        unclassified.sort();
+        crate::sort::sort(&mut unclassified);
         let mut unclassified_controls = 0usize;
         for story in unclassified {
             let before = builder.records.len();
@@ -1279,7 +1279,7 @@ impl Inventory {
                 format!("{count} controls share control id {id:?} because their paragraphs share an id; writes cannot address them by id."),
             ));
         }
-        notes.sort_by(|left, right| left.message.cmp(&right.message));
+        crate::sort::sort_by(&mut notes, &|left, right| left.message.cmp(&right.message));
         for record in &builder.records {
             if active(record.payload.get("value"))
                 && is_text_type(&record.control.metadata.control_type)

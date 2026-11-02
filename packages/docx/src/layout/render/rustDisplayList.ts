@@ -361,47 +361,47 @@ export interface RustDisplayListQueryEngine {
 }
 
 let enginePromise: Promise<RustDisplayListEngine & RustDisplayListQueryEngine> | null = null;
-let loadedEngine: (RustDisplayListEngine & RustDisplayListQueryEngine) | null = null;
+let queryEnginePromise: Promise<RustDisplayListQueryEngine> | null = null;
+let loadedEngine: RustDisplayListQueryEngine | null = null;
 
 function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngine> {
   enginePromise ??= import('../wasm/index').then(async (m) => {
     await m.preloadLayoutWasm();
-    return (loadedEngine = {
-    buildDisplayListJson: m.buildDisplayListJson,
-    hitTestRegionsJson: m.hitTestRegionsJson,
-    verticalMoveJson: m.verticalMoveJson,
-    rangeRectsJson: m.rangeRectsJson,
-    rangeRectsOnPagesJson: m.rangeRectsOnPagesJson,
-    hasRangeRectsOnPages: m.hasRangeRectsOnPages,
-    rangeRectsRegionJson: m.rangeRectsRegionJson,
-    hasRangeRectsRegion: m.hasRangeRectsRegion,
-    hasDisplayListSession: m.hasDisplayListSession,
-    openDisplayList: m.openDisplayList,
-    closeDisplayList: m.closeDisplayList,
-    updateDisplayList: m.updateDisplayList,
-    hasDisplayListUpdate: m.hasDisplayListUpdate,
-    hitTestRegionsByHandle: m.hitTestRegionsByHandle,
-    verticalMoveByHandle: m.verticalMoveByHandle,
-    rangeRectsByHandle: m.rangeRectsByHandle,
-    rangeRectsOnPagesByHandle: m.rangeRectsOnPagesByHandle,
-    rangeRectsRegionByHandle: m.rangeRectsRegionByHandle,
-  });
+    return { ...(await loadRustDisplayListQueryEngine()), buildDisplayListJson: m.buildDisplayListJson };
   });
   return enginePromise;
+}
+
+/** Load synchronous display-list queries. */
+export function loadRustDisplayListQueryEngine(): Promise<RustDisplayListQueryEngine> {
+  queryEnginePromise ??= import('../wasm/index').then(async (m) => {
+    await m.preloadDisplayListQueryWasm();
+    return (loadedEngine = {
+      hitTestRegionsJson: m.hitTestRegionsJson,
+      verticalMoveJson: m.verticalMoveJson,
+      rangeRectsJson: m.rangeRectsJson,
+      rangeRectsOnPagesJson: m.rangeRectsOnPagesJson,
+      hasRangeRectsOnPages: m.hasRangeRectsOnPages,
+      rangeRectsRegionJson: m.rangeRectsRegionJson,
+      hasRangeRectsRegion: m.hasRangeRectsRegion,
+      hasDisplayListSession: m.hasDisplayListSession,
+      openDisplayList: m.openDisplayList,
+      closeDisplayList: m.closeDisplayList,
+      updateDisplayList: m.updateDisplayList,
+      hasDisplayListUpdate: m.hasDisplayListUpdate,
+      hitTestRegionsByHandle: m.hitTestRegionsByHandle,
+      verticalMoveByHandle: m.verticalMoveByHandle,
+      rangeRectsByHandle: m.rangeRectsByHandle,
+      rangeRectsOnPagesByHandle: m.rangeRectsOnPagesByHandle,
+      rangeRectsRegionByHandle: m.rangeRectsRegionByHandle,
+    });
+  });
+  return queryEnginePromise;
 }
 
 /** The wasm query surface once {@link loadRustDisplayListQueryEngine} has loaded it, else null. */
 export function loadedRustDisplayListQueryEngine(): RustDisplayListQueryEngine | null {
   return loadedEngine;
-}
-
-/**
- * Lazily load the wasm query surface (hit-test + range-rects). Shares the
- * module promise with `buildRustDisplayList`, so on the canvas-renderer path
- * the engine is already resolved by the time the first display list lands.
- */
-export function loadRustDisplayListQueryEngine(): Promise<RustDisplayListQueryEngine> {
-  return loadEngine();
 }
 
 /**

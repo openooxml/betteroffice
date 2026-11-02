@@ -76,7 +76,6 @@ impl Serialize for AnyJson<'_> {
     }
 }
 
-#[cfg(any(feature = "wasm", test))]
 pub(crate) fn segments_json(
     segments: Vec<StorySegment>,
 ) -> Result<Vec<serde_json::Value>, serde_json::Error> {

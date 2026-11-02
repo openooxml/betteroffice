@@ -9,7 +9,9 @@ import { createAsyncEditorApi, type XlsxAsyncEditorApi } from './createAsyncEdit
 import { XlsxAsyncApiSyncAccessError } from './asyncApiErrors';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { WorkerDraftController } from './WorkerDraftController';
-import { asError, editableWorkbookSessionBackend, XlsxWorkerSessionFailedError } from './useEditableSessionWorkbook';
+import { asError } from './asError';
+import { XlsxWorkerSessionFailedError } from './workerEditorErrors';
+import { editableWorkbookSessionBackend } from './workbookSessionBackend';
 import type { EditableSessionWorkbookProps, EditableWorkbookSessionOptions } from './useEditableSessionWorkbook';
 
 interface SessionWorkbookOptions {
@@ -330,7 +332,7 @@ export function usePeerlessSessionWorkbook(
     if (props.file) void (async () => {
       try {
         const session = await editableWorkbookSessionBackend.open(props.file!, {
-          signal: controller.signal,
+          signal: controller.signal, png: false,
           includeEditState: true,
           ...(collaboration ? { collaborative: true,
             clientId: collaborationClientId, initialUpdate: collaborationInitialUpdate?.slice() } : {}),

@@ -69,6 +69,7 @@ async function open(page: Page, file: string | Buffer) {
   });
   await expect(canvas(page)).toBeVisible();
   await expect(canvas(page)).toHaveAttribute('data-paint-source', 'worker');
+  await expect(canvas(page)).toHaveAttribute('data-default-fonts', 'settled');
   await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
   await expect(page.locator('.notice')).toHaveCount(0);
   await expect(page.getByTestId('xlsx-error')).toHaveCount(0);

@@ -1,0 +1,9 @@
+html, body, #root { height: 100%; margin: 0; }
+.wopi-shell { display: flex; flex-direction: column; height: 100%; font-family: system-ui, sans-serif; }
+.wopi-bar { display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid #ddd; font-size: 13px; }
+.wopi-name { font-weight: 600; }
+.wopi-status { color: #555; }
+.wopi-close { margin-left: auto; }
+.wopi-banner { padding: 8px 12px; background: #fff4d6; border-bottom: 1px solid #e5c86b; font-size: 13px; }
+.wopi-editor { flex: 1; min-height: 0; }
+.wopi-error { padding: 24px; font-family: system-ui, sans-serif; }

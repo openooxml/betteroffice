@@ -32,6 +32,7 @@ impl SnapshotError {
             "snapshot storage exceeds advance byte budget"
                 | "snapshot logical chunk exceeds advance byte budget"
                 | "snapshot calculation exceeds advance byte budget"
+                | "snapshot formula exceeds advance byte budget"
                 | "snapshot record exceeds advance byte budget"
                 | "snapshot stream exceeds advance record or byte budget"
                 | "snapshot model exceeds advance byte budget"

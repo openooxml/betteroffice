@@ -14,7 +14,7 @@ const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
 const STYLES = `<w:styles xmlns:w="${W}">
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>

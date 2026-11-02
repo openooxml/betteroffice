@@ -1,4 +1,5 @@
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { createSessionWorker } from '#session-worker';
 import {
   adoptPresentationPeerIdentity, initWasm, openPresentationPeerDeck,
   registerPresentationPeerFonts, type PresentationPeerHandle,
@@ -57,8 +58,7 @@ export function createPptxWorkerEditorSession(
   bytes: Uint8Array | ArrayBuffer, options: PptxWorkerEditorOptions = {}
 ): PptxWorkerEditorSession {
   preflight(options);
-  const transport = createWorkerTransport(options.worker ? options.worker() :
-    new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
+  const transport = createWorkerTransport(options.worker ? options.worker() : createSessionWorker());
   return createPresentationEditorSession(bytes, options, transport);
 }
 

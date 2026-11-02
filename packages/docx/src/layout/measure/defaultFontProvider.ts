@@ -1,24 +1,120 @@
-/** Opt-in bundled-font provider resolution. @packageDocumentation */
+/** Lazy default-font provider resolution. @packageDocumentation */
 
-import type { BundledFontProvider } from './fontRegistry';
+import type { BundledFontLoader, BundledFontProvider } from './fontRegistry';
+import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import { decodeFontFace } from '../../wasm/fontDecoder';
 
-/**
- * The slice of `@betteroffice/fonts` this module consumes. Structural on
- * purpose: the engine never names that package, so no bundler ever has to
- * resolve it.
- *
- * @public
- */
-export interface BundledFontModule {
-  createFontProvider(options?: { baseUrl?: string | URL }): BundledFontProvider;
+export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';
+
+export class ImplicitFontAbsentError extends Error {}
+
+const implicitProviders = new WeakSet<BundledFontProvider>();
+
+export function isImplicitFontProvider(provider: BundledFontProvider | undefined): boolean {
+  return provider !== undefined && implicitProviders.has(provider);
 }
 
-/**
- * How to obtain bundled fonts. Nothing is loaded until one of `fonts` or
- * `load` is given — the engine never reaches for a font package on its own.
- *
- * @public
- */
+const hostedFamiliesKey = Symbol.for('@betteroffice/docx/hostedFontFamilies');
+
+export function hostedFontFamilies(source: object | undefined): ReadonlySet<string> | undefined {
+  return (source as { [hostedFamiliesKey]?: ReadonlySet<string> } | undefined)?.[hostedFamiliesKey];
+}
+
+export function excludeHostedFontFamilies(
+  provider: BundledFontProvider | undefined,
+  families: ReadonlySet<string> | undefined
+): BundledFontProvider | undefined {
+  if (!provider || !isImplicitFontProvider(provider) || !families?.size) return provider;
+  const hosted = (family: string) => families.has(family.trim().toLowerCase());
+  const filtered: BundledFontProvider = {
+    ...provider,
+    resolve: (family, bold, italic) => hosted(family) ? undefined : provider.resolve(family, bold, italic),
+    resolveFamily: (family, bold, italic) => hosted(family) ? undefined : provider.resolveFamily?.(family, bold, italic),
+    resolveGlyphFallback: (family, bold, italic, office) => hosted(family) ? undefined : provider.resolveGlyphFallback?.(family, bold, italic, office),
+    resolveLastResort: (family, bold, italic, office) => hosted(family) ? undefined : provider.resolveLastResort?.(family, bold, italic, office),
+  };
+  implicitProviders.add(filtered);
+  return filtered;
+}
+
+function implicitFontProvider(
+  manager: typeof import('@betteroffice/fonts'),
+  runtime: { decoder?: FontDecoder }
+): BundledFontProvider {
+  const provider = manager.createFontProvider(undefined, runtime);
+  const providesFamily = (family: string) =>
+    manager.resolveMetricCompatFamily(family) !== undefined ||
+    manager.resolveBundledFamilyFace(family, false, false) !== undefined;
+  const checked = (
+    loader: BundledFontLoader | undefined,
+    face: import('@betteroffice/fonts').BundledFontFace | undefined
+  ): BundledFontLoader | undefined => {
+    if (!face) return undefined;
+    if (!loader || !face.script) return loader;
+    return Object.assign(async () => {
+      let bytes: ArrayBuffer;
+      try { bytes = await loader(); }
+      catch { throw new ImplicitFontAbsentError(face.family); }
+      if (bytes.byteLength !== face.byteLength) throw new ImplicitFontAbsentError(face.family);
+      return bytes;
+    }, loader);
+  };
+  const checkedFamilyFallback = (
+    loader: BundledFontLoader | undefined,
+    family: string,
+    bold: boolean,
+    italic: boolean
+  ): BundledFontLoader | undefined => {
+    const face = manager.resolveMetricCompatFace(family, bold, italic) ??
+      manager.resolveBundledFamilyFace(family, bold, italic) ??
+      manager.resolveBundledFamilyFace(family, false, false);
+    if (!loader || !face?.script) return loader;
+    const primary = checked(
+      provider.resolve(family, bold, italic) ?? provider.resolveFamily(family, bold, italic) ??
+        provider.resolveFamily(family, false, false),
+      face
+    );
+    return Object.assign(async () => {
+      if (!primary) throw new ImplicitFontAbsentError(face.family);
+      await primary();
+      return loader();
+    }, loader);
+  };
+  const implicit: BundledFontProvider = {
+    ...provider,
+    resolve: (family, bold, italic) => checked(
+      provider.resolve(family, bold, italic) ?? provider.resolveFamily(family, bold, italic),
+      manager.resolveMetricCompatFace(family, bold, italic) ?? manager.resolveBundledFamilyFace(family, bold, italic)
+    ),
+    resolveFamily: (family, bold, italic) => checked(
+      provider.resolveFamily(family, bold, italic), manager.resolveBundledFamilyFace(family, bold, italic)
+    ),
+    resolveScriptFallback: (script, bold, italic) => checked(
+      provider.resolveScriptFallback(script, bold, italic), manager.resolveScriptFallbackFace(script, bold, italic)
+    ),
+    resolveGlyphFallback: (family, bold, italic, office) => providesFamily(family) ? checkedFamilyFallback(
+      checked(
+        provider.resolveGlyphFallback?.(family, bold, italic, office),
+        manager.resolveGlyphFallbackFace(family, bold, italic, office)
+      ), family, bold, italic
+    ) : undefined,
+    resolveLastResort: (family, bold, italic, office) => providesFamily(family) ? checkedFamilyFallback(
+      checked(
+        provider.resolveLastResort(family, bold, italic, office),
+        manager.resolveLastResortFace(family, bold, italic, office)
+      ), family, bold, italic
+    ) : undefined,
+  };
+  implicitProviders.add(implicit);
+  return implicit;
+}
+
+/** The consumed font-manager contract. @public */
+export interface BundledFontModule {
+  createFontProvider(options?: { baseUrl?: string | URL }, runtime?: { decoder?: FontDecoder }): BundledFontProvider;
+}
+
+/** Override the lazy `@betteroffice/fonts` default. @public */
 export interface DefaultFontOptions {
   /** The imported `@betteroffice/fonts` module. */
   fonts?: BundledFontModule;
@@ -29,7 +125,8 @@ export interface DefaultFontOptions {
 }
 
 let options: DefaultFontOptions = {};
-let resolved: Promise<BundledFontProvider | undefined> | undefined;
+const engineRuntime = { decoder: decodeFontFace };
+let resolved = new WeakMap<object, Promise<BundledFontProvider | undefined>>();
 
 function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
   if (baseUrl === undefined) return undefined;
@@ -44,47 +141,50 @@ function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
   }
 }
 
-function hasFontSource(): boolean {
-  return options.fonts !== undefined || options.load !== undefined;
+/** Whether a default font source is available. */
+export function hasDefaultFontSource(): boolean {
+  return true;
 }
 
 /** Whether {@link configureDefaultFonts} was given a font source. */
-export function hasDefaultFontSource(): boolean {
-  return hasFontSource();
+export function hasConfiguredFontSource(): boolean {
+  return options.fonts !== undefined || options.load !== undefined;
 }
 
 /** Configure the default provider and reset its memoized resolution. @public */
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };
-  resolved = undefined;
-  if (options.baseUrl !== undefined && !hasFontSource()) {
-    console.warn(
-      '[configureDefaultFonts] a baseUrl on its own loads nothing — the face manifest lives in ' +
-        '@betteroffice/fonts. Pass the module too: configureDefaultFonts({ fonts, baseUrl }).'
-    );
-  }
+  resolved = new WeakMap();
 }
 
-async function load(): Promise<BundledFontProvider | undefined> {
+async function load(runtime: { decoder?: FontDecoder }): Promise<BundledFontProvider | undefined> {
   const { baseUrl, fonts, load: loader } = options;
   try {
-    const module = fonts ?? ((await loader!()) as BundledFontModule);
-    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl });
+    if (fonts === undefined && loader === undefined && baseUrl === undefined) {
+      return implicitFontProvider(await import('@betteroffice/fonts'), runtime);
+    }
+    const module = fonts ?? (
+      (loader ? await loader() : await import('@betteroffice/fonts')) as BundledFontModule
+    );
+    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, runtime);
   } catch (error) {
     console.warn('[configureDefaultFonts] the configured font source failed to load', error);
     return undefined;
   }
 }
 
-/** Resolve the configured provider, or `undefined` when no font source is set. @public */
-export function resolveDefaultFontProvider(): Promise<BundledFontProvider | undefined> {
-  if (!hasFontSource()) return Promise.resolve(undefined);
-  if (resolved === undefined) {
-    const promise = load();
+/** Resolve the default provider, or `undefined` after a retryable failure. @public */
+export function resolveDefaultFontProvider(
+  runtime: { decoder?: FontDecoder } = engineRuntime
+): Promise<BundledFontProvider | undefined> {
+  let pending = resolved.get(runtime);
+  if (pending === undefined) {
+    const promise = load(runtime);
     promise.then((provider) => {
-      if (provider === undefined && resolved === promise) resolved = undefined;
+      if (provider === undefined && resolved.get(runtime) === promise) resolved.delete(runtime);
     });
-    resolved = promise;
+    resolved.set(runtime, promise);
+    pending = promise;
   }
-  return resolved;
+  return pending;
 }

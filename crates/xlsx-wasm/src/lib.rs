@@ -2,7 +2,50 @@
 //! `Session` methods in `core.rs`.
 
 use wasm_bindgen::prelude::*;
-use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
+#[cfg(feature = "peer-snapshot")]
+use xlsx_engine::SnapshotBuilder;
+use xlsx_engine::{Document, EngineError, ErrorKind, Host};
+
+#[wasm_bindgen(typescript_custom_section)]
+const DECODED_FONT_FACE: &str =
+    r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
+
+/// Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+/// Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+/// The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+#[wasm_bindgen(js_name = decodeFontFace, unchecked_return_type = "DecodedFontFace")]
+pub fn decode_font_face(
+    bytes: &[u8],
+    codec: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "Uint8Array | null")] dict: Option<Vec<u8>>,
+    #[wasm_bindgen(js_name = maxOutput, unchecked_optional_param_type = "number | null")]
+    max_output: Option<f64>,
+) -> Result<JsValue, JsError> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(bytes, codec, dict.as_deref(), max_output)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &"font".into(),
+        &js_sys::Uint8Array::from(decoded.font.as_slice()),
+    )
+    .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    if let Some(payload) = decoded.payload {
+        js_sys::Reflect::set(
+            &object,
+            &"payload".into(),
+            &js_sys::Uint8Array::from(payload.as_slice()),
+        )
+        .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    }
+    Ok(object.into())
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "raster")))]
+#[used]
+#[unsafe(link_section = "betteroffice.xlsx.no-png")]
+static PNG_EXPORT_UNAVAILABLE: [u8; 1] = [1];
 
 /// days from the 1900 epoch to 1970-01-01, phantom-1900 leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
@@ -126,7 +169,13 @@ pub struct XlsxDocument {
 
 #[wasm_bindgen]
 pub struct XlsxSnapshotBuilder {
+    #[cfg(feature = "peer-snapshot")]
     inner: SnapshotBuilder,
+}
+
+#[cfg(not(feature = "peer-snapshot"))]
+fn peer_snapshot_unavailable() -> JsValue {
+    JsValue::from_str("peer snapshots not in this build")
 }
 
 #[wasm_bindgen]
@@ -134,23 +183,47 @@ impl XlsxSnapshotBuilder {
     #[wasm_bindgen(constructor)]
     pub fn new() -> XlsxSnapshotBuilder {
         Self {
+            #[cfg(feature = "peer-snapshot")]
             inner: SnapshotBuilder::new(wasm_host()),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
-        self.inner.push(chunk).map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner.push(chunk).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = chunk;
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     pub fn advance(&mut self, records: usize, bytes: usize) -> Result<bool, JsValue> {
-        self.inner.advance(records, bytes).map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner.advance(records, bytes).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (records, bytes);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     pub fn finish(self) -> Result<XlsxDocument, JsValue> {
-        self.inner
-            .finish()
-            .map(|inner| XlsxDocument { inner })
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .finish()
+                .map(|inner| XlsxDocument { inner })
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            Err(peer_snapshot_unavailable())
+        }
     }
 }
 
@@ -162,6 +235,7 @@ impl Default for XlsxSnapshotBuilder {
 
 #[wasm_bindgen]
 impl XlsxDocument {
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = recoveryCheckpoint)]
     pub fn recovery_checkpoint(
         &self,
@@ -173,6 +247,7 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = openRecoveryCheckpoint)]
     pub fn open_recovery_checkpoint(
         bytes: &[u8],
@@ -185,21 +260,37 @@ impl XlsxDocument {
 
     #[wasm_bindgen(js_name = beginPeerSnapshot)]
     pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), JsValue> {
-        self.inner
-            .begin_peer_snapshot(records, bytes)
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .begin_peer_snapshot(records, bytes)
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (records, bytes);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     #[wasm_bindgen(js_name = nextPeerSnapshotChunk)]
     pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
-        self.inner
-            .next_peer_snapshot_chunk()
-            .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .next_peer_snapshot_chunk()
+                .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     #[wasm_bindgen(js_name = endPeerSnapshot)]
     pub fn end_peer_snapshot(&mut self) {
+        #[cfg(feature = "peer-snapshot")]
         self.inner.end_peer_snapshot();
     }
 
@@ -223,9 +314,17 @@ impl XlsxDocument {
         bytes: &[u8],
         hydration: &str,
     ) -> Result<XlsxDocument, JsValue> {
-        Document::open_with_peer_hydration_json(bytes, hydration, wasm_host())
-            .map(|inner| XlsxDocument { inner })
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            Document::open_with_peer_hydration_json(bytes, hydration, wasm_host())
+                .map(|inner| XlsxDocument { inner })
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (bytes, hydration);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     /// open a workbook from raw `.xlsx` bytes.
@@ -357,20 +456,48 @@ impl XlsxDocument {
         self.inner.move_chart_json(args).map_err(map_engine_error)
     }
 
-    /// render the current sheet viewport to png bytes (raster feature only).
-    #[cfg(feature = "raster")]
-    #[wasm_bindgen(js_name = renderPng)]
-    pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, JsValue> {
+    #[wasm_bindgen(js_name = pngDisplayListJson)]
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {
         self.inner
-            .render_png(viewport_json)
+            .png_display_list_json(viewport_json)
             .map_err(map_engine_error)
     }
 
+    #[wasm_bindgen(js_name = rangePngDisplayListJson)]
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner
+            .range_png_display_list_json(args)
+            .map_err(map_engine_error)
+    }
+
+    /// render the current sheet viewport to png bytes (raster feature only).
+    #[wasm_bindgen(js_name = renderPng)]
+    pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, JsValue> {
+        #[cfg(feature = "raster")]
+        {
+            self.inner
+                .render_png(viewport_json)
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "raster"))]
+        {
+            let _ = viewport_json;
+            Err(JsValue::from_str("png export not in this build"))
+        }
+    }
+
     /// render an a1 range (default: used range) at an optional scale to png.
-    #[cfg(feature = "raster")]
     #[wasm_bindgen(js_name = renderRangePng)]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, JsValue> {
-        self.inner.render_range_png(args).map_err(map_engine_error)
+        #[cfg(feature = "raster")]
+        {
+            self.inner.render_range_png(args).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "raster"))]
+        {
+            let _ = args;
+            Err(JsValue::from_str("png export not in this build"))
+        }
     }
 
     /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
@@ -401,6 +528,12 @@ impl XlsxDocument {
     #[wasm_bindgen(js_name = cellRectJson)]
     pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
         self.inner.cell_rect_json(args).map_err(map_engine_error)
+    }
+
+    /// Recalculate every formula; the next save writes the recalculated values.
+    #[wasm_bindgen(js_name = recalculateJson)]
+    pub fn recalculate_json(&mut self) -> Result<String, JsValue> {
+        self.inner.recalculate_json().map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = calculationStatusJson)]

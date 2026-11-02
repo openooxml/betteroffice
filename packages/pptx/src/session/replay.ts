@@ -17,7 +17,7 @@ export type EditorPosition = { version: string; sequence: number };
 export type EditorBaseline = EditorPosition & {
   state: PresentationSessionState;
   hydration: string;
-  module: WebAssembly.Module;
+  module: WebAssembly.Module | undefined;
 };
 export type EditorReplayReply = PresentationReplayReply & { projection: PresentationSessionState };
 export type PresentationEditorMethods = {

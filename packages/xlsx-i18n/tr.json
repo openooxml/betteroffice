@@ -135,6 +135,7 @@
       "unsupportedCommand": "Henüz desteklenmiyor.",
       "invalidArguments": "Bu değer geçerli değil.",
       "inputFailed": "Bundan önceki hücre girişi kaydedilemedi.",
+      "sheetProtected": "Bu hücre korumalı bir sayfada.",
       "documentReplaced": "Başka bir çalışma kitabı açıldı.",
       "targetChanged": "Seçim değişti.",
       "gestureActive": "Önce grafiği taşımayı bitirin.",

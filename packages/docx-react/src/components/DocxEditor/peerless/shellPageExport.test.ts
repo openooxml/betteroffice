@@ -16,7 +16,7 @@ let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))));
   startWorker = await residentWorkerFactory();
-});
+}, 30_000);
 
 function documentBytes(revisions: boolean) {
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';

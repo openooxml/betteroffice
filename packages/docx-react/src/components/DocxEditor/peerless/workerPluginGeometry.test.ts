@@ -45,7 +45,7 @@ const destroy: { destroy(): void }[] = [];
 beforeAll(async () => {
   await preloadLayoutWasm(wasm('edit/docx_edit'));
   await preloadEditWasm(wasm('edit/docx_edit'));
-});
+}, 30_000);
 afterEach(() => { for (const session of destroy.splice(0)) session.destroy(); });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 

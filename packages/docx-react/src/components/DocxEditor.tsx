@@ -11,7 +11,7 @@
 
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import type { Document, Theme } from '@betteroffice/docx/types/document';
+import type { Document, SectionProperties, Theme } from '@betteroffice/docx/types/document';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -98,6 +98,7 @@ import {
   type DocxMemoryPressure,
   type DocxMemoryStats,
 } from './DocxEditor/memoryStats';
+import type { ParagraphSpacingData } from './dialogs/ParagraphSpacingDialog';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
@@ -172,6 +173,7 @@ import { clampZoom } from '../commands/evaluate';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
+import { hostedFontProvider } from '../hooks/hostedFonts';
 import { useTableSelection } from '../hooks/useTableSelection';
 import { useDocumentHistory } from '../hooks/useHistory';
 
@@ -484,10 +486,10 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Translation overrides. Import a locale JSON file and pass it directly. */
   i18n?: Translations;
   /**
-   * Font provider for this editor, overriding whatever `configureDefaultFonts`
-   * set globally. With neither, measurement falls back to the browser and may
-   * not paginate like Word. Call `configureDefaultFonts` before editors load;
-   * existing registries retain their provider, so it is not per editor or tenant.
+   * Font provider for this editor, overriding the `configureDefaultFonts`
+   * source and the default fonts manager. Call `configureDefaultFonts` before
+   * editors load; existing registries retain their provider, so it is not per
+   * editor or tenant.
    */
   measurementFontProvider?: BundledFontProvider;
 }
@@ -869,10 +871,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   ref
 ) {
   const props = useDocxFileAliases(aliasedProps);
+  const hostedFamilies = props.fonts?.map(font => font.family.trim().toLowerCase()).sort().join('\n') ?? '';
+  const measurementFontProvider = useMemo(
+    () => hostedFontProvider(props.measurementFontProvider, hostedFamilies ? props.fonts : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.measurementFontProvider, hostedFamilies]
+  );
   const choice = useDocxEditorRoute(props);
   if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
-  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;
-  return <LegacyDocxEditor key={choice.route} {...props} ref={ref} />;
+  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
+  return <LegacyDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
 });
 
 function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className' | 'style'>) {
@@ -1020,7 +1028,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
-  const fontScope = useFontLoadScope();
+  const fontScope = useFontLoadScope(fonts);
 
   const {
     comments,
@@ -1490,6 +1498,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     setState((prev) => ({ ...prev, zoom }));
   }, []);
 
+  const [paragraphSpacingDialog, setParagraphSpacingDialog] = useState<ParagraphSpacingData | null>(null);
   const commands = useDocxCommandBinding({
     experimentalWorkerOpen: workerOpen,
     pagedEditorRef,
@@ -1535,6 +1544,11 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
         imageDialogTarget(image, commandBridgeRef.current?.imageHandle(image.pos) ?? null)
       );
       setImagePropsOpen(true);
+    },
+    openParagraphSpacing: () => {
+      const spacing = commandController.store.getState('paragraphSpacing').value;
+      setParagraphSpacingDialog({ before: spacing?.before ?? 0, after: spacing?.after ?? 0,
+        lineSpacing: commandController.store.getState('lineSpacing').value ?? 240 });
     },
     openPageSetup: () => handleOpenPageSetup(),
     openWatermark: () => handleOpenWatermark(),
@@ -1933,6 +1947,12 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   });
   const dialogApply = useRef({ pageSetup: handlePageSetupApply, watermark: handleWatermarkApply });
   dialogApply.current = { pageSetup: handlePageSetupApply, watermark: handleWatermarkApply };
+  const applyPageSetup = useCallback((properties: Partial<SectionProperties>) => {
+    void commands.complete('pageSetup', () => {
+      dialogApply.current.pageSetup(properties);
+      return commandOutcome(true);
+    });
+  }, [commands]);
 
   const { scrollPageInfo, setScrollPageInfo, readCurrentPage } = useScrollPageInfo({
     scrollContainerRef,
@@ -2536,8 +2556,19 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   };
 
   const chromeContext = useMemo<EditorChrome>(
-    () => ({ showZoomControl, toolbarExtra }),
-    [showZoomControl, toolbarExtra]
+    () => ({
+      showZoomControl,
+      toolbarExtra,
+      pageLayout: {
+        currentProps: history.state?.package.document?.finalSectionProperties,
+        unit: rulerUnit,
+        onApply: (properties) => {
+          commands.open('pageSetup');
+          applyPageSetup(properties);
+        },
+      },
+    }),
+    [showZoomControl, toolbarExtra, history.state, rulerUnit, commands, applyPageSetup]
   );
   const chrome = !showToolbar ? null : toolbar !== undefined ? (
     toolbar !== null && (
@@ -2891,14 +2922,16 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
             onImagePropsClose={() => setImagePropsOpen(false)}
             onApplyImageProperties={handleApplyImageProperties}
             pmImageContext={imageTarget}
-            showPageSetup={showPageSetup}
-            onPageSetupClose={() => setShowPageSetup(false)}
-            onPageSetupApply={(properties) => {
-              void commands.complete('pageSetup', () => {
-                dialogApply.current.pageSetup(properties);
-                return commandOutcome(true);
-              });
+            paragraphSpacing={paragraphSpacingDialog}
+            onParagraphSpacingClose={() => setParagraphSpacingDialog(null)}
+            onParagraphSpacingApply={(spacing) => {
+              void commands.complete('paragraphSpacingDialog', () =>
+                commandOutcome(commandBridgeRef.current?.format({ type: 'paragraphSpacing', ...spacing }) ?? false));
             }}
+            showPageSetup={showPageSetup}
+            pageSetupUnit={rulerUnit}
+            onPageSetupClose={() => setShowPageSetup(false)}
+            onPageSetupApply={applyPageSetup}
             showWatermark={showWatermark}
             onWatermarkClose={() => setShowWatermark(false)}
             onWatermarkApply={(watermark) => {

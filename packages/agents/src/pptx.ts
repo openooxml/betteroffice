@@ -1,6 +1,6 @@
 import { imageSize } from 'image-size';
 import { pptxBatchSchema, type PptxAgentBatch, type PptxAgentEdit } from './pptx-schema';
-import { renderPptxSlide } from './pptx-render';
+import { loadPptxFonts, pptxFontFaces, pptxThemeFonts, renderPptxSlide, type PptxThemeFonts } from './pptx-render';
 import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
 import { DocumentToolError, unknownMatchError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
@@ -8,6 +8,8 @@ import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, 
 export interface SlideTextChange { ref: string; slide: number; story: string; start: number; oldText: string; newText: string }
 interface Paragraph { ref: string; paragraphId: string; slide: number; story: PptxStoryText; start: number; end: number; editable: boolean }
 interface HeldMatch { ref: string; slide: number; target: PptxStoryTarget; start: number; paragraphStart: number; text: string; version: string }
+
+const SAVE_FONT_STYLES = 192;
 
 export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, PptxEditStep> {
   readonly format = 'pptx' as const;
@@ -17,13 +19,24 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   private nextRef = 1;
   private cachedLayouts?: ReturnType<PresentationHandle['layouts']>;
 
-  private constructor(private readonly handle: PresentationHandle, readonly name = 'presentation.pptx', private readonly owned = true) { super(); }
+  /** The version of a deck this document opened, before any edit. */
+  private readonly sourceVersion?: string;
+
+  private constructor(
+    private readonly handle: PresentationHandle,
+    readonly name = 'presentation.pptx',
+    private readonly owned = true,
+    private readonly themeFonts?: PptxThemeFonts,
+  ) {
+    super();
+    if (owned) this.sourceVersion = handle.version();
+  }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
     await initialize('pptx', initWasm, options.wasm);
     if (bytes.length > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a PPTX file up to 64 MiB.');
     const source = bytes.slice();
-    return new PptxAgentPresentation(openPresentation(source), options.name);
+    return new PptxAgentPresentation(openPresentation(source), options.name, true, pptxThemeFonts(source));
   }
 
   static attach(handle: PresentationHandle, options: { name?: string } = {}) {
@@ -219,15 +232,15 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   async preview(slideId: string | number, options: { scale?: number } = {}) {
     const deck = this.snapshot();
     const slide = this.slide(this.handle, slideId);
-    return renderPptxSlide(this.handle, deck.slides.findIndex(s => s.id === slide.id) + 1, options.scale);
+    return renderPptxSlide(this.handle, deck.slides.findIndex(s => s.id === slide.id) + 1, options.scale, undefined, this.themeFonts);
   }
 
   override async render(page?: number, proposal?: string): Promise<RenderedPage> {
     this.alive();
     if (page === undefined) throw new DocumentToolError('UNSUPPORTED', 'Use pptx_preview with a slide ID, or render(1) with a one-based slide index.');
-    if (!proposal) return renderPptxSlide(this.handle, page);
+    if (!proposal) return renderPptxSlide(this.handle, page, undefined, undefined, this.themeFonts);
     const draft = openPresentation(await this.export(proposal));
-    try { return await renderPptxSlide(draft, page); }
+    try { return await renderPptxSlide(draft, page, undefined, undefined, this.themeFonts); }
     finally { draft.dispose(); }
   }
 
@@ -557,11 +570,34 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const result = unwrap(this.handle.applyEdits({ expectVersion: version, steps, source: 'agent' }));
     return { applied: result.applied, version: result.version, changedSlides: result.changedSlides.length, changedStories: result.changedStories.length };
   }
-  protected save(steps?: PptxEditStep[]) {
-    if (!steps) return this.handle.save();
+  protected async save(steps?: PptxEditStep[]) {
+    if (!steps) return this.owned ? this.saveFitted(this.handle) : this.handle.save();
     const draft = this.handle.fork();
-    try { unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' })); return draft.save(); }
-    finally { draft.dispose(); }
+    try {
+      unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' }));
+      return this.owned ? await this.saveFitted(draft) : draft.save();
+    } finally { draft.dispose(); }
+  }
+
+  /**
+   * Saves an unedited deck as it is, and otherwise with the bundled faces of
+   * every slide so edited autofit text is fitted. The faces are loaded for the
+   * version that is saved: an edit made while they load loads them again, and
+   * a document closed meanwhile is not saved.
+   */
+  private async saveFitted(handle: PresentationHandle) {
+    for (;;) {
+      const version = handle.version();
+      if (version === this.sourceVersion) return handle.save();
+      const fonts = await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts, SAVE_FONT_STYLES));
+      this.alive();
+      if (handle.version() !== version) continue;
+      try { return handle.save(fonts); }
+      catch (error) {
+        if (error instanceof Error && /^(?:could not write PPTX: )?render resource limit exceeded(?::|$)/u.test(error.message)) return handle.save({ fonts: [] });
+        throw error;
+      }
+    }
   }
   protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }
   protected dispose() { this.refs.clear(); this.matches.clear(); if (this.owned) this.handle.dispose(); }

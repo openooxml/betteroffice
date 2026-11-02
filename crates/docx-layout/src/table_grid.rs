@@ -1017,19 +1017,16 @@ pub(crate) fn has_unknown_content_widths(
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
 ) -> bool {
     table_block.rows.iter().enumerate().any(|(row_index, row)| {
-        row.grid_before.is_some_and(|before| before > 0)
-            || row.cells.iter().enumerate().any(|(cell_index, cell)| {
-                cell.grid_start.is_some()
-                    || match content_widths {
-                        Some(rows) => rows
-                            .get(row_index)
-                            .and_then(|cells| cells.get(cell_index))
-                            .is_none_or(Option::is_none),
-                        None => {
-                            cell.min_content_width.is_none() || cell.max_content_width.is_none()
-                        }
-                    }
-            })
+        row.cells.iter().enumerate().any(|(cell_index, cell)| {
+            cell.grid_start.is_some()
+                || match content_widths {
+                    Some(rows) => rows
+                        .get(row_index)
+                        .and_then(|cells| cells.get(cell_index))
+                        .is_none_or(Option::is_none),
+                    None => cell.min_content_width.is_none() || cell.max_content_width.is_none(),
+                }
+        })
     })
 }
 

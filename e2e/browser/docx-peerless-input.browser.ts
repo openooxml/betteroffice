@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from 'playwright/test';
 import { pinnedEvaluate } from './pinned-evaluate';
+import { requirePeerlessHarness } from './peerless-harness';
 import JSZip from 'jszip';
 import { readFileSync } from 'node:fs';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
@@ -269,8 +270,8 @@ async function focusHarness(page: Page) {
   return input;
 }
 
-test('font picker prepares the selected family and retains shaped glyph widths', async ({ page }) => {
-  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Font command probes require DOCX_PEERLESS_HARNESS=1');
+test('font picker prepares the selected family and retains shaped glyph widths', { tag: '@harness' }, async ({ page }) => {
+  requirePeerlessHarness();
   const zip = await JSZip.loadAsync(await documentBytes());
   const xml = await zip.file('word/document.xml')!.async('string');
   zip.file('word/document.xml', xml.replace('<w:r>', '<w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/></w:rPr>'));
@@ -695,8 +696,8 @@ test('d2d_in_epoch_refusal_covers_sequence_and_accepts_later_input', async ({ pa
   expect(await savedText(page)).toBe('OKabcd');
 });
 
-test('handoff_installs_A_then_redraws_pending_B', async ({ page }) => {
-  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+test('handoff_installs_A_then_redraws_pending_B', { tag: '@harness' }, async ({ page }) => {
+  requirePeerlessHarness();
   await openHarness(page);
   const input = await focusHarness(page);
   const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
@@ -863,8 +864,8 @@ async function expectEchoMatchesReply(page: Page, canvas: Locator, label: string
   await settled(page);
 }
 
-test('echo paints the caret line of a wrapped paragraph before the reply and reconciles to the reply', async ({ page }) => {
-  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+test('echo paints the caret line of a wrapped paragraph before the reply and reconciles to the reply', { tag: '@harness' }, async ({ page }) => {
+  requirePeerlessHarness();
   await openHarness(page, 1, await echoDocumentBytes());
   const input = await focusHarness(page);
   for (const key of ['ArrowDown', 'ArrowDown', 'ArrowRight', 'ArrowRight', 'ArrowRight']) await input.press(key);
@@ -922,8 +923,8 @@ test('echo paints the caret line of a wrapped paragraph before the reply and rec
   expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
 });
 
-test('echo paints exactly the pixels of the reply for inserts and backspaces', async ({ page }) => {
-  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+test('echo paints exactly the pixels of the reply for inserts and backspaces', { tag: '@harness' }, async ({ page }) => {
+  requirePeerlessHarness();
   await openHarness(page, 1, await echoDocumentBytes());
   const input = await focusHarness(page);
   const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
@@ -965,8 +966,8 @@ async function alignedDocumentBytes() {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-test('echo paints exactly the pixels of the reply on centered and justified closing lines, never on stretched ones', async ({ page }) => {
-  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+test('echo paints exactly the pixels of the reply on centered and justified closing lines, never on stretched ones', { tag: '@harness' }, async ({ page }) => {
+  requirePeerlessHarness();
   await openHarness(page, 1, await alignedDocumentBytes());
   const input = await focusHarness(page);
   const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
@@ -1231,7 +1232,13 @@ test('d2d_composition_event_orders_commit_once', async ({ page }) => {
     const commands = await commandsSince(page, start);
     expect(commands.map((command) => command.kind)).toEqual(['insertText', 'replaceSelection']);
     expect(commands[1]!.payload).toEqual({ text: '漢字' });
-    expect(commands[1]!.afterSeq).toBe(commands[0]!.seq);
+    const sent = await page.evaluate((start) => window.__docxPeerlessInput.commands.slice(start), start);
+    const insert = sent.findIndex((command) => command.seq === commands[0]!.seq);
+    const commit = sent.findIndex((command) => command.seq === commands[1]!.seq);
+    expect(sent.slice(insert + 1, commit).map((command) => command.kind)).toEqual(
+      Array(commit - insert - 1).fill('setFontEnvironment')
+    );
+    expect(commands[1]!.afterSeq).toBe(sent[commit - 1]!.seq);
   }
   expect(await savedText(page)).toBe('P漢字'.repeat(3) + 'abcd');
 });
@@ -1474,8 +1481,8 @@ test(`viewport-first ${feature} open preserves pixels and page position as certi
   expect(after).toEqual(before);
 });
 
-test(`viewport-first ${feature} open paints later pages after certified geometry grows`, async ({ page }) => {
-  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Viewport probes require DOCX_PEERLESS_HARNESS=1');
+test(`viewport-first ${feature} open paints later pages after certified geometry grows`, { tag: '@harness' }, async ({ page }) => {
+  requirePeerlessHarness();
   await openViewportFirst(page, feature);
   await releaseCertifiedGeometry(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
