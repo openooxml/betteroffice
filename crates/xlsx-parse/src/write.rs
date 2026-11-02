@@ -21,7 +21,7 @@ use xlsx_model::{
 
 use crate::ParseError;
 use crate::axis::SheetAxes;
-use crate::future_functions::excel_formula;
+use crate::future_functions::{DefinedFunctionNames, FormulaNames, excel_formula};
 use crate::package::{
     ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship,
     SourceSheetKind, XmlAttribute, XmlTemplate, attributes_from_fragment, effective_content_type,
@@ -188,6 +188,7 @@ fn conditional_formatting_bytes(
     sheet_index: usize,
     plan: &CfPlan,
     source: Option<(&XmlTemplate, &Sheet)>,
+    names: FormulaNames<'_>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
     let mut source_indices = sheet
         .conditional_formats
@@ -257,7 +258,7 @@ fn conditional_formatting_bytes(
                 for formula in &rule.formulas {
                     rule_xml.push_str(&format!(
                         "<formula>{}</formula>",
-                        escape_xml_text(&excel_formula(formula))
+                        escape_xml_text(&excel_formula(formula, names))
                     ));
                 }
                 rule_xml.push_str("</cfRule>");
@@ -2347,9 +2348,10 @@ fn write_defined_names(w: &mut Writer<Vec<u8>>, wb: &Workbook) -> io::Result<()>
     if wb.defined_names.is_empty() {
         return Ok(());
     }
+    let names = DefinedFunctionNames::new(&wb.defined_names);
     w.create_element("definedNames").write_inner_content(|w| {
         for defined in &wb.defined_names {
-            write_defined_name(w, defined)?;
+            write_defined_name(w, defined, names.visible_from(defined.local_sheet))?;
         }
         Ok(())
     })?;
@@ -2359,6 +2361,7 @@ fn write_defined_names(w: &mut Writer<Vec<u8>>, wb: &Workbook) -> io::Result<()>
 fn write_defined_name(
     w: &mut Writer<Vec<u8>>,
     defined: &xlsx_model::DefinedName,
+    names: FormulaNames<'_>,
 ) -> io::Result<()> {
     let mut element = BytesStart::new("definedName");
     element.push_attribute(("name", defined.name.as_str()));
@@ -2372,6 +2375,7 @@ fn write_defined_name(
     w.write_event(Event::Start(element))?;
     w.write_event(Event::Text(BytesText::new(&excel_formula(
         &defined.formula,
+        names,
     ))))?;
     w.write_event(Event::End(BytesEnd::new("definedName")))?;
     Ok(())
@@ -2554,6 +2558,7 @@ fn edited_defined_names(
     let template = root.capture_child(container)?;
     template.require_unwrapped_child("definedName")?;
     let sources = template.children_named("definedName").collect::<Vec<_>>();
+    let names = DefinedFunctionNames::new(&wb.defined_names);
     let originals = &package.original_workbook.defined_names;
     if sources.len() != originals.len() {
         return Err(unsupported());
@@ -2629,15 +2634,25 @@ fn edited_defined_names(
                     || current.formula != original.formula
                     || current.hidden != original.hidden)
             {
-                template.qualify_fragment(&written_defined_name(current)?)?
+                template.qualify_fragment(&written_defined_name(
+                    current,
+                    names.visible_from(current.local_sheet),
+                )?)?
             } else {
-                patch_defined_name(&source.bytes, current)?
+                patch_defined_name(
+                    &source.bytes,
+                    current,
+                    names.visible_from(current.local_sheet),
+                )?
             });
         }
     }
     for (index, current) in wb.defined_names.iter().enumerate() {
         if !used.contains(&index) {
-            replacements.push(template.qualify_fragment(&written_defined_name(current)?)?);
+            replacements.push(template.qualify_fragment(&written_defined_name(
+                current,
+                names.visible_from(current.local_sheet),
+            )?)?);
         }
     }
     if replacements.is_empty() {
@@ -2650,13 +2665,17 @@ fn edited_defined_names(
     )?))
 }
 
-fn written_defined_name(defined: &xlsx_model::DefinedName) -> Result<Vec<u8>, ParseError> {
-    fragment(|writer| write_defined_name(writer, defined))
+fn written_defined_name(
+    defined: &xlsx_model::DefinedName,
+    names: FormulaNames<'_>,
+) -> Result<Vec<u8>, ParseError> {
+    fragment(|writer| write_defined_name(writer, defined, names))
 }
 
 fn patch_defined_name(
     source: &[u8],
     defined: &xlsx_model::DefinedName,
+    names: FormulaNames<'_>,
 ) -> Result<Vec<u8>, ParseError> {
     let mut reader = Reader::from_reader(source);
     let element_name = loop {
@@ -2705,6 +2724,7 @@ fn patch_defined_name(
         writer.write_event(Event::Start(element))?;
         writer.write_event(Event::Text(BytesText::new(&excel_formula(
             &defined.formula,
+            names,
         ))))?;
         writer.write_event(Event::End(BytesEnd::new(element_name.as_str())))?;
         Ok(())
@@ -2965,6 +2985,8 @@ fn worksheet_xml_with_namespace(
     sheet_index: usize,
     cf_plan: &CfPlan,
 ) -> Result<Vec<u8>, ParseError> {
+    let defined = DefinedFunctionNames::new(&wb.defined_names);
+    let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
         root.push_attribute(("xmlns", main_namespace));
@@ -2981,6 +3003,7 @@ fn worksheet_xml_with_namespace(
             &SharedStringCells::new(),
             shared_string_plan,
             None,
+            names,
         )?;
         if let Some(bytes) =
             auto_filter_bytes(sheet).map_err(|error| io::Error::other(error.to_string()))?
@@ -2988,7 +3011,7 @@ fn worksheet_xml_with_namespace(
             writer.get_mut().extend_from_slice(&bytes);
         }
         write_merges(writer, sheet)?;
-        if let Some(bytes) = conditional_formatting_bytes(sheet, sheet_index, cf_plan, None)
+        if let Some(bytes) = conditional_formatting_bytes(sheet, sheet_index, cf_plan, None, names)
             .map_err(|error| io::Error::other(error.to_string()))?
         {
             writer.get_mut().extend_from_slice(&bytes);
@@ -3018,6 +3041,7 @@ fn patched_grid(
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
     styles: &StyleMatch<'_>,
+    names: FormulaNames<'_>,
 ) -> Result<(Option<Vec<u8>>, Vec<u8>), ParseError> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -3034,6 +3058,7 @@ fn patched_grid(
         retained: shared_string_cells,
         plan: shared_string_plan,
         styles,
+        names,
     };
     let columns = patch
         .cols(
@@ -3083,6 +3108,7 @@ fn patched_grid(
                         axes,
                         styles,
                     }),
+                    names,
                 )
             })?
         }
@@ -3107,6 +3133,8 @@ fn worksheet_xml_with_template(
     cf_plan: &CfPlan,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
+    let defined = DefinedFunctionNames::new(&wb.defined_names);
+    let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
     if let Some(original) = original
         && original.auto_filter != sheet.auto_filter
         && sheet_axes.is_none_or(SheetAxes::is_identity)
@@ -3133,6 +3161,7 @@ fn worksheet_xml_with_template(
             shared_string_cells,
             shared_string_plan,
             styles,
+            names,
         )?),
         _ => None,
     };
@@ -3156,6 +3185,7 @@ fn worksheet_xml_with_template(
                             axes,
                             styles,
                         }),
+                    names,
                 )
             })?),
         ),
@@ -3207,6 +3237,7 @@ fn worksheet_xml_with_template(
                 sheet_index,
                 cf_plan,
                 original.map(|sheet| (template, sheet)),
+                names,
             )?,
         ));
     }
@@ -3461,6 +3492,7 @@ fn write_sheet_data(
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
     source_styles: Option<SourceStyles<'_>>,
+    names: FormulaNames<'_>,
 ) -> io::Result<()> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -3497,6 +3529,7 @@ fn write_sheet_data(
                     retained,
                     shared_string_plan,
                     source_styles,
+                    names,
                 )?;
                 if height_row == Some(row) {
                     heights.next();
@@ -3713,6 +3746,7 @@ pub(crate) fn write_row<'a, I>(
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
     source_styles: Option<SourceStyles<'_>>,
+    names: FormulaNames<'_>,
 ) -> io::Result<()>
 where
     I: Iterator<Item = (CellRef, &'a Cell)>,
@@ -3752,6 +3786,7 @@ where
             sst_index,
             retained,
             sheet.array_formula(addr),
+            names,
         )?;
     }
     w.write_event(Event::End(BytesEnd::new("row")))?;
@@ -3781,7 +3816,9 @@ pub(crate) fn shared_string_index(
 }
 
 /// serialize a single cell with `style` as its `s`, choosing the `t` type and
-/// body from its value and whether it carries a formula.
+/// body from its value and whether it carries a formula, writing the formula
+/// as Excel stores it with the defined `names` in its scope.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_cell(
     w: &mut Writer<Vec<u8>>,
     addr: CellRef,
@@ -3790,6 +3827,7 @@ pub(crate) fn write_cell(
     sst_index: &HashMap<&str, usize>,
     retained: Option<usize>,
     array_ref: Option<xlsx_model::CellRange>,
+    names: FormulaNames<'_>,
 ) -> io::Result<()> {
     let a1 = addr.to_a1();
     let CellValueMarkup { ty, value, inline } = cell_value_markup(cell, sst_index, retained);
@@ -3812,7 +3850,7 @@ pub(crate) fn write_cell(
                 .with_attribute(("t", "array"))
                 .with_attribute(("ref", reference.as_str()));
         }
-        element.write_text_content(BytesText::new(&excel_formula(f)))?;
+        element.write_text_content(BytesText::new(&excel_formula(f, names)))?;
     }
     if let Some(v) = &value {
         w.create_element("v")

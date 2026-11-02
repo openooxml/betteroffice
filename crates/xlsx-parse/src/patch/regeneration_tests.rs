@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use xlsx_model::{CellValue, SheetId, Workbook};
 
 use super::style_match_tests::{cells, edit, parsed_sheet, save};
-use super::{SheetPatch, StyleMatch, scan_sheet_data};
+use super::{FormulaNames, SheetPatch, StyleMatch, scan_sheet_data};
 use crate::{
     ParseError, ParsedWorkbook, SaveEdits, SheetAxes,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
@@ -249,6 +249,7 @@ fn patch_errors_keep_the_sheet_name_and_original_error() {
             retained: &retained,
             plan: None,
             styles: &styles,
+            names: FormulaNames::default(),
         };
         let template = &parsed.package.sheets[0].template;
         let original_error = if columns {
