@@ -2,7 +2,8 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "paths": {
-      "#session-worker": ["./src/yrs/sessionWorker.node.ts"]
+      "#session-worker": ["./src/yrs/sessionWorker.node.ts"],
+      "#session-scope": ["./src/yrs/sessionScope.node.ts"]
     }
   }
 }

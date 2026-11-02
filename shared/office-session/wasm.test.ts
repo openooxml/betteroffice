@@ -4,7 +4,7 @@ import { createSessionClient } from './client';
 import { isHostMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 import { compileWasm, createWorkerWasmInitializer } from './wasm';
-import { compileSessionWasm } from './nodeSessionWorker';
+import { compileSessionWasm } from './nodeSessionScope';
 
 const WASM_BYTES = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
 const URL_INPUT = new URL('https://example.test/module.wasm');
