@@ -9,11 +9,17 @@ import {
   type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
+import type { ProgressiveFontFace } from './progressive';
 
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   /** Word measurement family; defaults to the requested family. */
   measureAs?: string;
   onlyIfPrimaryFails?: boolean;
+  /**
+   * Present for a face shipped in slices: opens it as a face whose outlines load
+   * as they are needed. Calling the loader itself still yields the whole face.
+   */
+  progressive?: () => Promise<ProgressiveFontFace>;
 };
 
 /** Structural provider contract keeps this package independent of the engine. */
@@ -57,6 +63,7 @@ export interface BundledFontSource {
 
 export function fontProvider(
   loadBytes: (face: BundledFontFace) => Promise<ArrayBuffer>,
+  loadProgressive?: (face: BundledFontFace) => (() => Promise<ProgressiveFontFace>) | undefined,
 ): BundledFontSource {
   const loaders = new Map<string, BundledFontLoader>();
   const load = (
@@ -66,7 +73,8 @@ export function fontProvider(
     const key = `${face.file}|${options?.measureAs ?? ''}|${options?.onlyIfPrimaryFails ?? false}`;
     let loader = loaders.get(key);
     if (loader === undefined) {
-      loader = Object.assign(() => loadBytes(face), options);
+      const progressive = loadProgressive?.(face);
+      loader = Object.assign(() => loadBytes(face), options, progressive ? { progressive } : undefined);
       loaders.set(key, loader);
     }
     return loader;

@@ -2,10 +2,12 @@ export * from './manifest';
 export type { FontDecoder } from './decode';
 import type { FontDecoder } from './decode';
 export type { BundledFontLoader, BundledFontSource } from './provider';
+export type { ProgressiveFontFace } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { loadPackedFontBytes, isLatinFont } from './packed';
+import { loadPackedFontBytes, loadProgressiveFace, isLatinFont, sliceRefOf } from './packed';
+import type { ProgressiveFontFace } from './progressive';
 
 export interface FontAssetOptions {
   /**
@@ -206,6 +208,32 @@ async function assetUrl(
   throw new Error(`Unknown bundled font asset: ${file}`);
 }
 
+async function sliceAssetUrl(file: string, baseUrl: URL | undefined): Promise<URL> {
+  if (baseUrl !== undefined) return new URL(file, baseUrl);
+  const cjk = await loadCjkAssetUrls();
+  const resolve = cjk?.[file];
+  if (resolve) return resolve();
+  throw new MissingCjkAddonError(cjk
+    ? `Font slice ${file} needs a @betteroffice/fonts-cjk release matching @betteroffice/fonts`
+    : `Font slice ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
+}
+
+function progressiveLoader(
+  face: BundledFontFace,
+  baseUrl: URL | undefined,
+  runtime?: { decoder?: FontDecoder },
+): (() => Promise<ProgressiveFontFace>) | undefined {
+  if (sliceRefOf(face.file) === undefined) return undefined;
+  return () => loadProgressiveFace(
+    face,
+    (file) => sliceAssetUrl(file, baseUrl),
+    baseUrl?.href ?? '',
+    undefined,
+    baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
+    runtime,
+  );
+}
+
 /** Loads font bytes into consumer-owned buffers with retryable failures. */
 export function loadBundledFontBytes(
   face: BundledFontFace,
@@ -300,5 +328,8 @@ export function createFontProvider(
     options?.baseUrl === undefined
       ? undefined
       : { baseUrl: resolvedAssetBase(options.baseUrl) };
-  return fontProvider((face) => loadBundledFontBytes(face, resolvedOptions, runtime));
+  return fontProvider(
+    (face) => loadBundledFontBytes(face, resolvedOptions, runtime),
+    (face) => progressiveLoader(face, resolvedOptions?.baseUrl, runtime),
+  );
 }

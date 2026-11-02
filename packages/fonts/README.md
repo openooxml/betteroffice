@@ -165,6 +165,7 @@ sources and other consumers:
 | `resolveDigitAdvance`, `maxDigitWidth` | Widest digit advance, recorded or measured. |
 | `loadBundledFontBytes(face, { baseUrl? })` | Fetches a face's bytes, cached per face and base URL. |
 | `registerBundledFontFace(face)` | Registers a face with the browser `FontFace` API; no-op outside the DOM. |
+| `ProgressiveFontFace` (type) | A CJK face opened from its slices through a loader's optional `progressive()`: layout tables complete at once, outlines loaded by glyph id (`ensureGlyphs`) or predicted from text (`prefetch`). Calling the loader itself still returns the whole face. |
 
 ## Documentation
 
