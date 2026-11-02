@@ -343,6 +343,16 @@ test('a partly failed remote load repaints for the slices it registered and retr
   expect(repaint).toHaveBeenCalledTimes(1);
 });
 
+test('characters the General format generates when it shortens a number are requested', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [{
+    op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
+    numberFormat: { left: 0, width: 80, parts: [], general: 7 },
+  } as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['7#012345689.-E+']);
+});
+
 test('a face the host registered under the family keeps the remote provider away', async () => {
   const { added } = browser();
   const { remoteLoads } = provider();

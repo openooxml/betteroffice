@@ -247,7 +247,7 @@ export function fetchRemoteFontSlices(
   return within(Promise.all(slices.map((rule) => fetchSlice(rule, options, signal))), signal);
 }
 
-/** A range-aware load in which some slices failed; `faces` are the slices this call newly registered. */
+/** A range-aware load in which some slices failed; `faces` are the slices that registered while the call waited. */
 export class RemoteFontLoadError extends Error {
   constructor(message: string, readonly faces: FontFace[], options?: { cause?: unknown }) {
     super(message, options);
@@ -294,7 +294,7 @@ const registeredSlices = new WeakMap<FontFaceSet, Map<string, RegisteredSlice>>(
  * every caller abandoned is not registered. The record of registered slices lives with `fontSet`,
  * refetches a slice whose face was removed from the set and holds at most 1024 slices; a call
  * needing more rejects. A call settles once all its slices have; when some failed it rejects with a
- * `RemoteFontLoadError` listing the faces it newly registered.
+ * `RemoteFontLoadError` listing the faces that registered while it waited.
  */
 export async function loadRemoteFontFaces(
   family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet,
@@ -338,13 +338,13 @@ export async function loadRemoteFontFaces(
     registered.set(key, entry);
     void entry.font.then((font) => { entry.loaded = font; }, () => { if (registered.get(key) === entry) registered.delete(key); });
   }
-  const started = new Set(fresh.map((rule) => registered.get(keyOf(rule))));
   const entries = slices.flatMap((rule) => registered.get(keyOf(rule)) ?? []);
+  const pending = new Set(entries.filter((entry) => !entry.loaded));
   for (const entry of entries) if (!entry.loaded) entry.waiting.add(options.signal ?? null);
   const fonts = Promise.allSettled(entries.map((entry) => entry.font)).then((results) => {
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failed) {
-      const added = results.flatMap((result, index) => result.status === 'fulfilled' && started.has(entries[index]) ? [result.value] : []);
+      const added = results.flatMap((result, index) => result.status === 'fulfilled' && pending.has(entries[index]!) ? [result.value] : []);
       throw new RemoteFontLoadError('Some remote font slices failed to load', added, { cause: failed.reason });
     }
     return results.map((result) => (result as PromiseFulfilledResult<FontFace>).value);

@@ -519,6 +519,34 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a partial failure lists a shared slice that registered while the call waited', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const fontSet = { add: () => {} } as unknown as FontFaceSet;
+      const releases: (() => void)[] = [];
+      const fetch = mock(async (url: string | URL | Request) => String(url).includes('/css?') ? new Response(BUNNY_CSS)
+        : new Promise<Response>((resolve) => { releases.push(() => resolve(String(url).includes('-ext-')
+          ? new Response('', { status: 404 }) : new Response(new Uint8Array([1])))); }));
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/joined/css' } };
+      const face = { weight: 400, style: 'normal' } as const;
+      const leaving = new AbortController();
+      const first = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A', signal: leaving.signal });
+      for (let wait = 0; wait < 100 && releases.length < 1; wait++) await new Promise((resolve) => setTimeout(resolve, 5));
+      const joined = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'AŁ' });
+      for (let wait = 0; wait < 100 && releases.length < 2; wait++) await new Promise((resolve) => setTimeout(resolve, 5));
+      leaving.abort();
+      await expect(first).rejects.toThrow();
+      releases[1]!();
+      releases[0]!();
+      const error = await joined.then(() => null, (reason: unknown) => reason);
+      expect(error).toBeInstanceOf(RemoteFontLoadError);
+      expect((error as RemoteFontLoadError).faces).toHaveLength(1);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
   test('slices sharing a file but not a range register separately', async () => {
     const original = globalThis.FontFace;
     globalThis.FontFace = class { constructor(readonly family: string, readonly source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}
