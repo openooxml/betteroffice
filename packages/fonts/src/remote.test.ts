@@ -360,6 +360,64 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a slice every caller abandoned is not registered and loads again later', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const faces = new Set<unknown>();
+      const fontSet = { add: (face: unknown) => { faces.add(face); }, has: (face: unknown) => faces.has(face) } as unknown as FontFaceSet;
+      let release!: () => void;
+      let started!: () => void;
+      const downloading = new Promise<void>((resolve) => { started = resolve; });
+      const fetch = mock(async (url: string | URL | Request) => {
+        if (String(url).includes('/css?')) return new Response(BUNNY_CSS);
+        started();
+        return new Promise<Response>((resolve) => { release = () => resolve(new Response(new Uint8Array([1]))); });
+      });
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/abandoned/css' } };
+      const face = { weight: 400, style: 'normal' } as const;
+      const leaving = new AbortController();
+      const only = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A', signal: leaving.signal });
+      await downloading;
+      leaving.abort();
+      await expect(only).rejects.toThrow();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(faces.size).toBe(0);
+      const again = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A' });
+      for (let wait = 0; wait < 100 && fetch.mock.calls.length < 3; wait++) await new Promise((resolve) => setTimeout(resolve, 5));
+      release();
+      expect(await again).toHaveLength(1);
+      expect(faces.size).toBe(1);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
+  test('the slice record stops at 1024 slices without registering duplicates', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      let registered = 0;
+      const fontSet = { add: () => { registered += 1; } } as unknown as FontFaceSet;
+      const sliced = Array.from({ length: 512 }, (_, index) => `@font-face { font-family: 'Noto Sans JP'; font-style: normal; font-weight: 400; src: url(https://fonts.bunny.net/cap/${index}.woff2) format('woff2'); unicode-range: U+${(0x4e00 + index).toString(16)}; }`).join('\n');
+      const fetch = mock(async (url: string | URL | Request) =>
+        String(url).includes('/css?') ? new Response(sliced) : new Response(new Uint8Array([1])));
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/cap/css' } };
+      const text = Array.from({ length: 512 }, (_, index) => String.fromCodePoint(0x4e00 + index)).join('');
+      const counts: number[] = [];
+      for (let round = 0; round < 2; round++) {
+        for (const alias of ['First', 'Second', 'Third']) {
+          counts.push((await loadRemoteFontFaces('MS Gothic', alias, { weight: 400, style: 'normal' }, fontSet, { ...options, text })).length);
+        }
+      }
+      expect(counts).toEqual([512, 512, 0, 512, 512, 0]);
+      expect(registered).toBe(1024);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
   test('slices sharing a file but not a range register separately', async () => {
     const original = globalThis.FontFace;
     globalThis.FontFace = class { constructor(readonly family: string, readonly source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}

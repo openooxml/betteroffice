@@ -254,7 +254,13 @@ function remoteFace(alias: string, rule: RemoteFontFaceRule, bytes: ArrayBuffer)
 }
 
 const MAX_REGISTERED_SLICES = 1024;
-const registeredSlices = new WeakMap<FontFaceSet, Map<string, { font: Promise<FontFace>; loaded?: FontFace }>>();
+interface RegisteredSlice {
+  font: Promise<FontFace>;
+  loaded?: FontFace;
+  waiting: Set<AbortSignal | null>;
+}
+
+const registeredSlices = new WeakMap<FontFaceSet, Map<string, RegisteredSlice>>();
 
 /**
  * Registers the provider's look-alike for an Office family under the document's own family name
@@ -266,10 +272,11 @@ const registeredSlices = new WeakMap<FontFaceSet, Map<string, { font: Promise<Fo
  * referrer, like the stylesheet. A look-alike without the requested weight or style registers its
  * regular face, which the browser emboldens or slants. Resolves to the faces covering the request,
  * or an empty list when the table has no look-alike, the provider is off or nothing matches.
- * Without `text`, nothing is registered once `signal` aborts. With it, concurrent calls share one
- * fetch per slice, an aborting caller stops waiting while the shared fetch continues for the others,
- * and the record of registered slices lives with `fontSet`, keeps at most 1024 loaded slices and
- * refetches a slice whose face was removed from the set.
+ * Nothing is registered once `signal` aborts. With `text`, concurrent calls share one fetch per
+ * slice: an aborting caller stops waiting while the fetch continues for the others, and a slice
+ * every caller abandoned is not registered. The record of registered slices lives with `fontSet`,
+ * holds at most 1024 slices (further slices are not loaded) and refetches a slice whose face was
+ * removed from the set.
  */
 export async function loadRemoteFontFaces(
   family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet,
@@ -287,34 +294,32 @@ export async function loadRemoteFontFaces(
   let registered = registeredSlices.get(fontSet);
   if (!registered) registeredSlices.set(fontSet, registered = new Map());
   const keyOf = (rule: RemoteFontFaceRule) => JSON.stringify([alias, rule.weight, rule.style, rule.unicodeRange, preferredSource(rule).url]);
-  const trim = () => {
-    for (const [key, entry] of registered) {
-      if (registered.size <= MAX_REGISTERED_SLICES) break;
-      if (entry.loaded) registered.delete(key);
-    }
-  };
   for (const rule of slices) {
     const entry = registered.get(keyOf(rule));
     if (entry?.loaded && typeof fontSet.has === 'function' && !fontSet.has(entry.loaded)) registered.delete(keyOf(rule));
   }
-  const fresh = slices.filter((rule) => !registered.has(keyOf(rule)));
+  const capacity = Math.max(0, MAX_REGISTERED_SLICES - registered.size);
+  const fresh = slices.filter((rule) => !registered.has(keyOf(rule))).slice(0, capacity);
   if (fresh.length > 0) {
-    const shared = { ...options, signal: deadline(options, true) };
-    const batch = fetchRemoteFontSlices(fresh, shared)
+    const waiting = new Set<AbortSignal | null>();
+    const batch = fetchRemoteFontSlices(fresh, { ...options, signal: deadline(options, true) })
       .then((bytes) => Promise.all(fresh.map((rule, index) => remoteFace(alias, rule, bytes[index]!))))
       .then((fonts) => {
+        const live = [...waiting].some((signal) => signal === null || !signal.aborted);
+        waiting.clear();
+        if (!live) throw new Error('Remote font load abandoned by every caller');
         for (const font of fonts) fontSet.add(font);
         return fonts;
       });
     fresh.forEach((rule, index) => {
       const key = keyOf(rule);
-      const entry: { font: Promise<FontFace>; loaded?: FontFace } = { font: batch.then((fonts) => fonts[index]!) };
+      const entry: RegisteredSlice = { font: batch.then((fonts) => fonts[index]!), waiting };
       registered.set(key, entry);
-      void entry.font.then((font) => { entry.loaded = font; trim(); }, () => { if (registered.get(key) === entry) registered.delete(key); });
+      void entry.font.then((font) => { entry.loaded = font; }, () => { if (registered.get(key) === entry) registered.delete(key); });
     });
   }
-  const requested = slices.map((rule) => registered.get(keyOf(rule))!.font);
-  trim();
-  const fonts = Promise.all(requested);
+  const entries = slices.flatMap((rule) => registered.get(keyOf(rule)) ?? []);
+  for (const entry of entries) if (!entry.loaded) entry.waiting.add(options.signal ?? null);
+  const fonts = Promise.all(entries.map((entry) => entry.font));
   return options.signal ? within(fonts, options.signal) : fonts;
 }

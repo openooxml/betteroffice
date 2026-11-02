@@ -223,7 +223,7 @@ export function createDefaultFontPainter(
   function isSettled(displayList: DisplayList): boolean {
     if (inactive()) return true;
     for (const [key, { characters }] of faceKeys(displayList)) {
-      if (!settled.has(key) || (loaded.has(key) && remote.has(key) && unrequested(key, characters))) return false;
+      if (!settled.has(key) || (remote.has(key) && (pending.has(key) || (loaded.has(key) && unrequested(key, characters))))) return false;
     }
     return true;
   }
@@ -247,6 +247,8 @@ export function createDefaultFontPainter(
           loaded.add(key);
           changed = true;
         }
+        const latest = !disposed && remote.has(key) && lastPainted ? faceKeys(lastPainted).get(key) : undefined;
+        if (latest && [...latest.characters].some((character) => !text.includes(character))) void load(lastPainted!).catch(() => {});
         if (!disposed && !pending.size && changed) {
           changed = false;
           unsettledPaint = false;

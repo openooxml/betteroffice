@@ -276,6 +276,26 @@ test('a registered look-alike does not count as a locally installed family for l
   expect(remoteLoads).toHaveBeenCalledTimes(3);
 });
 
+test('characters painted while a failing remote load is pending are requested once it settles', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  const gate = deferred<void>();
+  remoteLoads.mockImplementationOnce(async () => { await gate.promise; throw new Error('404'); });
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  const first = painter.load(cell('A'));
+  for (let tick = 0; tick < 50 && remoteLoads.mock.calls.length === 0; tick++) await Promise.resolve();
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(false);
+  gate.resolve();
+  await first;
+  for (let wait = 0; wait < 100 && repaint.mock.calls.length === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'AŁ']);
+  expect(repaint).toHaveBeenCalledTimes(1);
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(true);
+});
+
 test('disposing the painter, as switching remote fonts off does, aborts its remote load before anything registers', async () => {
   const { added } = browser();
   const { remoteLoads, remoteGate } = provider();
