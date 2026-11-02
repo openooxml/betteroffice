@@ -269,6 +269,29 @@ test('failed and stalled defaults still acknowledge an open', async () => {
   }
 });
 
+test('a stalled coverage scan never holds back the default fonts', async () => {
+  const manager = source({ Calibri: async () => font });
+  const native = globalThis.DecompressionStream;
+  globalThis.DecompressionStream = class {
+    readonly readable = new ReadableStream<Uint8Array>();
+    readonly writable = new WritableStream<BufferSource>();
+  } as unknown as typeof DecompressionStream;
+  restorers.push(() => { globalThis.DecompressionStream = native; });
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) =>
+    timeout(callback, delay === 5000 ? 50 : delay, ...args)) as typeof setTimeout);
+  restorers.push(() => timer.mockRestore());
+  const deflated = await (await JSZip.loadAsync(await deck(['Calibri'])))
+    .generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const faces: string[] = [];
+  const client = await createPresentationCommandClient(deflated, Object.assign({ ...options }, {
+    [defaultFontInstaller]: async (additions: readonly DefaultFontFace[]) => { faces.push(...additions.map((face) => face.family)); },
+  }), connection().transport);
+  clients.push(client);
+  expect(manager.resolve.mock.calls.map(([family]) => family)).toContain('Calibri');
+  expect(faces).toEqual(['Calibri']);
+});
+
 test('formatting updates collect new families in the background', async () => {
   const requested = deferred<void>();
   source({ Calibri: async () => font, Cambria: async () => { requested.resolve(); return font; } });

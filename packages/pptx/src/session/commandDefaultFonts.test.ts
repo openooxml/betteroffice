@@ -44,7 +44,7 @@ test('coverage prefetch loads each face once and decodes only after the session 
   const ready = new Promise<void>((resolve) => { release = resolve; });
   const load = mock(async () => bytes);
   const { resolveScriptFallback } = provider(() => undefined, (script) => script === 'cjk-jp' ? load : undefined);
-  prefetchCoverageFaces(['cjk-jp'], ready);
+  prefetchCoverageFaces(['cjk-jp'], ready, () => commandFontProvider.load());
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
   expect(load).toHaveBeenCalledTimes(1);
@@ -67,8 +67,9 @@ test('a prefetched coverage face and the later request share one decode', async 
   const decode = mock(decodeFontFace);
   const create = spyOn(fonts, 'createFontProvider').mockImplementation((options) => original(options, { decoder: decode }));
   restorers.push(() => create.mockRestore());
-  prefetchCoverageFaces(['cjk-jp'], Promise.resolve());
-  const source = await commandFontProvider.load();
+  const shared = commandFontProvider.load();
+  prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), () => shared);
+  const source = await shared;
   const japanese = await source.resolveScriptFallback('cjk-jp', false, false)!();
   expect(japanese.byteLength).toBe((await notoSansJP()).byteLength);
   expect(decode).toHaveBeenCalledTimes(1);
@@ -76,7 +77,7 @@ test('a prefetched coverage face and the later request share one decode', async 
 
 test('coverage prefetch without scripts loads nothing', async () => {
   const { imported } = provider(() => undefined);
-  prefetchCoverageFaces([], Promise.resolve());
+  prefetchCoverageFaces([], Promise.resolve(), () => commandFontProvider.load());
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(imported).not.toHaveBeenCalled();
 });

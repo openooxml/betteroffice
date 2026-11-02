@@ -1,4 +1,6 @@
 const MAX_PART_BYTES = 4 * 1024 * 1024;
+const MAX_SCAN_BYTES = 8 * 1024 * 1024;
+const MAX_ENTRIES = 5000;
 
 interface ZipEntry {
   method: number;
@@ -17,7 +19,7 @@ function centralDirectory(bytes: Uint8Array): Map<string, ZipEntry> | undefined 
   if (end < 0) return undefined;
   const count = view.getUint16(end + 10, true);
   let at = view.getUint32(end + 16, true);
-  if (count === 0xffff || at === 0xffffffff) return undefined;
+  if (count > MAX_ENTRIES || at === 0xffffffff) return undefined;
   const decoder = new TextDecoder();
   const entries = new Map<string, ZipEntry>();
   for (let index = 0; index < count; index++) {
@@ -36,22 +38,79 @@ function centralDirectory(bytes: Uint8Array): Map<string, ZipEntry> | undefined 
   return entries;
 }
 
-async function readPart(bytes: Uint8Array, entries: Map<string, ZipEntry>, name: string): Promise<string | undefined> {
+/** Inflates `data`, giving up as soon as the output passes `limit` bytes, whatever the entry declared. */
+async function inflate(data: Uint8Array<ArrayBuffer>, limit: number): Promise<Uint8Array | undefined> {
+  const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        void reader.cancel().catch(() => {});
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return undefined;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
+  return out;
+}
+
+async function readPart(
+  bytes: Uint8Array, entries: Map<string, ZipEntry>, name: string, budget: { left: number },
+): Promise<string | undefined> {
   const entry = entries.get(name);
-  if (!entry || entry.size > MAX_PART_BYTES) return undefined;
+  const limit = Math.min(MAX_PART_BYTES, budget.left);
+  if (!entry || entry.size > limit || entry.compressedSize > limit) return undefined;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (entry.offset + 30 > bytes.byteLength || view.getUint32(entry.offset, true) !== 0x04034b50) return undefined;
   const start = entry.offset + 30 + view.getUint16(entry.offset + 26, true) + view.getUint16(entry.offset + 28, true);
+  if (start + entry.compressedSize > bytes.byteLength) return undefined;
   const data = bytes.slice(start, start + entry.compressedSize);
-  if (entry.method === 0) return new TextDecoder().decode(data);
-  if (entry.method !== 8 || typeof DecompressionStream === 'undefined') return undefined;
-  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new TextDecoder().decode(await new Response(stream).arrayBuffer());
+  let out: Uint8Array | undefined;
+  if (entry.method === 0) out = entry.compressedSize === entry.size ? data : undefined;
+  else if (entry.method === 8 && typeof DecompressionStream !== 'undefined') out = await inflate(data, limit);
+  if (!out) return undefined;
+  budget.left -= out.byteLength;
+  return new TextDecoder().decode(out);
 }
 
-function relationshipTarget(rels: string, id: string): string | undefined {
-  for (const match of rels.matchAll(/<Relationship\b[^>]*>/g)) {
-    if (new RegExp(`\\bId="${id}"`).test(match[0])) return /\bTarget="([^"]+)"/.exec(match[0])?.[1];
+/** Calls `visit` with each tag's text between `<` and `>` in one pass; stops at an unterminated tag. */
+function eachTag(xml: string, from: number, to: number, visit: (tag: string, end: number) => number | void): void {
+  let at = from;
+  while (at < to) {
+    const open = xml.indexOf('<', at);
+    if (open < 0 || open >= to) return;
+    const close = xml.indexOf('>', open + 1);
+    if (close < 0) return;
+    const next = visit(xml.slice(open + 1, close), close + 1);
+    at = typeof next === 'number' ? next : close + 1;
+  }
+}
+
+const isSpace = (code: number) => code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+
+function isTag(tag: string, name: string): boolean {
+  if (!tag.startsWith(name)) return false;
+  const after = tag.charCodeAt(name.length);
+  return Number.isNaN(after) || after === 0x2f || isSpace(after);
+}
+
+/** The value of attribute `name` in a tag's text, read as a plain string. */
+function attribute(tag: string, name: string): string | undefined {
+  for (let at = tag.indexOf(`${name}=`); at >= 0; at = tag.indexOf(`${name}=`, at + 1)) {
+    const quote = tag[at + name.length + 1];
+    if (!isSpace(tag.charCodeAt(at - 1)) || (quote !== '"' && quote !== "'")) continue;
+    const start = at + name.length + 2;
+    const end = tag.indexOf(quote, start);
+    return end < 0 ? undefined : tag.slice(start, end);
   }
   return undefined;
 }
@@ -66,26 +125,60 @@ function hanScript(language: string | undefined): string | undefined {
   return rest.some((part) => part === 'hant' || part === 'tw' || part === 'hk' || part === 'mo') ? 'cjk-tc' : 'cjk-sc';
 }
 
+function addScripts(text: string, language: string | undefined, scripts: Set<string>): void {
+  for (const character of text) {
+    const point = character.codePointAt(0)!;
+    if ((point >= 0x3040 && point <= 0x30ff) || (point >= 0x31f0 && point <= 0x31ff) || (point >= 0xff66 && point <= 0xff9f)) {
+      scripts.add('cjk-jp');
+    } else if ((point >= 0xac00 && point <= 0xd7ff) || (point >= 0x1100 && point <= 0x11ff) || (point >= 0x3130 && point <= 0x318f)) {
+      scripts.add('cjk-kr');
+    } else if ((point >= 0x4e00 && point <= 0x9fff) || (point >= 0x3400 && point <= 0x4dbf) || (point >= 0xf900 && point <= 0xfaff) || point >= 0x20000) {
+      const script = hanScript(language);
+      if (script) scripts.add(script);
+    }
+  }
+}
+
 /** CJK coverage scripts the slide's text certainly needs: kana, hangul, or Han in a run tagged ja, ko or zh. */
 export function slideCoverageScripts(xml: string): string[] {
   const scripts = new Set<string>();
   let language: string | undefined;
-  for (const match of xml.matchAll(/<a:(?:rPr|endParaRPr)\b([^>]*)>|<a:t>([^<]*)<\/a:t>|<\/a:r>/g)) {
-    if (match[1] !== undefined) { language = /\blang="([^"]*)"/.exec(match[1])?.[1]; continue; }
-    if (match[2] === undefined) { language = undefined; continue; }
-    for (const character of match[2]) {
-      const point = character.codePointAt(0)!;
-      if ((point >= 0x3040 && point <= 0x30ff) || (point >= 0x31f0 && point <= 0x31ff) || (point >= 0xff66 && point <= 0xff9f)) {
-        scripts.add('cjk-jp');
-      } else if ((point >= 0xac00 && point <= 0xd7ff) || (point >= 0x1100 && point <= 0x11ff) || (point >= 0x3130 && point <= 0x318f)) {
-        scripts.add('cjk-kr');
-      } else if ((point >= 0x4e00 && point <= 0x9fff) || (point >= 0x3400 && point <= 0x4dbf) || (point >= 0xf900 && point <= 0xfaff) || point >= 0x20000) {
-        const script = hanScript(language);
-        if (script) scripts.add(script);
-      }
+  eachTag(xml, 0, xml.length, (tag, end) => {
+    if (isTag(tag, 'a:rPr') || isTag(tag, 'a:endParaRPr')) {
+      language = attribute(tag, 'lang');
+    } else if (tag === '/a:r') {
+      language = undefined;
+    } else if (isTag(tag, 'a:t') && !tag.endsWith('/')) {
+      const close = xml.indexOf('<', end);
+      const stop = close < 0 ? xml.length : close;
+      addScripts(xml.slice(end, stop), language, scripts);
+      return stop;
     }
-  }
+  });
   return [...scripts];
+}
+
+function slideIds(presentation: string): string[] {
+  const ids: string[] = [];
+  const start = presentation.indexOf('<p:sldIdLst');
+  if (start < 0) return ids;
+  const end = presentation.indexOf('</p:sldIdLst>', start);
+  eachTag(presentation, start, end < 0 ? presentation.length : end, (tag) => {
+    if (!isTag(tag, 'p:sldId')) return;
+    const id = attribute(tag, 'r:id');
+    if (id !== undefined) ids.push(id);
+  });
+  return ids;
+}
+
+function relationshipTarget(rels: string, id: string): string | undefined {
+  let target: string | undefined;
+  eachTag(rels, 0, rels.length, (tag) => {
+    if (!isTag(tag, 'Relationship') || attribute(tag, 'Id') !== id) return;
+    target = attribute(tag, 'Target');
+    return rels.length;
+  });
+  return target;
 }
 
 /** Coverage scripts of the slide that opens first, from the package bytes; empty when anything is unexpected. */
@@ -94,16 +187,16 @@ export async function activeSlideCoverageScripts(source: ArrayBuffer | Uint8Arra
     const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
     const entries = centralDirectory(bytes);
     if (!entries) return [];
-    const presentation = await readPart(bytes, entries, 'ppt/presentation.xml');
-    const rels = await readPart(bytes, entries, 'ppt/_rels/presentation.xml.rels');
+    const budget = { left: MAX_SCAN_BYTES };
+    const presentation = await readPart(bytes, entries, 'ppt/presentation.xml', budget);
+    const rels = await readPart(bytes, entries, 'ppt/_rels/presentation.xml.rels', budget);
     if (!presentation || !rels) return [];
-    const ids = [...(/<p:sldIdLst>([\s\S]*?)<\/p:sldIdLst>/.exec(presentation)?.[1] ?? '').matchAll(/\br:id="([^"]+)"/g)]
-      .map((match) => match[1]);
+    const ids = slideIds(presentation);
     const id = ids[Math.max(0, Math.min(activeSlideIndex, ids.length - 1))];
     const target = id === undefined ? undefined : relationshipTarget(rels, id);
     if (!target) return [];
     const path = target.startsWith('/') ? target.slice(1) : `ppt/${target.replace(/^\.\//, '')}`;
-    const xml = await readPart(bytes, entries, path);
+    const xml = await readPart(bytes, entries, path, budget);
     return xml ? slideCoverageScripts(xml) : [];
   } catch {
     return [];
