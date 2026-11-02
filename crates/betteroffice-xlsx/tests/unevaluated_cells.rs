@@ -816,3 +816,49 @@ fn readers_of_cells_a_kept_spill_would_fill_are_listed_through_every_open() {
     assert_eq!(at(&recalculated, 0, 1), number(99.0), "recalculated");
     assert_eq!(unevaluated(&recalculated), listed, "recalculated");
 }
+
+/// B1 reads the uncomputable A1 only through `INDIRECT`, so no edge of the
+/// graph leads there; what it reads keeps it at Excel's value and listed,
+/// whatever opens, recalculates or restores it. C1 reads plain cells the same
+/// way and computes.
+#[test]
+fn a_reader_through_a_computed_reference_keeps_excels_value_through_every_path() {
+    let bytes = cells(&[
+        (0, 0, Some(r#"_xlfn.WEBSERVICE("http://x")"#), text("live")),
+        (0, 1, Some(r#"INDIRECT("A1")&"!""#), text("cached")),
+        (0, 2, Some(r#"SUM(INDIRECT("D1:E1"))"#), number(0.0)),
+        (0, 3, None, number(1.0)),
+        (0, 4, None, number(2.0)),
+    ]);
+    let check = |workbook: &Workbook, stage: &str, sum: f64| {
+        assert_eq!(at(workbook, 0, 0), text("live"), "{stage}");
+        assert_eq!(at(workbook, 0, 1), text("cached"), "{stage}");
+        assert_eq!(unevaluated(workbook), ["A1", "B1"], "{stage}");
+        if sum > 0.0 {
+            assert_eq!(at(workbook, 0, 2), number(sum), "{stage}");
+        }
+    };
+    let options = CalculationOptions::default();
+    let mut opened = Workbook::open(&bytes).unwrap();
+    check(&opened, "open", 0.0);
+    set(&mut opened, 0, 3, "4");
+    check(&opened, "open edit", 6.0);
+    check(
+        &Workbook::open_for_read(&bytes).unwrap(),
+        "read-only open",
+        0.0,
+    );
+    let mut workbook = Workbook::open_recalculated(&bytes, options).unwrap();
+    check(&workbook, "open recalculated", 3.0);
+    let mut restored = hydrated(&workbook);
+    check(&restored, "snapshot", 0.0);
+    set(&mut restored, 0, 4, "5");
+    check(&restored, "snapshot edit", 6.0);
+    workbook.recalculate_all(options);
+    check(&workbook, "recalculate all", 3.0);
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    let (mut recovered, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    check(&recovered, "recovery", 0.0);
+    recovered.recalculate_all(options);
+    check(&recovered, "recovery recalculate all", 3.0);
+}

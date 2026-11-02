@@ -811,16 +811,6 @@ impl DepGraph {
         Some((lookup_sheet, *index))
     }
 
-    /// every formula that may call an uncomputable function, directly or
-    /// through a defined name, in any branch.
-    pub(crate) fn uncomputable_formulas(&self) -> Vec<(SheetId, CellRef)> {
-        self.deps
-            .iter()
-            .filter(|(key, entry)| !self.uncomputable_calls(key.sheet, &entry.ast).is_empty())
-            .map(|(key, _)| (key.sheet, key.cell()))
-            .collect()
-    }
-
     /// the uncomputable functions the formula at `cell` may call, directly or
     /// through a defined name, in any branch, sorted.
     pub(crate) fn uncomputable_calls_at(&self, sheet: SheetId, cell: CellRef) -> Vec<String> {

@@ -1008,6 +1008,7 @@ fn anchorarray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         return Value::error(ErrorValue::Ref);
     };
     let Some(range) = ctx.provider.spill_range(sid, *cell) else {
+        ctx.note_read(sid, *cell);
         return Value::Scalar(normalize_provider_value(ctx.provider.value(sid, *cell)));
     };
     let area = Area {

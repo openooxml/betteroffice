@@ -102,6 +102,19 @@ impl EvaluationBudget {
         }
     }
 
+    /// a budget taking up where one that [`EvaluationBudget::left`] read
+    /// stopped.
+    pub(crate) fn resumed(cells: u64, text: u64, refused: bool) -> Self {
+        let budget = Self::with_text(cells, text);
+        budget.refused.set(refused);
+        budget
+    }
+
+    /// the cell visits and text bytes left, and whether work was turned away.
+    pub(crate) fn left(&self) -> (u64, u64, bool) {
+        (self.remaining.get(), self.text.get(), self.refused.get())
+    }
+
     pub(crate) fn consume(&self, count: u64) -> bool {
         self.granted(take(&self.remaining, count))
     }
@@ -193,6 +206,16 @@ pub struct EvalContext<'a> {
     /// a graph whose names match the provider's, looked up instead of
     /// scanning them; `None` reads names through the provider.
     pub(crate) name_index: Option<&'a DepGraph>,
+    /// the cells an uncomputable call keeps unevaluated, consulted on every
+    /// read of a formula whose reads the graph cannot know ahead.
+    pub(crate) held_cells: Option<&'a dyn HeldCells>,
+}
+
+/// what a read tells a formula about the cell it reads.
+pub(crate) trait HeldCells {
+    /// the uncomputable functions keeping the cell at `at` unevaluated, if
+    /// any do.
+    fn held(&self, sheet: SheetId, at: CellRef) -> Option<Vec<String>>;
 }
 
 impl<'a> EvalContext<'a> {
@@ -259,6 +282,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: None,
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -304,6 +328,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: None,
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -339,6 +364,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: None,
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -368,6 +394,7 @@ impl<'a> EvalContext<'a> {
             parse_cache: self.parse_cache,
             name_index: self.name_index,
             spill_index: self.spill_index,
+            held_cells: self.held_cells,
         }
     }
 
@@ -538,6 +565,26 @@ impl<'a> EvalContext<'a> {
     /// call is unknown, so no handler's answer is known either.
     pub(crate) fn record_uncomputable(&self, name: String) {
         self.uncomputable.borrow_mut().push(name);
+    }
+
+    /// notes a read of the cell at `at`: an uncomputable call keeping that
+    /// cell unevaluated reaches this evaluation too.
+    pub(crate) fn note_read(&self, sheet: SheetId, at: CellRef) {
+        let Some(functions) = self.held_cells.and_then(|held| held.held(sheet, at)) else {
+            return;
+        };
+        let mut called = self.uncomputable.borrow_mut();
+        for name in functions {
+            if !called.contains(&name) {
+                called.push(name);
+            }
+        }
+    }
+
+    /// whether every read must pass through [`EvalContext::note_read`], so no
+    /// index built for other formulas may answer for one.
+    pub(crate) fn watches_reads(&self) -> bool {
+        self.held_cells.is_some()
     }
 
     pub(crate) fn uncomputable_checkpoint(&self) -> usize {
@@ -940,6 +987,7 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
+    ctx.note_read(sid, cell);
     kept(
         ctx,
         normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned(),
@@ -1369,6 +1417,7 @@ impl Area {
         col: usize,
     ) -> Cow<'p, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
+        ctx.note_read(self.sheet, cell);
         normalize_cow(ctx.provider.value_cow(self.sheet, cell))
     }
 

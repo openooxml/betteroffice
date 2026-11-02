@@ -3307,6 +3307,13 @@ impl Workbook {
             let graph = self.graph.as_ref().expect("graph initialized");
             let now_serial = context.and_then(|context| context.now_serial);
             xlsx_calc::derive_unevaluated(&self.model, graph, now_serial, self.rand_seed);
+            self.adopt_derived_unevaluated();
+        }
+    }
+
+    /// takes the list a derivation marked on the graph as the session's.
+    pub(crate) fn adopt_derived_unevaluated(&mut self) {
+        if let Some(graph) = &self.graph {
             self.last_calculation.unevaluated_cells = unevaluated_cells(&graph.unevaluated_cells());
         }
     }

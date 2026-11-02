@@ -1077,6 +1077,9 @@ fn criteria_index_spill_schedules_guard_before_later_readers() {
             inherited: HashMap::new(),
             replaced: HashMap::new(),
             rerun: Vec::new(),
+            early: HashMap::new(),
+            watching: false,
+            unwatched: Vec::new(),
         };
         let sheet = SheetId(0);
         let reader = CellRef::new(0, 1);

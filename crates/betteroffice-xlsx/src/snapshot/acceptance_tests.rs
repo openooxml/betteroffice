@@ -3376,3 +3376,87 @@ fn snapshot_read_cells_reports_header_footer_without_package_rebuild() {
         }
     }
 }
+
+/// a sheet of uncomputable calls, readers through computed references, a
+/// cycle through a fallback and a long tail of plain cells.
+fn uncomputable_source() -> Vec<u8> {
+    let mut sheet = xlsx_model::Sheet::new("Data");
+    let mut put = |at: &str, formula: Option<&str>, value: CellValue| {
+        sheet.set_cell(
+            CellRef::parse_a1(at).unwrap(),
+            Cell {
+                value,
+                formula: formula.map(str::to_owned),
+                style: None,
+            },
+        );
+    };
+    let number = |value: f64| CellValue::Number { value };
+    put("A6", Some(r#"_xlfn.WEBSERVICE("http://x")"#), number(5.0));
+    put("B1", Some(r#"INDIRECT("A6")*2"#), number(99.0));
+    put("C1", Some("LEN(A6)"), number(1.0));
+    put(
+        "D1",
+        Some(r#"IFERROR(_xlfn.WEBSERVICE("http://x"),E1)"#),
+        number(3.0),
+    );
+    put("E1", Some("D1"), number(3.0));
+    for row in 10u32..400 {
+        put(&format!("A{row}"), None, number(f64::from(row)));
+        put(
+            &format!("B{row}"),
+            Some(&format!("A{row}*2")),
+            number(f64::from(row * 2)),
+        );
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    };
+    ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
+}
+
+/// a restored session re-derives its unevaluated cells in steps each
+/// advance's budget bounds, and a one-record budget derives the same list as
+/// an unbounded one.
+#[test]
+fn snapshot_rederivation_stays_within_each_advance_budget() {
+    let worker = worker(&uncomputable_source());
+    let listed: Vec<String> = worker
+        .last_calculation
+        .unevaluated_cells
+        .iter()
+        .map(|cell| cell.address.cell.to_a1())
+        .collect();
+    assert_eq!(listed, ["B1", "C1", "D1", "E1", "A6"]);
+    let tiny = SnapshotBudget::new(1, 16 * 1024).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in encode(&worker, tiny) {
+        builder.push(&chunk).unwrap();
+        builder.advance(tiny).unwrap();
+    }
+    let mut ready = false;
+    for _ in 0..200_000 {
+        xlsx_calc::engine::track_formula_evaluations();
+        ready = builder.advance(tiny).unwrap().is_ready();
+        assert_step_budget(tiny);
+        assert!(xlsx_calc::engine::take_evaluated_formulas().len() <= 1);
+        if ready {
+            break;
+        }
+    }
+    assert!(ready);
+    let (bounded, _) = builder.finish().unwrap().into_parts();
+    let unbounded = hydrate(
+        &worker,
+        SnapshotBudget::new(usize::MAX, usize::MAX).unwrap(),
+    );
+    assert_eq!(
+        bounded.last_calculation.unevaluated_cells,
+        worker.last_calculation.unevaluated_cells
+    );
+    assert_eq!(
+        unbounded.last_calculation.unevaluated_cells,
+        worker.last_calculation.unevaluated_cells
+    );
+}
