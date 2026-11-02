@@ -593,7 +593,7 @@ pub(crate) fn fixed(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// `x` rounded at `decimals` and written out. the rounding works on the 15
 /// significant digits excel keeps, so 2.675 rounds up to 2.68 as it displays.
-fn fixed_text(x: f64, decimals: i32, commas: bool) -> String {
+pub(crate) fn fixed_text(x: f64, decimals: i32, commas: bool) -> String {
     let scientific = format!("{:.14e}", x.abs());
     let (mantissa, exponent) = scientific
         .split_once('e')

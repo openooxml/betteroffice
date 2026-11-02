@@ -9,11 +9,11 @@ import { createTestWorkbookSession } from '../../../xlsx/src/session/testHelpers
 import { XlsxWorkerEditor } from './XlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 import type { XlsxAsyncEditorApi } from './createAsyncEditorApi';
+import { MOUNTED } from '../__fixtures__/mounted';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
-const MOUNTED = { timeout: 4_000 };
 const restorers: (() => void)[] = [];
 let frames: Map<number, FrameRequestCallback>;
 let nextFrame = 0;

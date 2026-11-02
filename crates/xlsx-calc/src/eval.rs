@@ -12,6 +12,7 @@ use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, Sheet
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
+use crate::deps::{mentions_workbook_index, names_other_workbook, reads_other_workbook};
 use crate::fmath;
 use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
@@ -176,6 +177,7 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
+    other_workbook: Rc<Cell<bool>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<DefinedNameValues>>,
     array_depth: Rc<Cell<u32>>,
@@ -241,6 +243,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -285,6 +288,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -322,6 +326,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -350,6 +355,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
+            other_workbook: Rc::clone(&self.other_workbook),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             array_depth: Rc::clone(&self.array_depth),
@@ -521,6 +527,18 @@ impl<'a> EvalContext<'a> {
     /// evaluation's result, rather than being answered by a handler.
     pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
         self.unsupported_functions.get() != 0
+    }
+
+    /// whether this evaluation read another workbook, directly or through a
+    /// defined name. the package carries none of its cells, so the result
+    /// stands in for nothing, whatever a handler made of the gap.
+    pub fn read_other_workbook(&self) -> bool {
+        self.other_workbook.get()
+    }
+
+    pub(crate) fn record_other_workbook(&self) {
+        self.other_workbook.set(true);
+        self.record_unsupported_function();
     }
 
     pub(crate) fn record_unsupported_function(&self) {
@@ -843,11 +861,16 @@ fn bind_defined_name(
         None => parse_formula(formula).ok().map(Arc::new),
     }
     .ok_or_else(|| {
-        if formula.contains('[') {
+        if mentions_workbook_index(formula) {
+            ctx.record_other_workbook();
+        } else if formula.contains('[') {
             ctx.record_unsupported_function();
         }
         ErrorValue::Name
     })?;
+    if reads_other_workbook(&expression) {
+        ctx.record_other_workbook();
+    }
     let sheet = defined.local_sheet.unwrap_or(key.0);
     #[cfg(test)]
     DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
@@ -901,7 +924,9 @@ pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Op
 /// workbook (`[1]Sheet`; a sheet name cannot contain `[`) is an engine gap,
 /// since the package carries none of that workbook's cells.
 fn missing_sheet(name: &str, ctx: &EvalContext<'_>) -> Option<SheetId> {
-    if name.contains('[') {
+    if names_other_workbook(name) {
+        ctx.record_other_workbook();
+    } else if name.contains('[') {
         ctx.record_unsupported_function();
     }
     None
@@ -1227,9 +1252,54 @@ pub(crate) fn parse_clock(s: &str) -> Option<f64> {
     Some((hour * 3600.0 + minute * 60.0 + second) / 86400.0)
 }
 
-/// excel "general" number formatting, good enough for text coercion: integers
-/// print without a decimal, everything else uses rust's shortest round-trip.
-pub(crate) fn format_number(n: f64) -> String {
+/// the longest plain form, sign excluded, excel writes for a number in text;
+/// a longer one switches to scientific notation.
+const PLAIN_TEXT_CHARS: usize = 20;
+
+/// a number as excel writes it into text: rounded to 15 significant digits
+/// without trailing zeros, plain unless that takes more than
+/// [`PLAIN_TEXT_CHARS`] characters, then scientific with a signed exponent
+/// of at least two digits. so `0.1+0.2` reads as "0.3", 10^19 as
+/// "10000000000000000000", 10^20 as "1E+20" and 10^-19 as "1E-19".
+pub(crate) fn format_number(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return exact_number_text(x);
+    }
+    let scientific = format!("{:.14e}", x.abs());
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_end_matches('0');
+    let sign = if x < 0.0 { "-" } else { "" };
+    let magnitude = exponent.unsigned_abs() as usize;
+    let plain_chars = if exponent < 0 {
+        magnitude + 1 + digits.len()
+    } else if digits.len() <= magnitude + 1 {
+        magnitude + 1
+    } else {
+        digits.len() + 1
+    };
+    if plain_chars > PLAIN_TEXT_CHARS {
+        let (head, tail) = digits.split_at(1);
+        let point = if tail.is_empty() { "" } else { "." };
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!("{sign}{head}{point}{tail}E{exponent_sign}{magnitude:02}");
+    }
+    if exponent < 0 {
+        let zeros = "0".repeat(magnitude - 1);
+        return format!("{sign}0.{zeros}{digits}");
+    }
+    let whole = magnitude + 1;
+    if digits.len() <= whole {
+        format!("{sign}{digits:0<whole$}")
+    } else {
+        format!("{sign}{}.{}", &digits[..whole], &digits[whole..])
+    }
+}
+
+/// a number as the shortest text that reads back as the same double, for
+/// keys and formula text that must not merge distinct values.
+pub(crate) fn exact_number_text(n: f64) -> String {
     if n == 0.0 {
         return "0".to_string();
     }
@@ -2272,7 +2342,7 @@ mod tests {
     fn non_finite_arithmetic_becomes_num_error() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
-        for formula in ["MEDIAN(1e308*1e308,1)", "SMALL(1e308*1e308,1)"] {
+        for formula in ["MEDIAN(1e307*1e307,1)", "SMALL(1e307*1e307,1)"] {
             let expression = parse_formula(formula).unwrap();
             let context = EvalContext::new(&workbook, SheetId(0));
             assert_eq!(

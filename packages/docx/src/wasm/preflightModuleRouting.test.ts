@@ -5,8 +5,9 @@ import { routingDocxEntries } from './__fixtures__/routingDocx';
 import { wasmModuleMemories } from './loadWasmAsset';
 import { preloadOpcWasm, rezipContainer } from './opc';
 import { preflightWasmState } from './preflight';
+import { engineKind } from './engineEdit';
 
-test('opening an engine leaves preflight unloaded until requested', async () => {
+test.skipIf(engineKind === 'native')('opening an engine leaves preflight unloaded until requested', async () => {
   const fetch = spyOn(globalThis, 'fetch');
   try {
     expect(preflightWasmState.status()).toBe('idle');

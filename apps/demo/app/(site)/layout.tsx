@@ -1,11 +1,9 @@
 import type { Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import Link from "next/link";
 import { Logo } from "../components/Logo";
 import { listedLiveFormats } from "../../lib/formats";
-
-const sans = Geist({ subsets: ["latin"], variable: "--font-geist", display: "swap" });
-const mono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono", display: "swap" });
 
 export const viewport: Viewport = {
   themeColor: [
@@ -20,7 +18,7 @@ const navLink = "font-mono text-xs text-ink no-underline transition-colors hover
 // the launcher's chrome, in the website's frame and type; the editor routes render without it
 export default function SiteLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className={`site ${sans.variable} ${mono.variable} flex min-h-dvh flex-col antialiased`}>
+    <div className="site flex min-h-dvh flex-col antialiased">
       <header className="sticky top-0 z-10 border-b border-line-soft bg-head backdrop-blur-xl">
         <div className="wrap flex h-16 items-center justify-between gap-6 max-[36rem]:h-auto max-[36rem]:flex-wrap max-[36rem]:gap-y-2 max-[36rem]:py-3.5">
           <Link

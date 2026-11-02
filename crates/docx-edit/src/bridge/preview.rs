@@ -878,7 +878,7 @@ fn replace_positions<T>(
 ) {
     entries.retain(|entry| !pm.contains(&key(entry)));
     entries.extend(replacements);
-    entries.sort_by_key(key);
+    crate::sort::sort_by_key(entries, &key);
 }
 
 pub(crate) fn targets(
