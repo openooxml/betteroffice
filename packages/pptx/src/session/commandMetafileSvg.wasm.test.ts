@@ -120,14 +120,17 @@ test('openPresentationSession retries a failed converter load on the next frame'
   expect(load).toHaveBeenCalledTimes(2);
 });
 
-test('openPresentationSession retries media after a converter load times out', async () => {
+test('openPresentationSession holds a frame until a slow converter load settles', async () => {
   const pending = deferred<MetafileSvgModule>();
   const load = loader(() => pending.promise);
   const client = await openPresentationSession(await deck(1), { worker: sessionWorker });
   clients.push(client);
-  expect((await client.call.frame(0)).media.get('ppt/media/picture.emf')).toHaveLength(0);
+  let settled = false;
+  const framing = client.call.frame(0).then((frame) => { settled = true; return frame; });
+  await new Promise((resolve) => setTimeout(resolve, 3500));
+  expect(settled).toBe(false);
   pending.resolve(svgModule());
-  expect((await client.call.frame(0)).media.get('ppt/media/picture.emf')).toEqual(svg);
+  expect((await framing).media.get('ppt/media/picture.emf')).toEqual(svg);
   expect(load).toHaveBeenCalledTimes(1);
 }, 10_000);
 

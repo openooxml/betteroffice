@@ -81,15 +81,9 @@ export function createPresentationSessionHost(
   } : createMetafileSvg();
 
   async function loadMetafiles(): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        metafiles.start(),
-        new Promise<void>((resolve) => { timer = setTimeout(resolve, 3000); }),
-      ]);
-    } catch {} finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+      await metafiles.start();
+    } catch {}
   }
 
   function presentation(): PresentationHandle | PresentationPeerHandle {
