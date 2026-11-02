@@ -77,7 +77,7 @@ export interface RustMeasureSource {
   measurementConfigForRequirements(
     requirements: ResidentFontRequirement[],
   ): ResidentMeasurementConfig | undefined;
-  /** @internal Whether later requirements need no face the prepared chains lack; holds no font bytes, so it outlives `clear()`. */
+  /** @internal Whether later requirements need no face the prepared chains lack (characters prepared here count as settled); holds no font bytes, so it outlives `clear()`. */
   coverageCheck(
     requirements: ResidentFontRequirement[],
   ): (next: ResidentFontRequirement[]) => boolean;
@@ -262,7 +262,9 @@ export function createRustMeasureSource(options: {
 
     coverageCheck(requirements) {
       const chains = new Map<string, FontCoverage[] | null>();
+      const settled = new Map<string, Set<string>>();
       for (const requirement of mergeRequirements(requirements)) {
+        settled.set(requirement.key, new Set(requirement.characters));
         const familyIds = registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false);
         const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
           registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false);
@@ -283,7 +285,8 @@ export function createRustMeasureSource(options: {
         const coverage = chains.get(requirement.key);
         if (coverage === undefined) return false;
         const aliases = symbolFamily(requirement.family);
-        return coverage === null || (requirement.characters ?? []).every(character =>
+        const known = settled.get(requirement.key);
+        return coverage === null || (requirement.characters ?? []).every(character => known?.has(character) ||
           !baseLatinCandidate(character, false) || (baseLatinAlias(character) && !aliases) ||
           coverage.some(covers => covers(character)));
       });

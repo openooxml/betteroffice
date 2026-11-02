@@ -83,6 +83,23 @@ test('the coverage check answers after the registry is cleared', async () => {
   expect(covers([requirement, plain, { key: 'other|0|0', family: 'Other', bold: false, italic: false }])).toBe(false);
 });
 
+test('characters the coverage check was taken with stay settled although no face covers them', async () => {
+  let next = 0;
+  const source = createRustMeasureSource({ engine: { registerFont: () => next++, clearFonts() {} },
+    bundled: { resolve: () => async () => hebrew, resolveBaseLatin: () => async () => regular } });
+  const faces = [regular, hebrew].map(face => fontCoverage(new Uint8Array(face))!);
+  const [first, second] = Array.from({ length: 0x27bf - 0x25a0 + 1 }, (_, index) => String.fromCodePoint(0x25a0 + index))
+    .filter(character => !faces.some(covers => covers(character)));
+  expect(second).toBeDefined();
+  const requirement = { key: 'emoji|0|0', family: 'Emoji', bold: false, italic: false, characters: [first!] };
+  await source.prepareFontRequirements([requirement]);
+  expect(source.measurementConfigForRequirements([requirement])).toBeDefined();
+  const covers = source.coverageCheck([requirement]);
+  source.clear();
+  expect(covers([requirement])).toBe(true);
+  expect(covers([{ ...requirement, characters: [first!, second!] }])).toBe(false);
+});
+
 test('aliased requirement keys settle with independent character sets', async () => {
   let next = 0;
   const source = createRustMeasureSource({
