@@ -33,7 +33,10 @@ mod tests {
         let mut cache = pptx_edit::MetafileSvgCache::default();
         for (key, bytes) in [("text", TEXT), ("bitmap", BITMAP)] {
             let expected = cache.resolve(key, bytes).unwrap();
-            assert_eq!(converter.to_svg(bytes).unwrap().as_slice(), expected.as_ref());
+            assert_eq!(
+                converter.to_svg(bytes).unwrap().as_slice(),
+                expected.as_ref()
+            );
         }
     }
 
