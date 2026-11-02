@@ -208,7 +208,10 @@ impl<'a> Skeleton<'a> {
 /// `(glyph id, charstring)` pairs of a chunk file.
 pub fn chunk_entries(chunk: &[u8]) -> Result<Vec<(u32, &[u8])>, SliceError> {
     let count = usize_at(chunk, 0)?;
-    let mut entries = Vec::with_capacity(count.min(chunk.len() / 8));
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(count.min(chunk.len() / 8))
+        .map_err(|_| SliceError::TooLarge)?;
     let mut position = 4usize;
     for _ in 0..count {
         let glyph = u32_at(chunk, position)?;
