@@ -521,6 +521,15 @@ impl StoryParser<'_, '_> {
                     }
                     "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
                     "AlternateContent" => {
+                        let shared = crate::text_box::shares_a_bookmarked_branch(child);
+                        if shared
+                            && holds_whole_alternate_content(
+                                paragraph,
+                                &crate::text_box::source_xml(child),
+                            )
+                        {
+                            continue;
+                        }
                         let branch = child
                             .child_elements()
                             .find(|branch| branch.local_name() == "Choice")
@@ -533,7 +542,11 @@ impl StoryParser<'_, '_> {
                             for item in branch.child_elements() {
                                 match item.local_name() {
                                     "drawing" => self.enrich_text_box_drawing(
-                                        paragraph, item, child, run_index, depth,
+                                        paragraph,
+                                        item,
+                                        if shared { item } else { child },
+                                        run_index,
+                                        depth,
                                     )?,
                                     "pict" => self.enrich_vml_text_box(paragraph, item, depth)?,
                                     _ => {}
@@ -722,6 +735,15 @@ impl StoryParser<'_, '_> {
 
 /// `parent`'s children in document order, descending through `w:customXml`
 /// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
+fn holds_whole_alternate_content(paragraph: &Paragraph, xml: &str) -> bool {
+    paragraph.content.iter().any(|content| {
+        matches!(content, ParagraphContent::Inline(InlineNode::Run(run))
+            if run.content.iter().any(|item| matches!(item,
+                RunContent::OpaqueDrawing { kind, xml: whole, .. }
+                    if kind == "alternateContent" && whole == xml)))
+    })
+}
+
 pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {
     let mut children = Vec::new();
     visit_transparent_children(parent, through_sdt, &mut Vec::new(), &mut |_, child| {

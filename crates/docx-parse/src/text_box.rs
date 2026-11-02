@@ -184,6 +184,19 @@ pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     )
 }
 
+/// An `mc:AlternateContent` holding a bookmarked text box next to another drawing in one
+/// branch: no single shape can own its source, so each drawing keeps its own.
+pub(crate) fn shares_a_bookmarked_branch(element: &XmlElement) -> bool {
+    has_bookmarked_text_box(element)
+        && element.child_elements().any(|branch| {
+            branch
+                .child_elements()
+                .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+                .count()
+                > 1
+        })
+}
+
 pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
     has_block_bookmarks(element, false)
 }
