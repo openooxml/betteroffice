@@ -390,7 +390,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const renderEnvironment = useRef({ theme: null as DocxEditorProps['theme'], requested: '' });
   const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: DocxFontEnvironment;
     requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'];
-    covers?: (requirements: ResidentFontRequirement[]) => boolean } | null>(null);
+    covers?: (requirements: ResidentFontRequirement[]) => boolean;
+    initialRequirements: ResidentFontRequirement[]; initialCovers?: (requirements: ResidentFontRequirement[]) => boolean } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; pick: AbortSignal | null; read: number }>(
@@ -665,11 +666,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       });
       const families = [...new Set([...requirements.map(item => item.family),
         ...(metadata.package.fontTable?.fonts ?? []).map(font => font.name)])];
+      const covers = measurement?.coverageCheck(requirements);
       fontSource.current = { document: metadata, layoutInput: JSON.stringify(layout), families, requirements,
         initial: fontEnvironmentForRegistrations(fonts, config.fontChains, requirements, families, fontStyles),
         signature: settings.current.fonts === undefined && !settings.current.reportFonts ? '[]' : null,
         provider: settings.current.measurementFontProvider,
-        covers: measurement?.coverageCheck(requirements) };
+        covers, initialRequirements: requirements, initialCovers: covers };
       controller.fontChoices(families);
       identity.current = {
         session: connection.initial.session,
@@ -782,7 +784,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       let payload: DocxFontEnvironment;
       let requirements = opened.requirements;
       let covers = opened.covers;
-      if (!requirementsChanged && opened.signature === null && !fonts?.length && provider === opened.provider) payload = structuredClone(opened.initial);
+      if (!requirementsChanged && opened.signature === null && !fonts?.length && provider === opened.provider) {
+        payload = structuredClone(opened.initial);
+        requirements = opened.initialRequirements;
+        covers = opened.initialCovers;
+      }
       else {
         if (requirementsChanged) fontRefresh.current.read = performance.now();
         const next = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];
