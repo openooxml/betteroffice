@@ -1258,6 +1258,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       neighborFrames.set(neighbor.index, { sheetId: neighbor.id, proposals: proposalsAt,
         request: { ...current, sheet: neighbor.index, viewport: { ...frame.viewport } },
         paint: { displayList: frame.displayList, mergedRanges: frame.mergedRanges ?? [], version: frame.version } });
+      paintWithDefaultFonts.preload(frame.displayList);
     }
   };
   scheduleNeighborFrames.current = () => {

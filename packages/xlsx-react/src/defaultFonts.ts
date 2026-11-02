@@ -126,7 +126,13 @@ export function createDefaultFontPainter(
     return true;
   }
 
-  async function load(displayList: DisplayList): Promise<void> {
+  const paintedNeeds = (key: string) => {
+    if (!lastPainted) return false;
+    for (const face of faceKeys(lastPainted)) if (face.key === key) return true;
+    return false;
+  };
+
+  async function load(displayList: DisplayList, quiet = false): Promise<void> {
     if (inactive()) return;
     const batch: Promise<boolean>[] = [];
     for (const { fontFamily, bold, italic, key } of faceKeys(displayList)) {
@@ -136,7 +142,7 @@ export function createDefaultFontPainter(
         settled.add(key);
         if (success) {
           loaded.add(key);
-          changed = true;
+          if (!quiet || paintedNeeds(key)) changed = true;
         }
         if (!disposed && !pending.size && changed) {
           changed = false;
@@ -156,6 +162,10 @@ export function createDefaultFontPainter(
 
   return {
     load,
+    /** Loads the faces of a frame that is not painted yet, without repainting the current one. */
+    preload(displayList: DisplayList): void {
+      void load(displayList, true).catch(() => {});
+    },
     /** Takes over a frame painted before this painter existed. */
     adopt(displayList: DisplayList): void {
       lastPainted = displayList;

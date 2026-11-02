@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import type { DisplayList, WorkbookSession } from '@betteroffice/xlsx';
 import type { createDefaultFontPainter } from './defaultFonts';
 
@@ -28,7 +28,7 @@ export function useDefaultFonts(
       if (state.current === current) state.current = undefined;
     };
   }, [owner, decoder, defaultFonts]);
-  return useCallback((displayList: DisplayList, paint: () => void): boolean => {
+  const paintWithFonts = useCallback((displayList: DisplayList, paint: () => void): boolean => {
     const current = state.current;
     if (current?.painter) return current.painter.paint(displayList, paint);
     paint();
@@ -36,4 +36,7 @@ export function useDefaultFonts(
     current.last = displayList;
     return false;
   }, []);
+  return useMemo(() => Object.assign(paintWithFonts, {
+    preload: (displayList: DisplayList) => { state.current?.painter?.preload(displayList); },
+  }), [paintWithFonts]);
 }
