@@ -1303,10 +1303,10 @@ function applyPreparedDocxCommand(
       }
       pastedOver = structuredClone(last.range);
       pastedMarks = last.storedMarks;
-      caret(applyClipboardFragment(engine, last.range, command.payload.fragment, command.payload.suggesting));
-      const firstLine = command.payload.fragment.paragraphs[0]?.text.length ?? 0;
-      if (command.payload.plain && pastedMarks && firstLine > 0) {
-        const typed = { story, start, end: { paraId: start.paraId, offset: start.offset + firstLine } };
+      const after = applyClipboardFragment(engine, last.range, command.payload.fragment, command.payload.suggesting);
+      caret(after);
+      if (command.payload.plain && pastedMarks && (after.paraId !== start.paraId || after.offset !== start.offset)) {
+        const typed = { story, start, end: { paraId: after.paraId, offset: after.offset } };
         if (pastedMarks.clear) engine.clearFormatting(typed);
         if (Object.keys(pastedMarks.delta).length) engine.formatRange(typed, pastedMarks.delta);
       }

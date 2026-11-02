@@ -453,6 +453,8 @@ function normalizeTextPart(part: string): string {
   return part.replace(/[ \n\r\f\v\u00a0\u2028\u2029]+/g, ' ');
 }
 
+const KEPT_SPACE = '\uE000';
+
 function textNodeText(node: Text): string {
   return node.data.split(NBSP).join(' ');
 }
@@ -725,20 +727,22 @@ function inlineParagraphs(
       ...blockProperties,
     });
   };
+  let collapsibleEnd = false;
   const pushText = (raw: string, chain: Element[]) => {
     if (chain.some(element => element.tagName.toUpperCase() === 'PRE')) {
-      raw.split(/\r\n|\r|\n/).forEach((line, index) => {
+      raw.split(NBSP).join(' ').split(/\r\n|\r|\n/).forEach((line, index) => {
         if (index > 0) flush(true);
         preformattedLine = true;
+        collapsibleEnd = false;
         if (line !== '') appendRun(line, chain);
       });
       return;
     }
-    let text = raw.split('\t').map(normalizeTextPart).join('\t');
-    const previous = runs[runs.length - 1];
-    if (!previous || previous.text.endsWith(' ')) text = text.replace(/^ +/, '');
+    let text = raw.split(NBSP).join(KEPT_SPACE).split('\t').map(normalizeTextPart).join('\t');
+    if (runs.length === 0 || collapsibleEnd) text = text.replace(/^ +/, '');
     if (text === '') return;
-    appendRun(text, chain);
+    collapsibleEnd = text.endsWith(' ');
+    appendRun(text.split(KEPT_SPACE).join(' '), chain);
   };
   const appendRun = (text: string, chain: Element[]) => {
     const state = blankInlineFormat();
@@ -757,7 +761,7 @@ function inlineParagraphs(
     if (node.nodeType === 8) return;
     if (node.nodeType === 3) {
       if ((node as Text).data.includes(NBSP)) nonBreakingLine = true;
-      pushText(textNodeText(node as Text), chain);
+      pushText((node as Text).data, chain);
       return;
     }
     if (node.nodeType !== 1) return;

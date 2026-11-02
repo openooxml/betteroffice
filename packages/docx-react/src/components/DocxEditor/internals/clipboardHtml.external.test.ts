@@ -220,3 +220,12 @@ test('preformatted text keeps its lines and indentation', () => {
   expect(parseClipboardHtml('<pre><b>if (x) {\n  y();\n}</b></pre>')?.paragraphs.map((paragraph) => paragraph.text))
     .toEqual(['if (x) {', '  y();', '}']);
 });
+
+test('non-breaking spaces at a run boundary are both kept', () => {
+  expect(parseClipboardHtml('<p><b>A&nbsp;</b><i>&nbsp;B</i></p>')).toEqual({
+    paragraphs: [{ text: 'A  B', runs: [
+      { text: 'A ', format: { bold: true } },
+      { text: ' B', format: { italic: true } },
+    ] }],
+  });
+});
