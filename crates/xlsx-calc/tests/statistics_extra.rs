@@ -857,20 +857,16 @@ fn negative_fractional_counts_are_num_errors() {
     approx("POISSON.DIST(0.9,5,FALSE)", (-5.0f64).exp());
 }
 
-/// an alpha of one is reached only by every trial, and an alpha just below
-/// one compares the upper tail with 1 - alpha, so a cumulative that rounds
-/// up to alpha does not end the search early.
+/// excel requires alpha below one.
 #[test]
-fn binom_inv_at_full_probability() {
-    approx("BINOM.INV(1000,0.001,1)", 1000.0);
-    approx("CRITBINOM(1000,0.001,1)", 1000.0);
-    approx("BINOM.INV(6,0.5,1)", 6.0);
-    approx("BINOM.INV(1E200,0.5,1)", 1e200);
-    // mpmath 30 digits: P(X >= 18) = 1.557e-16 is above 1 - alpha = 2^-53
-    approx("BINOM.INV(20,0.1,0.9999999999999999)", 18.0);
-    // mpmath 30 digits: P(X >= 89) = 1.270e-16 is above 2^-53
-    approx("CRITBINOM(100,0.5,0.9999999999999999)", 89.0);
-    approx("BINOM.INV(6,0,1)", 0.0);
+fn binom_inv_rejects_an_alpha_of_one() {
+    check(&[
+        // Excel 365 for Mac result
+        ("BINOM.INV(1000,0.001,1)", e(ErrorValue::Num)),
+        // Excel 365 for Mac result
+        ("CRITBINOM(20,0.1,1)", e(ErrorValue::Num)),
+        ("BINOM.INV(6,0.5,1)", e(ErrorValue::Num)),
+    ]);
 }
 
 /// a skipped known_x fits against 1, 2, 3, ... as GROWTH does, and a skipped
@@ -899,67 +895,67 @@ fn logest_with_skipped_known_x() {
     relative("INDEX(LOGEST({1E-200;1E-199;1E-198}),1,2)", 1e-201, 1e-12);
 }
 
-/// the residuals come from the fitted line, so large nearly collinear values
-/// keep their error, and scaled samples neither overflow nor underflow.
+/// STEYX keeps excel's textbook formula, cancellation included; sums that
+/// overflow are `#NUM!` rather than a zero.
 #[test]
-fn steyx_keeps_small_residuals_of_large_values() {
-    // mpmath 30 digits: sqrt(2/3)
-    approx(
-        "STEYX({100000000,200000001,300000000},{1,2,3})",
-        0.816496580927726,
-    );
-    // mpmath 30 digits
-    relative(
-        "STEYX({1E200,3E200,2E200,5E200},{1,2,3,4})",
-        1.1618950038622251e200,
-        1e-12,
-    );
-    // mpmath 30 digits
-    relative(
-        "STEYX({1E-200,3E-200,2E-200,5E-200},{1E-200,2E-200,3E-200,4E-200})",
-        1.161895003862225e-200,
-        1e-12,
-    );
+fn steyx_follows_the_textbook_formula() {
+    check(&[
+        // Excel 365 for Mac result
+        ("STEYX({100000000,200000001,300000000},{1,2,3})", n(0.0)),
+        (
+            "STEYX({1E200,3E200,2E200,5E200},{1,2,3,4})",
+            e(ErrorValue::Num),
+        ),
+    ]);
 }
 
-/// a density that underflows is zero, not infinity times zero, and x / beta
-/// outside the normal range is taken through logarithms.
+/// WEIBULL.DIST evaluates the density directly, so terms that overflow are
+/// `#NUM!` as in excel.
 #[test]
-fn weibull_density_underflows_to_zero() {
+fn weibull_density_overflow_is_a_num_error() {
     check(&[
-        ("WEIBULL.DIST(100,200,1,FALSE)", n(0.0)),
-        ("WEIBULL(100,200,1,FALSE)", n(0.0)),
-        ("WEIBULL.DIST(1E200,1E200,1,FALSE)", n(0.0)),
-        ("WEIBULL.DIST(100,200,1,TRUE)", n(1.0)),
-        ("WEIBULL.DIST(0,2,1,FALSE)", n(0.0)),
-        ("WEIBULL.DIST(0,2,1,TRUE)", n(0.0)),
-        ("WEIBULL.DIST(0,1,2,FALSE)", n(0.5)),
-        ("WEIBULL.DIST(0,0.5,1,FALSE)", e(ErrorValue::Num)),
+        // Excel 365 for Mac result
+        ("WEIBULL.DIST(100,200,1,FALSE)", e(ErrorValue::Num)),
+        ("WEIBULL(100,200,1,FALSE)", e(ErrorValue::Num)),
     ]);
-    // mpmath 30 digits
-    relative(
-        "WEIBULL.DIST(1E-200,0.001,1E200,FALSE)",
-        2.6736481423015296e196,
-        1e-12,
-    );
-    // mpmath 30 digits
-    relative(
-        "WEIBULL.DIST(1E-200,0.001,1E200,TRUE)",
-        0.32840995087219926,
-        1e-12,
-    );
-    // mpmath 30 digits
-    relative(
-        "WEIBULL.DIST(1E-200,2,1E-200,FALSE)",
-        7.357588823428846e199,
-        1e-12,
-    );
-    // mpmath 30 digits
-    relative(
-        "WEIBULL.DIST(1E200,1,1E200,FALSE)",
-        3.6787944117144235e-201,
-        1e-12,
-    );
+}
+
+/// functions that only exist in array form, nested as an argument of another
+/// function, in a plain and an array formula. LOGEST's slope here is
+/// exp(ln 2), one unit in the last place below 2, so it is rounded before it
+/// is written as text.
+#[test]
+fn array_form_functions_nest_as_arguments() {
+    let wb = data_workbook();
+    let cases = [
+        (
+            "TEXTJOIN(\",\",TRUE,ROUND(LOGEST({2,4,8},,FALSE),12))",
+            t("2,1"),
+        ),
+        ("COLUMNS(LOGEST({2,4,8},,FALSE))", n(2.0)),
+        ("SUM(LOGEST({2,4,8},,FALSE))", n(3.0)),
+        ("VARA(LOGEST({2,4,8},,FALSE))", n(0.5)),
+        ("SUM(LINEST({3,5,7},{1,2,3}))", n(3.0)),
+        ("SUM(TREND({1,2,3}))", n(6.0)),
+        ("SUM(GROWTH({2,4,8}))", n(14.0)),
+        ("SUM(MINVERSE({2,0;0,4}))", n(0.75)),
+        ("STDEVPA(MUNIT(2))", n(0.5)),
+        ("SUM(LET(a,LOGEST({2,4,8},,FALSE),a*2))", n(6.0)),
+        ("SUM(MAP(LOGEST({2,4,8},,FALSE),LAMBDA(v,v*2)))", n(6.0)),
+        ("TEXTJOIN(\",\",TRUE,MODE.MULT({1,1,2,2,3}))", t("1,2")),
+    ];
+    for (src, want) in cases {
+        let got = eval_in(&wb, src);
+        let (_, _, arrayed) = arrayed(&wb, src);
+        for value in [got, arrayed[0].clone()] {
+            match (&value, &want) {
+                (CellValue::Number { value }, CellValue::Number { value: want }) => {
+                    assert!((value - want).abs() <= 1e-12, "{src}: {value} != {want}")
+                }
+                _ => assert_eq!(value, want, "{src}"),
+            }
+        }
+    }
 }
 
 /// the probability loops charge the recalculation budget per step, so many

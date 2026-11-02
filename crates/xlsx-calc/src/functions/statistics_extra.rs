@@ -440,62 +440,54 @@ pub(crate) fn binom_dist_range(args: &[Expr], ctx: &EvalContext<'_>) -> CellValu
     })())
 }
 
-/// the largest count a BINOM.INV search visits: past every mode that can be
-/// summed, and exact in f64.
-const SEARCH_TOP: f64 = 9e15;
-
 /// BINOM.INV and CRITBINOM(trials, probability_s, alpha): the smallest
-/// number of successes whose cumulative probability reaches `alpha`. an
-/// alpha of one is reached only by every trial; above one half the upper
-/// tail is compared with 1 - alpha, which is exact there, so a cumulative
-/// that rounds up to alpha does not end the search early. the search starts
-/// at the normal approximation and widens until it brackets the answer.
+/// number of successes whose cumulative probability reaches `alpha`, within
+/// 40 standard deviations of the mode. excel requires 0 <= alpha < 1. the
+/// search starts at the normal approximation and widens until it brackets
+/// the answer, so a long walk is summed only a few times.
 pub(crate) fn binom_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     answer((|| {
         arity(args, 3, 3)?;
         let v = numbers(args, ctx, 3)?;
         let (n, p, alpha) = (count(v[0])?, v[1], v[2]);
         binomial_domain(n, p)?;
-        if !(0.0..=1.0).contains(&alpha) {
+        if !(0.0..1.0).contains(&alpha) {
             return Err(ErrorValue::Num);
         }
         if alpha == 0.0 || p == 0.0 {
             return Ok(0.0);
         }
-        if alpha == 1.0 || p == 1.0 {
+        if p == 1.0 {
             return Ok(n);
         }
         binomial_summable(n, p)?;
         let mut meter = Meter::new(ctx)?;
-        let dist = binomial(n, p);
         let reaches = |k: u64, meter: &mut Meter<'_, '_>| -> Result<bool, ErrorValue> {
-            let k = k as f64;
-            Ok(if alpha > 0.5 {
-                dist.upper(k + 1.0, meter)? <= 1.0 - alpha
-            } else {
-                dist.lower(k, meter)? >= alpha
-            })
+            Ok(binomial_cdf(k as f64, n, p, meter)? >= alpha)
         };
         let q = 1.0 - p;
+        let mode = binomial_mode(n, p);
+        let reach = 40.0 * (n * p * q).sqrt() + 1.0;
+        let bottom = (mode - reach).max(0.0) as u64;
+        let top = (mode + reach).min(n) as u64;
         let z = if alpha > 0.5 {
             -special::norm_inv_lower(1.0 - alpha)
         } else {
             special::norm_inv_lower(alpha)
         };
         meter.pay(special::take_steps())?;
-        let top = n.min(SEARCH_TOP) as u64;
         let guess = (n * p + z * (n * p * q).sqrt() + (q - p) * (z * z - 1.0) / 6.0 - 0.5)
             .round()
-            .clamp(0.0, top as f64) as u64;
+            .clamp(bottom as f64, top as f64) as u64;
         let mut step: u64 = 1;
         let (mut lo, mut hi);
         if reaches(guess, &mut meter)? {
             hi = guess;
             lo = loop {
-                if hi == 0 {
-                    break 0;
+                if hi == bottom {
+                    break bottom;
                 }
-                let probe = hi.saturating_sub(step);
+                let probe = hi.saturating_sub(step).max(bottom);
                 if !reaches(probe, &mut meter)? {
                     break probe + 1;
                 }
@@ -506,11 +498,8 @@ pub(crate) fn binom_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             lo = guess + 1;
             hi = loop {
                 let probe = lo.saturating_add(step - 1).min(top);
-                if reaches(probe, &mut meter)? {
+                if probe == top || reaches(probe, &mut meter)? {
                     break probe;
-                }
-                if probe == top {
-                    return Err(ErrorValue::Num);
                 }
                 lo = probe + 1;
                 step = step.saturating_mul(2);
@@ -524,7 +513,7 @@ pub(crate) fn binom_inv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 lo = mid + 1;
             }
         }
-        meter.settle(lo as f64)
+        meter.settle(lo.min(hi) as f64)
     })())
 }
 
@@ -719,11 +708,8 @@ pub(crate) fn expon_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     })())
 }
 
-/// WEIBULL.DIST and WEIBULL(x, alpha, beta, cumulative). when x / beta or
-/// the density leaves the normal range the terms are taken as logarithms, so
-/// a density that underflows is zero rather than infinity times zero; at
-/// x = 0 the density is infinite for alpha < 1 (`#NUM!`), 1 / beta for
-/// alpha = 1 and zero beyond.
+/// WEIBULL.DIST and WEIBULL(x, alpha, beta, cumulative), by the direct
+/// formula as excel evaluates it: a density whose terms overflow is `#NUM!`.
 pub(crate) fn weibull_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     answer((|| {
         arity(args, 4, 4)?;
@@ -733,33 +719,12 @@ pub(crate) fn weibull_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         if x < 0.0 || alpha <= 0.0 || beta <= 0.0 {
             return Err(ErrorValue::Num);
         }
-        let ratio = x / beta;
-        if ratio.is_normal() {
-            let scaled = ratio.powf(alpha);
-            if cumulative {
-                return Ok(-(-scaled).exp_m1());
-            }
-            let density = alpha / beta * ratio.powf(alpha - 1.0) * (-scaled).exp();
-            if density.is_normal() {
-                return Ok(density);
-            }
-        }
-        if x == 0.0 {
-            return match (cumulative, alpha.total_cmp(&1.0)) {
-                (true, _) | (false, std::cmp::Ordering::Greater) => Ok(0.0),
-                (false, std::cmp::Ordering::Equal) => Ok(1.0 / beta),
-                (false, std::cmp::Ordering::Less) => Err(ErrorValue::Num),
-            };
-        }
-        let log_ratio = x.ln() - beta.ln();
-        let scaled = (alpha * log_ratio).exp();
-        if cumulative {
-            return Ok(-(-scaled).exp_m1());
-        }
-        if scaled.is_infinite() {
-            return Ok(0.0);
-        }
-        Ok((alpha.ln() - beta.ln() + (alpha - 1.0) * log_ratio - scaled).exp())
+        let scaled = (x / beta).powf(alpha);
+        Ok(if cumulative {
+            -(-scaled).exp_m1()
+        } else {
+            alpha / beta * (x / beta).powf(alpha - 1.0) * (-scaled).exp()
+        })
     })())
 }
 
@@ -826,46 +791,25 @@ pub(crate) fn permutationa(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     })())
 }
 
-/// the largest power of two at or below the largest magnitude in `values`,
-/// so dividing by it is exact; one when every value is zero or subnormal.
-fn power_scale(values: &[f64]) -> f64 {
-    let largest = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    if largest.is_normal() {
-        f64::from_bits(largest.to_bits() & 0x7ff0_0000_0000_0000)
-    } else {
-        1.0
-    }
-}
-
 /// STEYX(known_y's, known_x's): the standard error of the predicted y,
 /// pairing the arguments as CORREL does; fewer than three pairs is
-/// `#DIV/0!`. the residuals are taken from the fitted line rather than as a
-/// difference of sums, so large nearly collinear values keep their error,
-/// and both samples are scaled by powers of two so squares neither overflow
-/// nor underflow.
+/// `#DIV/0!`. excel's textbook form sqrt((Syy - Sxy^2 / Sxx) / (n - 2)),
+/// cancellation included; sums that overflow are `#NUM!`.
 pub(crate) fn steyx(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     answer((|| {
         let (ys, xs) = stats::pairs(args, ctx)?;
         if ys.len() < 3 {
             return Err(ErrorValue::Div0);
         }
-        let (sx, sy) = (power_scale(&xs), power_scale(&ys));
-        let us: Vec<f64> = xs.iter().map(|x| x / sx).collect();
-        let vs: Vec<f64> = ys.iter().map(|y| y / sy).collect();
-        let (n, mu, mv, suu, _, suv) = stats::moments(&vs, &us);
-        if suu == 0.0 {
+        let (n, _, _, sxx, syy, sxy) = stats::moments(&ys, &xs);
+        if sxx == 0.0 {
             return Err(ErrorValue::Div0);
         }
-        let slope = suv / suu;
-        let residuals: f64 = us
-            .iter()
-            .zip(&vs)
-            .map(|(u, v)| {
-                let r = (v - mv) - slope * (u - mu);
-                r * r
-            })
-            .sum();
-        Ok(sy * (residuals / (n - 2.0)).sqrt())
+        let unexplained = syy - sxy * sxy / sxx;
+        if unexplained.is_nan() {
+            return Err(ErrorValue::Num);
+        }
+        Ok((unexplained.max(0.0) / (n - 2.0)).sqrt())
     })())
 }
 
