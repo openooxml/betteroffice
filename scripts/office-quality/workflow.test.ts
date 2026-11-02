@@ -184,7 +184,7 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
   expect(gated.length).toBe(6);
   for (const step of gated) expect(String(step.if).startsWith(RENDERS)).toBe(true);
   const publishing = publish.steps.find((step: any) => String(step.run ?? '').includes('publish-renders.mjs'));
-  expect(publishing.if).toBe(`${RENDERS} && github.repository == 'openooxml/betteroffice'`);
+  expect(publishing.if).toBe(`${RENDERS} && !inputs.private_corpus && github.repository == 'openooxml/betteroffice'`);
   const reconcile = publish.steps.find((step: any) => step.name === 'Reconcile the format reports');
   expect(reconcile.env.QUALITY_REQUIRE_RENDERS).toBe(`\${{ ${RENDERS} }}`);
 });
