@@ -5,7 +5,7 @@ import { fetchAsset } from './asset-cache.mjs';
 import { digest } from './docx-benchmark.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const METHOD = 'office-single-edit-preservation-v2';
 export const CHANNELS = ['published', 'commit', 'libreoffice'];
@@ -145,7 +145,7 @@ export async function stageRoundtrip(planPath, output, format, shardIndex, cache
     const directory = resolve(output, sample.id);
     await mkdir(directory, { recursive: true });
     await writeFile(resolve(directory, `source.${format}`), await fetchAsset(sample.metadata.source, sample.id,
-      download, { cacheDir, origin: CORPUS_ORIGIN, maximum: 128 * 1024 * 1024 }));
+      download, { cacheDir, origin: corpusOrigin(), maximum: 128 * 1024 * 1024 }));
     if (++completed % 25 === 0 || completed === samples.length)
       console.log(`${format.toUpperCase()} roundtrip: staged ${completed}/${samples.length} verified files`);
   });

@@ -18,9 +18,22 @@ on:
         default: true
         required: false
         type: boolean
+      collection:
+        description: Corpus collection to measure when no samples are given
+        default: office-quality
+        required: false
+        type: string
+      corpus_origin:
+        description: Optional corpus origin serving the collection and sample folders
+        default: ''
+        required: false
+        type: string
 
 permissions:
   contents: read
+
+env:
+  QUALITY_CORPUS_ORIGIN: ${{ inputs.corpus_origin }}
 
 concurrency:
   group: visual-fidelity-${{ inputs.branch }}
@@ -73,6 +86,7 @@ jobs:
         id: plan
         env:
           QUALITY_SAMPLES: ${{ inputs.samples }}
+          QUALITY_COLLECTION: ${{ inputs.collection }}
           QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-plan
         run: |
           node scripts/office-quality/plan.mjs
