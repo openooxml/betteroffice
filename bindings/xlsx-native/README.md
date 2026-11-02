@@ -34,14 +34,15 @@ use `@betteroffice/xlsx` there. Main-thread edit peers hydrated from a worker se
 
 ## Memory and untrusted input
 
-The native engine runs inside the calling process. `@betteroffice/xlsx` runs each engine in a WebAssembly
-memory of at most 4 GiB, so a document that needs more fails the open or the session with a typed
-out-of-memory error. The native engine has no such cap: a document that needs more memory than the
-machine has makes the whole process run out of memory.
+The native engine runs inside the calling process. In `@betteroffice/xlsx` each engine runs in a
+WebAssembly memory of at most 4 GiB: a document that needs more makes that engine fail (worker
+sessions report it as an error, in some APIs a typed out-of-memory error) while the process keeps
+running. The native engine has no such cap: a document that needs more memory than the machine has
+makes the whole process run out of memory.
 
 Both engines bound their input the same way. A package is refused above 512 MiB uncompressed or
-5,000 parts, XML nested deeper than 256 levels is refused, and images above 33,554,432 pixels or
-256 MiB are not decoded. Worksheets are read up to 10,000,000 cells and the shared string table up to 10,000,000 entries.
+5,000 parts, and XML nested deeper than 256 levels is refused. The native engine decodes images in
+Rust, which skips images above 33,554,432 pixels or 256 MiB. Worksheets are read up to 10,000,000 cells and the shared string table up to 10,000,000 entries.
 
 When you open documents from untrusted sources with this package on a server, run it under a
 memory limit (a container or cgroup limit, or a separate process) so an oversized document cannot
