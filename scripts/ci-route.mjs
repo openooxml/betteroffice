@@ -21,7 +21,7 @@ export function parseGroups(spec) {
     });
 }
 
-/** First fit: a group that does not fit stays on kyora, and a later, smaller one may still fit. */
+/** First fit: a group that does not fit stays self-hosted, and a later, smaller one may still fit. */
 export function allocate(groups, free) {
   const routes = {};
   for (const { name, slots } of groups) {
@@ -98,7 +98,7 @@ export async function route(env, fetchImpl = fetch, signal = AbortSignal.timeout
   return { routes: allocate(groups, free), busy };
 }
 
-// Never fails the job: any error or the deadline leaves every output empty, which keeps the jobs on their kyora class.
+// Never fails the job: any error or the deadline leaves every output empty, which keeps the jobs on their self-hosted class.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   let groups = [];
   let result;
