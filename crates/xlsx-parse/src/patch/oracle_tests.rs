@@ -107,6 +107,7 @@ impl Case {
             retained: &self.retained,
             plan: plan.as_ref(),
             styles: &styles,
+            names: FormulaNames::default(),
         })
     }
 

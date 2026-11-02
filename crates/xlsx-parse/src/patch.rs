@@ -10,6 +10,7 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, ColId, ColStyle, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
+use crate::future_functions::FormulaNames;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
 use crate::read::{SharedStringCells, is_truthy};
 use crate::write::{
@@ -51,6 +52,8 @@ pub(crate) struct SheetPatch<'a> {
     pub(crate) retained: &'a SharedStringCells,
     pub(crate) plan: Option<&'a SharedStringPlan>,
     pub(crate) styles: &'a StyleMatch<'a>,
+    /// The defined names this sheet's formulas resolve.
+    pub(crate) names: FormulaNames<'a>,
 }
 
 struct SourceElement {
@@ -377,6 +380,7 @@ impl SheetPatch<'_> {
             self.retained,
             self.plan,
             None,
+            self.names,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -758,6 +762,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             retained,
             self.sheet.array_formula(at),
+            self.names,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();

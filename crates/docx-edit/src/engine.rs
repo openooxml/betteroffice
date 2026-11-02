@@ -27050,6 +27050,135 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         check(&ooxml_opc::rezip_parts(&parts).unwrap());
     }
 
+    #[test]
+    fn raw_docx_font_preflight_matches_engine_cjk_faces_by_language() {
+        let normal = |language: &str| {
+            format!(
+                r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:lang w:val="en-US" w:eastAsia="{language}"/></w:rPr></w:style><w:style w:type="character" w:styleId="Traditional"><w:rPr><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style>"#
+            )
+        };
+        let paragraph = |mark: &str, properties: &str, text: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:rPr>{mark}</w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:eastAsia="CJK"/>{properties}</w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let korean = r#"<w:lang w:eastAsia="ko-KR"/>"#;
+        let cases: [(String, String, Option<&[&str]>); 12] = [
+            (
+                normal("ja-JP"),
+                paragraph("", "", "漢字"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                normal("ja-JP"),
+                paragraph("", r#"<w:lang w:val="en-US"/>"#, "漢字"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                normal("ja-JP"),
+                paragraph(korean, "", "漢字"),
+                Some(&["cjk-kr"]),
+            ),
+            (
+                normal("zh-CN"),
+                paragraph("", "", "漢字かな"),
+                Some(&["cjk-jp", "cjk-sc"]),
+            ),
+            (String::new(), paragraph("", "", "漢字"), Some(&["cjk-sc"])),
+            (
+                String::new(),
+                paragraph("", "", "漢字かな"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                String::new(),
+                paragraph(r#"<w:lang w:eastAsia="zh-HK"/>"#, "", "漢字"),
+                Some(&["cjk-tc"]),
+            ),
+            (
+                normal("ja-JP"),
+                paragraph(r#"<w:lang w:eastAsia=" "/>"#, "", "漢字"),
+                Some(&["cjk-jp"]),
+            ),
+            (
+                String::new(),
+                paragraph(r#"<w:lang w:eastAsia="ja_JP"/>"#, "", "漢字"),
+                Some(&["cjk-sc"]),
+            ),
+            (
+                String::new(),
+                format!(
+                    r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:synthetic:vml" id="shape1" style="width:100pt;height:40pt"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+                    paragraph("", r#"<w:lang w:eastAsia="ja-JP"/>"#, "漢字")
+                ),
+                Some(&["cjk-jp"]),
+            ),
+            (normal("ja-JP"), paragraph("", korean, "漢字"), None),
+            (
+                normal("ja-JP"),
+                paragraph("", r#"<w:rStyle w:val="Traditional"/>"#, "繁體"),
+                None,
+            ),
+        ];
+        for (styles, body, expected) in cases {
+            let bytes = docx_bytes(&styles, &body);
+            let preflight = ooxml_font_preflight::docx_font_preflight(&bytes).unwrap();
+            let engine = EngineSession::new(1702);
+            crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+            let requirements: Vec<serde_json::Value> = serde_json::from_str(
+                &engine
+                    .layout_font_requirements_json(r#"{"bodyStory":"body","renderEnv":{}}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+            let cjk = |scripts: Vec<&str>| -> Vec<String> {
+                let mut scripts: Vec<String> = scripts
+                    .into_iter()
+                    .filter(|script| script.starts_with("cjk-"))
+                    .map(str::to_owned)
+                    .collect();
+                scripts.sort();
+                scripts
+            };
+            let mut checked = 0;
+            for requirement in &requirements {
+                let scripts = cjk(requirement["scripts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|script| script.as_str().unwrap())
+                    .collect());
+                if scripts.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                if let Some(expected) = expected {
+                    assert_eq!(
+                        scripts,
+                        cjk(expected.to_vec()),
+                        "engine {body} {requirement}"
+                    );
+                }
+                let face = preflight
+                    .faces
+                    .iter()
+                    .find(|face| {
+                        face.family
+                            .eq_ignore_ascii_case(requirement["family"].as_str().unwrap())
+                            && face.bold == requirement["bold"].as_bool().unwrap()
+                            && face.italic == requirement["italic"].as_bool().unwrap()
+                    })
+                    .unwrap_or_else(|| panic!("preflight misses {requirement}"));
+                assert_eq!(
+                    cjk(face.scripts.iter().map(String::as_str).collect()),
+                    scripts,
+                    "preflight {body} {face:?}"
+                );
+            }
+            assert!(checked > 0, "{body}: {requirements:?}");
+        }
+    }
+
     fn layout_with_note_separator(
         kind: &str,
         separator: Option<&str>,

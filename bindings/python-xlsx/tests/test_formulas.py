@@ -98,3 +98,12 @@ def test_shared_mixed_references_track_translated_dependencies(sample_bytes):
     reopened = bo.Workbook.open(workbook.save())[0]
     assert [reopened.formula(address) for address in addresses] == list(formulas)
     assert [reopened[address] for address in addresses] == [59, 73, 81]
+
+
+def test_formulas_read_without_storage_prefixes(sample_bytes):
+    stored = "_xlfn.LET(_xlpm.x,_xlfn.XLOOKUP(2,D2,B4),_xlpm.x*D2)"
+    source = formula_workbook(sample_bytes, stored)
+    workbook = bo.Workbook.open(source)
+    assert workbook[0].formula("A1") == "LET(x,XLOOKUP(2,D2,B4),x*D2)"
+    with zipfile.ZipFile(io.BytesIO(workbook.save())) as saved:
+        assert f"<f>{stored}</f>" in saved.read("xl/worksheets/sheet1.xml").decode()

@@ -12,6 +12,8 @@
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
     "@tailwindcss/postcss": "^4.3.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

@@ -1036,7 +1036,7 @@ impl ReadSource {
         let mut paired: HashMap<(String, String), Vec<(Option<String>, ControlSafety)>> =
             HashMap::new();
         let mut parts_in_order: Vec<(String, Vec<RawSource>)> = by_part.into_iter().collect();
-        parts_in_order.sort_by(|left, right| left.0.cmp(&right.0));
+        crate::sort::sort_by(&mut parts_in_order, &|left, right| left.0.cmp(&right.0));
         for (part, items) in parts_in_order {
             let Some(parsed) = parse_part(parts, &part) else {
                 for source in &items {

@@ -21,7 +21,7 @@ pub use formatting::{
 };
 pub use input::{
     ParsedInput, cell_state_for_input, cell_state_for_input_no_eval, cell_state_from_parsed,
-    parse_input, parse_input_with_context,
+    is_formula_source, parse_input, parse_input_with_context,
 };
 #[cfg(any(test, feature = "fuzzing"))]
 pub use op::OracleOp;

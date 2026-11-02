@@ -2,6 +2,8 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "paths": {
+      "#session-worker": ["../../packages/docx/src/yrs/sessionWorker.node.ts"],
+      "#session-scope": ["../../packages/docx/src/yrs/sessionScope.node.ts"],
       "@betteroffice/docx-react": ["../../packages/docx-react/src/index.ts"],
       "@betteroffice/xlsx-react": ["../../packages/xlsx-react/src/index.ts"],
       "@betteroffice/pptx-react": ["../../packages/pptx-react/src/index.ts"],

@@ -9,6 +9,7 @@ import { createResidentEngineSession } from './residentEngineSession';
 import { setEditWasmHeapLimit } from '../wasm/edit';
 import { wasmModuleMemories } from './index';
 import { commandMayNeedNewFonts } from './residentFontEnvironment';
+import { engineKind } from '../wasm/engineEdit';
 
 const TIMEOUT = 20_000;
 let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -37,12 +38,14 @@ test('oversized WOFF table leaves wasm memory and a bounded editing session inta
     view.setUint32(48, 64);
     view.setUint32(52, 1);
     view.setUint32(56, 65 * 1024 * 1024);
-    const before = wasmModuleMemories().find(entry => entry.label === 'docx-edit')!;
+    const before = wasmModuleMemories().find(entry => entry.label === 'docx-edit');
     expect(() => engine.decodeFont(bytes)).toThrow('Invalid resident font size');
-    const after = wasmModuleMemories().find(entry => entry.label === 'docx-edit')!;
-    expect(after.bufferBytes).toBe(before.bufferBytes);
-    expect(after.liveBytes! - before.liveBytes!).toBeLessThan(65536);
-    expect(after.failedAllocationBytes).toBe(0);
+    if (engineKind === 'wasm') {
+      const after = wasmModuleMemories().find(entry => entry.label === 'docx-edit')!;
+      expect(after.bufferBytes).toBe(before!.bufferBytes);
+      expect(after.liveBytes! - before!.liveBytes!).toBeLessThan(65536);
+      expect(after.failedAllocationBytes).toBe(0);
+    }
     engine.insertText({ story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 }, 'Still ');
     expect(engine.paragraphs('body')[0]!.text).toBe('Still Text');
   } finally { engine.destroy(); setEditWasmHeapLimit(undefined); }
@@ -81,7 +84,7 @@ for (const extension of ['woff', 'woff2']) {
       expect(worker.fontFaces.size).toBe(1);
       expect(events).toMatchObject([{ phase: 'ready', revision: 1 }, { phase: 'presentation', revision: 1, frameEpoch: ack.frame?.revision }]);
       expect(memory.length).toBeGreaterThan(0);
-      expect(client.memory()?.some(sample => sample.label === 'docx-edit')).toBe(true);
+      expect(client.memory()?.some(sample => sample.label === 'docx-edit')).toBe(engineKind === 'wasm');
       const duplicate = await client.edit(envelope);
       expect(duplicate.version).toBe(ack.version);
       expect(events).toHaveLength(2);
