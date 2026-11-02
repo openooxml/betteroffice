@@ -129,12 +129,6 @@ export function createDefaultFontPainter(
     return true;
   }
 
-  const paintedPending = () => {
-    if (!lastPainted) return false;
-    for (const face of faceKeys(lastPainted)) if (pending.has(face.key)) return true;
-    return false;
-  };
-
   async function load(displayList: DisplayList): Promise<void> {
     if (inactive()) return;
     const batch: Promise<boolean>[] = [];
@@ -147,11 +141,11 @@ export function createDefaultFontPainter(
           loaded.add(key);
           changed = true;
         }
-        if (!disposed && !paintedPending() && changed) {
+        if (!disposed && !pending.size && changed) {
           changed = false;
           unsettledPaint = false;
           repaint();
-        } else if (!disposed && !paintedPending() && unsettledPaint && lastPainted && isSettled(lastPainted)) {
+        } else if (!disposed && !pending.size && unsettledPaint && lastPainted && isSettled(lastPainted)) {
           unsettledPaint = false;
           options.onSettled?.();
         }
