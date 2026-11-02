@@ -11,7 +11,7 @@ const sourceSessionWorker: Plugin = {
   name: 'source-session-worker',
   enforce: 'pre',
   resolveId(source, importer) {
-    const variant = { '#session-worker': 'sessionWorker', '#session-scope': 'sessionScope' }[source];
+    const variant = source === '#session-worker' ? 'sessionWorker' : source === '#session-scope' ? 'sessionScope' : undefined;
     if (!variant || !importer) return null;
     const format = /\/packages\/(docx|pptx|xlsx)\/src\//.exec(importer)?.[1];
     if (!format) return null;
