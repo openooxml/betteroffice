@@ -42,7 +42,7 @@ test('every job feeding the report runs on the runner image the plan recorded', 
 });
 
 test('only the reconciler publishes reports and renders after every format succeeds', () => {
-  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip']);
+  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b']);
   expect(publish.if).not.toContain('always()');
   expect(
     measure.steps.some((step: any) => step.run?.includes('publish-renders.mjs'))
@@ -138,20 +138,33 @@ test('XLSX fidelity covers every planned workbook independently of calculation w
 
 test('native parse/edit/save probes run independently and gate the final report', () => {
   const build = workflow.jobs['roundtrip-build'];
-  const probe = workflow.jobs.roundtrip;
   expect(build.needs).toBe('prepare');
   expect(build.strategy.matrix.include).toBe('${{ fromJSON(needs.prepare.outputs.roundtrip-builds) }}');
   expect(build.steps[1].with.ref).toBe('${{ matrix.source }}');
-  expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
-  expect(probe.strategy.matrix.include).toBe('${{ fromJSON(needs.prepare.outputs.roundtrip-shards) }}');
-  expect(probe.env.LO_PYTHON).toBe('/opt/libreoffice26.2/program/python');
-  expect(probe.steps.some((step: any) => step.run?.includes('install-libreoffice.sh'))).toBe(true);
-  expect(publish.if).toContain("needs.roundtrip.result == 'success'");
+  expect(workflow.jobs.roundtrip).toBeUndefined();
+  const [first, second] = ['a', 'b'].map(half => {
+    const probe = workflow.jobs[`roundtrip-${half}`];
+    expect(prepare.outputs[`roundtrip-shards-${half}`]).toBe(`\${{ steps.plan.outputs.roundtrip-shards-${half} }}`);
+    expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
+    expect(probe.strategy).toEqual({'fail-fast': false, matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
+    expect(probe.env.LO_PYTHON).toBe('/opt/libreoffice26.2/program/python');
+    expect(probe.steps.some((step: any) => step.run?.includes('install-libreoffice.sh'))).toBe(true);
+    return probe;
+  });
+  expect(prepare.outputs['roundtrip-shards']).toBeUndefined();
+  expect(prepare.steps.find((step: any) => step.id === 'plan').run).toContain('roundtripMatrices(plan)');
+  expect(first.if).toBeUndefined();
+  expect(second.if).toBe("needs.prepare.outputs.roundtrip-shards-b != '[]'");
+  expect(second.steps).toEqual(first.steps);
+  expect(second.env).toEqual(first.env);
+  expect(second['timeout-minutes']).toBe(first['timeout-minutes']);
+  expect(publish.if).toContain("needs.roundtrip-a.result == 'success'");
+  expect(publish.if).toContain("(needs.prepare.outputs.roundtrip-shards-b == '[]' || needs.roundtrip-b.result == 'success')");
   expect(publish.steps.find((step: any) => step.run?.includes('merge.mjs')).env.QUALITY_REQUIRE_ROUNDTRIP).toBe('true');
 });
 
 test('a shard of the slowest possible samples still finishes inside the job timeout', () => {
-  const probe = workflow.jobs.roundtrip;
+  const probe = workflow.jobs['roundtrip-a'];
   const worstSeconds =
     Math.ceil(SHARD_SIZE / PARALLELISM) *
     (CHANNELS.length * (ENGINE_TIMEOUT + HELPER_TIMEOUT) + HELPER_TIMEOUT);
