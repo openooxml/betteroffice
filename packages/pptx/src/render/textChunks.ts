@@ -28,10 +28,18 @@ function positionedTextChunks(
   run: PositionedTextRun
 ): Array<{ text: string; x: number; width?: number; fitText?: string }> {
   if (run.glyphs.length === 0) return [{ text: run.text, x: run.x }];
-  // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
-  // piece itself, drawn from that piece's leftmost glyph.
-  const nextCluster = run.glyphs.find((glyph) => glyph.cluster !== run.glyphs[0].cluster);
-  if (nextCluster && nextCluster.x < run.glyphs[0].x) {
+  // A right-to-left run's clusters step leftward: the canvas orders each tab-free
+  // piece itself, drawn from that piece's leftmost glyph. A cluster can open
+  // with a mark or dots glyph at its right edge, where the cluster before it
+  // ends, so it is the clusters' leftmost glyphs that tell the direction, from
+  // the first one that a zero-width cluster does not leave in place.
+  const lefts = new Map<number, number>();
+  for (const glyph of run.glyphs) {
+    lefts.set(glyph.cluster, Math.min(lefts.get(glyph.cluster) ?? Infinity, glyph.x));
+  }
+  const [firstLeft, ...laterLefts] = lefts.values();
+  const nextLeft = laterLefts.find((left) => Math.abs(left - firstLeft) > 0.01);
+  if (nextLeft !== undefined && nextLeft < firstLeft) {
     const texts = run.text.split('\t');
     const ends: number[] = [];
     let end = -1;

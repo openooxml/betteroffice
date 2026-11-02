@@ -52,6 +52,7 @@ print(edit.para_id, edit.start, edit.end)
 document.save_path("report-edited.docx")
 ```
 
+`replace_paragraph_text(para_id, text)` is an alias of `replace_text`.
 `replace_text` rewrites one paragraph and keeps its style, alignment, and the
 run formatting it already had. The engine rebuilds the paragraph from a single
 run, so a paragraph that mixes runs (half bold, a hyperlink, a field) raises
@@ -139,23 +140,27 @@ paints them.
 
 ## Rasterize
 
-Register a face under each family the text names before rasterizing; here
-Carlito stands in for Calibri:
+Text renders with the bundled fonts, which the package installs as the
+`betteroffice-fonts-latin`, `-intl` and `-cjk` wheels and reads from disk
+(Carlito stands in for Calibri, for example):
 
 ```python
-from pathlib import Path
-
-document.register_font("Calibri", Path("Carlito-Regular.ttf").read_bytes())
-document.register_font("Calibri", Path("Carlito-Bold.ttf").read_bytes(), bold=True)
-
 png = document.render_png(layout.display_list, 0)
 png.write("page-0.png")
 print(len(png), png.skipped_images)
 ```
 
-Text whose family has no chain raises `RenderError` naming the chain it wanted
-(``missing font chain for `calibri|0|0` ``), so a missing face is loud rather
-than silently blank.
+`register_font` adds a family or replaces a bundled one:
+
+```python
+from pathlib import Path
+
+document.register_font("Brand Sans", Path("BrandSans-Regular.ttf").read_bytes())
+```
+
+Without the font wheels (installed with `--no-deps`), text whose family has no
+registered face raises `RenderError` naming the chain it wanted
+(``missing font chain for `calibri|0|0` ``).
 
 `png.skipped_images` counts unresolved references. Register image bytes under
 the relationship ID and owning part:

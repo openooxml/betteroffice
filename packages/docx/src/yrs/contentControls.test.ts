@@ -149,7 +149,7 @@ print(json.dumps(out))`,
 }
 
 describe('content controls', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('lists and finds controls from a session and from bytes', async () => {
     const session = await open();

@@ -7,11 +7,14 @@ import type {
   PptxWorkerSession, PresentationCommandClient, PresentationCommandEvents, PresentationCommandMethods,
   PresentationCommandSelection,
 } from '@betteroffice/pptx/worker';
+import { createPptxWorkerSession } from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import { initWasm } from '../../../pptx/src/wasm/loader';
+import { commandFontProvider } from '../../../pptx/src/session/commandDefaultFonts';
+import { createPresentationSessionHost } from '../../../pptx/src/session/host';
 import { PptxEditor } from '../PptxEditor';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
@@ -103,6 +106,78 @@ afterEach(async () => {
   for (const restore of restorers.splice(0).reverse()) restore();
 });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
+
+test('default fonts gate the initial paint and background navigation on browser installation', async () => {
+  const active = deferred<void>();
+  const background = deferred<void>();
+  const backgroundBytes = deferred<ArrayBuffer>();
+  const font = new Uint8Array(await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url))).buffer;
+  const manager = spyOn(commandFontProvider, 'load').mockResolvedValue({
+    resolve: (family) => family === 'Calibri' ? async () => font : family === 'Cambria' ? () => backgroundBytes.promise : undefined,
+    resolveFamily: () => undefined, resolveScriptFallback: () => undefined,
+    resolveLastResort: () => { throw new Error('Unrelated substitution'); },
+  });
+  restorers.push(() => manager.mockRestore());
+  const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
+  restorers.push(() => fetch.mockRestore());
+  const added: string[] = [];
+  const created: string[] = [];
+  const removed: string[] = [];
+  const fontFace = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+  const fontSet = Object.getOwnPropertyDescriptor(document, 'fonts');
+  class Face {
+    constructor(readonly family: string) { created.push(family); }
+    async load() { await (this.family === 'Calibri' ? active.promise : background.promise); return this; }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: {
+    add: (face: Face) => { added.push(face.family); }, delete: (face: Face) => { removed.push(face.family); },
+  } });
+  restorers.push(() => {
+    if (fontFace) Object.defineProperty(globalThis, 'FontFace', fontFace); else Reflect.deleteProperty(globalThis, 'FontFace');
+    if (fontSet) Object.defineProperty(document, 'fonts', fontSet); else Reflect.deleteProperty(document, 'fonts');
+  });
+  const opener = spyOn(peerlessSessionOpener, 'open').mockImplementation((bytes, options = {}) => {
+    const pair = createInProcessPair();
+    createPresentationSessionHost(pair.host, { initWasm: async () => {
+      await initWasm(await readFile(new URL('../../../pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+    } });
+    const endpoint = new class extends EventTarget {
+      postMessage(message: unknown, transfer?: Transferable[]) { pair.client.post(message, transfer); }
+      terminate() { pair.client.close(); }
+    };
+    const off = pair.client.listen((message) => endpoint.dispatchEvent(new MessageEvent('message', { data: message })));
+    restorers.push(off);
+    const session = createPptxWorkerSession(bytes, { ...options, worker: () => endpoint as unknown as Worker });
+    sessions.push(session);
+    return session;
+  });
+  restorers.push(() => opener.mockRestore());
+  const zip = await JSZip.loadAsync(await deck());
+  for (const [index, family] of ['Calibri', 'Cambria'].entries()) {
+    const path = `ppt/slides/slide${index + 1}.xml`;
+    zip.file(path, (await zip.file(path)!.async('string')).split('Liberation Sans').join(family));
+  }
+  const ready = mock((_api: PptxAsyncEditorApi) => {});
+  const file = await zip.generateAsync({ type: 'uint8array' });
+  const view = render(<PptxEditor fonts={[]} file={file} onReady={ready} />);
+  await waitFor(() => expect(created).toContain('Calibri'));
+  expect(ready).not.toHaveBeenCalled();
+  expect(canvasCalls.filter((call) => call.kind === 'paint')).toEqual([]);
+  await act(async () => { active.resolve(); });
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  expect(added).toEqual(['Calibri']);
+  let navigated = false;
+  const navigation = ready.mock.calls[0][0].goToSlide(2).then(() => { navigated = true; });
+  await act(async () => { backgroundBytes.resolve(font); });
+  await waitFor(() => expect(created).toContain('Cambria'));
+  expect(navigated).toBe(false);
+  expect(added).toEqual(['Calibri']);
+  await act(async () => { background.resolve(); await navigation; });
+  expect(added).toEqual(['Calibri', 'Cambria']);
+  view.unmount();
+  expect(removed).toEqual(['Calibri', 'Cambria']);
+});
 
 test('initial_bounds', async () => {
   const file = await deck();

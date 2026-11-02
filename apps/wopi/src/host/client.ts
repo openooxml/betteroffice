@@ -41,6 +41,7 @@ export interface CheckFileInfo {
   SupportsRename?: boolean;
   PostMessageOrigin?: string;
   CloseUrl?: string;
+  ClosePostMessage?: boolean;
   LastModifiedTime?: string;
   [key: string]: unknown;
 }

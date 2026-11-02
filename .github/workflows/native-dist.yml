@@ -55,6 +55,17 @@ jobs:
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release -- --locked
 
+      - name: Build the font packages
+        shell: bash
+        run: |
+          bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build
+          (cd packages/fonts && bunx tsup)
+
+      - name: Build the JS entries
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js
+
       - name: Test binding
         run: bun test bindings/${{ inputs.binding }}-native/index.test.ts
 
@@ -68,5 +79,7 @@ jobs:
         if: matrix.platform.target == 'x86_64-unknown-linux-gnu'
         with:
           name: ${{ inputs.binding }}-native-loader
-          path: bindings/${{ inputs.binding }}-native/index.js
+          path: |
+            bindings/${{ inputs.binding }}-native/index.js
+            bindings/${{ inputs.binding }}-native/dist
           if-no-files-found: error

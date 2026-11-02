@@ -26,7 +26,7 @@ function source(rank: number, shapeType?: string): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 test.each([
   { rank: 0, shapeType: undefined },

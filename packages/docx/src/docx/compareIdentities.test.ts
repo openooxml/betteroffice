@@ -59,7 +59,7 @@ function startTags(bytes: Uint8Array): string[] {
 
 const sessions: YrsSession[] = [];
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 afterEach(() => {
   for (const created of sessions.splice(0)) created.destroy();

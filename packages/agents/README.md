@@ -148,7 +148,7 @@ browser, pass the module bytes as `wasm`. DOCX previews in a browser need a cust
 - `verify` confirms that the saved file reopens. It does not check visual fidelity or whether the
   edit is semantically correct; use reads and previews for that.
 - Previews use the BetterOffice layout engine and bundled fonts and are not pixel-identical to
-  Office. Install `@betteroffice/fonts-cjk` for CJK glyphs.
+  Office. Install `@betteroffice/fonts-cjk` for CJK glyphs and `@betteroffice/fonts-intl` for additional international scripts.
 
 ## Documentation
 

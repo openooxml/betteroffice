@@ -125,6 +125,9 @@ export interface DocxCommandArgs {
   alignment: { value: ParagraphAlignment };
   /** Auto line spacing in twips; 240 is single spacing. */
   lineSpacing: { value: number };
+  /** Paragraph spacing in twips. */
+  paragraphSpacing: { before?: number; after?: number };
+  paragraphSpacingDialog: null;
   bulletList: null;
   numberedList: null;
   indent: null;
@@ -203,6 +206,8 @@ export interface DocxCommandValues {
   highlightColor: string | null;
   alignment: ParagraphAlignment | null;
   lineSpacing: number | null;
+  paragraphSpacing: { before: number; after: number };
+  paragraphSpacingDialog: null;
   bulletList: null;
   numberedList: null;
   indent: null;
@@ -331,6 +336,8 @@ export type DocxCommandState<K extends DocxCommandId = DocxCommandId> = CommandS
 export interface DocxCommandShortcut<K extends DocxCommandId = DocxCommandId> {
   chord: string;
   args: DocxCommandArgs[K];
+  /** This binding exists only on the specified platform. */
+  platform?: 'mac' | 'other';
 }
 
 /**

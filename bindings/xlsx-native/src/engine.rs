@@ -9,6 +9,34 @@ use napi::{Env, Error, JsValue, Result, Status, Unknown, ValueType};
 use napi_derive::napi;
 use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
 
+#[napi(object)]
+pub struct DecodedFontFace {
+    pub font: Uint8Array,
+    pub payload: Option<Uint8Array>,
+}
+
+/// Decodes one font pack face using this engine's linked decoder.
+#[napi(
+    js_name = "decodeFontFace",
+    ts_args_type = "bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null",
+    ts_return_type = "DecodedFontFace"
+)]
+pub fn decode_font_face(
+    env: Env,
+    bytes: Uint8Array,
+    codec: String,
+    dict: Option<Uint8Array>,
+    max_output: Option<f64>,
+) -> Result<DecodedFontFace> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
+            .map_err(|error| throw_error(&env, &error.to_string()))?;
+    Ok(DecodedFontFace {
+        font: Uint8Array::new(decoded.font),
+        payload: decoded.payload.map(Uint8Array::new),
+    })
+}
+
 thread_local! {
     static CURRENT_ENV: Cell<Option<Env>> = const { Cell::new(None) };
 }
@@ -97,10 +125,22 @@ fn native_host() -> Host {
     }
 }
 
+fn throw_error(env: &Env, message: &str) -> Error {
+    let result = (|| -> Result<()> {
+        let mut exception = env.create_error(Error::from_reason(message))?;
+        exception.delete_named_property("code")?;
+        env.throw(exception)
+    })();
+    match result {
+        Ok(()) => Error::new(Status::PendingException, message.to_owned()),
+        Err(error) => error,
+    }
+}
+
 fn map_error(env: Env, error: EngineError) -> Error {
     let result = match error.kind {
         ErrorKind::Message => env.throw(&error.message),
-        ErrorKind::Error => return Error::from_reason(error.message),
+        ErrorKind::Error => return throw_error(&env, &error.message),
         ErrorKind::TypeError => env.throw_type_error(&error.message, None),
         ErrorKind::PendingException => return Error::new(Status::PendingException, error.message),
     };
@@ -209,6 +249,7 @@ impl XlsxDocument {
         Ok(self.document(env)?.client_id())
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[napi]
     pub fn recovery_checkpoint(
         &self,
@@ -359,6 +400,22 @@ impl XlsxDocument {
     }
 
     #[napi]
+    pub fn png_display_list_json(&self, env: Env, viewport_json: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .png_display_list_json(&viewport_json)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
+    pub fn range_png_display_list_json(&self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .range_png_display_list_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
     pub fn display_list_profiled_json(&self, env: Env, viewport_json: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -435,6 +492,14 @@ impl XlsxDocument {
         let _call = EngineCall::new(env);
         self.document(env)?
             .cell_rect_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
+    pub fn recalculate_json(&mut self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document_mut(env)?
+            .recalculate_json()
             .map_err(|error| map_error(env, error))
     }
 
@@ -777,6 +842,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[napi(factory, js_name = "openRecoveryCheckpoint")]
     pub fn open_recovery_checkpoint(env: Env, bytes: Uint8Array, through_seq: f64) -> Result<Self> {
         let bytes = bytes.to_vec();

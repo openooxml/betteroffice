@@ -14,6 +14,7 @@ mod model;
 mod notes;
 mod package;
 mod relationships;
+mod slide_splice;
 mod table_style;
 mod theme;
 mod write;

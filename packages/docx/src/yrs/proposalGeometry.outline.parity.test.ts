@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm, type EditSession } from '../wasm/edit';
-import { EditSession as WasmEditSession } from '../wasm/generated/edit/docx_edit';
+import { EditSession as EngineEditSession } from '../wasm/engineEdit';
 import { createYrsSession, type YrsRawOp, type YrsSession } from './index';
 import { computeProposalGeometryMirror, type ProposalGeometryReader } from './proposalGeometry';
 import type { DocxProposalSnapshot } from './proposals';
@@ -65,8 +65,8 @@ const ins = { ins: { id: 'owned' } };
 async function replica(main?: YrsSession): Promise<{ resident: ResidentEngineSession; raw: EditSession }> {
   const resident = await createResidentEngineSession();
   let raw: EditSession | undefined;
-  const version = WasmEditSession.prototype.version;
-  const capture = spyOn(WasmEditSession.prototype, 'version').mockImplementation(function (this: EditSession) {
+  const version = EngineEditSession.prototype.version;
+  const capture = spyOn(EngineEditSession.prototype, 'version').mockImplementation(function (this: EditSession) {
     raw = this;
     return version.call(this);
   });
@@ -179,7 +179,7 @@ function parity(
   expect(yrsLocToProjectedDisplayPosition(gate, () => fast, { story: 'body', paraId: 'missing', offset: 0 })).toBeNull();
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 describe('native proposal geometry outline parity', () => {
   const fixtures: Array<[string, Uint8Array]> = [

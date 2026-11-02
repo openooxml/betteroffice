@@ -1,14 +1,35 @@
-#[cfg(feature = "raster")]
-use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
     CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
     PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SelectionDirection, SheetId,
-    SnapshotBudget, StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook,
-    WorkbookSnapshotEncoder,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, RenderOptions,
+    SelectionDirection, SheetId, SheetInfoWire as SheetInfo, SnapshotBudget, StylePatch,
+    UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
+
+fn range_png_options(args: &str) -> Result<RenderOptions, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        range: Option<String>,
+        scale: Option<f32>,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+    }
+
+    let args: Args = serde_json::from_str(args).map_err(|error| format!("bad args: {error}"))?;
+    let range = args
+        .range
+        .map(|range| CellRange::parse_a1(&range).map_err(|error| format!("bad range: {error}")))
+        .transpose()?;
+    Ok(RenderOptions {
+        range,
+        scale: args.scale.unwrap_or(1.0),
+        max_width: args.max_width,
+        max_height: args.max_height,
+    })
+}
 
 pub struct Session {
     workbook: Workbook,
@@ -42,38 +63,6 @@ impl WorkbookCalculationContext {
         Ok(CalculationOptions {
             now_serial: Some(self.now_serial),
         })
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SheetInfo {
-    sheet_ids: Vec<String>,
-    sheet_names: Vec<String>,
-    active_sheet: u32,
-    content_width: f32,
-    content_height: f32,
-    frozen_rows: u32,
-    frozen_cols: u32,
-    initial_scroll_x: f32,
-    initial_scroll_y: f32,
-    auto_filter: Option<String>,
-}
-
-impl From<betteroffice_xlsx::SheetInfo> for SheetInfo {
-    fn from(info: betteroffice_xlsx::SheetInfo) -> Self {
-        Self {
-            auto_filter: None,
-            sheet_ids: info.sheet_ids,
-            sheet_names: info.sheet_names,
-            active_sheet: info.active_sheet.0,
-            content_width: info.content_width,
-            content_height: info.content_height,
-            frozen_rows: info.frozen_rows,
-            frozen_cols: info.frozen_cols,
-            initial_scroll_x: info.initial_scroll_x,
-            initial_scroll_y: info.initial_scroll_y,
-        }
     }
 }
 
@@ -137,18 +126,6 @@ struct SearchTextArgs {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TextSearchMatch {
-    sheet: u32,
-    sheet_id: String,
-    sheet_name: String,
-    row: u32,
-    col: u32,
-    a1: String,
-    text: String,
-}
-
-#[derive(Serialize)]
 struct CellPosition {
     x: f32,
     y: f32,
@@ -198,11 +175,6 @@ struct ApplyFormatArgs {
 }
 
 #[derive(Serialize)]
-struct MergedRanges {
-    ranges: Vec<CellRange>,
-}
-
-#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EditResult {
     applied: bool,
@@ -223,30 +195,6 @@ struct ProfiledEditResult {
 struct DisplayListProfile {
     build_ms: f64,
     encode_ms: f64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CalculationStatus {
-    limited_cells: Vec<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    budget_exhausted: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CellEdit {
-    a1: String,
-    input: String,
-    is_formula: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_array_formula: Option<bool>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RangeCells {
-    cells: Vec<Vec<CellEdit>>,
 }
 
 #[derive(Deserialize)]
@@ -322,6 +270,7 @@ struct AcceptResult {
 }
 
 impl Session {
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: u64,
@@ -336,6 +285,7 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn open_recovery_checkpoint(bytes: &[u8], expected_seq: u64) -> Result<Self, String> {
         let (workbook, through_seq, calculation_context, _) =
             Workbook::restore_recovery_checkpoint(bytes).map_err(|error| error.to_string())?;
@@ -626,35 +576,38 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let (display_list, _, _) = self
+            .workbook
+            .png_display_list_for(self.workbook.active_sheet(), &viewport)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, String> {
+        let options = range_png_options(args)?;
+        let (display_list, _, _) = self
+            .workbook
+            .range_png_display_list_for(self.workbook.active_sheet(), &options)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
     #[cfg(feature = "raster")]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, String> {
-        #[derive(Deserialize)]
-        struct Args {
-            range: Option<String>,
-            scale: Option<f32>,
-        }
-
-        let args: Args =
-            serde_json::from_str(args).map_err(|error| format!("bad args: {error}"))?;
-        let range = args
-            .range
-            .map(|range| CellRange::parse_a1(&range).map_err(|error| format!("bad range: {error}")))
-            .transpose()?;
+        let options = range_png_options(args)?;
         self.workbook
-            .render_sheet(
-                self.workbook.active_sheet(),
-                &RenderOptions {
-                    range,
-                    scale: args.scale.unwrap_or(1.0),
-                    ..RenderOptions::default()
-                },
-            )
+            .render_sheet(self.workbook.active_sheet(), &options)
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
 
     pub fn sheet_info_json(&self) -> Result<String, String> {
-        serde_json::to_string(&self.sheet_info()?).map_err(|error| error.to_string())
+        self.workbook
+            .sheet_info_json()
+            .map_err(|error| error.to_string())
     }
 
     pub fn sheet_count(&self) -> usize {
@@ -662,24 +615,15 @@ impl Session {
     }
 
     pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, String> {
-        let info = self
-            .workbook
-            .sheet_info_for(SheetId(sheet))
-            .map_err(|error| error.to_string())?;
-        let mut info = SheetInfo::from(info);
-        info.auto_filter = self.workbook.model().sheets[sheet as usize]
-            .auto_filter
-            .as_ref()
-            .map(|filter| filter.range.to_a1());
-        serde_json::to_string(&info).map_err(|error| error.to_string())
+        self.workbook
+            .sheet_info_for_json(SheetId(sheet))
+            .map_err(|error| error.to_string())
     }
 
     pub fn charts_json(&self, sheet: u32) -> Result<String, String> {
-        let charts = self
-            .workbook
-            .charts(SheetId(sheet))
-            .map_err(|error| error.to_string())?;
-        serde_json::to_string(&charts).map_err(|error| error.to_string())
+        self.workbook
+            .charts_json(SheetId(sheet))
+            .map_err(|error| error.to_string())
     }
 
     pub fn edit_charts_json(
@@ -697,54 +641,24 @@ impl Session {
     }
 
     pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, String> {
-        let model = self.workbook.model();
-        let sheet = model
-            .sheet(SheetId(sheet))
-            .ok_or_else(|| format!("sheet {sheet} not found"))?;
-        let mut items = Vec::new();
-        for group in &sheet.conditional_formats {
-            for rule in &group.rules {
-                let mut format = serde_json::Map::new();
-                if let Some(color) = &rule.format.font_color {
-                    format.insert("fontColor".into(), color.clone().into());
-                }
-                if let Some(bold) = rule.format.bold {
-                    format.insert("bold".into(), bold.into());
-                }
-                if let Some(italic) = rule.format.italic {
-                    format.insert("italic".into(), italic.into());
-                }
-                if let Some(fill) = &rule.format.fill {
-                    format.insert("fill".into(), fill.clone().into());
-                }
-                let mut item = serde_json::json!({
-                    "id": rule.id,
-                    "range": group.sqref,
-                    "type": rule.rule_type,
-                    "formulas": rule.formulas,
-                    "priority": rule.priority,
-                    "format": format,
-                    "editable": rule.editable(),
-                });
-                if let Some(operator) = &rule.operator {
-                    item["operator"] = operator.clone().into();
-                }
-                if let Some(dxf_id) = rule.dxf_id {
-                    item["dxfId"] = dxf_id.into();
-                }
-                items.push(item);
-            }
-        }
-        serde_json::to_string(&items).map_err(|error| error.to_string())
+        self.workbook
+            .conditional_formats_json(SheetId(sheet))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Recalculate every formula with the handle clock (or `now_serial`), counting it as an
+    /// edit so the next save writes the recalculated values, and report the calculation
+    /// status.
+    pub fn recalculate_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
+        let options = self.calculation_options(now_serial);
+        self.workbook.recalculate_all(options);
+        self.calculation_status_json()
     }
 
     pub fn calculation_status_json(&self) -> Result<String, String> {
-        let calculation = self.workbook.last_calculation();
-        serde_json::to_string(&CalculationStatus {
-            limited_cells: self.changed_list(&calculation.limited_cells),
-            budget_exhausted: calculation.budget_exhausted,
-        })
-        .map_err(|error| error.to_string())
+        self.workbook
+            .calculation_status_json()
+            .map_err(|error| error.to_string())
     }
 
     pub fn set_active_sheet(&mut self, index: u32) -> Result<(), String> {
@@ -904,54 +818,17 @@ impl Session {
     pub fn cell_json(&self, args: &str) -> Result<String, String> {
         let args: CellArgs =
             serde_json::from_str(args).map_err(|error| format!("bad cell args: {error}"))?;
-        let cell = self
-            .workbook
-            .cell(SheetId(args.sheet), CellRef::new(args.row, args.col))
-            .map_err(|error| error.to_string())?;
-        serde_json::to_string(&CellEdit {
-            a1: cell.cell.to_a1(),
-            input: cell.input,
-            is_formula: cell.is_formula,
-            is_array_formula: self
-                .workbook
-                .sheet(SheetId(args.sheet))
-                .map_err(|error| error.to_string())?
-                .array_formulas()
-                .any(|(_, range)| range.contains(cell.cell))
-                .then_some(true),
-        })
-        .map_err(|error| error.to_string())
+        self.workbook
+            .cell_json(SheetId(args.sheet), CellRef::new(args.row, args.col))
+            .map_err(|error| error.to_string())
     }
 
     pub fn search_text_json(&self, args: &str) -> Result<String, String> {
         let args: SearchTextArgs =
             serde_json::from_str(args).map_err(|error| format!("bad search text args: {error}"))?;
-        let info = self
-            .workbook
-            .sheet_info()
-            .map_err(|error| error.to_string())?;
-        let matches = self
-            .workbook
-            .search_text(
-                &args.query,
-                args.case_sensitive,
-                args.limit.map(|limit| limit as usize),
-            )
-            .into_iter()
-            .map(|result| {
-                let sheet = result.address.sheet.0;
-                TextSearchMatch {
-                    sheet,
-                    sheet_id: info.sheet_ids[sheet as usize].clone(),
-                    sheet_name: info.sheet_names[sheet as usize].clone(),
-                    row: result.address.cell.row,
-                    col: result.address.cell.col,
-                    a1: result.address.cell.to_a1(),
-                    text: result.text,
-                }
-            })
-            .collect::<Vec<_>>();
-        serde_json::to_string(&matches).map_err(|error| error.to_string())
+        self.workbook
+            .search_text_json(&args.query, args.case_sensitive, args.limit)
+            .map_err(|error| error.to_string())
     }
 
     pub fn cell_position_json(&self, args: &str) -> Result<String, String> {
@@ -993,33 +870,11 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
         let range =
             CellRange::parse_a1(&args.range).map_err(|error| format!("bad range: {error}"))?;
-        let arrays: Vec<_> = self
-            .workbook
-            .sheet(SheetId(args.sheet))
-            .map_err(|error| error.to_string())?
-            .array_formulas()
-            .filter_map(|(_, array)| array.overlaps(&range).then_some(array))
-            .collect();
         let cells = self
             .workbook
-            .range_cells(SheetId(args.sheet), range)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|cell| CellEdit {
-                        a1: cell.cell.to_a1(),
-                        input: cell.input,
-                        is_formula: cell.is_formula,
-                        is_array_formula: arrays
-                            .iter()
-                            .any(|range| range.contains(cell.cell))
-                            .then_some(true),
-                    })
-                    .collect()
-            })
-            .collect();
-        serde_json::to_string(&RangeCells { cells }).map_err(|error| error.to_string())
+            .range_cells_json(SheetId(args.sheet), range)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(r#"{{"cells":{cells}}}"#))
     }
 
     pub fn patch_range_style_json(
@@ -1065,11 +920,9 @@ impl Session {
     pub fn selection_formatting_json(&self, args: &str) -> Result<String, String> {
         let args: RangeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
-        let formatting = self
-            .workbook
-            .selection_formatting(SheetId(args.sheet), parse_range(&args.range)?)
-            .map_err(|error| error.to_string())?;
-        serde_json::to_string(&formatting).map_err(|error| error.to_string())
+        self.workbook
+            .selection_formatting_json(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())
     }
 
     pub fn capture_format_json(&self, args: &str) -> Result<String, String> {
@@ -1107,9 +960,9 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
         let ranges = self
             .workbook
-            .merged_ranges(SheetId(args.sheet), parse_range(&args.range)?)
+            .merged_range_list_json(SheetId(args.sheet), parse_range(&args.range)?)
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
+        Ok(format!(r#"{{"ranges":{ranges}}}"#))
     }
 
     pub fn visible_merged_ranges_json(
@@ -1117,13 +970,14 @@ impl Session {
         sheet: u32,
         viewport_json: &str,
     ) -> Result<String, String> {
-        let viewport: Viewport = serde_json::from_str(viewport_json)
-            .map_err(|error| format!("bad viewport: {error}"))?;
         let ranges = self
             .workbook
-            .visible_merged_ranges(SheetId(sheet), &viewport)
-            .map_err(|error| error.to_string())?;
-        serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
+            .visible_merged_ranges_json(SheetId(sheet), viewport_json)
+            .map_err(|error| match error {
+                Error::InvalidRequest(message) => format!("bad viewport: {message}"),
+                error => error.to_string(),
+            })?;
+        Ok(format!(r#"{{"ranges":{ranges}}}"#))
     }
 
     pub fn history_state_json(&self) -> Result<String, String> {
@@ -1210,56 +1064,9 @@ impl Session {
     }
 
     pub fn list_defined_names_json(&self, request: &str) -> Result<String, String> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Request {
-            #[serde(default, deserialize_with = "scope_filter")]
-            scope: Option<Option<u32>>,
-            offset: Option<usize>,
-            limit: Option<usize>,
-        }
-        fn scope_filter<'de, D: serde::Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Option<Option<u32>>, D::Error> {
-            Option::<u32>::deserialize(deserializer).map(Some)
-        }
-        let request: Request = serde_json::from_str(request).map_err(|error| error.to_string())?;
-        let offset = request.offset.unwrap_or(0);
-        let limit = request.limit.unwrap_or(100);
-        if !(1..=100).contains(&limit) {
-            return Err("limit must be between 1 and 100".into());
-        }
-        if let Some(Some(scope)) = request.scope
-            && self.workbook.model().sheet(SheetId(scope)).is_none()
-        {
-            return Err("scope sheet is out of range".into());
-        }
-        let names = self.workbook.model().defined_names.iter().filter(|name| {
-            request
-                .scope
-                .is_none_or(|scope| scope == name.local_sheet.map(|sheet| sheet.0))
-        });
-        let total = names.clone().count();
-        let items = names
-            .skip(offset)
-            .take(limit)
-            .map(|name| {
-                serde_json::json!({
-                    "name": name.name,
-                    "refersTo": name.formula,
-                    "scope": name.local_sheet.map(|sheet| sheet.0),
-                    "hidden": name.hidden,
-                })
-            })
-            .collect::<Vec<_>>();
-        let next = offset.saturating_add(items.len());
-        serde_json::to_string(&serde_json::json!({
-            "version": self.document_version(),
-            "items": items,
-            "total": total,
-            "nextOffset": (next < total).then_some(next),
-        }))
-        .map_err(|error| error.to_string())
+        self.workbook
+            .list_defined_names_json(request)
+            .map_err(|error| error.to_string())
     }
 
     pub fn find_text_json(&self, request: &str) -> Result<String, String> {
@@ -1336,17 +1143,15 @@ impl Session {
     }
 
     fn sheet_info(&self) -> Result<SheetInfo, String> {
-        self.workbook
+        let info = self
+            .workbook
             .sheet_info()
-            .map(|info| {
-                let mut info = SheetInfo::from(info);
-                info.auto_filter = self.workbook.model().sheets[info.active_sheet as usize]
-                    .auto_filter
-                    .as_ref()
-                    .map(|filter| filter.range.to_a1());
-                info
-            })
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let auto_filter = self
+            .workbook
+            .auto_filter(info.active_sheet)
+            .map_err(|error| error.to_string())?;
+        Ok(SheetInfo::new(info, auto_filter))
     }
 
     fn edit_result(&self, result: MutationResult) -> Result<String, String> {
@@ -1808,6 +1613,73 @@ mod tests {
     }
 
     #[test]
+    fn cell_edit_succeeds_when_auto_sized_content_height_is_infinite() {
+        let mut model = WorkbookModel::default();
+        model.styles.fonts.extend([
+            xlsx_model::Font::default(),
+            xlsx_model::Font {
+                size_pt: Some(1e40),
+                ..Default::default()
+            },
+        ]);
+        model.styles.cell_xfs.extend([
+            xlsx_model::Xf {
+                font: Some(0),
+                ..Default::default()
+            },
+            xlsx_model::Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ]);
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "Hello".into(),
+                },
+                style: Some(1),
+                ..Default::default()
+            },
+        );
+        model.sheets.push(sheet);
+        let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut session = Session::open(&bytes, None).unwrap();
+        assert_eq!(
+            session.workbook.model().styles.font_for(1).unwrap().size_pt,
+            Some(1e40)
+        );
+        assert!(
+            session
+                .workbook
+                .sheet_info()
+                .unwrap()
+                .content_height
+                .is_infinite()
+        );
+
+        let response = session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"updated"}"#, None)
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["applied"], true);
+        assert_eq!(
+            response["sheetInfo"].get("contentHeight"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(0, 0))
+                .unwrap()
+                .input,
+            "updated"
+        );
+    }
+
+    #[test]
     fn preserves_display_and_sheet_info_wire_shapes() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let display = session
@@ -1834,7 +1706,7 @@ mod tests {
         assert!(position["y"].as_f64().unwrap() > 0.0);
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
         session.set_active_sheet(1).unwrap();
         assert!(
@@ -2524,7 +2396,7 @@ mod tests {
         assert!(result.contains(r#""limitedCells":["A3"]"#), "{result}");
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":["A3"]}"#
+            r#"{"limitedCells":["A3"],"unevaluatedCells":[]}"#
         );
     }
 
@@ -2553,7 +2425,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
     }
 
@@ -2995,6 +2867,46 @@ mod tests {
                 .contains("frozen workbook structure")
         );
         assert_eq!(target.encode_state_as_update(), target_state);
+    }
+
+    #[test]
+    fn png_display_lists_validate_viewports_ranges_and_scales() {
+        let session = Session::open(&sample_xlsx(), None).unwrap();
+        let viewport = r#"{"x":13.37,"y":21.125,"width":300.3,"height":180.7}"#;
+        let list: serde_json::Value =
+            serde_json::from_str(&session.png_display_list_json(viewport).unwrap()).unwrap();
+        assert!(!list["commands"].as_array().unwrap().is_empty());
+        let list: serde_json::Value = serde_json::from_str(
+            &session
+                .range_png_display_list_json(
+                    r#"{"range":"A1:B2","scale":1.3,"maxWidth":100,"maxHeight":50}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(list["width"].as_f64().unwrap() <= 100.0001);
+        assert!(list["height"].as_f64().unwrap() <= 50.0001);
+        for viewport in [
+            "not json",
+            r#"{"x":0,"y":0,"width":-1,"height":120}"#,
+            r#"{"x":0,"y":0,"width":17000,"height":120}"#,
+        ] {
+            let error = session.png_display_list_json(viewport).unwrap_err();
+            assert!(!error.is_empty());
+            #[cfg(feature = "raster")]
+            assert_eq!(error, session.render_png(viewport).unwrap_err());
+        }
+        for args in [
+            "not json",
+            r#"{"range":"nope"}"#,
+            r#"{"range":"A1:B2","scale":0}"#,
+            r#"{"range":"A1:B2","scale":-1}"#,
+        ] {
+            let error = session.range_png_display_list_json(args).unwrap_err();
+            assert!(!error.is_empty());
+            #[cfg(feature = "raster")]
+            assert_eq!(error, session.render_range_png(args).unwrap_err());
+        }
     }
 
     #[cfg(feature = "raster")]

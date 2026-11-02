@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { RUST_CRATES } from './rust-crates.mjs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
 import {
+  CONTAINER_IMAGES,
   PYPI_DISTRIBUTIONS,
   publishedCommands,
   publishedCrates,
@@ -51,8 +52,13 @@ describe('docs name nothing that does not exist', () => {
     expect([...new Set(claimed)].filter((name) => !real.has(name))).toEqual([]);
   });
 
-  test('every crate-shaped name is a registered crate, PyPI distribution or executable', () => {
-    const real = new Set([...RUST_CRATES.map((crate) => crate.name), ...PYPI_DISTRIBUTIONS, ...publishedCommands()]);
+  test('every crate-shaped name is a registered crate, PyPI distribution, executable or container image', () => {
+    const real = new Set([
+      ...RUST_CRATES.map((crate) => crate.name),
+      ...PYPI_DISTRIBUTIONS,
+      ...publishedCommands(),
+      ...CONTAINER_IMAGES
+    ]);
     const claimed = [...DOCS.matchAll(/\bbetteroffice(?:-[a-z0-9]+)+\b/g)].map((m) => m[0]);
     expect([...new Set(claimed)].filter((name) => !real.has(name))).toEqual([]);
   });

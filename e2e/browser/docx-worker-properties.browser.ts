@@ -2,7 +2,7 @@ import { expect, test, type Page, type TestInfo } from 'playwright/test';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 
-async function open(page: Page, twoSections = false) {
+async function seed(twoSections: boolean) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
@@ -10,8 +10,12 @@ async function open(page: Page, twoSections = false) {
   zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001">' +
     (twoSections ? `<w:pPr>${properties}</w:pPr>` : '') + '<w:r><w:t>Seed</w:t></w:r></w:p>' +
     (twoSections ? '<w:p><w:r><w:t>Second</w:t></w:r></w:p>' : '') + properties + '</w:body></w:document>');
+  return { name: 'worker-properties.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) };
+}
+
+async function open(page: Page, twoSections = false) {
   await page.goto('/?format=docx&peerless=1');
-  await page.locator('input[type=file]').last().setInputFiles({ name: 'worker-properties.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
+  await page.locator('input[type=file]').last().setInputFiles(await seed(twoSections));
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60000 });
   const input = page.locator('.paged-editor__input');
   await input.focus();
@@ -56,6 +60,24 @@ test('worker page setup preserves admitted text and saves authored margins', asy
   expect(xml).toContain('Before Seed');
   expect(xml).toContain('w:left="2160"');
 });
+
+for (const arm of ['&peerless=0', '']) {
+  test(`page setup shows and saves margins in the ruler unit (${arm ? 'hybrid' : 'default'})`, async ({ page }, info) => {
+    await page.goto(`/?format=docx&rulerUnit=cm${arm}`);
+    await page.locator('input[type=file]').last().setInputFiles(await seed(false));
+    await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60000 });
+    await page.getByRole('menubar').getByRole('menuitem', { name: 'File', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Page setup', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Page Setup', exact: true });
+    const left = dialog.getByLabel('Left', { exact: true });
+    await expect(left).toHaveValue('2.54');
+    await expect(dialog.getByText('cm', { exact: true })).toHaveCount(4);
+    await left.fill('3');
+    await left.press('Enter');
+    await expect(dialog).toBeHidden();
+    expect(await savedXml(page, info)).toContain('w:left="1701"');
+  });
+}
 
 test('worker ruler tabs and paragraph indents save through their native commands', async ({ page }, info) => {
   await open(page);

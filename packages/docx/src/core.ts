@@ -26,6 +26,8 @@ export const VERSION: string = packageVersion;
 // ============================================================================
 
 export { parseDocx } from './docx/parser';
+export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
+export type { FontPreflight, FontPreflightFace } from './wasm/preflight';
 export {
   serializeDocument as serializeDocx,
   serializeDocumentBody,
@@ -130,6 +132,7 @@ export {
   setGoogleFontsEnabled,
   isGoogleFontsEnabled,
 } from './utils/fontLoader';
+export { decodeFontFace } from './wasm/fontDecoder';
 
 export {
   type PrintOptions,

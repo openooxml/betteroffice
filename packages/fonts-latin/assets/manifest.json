@@ -1,0 +1,708 @@
+{
+  "format": 1,
+  "schema": 1,
+  "pack": "latin",
+  "version": "0.4.2",
+  "faces": [
+    {
+      "file": "Caladea-Bold.ttf.zst",
+      "source": "Caladea-Bold.ttf",
+      "family": "Caladea",
+      "codec": "woff2t+zstd",
+      "encodedLength": 21905,
+      "byteLength": 84468,
+      "sha256": "2232eb978a52d6cf5bc68bf47f8f3cd1e25dbd97269ced65f42f5cfb7636e556",
+      "dict": "Caladea-Regular.ttf.zst"
+    },
+    {
+      "file": "Caladea-BoldItalic.ttf.zst",
+      "source": "Caladea-BoldItalic.ttf",
+      "family": "Caladea",
+      "codec": "woff2t+zstd",
+      "encodedLength": 28887,
+      "byteLength": 83332,
+      "sha256": "2f7b738168c95adb66b9a16675e004ab91da23f92439baadcbe0188a5aa57e3d",
+      "dict": "Caladea-Regular.ttf.zst"
+    },
+    {
+      "file": "Caladea-Italic.ttf.zst",
+      "source": "Caladea-Italic.ttf",
+      "family": "Caladea",
+      "codec": "woff2t+zstd",
+      "encodedLength": 28027,
+      "byteLength": 83748,
+      "sha256": "609d28fb3c53bcc14d9996e51590cc422bf4ffd96e3cbd613605ccf75cda2b6e",
+      "dict": "Caladea-Regular.ttf.zst"
+    },
+    {
+      "file": "Caladea-Regular.ttf.zst",
+      "source": "Caladea-Regular.ttf",
+      "family": "Caladea",
+      "codec": "woff2t+zstd",
+      "encodedLength": 33985,
+      "byteLength": 81576,
+      "sha256": "da44b1e107daf242afbd765b8d4b5de5d52bc369f71b3666bff7e8dd0c45a8c7",
+      "dict": null
+    },
+    {
+      "file": "Carlito-Bold.ttf.zst",
+      "source": "Carlito-Bold.ttf",
+      "family": "Carlito",
+      "codec": "woff2t+zstd",
+      "encodedLength": 159534,
+      "byteLength": 686544,
+      "sha256": "708f167f7c3215cdbd270d40f89217530c37cb4281aa16b27791e2ce61e2de40",
+      "dict": "Carlito-Regular.ttf.zst"
+    },
+    {
+      "file": "Carlito-BoldItalic.ttf.zst",
+      "source": "Carlito-BoldItalic.ttf",
+      "family": "Carlito",
+      "codec": "woff2t+zstd",
+      "encodedLength": 192091,
+      "byteLength": 812632,
+      "sha256": "7aa387d2a7bb4c29b6613ebfed2ee5b203379715b32325d060cc2256ffcf0434",
+      "dict": "Carlito-Regular.ttf.zst"
+    },
+    {
+      "file": "Carlito-Italic.ttf.zst",
+      "source": "Carlito-Italic.ttf",
+      "family": "Carlito",
+      "codec": "woff2t+zstd",
+      "encodedLength": 169386,
+      "byteLength": 619352,
+      "sha256": "251f8a2efce3f042a9e8d72d167aef42d009c965725b23b4b766fde42d623e58",
+      "dict": "Carlito-Regular.ttf.zst"
+    },
+    {
+      "file": "Carlito-Regular.ttf.zst",
+      "source": "Carlito-Regular.ttf",
+      "family": "Carlito",
+      "codec": "woff2t+zstd",
+      "encodedLength": 201493,
+      "byteLength": 632084,
+      "sha256": "4cd4f010f14990501a59c127bf6b489ffddebf9563196c933c02ff80f6069d56",
+      "dict": null
+    },
+    {
+      "file": "ComicRelief-Bold.ttf.zst",
+      "source": "ComicRelief-Bold.ttf",
+      "family": "ComicRelief",
+      "codec": "woff2t+zstd",
+      "encodedLength": 40330,
+      "byteLength": 94684,
+      "sha256": "111224e5cd44fb9e704f09f669919688b4fe77b7bcc5ddb0851cb5902e13156b",
+      "dict": "ComicRelief-Regular.ttf.zst"
+    },
+    {
+      "file": "ComicRelief-Regular.ttf.zst",
+      "source": "ComicRelief-Regular.ttf",
+      "family": "ComicRelief",
+      "codec": "woff2t+zstd",
+      "encodedLength": 39050,
+      "byteLength": 80324,
+      "sha256": "b53344de83f058df9b3415b0eab23dfb0a9753a3891c6c7748ff6a7529f6cca2",
+      "dict": null
+    },
+    {
+      "file": "DMSans-Bold.ttf.zst",
+      "source": "DMSans-Bold.ttf",
+      "family": "DMSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 12993,
+      "byteLength": 57104,
+      "sha256": "97fb8612dc026b4e9311d7fc07f97d16000d6c715e8c3b02dd414699b94cbb58",
+      "dict": "DMSans-Regular.ttf.zst"
+    },
+    {
+      "file": "DMSans-BoldItalic.ttf.zst",
+      "source": "DMSans-BoldItalic.ttf",
+      "family": "DMSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 20842,
+      "byteLength": 61664,
+      "sha256": "9fe83e925d8e54d12badf24d4c692b474a66bacac87b367a49fc8b8367dbf8d7",
+      "dict": "DMSans-Regular.ttf.zst"
+    },
+    {
+      "file": "DMSans-Italic.ttf.zst",
+      "source": "DMSans-Italic.ttf",
+      "family": "DMSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 19858,
+      "byteLength": 61796,
+      "sha256": "508b80473a75336ef2409d6e9e91db99dceac0bde5ecbedff20c04baf4fc15f4",
+      "dict": "DMSans-Regular.ttf.zst"
+    },
+    {
+      "file": "DMSans-Regular.ttf.zst",
+      "source": "DMSans-Regular.ttf",
+      "family": "DMSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 24149,
+      "byteLength": 57184,
+      "sha256": "2b937658a9738fd7e6c5c58272304b18909d1d77367eeff5e45c30349c634fe3",
+      "dict": null
+    },
+    {
+      "file": "DMSerifDisplay-Italic.ttf.zst",
+      "source": "DMSerifDisplay-Italic.ttf",
+      "family": "DMSerifDisplay",
+      "codec": "woff2t+zstd",
+      "encodedLength": 24017,
+      "byteLength": 68828,
+      "sha256": "b0f60b2bb27387e5a5adee9ae82d9892d913899fd8779243f01710919ce7378e",
+      "dict": "DMSerifDisplay-Regular.ttf.zst"
+    },
+    {
+      "file": "DMSerifDisplay-Regular.ttf.zst",
+      "source": "DMSerifDisplay-Regular.ttf",
+      "family": "DMSerifDisplay",
+      "codec": "woff2t+zstd",
+      "encodedLength": 32202,
+      "byteLength": 70680,
+      "sha256": "554fd2457ac34a78429fe507c57fdc7a165c0e397839d23469593b4482d57cc4",
+      "dict": null
+    },
+    {
+      "file": "Gelasio-Bold.ttf.zst",
+      "source": "Gelasio-Bold.ttf",
+      "family": "Gelasio",
+      "codec": "woff2t+zstd",
+      "encodedLength": 28791,
+      "byteLength": 108424,
+      "sha256": "41ba5cfbf13a39fc632ef6a3bcc17266263051772a7a0f672402f677a1f3ff1a",
+      "dict": "Gelasio-Regular.ttf.zst"
+    },
+    {
+      "file": "Gelasio-BoldItalic.ttf.zst",
+      "source": "Gelasio-BoldItalic.ttf",
+      "family": "Gelasio",
+      "codec": "woff2t+zstd",
+      "encodedLength": 39212,
+      "byteLength": 108444,
+      "sha256": "7fcfbd0b37d52274fc5c1f614d550d4cc1130e7847f5bdcda8349abe8f321fff",
+      "dict": "Gelasio-Regular.ttf.zst"
+    },
+    {
+      "file": "Gelasio-Italic.ttf.zst",
+      "source": "Gelasio-Italic.ttf",
+      "family": "Gelasio",
+      "codec": "woff2t+zstd",
+      "encodedLength": 38046,
+      "byteLength": 108428,
+      "sha256": "f509ba5f3758c52c1499f6a1e7f33434bae22763a39e12b21220b31e7b694127",
+      "dict": "Gelasio-Regular.ttf.zst"
+    },
+    {
+      "file": "Gelasio-Regular.ttf.zst",
+      "source": "Gelasio-Regular.ttf",
+      "family": "Gelasio",
+      "codec": "woff2t+zstd",
+      "encodedLength": 44536,
+      "byteLength": 108244,
+      "sha256": "39b7530d21ee6974fd976b8b7b3344388c26b0d6a10e4588e28725c00821b1d9",
+      "dict": null
+    },
+    {
+      "file": "Heebo-Bold.ttf.zst",
+      "source": "Heebo-Bold.ttf",
+      "family": "Heebo",
+      "codec": "woff2t+zstd",
+      "encodedLength": 15367,
+      "byteLength": 43076,
+      "sha256": "332bdc93d6793764328ad645d6c916ceeccbab8bee57014d74bb1d67a9aa3f0b",
+      "dict": "Heebo-Regular.ttf.zst"
+    },
+    {
+      "file": "Heebo-Regular.ttf.zst",
+      "source": "Heebo-Regular.ttf",
+      "family": "Heebo",
+      "codec": "woff2t+zstd",
+      "encodedLength": 20855,
+      "byteLength": 42700,
+      "sha256": "f77d0f8bf7f50913ae04cef33cdd5f89e0bb413c0b0c8aac528a9fc47b751f19",
+      "dict": null
+    },
+    {
+      "file": "Inter-Bold.ttf.zst",
+      "source": "Inter-Bold.ttf",
+      "family": "Inter",
+      "codec": "woff2t+zstd",
+      "encodedLength": 62864,
+      "byteLength": 345568,
+      "sha256": "4517d0eee11ae5d4a0c3dd15ffe7836daa241b1d3531fe005995f3da91350c84",
+      "dict": "Inter-Regular.ttf.zst"
+    },
+    {
+      "file": "Inter-BoldItalic.ttf.zst",
+      "source": "Inter-BoldItalic.ttf",
+      "family": "Inter",
+      "codec": "woff2t+zstd",
+      "encodedLength": 105501,
+      "byteLength": 349012,
+      "sha256": "1ec39173a03a5b37e53a8e1b47b31cda544f9b27e5ecce02f7d139aec664e57a",
+      "dict": "Inter-Regular.ttf.zst"
+    },
+    {
+      "file": "Inter-Italic.ttf.zst",
+      "source": "Inter-Italic.ttf",
+      "family": "Inter",
+      "codec": "woff2t+zstd",
+      "encodedLength": 98252,
+      "byteLength": 347140,
+      "sha256": "acdbe0bdb8315cbbe45018c80c1c320cb997c89c09f5b3583e30ccb724c7be09",
+      "dict": "Inter-Regular.ttf.zst"
+    },
+    {
+      "file": "Inter-Regular.ttf.zst",
+      "source": "Inter-Regular.ttf",
+      "family": "Inter",
+      "codec": "woff2t+zstd",
+      "encodedLength": 123512,
+      "byteLength": 343792,
+      "sha256": "b622889ba11c7ce42298e6c161a63e83e88674f04f53fd1823eb1805116c35d3",
+      "dict": null
+    },
+    {
+      "file": "LiberationMono-Bold.ttf.zst",
+      "source": "LiberationMono-Bold.ttf",
+      "family": "LiberationMono",
+      "codec": "woff2t+zstd",
+      "encodedLength": 98360,
+      "byteLength": 307964,
+      "sha256": "0afd655a6cdd339c1d242045a63af2d0009b1b66af4fc36da89da900abf4abe8",
+      "dict": "LiberationMono-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationMono-BoldItalic.ttf.zst",
+      "source": "LiberationMono-BoldItalic.ttf",
+      "family": "LiberationMono",
+      "codec": "woff2t+zstd",
+      "encodedLength": 99395,
+      "byteLength": 284012,
+      "sha256": "7f4f09b69a4d781c6de982153a10aeb1d7b2a56749756fc38c87c8dcc930216c",
+      "dict": "LiberationMono-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationMono-Italic.ttf.zst",
+      "source": "LiberationMono-Italic.ttf",
+      "family": "LiberationMono",
+      "codec": "woff2t+zstd",
+      "encodedLength": 91094,
+      "byteLength": 281492,
+      "sha256": "e77cde86fd02a11aa01a479c397317b314214f175429e760f1afdbac16f7bcb9",
+      "dict": "LiberationMono-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationMono-Regular.ttf.zst",
+      "source": "LiberationMono-Regular.ttf",
+      "family": "LiberationMono",
+      "codec": "woff2t+zstd",
+      "encodedLength": 133511,
+      "byteLength": 319464,
+      "sha256": "918e5910b9226ffc2c154bfcd16c54af2430ff82e4cb11ad826213b84cfbf9f3",
+      "dict": null
+    },
+    {
+      "file": "LiberationSans-Bold.ttf.zst",
+      "source": "LiberationSans-Bold.ttf",
+      "family": "LiberationSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 118901,
+      "byteLength": 414428,
+      "sha256": "246d4db41e2f51a64ed99e372dbee7ce67ef31b10d9122dd675c365a826f2c3a",
+      "dict": "LiberationSans-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationSans-BoldItalic.ttf.zst",
+      "source": "LiberationSans-BoldItalic.ttf",
+      "family": "LiberationSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 125494,
+      "byteLength": 408960,
+      "sha256": "688c23f57881a9f504742bfed5e6d84b8b679973d0b4ed364fe18c41745c7a7a",
+      "dict": "LiberationSans-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationSans-Italic.ttf.zst",
+      "source": "LiberationSans-Italic.ttf",
+      "family": "LiberationSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 121743,
+      "byteLength": 415768,
+      "sha256": "89c48340314ca981b6c15e1ea87346248eeb63b44f10bf2f8aa2b5a9bb910091",
+      "dict": "LiberationSans-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationSans-Regular.ttf.zst",
+      "source": "LiberationSans-Regular.ttf",
+      "family": "LiberationSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 160582,
+      "byteLength": 410684,
+      "sha256": "988219c3d1d8d929b1b67599864a9f94f209dd3f1124a7ebb625b26e215d1543",
+      "dict": null
+    },
+    {
+      "file": "LiberationSerif-Bold.ttf.zst",
+      "source": "LiberationSerif-Bold.ttf",
+      "family": "LiberationSerif",
+      "codec": "woff2t+zstd",
+      "encodedLength": 113267,
+      "byteLength": 370084,
+      "sha256": "abbc8f40b5f46100a3b9a2497b8fd084ad18376851efdecf8dd509ccb58f2c38",
+      "dict": "LiberationSerif-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationSerif-BoldItalic.ttf.zst",
+      "source": "LiberationSerif-BoldItalic.ttf",
+      "family": "LiberationSerif",
+      "codec": "woff2t+zstd",
+      "encodedLength": 127059,
+      "byteLength": 376752,
+      "sha256": "e2881162ee8df048564f71b9a0cee11eb44fb10b58218a76a2021f5300af638f",
+      "dict": "LiberationSerif-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationSerif-Italic.ttf.zst",
+      "source": "LiberationSerif-Italic.ttf",
+      "family": "LiberationSerif",
+      "codec": "woff2t+zstd",
+      "encodedLength": 123578,
+      "byteLength": 375624,
+      "sha256": "6435e5bc7d756c790d1b696ca69ffa7fe87b1bcea93c55b1724697d1f6fd2fbe",
+      "dict": "LiberationSerif-Regular.ttf.zst"
+    },
+    {
+      "file": "LiberationSerif-Regular.ttf.zst",
+      "source": "LiberationSerif-Regular.ttf",
+      "family": "LiberationSerif",
+      "codec": "woff2t+zstd",
+      "encodedLength": 156988,
+      "byteLength": 393560,
+      "sha256": "e1c83ee51195cf5877a30100141741b6527d2cb70d97030a3e297dd79cd90af9",
+      "dict": null
+    },
+    {
+      "file": "Montserrat-Bold.ttf.zst",
+      "source": "Montserrat-Bold.ttf",
+      "family": "Montserrat",
+      "codec": "woff2t+zstd",
+      "encodedLength": 67001,
+      "byteLength": 382660,
+      "sha256": "ea6848a18ec0c29c676713548624e062bb423759823ed12a718cc6c0ae868edc",
+      "dict": "Montserrat-Regular.ttf.zst"
+    },
+    {
+      "file": "Montserrat-BoldItalic.ttf.zst",
+      "source": "Montserrat-BoldItalic.ttf",
+      "family": "Montserrat",
+      "codec": "woff2t+zstd",
+      "encodedLength": 100368,
+      "byteLength": 387916,
+      "sha256": "501313b93e7cff4b54c4cffaada1802de6f30d56fb33a4765909f3e9dd7c98ff",
+      "dict": "Montserrat-Regular.ttf.zst"
+    },
+    {
+      "file": "Montserrat-Italic.ttf.zst",
+      "source": "Montserrat-Italic.ttf",
+      "family": "Montserrat",
+      "codec": "woff2t+zstd",
+      "encodedLength": 88097,
+      "byteLength": 387668,
+      "sha256": "28f70408cc5823af7b38a80fb6b75feb4b9e48a3a786798aa43ed66c94bba4e8",
+      "dict": "Montserrat-Regular.ttf.zst"
+    },
+    {
+      "file": "Montserrat-Regular.ttf.zst",
+      "source": "Montserrat-Regular.ttf",
+      "family": "Montserrat",
+      "codec": "woff2t+zstd",
+      "encodedLength": 116235,
+      "byteLength": 382512,
+      "sha256": "1847e0c96868041ac80f348625fadf2126b823e693b1b99836921220f8c789e8",
+      "dict": null
+    },
+    {
+      "file": "NotoNaskhArabic-Regular.ttf.zst",
+      "source": "NotoNaskhArabic-Regular.ttf",
+      "family": "NotoNaskhArabic",
+      "codec": "woff2t+zstd",
+      "encodedLength": 87473,
+      "byteLength": 247336,
+      "sha256": "16485107fe2151208892e7007d6393c6b07c35a2bd15aeab76ffa74e90200fe0",
+      "dict": null
+    },
+    {
+      "file": "NotoSansArabic-Bold.ttf.zst",
+      "source": "NotoSansArabic-Bold.ttf",
+      "family": "NotoSansArabic",
+      "codec": "woff2t+zstd",
+      "encodedLength": 59452,
+      "byteLength": 261460,
+      "sha256": "9eed45f76952c9f557a9d17464dcda8e28fa9eeedb0a7c673ae4ab6959d4f21f",
+      "dict": "NotoSansArabic-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansArabic-Regular.ttf.zst",
+      "source": "NotoSansArabic-Regular.ttf",
+      "family": "NotoSansArabic",
+      "codec": "woff2t+zstd",
+      "encodedLength": 80208,
+      "byteLength": 234892,
+      "sha256": "e199135893cf81284289849d27bb90c85127565b045f5020fbf378420a357a23",
+      "dict": null
+    },
+    {
+      "file": "NotoSansHebrew-Bold.ttf.zst",
+      "source": "NotoSansHebrew-Bold.ttf",
+      "family": "NotoSansHebrew",
+      "codec": "woff2t+zstd",
+      "encodedLength": 4768,
+      "byteLength": 26860,
+      "sha256": "e27d1e835526a42abe895271be0e7ebc84cfcd3905591e3eb233a67d54feaac1",
+      "dict": "NotoSansHebrew-Regular.ttf.zst"
+    },
+    {
+      "file": "NotoSansHebrew-Regular.ttf.zst",
+      "source": "NotoSansHebrew-Regular.ttf",
+      "family": "NotoSansHebrew",
+      "codec": "woff2t+zstd",
+      "encodedLength": 11741,
+      "byteLength": 26860,
+      "sha256": "ceab815ea653db4b433adf5b1e5d4bf0cf6e770eba2d1e007a3733af5bc0ca4c",
+      "dict": null
+    },
+    {
+      "file": "OpenSans-Bold.ttf.zst",
+      "source": "OpenSans-Bold.ttf",
+      "family": "OpenSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 35237,
+      "byteLength": 131376,
+      "sha256": "a5e58d48453979fe3bbf23741685a38eafa5844213478518eeba49b04ffd724a",
+      "dict": "OpenSans-Regular.ttf.zst"
+    },
+    {
+      "file": "OpenSans-BoldItalic.ttf.zst",
+      "source": "OpenSans-BoldItalic.ttf",
+      "family": "OpenSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 53635,
+      "byteLength": 136572,
+      "sha256": "253b170672a6ef00759c13f0d9e6d722cc6ca3250a6755137036efa0dbb42f26",
+      "dict": "OpenSans-Regular.ttf.zst"
+    },
+    {
+      "file": "OpenSans-Italic.ttf.zst",
+      "source": "OpenSans-Italic.ttf",
+      "family": "OpenSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 55398,
+      "byteLength": 136904,
+      "sha256": "9219305ac95ecc0a6b24edf1c51ccd642be4c12c72a00cb23501e2bc8fd7ec4e",
+      "dict": "OpenSans-Regular.ttf.zst"
+    },
+    {
+      "file": "OpenSans-Regular.ttf.zst",
+      "source": "OpenSans-Regular.ttf",
+      "family": "OpenSans",
+      "codec": "woff2t+zstd",
+      "encodedLength": 63052,
+      "byteLength": 131348,
+      "sha256": "321402fc191778afd1e4c5c6582d8ba776f1a4fde5fa36727915196d3ee5b250",
+      "dict": null
+    },
+    {
+      "file": "Oswald-Bold.ttf.zst",
+      "source": "Oswald-Bold.ttf",
+      "family": "Oswald",
+      "codec": "woff2t+zstd",
+      "encodedLength": 21980,
+      "byteLength": 79124,
+      "sha256": "9ca59ad293d09b4aca68767e6d5035879e5abe62622375bfee14be5056740cac",
+      "dict": "Oswald-Regular.ttf.zst"
+    },
+    {
+      "file": "Oswald-Regular.ttf.zst",
+      "source": "Oswald-Regular.ttf",
+      "family": "Oswald",
+      "codec": "woff2t+zstd",
+      "encodedLength": 30980,
+      "byteLength": 78864,
+      "sha256": "666626e668f6a733640ce821133444b4de3106ae9d63c1384d2cb81e5387a058",
+      "dict": null
+    },
+    {
+      "file": "Poppins-Bold.ttf.zst",
+      "source": "Poppins-Bold.ttf",
+      "family": "Poppins",
+      "codec": "woff2t+zstd",
+      "encodedLength": 9889,
+      "byteLength": 28380,
+      "sha256": "ae4fe8bf5b0d0952734cb319b2e4be3bb07f392b054d45ff227008cba41f723d",
+      "dict": "Poppins-Regular.ttf.zst"
+    },
+    {
+      "file": "Poppins-BoldItalic.ttf.zst",
+      "source": "Poppins-BoldItalic.ttf",
+      "family": "Poppins",
+      "codec": "woff2t+zstd",
+      "encodedLength": 11833,
+      "byteLength": 30644,
+      "sha256": "a46a88258dd9db50d31014ae337bab75f10df50582ec41a87cebabb863cb3262",
+      "dict": "Poppins-Regular.ttf.zst"
+    },
+    {
+      "file": "Poppins-Italic.ttf.zst",
+      "source": "Poppins-Italic.ttf",
+      "family": "Poppins",
+      "codec": "woff2t+zstd",
+      "encodedLength": 11275,
+      "byteLength": 31028,
+      "sha256": "59dacd6fc164e4609e59f4aba9159fd4380134fdc3819a78df80e1cfd2ab3f3f",
+      "dict": "Poppins-Regular.ttf.zst"
+    },
+    {
+      "file": "Poppins-Regular.ttf.zst",
+      "source": "Poppins-Regular.ttf",
+      "family": "Poppins",
+      "codec": "woff2t+zstd",
+      "encodedLength": 12849,
+      "byteLength": 28744,
+      "sha256": "08301da3d6d5b96e10ab21ecd44805061516495f3b5e991d4abe4086b51f516d",
+      "dict": null
+    },
+    {
+      "file": "Roboto-Bold.ttf.zst",
+      "source": "Roboto-Bold.ttf",
+      "family": "Roboto",
+      "codec": "woff2t+zstd",
+      "encodedLength": 40499,
+      "byteLength": 159516,
+      "sha256": "22daa6ad3481345ba565236d92ba6ee20ba3f0d3955316aa9adfe98342e9fcdf",
+      "dict": "Roboto-Regular.ttf.zst"
+    },
+    {
+      "file": "Roboto-BoldItalic.ttf.zst",
+      "source": "Roboto-BoldItalic.ttf",
+      "family": "Roboto",
+      "codec": "woff2t+zstd",
+      "encodedLength": 50838,
+      "byteLength": 165300,
+      "sha256": "6bcd40c6c30d71d34cbb409868bf471ceb8fd3518419a1526de555c8b26482fe",
+      "dict": "Roboto-Regular.ttf.zst"
+    },
+    {
+      "file": "Roboto-Italic.ttf.zst",
+      "source": "Roboto-Italic.ttf",
+      "family": "Roboto",
+      "codec": "woff2t+zstd",
+      "encodedLength": 45173,
+      "byteLength": 164436,
+      "sha256": "35453ffbd70a5ff93e7071bcad710382861138071ff3e360db50904132832c4b",
+      "dict": "Roboto-Regular.ttf.zst"
+    },
+    {
+      "file": "Roboto-Regular.ttf.zst",
+      "source": "Roboto-Regular.ttf",
+      "family": "Roboto",
+      "codec": "woff2t+zstd",
+      "encodedLength": 73157,
+      "byteLength": 158800,
+      "sha256": "ec8cb7b5fe7a4fee22fbf83ff1d9182b816d3720841f5c81465613b0eefe51a1",
+      "dict": null
+    },
+    {
+      "file": "Selawik-Bold.ttf.zst",
+      "source": "Selawik-Bold.ttf",
+      "family": "Selawik",
+      "codec": "woff2t+zstd",
+      "encodedLength": 11215,
+      "byteLength": 37160,
+      "sha256": "91fbcbb62d2f81b353d79983e1581a09d6aa29284feb4c7a61bf74b11643beee",
+      "dict": "Selawik-Regular.ttf.zst"
+    },
+    {
+      "file": "Selawik-Light.ttf.zst",
+      "source": "Selawik-Light.ttf",
+      "family": "Selawik",
+      "codec": "woff2t+zstd",
+      "encodedLength": 10825,
+      "byteLength": 37336,
+      "sha256": "0453552666983f7f1223fd465408614633a87e55e51ba2d7caec23984756f201",
+      "dict": "Selawik-Regular.ttf.zst"
+    },
+    {
+      "file": "Selawik-Regular.ttf.zst",
+      "source": "Selawik-Regular.ttf",
+      "family": "Selawik",
+      "codec": "woff2t+zstd",
+      "encodedLength": 15274,
+      "byteLength": 37332,
+      "sha256": "d21efc27f5faa09d6c97dfc9d8e04e1485b7b541f673f8370776aa0f6a15de41",
+      "dict": null
+    },
+    {
+      "file": "Selawik-Semibold.ttf.zst",
+      "source": "Selawik-Semibold.ttf",
+      "family": "Selawik",
+      "codec": "woff2t+zstd",
+      "encodedLength": 11167,
+      "byteLength": 37296,
+      "sha256": "49bdfb67bf85474297499685acf27ddcf341e2b44574d73e5a3a1f14db918216",
+      "dict": "Selawik-Regular.ttf.zst"
+    },
+    {
+      "file": "Selawik-Semilight.ttf.zst",
+      "source": "Selawik-Semilight.ttf",
+      "family": "Selawik",
+      "codec": "woff2t+zstd",
+      "encodedLength": 10626,
+      "byteLength": 37356,
+      "sha256": "7f7e6dc7fbf1a958237bb2458b7ad4dcb6a5b4653e0080d5ff22e68b27dda23b",
+      "dict": "Selawik-Regular.ttf.zst"
+    },
+    {
+      "file": "SourceSans3-Bold.ttf.zst",
+      "source": "SourceSans3-Bold.ttf",
+      "family": "SourceSans3",
+      "codec": "woff2t+zstd",
+      "encodedLength": 59669,
+      "byteLength": 381448,
+      "sha256": "0dc147bb4ef75eba8f7e850d9d7b171bc415fbd34ff9e2507093064e4d40ef0c",
+      "dict": "SourceSans3-Regular.ttf.zst"
+    },
+    {
+      "file": "SourceSans3-BoldItalic.ttf.zst",
+      "source": "SourceSans3-BoldItalic.ttf",
+      "family": "SourceSans3",
+      "codec": "woff2t+zstd",
+      "encodedLength": 64432,
+      "byteLength": 241716,
+      "sha256": "882bed09dd50d5b640d2bfb3a7949a176fbe6edf00c6337eeadbc91dab87e49e",
+      "dict": "SourceSans3-Regular.ttf.zst"
+    },
+    {
+      "file": "SourceSans3-Italic.ttf.zst",
+      "source": "SourceSans3-Italic.ttf",
+      "family": "SourceSans3",
+      "codec": "woff2t+zstd",
+      "encodedLength": 63358,
+      "byteLength": 241888,
+      "sha256": "485b89001477742fff8f2c79161c663e7e71fbecc15acfd4c242fae8e226c10a",
+      "dict": "SourceSans3-Regular.ttf.zst"
+    },
+    {
+      "file": "SourceSans3-Regular.ttf.zst",
+      "source": "SourceSans3-Regular.ttf",
+      "family": "SourceSans3",
+      "codec": "woff2t+zstd",
+      "encodedLength": 113140,
+      "byteLength": 381684,
+      "sha256": "5ebbfd4b12455f56d84839d4c389c46f8c7ff930bb4ce2acb80bf76a624b1ce2",
+      "dict": null
+    }
+  ]
+}

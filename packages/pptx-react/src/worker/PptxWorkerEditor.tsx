@@ -1,6 +1,6 @@
 import type { PptxInThreadEditorProps } from '../PptxEditor';
 import { LEGACY_SYNC_API } from '../runtimeOptions';
-import { PptxEditorContent } from '../PptxEditor';
+import { PptxEditorContent } from '../PptxEditorContent';
 import type { PptxWorkerEditorApi } from './createWorkerEditorApi';
 import { useEditableSessionPresentation } from './useEditableSessionPresentation';
 

@@ -19,9 +19,25 @@ function builtinModule<T>(name: string): T | undefined {
   }
 }
 
+const OLD_NODE =
+  'Reading bundled fonts from installed packages needs Node.js 20.16+ or 22.3+ (process.getBuiltinModule); upgrade Node.js or pass a font baseUrl.';
+let warnedOldNode = false;
+
 /** Node fetch cannot read file: package assets, so server imports use built-in I/O. */
 function readFileAsset(url: URL): ArrayBuffer | undefined {
   if (url.protocol !== 'file:') return undefined;
+  const runtime = globalThis as {
+    process?: { versions?: { node?: string }; getBuiltinModule?: unknown };
+    Deno?: unknown;
+  };
+  if (runtime.process?.versions?.node !== undefined && runtime.Deno === undefined
+    && typeof runtime.process.getBuiltinModule !== 'function') {
+    if (!warnedOldNode) {
+      warnedOldNode = true;
+      console.warn(`[@betteroffice/fonts] ${OLD_NODE}`);
+    }
+    throw new Error(OLD_NODE);
+  }
   const fs = builtinModule<NodeFsLike>('node:fs');
   const nodeUrl = builtinModule<NodeUrlLike>('node:url');
   if (!fs || !nodeUrl) return undefined;
@@ -49,6 +65,29 @@ function validateByteLength(
   return bytes;
 }
 
+export async function readFontBytes(
+  file: string,
+  url: URL,
+  timeoutMs?: number,
+): Promise<ArrayBuffer> {
+  const onDisk = readFileAsset(url);
+  if (onDisk) return onDisk;
+  const response = await fetch(
+    url,
+    timeoutMs === undefined
+      ? undefined
+      : {
+          signal: AbortSignal.timeout(timeoutMs),
+          credentials: 'omit',
+          referrerPolicy: 'no-referrer',
+        },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch bundled font ${file}: HTTP ${response.status}`);
+  }
+  return response.arrayBuffer();
+}
+
 const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 
 export function loadFontBytes(
@@ -60,24 +99,7 @@ export function loadFontBytes(
   const cached = bytesCache.get(key);
   if (cached) return cached;
   const promise = (async () => {
-    const onDisk = readFileAsset(url);
-    if (onDisk) return validateByteLength(face, onDisk);
-    const response = await fetch(
-      url,
-      timeoutMs === undefined
-        ? undefined
-        : {
-            signal: AbortSignal.timeout(timeoutMs),
-            credentials: 'omit',
-            referrerPolicy: 'no-referrer',
-          },
-    );
-    if (!response.ok) {
-      throw new Error(
-        `Failed to fetch bundled font ${face.file}: HTTP ${response.status}`,
-      );
-    }
-    return validateByteLength(face, await response.arrayBuffer());
+    return validateByteLength(face, await readFontBytes(face.file, url, timeoutMs));
   })();
   promise.catch(() => {
     if (bytesCache.get(key) === promise) bytesCache.delete(key);

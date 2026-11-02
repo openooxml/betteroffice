@@ -14,18 +14,18 @@ export type {
   XlsxEditorCollaborationOptions,
   XlsxWorkerViewerApi,
   XlsxWorkerViewerProps,
-} from './XlsxEditor';
+} from './XlsxEditor.types';
 /** @experimental */
-export type { XlsxAsyncEditorProps, XlsxWorkerEditorProps } from './XlsxEditor';
+export type { XlsxAsyncEditorProps, XlsxWorkerEditorProps } from './XlsxEditor.types';
 /** @experimental */
 export { XlsxAsyncApiSyncAccessError } from './worker/asyncApiErrors';
 export type { XlsxAsyncEditorApi, XlsxProposalRequest, XlsxProposalResult } from './worker/createAsyncEditorApi';
 /** @experimental */
 export type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 /** @experimental */
-export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
+export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/workerEditorErrors';
 /** @experimental */
-export { XlsxWorkerSessionFailedError } from './worker/useEditableSessionWorkbook';
+export { XlsxWorkerSessionFailedError } from './worker/workerEditorErrors';
 export { XlsxWorkerEditorChunkLoadError } from './worker/XlsxWorkerEditor';
 export { EditorToolbar } from './components/EditorToolbar';
 export {

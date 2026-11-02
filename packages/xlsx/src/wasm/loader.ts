@@ -12,16 +12,25 @@ import initWasmModule, {
   XlsxDocument,
   XlsxSnapshotBuilder,
   allocationFailure,
-  backend,
+  decodeFontFace as decodePackedFontFace,
   displayListCellLimit,
+  engineKind,
   exportXlsxMarkdownJson,
   exportXlsxStructuredJson,
   renderXlsxMarkdownJson,
 } from './engine';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import { wasmAssetUrl } from './asset';
-import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
+import { pngDisplayListReaders } from './pngDisplayList';
+import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
@@ -130,6 +139,20 @@ export interface CalculationStatus {
   limitedCells: string[];
   /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
   budgetExhausted?: boolean;
+  /** Formula cells the engine could not compute, at most 10,000; omitted by cores built before the list. */
+  unevaluatedCells?: UnevaluatedCellStatus[];
+}
+
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value,
+ * or stays blank when the file saved none, unless only an engine gap was
+ * involved, which shows its error.
+ */
+export interface UnevaluatedCellStatus {
+  /** The cell, qualified by its sheet when that is not the active one. */
+  address: string;
+  /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+  functions: string[];
 }
 
 export type NumberFormat =
@@ -335,6 +358,7 @@ export type WorkbookUpdateListener = (
 ) => void;
 
 export interface WorkbookCalculationContext {
+  /** Current local date and time as a 1900 date-system serial (days since 1899-12-30), also in 1904 workbooks. */
   nowSerial: number;
   randSeed: number;
 }
@@ -513,6 +537,12 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
+  /**
+   * Recalculate every formula with the handle's calculation context (or the host clock).
+   * The next `save()` writes the recalculated values; a formula the engine cannot evaluate
+   * keeps the result the file stored.
+   */
+  recalculate(): CalculationStatus;
   /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
@@ -648,6 +678,7 @@ export interface WorkbookHandle extends CollaborationReplica {
 let initialized = false;
 let engineMemory: WebAssembly.Memory | undefined;
 let initialization: Promise<void> | undefined;
+let pngExportAvailable = true;
 const displayListJsonReaders = new WeakMap<
   WorkbookHandle, (viewport: Viewport, sheet?: number) => string
 >();
@@ -663,15 +694,49 @@ export function workbookDisplayListJson(
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
+export interface WasmInitOptions {
+  png?: boolean;
+}
+
+async function compileWasmInput(input: WasmInitInput): Promise<WebAssembly.Module> {
+  let source = await input;
+  if (source instanceof WebAssembly.Module ||
+    Object.prototype.toString.call(source) === '[object WebAssembly.Module]') return source as WebAssembly.Module;
+  if (typeof source === 'string' || source instanceof URL ||
+    (typeof Request === 'function' && source instanceof Request)) source = await fetch(source);
+  if (typeof Response === 'function' && source instanceof Response) {
+    if (typeof WebAssembly.compileStreaming === 'function') {
+      try { return await WebAssembly.compileStreaming(source.clone()); }
+      catch (error) {
+        if (!source.ok || !['basic', 'cors', 'default'].includes(source.type) ||
+          source.headers.get('Content-Type') === 'application/wasm') throw error;
+      }
+    }
+    source = await source.arrayBuffer();
+  }
+  return WebAssembly.compile(source as BufferSource);
+}
+
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
 export function initWasm(
-  input: WasmInitInput = wasmAssetUrl()
+  input?: WasmInitInput,
+  options: WasmInitOptions = {}
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
-  initialization = initWasmModule({ module_or_path: input }).then(
+  const png = options.png !== false;
+  let module: WebAssembly.Module | undefined;
+  const source = engineKind === 'native' || (input === undefined && png)
+    ? input ?? wasmAssetUrl()
+    : compileWasmInput(input ?? wasmAssetUrl(png)).then((compiled) => {
+      module = compiled;
+      return compiled;
+    });
+  initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
+      pngExportAvailable = engineKind === 'native' || module === undefined ||
+        WebAssembly.Module.customSections(module, 'betteroffice.xlsx.no-png').length === 0;
       initialized = true;
     },
     (error: unknown) => {
@@ -716,20 +781,14 @@ export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
 }
 
-export type EngineBackend = 'wasm' | 'native';
-
-/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
-export function engineBackend(): EngineBackend {
-  return backend;
-}
-
 /**
  * Whether the embedded wasm core was built with png export (the `raster` cargo
  * feature). The wasm-bindgen method only exists on the class when compiled in,
  * so chrome can disable an export control instead of calling and catching.
  */
 export function isPngExportAvailable(): boolean {
-  return typeof (XlsxDocument.prototype as { renderPng?: unknown }).renderPng === 'function';
+  return pngExportAvailable &&
+    typeof (XlsxDocument.prototype as { renderPng?: unknown }).renderPng === 'function';
 }
 
 /**
@@ -755,12 +814,14 @@ export function openWorkbook(
 const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
 const recoveryReaders = new WeakMap<WorkbookHandle, (throughSeq: number, preserveHistory: boolean) => Uint8Array>();
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory = false): Uint8Array {
   const capture = recoveryReaders.get(handle);
   if (!capture) throw new TypeError('Workbook does not support recovery checkpoints');
   return capture(throughSeq, preserveHistory);
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number,
   options: OpenWorkbookOptions = {}): WorkbookHandle {
   requireInitialized();
@@ -1055,10 +1116,14 @@ function wrapWorkbookDocument(
       }
       return parseJson(() => doc.sheetInfoForJson(sheet));
     },
+    recalculate(): CalculationStatus {
+      assertAlive();
+      return parseJson<CalculationStatus>(() => doc.recalculateJson(), true);
+    },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
         const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
-        if (typeof fn !== 'function') return { limitedCells: [] };
+        if (typeof fn !== 'function') return { limitedCells: [], unevaluatedCells: [] };
         return JSON.parse(fn.call(doc)) as CalculationStatus;
       });
     },
@@ -1346,6 +1411,10 @@ function wrapWorkbookDocument(
       reportDisplayLimit(JSON.parse(json) as DisplayList);
     }
     return json;
+  });
+  pngDisplayListReaders.set(handle, {
+    viewport: (viewport) => wasmCall(() => doc.pngDisplayListJson(JSON.stringify(viewport))),
+    range: (options) => wasmCall(() => doc.rangePngDisplayListJson(JSON.stringify(options ?? {}))),
   });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));

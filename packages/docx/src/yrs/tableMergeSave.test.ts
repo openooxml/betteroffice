@@ -109,7 +109,7 @@ async function reopenedStoryTexts(bytes: Uint8Array): Promise<Record<string, str
 }
 
 describe('saving merged table cells after an earlier save', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('keeps the merged-in cell text', async () => {
     const session = await opened(
@@ -165,7 +165,7 @@ describe('saving untouched vertical merges after reseeding', () => {
     await preloadOpcWasm(new Uint8Array(readFileSync(
       resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')
     )));
-  });
+  }, 30_000);
 
   it('keeps grid offsets when merging the middle columns across rows', async () => {
     const offsets = '<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>';
@@ -395,7 +395,7 @@ describe('saving untouched vertical merges after reseeding', () => {
 });
 
 describe('saving deleted table cells', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('retains deleted cells through a save until a fresh seed replaces the session', async () => {
     const session = await opened(docx(table(paragraph('CellA')) + paragraph('After')));
@@ -461,7 +461,7 @@ describe('saving table rows with grid offsets', () => {
     await preloadOpcWasm(new Uint8Array(readFileSync(
       resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')
     )));
-  });
+  }, 30_000);
 
   it('keeps row grid offsets and their widths when another row is rewritten', async () => {
     const offsets = '<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/>' +

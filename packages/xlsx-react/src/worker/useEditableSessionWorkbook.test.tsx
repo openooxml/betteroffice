@@ -543,7 +543,7 @@ describe('editable session workbook', () => {
     expect(editor.frame).not.toHaveBeenCalled();
     expect(editor.sheetView).not.toHaveBeenCalled();
     expect(editor.errors).not.toHaveBeenCalled();
-    mounted.rerender(<XlsxWorkerEditor backend="legacy" file={file} showToolbar={false}
+    mounted.rerender(<XlsxWorkerEditor backend="peerless" file={file} showToolbar={false}
       onReady={editor.ready} onError={editor.errors} />);
     await editor.tick();
     expect(editor.opener).toHaveBeenCalledTimes(1);
@@ -783,7 +783,7 @@ describe('editable session workbook', () => {
     const commands = createXlsxCommandController().store;
     const { result } = renderHook(() => useEditableSessionWorkbook({ file, onReady: ready }, commands, controls));
     await waitFor(() => expect(result.current.run).not.toBeNull());
-    expect(opener).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), retainPeerHydration: true });
+    expect(opener).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: true, retainPeerHydration: true });
     expect(hydrate).not.toHaveBeenCalled();
     const run = result.current.run!;
     await act(async () => run.firstPaint());

@@ -3961,7 +3961,7 @@ function rememberWorkerPreview(
 /** Stamps `queries` with the reservations key `source` was rendered with, when known. */
 function carryReservationsKey(queries: object | null, source: object | null): void {
   const key = reservationsKeyOf(source);
-  if (queries && key !== null) stampReservationsKey(queries, key);
+  if (queries && key !== null) stampReservationsKey(queries, key, source);
 }
 
 /**

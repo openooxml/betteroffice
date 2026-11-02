@@ -199,7 +199,7 @@ test('the section embeds the benchmark chart flush left, over collapsed data, wi
     expect(section).toContain(`<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/${name}.svg?theme=dark">`);
     expect(section).toContain(`<img src="https://betteroffice.dev/api/charts/${name}.svg" alt="`);
   }
-  expect(section).toContain('width="70%">');
+  expect(section).toContain('width="100%">');
   expect(section).not.toContain('<p align="center">');
   expect(section.indexOf('<picture>')).toBeLessThan(section.indexOf('<details>\n<summary>Data</summary>'));
   expect(section.indexOf('<summary>Data</summary>')).toBeLessThan(section.indexOf('### DOCX'));

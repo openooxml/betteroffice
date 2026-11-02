@@ -238,6 +238,7 @@ export function createPeerlessWorkerInputCoordinator(
   const acknowledgements = new Map<number, PeerlessTicket>();
   let draft: InputDraft | null = null;
   let rejected: readonly InputDraft[] = [];
+  const refusals = new WeakMap<InputDraft, PeerlessWorkerCommandRefusal>();
   let failure: { error: unknown } | null = null;
   let retired = false;
   let suspended = false;
@@ -382,6 +383,7 @@ export function createPeerlessWorkerInputCoordinator(
       if (boundary === entry.ticket) boundary = undefined;
       if (last === entry.ticket) last = undefined;
       if (status.status === 'refused' && entry.draft) {
+        if (error.code === 'sheet-protected') refusals.set(entry.draft, error);
         rejected = [...rejected.filter((value) => !sameCell(value, entry.draft!)), entry.draft].slice(-maxQueued);
         if (!draft) draft = entry.draft;
       }
@@ -685,7 +687,7 @@ export function createPeerlessWorkerInputCoordinator(
         if (fence === 'settled' || fence === 'read') await lease.wait(Promise.allSettled(earlier));
         else {
           await lease.wait(Promise.all(earlier));
-          if (rejected.length) throw new XlsxCommandAdmissionError('input-failed');
+          if (rejected.length) throw refusals.get(rejected[0]) ?? new XlsxCommandAdmissionError('input-failed');
         }
         const previousPumping = pumping;
         const previousInsertion = insertion;
@@ -877,7 +879,11 @@ export class PeerlessWorkerCommandRefusal extends WorkerInputRefusal {
     readonly status: CommandStatus, readonly target: XlsxRangeTarget | null,
     readonly draft: InputDraft | null
   ) {
-    super(status.reason ?? 'Worker command refused');
+    const result = status.result as { failure?: { message?: string } } | undefined;
+    const protectedCell = status.reason === 'locked-target' &&
+      /^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(result?.failure?.message ?? '');
+    super(protectedCell ? 'This cell is on a protected sheet.' : status.reason ?? 'Worker command refused',
+      false, protectedCell ? 'sheet-protected' : 'input-failed');
     this.name = 'XlsxWorkerCommandRefusal';
   }
 }

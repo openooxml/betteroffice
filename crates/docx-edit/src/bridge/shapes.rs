@@ -9,6 +9,7 @@ use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map, Value, json};
 
 use super::RenderEnv;
+use crate::fmath;
 
 const EMU_PER_INCH: f64 = 914_400.0;
 const PIXELS_PER_INCH: f64 = 96.0;
@@ -817,6 +818,16 @@ fn shape_shading(formatting: Option<&Value>, env: &RenderEnv) -> Option<String> 
 
 fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
     let mut formatting = shape_run_formatting(source);
+    if let Some(slots) = formatting.font_slots.as_mut() {
+        super::resolve_font_slots(slots, env);
+        formatting.font_family = slots
+            .ascii
+            .clone()
+            .or_else(|| slots.h_ansi.clone())
+            .or_else(|| slots.east_asia.clone())
+            .or_else(|| slots.cs.clone())
+            .filter(|family| !family.is_empty());
+    }
     formatting.highlight = shape_shading(source, env);
     formatting
 }
@@ -1034,7 +1045,7 @@ fn regular_polygon(sides: usize) -> Vec<Value> {
     let points: Vec<_> = (0..sides)
         .map(|index| {
             let angle = -PI / 2.0 + index as f64 * PI * 2.0 / sides as f64;
-            (0.5 + angle.cos() * 0.5, 0.5 + angle.sin() * 0.5)
+            (0.5 + fmath::cos(angle) * 0.5, 0.5 + fmath::sin(angle) * 0.5)
         })
         .collect();
     polygon(&points)
@@ -1045,7 +1056,10 @@ fn star(points: usize) -> Vec<Value> {
         .map(|index| {
             let angle = -PI / 2.0 + index as f64 * PI / points as f64;
             let radius = if index % 2 == 0 { 0.5 } else { 0.225 };
-            (0.5 + angle.cos() * radius, 0.5 + angle.sin() * radius)
+            (
+                0.5 + fmath::cos(angle) * radius,
+                0.5 + fmath::sin(angle) * radius,
+            )
         })
         .collect();
     polygon(&vertices)

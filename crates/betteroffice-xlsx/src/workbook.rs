@@ -9,7 +9,8 @@ mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
 mod geometry;
-mod recovery;
+pub(crate) mod reads;
+pub(crate) mod recovery;
 mod rich_text;
 #[cfg(test)]
 mod save_oracle_tests;
@@ -48,13 +49,13 @@ use xlsx_ops::{
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     insertion_keeps_chart_anchor_on_grid,
 };
-use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
+use xlsx_parse::{
+    ChartRefresh, ChartRefreshPlan, DefinedFunctionNames, FormulaNames, display_formula, saves_as,
+};
 use xlsx_render::chart::chart_regions_with_geometry;
-#[cfg(feature = "raster")]
 use xlsx_render::region::{
     viewport_for_range_with_geometry, viewport_for_used_range_with_geometry,
 };
-#[cfg(feature = "raster")]
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
@@ -63,6 +64,8 @@ use xlsx_render::{
     visible_merged_ranges_with_geometry,
 };
 
+#[cfg(feature = "raster")]
+use crate::RenderedPng;
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
     StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
@@ -78,11 +81,9 @@ use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
-    ProposalRequest, Result, SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent,
-    UpdateOrigin,
+    ProposalRequest, RenderOptions, Result, SelectionFormatting, SheetInfo, TextSearchMatch,
+    UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
-#[cfg(feature = "raster")]
-use crate::{RenderOptions, RenderedPng};
 use batch::DocumentVersion;
 use staging::CommitHistory;
 
@@ -365,15 +366,37 @@ fn sheet_content(
     }
 }
 
-/// The cycle and limited cells of a calculation, order aside.
-fn calculation_status(result: &CalculationResult) -> [BTreeSet<(u32, u32, u32)>; 2] {
+/// A reported cell by sheet, row and column, with the functions it names.
+type ReportedCell = (u32, u32, u32, Vec<String>);
+
+/// The cycle, limited and unevaluated cells of a calculation, order aside.
+fn calculation_status(result: &CalculationResult) -> [BTreeSet<ReportedCell>; 3] {
     let cells = |cells: &[CellAddress]| {
         cells
             .iter()
-            .map(|address| (address.sheet.0, address.cell.row, address.cell.col))
+            .map(|address| {
+                (
+                    address.sheet.0,
+                    address.cell.row,
+                    address.cell.col,
+                    Vec::new(),
+                )
+            })
             .collect()
     };
-    [cells(&result.cycle_cells), cells(&result.limited_cells)]
+    let unevaluated = result
+        .unevaluated_cells
+        .iter()
+        .map(|cell| {
+            let CellAddress { sheet, cell: at } = cell.address;
+            (sheet.0, at.row, at.col, cell.functions.clone())
+        })
+        .collect();
+    [
+        cells(&result.cycle_cells),
+        cells(&result.limited_cells),
+        unevaluated,
+    ]
 }
 
 /// On the used range's edge — the only place removing a cell can shrink it.
@@ -388,6 +411,10 @@ fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
 }
 
 pub struct Workbook {
+    #[cfg(feature = "fonts")]
+    pub(crate) font_manager: betteroffice_fonts::FontManager,
+    #[cfg(all(feature = "fonts", feature = "raster"))]
+    pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     authority: WorkbookAuthority,
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
@@ -594,8 +621,23 @@ impl Workbook {
         Self::open_internal(bytes, true, None)
     }
 
+    #[cfg(feature = "fonts")]
+    pub fn open_with_options(bytes: &[u8], options: &crate::OpenOptions) -> Result<Self> {
+        let font_manager =
+            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)?;
+        let mut workbook = Self::open(bytes)?;
+        workbook.font_manager = font_manager;
+        #[cfg(feature = "raster")]
+        for font in &options.fonts {
+            workbook.register_font(&font.family, font.bold, font.italic, &font.data)?;
+        }
+        Ok(workbook)
+    }
+
     pub fn open_for_read(bytes: &[u8]) -> Result<Self> {
-        Self::open_internal(bytes, false, None)
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.derive_unevaluated(None);
+        Ok(workbook)
     }
 
     /// Opens a replica. `client_id` must be unique among connected peers.
@@ -610,6 +652,9 @@ impl Workbook {
     }
 
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        xlsx_model::open_timing! {
+            let timing_parse = xlsx_model::open_timing::span("package_parse");
+        }
         let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
         let mut names = HashSet::with_capacity(parts.len());
         for (name, _) in &parts {
@@ -618,6 +663,7 @@ impl Workbook {
             }
         }
         let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        xlsx_model::open_timing! { drop(timing_parse); }
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -633,6 +679,9 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("recalculate");
+        }
         workbook.recalculate(options);
         Ok(workbook)
     }
@@ -738,12 +787,13 @@ impl Workbook {
         }
         let model = projected;
         validate_model(&model)?;
-        let opened_anchors = model
-            .sheets
-            .iter()
-            .flat_map(|sheet| &sheet.charts)
-            .map(|chart| (chart.frame_id(), chart.anchor))
-            .collect();
+        let opened_anchors = model.sheets.iter().flat_map(|sheet| &sheet.charts).fold(
+            BTreeMap::new(),
+            |mut anchors, chart| {
+                anchors.insert(chart.frame_id(), chart.anchor);
+                anchors
+            },
+        );
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
@@ -772,7 +822,7 @@ impl Workbook {
             },
         };
         let version_nonce = batch::mint_nonce();
-        Ok(Self {
+        let mut workbook = Self {
             authority,
             mode,
             pending_remote_updates: Vec::new(),
@@ -803,7 +853,18 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
-        })
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
+        };
+        if build_graph {
+            workbook.derive_unevaluated(None);
+        }
+        Ok(workbook)
     }
 
     fn require_snapshot_standalone(&self) -> crate::snapshot::SnapshotResult<()> {
@@ -1209,6 +1270,12 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
+                let recalculated =
+                    self.recalculated_since_open
+                        && package.requests_full_calculation()
+                        && self.model.sheets.iter().any(|sheet| {
+                            sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
+                        });
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -1216,7 +1283,7 @@ impl Workbook {
                     &self.preserved.shared_string_cells,
                     &self.preserved.axes,
                     xlsx_parse::SaveEdits {
-                        changed: self.edited_since_open,
+                        changed: self.edited_since_open || recalculated,
                         moved_references: self.moved_references_since_open,
                     },
                     self.active_sheet,
@@ -1423,11 +1490,21 @@ impl Workbook {
     }
 
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        self.cell_shown(sheet, cell, names.visible_from(Some(sheet)))
+    }
+
+    fn cell_shown(
+        &self,
+        sheet: SheetId,
+        cell: CellRef,
+        names: FormulaNames<'_>,
+    ) -> Result<CellEdit> {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
         let (input, is_formula) = match sheet_ref.cell(cell) {
             Some(stored) => match &stored.formula {
-                Some(formula) => (format!("={formula}"), true),
+                Some(formula) => (format!("={}", display_formula(formula, names)), true),
                 None => (
                     value_to_input(&self.model, sheet, cell, &stored.value),
                     false,
@@ -1483,11 +1560,13 @@ impl Workbook {
 
     pub fn range_cells(&self, sheet: SheetId, range: CellRange) -> Result<Vec<Vec<CellEdit>>> {
         let (rows, cols) = self.validate_bounded_range(sheet, range)?;
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        let names = names.visible_from(Some(sheet));
         let mut cells = Vec::with_capacity(rows as usize);
         for row in range.start.row..=range.end.row {
             let mut row_cells = Vec::with_capacity(cols as usize);
             for col in range.start.col..=range.end.col {
-                row_cells.push(self.cell(sheet, CellRef::new(row, col))?);
+                row_cells.push(self.cell_shown(sheet, CellRef::new(row, col), names)?);
             }
             cells.push(row_cells);
         }
@@ -1740,7 +1819,9 @@ impl Workbook {
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
-        let (state, format) = edit_cell_state(&self.model, sheet, cell, input, options.now_serial);
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        let (state, format) =
+            edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
         validate_cell_state(&state)?;
         if format.is_none()
             && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
@@ -1790,11 +1871,18 @@ impl Workbook {
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
         for edit in edits {
             self.validate_cell(edit.cell)?;
-            let (state, format) =
-                edit_cell_state(&preview, sheet, edit.cell, &edit.input, options.now_serial);
+            let (state, format) = edit_cell_state(
+                &preview,
+                &names,
+                sheet,
+                edit.cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             let old = current_cell_state(&preview, sheet, edit.cell);
             if format.is_none() && cell_states_semantically_equal(&old, &state) {
@@ -1926,7 +2014,7 @@ impl Workbook {
 
     fn apply_ops_marked(
         &mut self,
-        ops: Vec<Op>,
+        mut ops: Vec<Op>,
         options: CalculationOptions,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
@@ -1945,7 +2033,9 @@ impl Workbook {
         let mut origins = self.preserved.origins.clone();
         let mut names = self.sheet_names();
         let mut per_op = Vec::with_capacity(ops.len());
-        for op in &ops {
+        let defined = DefinedFunctionNames::new(&preview.defined_names);
+        for op in &mut ops {
+            keep_stored_formula(&preview, &defined, op);
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet_in(&preview, &origins, sheet)?;
             }
@@ -2018,12 +2108,15 @@ impl Workbook {
     }
 
     /// A recalculation that moves any value moves [`Workbook::version`] too, since values
-    /// and display text can be guarded, as does one that changes what a structured export
-    /// reports about results: the cells left in a cycle or at a limit, or, on the first
-    /// calculation, formulas the file stored no result for. One that moves none of these
-    /// leaves it. Such a recalculation also notifies observers with an empty
+    /// and display text can be guarded, as does one that changes what reads and structured
+    /// exports report about results: the cells left in a cycle, at a limit or unevaluated,
+    /// or, on the first calculation, formulas the file stored no result for. One that moves
+    /// none of these leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
-    /// the recalculated values; the recalculation at open does not.
+    /// the recalculated values. The recalculation at open does not, except that a file
+    /// asking for a full calculation on load (`calcPr` `fullCalcOnLoad` or `forceFullCalc`)
+    /// saves the values it produced when it holds any formula; formulas the engine
+    /// cannot evaluate keep their cached results either way.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
         let result = self.recalculate(options);
         self.edited_since_open = true;
@@ -2268,20 +2361,29 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<Proposal> {
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
             let (state, format) = edit_cell_state(
                 &preview,
+                &names,
                 edit.sheet,
                 edit.cell,
                 &edit.input,
                 options.now_serial,
             );
             validate_cell_state(&state)?;
-            preview
-                .sheet_mut(edit.sheet)
-                .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                .set_cell(edit.cell, state.into());
+            if format.is_some()
+                || !cell_states_semantically_equal(
+                    &current_cell_state(&preview, edit.sheet, edit.cell),
+                    &state,
+                )
+            {
+                preview
+                    .sheet_mut(edit.sheet)
+                    .ok_or(Error::SheetOutOfRange(edit.sheet))?
+                    .set_cell(edit.cell, state.into());
+            }
             if let Some(format) = format {
                 xlsx_ops::apply_in_place(&mut preview, &format)?;
             }
@@ -2363,12 +2465,19 @@ impl Workbook {
         let mut ops = Vec::with_capacity(proposal.edits.len());
         let mut per_op = Vec::with_capacity(proposal.edits.len());
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            let (state, format) =
-                edit_cell_state(&preview, sheet, cell, &edit.input, options.now_serial);
+            let (state, format) = edit_cell_state(
+                &preview,
+                &names,
+                sheet,
+                cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 touched.push((sheet, cell, state.formula.clone()));
@@ -2660,14 +2769,25 @@ impl Workbook {
 
     #[cfg(feature = "raster")]
     pub fn render_png_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<RenderedPng> {
-        validate_viewport(viewport)?;
-        let width = viewport.width.ceil().max(1.0) as u32;
-        let height = viewport.height.ceil().max(1.0) as u32;
-        validate_render_size(width, height)?;
-        let geometry = self.sheet_geometry(sheet)?;
-        validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
-        let display_list = self.display_list_for(sheet, viewport)?;
-        let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
+        let (display_list, width, height) = self.png_display_list_for(sheet, viewport)?;
+        self.rasterize_display_list(&display_list, width, height)
+    }
+
+    #[cfg(feature = "raster")]
+    fn rasterize_display_list(
+        &self,
+        display_list: &DisplayList,
+        width: u32,
+        height: u32,
+    ) -> Result<RenderedPng> {
+        #[cfg(feature = "fonts")]
+        let bytes = {
+            let fonts = self.raster_fonts(display_list)?;
+            xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
+                .map_err(Error::Raster)?
+        };
+        #[cfg(not(feature = "fonts"))]
+        let bytes = xlsx_raster::render_png(display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
             bytes,
             width,
@@ -2675,8 +2795,34 @@ impl Workbook {
         })
     }
 
+    #[doc(hidden)]
+    pub fn png_display_list_for(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+    ) -> Result<(DisplayList, u32, u32)> {
+        validate_viewport(viewport)?;
+        let width = viewport.width.ceil().max(1.0) as u32;
+        let height = viewport.height.ceil().max(1.0) as u32;
+        validate_render_size(width, height)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
+        let display_list = self.display_list_for(sheet, viewport)?;
+        Ok((display_list, width, height))
+    }
+
     #[cfg(feature = "raster")]
     pub fn render_sheet(&self, sheet: SheetId, options: &RenderOptions) -> Result<RenderedPng> {
+        let (display_list, width, height) = self.range_png_display_list_for(sheet, options)?;
+        self.rasterize_display_list(&display_list, width, height)
+    }
+
+    #[doc(hidden)]
+    pub fn range_png_display_list_for(
+        &self,
+        sheet: SheetId,
+        options: &RenderOptions,
+    ) -> Result<(DisplayList, u32, u32)> {
         if !(options.scale.is_finite() && options.scale > 0.0) {
             return Err(Error::InvalidScale(options.scale));
         }
@@ -2717,12 +2863,7 @@ impl Workbook {
         } else {
             scaled(display_list, options.scale)
         };
-        let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
-        Ok(RenderedPng {
-            bytes,
-            width,
-            height,
-        })
+        Ok((display_list, width, height))
     }
 
     pub fn format_address(&self, address: CellAddress) -> String {
@@ -3206,9 +3347,47 @@ impl Workbook {
         result
     }
 
+    /// Derives what a recalculation would leave unevaluated, for a session
+    /// opened or restored without one, under the calculation context it was
+    /// saved with, if any: the uncomputable calls the formulas reach over the
+    /// values held and the cells reading them, not the engine's other gaps.
+    pub(crate) fn derive_unevaluated(&mut self, context: Option<CalculationOptions>) {
+        if self.may_call_uncomputable() {
+            self.ensure_graph();
+            let graph = self.graph.as_ref().expect("graph initialized");
+            let now_serial = context.and_then(|context| context.now_serial);
+            xlsx_calc::derive_unevaluated(&self.model, graph, now_serial, self.rand_seed);
+            self.adopt_derived_unevaluated();
+        }
+    }
+
+    /// takes the list a derivation marked on the graph as the session's.
+    pub(crate) fn adopt_derived_unevaluated(&mut self) {
+        if let Some(graph) = &self.graph {
+            self.last_calculation.unevaluated_cells = unevaluated_cells(&graph.unevaluated_cells());
+        }
+    }
+
+    /// whether any formula's text may call an uncomputable function, so a
+    /// workbook without one derives nothing and builds no graph for it.
+    fn may_call_uncomputable(&self) -> bool {
+        let may_call = xlsx_calc::functions::may_call_uncomputable;
+        self.model
+            .defined_names
+            .iter()
+            .any(|defined| may_call(&defined.formula))
+            || self.model.sheets.iter().any(|sheet| {
+                sheet
+                    .iter_cells()
+                    .any(|(_, cell)| cell.formula.as_deref().is_some_and(may_call))
+            })
+    }
+
     fn ensure_graph(&mut self) {
         if self.graph.is_none() {
-            self.graph = Some(DepGraph::build(&self.model));
+            let graph = DepGraph::build(&self.model);
+            assume_unevaluated(&graph, &self.last_calculation);
+            self.graph = Some(graph);
         }
     }
 
@@ -3521,6 +3700,17 @@ fn profiled<T>(
     ))
 }
 
+/// marks on `graph` the cells `calculation` left unevaluated.
+fn assume_unevaluated(graph: &DepGraph, calculation: &CalculationResult) {
+    graph.assume_unevaluated(calculation.unevaluated_cells.iter().map(|cell| {
+        xlsx_calc::UnevaluatedCell {
+            sheet: cell.address.sheet,
+            cell: cell.address.cell,
+            functions: cell.functions.clone(),
+        }
+    }));
+}
+
 fn calculation_result(result: &RecalcResult) -> CalculationResult {
     CalculationResult {
         changed: result
@@ -3539,7 +3729,21 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
             .map(|&(sheet, cell)| CellAddress { sheet, cell })
             .collect(),
         budget_exhausted: result.budget_exhausted,
+        unevaluated_cells: unevaluated_cells(&result.unevaluated_cells),
     }
+}
+
+fn unevaluated_cells(cells: &[xlsx_calc::UnevaluatedCell]) -> Vec<UnevaluatedCell> {
+    cells
+        .iter()
+        .map(|cell| UnevaluatedCell {
+            address: CellAddress {
+                sheet: cell.sheet,
+                cell: cell.cell,
+            },
+            functions: cell.functions.clone(),
+        })
+        .collect()
 }
 
 /// the collaboration document carries cells, not the rectangle a `t="array"`
@@ -4552,6 +4756,7 @@ fn written_cell_style(
 
 fn edit_cell_state(
     workbook: &WorkbookModel,
+    names: &DefinedFunctionNames,
     sheet: SheetId,
     cell: CellRef,
     input: &str,
@@ -4566,7 +4771,24 @@ fn edit_cell_state(
         .number_format;
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
-    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    let kept = match &parsed {
+        xlsx_ops::ParsedInput::Formula(text) => kept_formula(workbook, sheet, cell, text),
+        _ => None,
+    };
+    let mut state = match kept {
+        Some(stored) => CellState {
+            formula: Some(stored.to_owned()),
+            ..CellState::default()
+        },
+        None => xlsx_ops::cell_state_from_parsed(input, parsed),
+    };
+    state.formula = state.formula.map(|typed| {
+        committed_formula(
+            typed,
+            stored_formula(workbook, sheet, cell),
+            names.visible_from(Some(sheet)),
+        )
+    });
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     let format = inferred.map(|id| {
         let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));
@@ -4589,6 +4811,68 @@ fn edit_cell_state(
         }
     });
     (state, format)
+}
+
+fn stored_formula(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> Option<&str> {
+    workbook.sheet(sheet)?.cell(cell)?.formula.as_deref()
+}
+
+/// `typed`, or `stored` when `typed` saves as exactly that text with the
+/// defined `names` in its scope, so committing shown formula text unchanged
+/// leaves the stored text as it was.
+fn committed_formula(typed: String, stored: Option<&str>, names: FormulaNames<'_>) -> String {
+    match stored {
+        Some(stored) if typed != stored && saves_as(&typed, stored, names) => stored.to_owned(),
+        _ => typed,
+    }
+}
+
+/// An op that re-commits a cell formula or defined name in a form that saves
+/// as exactly the stored text keeps the stored text.
+fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, op: &mut Op) {
+    match op {
+        Op::SetCell { sheet, at, cell } => {
+            cell.formula = cell.formula.take().map(|typed| {
+                committed_formula(
+                    typed,
+                    stored_formula(workbook, *sheet, *at),
+                    names.visible_from(Some(*sheet)),
+                )
+            });
+        }
+        Op::SetDefinedName {
+            name,
+            refers_to,
+            scope,
+            ..
+        } => {
+            let stored = workbook
+                .defined_names
+                .iter()
+                .find(|defined| {
+                    defined.local_sheet == *scope && defined.name.eq_ignore_ascii_case(name)
+                })
+                .map(|defined| defined.formula.as_str());
+            *refers_to = committed_formula(
+                std::mem::take(refers_to),
+                stored,
+                names.visible_from(*scope),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// The formula `cell` stores when `typed` is that text, or that text without the leading `=`
+/// some producers store; re-committing keeps it even when the engine cannot parse it.
+fn kept_formula<'a>(
+    workbook: &'a WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    typed: &str,
+) -> Option<&'a str> {
+    stored_formula(workbook, sheet, cell)
+        .filter(|stored| *stored == typed || stored.strip_prefix('=') == Some(typed))
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {
@@ -4954,7 +5238,6 @@ impl Workbook {
     }
 }
 
-#[cfg(feature = "raster")]
 fn validate_display_region(
     sheet: &Sheet,
     geometry: &GridGeometry,
@@ -5003,9 +5286,8 @@ fn validate_display_cells(row_count: u64, column_count: u64) -> Result<()> {
 }
 
 /// Whether a default-range render of `viewport` would clear every guard
-/// [`Workbook::render_sheet`] applies. The used range itself is the caller's
+/// the PNG export applies. The used range itself is the caller's
 /// to answer for; this decides only whether a chart may widen the frame.
-#[cfg(feature = "raster")]
 fn renderable(sheet: &Sheet, geometry: &GridGeometry, viewport: &Viewport, scale: f32) -> bool {
     let width = ((viewport.width * scale).ceil() as u32).max(1);
     let height = ((viewport.height * scale).ceil() as u32).max(1);
@@ -5013,7 +5295,6 @@ fn renderable(sheet: &Sheet, geometry: &GridGeometry, viewport: &Viewport, scale
         && validate_display_region(sheet, geometry, viewport).is_ok()
 }
 
-#[cfg(feature = "raster")]
 fn validate_render_size(width: u32, height: u32) -> Result<()> {
     if width > MAX_PIXMAP_DIM || height > MAX_PIXMAP_DIM {
         return Err(Error::RenderTooLarge {
@@ -5504,6 +5785,13 @@ impl Workbook {
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
         })
     }
 }

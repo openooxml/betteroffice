@@ -41,6 +41,7 @@ These entry points are exported from `@betteroffice/xlsx`:
 | entry point | description |
 | --- | --- |
 | `initWasm(input?)` | Initialize the engine; concurrent calls share initialization. |
+| `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the selected engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `openWorkbook(bytes, options?)` | Open XLSX bytes as a synchronous `WorkbookHandle` after initialization. |
 | `openWorkbookSession(bytes, options?)` | Open a workbook in a dedicated worker with asynchronous access. |
 | `paintDisplayList(ctx, frame, dpr, origin?)` | Paint a display list onto a canvas 2D context. |
@@ -95,6 +96,8 @@ its used range, or accepts `{ range, scale }` to select an A1 range and raster s
 bytes synchronously; check `isPngExportAvailable()` before calling them.
 
 ## Worker sessions
+
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed.
 
 The low-level `openWorkbookSession` API (also exported from `@betteroffice/xlsx/worker`) can
 change in minor releases. It returns a `WorkbookSession` with

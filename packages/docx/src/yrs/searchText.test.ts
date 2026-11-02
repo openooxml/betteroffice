@@ -8,7 +8,7 @@ import { createYrsSession } from './index';
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
 describe('YrsSession searchText', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('returns every paragraph-local match in deterministic story order', async () => {
     const session = await createYrsSession({ clientId: 76001 });

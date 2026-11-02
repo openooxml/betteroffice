@@ -1,0 +1,492 @@
+[
+  {
+    "family": "Caladea",
+    "metricCompatWith": "Cambria",
+    "weight": 700,
+    "style": "normal",
+    "file": "Caladea-Bold.ttf"
+  },
+  {
+    "family": "Caladea",
+    "metricCompatWith": "Cambria",
+    "weight": 700,
+    "style": "italic",
+    "file": "Caladea-BoldItalic.ttf"
+  },
+  {
+    "family": "Caladea",
+    "metricCompatWith": "Cambria",
+    "weight": 400,
+    "style": "italic",
+    "file": "Caladea-Italic.ttf"
+  },
+  {
+    "family": "Caladea",
+    "metricCompatWith": "Cambria",
+    "weight": 400,
+    "style": "normal",
+    "file": "Caladea-Regular.ttf"
+  },
+  {
+    "family": "Carlito",
+    "metricCompatWith": "Calibri",
+    "weight": 700,
+    "style": "normal",
+    "file": "Carlito-Bold.ttf"
+  },
+  {
+    "family": "Carlito",
+    "metricCompatWith": "Calibri",
+    "weight": 700,
+    "style": "italic",
+    "file": "Carlito-BoldItalic.ttf"
+  },
+  {
+    "family": "Carlito",
+    "metricCompatWith": "Calibri",
+    "weight": 400,
+    "style": "italic",
+    "file": "Carlito-Italic.ttf"
+  },
+  {
+    "family": "Carlito",
+    "metricCompatWith": "Calibri",
+    "weight": 400,
+    "style": "normal",
+    "file": "Carlito-Regular.ttf"
+  },
+  {
+    "family": "Comic Relief",
+    "weight": 700,
+    "style": "normal",
+    "file": "ComicRelief-Bold.ttf",
+    "metricCompatWith": "Comic Sans MS"
+  },
+  {
+    "family": "Comic Relief",
+    "weight": 400,
+    "style": "normal",
+    "file": "ComicRelief-Regular.ttf",
+    "metricCompatWith": "Comic Sans MS"
+  },
+  {
+    "family": "DM Sans",
+    "metricCompatWith": "DM Sans",
+    "weight": 700,
+    "style": "normal",
+    "file": "DMSans-Bold.ttf"
+  },
+  {
+    "family": "DM Sans",
+    "metricCompatWith": "DM Sans",
+    "weight": 700,
+    "style": "italic",
+    "file": "DMSans-BoldItalic.ttf"
+  },
+  {
+    "family": "DM Sans",
+    "metricCompatWith": "DM Sans",
+    "weight": 400,
+    "style": "italic",
+    "file": "DMSans-Italic.ttf"
+  },
+  {
+    "family": "DM Sans",
+    "metricCompatWith": "DM Sans",
+    "weight": 400,
+    "style": "normal",
+    "file": "DMSans-Regular.ttf"
+  },
+  {
+    "family": "DM Serif Display",
+    "weight": 400,
+    "style": "italic",
+    "file": "DMSerifDisplay-Italic.ttf",
+    "metricCompatWith": "DM Serif Display"
+  },
+  {
+    "family": "DM Serif Display",
+    "weight": 400,
+    "style": "normal",
+    "file": "DMSerifDisplay-Regular.ttf",
+    "metricCompatWith": "DM Serif Display"
+  },
+  {
+    "family": "Gelasio",
+    "metricCompatWith": "Georgia",
+    "weight": 700,
+    "style": "normal",
+    "file": "Gelasio-Bold.ttf"
+  },
+  {
+    "family": "Gelasio",
+    "metricCompatWith": "Georgia",
+    "weight": 700,
+    "style": "italic",
+    "file": "Gelasio-BoldItalic.ttf"
+  },
+  {
+    "family": "Gelasio",
+    "metricCompatWith": "Georgia",
+    "weight": 400,
+    "style": "italic",
+    "file": "Gelasio-Italic.ttf"
+  },
+  {
+    "family": "Gelasio",
+    "metricCompatWith": "Georgia",
+    "weight": 400,
+    "style": "normal",
+    "file": "Gelasio-Regular.ttf"
+  },
+  {
+    "family": "Heebo",
+    "weight": 700,
+    "style": "normal",
+    "file": "Heebo-Bold.ttf",
+    "metricCompatWith": "Heebo"
+  },
+  {
+    "family": "Heebo",
+    "weight": 400,
+    "style": "normal",
+    "file": "Heebo-Regular.ttf",
+    "metricCompatWith": "Heebo"
+  },
+  {
+    "family": "Inter",
+    "metricCompatWith": "Inter",
+    "weight": 700,
+    "style": "normal",
+    "file": "Inter-Bold.ttf"
+  },
+  {
+    "family": "Inter",
+    "metricCompatWith": "Inter",
+    "weight": 700,
+    "style": "italic",
+    "file": "Inter-BoldItalic.ttf"
+  },
+  {
+    "family": "Inter",
+    "metricCompatWith": "Inter",
+    "weight": 400,
+    "style": "italic",
+    "file": "Inter-Italic.ttf"
+  },
+  {
+    "family": "Inter",
+    "metricCompatWith": "Inter",
+    "weight": 400,
+    "style": "normal",
+    "file": "Inter-Regular.ttf"
+  },
+  {
+    "family": "Liberation Mono",
+    "metricCompatWith": "Courier New",
+    "weight": 700,
+    "style": "normal",
+    "file": "LiberationMono-Bold.ttf"
+  },
+  {
+    "family": "Liberation Mono",
+    "metricCompatWith": "Courier New",
+    "weight": 700,
+    "style": "italic",
+    "file": "LiberationMono-BoldItalic.ttf"
+  },
+  {
+    "family": "Liberation Mono",
+    "metricCompatWith": "Courier New",
+    "weight": 400,
+    "style": "italic",
+    "file": "LiberationMono-Italic.ttf"
+  },
+  {
+    "family": "Liberation Mono",
+    "metricCompatWith": "Courier New",
+    "weight": 400,
+    "style": "normal",
+    "file": "LiberationMono-Regular.ttf"
+  },
+  {
+    "family": "Liberation Sans",
+    "metricCompatWith": "Arial",
+    "weight": 700,
+    "style": "normal",
+    "file": "LiberationSans-Bold.ttf"
+  },
+  {
+    "family": "Liberation Sans",
+    "metricCompatWith": "Arial",
+    "weight": 700,
+    "style": "italic",
+    "file": "LiberationSans-BoldItalic.ttf"
+  },
+  {
+    "family": "Liberation Sans",
+    "metricCompatWith": "Arial",
+    "weight": 400,
+    "style": "italic",
+    "file": "LiberationSans-Italic.ttf"
+  },
+  {
+    "family": "Liberation Sans",
+    "metricCompatWith": "Arial",
+    "weight": 400,
+    "style": "normal",
+    "file": "LiberationSans-Regular.ttf"
+  },
+  {
+    "family": "Liberation Serif",
+    "metricCompatWith": "Times New Roman",
+    "weight": 700,
+    "style": "normal",
+    "file": "LiberationSerif-Bold.ttf"
+  },
+  {
+    "family": "Liberation Serif",
+    "metricCompatWith": "Times New Roman",
+    "weight": 700,
+    "style": "italic",
+    "file": "LiberationSerif-BoldItalic.ttf"
+  },
+  {
+    "family": "Liberation Serif",
+    "metricCompatWith": "Times New Roman",
+    "weight": 400,
+    "style": "italic",
+    "file": "LiberationSerif-Italic.ttf"
+  },
+  {
+    "family": "Liberation Serif",
+    "metricCompatWith": "Times New Roman",
+    "weight": 400,
+    "style": "normal",
+    "file": "LiberationSerif-Regular.ttf"
+  },
+  {
+    "family": "Montserrat",
+    "metricCompatWith": "Montserrat",
+    "weight": 700,
+    "style": "normal",
+    "file": "Montserrat-Bold.ttf"
+  },
+  {
+    "family": "Montserrat",
+    "metricCompatWith": "Montserrat",
+    "weight": 700,
+    "style": "italic",
+    "file": "Montserrat-BoldItalic.ttf"
+  },
+  {
+    "family": "Montserrat",
+    "metricCompatWith": "Montserrat",
+    "weight": 400,
+    "style": "italic",
+    "file": "Montserrat-Italic.ttf"
+  },
+  {
+    "family": "Montserrat",
+    "metricCompatWith": "Montserrat",
+    "weight": 400,
+    "style": "normal",
+    "file": "Montserrat-Regular.ttf"
+  },
+  {
+    "family": "Noto Naskh Arabic",
+    "weight": 400,
+    "style": "normal",
+    "file": "NotoNaskhArabic-Regular.ttf",
+    "script": "arabic"
+  },
+  {
+    "family": "Noto Sans Arabic",
+    "weight": 700,
+    "style": "normal",
+    "file": "NotoSansArabic-Bold.ttf",
+    "script": "arabic"
+  },
+  {
+    "family": "Noto Sans Arabic",
+    "weight": 400,
+    "style": "normal",
+    "file": "NotoSansArabic-Regular.ttf",
+    "script": "arabic"
+  },
+  {
+    "family": "Noto Sans Hebrew",
+    "weight": 700,
+    "style": "normal",
+    "file": "NotoSansHebrew-Bold.ttf",
+    "script": "hebrew"
+  },
+  {
+    "family": "Noto Sans Hebrew",
+    "weight": 400,
+    "style": "normal",
+    "file": "NotoSansHebrew-Regular.ttf",
+    "script": "hebrew"
+  },
+  {
+    "family": "Open Sans",
+    "metricCompatWith": "Open Sans",
+    "weight": 700,
+    "style": "normal",
+    "file": "OpenSans-Bold.ttf"
+  },
+  {
+    "family": "Open Sans",
+    "metricCompatWith": "Open Sans",
+    "weight": 700,
+    "style": "italic",
+    "file": "OpenSans-BoldItalic.ttf"
+  },
+  {
+    "family": "Open Sans",
+    "metricCompatWith": "Open Sans",
+    "weight": 400,
+    "style": "italic",
+    "file": "OpenSans-Italic.ttf"
+  },
+  {
+    "family": "Open Sans",
+    "metricCompatWith": "Open Sans",
+    "weight": 400,
+    "style": "normal",
+    "file": "OpenSans-Regular.ttf"
+  },
+  {
+    "family": "Oswald",
+    "weight": 700,
+    "style": "normal",
+    "file": "Oswald-Bold.ttf",
+    "metricCompatWith": "Oswald"
+  },
+  {
+    "family": "Oswald",
+    "weight": 400,
+    "style": "normal",
+    "file": "Oswald-Regular.ttf",
+    "metricCompatWith": "Oswald"
+  },
+  {
+    "family": "Poppins",
+    "metricCompatWith": "Poppins",
+    "weight": 700,
+    "style": "normal",
+    "file": "Poppins-Bold.ttf"
+  },
+  {
+    "family": "Poppins",
+    "metricCompatWith": "Poppins",
+    "weight": 700,
+    "style": "italic",
+    "file": "Poppins-BoldItalic.ttf"
+  },
+  {
+    "family": "Poppins",
+    "metricCompatWith": "Poppins",
+    "weight": 400,
+    "style": "italic",
+    "file": "Poppins-Italic.ttf"
+  },
+  {
+    "family": "Poppins",
+    "metricCompatWith": "Poppins",
+    "weight": 400,
+    "style": "normal",
+    "file": "Poppins-Regular.ttf"
+  },
+  {
+    "family": "Roboto",
+    "metricCompatWith": "Roboto",
+    "weight": 700,
+    "style": "normal",
+    "file": "Roboto-Bold.ttf"
+  },
+  {
+    "family": "Roboto",
+    "metricCompatWith": "Roboto",
+    "weight": 700,
+    "style": "italic",
+    "file": "Roboto-BoldItalic.ttf"
+  },
+  {
+    "family": "Roboto",
+    "metricCompatWith": "Roboto",
+    "weight": 400,
+    "style": "italic",
+    "file": "Roboto-Italic.ttf"
+  },
+  {
+    "family": "Roboto",
+    "metricCompatWith": "Roboto",
+    "weight": 400,
+    "style": "normal",
+    "file": "Roboto-Regular.ttf"
+  },
+  {
+    "family": "Selawik",
+    "weight": 700,
+    "style": "normal",
+    "file": "Selawik-Bold.ttf",
+    "metricCompatWith": "Segoe UI"
+  },
+  {
+    "family": "Selawik",
+    "weight": 400,
+    "style": "normal",
+    "file": "Selawik-Light.ttf",
+    "metricCompatWith": "Segoe UI Light"
+  },
+  {
+    "family": "Selawik",
+    "weight": 400,
+    "style": "normal",
+    "file": "Selawik-Regular.ttf",
+    "metricCompatWith": "Segoe UI"
+  },
+  {
+    "family": "Selawik",
+    "weight": 400,
+    "style": "normal",
+    "file": "Selawik-Semibold.ttf",
+    "metricCompatWith": "Segoe UI Semibold"
+  },
+  {
+    "family": "Selawik",
+    "weight": 400,
+    "style": "normal",
+    "file": "Selawik-Semilight.ttf",
+    "metricCompatWith": "Segoe UI Semilight"
+  },
+  {
+    "family": "Source Sans 3",
+    "metricCompatWith": "Source Sans Pro",
+    "weight": 700,
+    "style": "normal",
+    "file": "SourceSans3-Bold.ttf"
+  },
+  {
+    "family": "Source Sans 3",
+    "metricCompatWith": "Source Sans Pro",
+    "weight": 700,
+    "style": "italic",
+    "file": "SourceSans3-BoldItalic.ttf"
+  },
+  {
+    "family": "Source Sans 3",
+    "metricCompatWith": "Source Sans Pro",
+    "weight": 400,
+    "style": "italic",
+    "file": "SourceSans3-Italic.ttf"
+  },
+  {
+    "family": "Source Sans 3",
+    "metricCompatWith": "Source Sans Pro",
+    "weight": 400,
+    "style": "normal",
+    "file": "SourceSans3-Regular.ttf"
+  }
+]

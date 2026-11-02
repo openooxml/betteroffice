@@ -290,6 +290,10 @@ pub struct ColumnRuns {
 
 impl ColumnRuns {
     pub fn push(&mut self, run: ColStyle) {
+        crate::open_timing! {
+            let _timing = crate::open_timing::span("style_column_runs");
+            crate::open_timing::count("style_column_runs_input", 1);
+        }
         if run.first > run.last {
             return;
         }
@@ -321,6 +325,9 @@ impl ColumnRuns {
             .map(|(&first, _)| first)
             .collect::<Vec<_>>();
         for first in inside {
+            crate::open_timing! {
+                crate::open_timing::count("style_column_runs_visited", 1);
+            }
             let Some(old) = runs.remove(&first) else {
                 continue;
             };
@@ -437,7 +444,12 @@ impl Sheet {
         self.col_styles
             .iter()
             .rev()
-            .find(|run| (run.first..=run.last).contains(&col))
+            .find(|run| {
+                crate::open_timing! {
+                    crate::open_timing::count("style_column_scan_runs", 1);
+                }
+                (run.first..=run.last).contains(&col)
+            })
             .map(|run| run.xf)
     }
 
@@ -470,9 +482,18 @@ impl Sheet {
         at: CellRef,
         col_style: impl FnOnce(ColId) -> Option<u32>,
     ) -> Option<u32> {
+        crate::open_timing! {
+            let _timing = crate::open_timing::span("style_inherited");
+            crate::open_timing::count("style_inherited_rows", 1);
+        }
         match self.row_styles.get(&at.row) {
             Some(&style) => Some(style),
-            None => col_style(at.col),
+            None => {
+                crate::open_timing! {
+                    crate::open_timing::count("style_inherited_cols", 1);
+                }
+                col_style(at.col)
+            }
         }
     }
 
@@ -481,6 +502,10 @@ impl Sheet {
         at: CellRef,
         col_style: impl FnOnce(ColId) -> Option<u32>,
     ) -> Option<u32> {
+        crate::open_timing! {
+            let _timing = crate::open_timing::span("style_effective");
+            crate::open_timing::count("style_effective_cells", 1);
+        }
         match self.cell(at) {
             Some(cell) => cell.style,
             None => self.inherited_style_with(at, col_style),
@@ -511,13 +536,16 @@ impl Sheet {
         })
     }
 
+    /// writes a computed value, keeping the cell's formula and style; returns
+    /// the value it replaced.
     #[doc(hidden)]
-    pub fn set_calculated_value(&mut self, at: CellRef, value: CellValue) {
+    pub fn set_calculated_value(&mut self, at: CellRef, value: CellValue) -> CellValue {
         if let Some(cell) = self.cells.get_mut(&(at.row, at.col)) {
-            cell.value = value;
+            let replaced = std::mem::replace(&mut cell.value, value);
             if *cell == Cell::default() {
                 self.cells.remove(&(at.row, at.col));
             }
+            replaced
         } else {
             self.set_cell(
                 at,
@@ -526,6 +554,7 @@ impl Sheet {
                     ..Cell::default()
                 },
             );
+            CellValue::Empty
         }
     }
 

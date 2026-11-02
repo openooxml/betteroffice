@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { openXlsx } from '../src/xlsx';
 import { DocumentToolError } from '../src/types';
+import { cliEnv } from './cli-env';
 
 async function fixture(table = false) {
   const zip = new JSZip();
@@ -48,7 +49,7 @@ test('table overlap is an actionable document tool error', async () => {
 test('MCP tool extends the filter using the latest version', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-filter-'));
   const client = new Client({ name: 'xlsx-filter-test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   try {
     await writeFile(join(root, 'book.xlsx'), await fixture());
     await client.connect(transport);

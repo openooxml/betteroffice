@@ -1427,8 +1427,16 @@ fn emit_inherited_fills(
     merges: &MergeIndex,
     geom: &GridGeometry,
 ) {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("style_fills");
+    }
     if sheet.col_styles.is_empty() && sheet.row_styles.is_empty() && fx.xf(None).fill.is_none() {
         return;
+    }
+    xlsx_model::open_timing! {
+        xlsx_model::open_timing::count("style_fill_rows", rows.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_fill_cols", cols.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_fill_cells", (rows.tracks.len() * cols.tracks.len()) as u64);
     }
     for col in &cols.tracks {
         let origin_x = if col.pinned { 0.0 } else { -cols.scroll };
@@ -1520,8 +1528,16 @@ fn emit_inherited_borders(
     merges: &MergeIndex,
     geom: &GridGeometry,
 ) {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("style_borders");
+    }
     if sheet.row_styles.is_empty() && sheet.col_styles.is_empty() && fx.xf(None).border.is_none() {
         return;
+    }
+    xlsx_model::open_timing! {
+        xlsx_model::open_timing::count("style_border_rows", rows.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_border_cols", cols.tracks.len() as u64);
+        xlsx_model::open_timing::count("style_border_cells", (rows.tracks.len() * cols.tracks.len()) as u64);
     }
     for row in &rows.tracks {
         for col in &cols.tracks {

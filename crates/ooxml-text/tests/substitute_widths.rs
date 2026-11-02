@@ -5,8 +5,14 @@ use ooxml_text::{
 };
 
 const LIBERATION_SANS: &[u8] = include_bytes!("fonts/LiberationSans-Regular.ttf");
-const NOTO_SANS_JP: &[u8] =
-    include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
+fn noto_sans_jp() -> Vec<u8> {
+    betteroffice_fonts::decode(
+        include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf.zst"),
+        None,
+        64 << 20,
+    )
+    .unwrap()
+}
 
 fn store_with_font() -> (FontStore, FontId) {
     let mut store = FontStore::new();
@@ -42,7 +48,7 @@ fn table_offset(bytes: &[u8], tag: &[u8; 4]) -> usize {
 #[test]
 fn japanese_substitutes_apply_width_tables_without_scaling_cjk_outlines() {
     let mut store = FontStore::new();
-    let base = store.register(NOTO_SANS_JP.to_vec()).unwrap();
+    let base = store.register(noto_sans_jp()).unwrap();
     let upem = f32::from(store.metrics(base).unwrap().units_per_em);
     for family in [
         "MS Mincho",
@@ -113,7 +119,7 @@ fn japanese_substitutes_apply_width_tables_without_scaling_cjk_outlines() {
 #[test]
 fn japanese_combining_marks_use_the_composed_kana_width() {
     let mut store = FontStore::new();
-    let base = store.register(NOTO_SANS_JP.to_vec()).unwrap();
+    let base = store.register(noto_sans_jp()).unwrap();
     for family in [
         "ms mincho",
         "ms gothic",
@@ -182,7 +188,7 @@ fn synthetic_japanese_styles_measure_ascii_at_half_an_em() {
 #[test]
 fn tracked_ms_mincho_lines_measure_half_width_digits_and_full_width_ideographs() {
     let mut store = FontStore::new();
-    let base = store.register(NOTO_SANS_JP.to_vec()).unwrap();
+    let base = store.register(noto_sans_jp()).unwrap();
     let text = format!("123456{}", "中".repeat(36));
     let measure = |store: &FontStore, font: FontId, family: &str, tracking, max_width| {
         let key = format!("{}|0|0", family.to_lowercase());

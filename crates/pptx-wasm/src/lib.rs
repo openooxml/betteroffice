@@ -4,6 +4,47 @@ use wasm_bindgen::prelude::*;
 
 pub use pptx_edit::wasm::PptxDocument;
 
+#[cfg(all(target_arch = "wasm32", not(feature = "oneshot")))]
+#[used]
+#[unsafe(link_section = "betteroffice.pptx.editor-core")]
+static EDITOR_CORE: [u8; 1] = [1];
+
+#[wasm_bindgen(typescript_custom_section)]
+const DECODED_FONT_FACE: &str =
+    r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
+
+/// Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+/// Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+/// The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+#[wasm_bindgen(js_name = decodeFontFace, unchecked_return_type = "DecodedFontFace")]
+pub fn decode_font_face(
+    bytes: &[u8],
+    codec: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "Uint8Array | null")] dict: Option<Vec<u8>>,
+    #[wasm_bindgen(js_name = maxOutput, unchecked_optional_param_type = "number | null")]
+    max_output: Option<f64>,
+) -> Result<JsValue, JsError> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(bytes, codec, dict.as_deref(), max_output)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &"font".into(),
+        &js_sys::Uint8Array::from(decoded.font.as_slice()),
+    )
+    .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    if let Some(payload) = decoded.payload {
+        js_sys::Reflect::set(
+            &object,
+            &"payload".into(),
+            &js_sys::Uint8Array::from(payload.as_slice()),
+        )
+        .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    }
+    Ok(object.into())
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = performance, js_name = now)]
@@ -66,7 +107,13 @@ impl PptxRenderer {
             .map_err(js_error)
     }
 
-    /// requested font faces before layout, for one slide or the whole deck.
+    /// Enables browser metrics for uncovered characters. Off by default.
+    #[wasm_bindgen(js_name = setBrowserCoverageFallback)]
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
+        self.inner.set_browser_coverage_fallback(enabled);
+    }
+
+    /// Requested faces with optional script coverage buckets, before layout.
     #[wasm_bindgen(js_name = requestedFontFacesJson)]
     pub fn requested_font_faces_json(
         &self,
@@ -193,12 +240,28 @@ pub fn export_pptx_markdown_json(data: &[u8], options: &str) -> Result<String, J
 /// Renders schema-version-1 structured content as Markdown; `options` is `{"maxBytes"?}`.
 #[wasm_bindgen(js_name = renderPptxMarkdownJson)]
 pub fn render_pptx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    pptx_engine::render_pptx_markdown_json(content, options).map_err(js_error)
+    #[cfg(feature = "oneshot")]
+    {
+        pptx_engine::render_pptx_markdown_json(content, options).map_err(js_error)
+    }
+    #[cfg(not(feature = "oneshot"))]
+    {
+        let _ = (content, options);
+        Err(JsValue::from_str(EDITOR_CORE_UNAVAILABLE))
+    }
 }
 
 #[wasm_bindgen(js_name = compileSlideJson)]
 pub fn compile_slide_json(slide_json: &str) -> Result<String, JsValue> {
-    pptx_engine::compile_slide_json(slide_json).map_err(js_error)
+    #[cfg(feature = "oneshot")]
+    {
+        pptx_engine::compile_slide_json(slide_json).map_err(js_error)
+    }
+    #[cfg(not(feature = "oneshot"))]
+    {
+        let _ = slide_json;
+        Err(JsValue::from_str(EDITOR_CORE_UNAVAILABLE))
+    }
 }
 
 #[wasm_bindgen(js_name = rendererVersion)]
@@ -211,6 +274,9 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
     pptx_engine::decode_tiff_png(data).map_err(js_error)
 }
 
+#[cfg(not(feature = "oneshot"))]
+const EDITOR_CORE_UNAVAILABLE: &str = "not available in the editor core";
+
 fn js_error(error: pptx_engine::EngineError) -> JsValue {
-    JsValue::from_str(&error.message)
+    pptx_edit::wasm::to_js(error)
 }

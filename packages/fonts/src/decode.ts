@@ -1,3 +1,8 @@
+export type FontDecoder = (
+  bytes: ArrayBuffer | Uint8Array,
+  options: { codec: string; dict?: ArrayBuffer | Uint8Array; maxOutput?: number },
+) => Promise<{ font: ArrayBuffer; payload?: ArrayBuffer }>;
+
 interface NodeZlibLike {
   zstdDecompressSync?: (
     bytes: Uint8Array,
@@ -134,9 +139,15 @@ async function instantiate(url: URL): Promise<Decoder> {
     instance = result.instance;
   } else {
     if (typeof fetch !== 'function') throw new Error('Cannot fetch font decoder wasm');
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(30_000),
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+    });
     if (!response.ok) {
-      throw new Error(`Cannot load font decoder wasm: HTTP ${response.status}`);
+      throw Object.assign(new Error(`Cannot load font decoder wasm: HTTP ${response.status}`), {
+        decoderStatus: response.status,
+      });
     }
     if (
       /^https?:$/.test(url.protocol) &&
@@ -166,6 +177,53 @@ async function instantiate(url: URL): Promise<Decoder> {
     throw new Error('Font decoder wasm has incompatible exports');
   }
   return exports as unknown as Decoder;
+}
+
+const missingDecoders = new Map<string, string>();
+
+function missingDecoder(error: unknown): string | undefined {
+  const { decoderStatus, code } = (error ?? {}) as { decoderStatus?: number; code?: string };
+  if (decoderStatus === 403 || decoderStatus === 404 || decoderStatus === 410) return `HTTP ${decoderStatus}`;
+  return code === 'ENOENT' ? 'no such file' : undefined;
+}
+
+function bundledDecoderUrl(): URL | undefined {
+  try {
+    return new URL('./decoder/fontpack.wasm', import.meta.url);
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadDecoder(configured: URL | undefined): Promise<DecoderInstance> {
+  const urls: URL[] = [];
+  for (const url of [configured, bundledDecoderUrl()]) {
+    if (url !== undefined && !urls.some((other) => other.href === url.href)) urls.push(url);
+  }
+  const misses: string[] = [];
+  let cause: unknown;
+  for (const url of urls) {
+    const missing = missingDecoders.get(url.href);
+    if (missing !== undefined) {
+      misses.push(`${url.href} (${missing})`);
+      continue;
+    }
+    try {
+      let instance = await decoder(url);
+      while (instance.failed) instance = await decoder(url);
+      return instance;
+    } catch (error) {
+      const reason = missingDecoder(error);
+      if (reason === undefined) throw error;
+      missingDecoders.set(url.href, reason);
+      misses.push(`${url.href} (${reason})`);
+      cause = error;
+    }
+  }
+  throw Object.assign(new Error(
+    `Font decoder wasm not found: ${misses.join(', ') || 'no decoder URL'}. Serve `
+      + '@betteroffice/fonts/dist/decoder/fontpack.wasm at the first location, or let the bundler emit the package decoder.',
+  ), { cause });
 }
 
 function decoder(url: URL): Promise<DecoderInstance> {
@@ -298,8 +356,7 @@ export async function decodeFontFace(
   if (codec === 'woff2t+zstd' && (input.length > maxOutput || (dictionary?.length ?? 0) > maxOutput)) {
     throw new Error('Font face is too large for maxOutput');
   }
-  const zlib = options?.wasmUrl || codec === 'woff2t+zstd'
-    ? undefined : builtinModule<NodeZlibLike>('node:zlib');
+  const zlib = codec === 'woff2t+zstd' ? undefined : builtinModule<NodeZlibLike>('node:zlib');
   if (typeof zlib?.zstdDecompressSync === 'function') {
     try {
       const buffer = builtinModule<NodeBufferLike>('node:buffer');
@@ -314,8 +371,7 @@ export async function decodeFontFace(
       throw new Error(`Font face is corrupt or uses a wrong dictionary: ${detail}`);
     }
   }
-  const url = options?.wasmUrl ?? new URL('../dist/decoder/fontpack.wasm', import.meta.url);
-  let instance = await decoder(url);
-  while (instance.failed) instance = await decoder(url);
+  let instance = await loadDecoder(options?.wasmUrl);
+  while (instance.failed) instance = await loadDecoder(options?.wasmUrl);
   return decodeWasm(instance, input, dictionary, maxOutput, expectedSize, codec);
 }

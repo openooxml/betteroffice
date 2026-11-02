@@ -428,18 +428,26 @@ function decodeRelationship(value: unknown, path: string, mapId: string): Relati
   return decoded;
 }
 
-function assertSafeTree(value: unknown, path: string, active = new WeakSet<object>()): void {
-  if (value === null || typeof value !== 'object') return;
-  if (active.has(value)) throw new TypeError(`${path} contains a cycle`);
-  active.add(value);
-  try {
-    for (const key of Object.keys(value)) {
-      if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${path} contains forbidden key ${key}`);
-      assertSafeTree((value as Record<string, unknown>)[key], `${path}.${key}`, active);
+/** @internal */
+export function assertSafeTree(value: unknown, path: string, active = new WeakSet<object>()): void {
+  const segments: string[] = [];
+  const currentPath = (): string => path + (segments.length ? `.${segments.join('.')}` : '');
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== 'object') return;
+    if (active.has(value)) throw new TypeError(`${currentPath()} contains a cycle`);
+    active.add(value);
+    try {
+      for (const key of Object.keys(value)) {
+        if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
+        segments.push(key);
+        visit((value as Record<string, unknown>)[key]);
+        segments.pop();
+      }
+    } finally {
+      active.delete(value);
     }
-  } finally {
-    active.delete(value);
-  }
+  };
+  visit(value);
 }
 
 function objectAt(value: unknown, path: string): Record<string, unknown> {

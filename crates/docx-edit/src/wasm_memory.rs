@@ -48,7 +48,10 @@ fn counted(pointer: *mut u8, bytes: usize) -> *mut u8 {
 
 // SAFETY: every call forwards to `System` unchanged, or returns null without
 // allocating once the limit is reached, which `GlobalAlloc` permits.
+// The methods stay out of line: inlined into every allocation site, the
+// counting bloats the module by megabytes.
 unsafe impl GlobalAlloc for CountingAllocator {
+    #[inline(never)]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if over_limit(layout.size()) {
             return std::ptr::null_mut();
@@ -56,6 +59,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         counted(unsafe { System.alloc(layout) }, layout.size())
     }
 
+    #[inline(never)]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if over_limit(layout.size()) {
             return std::ptr::null_mut();
@@ -63,11 +67,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
         counted(unsafe { System.alloc_zeroed(layout) }, layout.size())
     }
 
+    #[inline(never)]
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         unsafe { System.dealloc(pointer, layout) };
         shrank(layout.size());
     }
 
+    #[inline(never)]
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if new_size > layout.size() && over_limit(new_size - layout.size()) {
             FAILED.store(new_size, Ordering::Relaxed);

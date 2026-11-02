@@ -12,11 +12,10 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx" }
+betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 betteroffice-xlsx-engine = { path = "../../crates/xlsx-engine", features = ["raster"] }
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.5"
-serde_json = "1"
 
 [build-dependencies]
 napi-build = "2.4.2"

@@ -1,4 +1,11 @@
-import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
+import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion, decodeFontFace as decodePackedFontFace } from './generated/vsdx_wasm.js';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import type { InitInput } from './generated/vsdx_wasm.js';
 import type { CellLocator, CellFormulaReceipt, CellWriteProbe, CellWriteQuery, CollaborationUpdateOrigin, ConnectedShapeReceipt, ConnectorGlue, ConnectorRoutePoint, ConnectorRouteReceipt, DiagramSnapshot, DocumentMaster, RawValidationIssue, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, PageLayer, ShapeDataReceipt, ShapeDataWrite, ShapeReceipt, ShapeTreeGlue, TextReceipt, ValidationIssue, VsdxFontFace } from '../types';
 

@@ -34,6 +34,7 @@ function replyError(error: unknown): ReplyError {
     name: error instanceof Error ? error.name : 'Error',
     message: error instanceof Error ? error.message : String(error),
   };
+  if (error !== null && typeof error === 'object' && 'code' in error && typeof error.code === 'string') result.code = error.code;
   if (error !== null && typeof error === 'object' && 'refusal' in error) result.refusal = error.refusal;
   return result;
 }
@@ -61,6 +62,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   let unlisten = () => {};
   let unerror = () => {};
   let running: number | undefined;
+  const deferredCalls = new Set<number>();
   let reported = 0;
   const timeouts = new Set<ReturnType<typeof setTimeout>>();
   const tasks = new Set<{ cancel(): void }>();
@@ -260,9 +262,10 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
         (context: C, ...args: unknown[]) => unknown;
       const value = await handler(options.context, ...message.args);
       if (isDeferredReply(value)) {
+        deferredCalls.add(message.id);
         void value.promise.then(
           (value) => resolve(message.id, value), (error) => reject(message.id, error)
-        );
+        ).finally(() => deferredCalls.delete(message.id));
       } else resolve(message.id, value);
     } catch (error) {
       reject(message.id, error);
@@ -306,9 +309,10 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
     emit: (name, payload, transfer) => send({ protocol: 1, kind: 'event', name, payload }, transfer),
     progress() {
       const now = Date.now();
-      if (running === undefined || now - reported < PROGRESS_INTERVAL_MS) return;
+      const id = running ?? deferredCalls.values().next().value;
+      if (id === undefined || now - reported < PROGRESS_INTERVAL_MS) return;
       reported = now;
-      send({ protocol: 1, kind: 'progress', id: running });
+      send({ protocol: 1, kind: 'progress', id });
     },
   };
 }

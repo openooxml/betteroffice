@@ -8,6 +8,16 @@
   "main": "./dist/core.mjs",
   "module": "./dist/core.mjs",
   "types": "./dist/core.d.mts",
+  "imports": {
+    "#session-worker": {
+      "node": "./dist/sessionWorker.node.mjs",
+      "default": "./dist/sessionWorker.browser.mjs"
+    },
+    "#session-scope": {
+      "node": "./dist/sessionScope.node.mjs",
+      "default": "./dist/sessionScope.browser.mjs"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/core.d.mts",
@@ -208,23 +218,18 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSES"
   ],
   "scripts": {
     "build": "bun ../../scripts/build-docx-wasm.ts && NODE_OPTIONS=--max-old-space-size=8192 tsup && bun scripts/copy-assets.ts",
     "typecheck": "tsc --noEmit",
     "build:wasm": "bun ../../scripts/build-docx-wasm.ts"
   },
-  "peerDependencies": {
+  "dependencies": {
     "@betteroffice/fonts": "workspace:^0"
   },
-  "peerDependenciesMeta": {
-    "@betteroffice/fonts": {
-      "optional": true
-    }
-  },
   "devDependencies": {
-    "@betteroffice/fonts": "workspace:*",
     "tsup": "^8.0.1",
     "typescript": "^6.0.3",
     "@types/bun": "^1.0.0",

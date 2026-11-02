@@ -47,7 +47,9 @@ print(png.width, png.height)
 ```
 
 Rendering is the same grid layout and display list the browser editor uses, so
-server-side output matches what the web canvas paints.
+server-side output matches what the web canvas paints. Cell text uses the
+bundled fonts, which the package installs as the `betteroffice-fonts-latin`,
+`-intl` and `-cjk` wheels and reads from disk.
 
 Opening, recalculating, rendering, and saving release the GIL, so they run in
 parallel across threads instead of serializing your workers.
@@ -159,6 +161,23 @@ Steps set inputs (parsed like `set`), formulas (source without `=`), number
 formats and styles. `validate_edits` stages a batch without changing anything,
 `find_text` searches display text exactly, and `history: "none"` keeps a batch
 out of undo. A malformed request raises `ValueError`.
+
+## Workbook reads
+
+`cell(sheet, row, col)` reads editable input at zero-based coordinates, and
+`range_cells(sheet, range)` returns a row-major matrix of those cells.
+`sheet_info()` and `sheet_info_for(sheet)` include sheet metadata and filters;
+`calculation_status()` reports calculation limits. `list_defined_names(request=None)`,
+`conditional_formats(sheet)`, and `charts(sheet)` return workbook metadata.
+`search_text(query, case_sensitive=False, limit=None)` searches formatted text;
+its options are keyword-only. `selection_formatting(sheet, range)` reads uniform
+formatting. `merged_range_list(sheet, range)` and
+`visible_merged_ranges(sheet, viewport)` return coordinate ranges, while
+`merged_ranges` continues to return A1 strings. A viewport is a dictionary with
+`x`, `y`, `width`, and `height` in pixels.
+
+These reads return plain dictionaries and lists with camelCase wire keys.
+Sheet arguments accept a name or index, and reads never recalculate.
 
 ## Structured export
 

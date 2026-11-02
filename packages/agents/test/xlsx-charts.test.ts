@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { implicitFontWorkbook } from './format-fixtures';
 import { openXlsx } from '../src/xlsx';
 import { registerXlsxTools } from '../src/xlsx-mcp';
+import { cliEnv } from './cli-env';
 
 export async function chartWorkbook() {
   const zip = await JSZip.loadAsync(await implicitFontWorkbook());
@@ -78,7 +79,7 @@ test('chart tools validate MCP schemas and export a reopenable workbook', async 
   const client = new Client({ name: 'xlsx-charts-test', version: '1' });
   try {
     await writeFile(join(root, 'book.xlsx'), await chartWorkbook());
-    await client.connect(new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' }));
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() }));
     const tools = (await client.listTools()).tools;
     expect(tools.find(tool => tool.name === 'xlsx_list_charts')?.annotations?.readOnlyHint).toBe(true);
     expect(tools.find(tool => tool.name === 'xlsx_edit_charts')?.inputSchema.additionalProperties).toBe(false);

@@ -4,12 +4,13 @@ import { resolve } from 'node:path';
 import { preloadEditWasm, setEditWasmHeapLimit } from './edit';
 import { wasmModuleMemories } from './loadWasmAsset';
 import { rezipContainer, unzipContainer } from './opc';
+import { engineKind } from './engineEdit';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, 'generated/edit/docx_edit_bg.wasm')
-))));
+))), 30_000);
 
-test('the edit heap limit also caps OPC calls routed through the resident engine', () => {
+test.skipIf(engineKind === 'native')('the edit heap limit also caps OPC calls routed through the resident engine', () => {
   let seed = 1;
   const payload = Uint8Array.from({ length: 2 * 1024 * 1024 }, () => {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;

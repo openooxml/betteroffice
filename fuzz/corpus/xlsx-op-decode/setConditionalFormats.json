@@ -1,0 +1,1 @@
+{"type":"setConditionalFormats","sheet":2,"formats":[{"sqref":"A1:B2","rules":[{"id":"cf1","type":"cellIs","operator":"greaterThan","formulas":["1"],"priority":1,"dxfId":2,"format":{"fontColor":"#112233","bold":true,"italic":true,"fill":"#445566"},"rawXml":"<cfRule/>"}]}]}

@@ -1,20 +1,26 @@
 import { createCanvas, loadImage, Path2D } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
 import { createFontProvider } from '@betteroffice/fonts';
+import { decodeFontFace } from '@betteroffice/docx/yrs';
 import { buildResidentRegionLayoutRequest, computeLayout, getLayoutKernelInputs } from '@betteroffice/docx/editor';
-import { createRustMeasureSource, type ResidentFontRequirement } from '@betteroffice/docx/layout';
+import { createRustMeasureSource, hasConfiguredFontSource, resolveDefaultFontProvider, type ResidentFontRequirement } from '@betteroffice/docx/layout';
+import { extractEmbeddedFontFaces } from '@betteroffice/docx/utils';
 import { buildRustDisplayList, drawDisplayPage, GlyphCache } from '@betteroffice/docx/layout/render';
 import { DocumentToolError, type DocumentRenderer } from './types';
 
 export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   const document = session.materializeDocx();
   if (!document) throw new DocumentToolError('UNSUPPORTED', 'Rendering requires a session opened from DOCX bytes.');
-  const source = createRustMeasureSource({ engine: session, bundled: createFontProvider() });
+  const bundled = hasConfiguredFontSource()
+    ? await resolveDefaultFontProvider()
+    : createFontProvider(undefined, { decoder: decodeFontFace });
+  const source = createRustMeasureSource({ engine: session, bundled });
+  source.setEmbeddedFaces(await extractEmbeddedFontFaces(document));
   const request = buildResidentRegionLayoutRequest(document, 0, {});
   const requirements = JSON.parse(session.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
   await source.prepareFontRequirements(requirements);
   const measurement = source.measurementConfigForRequirements(requirements);
-  if (!measurement) throw new DocumentToolError('FONT_UNAVAILABLE', 'Required fonts could not be loaded. Install @betteroffice/fonts and, for CJK, @betteroffice/fonts-cjk.');
+  if (!measurement) throw new DocumentToolError('FONT_UNAVAILABLE', 'Required fonts could not be loaded. Install @betteroffice/fonts and the optional coverage packages @betteroffice/fonts-cjk and @betteroffice/fonts-intl as needed.');
   const { layout, notesConverged } = computeLayout({ document, pageGap: 0, session, renderEnv: {}, measurement });
   const kernel = getLayoutKernelInputs(layout)!;
   const display = await buildRustDisplayList({ ...kernel, layout, fontChains: measurement.fontChains }, session);

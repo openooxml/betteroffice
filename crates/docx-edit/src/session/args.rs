@@ -55,7 +55,6 @@ pub(crate) struct ParaSpan {
     pub(crate) pilcrow: u32,
 }
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) struct IndexedLoc {
     pub(crate) para_id: String,
     pub(crate) offset: u32,
@@ -63,14 +62,12 @@ pub(crate) struct IndexedLoc {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) enum DeleteDirection {
     Backward,
     Forward,
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) enum AdjacentStoryUnit {
     Content(u32),
     Pilcrow,
@@ -112,7 +109,6 @@ pub(crate) fn loc_index(
     Ok(span.start + offset)
 }
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn comment_ranges(doc: &EditingDoc, ranges_json: &str) -> EngineResult<Vec<StoryRange>> {
     let value: Value = serde_json::from_str(ranges_json).map_err(EngineError::message)?;
     let entries = value
@@ -153,7 +149,6 @@ pub(crate) fn comment_ranges(doc: &EditingDoc, ranges_json: &str) -> EngineResul
 /// Transient story-global index -> public paragraph-keyed location. Sticky
 /// awareness positions resolve to story indices; the JS facade never exposes
 /// that internal coordinate system.
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> EngineResult<IndexedLoc> {
     let paragraphs = doc.paragraph_index(story).map_err(EngineError::message)?;
     let para = paragraphs.para_at(index).ok_or_else(|| {
@@ -168,7 +163,6 @@ pub(crate) fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> EngineResu
     })
 }
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn adjacent_story_unit(
     doc: &EditingDoc,
     story: &str,
@@ -212,7 +206,6 @@ pub(crate) fn adjacent_story_unit(
     }))
 }
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn table_embed_at(doc: &EditingDoc, story: &str, index: u32) -> EngineResult<bool> {
     let txn = doc.yrs_doc().transact();
     let text = crate::story_ref(&txn, story).map_err(EngineError::message)?;
@@ -226,7 +219,6 @@ pub(crate) fn table_embed_at(doc: &EditingDoc, story: &str, index: u32) -> Engin
     }))
 }
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> EngineResult<bool> {
     let segments = doc.segment_index(story).map_err(EngineError::message)?;
     Ok(segments
@@ -476,7 +468,6 @@ pub(crate) fn parse_para_attr_delta(attrs_json: &str) -> EngineResult<ParaAttrDe
     })
 }
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> EngineResult<Value> {
     serde_json::to_string(attrs)
         .ok()
@@ -484,7 +475,6 @@ pub(crate) fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> En
         .ok_or_else(|| EngineError::message("serialize attrs"))
 }
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn tri_state_value(state: TriState) -> Value {
     match state {
         TriState::On => Value::Bool(true),
@@ -667,7 +657,6 @@ pub(crate) fn parse_raw_ops(ops_json: &str) -> EngineResult<Vec<RawOp>> {
 /// Parses an accept/reject target from JSON: `{"revisionId": string}` (one
 /// coalesced revision, any story) or a Loc range
 /// `{"story","startPara","startOffset","endPara","endOffset"}`.
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn parse_change_target(
     doc: &EditingDoc,
     target_json: &str,
