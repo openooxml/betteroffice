@@ -1420,7 +1420,10 @@ fn text_runs_carry_the_scripts_their_paragraph_resolves() {
             })
             .expect("text run");
         assert_eq!(
-            run.scripts.as_deref().map(Vec::as_slice).unwrap_or_default(),
+            run.scripts
+                .as_deref()
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
             expected,
             "{text} {language:?}"
         );
