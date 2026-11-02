@@ -1,5 +1,5 @@
 import { compileSessionWasm } from '#session-worker';
-import { metafileWasmAssetUrl } from '../wasm/asset';
+import { metafileSvgBindings, metafileWasmAssetUrl } from '../wasm/asset';
 
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const SESSION_BYTES = 64 * 1024 * 1024;
@@ -12,7 +12,7 @@ export type MetafileSvgModuleLoader = () => Promise<MetafileSvgModule>;
 
 export const commandMetafileSvgModule = {
   async load(): Promise<MetafileSvgModule> {
-    const module = await import('../wasm/generated/metafile_svg_wasm');
+    const module = await metafileSvgBindings();
     const url = metafileWasmAssetUrl();
     await module.default({ module_or_path: url.protocol === 'file:' ? await compileSessionWasm(url) : url });
     return module;

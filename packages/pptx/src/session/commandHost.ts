@@ -1573,17 +1573,19 @@ export function registerPresentationCommandHandlers(
       try {
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
         let openingMetafiles: Promise<void> | undefined;
-        const scanReady = import('./coverageScan').then(async (scan) => {
+        let scanned: { openingSlideMetafile: boolean; packageMetafile: boolean } | undefined;
+        const scanning = import('./coverageScan').then(async (scan) => {
           const result = await scan.scanOpeningSlide(bytes, input.activeSlideIndex ?? 0);
-          if (disposed) return result;
+          if (disposed) return;
+          scanned = result;
           if (result.openingSlideMetafile) openingMetafiles = loadMetafiles().catch(() => {});
+          else if (result.packageMetafile && !opening && !metafiles.ready()) idleMetafiles();
           if (input.defaultFonts !== false && result.scripts.length) {
             void commandDefaultFontModule.load().then((fonts) => {
               if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts));
             }).catch(() => {});
           }
-          return result;
-        }).catch(() => ({ scripts: [], openingSlideMetafile: false, packageMetafile: false }));
+        }).catch(() => {});
         await wasmReady;
         if (disposed) throw new Error('Presentation command session is disposed');
         handle = openPresentation(new Uint8Array(bytes), { clientId: input.clientId,
@@ -1621,9 +1623,14 @@ export function registerPresentationCommandHandlers(
         const loading = !requestedFonts || activeSlideId === null ? [] : requestDefaultFonts(activeSlideId);
         const fonts = loading instanceof Promise ? await loading : undefined;
         if (disposed) throw new Error('Presentation command session is disposed');
-        const scan = await scanReady;
-        if (disposed) throw new Error('Presentation command session is disposed');
-        if (scan.openingSlideMetafile && !metafiles.ready()) {
+        if (!scanned) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 300);
+            void scanning.finally(() => { clearTimeout(timer); resolve(); });
+          });
+          if (disposed) throw new Error('Presentation command session is disposed');
+        }
+        if (openingMetafiles && !metafiles.ready()) {
           await new Promise<void>((resolve) => {
             const timer = setTimeout(resolve, 3000);
             void (openingMetafiles ?? Promise.resolve()).finally(() => { clearTimeout(timer); resolve(); });
@@ -1631,7 +1638,7 @@ export function registerPresentationCommandHandlers(
         }
         if (disposed) throw new Error('Presentation command session is disposed');
         const result = ack();
-        if ((scan.packageMetafile && !metafiles.ready()) || pendingMetafiles.size) idleMetafiles();
+        if ((scanned?.packageMetafile && !metafiles.ready()) || pendingMetafiles.size) idleMetafiles();
         const sourceBaseline = input.initialUpdate === undefined && !input.collaboration && !result.value.updates?.length;
         const recoveryUpdate = sourceBaseline ? undefined : ownedBuffer(handle.encodeStateAsUpdate());
         if (requestedFonts) loadDefaultFonts();

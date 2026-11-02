@@ -34,6 +34,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               ? testHarness.assetUrl : testHarness.assetUrl.replace(/\\.wasm$/, '_lean.wasm'));
               export const sessionWasmAssetUrl = () => new URL(testHarness.assetUrl.replace(/\\.wasm$/, '_editor.wasm'));
               export const metafileWasmAssetUrl = () => new URL('metafile.wasm', testHarness.assetUrl);
+              export const metafileSvgBindings = () => Promise.reject(new Error('No metafile converter in this harness'));
               export const rasterWasmAssetUrl = () => new URL('raster.wasm', testHarness.assetUrl);`,
             loader: 'js',
           }));

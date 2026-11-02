@@ -10,4 +10,8 @@ export function metafileWasmAssetUrl(): URL {
   return wasmAssetUrl();
 }
 
+export function metafileSvgBindings(): Promise<never> {
+  return Promise.reject(new Error('The native engine converts metafiles itself'));
+}
+
 export const shipsWasmAsset = false;

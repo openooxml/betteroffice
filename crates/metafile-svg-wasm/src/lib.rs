@@ -30,7 +30,10 @@ mod tests {
             let expected = pptx_edit::MetafileSvgCache::default()
                 .resolve("picture", bytes)
                 .unwrap();
-            assert_eq!(metafile_to_svg(bytes).unwrap().as_slice(), expected.as_ref());
+            assert_eq!(
+                metafile_to_svg(bytes).unwrap().as_slice(),
+                expected.as_ref()
+            );
         }
     }
 
