@@ -96,6 +96,7 @@ mod paragraph_facts;
 mod resident_font;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod resident_geometry;
+mod sort;
 pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;

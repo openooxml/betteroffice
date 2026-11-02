@@ -152,7 +152,9 @@ impl MediaSources {
             .iter()
             .map(|(digest, index)| (format!("{digest:016x}"), *index))
             .collect();
-        parts.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        crate::sort::sort_by(&mut parts, &|left, right| {
+            left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+        });
         serde_json::json!({
             "key": [format!("{:016x}", self.0.key.0), format!("{:016x}", self.0.key.1)],
             "parts": parts,
