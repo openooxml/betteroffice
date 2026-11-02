@@ -11,7 +11,10 @@ const workflow = Bun.YAML.parse(
 const { prepare, measure, publish } = workflow.jobs;
 
 test('one frozen plan feeds independent format jobs at the same source revision', () => {
-  expect(workflow.on.workflow_dispatch.inputs.collection).toBeUndefined();
+  expect(workflow.on.workflow_dispatch.inputs.collection.default).toBe('office-quality');
+  expect(workflow.on.workflow_dispatch.inputs.corpus_origin.default).toBe('');
+  expect(workflow.env.QUALITY_CORPUS_ORIGIN).toBe('${{ inputs.corpus_origin }}');
+  expect(prepare.steps.find((step: any) => step.id === 'plan').env.QUALITY_COLLECTION).toBe('${{ inputs.collection }}');
   expect(prepare.outputs.formats).toBe('${{ steps.plan.outputs.formats }}');
   expect(measure.needs).toBe('prepare');
   expect(measure.strategy).toEqual({

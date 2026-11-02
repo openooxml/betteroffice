@@ -1,0 +1,42 @@
+
+scripts/office-quality/reference.test.ts:
+(pass) accepts complete DOCX references through the 250-page boundary without changing metadata [0.75ms]
+(pass) keeps non-DOCX references within the generic capture harness limit [0.15ms]
+(pass) rejects empty, excessive, noninteger, and mismatched reference counts [0.18ms]
+(pass) retains successful-export, source-identity, and 150-DPI requirements [0.13ms]
+
+scripts/office-quality/xlsx-fidelity.test.ts:
+(pass) XLSX fidelity includes non-formula workbooks and balances recorded ranges [0.14ms]
+(pass) renders real LibreOffice XLSX SSIM and scored coverage without calculation references [0.71ms]
+(pass) rejects incomplete, mixed, duplicate, or incorrectly assigned shards [0.56ms]
+
+scripts/office-quality/visual-fidelity-cache.test.ts:
+(pass) fidelity asset cache restores latest prefix and saves only changed digests [0.05ms]
+(pass) asset cache digest comes from cached blob names without extra manifest fetch [0.02ms]
+(pass) digest step and save run even on measurement failure [0.02ms]
+(pass) branch-head guard, least privilege, and score artifacts are unchanged [0.02ms]
+
+scripts/office-quality/asset-cache.test.ts:
+(pass) warm cache serves verified bytes with no network call [0.92ms]
+(pass) same-length hash-corrupt cache is discarded and refetched [0.73ms]
+(pass) truncated cache is discarded and refetched [1.36ms]
+(pass) repairs change the archive key and unchanged restored assets keep it [6.41ms]
+(pass) network hash mismatch fails instead of scoring stale data [0.28ms]
+(pass) changed SHA for the same URL does not reuse the old blob [0.39ms]
+(pass) invalid asset metadata fails before any network call [0.18ms]
+(pass) cache storage failures still return verified bytes [0.29ms]
+(pass) cache digest is stable regardless of listing order [0.05ms]
+(pass) cache digest ignores staging files and invalid names [0.04ms]
+(pass) cache digest changes when assets are added [0.58ms]
+(pass) asset cache directory is optional and blank-safe [0.03ms]
+
+2 tests failed:
+(fail) one frozen plan feeds independent format jobs at the same source revision [0.35ms]
+(fail) rejects bad revisions, metadata, duplicate samples, and format lists [1.28ms]
+
+ 141 pass
+ 2 fail
+ 1975 expect() calls
+Ran 143 tests across 24 files. [1274.00ms]
+[kyora-vms] sb_eu_u2pukc_FrWKxuKIkXjH3P9B: create 2.9s · upload 54.8 MB (5,678 entries) 13.3s · exec 4.5s · exit 0
+exit 0
