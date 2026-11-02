@@ -170,7 +170,7 @@ jobs:
         working-directory: apps/demo
         env:
           NEXT_TELEMETRY_DISABLED: "1"
-        run: bunx next build
+        run: NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$GITHUB_WORKSPACE/scripts/next-font-google-mocks.cjs" bunx next build
 
       - uses: actions/setup-node@v7.0.0
         with:
