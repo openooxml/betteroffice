@@ -1419,7 +1419,11 @@ fn text_runs_carry_the_scripts_their_paragraph_resolves() {
                 _ => None,
             })
             .expect("text run");
-        assert_eq!(run.scripts, expected, "{text} {language:?}");
+        assert_eq!(
+            run.scripts.as_deref().map(Vec::as_slice).unwrap_or_default(),
+            expected,
+            "{text} {language:?}"
+        );
         let json = serde_json::to_value(&run).unwrap();
         assert_eq!(json.get("scripts").is_some(), !expected.is_empty());
     }

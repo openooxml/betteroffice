@@ -257,10 +257,9 @@ fn text_requirement(run: &docx_layout::display_list::TextRunPrimitive) -> Option
         family: family.to_owned(),
         bold,
         italic,
-        scripts: if run.scripts.is_empty() {
-            ooxml_text::paragraph_scripts_with_han_fallback([run.text.as_str()], false)
-        } else {
-            run.scripts.clone()
+        scripts: match run.scripts.as_deref() {
+            Some(scripts) if !scripts.is_empty() => scripts.clone(),
+            _ => ooxml_text::paragraph_scripts_with_han_fallback([run.text.as_str()], false),
         },
     })
 }
@@ -281,9 +280,20 @@ mod tests {
     #[test]
     fn text_requirements_take_the_paragraph_scripts() {
         let japanese = text_requirement(&run("骨", &["cjk-jp"])).unwrap();
-        assert_eq!((japanese.family.as_str(), japanese.bold), ("MS Mincho", true));
+        assert_eq!(
+            (japanese.family.as_str(), japanese.bold),
+            ("MS Mincho", true)
+        );
         assert_eq!(japanese.scripts, ["cjk-jp"]);
-        assert_eq!(text_requirement(&run("漢字", &[])).unwrap().scripts, ["cjk-sc"]);
-        assert!(text_requirement(&run("Latin", &[])).unwrap().scripts.is_empty());
+        assert_eq!(
+            text_requirement(&run("漢字", &[])).unwrap().scripts,
+            ["cjk-sc"]
+        );
+        assert!(
+            text_requirement(&run("Latin", &[]))
+                .unwrap()
+                .scripts
+                .is_empty()
+        );
     }
 }

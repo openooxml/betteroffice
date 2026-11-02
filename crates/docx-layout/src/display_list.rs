@@ -795,8 +795,9 @@ pub struct TextRunPrimitive {
     /// CSS font shorthand.
     pub font: String,
     /// Script faces its paragraph needs, as the layout's font collection resolves them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub scripts: Vec<String>,
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<Box<Vec<String>>>,
     pub color: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub letter_spacing: Option<Number>,
@@ -3743,6 +3744,11 @@ fn row_parent_revision_id(row: &TableRowIn) -> Option<i64> {
 }
 
 /// Returns CSS font shorthand for a run.
+#[allow(clippy::box_collection)]
+fn boxed_scripts(scripts: &[String]) -> Option<Box<Vec<String>>> {
+    (!scripts.is_empty()).then(|| Box::new(scripts.to_vec()))
+}
+
 fn paragraph_scripts(runs: &[RunIn]) -> Vec<String> {
     ooxml_text::paragraph_scripts_with_languages(
         runs.iter().filter_map(|run| match run {
@@ -3967,7 +3973,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         width: px(width),
         paint_clip: None,
         font,
-        scripts: Vec::new(),
+        scripts: None,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
         word_spacing: None,
@@ -6533,7 +6539,7 @@ pub(crate) fn emit_paragraph_fragment(
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
             paint_clip: None,
             font: css_font(&RunFormattingIn::default()),
-            scripts: Vec::new(),
+            scripts: None,
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
             word_spacing: None,
@@ -7010,7 +7016,7 @@ fn emit_line(
             width: px(slot_width),
             paint_clip: None,
             font: css_font(&marker_format),
-            scripts: Vec::new(),
+            scripts: boxed_scripts(&scripts),
             color: color.to_owned(),
             letter_spacing: None,
             word_spacing: None,
@@ -7510,7 +7516,7 @@ fn emit_line(
                 width: px(0.0),
                 paint_clip: None,
                 font: css_font(&RunFormattingIn::default()),
-                scripts: Vec::new(),
+                scripts: None,
                 color: "#000000".to_string(),
                 letter_spacing: None,
                 word_spacing: None,
@@ -7655,7 +7661,7 @@ fn emit_tab_leader(
             width: px(width),
             paint_clip: None,
             font: css_font(&fmt),
-            scripts: Vec::new(),
+            scripts: None,
             color: run_color(&fmt),
             letter_spacing: None,
             word_spacing: None,
@@ -7971,7 +7977,7 @@ fn emit_text_segment(
             width: px(width),
             paint_clip,
             font: css_font(fmt),
-            scripts: scripts.to_vec(),
+            scripts: boxed_scripts(scripts),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
             word_spacing,
@@ -9997,7 +10003,7 @@ impl PlotSink for PrimitiveSink<'_> {
                     letter_spacing: (font.letter_spacing_px != 0.0)
                         .then(|| px(font.letter_spacing_px)),
                     font: font.css(),
-                    scripts: Vec::new(),
+                    scripts: None,
                     color,
                     word_spacing: None,
                     rtl: None,
