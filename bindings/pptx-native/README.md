@@ -37,3 +37,18 @@ package and each face is read from disk the first time a slide needs it; nothing
 
 Browsers need the WebAssembly engine: the `browser` export condition of this package throws, so
 use `@betteroffice/pptx` there.
+
+## Memory and untrusted input
+
+The native engine runs inside the calling process. In `@betteroffice/pptx` each engine runs in a
+WebAssembly memory of at most 4 GiB: a document that needs more makes that engine fail (worker
+sessions report it as an error, in some APIs a typed out-of-memory error) while the process keeps
+running. The native engine has no such cap: a document that needs more memory than the machine has
+makes the whole process run out of memory.
+
+Both engines bound their input the same way. A package is refused above 512 MiB uncompressed or
+5,000 parts, and XML nested deeper than 256 levels is refused. Rendering refuses decks that need more than 256 font faces.
+
+When you open documents from untrusted sources with this package on a server, run it under a
+memory limit (a container or cgroup limit, or a separate process) so an oversized document cannot
+take the server down.
