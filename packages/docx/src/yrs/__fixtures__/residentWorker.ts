@@ -20,11 +20,15 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   readonly sessions: ResidentEngineSession[];
   readonly imageBlobs: Blob[];
   readonly fontFaces: Set<FontFace>;
+  /** Messages the worker posted on its scheduler turn channel. */
+  readonly turnPosts: number;
   /** Holds the worker's replies until `release`. */
   hold(): void;
   /** Delivers the held replies `only` accepts and keeps holding, or delivers all and stops holding. */
   release(only?: (reply: DocxEngineWorkerResponse) => boolean): void;
 }
+
+const TURN_RESCUE_MS = 100;
 
 const STUBS: Record<string, string> = {
   '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
@@ -131,7 +135,39 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
   return (clientId) => {
     let held: DocxEngineWorkerResponse[] | null = null;
     let terminated = false;
-    const channels: MessageChannel[] = [];
+    const channels: TurnChannel[] = [];
+    let turnPosts = 0;
+    class TurnChannel {
+      readonly port1: { onmessage: ((event: { data: unknown }) => void) | null; close(): void };
+      readonly port2: { postMessage(data: unknown): void; close(): void };
+      constructor() {
+        const channel = new MessageChannel();
+        const delivered = new Set<number>();
+        let closed = false;
+        let next = 0;
+        const port1 = {
+          onmessage: null as ((event: { data: unknown }) => void) | null,
+          close: () => { closed = true; channel.port1.close(); },
+        };
+        const deliver = (id: number) => {
+          if (closed || terminated || delivered.has(id)) return;
+          delivered.add(id);
+          port1.onmessage?.({ data: null });
+        };
+        channel.port1.onmessage = (event) => deliver(event.data as number);
+        this.port1 = port1;
+        this.port2 = {
+          postMessage: () => {
+            turnPosts += 1;
+            const id = next++;
+            channel.port2.postMessage(id);
+            setTimeout(() => deliver(id), TURN_RESCUE_MS);
+          },
+          close: () => { closed = true; channel.port2.close(); },
+        };
+        channels.push(this);
+      }
+    }
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const fontFaces = new Set<FontFace>();
     const scope = {
@@ -168,6 +204,9 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
       sessions: [],
       imageBlobs: [],
       fontFaces,
+      get turnPosts() {
+        return turnPosts;
+      },
       postMessage(message, transfer = []) {
         worker.requests.push(message.type);
         if (terminated) return;
@@ -205,12 +244,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
     start(
       scope,
       'offscreenCanvas' in options ? options.offscreenCanvas : Canvas,
-      class extends MessageChannel {
-        constructor() {
-          super();
-          channels.push(this);
-        }
-      },
+      TurnChannel,
       (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
         const timer = setTimeout(() => {
           timers.delete(timer);

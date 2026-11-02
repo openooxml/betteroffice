@@ -1762,6 +1762,18 @@ impl EditSession {
             .prime_save_seed_states(paragraphs, inflated))
     }
 
+    #[napi(js_name = "prime_save_seed_states_slice")]
+    pub fn prime_save_seed_states_slice(
+        &self,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+    ) -> Result<u32> {
+        Ok(self
+            .document()?
+            .prime_save_seed_states_slice(paragraphs, inflated, max_bytes))
+    }
+
     #[napi(js_name = "paragraph_save_plan")]
     pub fn paragraph_save_plan(&self, env: Env) -> Result<String> {
         self.document()?
