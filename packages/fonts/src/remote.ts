@@ -247,10 +247,19 @@ export function fetchRemoteFontSlices(
   return within(Promise.all(slices.map((rule) => fetchSlice(rule, options, signal))), signal);
 }
 
-function remoteFace(alias: string, rule: RemoteFontFaceRule, bytes: ArrayBuffer): Promise<FontFace> {
-  return new FontFace(alias, bytes, {
+const remoteFontFaces = new WeakSet<object>();
+
+/** Whether `face` was registered by `loadRemoteFontFaces`, rather than by the host or the browser. */
+export function isRemoteFontFace(face: FontFace): boolean {
+  return remoteFontFaces.has(face);
+}
+
+async function remoteFace(alias: string, rule: RemoteFontFaceRule, bytes: ArrayBuffer): Promise<FontFace> {
+  const face = await new FontFace(alias, bytes, {
     weight: rule.weight, style: rule.style, ...(rule.unicodeRange ? { unicodeRange: rule.unicodeRange } : {}),
   }).load();
+  remoteFontFaces.add(face);
+  return face;
 }
 
 const MAX_REGISTERED_SLICES = 1024;
@@ -275,8 +284,8 @@ const registeredSlices = new WeakMap<FontFaceSet, Map<string, RegisteredSlice>>(
  * Nothing is registered once `signal` aborts. With `text`, concurrent calls share one fetch per
  * slice: an aborting caller stops waiting while the fetch continues for the others, and a slice
  * every caller abandoned is not registered. The record of registered slices lives with `fontSet`,
- * holds at most 1024 slices (further slices are not loaded) and refetches a slice whose face was
- * removed from the set.
+ * refetches a slice whose face was removed from the set and holds at most 1024 slices; a call
+ * needing more rejects.
  */
 export async function loadRemoteFontFaces(
   family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet,
@@ -299,27 +308,25 @@ export async function loadRemoteFontFaces(
     const entry = registered.get(keyOf(rule));
     if (entry && !present(entry)) registered.delete(keyOf(rule));
   }
-  if (registered.size >= MAX_REGISTERED_SLICES) {
+  const fresh = slices.filter((rule) => !registered.has(keyOf(rule)));
+  if (registered.size + fresh.length > MAX_REGISTERED_SLICES) {
     for (const [key, entry] of registered) if (!present(entry)) registered.delete(key);
   }
-  const capacity = Math.max(0, MAX_REGISTERED_SLICES - registered.size);
-  const fresh = slices.filter((rule) => !registered.has(keyOf(rule))).slice(0, capacity);
-  if (fresh.length > 0) {
-    const batch = fetchRemoteFontSlices(fresh, { ...options, signal: deadline(options, true) })
-      .then((bytes) => Promise.all(fresh.map((rule, index) => remoteFace(alias, rule, bytes[index]!))));
-    fresh.forEach((rule, index) => {
-      const key = keyOf(rule);
-      const waiting = new Set<AbortSignal | null>();
-      const entry: RegisteredSlice = { waiting, font: batch.then((fonts) => {
+  if (registered.size + fresh.length > MAX_REGISTERED_SLICES) throw new Error('Remote font slice record is full');
+  for (const rule of fresh) {
+    const key = keyOf(rule);
+    const waiting = new Set<AbortSignal | null>();
+    const entry: RegisteredSlice = { waiting, font: fetchSlice(rule, options, deadline(options, true))
+      .then((bytes) => remoteFace(alias, rule, bytes))
+      .then((font) => {
         const live = [...waiting].some((signal) => signal === null || !signal.aborted);
         waiting.clear();
         if (!live) throw new Error('Remote font slice abandoned by every caller');
-        fontSet.add(fonts[index]!);
-        return fonts[index]!;
+        fontSet.add(font);
+        return font;
       }) };
-      registered.set(key, entry);
-      void entry.font.then((font) => { entry.loaded = font; }, () => { if (registered.get(key) === entry) registered.delete(key); });
-    });
+    registered.set(key, entry);
+    void entry.font.then((font) => { entry.loaded = font; }, () => { if (registered.get(key) === entry) registered.delete(key); });
   }
   const entries = slices.flatMap((rule) => registered.get(keyOf(rule)) ?? []);
   for (const entry of entries) if (!entry.loaded) entry.waiting.add(options.signal ?? null);

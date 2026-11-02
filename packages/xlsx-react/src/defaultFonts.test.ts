@@ -34,7 +34,7 @@ function browser(gate: Promise<void> = Promise.resolve()) {
   const remove = mock((face: Face) => { added.splice(added.indexOf(face), 1); });
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
   Object.defineProperty(globalThis, 'document', { configurable: true,
-    value: { fonts: { add: (face: Face) => added.push(face), delete: remove } } });
+    value: { fonts: { add: (face: Face) => added.push(face), delete: remove, [Symbol.iterator]: () => added[Symbol.iterator]() } } });
   return { added, remove };
 }
 
@@ -82,6 +82,7 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
   const remote = {
     resolveWordFamilySubstitute: (family: string) => family === 'Tahoma' ? { remote: 'Open Sans', generic: 'sans-serif' } : undefined,
     loadRemoteFontFaces: remoteLoads,
+    isRemoteFontFace: (face: object) => 'remote' in face,
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.loadRemote>>;
   const remoteImported = spyOn(xlsxDefaultFontManager, 'loadRemote').mockResolvedValue(remote);
   restorers.push(() => imported.mockRestore(), () => remoteImported.mockRestore());
@@ -312,6 +313,15 @@ test('a failed load of newly painted characters settles and is retried only by a
   expect(painter.paint(cell('Ł'), () => {})).toBe(true);
   await new Promise((resolve) => setTimeout(resolve, 30));
   expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł', 'Ł']);
+});
+
+test('a face the host registered under the family keeps the remote provider away', async () => {
+  const { added } = browser();
+  const { remoteLoads } = provider();
+  (globalThis as unknown as { document: { fonts: FontFaceSet } }).document.fonts.add(new FontFace('Tahoma', new ArrayBuffer(4)) as never);
+  await createDefaultFontPainter(decoder(), mock(() => {})).load(display({ family: 'Tahoma' }));
+  expect(remoteLoads).not.toHaveBeenCalled();
+  expect(added).toHaveLength(1);
 });
 
 test('disposing the painter, as switching remote fonts off does, aborts its remote load before anything registers', async () => {

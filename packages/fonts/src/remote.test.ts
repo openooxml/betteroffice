@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   DEFAULT_REMOTE_FONT_PROVIDER, WORD_FAMILY_SUBSTITUTES, fetchRemoteFontRules, fetchRemoteFontSlices, loadRemoteFontFaces,
-  parseRemoteFontCss, remoteFontSlices, remoteFontStylesheetUrl, resolveWordFamilySubstitute, unicodeRangeIncludes,
+  isRemoteFontFace, parseRemoteFontCss, remoteFontSlices, remoteFontStylesheetUrl, resolveWordFamilySubstitute, unicodeRangeIncludes,
 } from './remote';
 
 const BUNNY_CSS = `/* latin-ext */
@@ -405,13 +405,12 @@ describe('provider stylesheets', () => {
         String(url).includes('/css?') ? new Response(sliced) : new Response(new Uint8Array([1])));
       const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/cap/css' } };
       const text = Array.from({ length: 512 }, (_, index) => String.fromCodePoint(0x4e00 + index)).join('');
-      const counts: number[] = [];
       for (let round = 0; round < 2; round++) {
-        for (const alias of ['First', 'Second', 'Third']) {
-          counts.push((await loadRemoteFontFaces('MS Gothic', alias, { weight: 400, style: 'normal' }, fontSet, { ...options, text })).length);
+        for (const alias of ['First', 'Second']) {
+          expect(await loadRemoteFontFaces('MS Gothic', alias, { weight: 400, style: 'normal' }, fontSet, { ...options, text })).toHaveLength(512);
         }
+        await expect(loadRemoteFontFaces('MS Gothic', 'Third', { weight: 400, style: 'normal' }, fontSet, { ...options, text })).rejects.toThrow('full');
       }
-      expect(counts).toEqual([512, 512, 0, 512, 512, 0]);
       expect(registered).toBe(1024);
     } finally {
       globalThis.FontFace = original;
@@ -460,6 +459,34 @@ describe('provider stylesheets', () => {
       faces.clear();
       expect(await loadRemoteFontFaces('MS Gothic', 'Third', { weight: 400, style: 'normal' }, fontSet, { ...options, text })).toHaveLength(512);
       expect(faces.size).toBe(512);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
+  test('a failing slice leaves the other slices of a shared request registered', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { constructor(readonly family: string, readonly source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}
+      async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const added: { descriptors: FontFaceDescriptors }[] = [];
+      const fontSet = { add: (face: { descriptors: FontFaceDescriptors }) => { added.push(face); } } as unknown as FontFaceSet;
+      const releases: (() => void)[] = [];
+      const fetch = mock(async (url: string | URL | Request) => String(url).includes('/css?') ? new Response(BUNNY_CSS)
+        : new Promise<Response>((resolve) => { releases.push(() => resolve(String(url).includes('-ext-')
+          ? new Response('', { status: 404 }) : new Response(new Uint8Array([1])))); }));
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/isolated/css' } };
+      const face = { weight: 400, style: 'normal' } as const;
+      const leaving = new AbortController();
+      const both = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'AŁ', signal: leaving.signal });
+      for (let wait = 0; wait < 100 && releases.length < 2; wait++) await new Promise((resolve) => setTimeout(resolve, 5));
+      const latin = loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'A' });
+      leaving.abort();
+      await expect(both).rejects.toThrow();
+      for (const release of releases) release();
+      expect(await latin).toHaveLength(1);
+      expect(added.map((face) => face.descriptors.unicodeRange)).toEqual(['U+0000-00FF,U+0131,U+0152-0153']);
+      expect(isRemoteFontFace(added[0] as unknown as FontFace)).toBe(true);
     } finally {
       globalThis.FontFace = original;
     }

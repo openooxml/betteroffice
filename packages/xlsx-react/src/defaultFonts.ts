@@ -14,7 +14,6 @@ interface RemoteTask {
 }
 
 const remoteFaces = new Map<string, RemoteTask>();
-const localFamilies = new Map<string, boolean>();
 let remoteFontSet: FontFaceSet | undefined;
 
 function installedLocally(family: string): boolean {
@@ -28,6 +27,14 @@ function installedLocally(family: string): boolean {
     context.font = `72px ${JSON.stringify(family)}, ${generic}`;
     return context.measureText(sample).width !== fallback;
   });
+}
+
+function providedElsewhere(fontSet: FontFaceSet, family: string, isRemote: (face: FontFace) => boolean): boolean {
+  const wanted = family.toLowerCase();
+  const registered = typeof (fontSet as Partial<Iterable<FontFace>>)[Symbol.iterator] === 'function'
+    ? [...(fontSet as unknown as Iterable<FontFace>)].filter((face) => face.family.replace(/^(['"])(.*)\1$/, '$2').toLowerCase() === wanted)
+    : [];
+  return registered.length > 0 ? registered.some((face) => !isRemote(face)) : installedLocally(family);
 }
 
 function releaseRemote(key: string, task: RemoteTask, owner: symbol): void {
@@ -45,7 +52,6 @@ async function loadRemoteFace(
   if (remoteFontSet !== fontSet) {
     for (const task of remoteFaces.values()) task.controller.abort();
     remoteFaces.clear();
-    localFamilies.clear();
     remoteFontSet = fontSet;
   }
   const key = JSON.stringify([provider, fontFamily.trim().toLowerCase(), bold, italic, text]);
@@ -56,10 +62,7 @@ async function loadRemoteFace(
       const remote = await xlsxDefaultFontManager.loadRemote();
       controller.signal.throwIfAborted();
       if (!remote.resolveWordFamilySubstitute(fontFamily)?.remote) return false;
-      const family = fontFamily.trim().toLowerCase();
-      let local = localFamilies.get(family);
-      if (local === undefined) localFamilies.set(family, local = installedLocally(fontFamily.trim()));
-      if (local) return false;
+      if (providedElsewhere(fontSet, fontFamily.trim(), (face) => remote.isRemoteFontFace?.(face) ?? false)) return false;
       await remote.loadRemoteFontFaces(fontFamily, fontFamily,
         { weight: bold ? 700 : 400, style: italic ? 'italic' : 'normal' }, fontSet,
         { provider, signal: controller.signal, text });
