@@ -240,6 +240,22 @@ test('a family without a bundled face loads its look-alike from the remote provi
   expect(remoteLoads.mock.calls.map((call) => call[4].provider)).toEqual(['bunny', 'google']);
 });
 
+test('remote look-alikes load for the painted characters and again only for newly painted ones', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('Abc'));
+  await painter.load(cell('bcA'));
+  expect(painter.paint(cell('Abc'), () => {})).toBe(true);
+  await painter.load(cell('Abcδ'));
+  expect(painter.paint(cell('Abcδ'), () => {})).toBe(true);
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['Abc', 'δ']);
+  expect(repaint).toHaveBeenCalledTimes(2);
+});
+
 test('disposing the painter, as switching remote fonts off does, aborts its remote load before anything registers', async () => {
   const { added } = browser();
   const { remoteLoads, remoteGate } = provider();

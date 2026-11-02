@@ -38,7 +38,7 @@ function releaseRemote(key: string, task: RemoteTask, owner: symbol): void {
 
 async function loadRemoteFace(
   fontFamily: string, bold: boolean, italic: boolean, provider: RemoteFontProvider, owner: symbol,
-  held: Map<string, RemoteTask>, isLive: () => boolean,
+  held: Map<string, RemoteTask>, isLive: () => boolean, text: string,
 ): Promise<boolean> {
   const fontSet = document.fonts;
   if (remoteFontSet !== fontSet) {
@@ -46,7 +46,7 @@ async function loadRemoteFace(
     remoteFaces.clear();
     remoteFontSet = fontSet;
   }
-  const key = JSON.stringify([provider, fontFamily.trim().toLowerCase(), bold, italic]);
+  const key = JSON.stringify([provider, fontFamily.trim().toLowerCase(), bold, italic, text]);
   let task = remoteFaces.get(key);
   if (!task) {
     const controller = new AbortController();
@@ -55,10 +55,10 @@ async function loadRemoteFace(
       controller.signal.throwIfAborted();
       if (!remote.resolveWordFamilySubstitute(fontFamily)?.remote) return false;
       if (installedLocally(fontFamily.trim())) return false;
-      const faces = await remote.loadRemoteFontFaces(fontFamily, fontFamily,
+      await remote.loadRemoteFontFaces(fontFamily, fontFamily,
         { weight: bold ? 700 : 400, style: italic ? 'italic' : 'normal' }, fontSet,
-        { provider, signal: controller.signal });
-      return faces.length > 0;
+        { provider, signal: controller.signal, text });
+      return true;
     })().catch(() => false);
     const created: RemoteTask = { done, owners: new Set(), controller };
     task = created;
@@ -117,6 +117,8 @@ export function createDefaultFontPainter(
   const loaded = new Set<string>();
   const settled = new Set<string>();
   const pending = new Map<string, Promise<boolean>>();
+  const remote = new Set<string>();
+  const requested = new Map<string, Set<string>>();
   let disposed = false;
   let changed = false;
   let unsettledPaint = false;
@@ -126,7 +128,9 @@ export function createDefaultFontPainter(
     source: ReturnType<Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>['createFontProvider']>;
   }> | undefined;
 
-  async function loadFace(fontFamily: string, bold: boolean, italic: boolean, retryShared = true): Promise<boolean> {
+  async function loadFace(
+    fontFamily: string, bold: boolean, italic: boolean, text: string, onRemote: () => void, retryShared = true,
+  ): Promise<boolean> {
     let owners: Set<symbol> | undefined;
     try {
       if (!provider) {
@@ -142,7 +146,9 @@ export function createDefaultFontPainter(
         ?? fonts.resolveBundledFamilyFace(fontFamily, bold, italic);
       if (!face) {
         const provider = options.remoteFonts ?? 'bunny';
-        return provider !== 'off' && await loadRemoteFace(fontFamily, bold, italic, provider, owner, remoteHeld, () => !disposed);
+        if (provider === 'off') return false;
+        onRemote();
+        return await loadRemoteFace(fontFamily, bold, italic, provider, owner, remoteHeld, () => !disposed, text);
       }
       const fontSet = document.fonts;
       if (activeFontSet !== fontSet) {
@@ -175,7 +181,7 @@ export function createDefaultFontPainter(
         interests.add(owners);
       }
       const success = await registration;
-      if (!success && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, false);
+      if (!success && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, text, onRemote, false);
       return success;
     } catch { return false; }
     finally {
@@ -189,27 +195,48 @@ export function createDefaultFontPainter(
   const inactive = () => disposed || options.defaultFonts === false || decoder === undefined
     || typeof document === 'undefined' || typeof FontFace === 'undefined' || !document.fonts;
 
-  function* faceKeys(displayList: DisplayList) {
+  function faceKeys(displayList: DisplayList) {
+    const faces = new Map<string, { fontFamily: string; bold: boolean; italic: boolean; characters: Set<string> }>();
     for (const command of displayList.commands) {
       if (command.op !== 'text' || !command.fontFamily || command.chart) continue;
       const { fontFamily, bold = false, italic = false } = command;
-      yield { fontFamily, bold, italic, key: JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic]) };
+      const key = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic]);
+      let face = faces.get(key);
+      if (!face) faces.set(key, face = { fontFamily, bold, italic, characters: new Set() });
+      for (const character of command.text ?? '') face.characters.add(character);
     }
+    return faces;
+  }
+
+  function unrequested(key: string, characters: Set<string>): string {
+    const known = requested.get(key);
+    let text = '';
+    for (const character of characters) if (!known?.has(character)) text += character;
+    return text;
   }
 
   function isSettled(displayList: DisplayList): boolean {
     if (inactive()) return true;
-    for (const { key } of faceKeys(displayList)) if (!settled.has(key)) return false;
+    for (const [key, { characters }] of faceKeys(displayList)) {
+      if (!settled.has(key) || (loaded.has(key) && remote.has(key) && unrequested(key, characters))) return false;
+    }
     return true;
   }
 
   async function load(displayList: DisplayList): Promise<void> {
     if (inactive()) return;
     const batch: Promise<boolean>[] = [];
-    for (const { fontFamily, bold, italic, key } of faceKeys(displayList)) {
-      if (loaded.has(key) || pending.has(key)) continue;
-      const task = loadFace(fontFamily, bold, italic).then((success) => {
+    for (const [key, { fontFamily, bold, italic, characters }] of faceKeys(displayList)) {
+      if (pending.has(key)) continue;
+      const text = loaded.has(key) ? unrequested(key, characters) : [...characters].join('');
+      if (loaded.has(key) && !(remote.has(key) && text)) continue;
+      const task = loadFace(fontFamily, bold, italic, text, () => { remote.add(key); }).then((success) => {
         pending.delete(key);
+        if (success) {
+          let known = requested.get(key);
+          if (!known) requested.set(key, known = new Set());
+          for (const character of text) known.add(character);
+        }
         settled.add(key);
         if (success) {
           loaded.add(key);

@@ -39,6 +39,12 @@ export interface RemoteFontLoadOptions {
   fetch?: typeof globalThis.fetch;
   /** Gives up on a stylesheet or face that has not arrived after this long. Defaults to 5000 ms. */
   timeoutMs?: number;
+  /**
+   * The characters to cover. Only the slices whose `unicode-range` includes one of them are
+   * fetched, so a later call with newly typed characters fetches only the slices those add.
+   * Without it every slice of the face is fetched, and a face in more than 12 slices is skipped.
+   */
+  text?: string;
 }
 
 const PROVIDER_CSS: Record<'bunny' | 'google', string> = {
@@ -172,19 +178,38 @@ function preferredSource(rule: RemoteFontFaceRule): RemoteFontSource {
   return rule.sources[0]!;
 }
 
+const parsedRanges = new Map<string, [number, number][]>();
+
+function unicodeRanges(range: string): [number, number][] {
+  let ranges = parsedRanges.get(range);
+  if (ranges) return ranges;
+  ranges = [];
+  for (const part of range.split(',')) {
+    const match = /^\s*U\+([0-9a-f?]{1,6})(?:-([0-9a-f]{1,6}))?\s*$/i.exec(part);
+    if (!match) continue;
+    const start = match[1]!;
+    ranges.push(match[2] === undefined
+      ? [Number.parseInt(start.replace(/\?/g, '0'), 16), Number.parseInt(start.replace(/\?/g, 'f'), 16)]
+      : [Number.parseInt(start, 16), Number.parseInt(match[2], 16)]);
+  }
+  if (parsedRanges.size < MAX_RULES * 4) parsedRanges.set(range, ranges);
+  return ranges;
+}
+
+/** Whether a CSS `unicode-range` value includes the code point; a rule without one covers every character. */
+export function unicodeRangeIncludes(range: string | null, point: number): boolean {
+  return range === null || unicodeRanges(range).some(([start, end]) => point >= start && point <= end);
+}
+
 /**
- * Registers the provider's look-alike for an Office family under the document's own family name
- * (`alias`) in `fontSet`, once every unicode-range slice of the requested face has loaded. The
- * font files are fetched without credentials or referrer, like the stylesheet. A look-alike
- * served in more than 12 slices (the CJK families) is not loaded. A look-alike without the
- * requested weight or style registers its regular face, which the browser emboldens or slants.
- * Resolves to the registered faces, or an empty list when the table has no look-alike, the
- * provider is off or the face is too large; nothing is registered once `signal` aborts.
+ * The provider's slices of the look-alike for an Office `family` in `face`, or in its regular face
+ * when the look-alike lacks that weight or style. With `options.text`, only the slices covering one
+ * of its characters; without it, every slice, or none for a face in more than 12 slices. Empty when
+ * the table has no look-alike or the provider is off. Fetch their bytes with `fetchRemoteFontSlices`.
  */
-export async function loadRemoteFontFaces(
-  family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet,
-  options: RemoteFontLoadOptions = {},
-): Promise<FontFace[]> {
+export async function remoteFontSlices(
+  family: string, face: RemoteFaceRequest, options: RemoteFontLoadOptions = {},
+): Promise<RemoteFontFaceRule[]> {
   const remote = resolveWordFamilySubstitute(family)?.remote;
   if (!remote || (options.provider ?? DEFAULT_REMOTE_FONT_PROVIDER) === 'off') return [];
   const matching = (rules: RemoteFontFaceRule[], wanted: RemoteFaceRequest) =>
@@ -196,20 +221,95 @@ export async function loadRemoteFontFaces(
     rules = matching(await fetchRemoteFontRules(remote, [regular], options), regular);
   }
   options.signal?.throwIfAborted();
-  if (rules.length === 0 || rules.length > MAX_FACES) return [];
-  const signal = deadline(options);
+  if (options.text === undefined) return rules.length > MAX_FACES ? [] : rules;
+  const points = new Set<number>();
+  for (const character of options.text) points.add(character.codePointAt(0)!);
+  return rules.filter((rule) => {
+    for (const point of points) if (unicodeRangeIncludes(rule.unicodeRange, point)) return true;
+    return false;
+  });
+}
+
+async function fetchSlice(rule: RemoteFontFaceRule, options: RemoteFontLoadOptions, signal: AbortSignal): Promise<ArrayBuffer> {
   const request = options.fetch ?? globalThis.fetch;
-  const fonts = await within(Promise.all(rules.map(async (rule) => {
-    const response = await request(preferredSource(rule).url,
-      { credentials: 'omit', referrerPolicy: 'no-referrer', signal });
-    if (!response.ok) throw new Error(`Remote font failed: ${response.status} ${response.url}`);
-    const bytes = await response.arrayBuffer();
-    if (bytes.byteLength > MAX_FONT_BYTES) throw new Error(`Remote font too large: ${response.url}`);
-    return new FontFace(alias, bytes, {
-      weight: rule.weight, style: rule.style, ...(rule.unicodeRange ? { unicodeRange: rule.unicodeRange } : {}),
-    }).load();
-  })), signal);
-  options.signal?.throwIfAborted();
-  for (const font of fonts) fontSet.add(font);
-  return fonts;
+  const response = await request(preferredSource(rule).url, { credentials: 'omit', referrerPolicy: 'no-referrer', signal });
+  if (!response.ok) throw new Error(`Remote font failed: ${response.status} ${response.url}`);
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength > MAX_FONT_BYTES) throw new Error(`Remote font too large: ${response.url}`);
+  return bytes;
+}
+
+/** The font files of `slices`, fetched without credentials or referrer, in the same order. */
+export function fetchRemoteFontSlices(
+  slices: readonly RemoteFontFaceRule[], options: RemoteFontLoadOptions = {},
+): Promise<ArrayBuffer[]> {
+  const signal = deadline(options);
+  return within(Promise.all(slices.map((rule) => fetchSlice(rule, options, signal))), signal);
+}
+
+function remoteFace(alias: string, rule: RemoteFontFaceRule, bytes: ArrayBuffer): Promise<FontFace> {
+  return new FontFace(alias, bytes, {
+    weight: rule.weight, style: rule.style, ...(rule.unicodeRange ? { unicodeRange: rule.unicodeRange } : {}),
+  }).load();
+}
+
+const MAX_REGISTERED_SLICES = 1024;
+const registeredSlices = new WeakMap<FontFaceSet, Map<string, { font: Promise<FontFace>; loaded?: FontFace }>>();
+
+/**
+ * Registers the provider's look-alike for an Office family under the document's own family name
+ * (`alias`) in `fontSet`. With `options.text`, only the unicode-range slices covering its
+ * characters are fetched and registered, and slices registered by an earlier call are reused, so
+ * newly typed characters fetch only the slices they add. Without it, every slice of the requested
+ * face is fetched and registered once all have loaded, and a look-alike served in more than 12
+ * slices (the CJK families) is not loaded. The font files are fetched without credentials or
+ * referrer, like the stylesheet. A look-alike without the requested weight or style registers its
+ * regular face, which the browser emboldens or slants. Resolves to the faces covering the request,
+ * or an empty list when the table has no look-alike, the provider is off or nothing matches;
+ * nothing new is registered once `signal` aborts. Concurrent calls share one fetch per slice; the
+ * record of registered slices lives with `fontSet`, holds at most 1024 slices and refetches a slice
+ * whose face was removed from the set.
+ */
+export async function loadRemoteFontFaces(
+  family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet,
+  options: RemoteFontLoadOptions = {},
+): Promise<FontFace[]> {
+  const slices = await remoteFontSlices(family, face, options);
+  if (slices.length === 0) return [];
+  if (options.text === undefined) {
+    const bytes = await fetchRemoteFontSlices(slices, options);
+    const fonts = await Promise.all(slices.map((rule, index) => remoteFace(alias, rule, bytes[index]!)));
+    options.signal?.throwIfAborted();
+    for (const font of fonts) fontSet.add(font);
+    return fonts;
+  }
+  let registered = registeredSlices.get(fontSet);
+  if (!registered) registeredSlices.set(fontSet, registered = new Map());
+  const keyOf = (rule: RemoteFontFaceRule) => JSON.stringify([alias, rule.weight, rule.style, preferredSource(rule).url]);
+  for (const rule of slices) {
+    const entry = registered.get(keyOf(rule));
+    if (entry?.loaded && typeof fontSet.has === 'function' && !fontSet.has(entry.loaded)) registered.delete(keyOf(rule));
+  }
+  const fresh = slices.filter((rule) => !registered.has(keyOf(rule)));
+  if (fresh.length > 0) {
+    const batch = fetchRemoteFontSlices(fresh, options)
+      .then((bytes) => Promise.all(fresh.map((rule, index) => remoteFace(alias, rule, bytes[index]!))))
+      .then((fonts) => {
+        options.signal?.throwIfAborted();
+        for (const font of fonts) fontSet.add(font);
+        return fonts;
+      });
+    fresh.forEach((rule, index) => {
+      const key = keyOf(rule);
+      const entry: { font: Promise<FontFace>; loaded?: FontFace } = { font: batch.then((fonts) => fonts[index]!) };
+      registered.set(key, entry);
+      void entry.font.then((font) => { entry.loaded = font; }, () => { if (registered.get(key) === entry) registered.delete(key); });
+    });
+  }
+  const requested = slices.map((rule) => registered.get(keyOf(rule))!.font);
+  for (const [key, entry] of registered) {
+    if (registered.size <= MAX_REGISTERED_SLICES) break;
+    if (entry.loaded) registered.delete(key);
+  }
+  return Promise.all(requested);
 }

@@ -48,11 +48,14 @@ document editor reads it from `setRemoteFontProvider` in `@betteroffice/docx`.
 | `'off'` | nowhere | No remote font requests; the generic family is used. |
 
 The editor fetches the stylesheet and the font files it names itself, without cookies and without a
-referrer. The requests carry only the look-alike's family name and the requested weight and style,
-plus what every browser request carries (IP address, user agent); no document content is sent.
-Chinese, Japanese and Korean look-alikes are split into too many files to fetch this way; install
-`@betteroffice/fonts-cjk` for those families instead. A family installed on the viewer's machine
-is used directly and never fetched.
+referrer. Providers split each face into files by character range (`unicode-range`); the editor
+fetches only the files covering the characters it paints, and fetches another file only when newly
+typed or shown characters need it. The requests carry the look-alike's family name, the requested
+weight and style and the chosen files, plus what every browser request carries (IP address, user
+agent); no document text is sent, though the files requested show which character ranges the shown
+text uses. Chinese, Japanese and Korean look-alikes come in about a hundred such files, so those
+ranges are finer; install `@betteroffice/fonts-cjk` to keep those families local. A family installed
+on the viewer's machine is used directly and never fetched.
 
 A fetched face is used for both measuring and painting, so layout always matches what is drawn.
 The spreadsheet editor measures and paints text in the browser and uses fetched faces today. The

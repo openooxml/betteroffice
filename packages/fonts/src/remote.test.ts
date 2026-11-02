@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
-  DEFAULT_REMOTE_FONT_PROVIDER, WORD_FAMILY_SUBSTITUTES, fetchRemoteFontRules, loadRemoteFontFaces,
-  parseRemoteFontCss, remoteFontStylesheetUrl, resolveWordFamilySubstitute,
+  DEFAULT_REMOTE_FONT_PROVIDER, WORD_FAMILY_SUBSTITUTES, fetchRemoteFontRules, fetchRemoteFontSlices, loadRemoteFontFaces,
+  parseRemoteFontCss, remoteFontSlices, remoteFontStylesheetUrl, resolveWordFamilySubstitute, unicodeRangeIncludes,
 } from './remote';
 
 const BUNNY_CSS = `/* latin-ext */
@@ -244,6 +244,104 @@ describe('provider stylesheets', () => {
         { fetch: cjk as unknown as typeof globalThis.fetch })).toEqual([]);
       expect(cjk).toHaveBeenCalledTimes(1);
       expect(added).toEqual([]);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
+  test('unicode-range values match single points, spans and wildcards', () => {
+    expect(unicodeRangeIncludes('U+0000-00FF,U+0131', 0x41)).toBe(true);
+    expect(unicodeRangeIncludes('U+0000-00FF,U+0131', 0x131)).toBe(true);
+    expect(unicodeRangeIncludes('U+0000-00FF,U+0131', 0x141)).toBe(false);
+    expect(unicodeRangeIncludes('U+4??', 0x4ff)).toBe(true);
+    expect(unicodeRangeIncludes('U+4??', 0x500)).toBe(false);
+    expect(unicodeRangeIncludes(null, 0x1f600)).toBe(true);
+  });
+
+  test('the byte path fetches only the slices covering the text', async () => {
+    const fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(init).toMatchObject({ credentials: 'omit', referrerPolicy: 'no-referrer' });
+      return String(url).includes('/css?') ? new Response(BUNNY_CSS) : new Response(new Uint8Array([String(url).includes('-ext-') ? 2 : 1]));
+    });
+    const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/bytes/css' } };
+    const face = { weight: 400, style: 'normal' } as const;
+    const latin = await remoteFontSlices('Tahoma', face, { ...options, text: 'Hello' });
+    expect(latin.map((rule) => rule.unicodeRange)).toEqual(['U+0000-00FF,U+0131,U+0152-0153']);
+    expect((await fetchRemoteFontSlices(latin, options)).map((bytes) => new Uint8Array(bytes)[0])).toEqual([1]);
+    const extended = await remoteFontSlices('Tahoma', face, { ...options, text: 'Łódź' });
+    expect(extended.map((rule) => rule.unicodeRange)).toEqual(['U+0100-02AF,U+0304,U+0308', 'U+0000-00FF,U+0131,U+0152-0153']);
+    expect(await remoteFontSlices('Tahoma', face, { ...options, text: '日' })).toEqual([]);
+    expect(await remoteFontSlices('Tahoma', face, options)).toHaveLength(2);
+    expect(fetch.mock.calls.map((call) => String(call[0]))).toEqual([
+      'https://fonts.example.com/bytes/css?family=Open+Sans:400&display=swap',
+      'https://fonts.bunny.net/open-sans/files/open-sans-latin-400-normal.woff2',
+    ]);
+  });
+
+  test('the font set path registers covering slices once and fetches only those newly typed characters add', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { constructor(readonly family: string, readonly source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}
+      async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const added: { descriptors: FontFaceDescriptors }[] = [];
+      const fontSet = { add: (face: { descriptors: FontFaceDescriptors }) => { added.push(face); } } as unknown as FontFaceSet;
+      const fetch = mock(async (url: string | URL | Request) =>
+        String(url).includes('/css?') ? new Response(BUNNY_CSS) : new Response(new Uint8Array([1])));
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/typed/css' } };
+      const face = { weight: 400, style: 'normal' } as const;
+      expect(await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Hello' })).toHaveLength(1);
+      expect(await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Hello again' })).toHaveLength(1);
+      expect(await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Ł' })).toHaveLength(1);
+      expect(await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Hello Ł' })).toHaveLength(2);
+      expect(fetch.mock.calls.map((call) => String(call[0]))).toEqual([
+        'https://fonts.example.com/typed/css?family=Open+Sans:400&display=swap',
+        'https://fonts.bunny.net/open-sans/files/open-sans-latin-400-normal.woff2',
+        'https://fonts.bunny.net/open-sans/files/open-sans-latin-ext-400-normal.woff2',
+      ]);
+      expect(added.map((face) => face.descriptors.unicodeRange)).toEqual(['U+0000-00FF,U+0131,U+0152-0153', 'U+0100-02AF,U+0304,U+0308']);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
+  test('concurrent requests share one fetch per slice and a face removed from the set is fetched again', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const faces = new Set<unknown>();
+      const fontSet = { add: (face: unknown) => { faces.add(face); }, has: (face: unknown) => faces.has(face) } as unknown as FontFaceSet;
+      const fetch = mock(async (url: string | URL | Request) =>
+        String(url).includes('/css?') ? new Response(BUNNY_CSS) : new Response(new Uint8Array([1])));
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/shared/css' } };
+      const face = { weight: 400, style: 'normal' } as const;
+      const [first, second] = await Promise.all([
+        loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Hello' }),
+        loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'World' }),
+      ]);
+      expect(first).toEqual(second);
+      expect(fetch.mock.calls.filter((call) => !String(call[0]).includes('/css?'))).toHaveLength(1);
+      faces.clear();
+      expect(await loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Hello' })).toHaveLength(1);
+      expect(fetch.mock.calls.filter((call) => !String(call[0]).includes('/css?'))).toHaveLength(2);
+      expect(faces.size).toBe(1);
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
+  test('a face in many slices loads only the slices its text touches', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      const fontSet = { add: () => {} } as unknown as FontFaceSet;
+      const sliced = Array.from({ length: 100 }, (_, index) => `@font-face { font-family: 'Noto Sans JP'; font-style: normal; font-weight: 400; src: url(https://fonts.bunny.net/n/${index}.woff2) format('woff2'); unicode-range: U+${(0x4e00 + index * 16).toString(16)}-${(0x4e0f + index * 16).toString(16)}; }`).join('\n');
+      const fetch = mock(async (url: string | URL | Request) =>
+        String(url).includes('/css?') ? new Response(sliced) : new Response(new Uint8Array([1])));
+      const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/cjk/css' } };
+      const faces = await loadRemoteFontFaces('MS Gothic', 'MS Gothic', { weight: 400, style: 'normal' }, fontSet,
+        { ...options, text: String.fromCodePoint(0x4e00 + 5 * 16 + 3, 0x4e00 + 70 * 16) + 'a' });
+      expect(faces).toHaveLength(2);
+      expect(fetch.mock.calls.map((call) => String(call[0])).slice(1)).toEqual(['https://fonts.bunny.net/n/5.woff2', 'https://fonts.bunny.net/n/70.woff2']);
     } finally {
       globalThis.FontFace = original;
     }
