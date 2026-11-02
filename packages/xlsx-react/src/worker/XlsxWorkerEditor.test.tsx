@@ -25,7 +25,7 @@ import * as peerlessInput from '../commands/peerlessWorkerInputCoordinator';
 import type { PeerlessWorkerCommand } from '../commands/peerlessWorkerInputCoordinator';
 import type { XlsxCommandStore } from '../commands/types';
 import { defineXlsxPlugin } from '../plugins/defineXlsxPlugin';
-import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
+import type { XlsxPluginContext, XlsxPluginGeometry, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
 import { defaultFontPainterModule } from '../useDefaultFonts';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
@@ -585,9 +585,10 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
       } } : {}),
     });
   };
-  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4])) => view.rerender(
+  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4]),
+    hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => view.rerender(
     <Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} />
+      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} {...hostProps} />
     </Profiler>);
   const asyncEditor = (props: Partial<XlsxAsyncEditorProps> = {}) => (
     <XlsxEditor file={file} toolbar={<Chrome />} {...props} />
@@ -3797,6 +3798,31 @@ describe('peerless workbook worker editor', () => {
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
   });
 
+  it('answers plugin point queries through the peerless hit test and refuses them after replacement', async () => {
+    const host = peerlessHarness();
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 192, y: 48, w: 96, h: 48 },
+      clip: { x: 192, y: 48, w: 96, h: 48 } });
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = await host.mount(undefined, false, { plugins });
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 800, 600);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(40 + 144, 60 + 36)).toEqual({ sheet: 0, sheetId: 'sheet:0',
+      row: 1, col: 1, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(40 + 240, 60 + 72)).toBeNull();
+    expect(retained.getPositionAtPoint!(39, 96)).toBeNull();
+    expect(retained.getPositionAtPoint!(40 + 100, 60 + 600)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.POSITIVE_INFINITY, 96)).toBeNull();
+    host.open.mockResolvedValueOnce({ ...host.session, commandIdentity: { session: 'replacement', incarnation: 'worker' } });
+    await act(async () => host.replace(view, new Uint8Array([4]), { plugins }));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
+    await opened();
+    await waitFor(() => expect(host.ready).toHaveBeenCalledTimes(2));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
+  });
+
   it('replacement cancels retained chart nudges even with the same chart id', async () => {
     const host = peerlessHarness();
     host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 200, y: 100, w: 100, h: 100 },
@@ -4619,6 +4645,30 @@ describe('workbook worker editor', () => {
     await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen onReady={onReady} />); });
     expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toBeNull();
     await expect(apis[0].flushPendingInput()).rejects.toThrow('replaced');
+  });
+
+  it('answers plugin point queries through the worker hit test and refuses them after replacement', async () => {
+    harness();
+    const apis: XlsxWorkerEditorApi[] = [];
+    const onReady = (api: XlsxWorkerEditorApi) => { apis.push(api); };
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={plugins} onReady={onReady} />);
+    await opened();
+    await advance();
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 1200, 900);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    const point = [40 + 144 * 1.5, 60 + 36 * 1.5] as const;
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(...point)).toEqual({ ...apis[0].getPositionAtPoint(...point)!,
+      sheetId: geometry()!.layout.sheetId, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(...point)).toMatchObject({ sheet: 0, row: 1, col: 1 });
+    expect(retained.getPositionAtPoint!(39, 70)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.NaN, 70)).toBeNull();
+    await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen plugins={plugins} onReady={onReady} />); });
+    expect(apis[0].getPositionAtPoint(...point)).toBeNull();
+    expect(retained.getPositionAtPoint!(...point)).toBeNull();
   });
 
   it('clears a Ctrl+A sheet selection through its used cells', async () => {

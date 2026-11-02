@@ -18,7 +18,12 @@ import {
   type XlsxPluginActivation,
   type XlsxPluginHost,
 } from './createXlsxPluginHost';
-import { createPluginGeometry, pluginLayout, type PaintedGrid } from './geometry';
+import {
+  createPluginGeometry,
+  pluginLayout,
+  type EditorPointQuery,
+  type PaintedGrid,
+} from './geometry';
 import type { XlsxEditorPluginProps, XlsxPluginGeometry, XlsxPluginSelection } from './types';
 
 const NO_ACTIVATIONS: readonly XlsxPluginActivation[] = Object.freeze([]);
@@ -35,6 +40,8 @@ export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
   selection: XlsxPluginSelection;
   /** The canvas the grid paints into. */
   canvasRef: RefObject<HTMLCanvasElement | null>;
+  /** The editor's hit test that plugin point queries go through; read at call time. */
+  positionAtPoint?: EditorPointQuery;
   t: TFunction;
 }
 
@@ -79,6 +86,9 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     const installed = (latest.current.plugins?.length ?? 0) > 0;
     const layout =
       installed && host.generation() !== null ? pluginLayout(painted, host.version()) : null;
+    const pointAt: EditorPointQuery | undefined = latest.current.positionAtPoint
+      ? (clientX, clientY) => latest.current.positionAtPoint?.(clientX, clientY) ?? null
+      : undefined;
     geometryRef.current =
       layout && painted && canvas && layer
         ? 'identity' in latest.current.access ? latest.current.createGeometry?.(
@@ -93,12 +103,13 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
               const identity = access.identity();
               return { version: identity ? access.version(identity) : null,
                 painted: live ? paintedRef.current : null };
-            }
+            },
+            pointAt
           ) ?? null : createPluginGeometry(layout, painted, canvas, layer, () =>
               host.layoutId() === layout.id &&
               paintedRef.current === painted &&
               canvas.isConnected &&
-              layer.isConnected)
+              layer.isConnected, pointAt)
         : null;
     host.layoutChanged(layout);
     host.geometryChanged();

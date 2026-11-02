@@ -194,6 +194,7 @@ export function createXlsxPluginHost(
       scopedCommandStore(controller(), scopeFor(invocation))
     );
     const geometry = access.geometry();
+    const point = geometry?.getPositionAtPoint ?? null;
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -209,7 +210,7 @@ export function createXlsxPluginHost(
         layout: geometry.layout,
         getCellRect: (target) => invocation.refusal() ? null : geometry.getCellRect(target),
         getRangeRect: (target) => invocation.refusal() ? null : geometry.getRangeRect(target),
-        getPositionAtPoint: null,
+        getPositionAtPoint: point && ((clientX, clientY) => invocation.refusal() ? null : point(clientX, clientY)),
       } : geometry : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),

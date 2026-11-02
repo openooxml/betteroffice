@@ -2579,4 +2579,101 @@ describe('XlsxEditor plugin adapters', () => {
       expect(cell(5, 1)!.width).toBeLessThan(merged.width);
     }
   });
+  editorTest('point queries answer the editor hit test across zoom, scale and scroll', async () => {
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [
+      defineXlsxPlugin<null>({
+        id: 'acme.point',
+        createState: () => null,
+        onEvent(context) {
+          contexts.push(context);
+        },
+      }),
+    ];
+    const { api, ready, view, rerender } = await mount({ plugins, file: charted });
+    const geometry = () => last(contexts)?.geometry ?? null;
+    await until(() => geometry()?.layout.zoom === 1);
+    const canvas = view.container.querySelector('canvas')!;
+    const place = (scale: number) => {
+      canvas.getBoundingClientRect = () =>
+        new DOMRect(40, 60, VIEWPORT.width * scale, VIEWPORT.height * scale);
+    };
+    const query = (clientX: number, clientY: number) => {
+      const current = geometry()!;
+      const editor = api().getPositionAtPoint(clientX, clientY);
+      const position = current.getPositionAtPoint!(clientX, clientY);
+      expect(position).toEqual(
+        editor && {
+          ...editor,
+          sheetId: 'sheet:0',
+          version: current.layout.version,
+          layoutId: current.layout.id,
+        }
+      );
+      return position;
+    };
+    const probe = (zoom: number, scale: number) => {
+      const grid = api().handle.displayList(geometry()!.layout.viewport).grid!;
+      const row = grid.rowIndices?.[3] ?? grid.startRow + 3;
+      const col = grid.colIndices?.[0] ?? grid.startCol;
+      const rect = cellRect(grid, row, col)!;
+      const at = query(
+        40 + (rect.x + rect.w / 2) * zoom * scale,
+        60 + (rect.y + rect.h / 2) * zoom * scale
+      );
+      expect(at).toMatchObject({ sheet: 0, row, col });
+      return at!;
+    };
+
+    place(1);
+    const top = probe(1, 1);
+    const [chart] = api().handle.displayList(geometry()!.layout.viewport).charts!;
+    expect(query(40 + chart.clip.x + chart.clip.w / 2, 60 + chart.clip.y + chart.clip.h / 2)).toBeNull();
+    expect(query(39, 70)).toBeNull();
+    expect(query(Number.NaN, 70)).toBeNull();
+    expect(query(70, Number.POSITIVE_INFINITY)).toBeNull();
+    expect(query(40 + VIEWPORT.width, 70)).toBeNull();
+
+    const surface = view.getByTestId('xlsx-scroll');
+    surface.scrollTop = 200;
+    fireEvent.scroll(surface);
+    await until(() => geometry()?.layout.viewport.y === 200);
+    const scrolled = probe(1, 1);
+    expect(scrolled.row).toBeGreaterThan(top.row);
+    expect(scrolled.layoutId).not.toBe(top.layoutId);
+
+    for (const zoom of [1, 2]) {
+      if (zoom !== 1) {
+        await act(async () => {
+          await api().commands.execute('zoom', { scale: zoom });
+        });
+        await until(() => geometry()?.layout.zoom === zoom);
+      }
+      for (const scale of [1, 0.75, 1.5]) {
+        place(scale);
+        probe(zoom, scale);
+      }
+    }
+
+    place(1);
+    const retained = geometry()!;
+    const stale = api();
+    const grid = stale.handle.displayList(retained.layout.viewport).grid!;
+    const rect = cellRect(grid, grid.rowIndices?.[1] ?? grid.startRow + 1, 0)!;
+    const point = [40 + (rect.x + rect.w / 2) * 2, 60 + (rect.y + rect.h / 2) * 2] as const;
+    expect(retained.getPositionAtPoint!(...point)).not.toBeNull();
+    stale.handle.editCell(0, 0, 0, 'Direct');
+    expect(retained.getPositionAtPoint!(...point)).toBeNull();
+    await until(() => geometry()?.layout.version === stale.handle.version());
+    expect(query(...point)).not.toBeNull();
+
+    const painted = geometry()!;
+    rerender({ plugins, file: fixture.slice() });
+    await until(() => ready.length > 1);
+    expect(stale.getPositionAtPoint(...point)).toBeNull();
+    expect(painted.getPositionAtPoint!(...point)).toBeNull();
+    await until(() => geometry() !== null && geometry()!.layout.id !== painted.layout.id);
+    place(1);
+    expect(query(...point)).not.toBeNull();
+  });
 });

@@ -708,7 +708,10 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [run, active, selection, selectedChart]);
   const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
-    selection: pluginSelection, canvasRef, t });
+    selection: pluginSelection, canvasRef, t, positionAtPoint: (clientX, clientY) => {
+      const owner = runRef.current;
+      return owner?.current && !owner.retiring && !owner.failure ? apiBridge.getPositionAtPoint?.(clientX, clientY) ?? null : null;
+    } });
   const presentGridRef = useRef(pluginHost.presentGrid);
   presentGridRef.current = pluginHost.presentGrid;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
@@ -765,6 +768,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const sheetId = run.session.state.sheets[request.sheet]?.id;
         presentGridRef.current(sheetId === undefined ? null : {
           frame: painted.displayList, zoom: request.zoom, viewport: request.viewport, version: painted.version, sheetId,
+          sheet: request.sheet,
         });
         for (const waiter of paintWaiters.current.slice()) {
           const covered = samePaint(painted, waiter.request, waiter.sequence);
