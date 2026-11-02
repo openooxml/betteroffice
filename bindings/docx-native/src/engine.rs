@@ -6,6 +6,7 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::thread::{self, ThreadId};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use docx_engine::{Document, EngineError, EngineErrorKind, Host};
@@ -113,12 +114,57 @@ fn native_clock_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn native_host() -> Host {
-    Host::new(
-        Arc::new(native_clock_ms),
-        Arc::new(native_entropy),
-        Arc::new(native_timer_ms),
-    )
+fn read_js_clock(env: Env) -> Option<u64> {
+    let read = || -> Result<f64> {
+        let date: Function<f64> = env.get_global()?.get_named_property("Date")?;
+        let now: Function<(), f64> = date.get_named_property("now")?;
+        now.apply(date, ())
+    };
+    match read() {
+        Ok(ms) if ms.is_finite() && ms >= 0.0 => Some(ms as u64),
+        Ok(_) => None,
+        Err(_) => {
+            let _ = take_pending_exception(env);
+            None
+        }
+    }
+}
+
+struct JsClock {
+    env: usize,
+    thread: ThreadId,
+    now: Arc<AtomicU64>,
+}
+
+impl JsClock {
+    fn new(env: Env) -> Self {
+        let clock = Self {
+            env: env.raw() as usize,
+            thread: thread::current().id(),
+            now: Arc::new(AtomicU64::new(0)),
+        };
+        clock.refresh();
+        clock
+    }
+
+    fn refresh(&self) {
+        let now = if thread::current().id() == self.thread {
+            read_js_clock(Env::from_raw(self.env as napi::sys::napi_env))
+        } else {
+            None
+        };
+        self.now
+            .store(now.unwrap_or_else(native_clock_ms), Ordering::Relaxed);
+    }
+
+    fn host(&self) -> Host {
+        let now = Arc::clone(&self.now);
+        Host::new(
+            Arc::new(move || now.load(Ordering::Relaxed)),
+            Arc::new(native_entropy),
+            Arc::new(native_timer_ms),
+        )
+    }
 }
 
 fn map_error(env: Env, error: EngineError) -> Error {
@@ -224,10 +270,16 @@ pub struct EditSession {
     update_observer: RefCell<Option<UpdateObserver>>,
     delivering: Cell<bool>,
     core: RefCell<Option<Document>>,
+    clock: JsClock,
 }
 
 impl EditSession {
     fn document(&self) -> Result<DocumentGuard<'_, Ref<'_, Document>>> {
+        self.clock.refresh();
+        self.document_unclocked()
+    }
+
+    fn document_unclocked(&self) -> Result<DocumentGuard<'_, Ref<'_, Document>>> {
         let core = self.core.try_borrow().map_err(|_| borrow_error())?;
         let core = Ref::filter_map(core, Option::as_ref)
             .map_err(|_| Error::from_reason("EditSession was freed"))?;
@@ -238,6 +290,11 @@ impl EditSession {
     }
 
     fn document_mut(&self) -> Result<DocumentGuard<'_, RefMut<'_, Document>>> {
+        self.clock.refresh();
+        self.document_mut_unclocked()
+    }
+
+    fn document_mut_unclocked(&self) -> Result<DocumentGuard<'_, RefMut<'_, Document>>> {
         let core = self.core.try_borrow_mut().map_err(|_| borrow_error())?;
         let core = RefMut::filter_map(core, Option::as_mut)
             .map_err(|_| Error::from_reason("EditSession was freed"))?;
@@ -321,14 +378,14 @@ impl EditSession {
 
     #[napi(js_name = "register_measure_font")]
     pub fn register_measure_font(&self, env: Env, bytes: Uint8Array) -> Result<u32> {
-        self.document()?
+        self.document_unclocked()?
             .register_measure_font(&bytes)
             .map_err(|error| map_error(env, error))
     }
 
     #[napi(js_name = "decode_font")]
     pub fn decode_font(&self, env: Env, bytes: Uint8Array) -> Result<Uint8Array> {
-        self.document()?
+        self.document_unclocked()?
             .decode_font(&bytes)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
@@ -545,7 +602,7 @@ impl EditSession {
         pages: Uint32Array,
         expected_frame_epoch: f64,
     ) -> Result<Uint8Array> {
-        self.document()?
+        self.document_unclocked()?
             .build_display_pages_frame(pages.to_vec(), expected_frame_epoch)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
@@ -558,7 +615,7 @@ impl EditSession {
         pages: Uint32Array,
         expected_frame_epoch: f64,
     ) -> Result<Uint8Array> {
-        self.document()?
+        self.document_unclocked()?
             .release_display_pages_frame(pages.to_vec(), expected_frame_epoch)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
@@ -704,7 +761,7 @@ impl EditSession {
         part_id: String,
         ranges: Float64Array,
     ) -> Result<Float64Array> {
-        self.document()?
+        self.document_unclocked()?
             .display_range_rects_batch(&region, &part_id, ranges.to_vec())
             .map_err(|error| map_error(env, error))
             .map(Float64Array::new)
@@ -767,13 +824,14 @@ impl EditSession {
 
     #[napi(js_name = "apply_host_update")]
     pub fn apply_host_update(&self, env: Env, update: Uint8Array) -> Result<()> {
-        self.document()?
+        self.document_unclocked()?
             .apply_host_update(&update)
             .map_err(|error| map_error(env, error))
     }
 
     #[napi(js_name = "apply_local_update")]
     pub fn apply_local_update(&self, env: Env, update: Uint8Array) -> Result<()> {
+        let update = update.to_vec();
         self.document()?
             .apply_local_update(&update)
             .map_err(|error| map_error(env, error))
@@ -840,21 +898,21 @@ impl EditSession {
                 })?;
             chunks.push(bytes.to_vec());
         }
-        self.document()?
+        self.document_unclocked()?
             .apply_update_chunks(&chunks)
             .map_err(|error| map_error(env, error))
     }
 
     #[napi(js_name = "apply_update")]
     pub fn apply_update(&self, env: Env, update: Uint8Array) -> Result<()> {
-        self.document()?
+        self.document_unclocked()?
             .apply_update(&update)
             .map_err(|error| map_error(env, error))
     }
 
     #[napi(js_name = "apply_update_with_inference")]
     pub fn apply_update_with_inference(&self, env: Env, update: Uint8Array) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .apply_update_with_inference(&update)
             .map_err(|error| map_error(env, error))
     }
@@ -879,7 +937,7 @@ impl EditSession {
         metadata: Uint8Array,
         source: Option<Uint8Array>,
     ) -> Result<()> {
-        self.document()?
+        self.document_unclocked()?
             .bootstrap_peer(&state, &metadata, source.map(|bytes| bytes.to_vec()))
             .map_err(|error| map_error(env, error))
     }
@@ -965,7 +1023,7 @@ impl EditSession {
         revised: Uint8Array,
         options: String,
     ) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .compare_docx_json(&original, &revised, &options)
             .map_err(|error| map_error(env, error))
     }
@@ -1091,7 +1149,7 @@ impl EditSession {
         max_chunk_bytes: u32,
     ) -> Result<Array<'_>> {
         let chunks = self
-            .document()?
+            .document_unclocked()?
             .encode_diff_chunks(&remote_state_vector, max_chunk_bytes)
             .map_err(|error| map_error(env, error))?;
         let chunks = chunks
@@ -1103,7 +1161,7 @@ impl EditSession {
 
     #[napi(js_name = "encode_diff")]
     pub fn encode_diff(&self, env: Env, remote_state_vector: Uint8Array) -> Result<Uint8Array> {
-        self.document()?
+        self.document_unclocked()?
             .encode_diff(&remote_state_vector)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
@@ -1170,7 +1228,7 @@ impl EditSession {
         request: String,
         options: String,
     ) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .export_snapshot_with_private_fonts_json(&fonts, &font_lengths, &request, &options)
             .map_err(|error| map_error(env, error))
     }
@@ -1222,7 +1280,7 @@ impl EditSession {
 
     #[napi(js_name = "finish_compared_docx_json")]
     pub fn finish_compared_docx_json(&self, env: Env, bytes: Uint8Array) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .finish_compared_docx_json(&bytes)
             .map_err(|error| map_error(env, error))
     }
@@ -1497,7 +1555,7 @@ impl EditSession {
 
     #[napi(js_name = "load")]
     pub fn load(&self, env: Env, update: Uint8Array) -> Result<()> {
-        self.document()?
+        self.document_unclocked()?
             .load(&update)
             .map_err(|error| map_error(env, error))
     }
@@ -1518,7 +1576,7 @@ impl EditSession {
 
     #[napi(js_name = "load_note_separators")]
     pub fn load_note_separators(&self, env: Env, state: Uint8Array) -> Result<()> {
-        self.document()?
+        self.document_unclocked()?
             .load_note_separators(&state)
             .map_err(|error| map_error(env, error))
     }
@@ -1611,10 +1669,12 @@ impl EditSession {
                 EngineError::message("client_id must be a non-negative safe integer"),
             ));
         }
+        let clock = JsClock::new(env);
         Ok(Self {
             update_observer: RefCell::new(None),
             delivering: Cell::new(false),
-            core: RefCell::new(Some(Document::new(client_id as u64, native_host()))),
+            core: RefCell::new(Some(Document::new(client_id as u64, clock.host()))),
+            clock,
         })
     }
 
@@ -1649,7 +1709,7 @@ impl EditSession {
         generation: Option<String>,
         digest: Option<String>,
     ) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .open_docx_owned(bytes.to_vec(), seed_stories, generation, digest)
             .map_err(|error| map_error(env, error))
     }
@@ -1661,7 +1721,7 @@ impl EditSession {
         bytes: Uint8Array,
         blocks: u32,
     ) -> Result<Either<String, Undefined>> {
-        self.document()?
+        self.document_unclocked()?
             .open_docx_preview_owned(bytes.to_vec(), blocks)
             .map_err(|error| map_error(env, error))
             .map(optional_result)
@@ -1675,7 +1735,7 @@ impl EditSession {
         blocks: u32,
         paragraph_budget: Option<u32>,
     ) -> Result<Either<String, Undefined>> {
-        self.document()?
+        self.document_unclocked()?
             .open_docx_preview_with_budget_owned(bytes.to_vec(), blocks, paragraph_budget)
             .map_err(|error| map_error(env, error))
             .map(optional_result)
@@ -1854,7 +1914,7 @@ impl EditSession {
         anchor: Uint8Array,
         head: Uint8Array,
     ) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .resolve_encoded_selection(&story, &anchor, &head)
             .map_err(|error| map_error(env, error))
     }
@@ -1873,7 +1933,7 @@ impl EditSession {
         story: String,
         position: Uint8Array,
     ) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .resolve_sticky_position(&story, &position)
             .map_err(|error| map_error(env, error))
     }
@@ -1945,7 +2005,7 @@ impl EditSession {
         bytes: Uint8Array,
         generation: Option<String>,
     ) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .seed_from_docx_owned(bytes.to_vec(), generation)
             .map_err(|error| map_error(env, error))
     }
@@ -2325,7 +2385,7 @@ impl EditSession {
         env: Env,
         callback: Function<'_, FnArgs<(Uint8Array, u32)>, ()>,
     ) -> Result<()> {
-        let core = self.document_mut()?;
+        let core = self.document_mut_unclocked()?;
         let callback = Rc::new(callback.create_ref()?);
         let pending = Rc::new(RefCell::new(VecDeque::new()));
         let observed = Rc::clone(&pending);
@@ -2409,7 +2469,7 @@ impl EditSession {
         story: String,
         units: Uint32Array,
     ) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .story_segment_units(&story, units.to_vec())
             .map_err(|error| map_error(env, error))
     }
@@ -2506,7 +2566,7 @@ impl EditSession {
 
     #[napi(js_name = "written_paragraph_ids")]
     pub fn written_paragraph_ids(&self, env: Env, bytes: Uint8Array) -> Result<String> {
-        self.document()?
+        self.document_unclocked()?
             .written_paragraph_ids(&bytes)
             .map_err(|error| map_error(env, error))
     }
