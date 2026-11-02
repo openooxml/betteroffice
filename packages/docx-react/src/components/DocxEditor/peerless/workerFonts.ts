@@ -35,13 +35,14 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
 /**
  * `prepared` extended by every requirement of `next` it does not cover, or null when it covers all.
  * A requirement covers one with its key only with the same scripts in the same order: they fix the chain.
- * New characters alone count only when `covers` cannot place them in the fonts already registered.
+ * New characters alone count only when `covers` cannot place them in the fonts already registered;
+ * it judges only the requirements that gained characters.
  */
 export function uncoveredFontRequirements(prepared: readonly ResidentFontRequirement[],
   next: readonly ResidentFontRequirement[],
   covers?: (requirements: ResidentFontRequirement[]) => boolean): ResidentFontRequirement[] | null {
   const byKey = new Map(prepared.map(requirement => [requirement.key, requirement]));
-  let uncovered = false;
+  const added: ResidentFontRequirement[] = [];
   let chainsChanged = false;
   for (const requirement of next) {
     const known = byKey.get(requirement.key);
@@ -50,15 +51,15 @@ export function uncoveredFontRequirements(prepared: readonly ResidentFontRequire
     const covered = new Set(knownCharacters);
     const sameChain = !!known && (known.scripts ?? []).join() === (requirement.scripts ?? []).join();
     if (sameChain && characters.every(character => covered.has(character))) continue;
-    byKey.set(requirement.key, known ? {
+    const extended = known ? {
       ...requirement, characters: [...new Set([...knownCharacters, ...characters])].sort(),
-    } : requirement);
-    uncovered = true;
+    } : requirement;
+    byKey.set(requirement.key, extended);
+    added.push(extended);
     chainsChanged ||= !sameChain;
   }
-  if (!uncovered) return null;
-  const merged = [...byKey.values()];
-  return !chainsChanged && covers?.(merged) ? null : merged;
+  if (added.length === 0) return null;
+  return !chainsChanged && covers?.(added) ? null : [...byKey.values()];
 }
 
 export async function prepareWorkerFontEnvironment(options: {

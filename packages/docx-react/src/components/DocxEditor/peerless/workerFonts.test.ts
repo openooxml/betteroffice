@@ -39,6 +39,15 @@ test('new characters the registered fonts already cover do not rebuild the font 
   expect(uncoveredFontRequirements(prepared, added, () => true)?.map(item => item.key)).toEqual(['requested|0|0', 'other|0|0']);
 });
 
+test('the coverage check judges only the requirements that gained characters', () => {
+  const typed = { key: 'typed|0|0', family: 'Typed', bold: false, italic: false };
+  const other = { key: 'other|0|0', family: 'Other', bold: false, italic: false, characters: ['A'] };
+  const asked: unknown[] = [];
+  const covers = (requirements: unknown[]) => { asked.push(requirements); return requirements.length === 1; };
+  expect(uncoveredFontRequirements([{ ...typed, characters: ['A'] }, other], [{ ...typed, characters: ['j'] }, other], covers)).toBeNull();
+  expect(asked).toEqual([[{ ...typed, characters: ['A', 'j'] }]]);
+});
+
 test('compact requirement refreshes compare decoded candidates and settle', () => {
   const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false };
   const prepared = [{ ...requirement, characterBits: '0000000000000002' }];
