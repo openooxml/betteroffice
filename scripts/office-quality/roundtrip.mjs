@@ -15,16 +15,22 @@ export const ENGINE_TIMEOUT = 180;
 export const HELPER_TIMEOUT = 30;
 
 export const MAX_MATRIX_JOBS = 256;
+export const ROUNDTRIP_MATRICES = 2;
 
 export function roundtripShards(plan) {
-  const shards = plan.formats.flatMap(format => {
+  return plan.formats.flatMap(format => {
     const ids = plan.samples.filter(sample => sample.format === format).map(sample => sample.id).sort();
     return Array.from({ length: Math.ceil(ids.length / SHARD_SIZE) }, (_, shard) =>
       ({ format, shard, ids: ids.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE) }));
   });
-  if (shards.length > MAX_MATRIX_JOBS)
-    throw new Error(`Roundtrip needs ${shards.length} jobs; one workflow matrix holds at most ${MAX_MATRIX_JOBS}`);
-  return shards;
+}
+
+export function roundtripMatrices(plan) {
+  const shards = roundtripShards(plan).map(({ format, shard }) => ({ format, shard }));
+  const size = Math.ceil(shards.length / ROUNDTRIP_MATRICES);
+  if (size > MAX_MATRIX_JOBS)
+    throw new Error(`Roundtrip needs ${shards.length} jobs; ${ROUNDTRIP_MATRICES} workflow matrices hold at most ${ROUNDTRIP_MATRICES * MAX_MATRIX_JOBS}`);
+  return Array.from({ length: ROUNDTRIP_MATRICES }, (_, index) => shards.slice(index * size, (index + 1) * size));
 }
 
 function validateOutcome(result) {

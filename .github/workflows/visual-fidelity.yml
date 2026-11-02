@@ -49,7 +49,8 @@ jobs:
       runner-image: ${{ steps.runner.outputs.image }}
       formats: ${{ steps.plan.outputs.formats }}
       roundtrip-builds: ${{ steps.plan.outputs.roundtrip-builds }}
-      roundtrip-shards: ${{ steps.plan.outputs.roundtrip-shards }}
+      roundtrip-shards-a: ${{ steps.plan.outputs.roundtrip-shards-a }}
+      roundtrip-shards-b: ${{ steps.plan.outputs.roundtrip-shards-b }}
       docx-shards: ${{ steps.plan.outputs.docx-shards }}
       docx-published-source: ${{ steps.plan.outputs.docx-published-source }}
       pptx-published-source: ${{ steps.plan.outputs.pptx-published-source }}
@@ -99,13 +100,15 @@ jobs:
           node --input-type=module - <<'JS'
           import { appendFile, readFile } from 'node:fs/promises';
           import { docxShards } from './scripts/office-quality/docx-benchmark.mjs';
-          import { roundtripShards } from './scripts/office-quality/roundtrip.mjs';
+          import { roundtripMatrices } from './scripts/office-quality/roundtrip.mjs';
           import { xlsxFidelityShards } from './scripts/office-quality/xlsx-fidelity.mjs';
           import { xlsxShards } from './scripts/office-quality/xlsx-benchmark.mjs';
           const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
           const builds = plan.formats.flatMap(format => ['published', 'commit'].map(channel =>
             ({ format, channel, source: channel === 'commit' ? plan.source_sha : plan[`${format}_published_source_sha`] })));
-          await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-shards=${JSON.stringify(roundtripShards(plan).map(({ format, shard }) => ({ format, shard })))}\n`);
+          const [roundtripA, roundtripB] = roundtripMatrices(plan);
+          await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-shards-a=${JSON.stringify(roundtripA)}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-shards-b=${JSON.stringify(roundtripB)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-builds=${JSON.stringify(builds)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `formats=${JSON.stringify(plan.formats)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-shards=${JSON.stringify(docxShards(plan).map((_, index) => index))}\n`);
@@ -831,18 +834,18 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  roundtrip:
+  roundtrip-a:
     needs: [prepare, roundtrip-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    env:
+    env: &roundtrip-env
       SOFFICE: /opt/libreoffice26.2/program/soffice
       LO_PYTHON: /opt/libreoffice26.2/program/python
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards) }}
-    steps:
+        include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards-a) }}
+    steps: &roundtrip-steps
       - name: Require the planned runner image
         env:
           PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
@@ -915,11 +918,24 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  roundtrip-b:
+    needs: [prepare, roundtrip-build]
+    if: needs.prepare.outputs.roundtrip-shards-b != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env: *roundtrip-env
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards-b) }}
+    steps: *roundtrip-steps
+
   publish:
-    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip]
+    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip-a, roundtrip-b]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' &&
-      needs.prepare.result == 'success' && needs.measure.result == 'success' && needs.roundtrip.result == 'success' &&
+      needs.prepare.result == 'success' && needs.measure.result == 'success' && needs.roundtrip-a.result == 'success' &&
+      (needs.prepare.outputs.roundtrip-shards-b == '[]' || needs.roundtrip-b.result == 'success') &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success') &&
       (needs.prepare.outputs.xlsx-shards == '[]' || needs.xlsx-benchmark.result == 'success') &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success') &&
