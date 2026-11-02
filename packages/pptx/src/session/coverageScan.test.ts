@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
-import { activeSlideCoverageScripts, slideCoverageScripts } from './coverageScan';
+import { activeSlideCoverageScripts, activeSlideMetafileFlags, scanOpeningSlide, slideCoverageScripts } from './coverageScan';
 
 const run = (text: string, lang?: string) =>
   `<a:r><a:rPr${lang ? ` lang="${lang}"` : ''}/><a:t>${text}</a:t></a:r>`;
@@ -119,4 +119,47 @@ test('stored parts must match their declared size', async () => {
   expect(await activeSlideCoverageScripts(bytes)).toEqual(['cjk-jp']);
   declareSize(bytes, 'ppt/slides/slide1.xml', 10);
   expect(await activeSlideCoverageScripts(bytes)).toEqual([]);
+});
+
+for (const extension of ['emf', 'WMF']) test(`opening metafile relationships are found in presentation order (${extension})`, async () => {
+  const zip = await JSZip.loadAsync(await deck([slide(run('English')), slide(run('かな'))], [2, 1]));
+  zip.file('ppt/slides/_rels/slide2.xml.rels', `<Relationships><Relationship Id="picture" Target="../media/picture.${extension}"/></Relationships>`);
+  zip.file(`ppt/media/picture.${extension}`, new Uint8Array([1]));
+  const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  expect(await scanOpeningSlide(bytes)).toEqual({ scripts: ['cjk-jp'], openingSlideMetafile: true, packageMetafile: true });
+  expect(await activeSlideMetafileFlags(bytes, 1)).toEqual({ openingSlideMetafile: false, packageMetafile: true });
+  expect(await activeSlideMetafileFlags(bytes, 99)).toEqual({ openingSlideMetafile: false, packageMetafile: true });
+});
+
+test('metafile flags distinguish relationships from package media', async () => {
+  const zip = await JSZip.loadAsync(await deck([slide(run('English'))], [1]));
+  zip.file('ppt/slides/_rels/slide1.xml.rels', '<Relationships><Relationship Id="picture" Target="../media/picture.png"/></Relationships>');
+  zip.file('ppt/media/picture.png', new Uint8Array([1]));
+  zip.file('other/picture.emf', new Uint8Array([1]));
+  expect(await activeSlideMetafileFlags(await zip.generateAsync({ type: 'uint8array' })))
+    .toEqual({ openingSlideMetafile: false, packageMetafile: false });
+  zip.file('ppt/media/unused.EMF', new Uint8Array([1]));
+  expect(await activeSlideMetafileFlags(await zip.generateAsync({ type: 'uint8array' })))
+    .toEqual({ openingSlideMetafile: false, packageMetafile: true });
+  zip.remove('ppt/media/unused.EMF');
+  zip.file('ppt/slides/_rels/slide1.xml.rels', '<Relationships><Relationship Id="picture" Target="../media/missing.wmf"/></Relationships>');
+  expect(await activeSlideMetafileFlags(await zip.generateAsync({ type: 'uint8array' })))
+    .toEqual({ openingSlideMetafile: true, packageMetafile: false });
+});
+
+test('malformed packages have no metafile flags', async () => {
+  for (const bytes of [new Uint8Array(), new Uint8Array([1, 2, 3]), new Uint8Array(64)]) {
+    expect(await activeSlideMetafileFlags(bytes)).toEqual({ openingSlideMetafile: false, packageMetafile: false });
+  }
+  const bytes = await deck([slide(run('English'))], [1]);
+  expect(await activeSlideMetafileFlags(bytes.subarray(0, bytes.length - 20)))
+    .toEqual({ openingSlideMetafile: false, packageMetafile: false });
+});
+
+test('metafile relationship scans keep the part size limit', async () => {
+  const zip = await JSZip.loadAsync(await deck([slide(run('English'))], [1]));
+  zip.file('ppt/slides/_rels/slide1.xml.rels', '<Relationships><Relationship Id="picture" Target="../media/picture.emf"/></Relationships>');
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  declareSize(bytes, 'ppt/slides/_rels/slide1.xml.rels', 4 * 1024 * 1024 + 1);
+  expect(await activeSlideMetafileFlags(bytes)).toEqual({ openingSlideMetafile: false, packageMetafile: false });
 });

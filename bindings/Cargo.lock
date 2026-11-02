@@ -323,6 +323,7 @@ name = "betteroffice-pptx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-fonts",
+ "betteroffice-pptx-edit",
  "betteroffice-pptx-engine",
  "getrandom 0.3.4",
  "napi",

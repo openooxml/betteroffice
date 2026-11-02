@@ -1,16 +1,23 @@
+#[cfg(feature = "metafile-svg")]
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::DeckSession;
 
 #[doc(hidden)]
+#[cfg_attr(not(feature = "metafile-svg"), derive(Default))]
 pub struct MetafileSvgCache {
+    #[cfg(feature = "metafile-svg")]
     entries: HashMap<String, Option<Arc<[u8]>>>,
+    #[cfg(feature = "metafile-svg")]
     source_bytes: usize,
+    #[cfg(feature = "metafile-svg")]
     svg_bytes: usize,
+    #[cfg(feature = "metafile-svg")]
     replay: ooxml_metafile::ReplayBudget,
 }
 
+#[cfg(feature = "metafile-svg")]
 impl Default for MetafileSvgCache {
     fn default() -> Self {
         let picture = ooxml_metafile::ReplayBudget::default();
@@ -27,6 +34,12 @@ impl Default for MetafileSvgCache {
 }
 
 impl MetafileSvgCache {
+    #[cfg(not(feature = "metafile-svg"))]
+    pub fn resolve(&mut self, _key: &str, _bytes: &[u8]) -> Option<Arc<[u8]>> {
+        None
+    }
+
+    #[cfg(feature = "metafile-svg")]
     pub fn resolve(&mut self, key: &str, bytes: &[u8]) -> Option<Arc<[u8]>> {
         if let Some(svg) = self.entries.get(key) {
             return svg.clone();
@@ -54,15 +67,22 @@ impl MetafileSvgCache {
 impl DeckSession {
     /// Resolves a cached display copy without changing the source media.
     pub fn metafile_svg(&self, part_path: &str) -> Option<Arc<[u8]>> {
-        if let Some(svg) = self.metafile_svgs.borrow().entries.get(part_path) {
-            return svg.clone();
+        #[cfg(not(feature = "metafile-svg"))]
+        {
+            self.metafile_svgs.borrow_mut().resolve(part_path, &[])
         }
-        let bytes = self.media_bytes(part_path).ok()?;
-        self.metafile_svgs.borrow_mut().resolve(part_path, &bytes)
+        #[cfg(feature = "metafile-svg")]
+        {
+            if let Some(svg) = self.metafile_svgs.borrow().entries.get(part_path) {
+                return svg.clone();
+            }
+            let bytes = self.media_bytes(part_path).ok()?;
+            self.metafile_svgs.borrow_mut().resolve(part_path, &bytes)
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "metafile-svg"))]
 mod tests {
     use super::*;
 
@@ -119,5 +139,22 @@ mod tests {
                 .resolve("large", &oversized)
                 .is_none()
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "metafile-svg")))]
+mod lean_tests {
+    use super::*;
+
+    #[test]
+    fn svg_is_unavailable() {
+        let bytes = include_bytes!("../../pptx-render/tests/fixtures/metafile-text.emf");
+        assert!(MetafileSvgCache::default().resolve("text", bytes).is_none());
+        let session = DeckSession::open(
+            include_bytes!("../../pptx-render/tests/fixtures/metafile-svg-pictures.pptx"),
+            1,
+        )
+        .unwrap();
+        assert!(session.metafile_svg("ppt/media/image1.emf").is_none());
     }
 }

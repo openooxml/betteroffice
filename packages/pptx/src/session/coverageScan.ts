@@ -27,6 +27,7 @@ function centralDirectory(bytes: Uint8Array): Map<string, ZipEntry> | undefined 
     if (at + 46 > bytes.byteLength || view.getUint32(at, true) !== 0x02014b50) return undefined;
     const nameLength = view.getUint16(at + 28, true);
     const skip = nameLength + view.getUint16(at + 30, true) + view.getUint16(at + 32, true);
+    if (at + 46 + skip > bytes.byteLength) return undefined;
     const name = decoder.decode(bytes.subarray(at + 46, at + 46 + nameLength));
     entries.set(name, {
       method: view.getUint16(at + 10, true),
@@ -198,24 +199,55 @@ function relationshipTarget(rels: string, id: string): string | undefined {
   return target;
 }
 
-/** Coverage scripts of the slide that opens first, from the package bytes; empty when anything is unexpected. */
-export async function activeSlideCoverageScripts(source: ArrayBuffer | Uint8Array, activeSlideIndex = 0): Promise<string[]> {
+export interface OpeningSlideScan {
+  scripts: string[];
+  openingSlideMetafile: boolean;
+  packageMetafile: boolean;
+}
+
+function metafileTarget(target: string): boolean {
+  const lower = target.toLowerCase();
+  return lower.endsWith('.emf') || lower.endsWith('.wmf');
+}
+
+export async function scanOpeningSlide(source: ArrayBuffer | Uint8Array, activeSlideIndex = 0): Promise<OpeningSlideScan> {
+  const result: OpeningSlideScan = { scripts: [], openingSlideMetafile: false, packageMetafile: false };
   try {
     const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
     const entries = centralDirectory(bytes);
-    if (!entries) return [];
+    if (!entries) return result;
+    result.packageMetafile = [...entries.keys()].some((name) => name.startsWith('ppt/media/') && metafileTarget(name));
     const budget = { left: MAX_SCAN_BYTES };
     const presentation = await readPart(bytes, entries, 'ppt/presentation.xml', budget);
     const rels = await readPart(bytes, entries, 'ppt/_rels/presentation.xml.rels', budget);
-    if (!presentation || !rels) return [];
+    if (!presentation || !rels) return result;
     const ids = slideIds(presentation);
     const id = ids[Math.max(0, Math.min(activeSlideIndex, ids.length - 1))];
     const target = id === undefined ? undefined : relationshipTarget(rels, id);
-    if (!target) return [];
-    const path = target.startsWith('/') ? target.slice(1) : `ppt/${target.replace(/^\.\//, '')}`;
+    if (!target) return result;
+    const relative = target.startsWith('./') ? target.slice(2) : target;
+    const path = target.startsWith('/') ? target.slice(1) : `ppt/${relative}`;
+    const slash = path.lastIndexOf('/');
+    const slideRels = await readPart(bytes, entries, `${path.slice(0, slash)}/_rels/${path.slice(slash + 1)}.rels`, budget);
+    if (slideRels) eachTag(slideRels, 0, slideRels.length, (tag) => {
+      if (isTag(tag, 'Relationship') && metafileTarget(attribute(tag, 'Target') ?? '')) result.openingSlideMetafile = true;
+    });
     const xml = await readPart(bytes, entries, path, budget);
-    return xml ? slideCoverageScripts(xml) : [];
+    if (xml) result.scripts = slideCoverageScripts(xml);
+    return result;
   } catch {
-    return [];
+    return { scripts: [], openingSlideMetafile: false, packageMetafile: false };
   }
+}
+
+export async function activeSlideMetafileFlags(source: ArrayBuffer | Uint8Array, activeSlideIndex = 0): Promise<{
+  openingSlideMetafile: boolean; packageMetafile: boolean;
+}> {
+  const { openingSlideMetafile, packageMetafile } = await scanOpeningSlide(source, activeSlideIndex);
+  return { openingSlideMetafile, packageMetafile };
+}
+
+/** Coverage scripts of the slide that opens first. */
+export async function activeSlideCoverageScripts(source: ArrayBuffer | Uint8Array, activeSlideIndex = 0): Promise<string[]> {
+  return (await scanOpeningSlide(source, activeSlideIndex)).scripts;
 }

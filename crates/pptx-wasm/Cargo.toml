@@ -13,7 +13,8 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ["-O3"]
 
 [features]
-default = ["oneshot"]
+default = ["oneshot", "metafile-svg"]
+metafile-svg = ["pptx-edit/metafile-svg"]
 oneshot = []
 
 [dependencies]
