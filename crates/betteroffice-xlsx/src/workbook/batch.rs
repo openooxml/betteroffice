@@ -502,6 +502,9 @@ fn validate_formula(source: &str) -> std::result::Result<(), String> {
     if source.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES {
         return Err("exceeds the formula length limit".to_owned());
     }
+    if xlsx_ops::is_formula_source(source) {
+        return Ok(());
+    }
     parse_formula(source)
         .map(|_| ())
         .map_err(|error| format!("does not parse: {error}"))

@@ -163,10 +163,13 @@ enum SheetBinding {
 
 /// a defined name's formula without the `=` some producers store.
 fn definition_source(defined: &DefinedName) -> &str {
-    defined
-        .formula
-        .strip_prefix('=')
-        .unwrap_or(&defined.formula)
+    formula_source(&defined.formula)
+}
+
+/// stored formula text without the `=` some producers keep, which Excel
+/// leaves out of the file; the stored text itself stays as it was read.
+pub(crate) fn formula_source(formula: &str) -> &str {
+    formula.strip_prefix('=').unwrap_or(formula)
 }
 
 impl DepGraph {
@@ -297,7 +300,7 @@ impl DepGraph {
             .sheets
             .iter()
             .flat_map(|sheet| sheet.iter_cells())
-            .filter_map(|(_, cell)| cell.formula.as_deref())
+            .filter_map(|(_, cell)| cell.formula.as_deref().map(formula_source))
             .chain(wb.defined_names.iter().map(definition_source))
             .collect();
         self.asts
@@ -644,7 +647,7 @@ impl DepGraph {
 
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
-        let Some(expr) = parse_cached(&self.asts, src) else {
+        let Some(expr) = parse_cached(&self.asts, formula_source(src)) else {
             return;
         };
         let edges = self.resolve_edges(key, &expr);

@@ -20,6 +20,7 @@ use xlsx_model::{
 };
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
+use crate::deps::reads_other_workbook;
 use crate::eval::{
     EvalContext, EvaluationBudget, HeldCells, MAX_RECALCULATION_CELL_VISITS, evaluate,
 };
@@ -1473,7 +1474,8 @@ fn cell_random_seed(seed: u32, cell: Key) -> u64 {
 }
 
 /// evaluate one formula node; `None` keeps the cached value, because the cell
-/// has no formula, it no longer parses, or an engine gap reached the result.
+/// has no formula, it no longer parses, it reads another workbook, or an engine
+/// gap reached the result.
 fn eval_node(
     wb: &Workbook,
     u: Key,
@@ -1505,7 +1507,10 @@ fn eval_node_with(
         name_index,
         context,
     } = scope;
-    let Some(expr) = graph.ast(u.0, cell_of(u)) else {
+    let Some(expr) = graph
+        .ast(u.0, cell_of(u))
+        .filter(|expr| !reads_other_workbook(expr))
+    else {
         return Evaluated {
             value: None,
             limited: false,
@@ -1533,6 +1538,14 @@ fn eval_node_with(
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
     };
+    if ctx.read_other_workbook() {
+        return Evaluated {
+            value: None,
+            limited: ctx.exhausted(),
+            gap: None,
+            reach: None,
+        };
+    }
     let unsupported = ctx.has_unhandled_unsupported_function();
     let refused = ctx.has_unhandled_budget_error();
     let mut gap = unsupported.then(|| ctx.uncomputable_functions());

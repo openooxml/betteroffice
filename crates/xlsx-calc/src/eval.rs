@@ -12,6 +12,7 @@ use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, Sheet
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
+use crate::deps::{mentions_workbook_index, names_other_workbook, reads_other_workbook};
 use crate::fmath;
 use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
@@ -192,6 +193,7 @@ pub struct EvalContext<'a> {
     /// names of the uncomputable functions this evaluation called, in call
     /// order; no handler answers for them.
     uncomputable: Rc<RefCell<Vec<String>>>,
+    other_workbook: Rc<Cell<bool>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<DefinedNameValues>>,
     array_depth: Rc<Cell<u32>>,
@@ -268,6 +270,7 @@ impl<'a> EvalContext<'a> {
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -314,6 +317,7 @@ impl<'a> EvalContext<'a> {
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -353,6 +357,7 @@ impl<'a> EvalContext<'a> {
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -383,6 +388,7 @@ impl<'a> EvalContext<'a> {
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
             uncomputable: Rc::clone(&self.uncomputable),
+            other_workbook: Rc::clone(&self.other_workbook),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             array_depth: Rc::clone(&self.array_depth),
@@ -603,6 +609,18 @@ impl<'a> EvalContext<'a> {
         names.sort_unstable();
         names.dedup();
         names
+    }
+
+    /// whether this evaluation read another workbook, directly or through a
+    /// defined name. the package carries none of its cells, so the result
+    /// stands in for nothing, whatever a handler made of the gap.
+    pub fn read_other_workbook(&self) -> bool {
+        self.other_workbook.get()
+    }
+
+    pub(crate) fn record_other_workbook(&self) {
+        self.other_workbook.set(true);
+        self.record_unsupported_function();
     }
 
     pub(crate) fn record_unsupported_function(&self) {
@@ -951,11 +969,16 @@ fn bind_defined_name(
         None => parse_formula(formula).ok().map(Arc::new),
     }
     .ok_or_else(|| {
-        if formula.contains('[') {
+        if mentions_workbook_index(formula) {
+            ctx.record_other_workbook();
+        } else if formula.contains('[') {
             ctx.record_unsupported_function();
         }
         ErrorValue::Name
     })?;
+    if reads_other_workbook(&expression) {
+        ctx.record_other_workbook();
+    }
     let sheet = defined.local_sheet.unwrap_or(key.0);
     #[cfg(test)]
     DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
@@ -1010,7 +1033,9 @@ pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Op
 /// workbook (`[1]Sheet`; a sheet name cannot contain `[`) is an engine gap,
 /// since the package carries none of that workbook's cells.
 fn missing_sheet(name: &str, ctx: &EvalContext<'_>) -> Option<SheetId> {
-    if name.contains('[') {
+    if names_other_workbook(name) {
+        ctx.record_other_workbook();
+    } else if name.contains('[') {
         ctx.record_unsupported_function();
     }
     None
