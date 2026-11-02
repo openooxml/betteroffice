@@ -6,7 +6,8 @@ import { PptxEditor } from './PptxEditor';
 import { definePptxPlugin } from './plugins/definePptxPlugin';
 import type { PptxAsyncEditorProps, PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from './PptxEditor';
 import type { PptxAsyncEditorAccess, PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
-import type { BundledFontFace, PptxBundledFont, PptxCommandAdmissionCode, PptxInThreadEditorProps } from './index';
+import type { BundledFontFace, PptxBundledFont, PptxCommandAdmissionCode } from './index';
+import type { PptxInThreadEditorProps } from './PptxEditor';
 import type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends

@@ -32,9 +32,12 @@ export function Presentation({ file, fontBytes }: {
 fetched from your server or loaded with `loadBundledFontBytes` from
 [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts).
 You can also pass a bundled face from `@betteroffice/fonts` as a descriptor; the editor decodes it in its
-worker without loading the main-thread decoder:
+worker without loading the main-thread decoder. `baseUrl` is where you self-host the font assets; omit it
+when your bundler emits the package's assets:
 
 ```tsx
+import { resolveMetricCompatFace } from '@betteroffice/fonts';
+
 const arial = resolveMetricCompatFace('Arial', false, false)!;
 <PptxEditor file={file} fonts={[{ face: arial, baseUrl }]} />
 ```

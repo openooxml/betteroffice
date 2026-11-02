@@ -55,7 +55,11 @@ Hosts loading bundled bytes themselves can import `preparePresentationFontDecode
 then reuses that worker. Call `release()` on the prepared decoder if no session adopts it.
 
 ```ts
+import { preparePresentationFontDecoder } from '@betteroffice/pptx/worker';
+import { loadBundledFontBytes, resolveMetricCompatFace } from '@betteroffice/fonts';
+
 const { decoder, release } = preparePresentationFontDecoder(file);
+const face = resolveMetricCompatFace('Arial', false, false)!;
 const bytes = await loadBundledFontBytes(face, { baseUrl }, { decoder });
 ```
 
