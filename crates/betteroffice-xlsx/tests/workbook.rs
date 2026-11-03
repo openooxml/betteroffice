@@ -4298,7 +4298,10 @@ fn rename_keeps_pending_proposals() {
     let proposals = workbook.proposals();
     assert_eq!(proposals.len(), 1);
     let edit = &proposals[0].edits[0];
-    assert_eq!((edit.sheet, edit.a1.as_str(), edit.input.as_str()), (0, "A1", "=Data!A2"));
+    assert_eq!(
+        (edit.sheet, edit.a1.as_str(), edit.input.as_str()),
+        (0, "A1", "=Renamed!A2")
+    );
     assert_ne!(edit.stale, Some(true));
 }
 
