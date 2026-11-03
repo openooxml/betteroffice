@@ -36,7 +36,10 @@ describe('native package registry', () => {
       'darwin-arm64',
       'darwin-x64',
       'linux-arm64-gnu',
+      'linux-arm64-musl',
       'linux-x64-gnu',
+      'linux-x64-musl',
+      'win32-arm64-msvc',
       'win32-x64-msvc'
     ];
     expect(
@@ -48,7 +51,7 @@ describe('native package registry', () => {
         platforms.map((platform) => `@betteroffice/${format}-native-${platform}`)
       ).sort()
     );
-    expect(platformPackageVersions()).toHaveLength(NATIVE_PACKAGES.length * 5);
+    expect(platformPackageVersions()).toHaveLength(NATIVE_PACKAGES.length * 8);
     expect(() => validateNativeVersions()).not.toThrow();
   });
 
@@ -361,7 +364,7 @@ describe('native package release wiring', () => {
   test('dist builds exactly the declared targets at the requested commit', () => {
     const job = dist.jobs.bindings;
     const targets = job.strategy.matrix.platform.map((platform: any) => platform.target);
-    expect(targets).toHaveLength(5);
+    expect(targets).toHaveLength(8);
     for (const path of NATIVE_PACKAGES) {
       const manifest = JSON.parse(
         readFileSync(new URL(`../${path}/package.json`, import.meta.url), 'utf8')
@@ -379,8 +382,47 @@ describe('native package release wiring', () => {
     expect(toolchain.with.targets).toBe('${{ matrix.platform.target }}');
     const build = job.steps.find((step: any) => step.name === 'Build binding');
     expect(build.run).toBe(
-      'bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release -- --locked'
+      "bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked"
     );
+  });
+
+  test('dist cross-compiles musl with zig and Windows arm64 with MSVC on GitHub-hosted runners', () => {
+    const platforms = dist.jobs.bindings.strategy.matrix.platform;
+    const entry = (target: string) => platforms.find((platform: any) => platform.target === target);
+    for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl']) {
+      expect(entry(target)).toEqual({ os: 'ubuntu-latest', target, zig: true, cross: true });
+    }
+    expect(entry('aarch64-pc-windows-msvc')).toEqual({ os: 'windows-latest', target: 'aarch64-pc-windows-msvc', cross: true });
+    const steps = dist.jobs.bindings.steps;
+    const zig = steps.find((step: any) => step.uses?.startsWith('mlugg/setup-zig@'));
+    const zigbuild = steps.find((step: any) => step.uses?.startsWith('taiki-e/install-action@'));
+    expect(zig.if).toBe('matrix.platform.zig');
+    expect(zigbuild.if).toBe('matrix.platform.zig');
+    expect(zigbuild.with.tool).toStartWith('cargo-zigbuild@');
+    const testing = steps.find((step: any) => step.name === 'Test binding');
+    expect(testing.if).toBe('${{ !matrix.platform.cross }}');
+    const config = readFileSync(new URL('../bindings/.cargo/config.toml', import.meta.url), 'utf8');
+    for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl']) {
+      expect(config).toContain(`[target.${target}]\nrustflags = ["-C", "target-feature=-crt-static"]`);
+    }
+  });
+
+  test('dist loads each musl binary in Node on Alpine', () => {
+    const job = dist.jobs['musl-smoke'];
+    expect(job.needs).toBe('bindings');
+    expect(job.strategy.matrix.include).toEqual([
+      { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-musl' },
+      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-musl' }
+    ]);
+    const steps = job.steps;
+    expect(steps[0].with.ref).toBe('${{ inputs.sha }}');
+    const binary = steps.find((step: any) => step.with?.name === '${{ inputs.binding }}-native.${{ matrix.target }}');
+    const loader = steps.find((step: any) => step.with?.name === '${{ inputs.binding }}-native-loader');
+    expect(binary.with.path).toBe('bindings/${{ inputs.binding }}-native');
+    expect(loader.with.path).toBe('bindings/${{ inputs.binding }}-native');
+    const smoke = steps.find((step: any) => step.name === 'Smoke test on Alpine');
+    expect(smoke.run).toContain('node:24-alpine');
+    expect(smoke.run).toContain('node scripts/native-raw-smoke.mjs ${{ inputs.binding }}');
   });
 
   test('dist uploads the generated loader from GNU Linux x64 after testing', () => {
@@ -527,6 +569,7 @@ describe('native package release wiring', () => {
       'bindings/*-native/**',
       'scripts/native-bindings.mjs',
       'scripts/native-bindings-smoke.mjs',
+      'scripts/native-raw-smoke.mjs',
       'scripts/native-engine.ts',
       'packages/xlsx/src/**',
       'packages/xlsx/package.json',

@@ -49,6 +49,7 @@ export interface XlsxEditorBridge {
   handle(): WorkbookHandle | null;
   status(): XlsxCommandEnvironment['status'];
   readOnly(): boolean;
+  allowHostProposals?(): boolean;
   collaborative(): boolean;
   /** Bumped by every committed change, so cached engine reads stay current. */
   mutation(): number;
@@ -202,6 +203,7 @@ export function useXlsxCommandBinding(
       return {
         status: current.status(),
         readOnly: current.readOnly(),
+        allowHostProposals: current.allowHostProposals?.(),
         collaborative: current.collaborative(),
         selection,
         canUndo: read?.canUndo ?? false,

@@ -96,6 +96,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
           ids.push(engine.registerFont(Uint8Array.of(21, 22)));
         },
         measurementConfigForRequirements: () => ({ fontChains: Object.fromEntries(fontKeys.map((key) => [key, ids])) }),
+        coverageCheck: () => () => true,
         clear() { cleared = true; },
       };
     },

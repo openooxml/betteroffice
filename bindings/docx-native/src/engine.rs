@@ -391,6 +391,11 @@ impl EditSession {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
+    #[napi(js_name = "take_base_latin_miss")]
+    pub fn take_base_latin_miss(&self) -> Result<bool> {
+        Ok(self.document()?.take_base_latin_miss())
+    }
+
     #[napi(js_name = "register_substitute_measure_font")]
     pub fn register_substitute_measure_font(
         &self,
@@ -1760,6 +1765,18 @@ impl EditSession {
         Ok(self
             .document()?
             .prime_save_seed_states(paragraphs, inflated))
+    }
+
+    #[napi(js_name = "prime_save_seed_states_slice")]
+    pub fn prime_save_seed_states_slice(
+        &self,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+    ) -> Result<u32> {
+        Ok(self
+            .document()?
+            .prime_save_seed_states_slice(paragraphs, inflated, max_bytes))
     }
 
     #[napi(js_name = "paragraph_save_plan")]

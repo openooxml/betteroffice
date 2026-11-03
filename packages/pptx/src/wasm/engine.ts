@@ -15,3 +15,8 @@ export type { InitInput } from './generated/pptx_wasm.js';
 
 /** Which engine this build links; the native package builds these sources with its own engine module. */
 export const engineKind: 'wasm' | 'native' = 'wasm';
+
+/** The metafile SVG converter's bindings, imported only when a session needs them. */
+export function metafileSvgBindings(): Promise<typeof import('./generated/metafile_svg_wasm')> {
+  return import('./generated/metafile_svg_wasm');
+}

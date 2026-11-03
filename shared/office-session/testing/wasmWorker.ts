@@ -33,6 +33,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const wasmAssetUrl = (png = true) => new URL(png
               ? testHarness.assetUrl : testHarness.assetUrl.replace(/\\.wasm$/, '_lean.wasm'));
               export const sessionWasmAssetUrl = () => new URL(testHarness.assetUrl.replace(/\\.wasm$/, '_editor.wasm'));
+              export const metafileWasmAssetUrl = () => new URL('metafile.wasm', testHarness.assetUrl);
               export const rasterWasmAssetUrl = () => new URL('raster.wasm', testHarness.assetUrl);`,
             loader: 'js',
           }));
