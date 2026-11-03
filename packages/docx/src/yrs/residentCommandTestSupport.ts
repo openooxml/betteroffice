@@ -57,7 +57,7 @@ export interface OpenedCommandArm extends CommandArm {
 
 export async function openCommandEngine(
   texts = ['Alpha beta', 'Second'],
-  options: { editState?: boolean; bodyXml?: string; stylesXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
+  options: { editState?: boolean; bodyXml?: string; stylesXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number; bytes?: Uint8Array } = {}
 ): Promise<OpenedCommandArm> {
   const initial = stateAt(null);
   const unloaded = {} as DocxWorkerCommandEngine;
@@ -132,9 +132,9 @@ export async function openCommandEngine(
     replaceRange: (range, text, author) => JSON.parse(raw.replace_range(...args(range), text, author?.name, author?.date)),
     deleteRange: (range, author) => JSON.parse(raw.delete_range(...args(range), author?.name, author?.date)),
     splitParagraph: (at, author) => JSON.parse(raw.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date)),
-    toggleMark: (range, mark) => raw.toggle_mark(...args(range), JSON.stringify(mark)),
-    formatRange: (range, delta) => raw.format_range(...args(range), JSON.stringify(delta)),
-    clearFormatting: (range) => raw.clear_formatting(...args(range)),
+    toggleMark: (range, mark, suggesting) => raw.toggle_mark(...args(range), JSON.stringify(mark), suggesting?.name, suggesting?.date),
+    formatRange: (range, delta, suggesting) => raw.format_range(...args(range), JSON.stringify(delta), suggesting?.name, suggesting?.date),
+    clearFormatting: (range, suggesting) => raw.clear_formatting(...args(range), suggesting?.name, suggesting?.date),
     setParagraphAttrs: (range, attrs, author) => raw.set_paragraph_attrs(...args(range), JSON.stringify(attrs), author?.name, author?.date),
     applyParagraphStyle: (range, styleId, author) => raw.apply_paragraph_style(...args(range), styleId, author?.name, author?.date),
     beginUndoCapture: () => {
@@ -146,7 +146,7 @@ export async function openCommandEngine(
   };
   const engine = Object.assign({}, methods, resident);
   owned.push(engine);
-  const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+  const bytes = options.bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts));
   if (options.checkpoint) {
     raw.open_docx(bytes, false, undefined, undefined);
     engine.loadState(options.checkpoint);

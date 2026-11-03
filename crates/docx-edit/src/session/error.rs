@@ -10,6 +10,7 @@ pub struct EngineError {
 pub enum EngineErrorKind {
     Message,
     PeerMetadata { code: &'static str },
+    SuggestedFormattingOverContainer,
 }
 
 pub type EngineResult<T> = Result<T, EngineError>;
@@ -18,6 +19,21 @@ impl EngineError {
     pub fn message(error: impl fmt::Display) -> Self {
         Self {
             kind: EngineErrorKind::Message,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<crate::OpError> for EngineError {
+    fn from(error: crate::OpError) -> Self {
+        let kind = match &error {
+            crate::OpError::SuggestedFormattingOverContainer => {
+                EngineErrorKind::SuggestedFormattingOverContainer
+            }
+            _ => EngineErrorKind::Message,
+        };
+        Self {
+            kind,
             message: error.to_string(),
         }
     }

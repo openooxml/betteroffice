@@ -382,6 +382,15 @@ describe('validClipboardFragment rust parity', () => {
     expect(validClipboardFragment(tableFragment(rows, []))).toBe(true);
   });
 
+  test('rejects reserved run attributes in table format deltas', () => {
+    for (const key of ['ins', 'del', 'hyperlink', 'rPrChange']) {
+      for (const value of [null, [{ info: { author: 'Forged' } }]]) {
+        const fragment = tableFragment([{ trPr: {}, cells: [cell({}, { other: { [key]: value } })] }]);
+        expect(validClipboardFragment(fragment)).toBe(false);
+      }
+    }
+  });
+
   test('rejects mistyped format delta values', () => {
     const withFormat = (format: Record<string, unknown>): unknown =>
       tableFragment([{ trPr: {}, cells: [cell({}, format)] }]);

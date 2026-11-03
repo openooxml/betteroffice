@@ -735,6 +735,8 @@ pub enum RevisionKind {
     Ins,
     #[serde(rename = "del")]
     Del,
+    #[serde(rename = "format")]
+    Format,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -1896,6 +1898,8 @@ struct RunFormattingIn {
     change_date: Option<String>,
     #[serde(default)]
     change_revision_id: Option<i64>,
+    #[serde(default)]
+    format_change: Option<Revision>,
     #[serde(default)]
     hyperlink: Option<HyperlinkIn>,
     #[serde(default)]
@@ -7112,7 +7116,7 @@ fn emit_line(
         let color = match marker_revision {
             Some(RevisionKind::Ins) => REVISION_INS_COLOR,
             Some(RevisionKind::Del) => REVISION_DEL_COLOR,
-            None => attrs
+            None | Some(RevisionKind::Format) => attrs
                 .and_then(|attrs| attrs.list_marker_color.as_deref())
                 .unwrap_or("#000000"),
         };
@@ -7930,7 +7934,7 @@ fn emit_text_segment(
     attrs.doc_start = pm_start;
     attrs.doc_end = pm_end;
     attrs.comment_ids = comment_ids.clone();
-    attrs.revision = revision.map(Box::new);
+    attrs.revision = revision.or_else(|| fmt.format_change.clone()).map(Box::new);
     attrs.href = hyperlink_href(fmt);
     attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone().map(Box::new);
     attrs.logical_order = logical_order.or(fmt.logical_order);
@@ -8151,6 +8155,21 @@ fn emit_text_segment(
             dashed: false,
             dotted: true,
             attrs: attrs.clone(),
+        }));
+    }
+    if let Some(change) = &fmt.format_change {
+        let mut cue_attrs = attrs.clone();
+        cue_attrs.revision = Some(Box::new(change.clone()));
+        prims.push(Primitive::Decoration(DecorationPrimitive {
+            deco: DecoKind::Underline,
+            x: px(x),
+            y: px(paint_baseline + (font_px * 0.3).round()),
+            w: px(width),
+            h: px(1.0),
+            color: "#6a1b9a".to_owned(),
+            dashed: false,
+            dotted: true,
+            attrs: cue_attrs,
         }));
     }
     // Deletions strike through in the revision colour.
