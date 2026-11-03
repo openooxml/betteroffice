@@ -148,6 +148,9 @@ jobs:
           BETTEROFFICE_REQUIRE_WASM: "1"
         run: bun test scripts/wasm-memory.test.ts
 
+      - name: Check exact JSON number parsing in every artifact
+        run: bun test scripts/serde-json-exact.test.ts
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
