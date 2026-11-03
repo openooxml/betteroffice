@@ -4,11 +4,16 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import fitz
+import importlib.util
 
-from xlsx_reference import export_profile
+REFERENCE_TOOLS = importlib.util.find_spec('fitz') is not None
+if REFERENCE_TOOLS:
+    import fitz
+
+    from xlsx_reference import export_profile
 
 
+@unittest.skipUnless(REFERENCE_TOOLS, 'reference capture needs requirements-reference.txt')
 class XlsxReferenceTests(unittest.TestCase):
     def test_ranges_keep_order_and_source_bytes(self):
         profile = {'scale_percent': 75, 'margin_pt': 18,
