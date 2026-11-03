@@ -41,12 +41,14 @@ pub fn decode_font_face(
 thread_local! {
     static CURRENT_ENV: Cell<Option<Env>> = const { Cell::new(None) };
     static CURRENT_OBJECT: Cell<*const Cell<bool>> = const { Cell::new(std::ptr::null()) };
+    static REFUSED: Cell<bool> = const { Cell::new(false) };
 }
 
 const FAILED_OBJECT: &str = "This engine object failed in an earlier call and can only be freed";
 
 fn enter_object(failed: &Cell<bool>, env: Env) -> Result<()> {
     if failed.get() {
+        REFUSED.set(true);
         return Err(map_error(env, EngineError::error(FAILED_OBJECT)));
     }
     CURRENT_OBJECT.set(failed);
@@ -57,25 +59,31 @@ struct EngineCall {
     previous: Option<Env>,
     previous_object: *const Cell<bool>,
     budget: bool,
+    outermost: bool,
 }
 
 impl EngineCall {
     fn new(env: Env) -> Self {
-        if !crate::memory::begin_call(CURRENT_ENV.get().is_none()) {
+        let outermost = CURRENT_ENV.get().is_none();
+        if !crate::memory::begin_call(outermost) {
             panic!("{}", crate::memory::EXCEEDED);
         }
-        Self::enter(env, true)
+        if outermost {
+            REFUSED.set(false);
+        }
+        Self::enter(env, true, outermost)
     }
 
     fn release(env: Env) -> Self {
-        Self::enter(env, false)
+        Self::enter(env, false, false)
     }
 
-    fn enter(env: Env, budget: bool) -> Self {
+    fn enter(env: Env, budget: bool, outermost: bool) -> Self {
         Self {
             previous: CURRENT_ENV.replace(Some(env)),
             previous_object: CURRENT_OBJECT.replace(std::ptr::null()),
             budget,
+            outermost,
         }
     }
 }
@@ -95,6 +103,9 @@ impl Drop for EngineCall {
         }
         if failing && !unwinding {
             panic!("{}", crate::memory::EXCEEDED);
+        }
+        if self.outermost && !failing && !REFUSED.get() {
+            crate::memory::completed();
         }
     }
 }

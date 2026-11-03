@@ -64,17 +64,21 @@ pub(crate) fn live() -> usize {
 }
 
 /// Starts a budget-checked engine call; false when it must fail at once. An outermost call that
-/// starts within the budget forgets the crossing and failure an earlier call left, so they cannot
-/// describe it; a nested call inherits them.
+/// starts within the budget forgets the crossing an earlier call left; a nested call inherits it.
 pub(crate) fn begin_call(outermost: bool) -> bool {
     if over_budget() && (!outermost || live() > budget()) {
         return false;
     }
     if outermost {
         let _ = OVER.try_with(|over| over.set(false));
-        let _ = FAILED.try_with(|failed| failed.set(0));
     }
     true
+}
+
+/// Forgets the failure an earlier call left once an outermost call completes, so it cannot
+/// describe a later, unrelated failure. Calls that fail or are refused keep it for classification.
+pub(crate) fn completed() {
+    let _ = FAILED.try_with(|failed| failed.set(0));
 }
 
 /// The size of the allocation that took the calling thread past its budget, once.
