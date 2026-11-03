@@ -34,7 +34,8 @@ test('attached XLSX proposals belong to the engine and reflect editor decisions'
 });
 
 test('XLSX proposal acceptance permits unrelated user edits', async () => {
-  const book = await openXlsx(await xlsxFixture());
+  const owner = await openXlsx(await xlsxFixture());
+  const book = attachXlsx(owner.handle);
   try {
     const cell = book.readCells({ sheet: 'sheet:0', range: 'B3' }).cells[0].cell;
     const proposal = book.proposeCells({ author: 'Agent', edits: [{ cell, input: '123' }] });
@@ -42,7 +43,7 @@ test('XLSX proposal acceptance permits unrelated user edits', async () => {
     expect(book.review(proposal.id).stale).toBe(false);
     await book.accept(proposal.id);
     expect(book.handle.cell(0, 2, 1).input).toBe('123');
-  } finally { book.close(); }
+  } finally { book.close(); owner.close(); }
 });
 
 test('attached DOCX proposals show engine revisions while pending reads and exports retain original text', async () => {
@@ -54,6 +55,8 @@ test('attached DOCX proposals show engine revisions while pending reads and expo
     const proposal = agent.propose({ author: 'Agent', edits: [{ match: hit.match, newText: 'Updated summary' }] });
     expect(owner.session.getProposals().proposals).toHaveLength(1);
     expect(owner.session.listRevisions().every(revision => revision.author === 'Agent')).toBe(true);
+    const editorSave = await JSZip.loadAsync(await owner.export());
+    expect(await editorSave.file('word/document.xml')!.async('string')).toMatch(/<w:(ins|del)\b/);
     expect(agent.read(hit.ref)).toEqual(before);
     expect(agent.grep({ query: 'Updated' }).matches).toHaveLength(0);
     expect(agent.review(proposal.id).staleRefs).toEqual([]);
@@ -90,14 +93,17 @@ for (const state of ['accepted', 'rejected'] as const) {
 
 for (const tracked of [false, true]) {
   test(`DOCX agent acceptance uses engine revisions with tracked=${tracked}`, async () => {
-    const doc = await openDocx(await fixture());
+    const owner = await openDocx(await fixture());
+    const doc = attachDocx(owner.session);
     try {
       const [hit] = doc.grep({ query: 'Executive summary' }).matches;
       const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit.match, newText: 'Updated summary' }] });
       const revisionIds = doc.session.listRevisions().map(revision => revision.revisionId);
       const dates = doc.session.listRevisions().map(revision => revision.date);
       expect(revisionIds.length).toBeGreaterThan(0);
-      expect(await doc.accept(proposal.id, { tracked, ...(tracked ? { date: '2026-01-01T00:00:00Z' } : {}) })).toMatchObject({ id: proposal.id, status: 'accepted', tracked, changes: 1 });
+      await expect(doc.accept(proposal.id, { tracked, date: '2026-01-01T00:00:00Z' })).rejects.toMatchObject({ code: 'ACCEPT_DATE_UNSUPPORTED' });
+      expect(doc.review(proposal.id).status).toBe('pending');
+      expect(await doc.accept(proposal.id, { tracked })).toMatchObject({ id: proposal.id, status: 'accepted', tracked, changes: 1 });
       expect(doc.session.getProposals().proposals).toHaveLength(0);
       expect(doc.session.listRevisions().map(revision => revision.revisionId)).toEqual(tracked ? revisionIds : []);
       if (tracked) expect(doc.session.listRevisions().map(revision => revision.date)).toEqual(dates);
@@ -106,7 +112,7 @@ for (const tracked of [false, true]) {
       expect(xml).toContain('Updated');
       expect(/<w:ins\b/.test(xml)).toBe(tracked);
       expect(doc.review(proposal.id).status).toBe('accepted');
-    } finally { doc.close(); }
+    } finally { doc.close(); owner.close(); }
   });
 }
 
@@ -159,7 +165,8 @@ test('attached XLSX edit peer replays agent proposals and decisions to the edito
 }, 10000);
 
 test('DOCX proposals on separate ranges preserve original agent offsets', async () => {
-  const doc = await openDocx(await fixture());
+  const owner = await openDocx(await fixture());
+  const doc = attachDocx(owner.session);
   try {
     const hits = doc.grep({ query: 'draft' }).matches;
     const first = doc.propose({ author: 'Agent', edits: [{ match: hits[0].match, newText: 'confirmed' }] });
@@ -172,12 +179,13 @@ test('DOCX proposals on separate ranges preserve original agent offsets', async 
     doc.reject(first.id);
     await doc.accept(second.id);
     expect(doc.read(hits[0].ref).text).toBe('The forecast is draft; the appendix is final.');
-  } finally { doc.close(); }
+  } finally { doc.close(); owner.close(); }
 });
 
 test('DOCX pending render uses a private original view and selected preview', async () => {
   const rendered: string[] = [];
-  const doc = await openDocx(await fixture(), { renderer: async session => {
+  const owner = await openDocx(await fixture());
+  const doc = attachDocx(owner.session, { renderer: async session => {
     rendered.push(session.paragraphs('body')[0].text);
     return { png: new Uint8Array(), page: 1, pageCount: 1, width: 1, height: 1, warnings: [] };
   } });
@@ -189,11 +197,12 @@ test('DOCX pending render uses a private original view and selected preview', as
     expect(rendered).toEqual(['Executive summary', 'Updated summary']);
     expect(doc.review(proposal.id).status).toBe('pending');
     expect(doc.session.getProposals().proposals).toHaveLength(1);
-  } finally { doc.close(); }
+  } finally { doc.close(); owner.close(); }
 });
 
 test('XLSX proposal notifications refresh a live subscriber without document edits', async () => {
-  const book = await openXlsx(await xlsxFixture());
+  const owner = await openXlsx(await xlsxFixture());
+  const book = attachXlsx(owner.handle);
   const lengths: number[] = [];
   const off = book.handle.onProposalChange(proposals => { lengths.push(proposals.length); });
   try {
@@ -211,7 +220,7 @@ test('XLSX proposal notifications refresh a live subscriber without document edi
     book.proposeCells({ author: 'Agent', edits: [{ cell, input: '456' }] });
     expect(lengths).toEqual([1, 0]);
     expect(book.handle.getProposalStatus('missing')).toBeUndefined();
-  } finally { off(); book.close(); }
+  } finally { off(); book.close(); owner.close(); }
 });
 
 test('DOCX async attachment routes proposal mutations through the editor peer', async () => {
@@ -249,5 +258,62 @@ test('DOCX async attachment routes proposal mutations through the editor peer', 
     expect(owner.session.getProposals().proposals).toHaveLength(0);
     expect(() => agent.review(discarded.id)).toThrow('Proposal missing');
     expect(calls).toEqual(['propose', 'decide', 'settle', 'propose', 'decide', 'settle', 'propose', 'decide', 'keep', 'propose', 'decide', 'settle']);
+  } finally { agent.close(); owner.close(); }
+});
+
+for (const peer of [false, true]) {
+  test(`attached DOCX keeps refs, matches, cursors and pending ranges through own decisions with peer=${peer}`, async () => {
+    const owner = await openDocx(await fixture());
+    const doc = attachDocx(owner.session, peer ? { editPeer: {
+      async proposeChanges(request) { await Promise.resolve(); return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { await Promise.resolve(); return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { await Promise.resolve(); return owner.session.withdrawProposals(request); },
+    } } : {});
+    try {
+      const hits = doc.grep({ query: 'draft' }).matches;
+      const page = doc.grep({ query: 'draft', limit: 1 });
+      const first = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hits[0].match, newText: 'confirmed' }] });
+      const second = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hits[1].match, newText: 'final' }] });
+      await doc.accept(first.id);
+      expect(doc.read(hits[0].ref).revision).toBe(hits[0].revision);
+      expect(doc.review(second.id).staleRefs).toEqual([]);
+      expect(doc.grep({ query: 'draft', limit: 1, cursor: page.nextCursor! }).matches[0].start).toBe(hits[1].start + 4);
+      await doc.rejectAsync(second.id);
+      const reused = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hits[1].match, newText: 'final' }] });
+      await doc.accept(reused.id);
+      expect(doc.read(hits[0].ref).text).toBe('The forecast is confirmed; the appendix is final.');
+      const acceptedTarget = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hits[0].match, newText: 'approved' }] });
+      await doc.rejectAsync(acceptedTarget.id);
+      const reference = doc.read(hits[0].ref);
+      const exact = await doc.proposeAsync({ author: 'Agent', edits: [{ ...reference, revision: hits[0].revision, start: 0, oldText: 'The', newText: 'Our' }] });
+      await doc.rejectAsync(exact.id);
+      const cursor = doc.grep({ query: 'is', limit: 1 }).nextCursor!;
+      const paragraph = owner.session.paragraphs('body')[2];
+      owner.session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'User ');
+      expect(() => doc.grep({ query: 'is', limit: 1, cursor })).toThrow('edited');
+      await expect(doc.proposeAsync({ author: 'Agent', edits: [{ ...reference, start: 0, oldText: 'The', newText: 'Our' }] })).rejects.toMatchObject({ code: 'STALE_TARGET' });
+    } finally { doc.close(); owner.close(); }
+  });
+}
+
+test('an interleaved user edit during an async DOCX proposal does not revive refs or cursors', async () => {
+  const owner = await openDocx(await fixture());
+  const agent = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) {
+      const result = owner.session.proposeChanges(request);
+      const paragraph = owner.session.paragraphs('body')[2];
+      owner.session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'User ');
+      return result;
+    },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+  } });
+  try {
+    const hits = agent.grep({ query: 'draft' }).matches;
+    const cursor = agent.grep({ query: 'draft', limit: 1 }).nextCursor!;
+    const proposal = await agent.proposeAsync({ author: 'Agent', edits: [{ match: hits[0].match, newText: 'confirmed' }] });
+    expect(() => agent.grep({ query: 'draft', limit: 1, cursor })).toThrow('edited');
+    await expect(agent.proposeAsync({ author: 'Agent', edits: [{ match: hits[1].match, newText: 'final' }] })).rejects.toMatchObject({ code: 'STALE_TARGET' });
+    expect(agent.review(proposal.id).staleRefs).toEqual([hits[0].ref]);
   } finally { agent.close(); owner.close(); }
 });

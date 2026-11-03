@@ -92,6 +92,37 @@ DOCX and PPTX documents stage text edits with `grep`, `read` and `propose`; work
 browser, pass the module bytes as `wasm`. DOCX previews in a browser need a custom
 `DocumentRenderer` instead of the Node canvas renderer.
 
+## Attached mode
+
+`attachXlsx(handle, { editPeer? })` and `attachDocx(session, { editPeer? })` route
+proposals through the shared editor engine. Standalone `openXlsx` and `openDocx`,
+including the CLI and MCP defaults, keep JS proposals. With a DOCX `editPeer`, use
+`proposeAsync`, `rejectAsync` and `discardAsync`; acceptance is already async.
+
+Agent refs, matches, cell handles and search cursors survive the agent's own
+proposal operations in attached mode. User edits can still expire them. XLSX
+attached proposals use target guards, so unrelated user edits need not stale a
+proposal. Headless XLSX retains whole-workbook proposal staleness.
+
+XLSX accept receipt diagnostic counts come from engine acceptance: `changedCells`
+counts reported dependent addresses, `cycleCells` is 0, `limitedCells` counts
+calculation-status addresses, `truncated` reflects the calculation budget, and
+`changedSheets` counts applied target sheets.
+
+DOCX pending proposals are live tracked changes in the shared editor session.
+Editor save includes them as tracked changes; agent read, grep and default export
+project the original text. Export with a proposal ID projects that proposal as
+accepted. Attached acceptance settles outside undo history; tracked acceptance
+retains the proposal's revision IDs, author and timestamp. Any attached accept
+`date` option throws `AcceptDateUnsupportedError` with code
+`ACCEPT_DATE_UNSUPPORTED`. Headless tracked acceptance still honors `date`.
+
+Proposals over or next to existing tracked changes can throw
+`TrackedRevisionConflictError` with code `TRACKED_REVISION_CONFLICT`. Its
+`conflicts` list contains each conflicting `revisionId`, `author`, `kind`, `range`
+and paragraph `ref` (also available in `details.conflicts`). Headless insertion
+beside a tracked run retains its existing behavior.
+
 ## MCP tools
 
 | tool | purpose |

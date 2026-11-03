@@ -59,7 +59,7 @@ export async function initialize(format: 'xlsx' | 'pptx', init: (input?: Uint8Ar
 
 export abstract class PrototypeDocument<Change, Step> {
   private readonly proposals = new Map<string, { value: AgentProposal<Change>; steps: Step[]; engineId?: string }>();
-  private readonly cursors = new Map<string, { signature: string; version: string; offset: number }>();
+  private readonly cursors = new Map<string, { signature: string; version: string; offset: number; remaining?: string[] }>();
   private nextId = 1;
   protected readonly prefix = crypto.randomUUID();
   protected closed = false;
@@ -163,6 +163,8 @@ export abstract class PrototypeDocument<Change, Step> {
     this.dispose();
   }
 
+  protected searchKey(_hit: unknown): string | undefined { return undefined; }
+
   protected searchPage<T>(options: GrepOptions, hits: T[], clipped = false) {
     const limit = integer(options.limit ?? 20, 1, 100, 'limit');
     const signature = JSON.stringify([options.query, options.caseSensitive, options.story]);
@@ -171,7 +173,12 @@ export abstract class PrototypeDocument<Change, Step> {
     if (options.cursor && (!cursor || cursor.version !== version || cursor.signature !== signature)) {
       throw new DocumentToolError('STALE_CURSOR', 'Search changed or the document was edited. Repeat grep without cursor.');
     }
-    const offset = cursor?.offset ?? 0;
+    let offset = cursor?.offset ?? 0;
+    if (cursor?.remaining) {
+      const remaining = new Set(cursor.remaining);
+      const index = hits.findIndex(hit => remaining.has(this.searchKey(hit) ?? ''));
+      offset = index < 0 ? hits.length : index;
+    }
     const matches: T[] = [];
     let size = 0;
     for (const hit of hits.slice(offset, offset + limit)) {
@@ -183,9 +190,18 @@ export abstract class PrototypeDocument<Change, Step> {
     if (offset + matches.length < hits.length) {
       nextCursor = `${this.prefix}:cursor${this.nextId++}`;
       if (this.cursors.size >= 64) this.cursors.delete(this.cursors.keys().next().value!);
-      this.cursors.set(nextCursor, { signature, version, offset: offset + matches.length });
+      const keys = hits.slice(offset + matches.length).map(hit => this.searchKey(hit));
+      this.cursors.set(nextCursor, { signature, version, offset: offset + matches.length,
+        ...(keys.every((key): key is string => key !== undefined) ? { remaining: keys } : {}),
+      });
     }
     return { matches, nextCursor, version, truncated: clipped, ...(clipped ? { warning: 'Search stopped at 10000 matches. Narrow query or story to search beyond this cap.' } : {}) };
+  }
+
+  protected preserveSearchVersion(version: string) {
+    for (const cursor of this.cursors.values()) {
+      if (cursor.version === version) cursor.version = this.currentVersion();
+    }
   }
 
   protected checkQuery(options: GrepOptions) {

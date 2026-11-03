@@ -1,4 +1,4 @@
-import type { DocxProposalRequest, DocxProposalResult, DocxProposalStateRequest, DocxProposalWithdrawRequest, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxProposalRequest, DocxProposalResult, DocxProposalStateRequest, DocxProposalWithdrawRequest, YrsRevisionInfo, YrsSession } from '@betteroffice/docx/yrs';
 
 export interface ParagraphRef {
   ref: string;
@@ -116,5 +116,21 @@ export class DocumentToolError extends Error {
   ) {
     super(message);
     this.name = 'DocumentToolError';
+  }
+}
+
+export type DocxRevisionConflict = Pick<YrsRevisionInfo, 'revisionId' | 'author' | 'kind' | 'range'> & { ref: string };
+
+export class TrackedRevisionConflictError extends DocumentToolError {
+  constructor(readonly conflicts: DocxRevisionConflict[]) {
+    super('TRACKED_REVISION_CONFLICT', `Proposal conflicts with tracked revisions: ${conflicts.map(revision => `${revision.revisionId} by ${revision.author} (${revision.kind})`).join(', ')}.`, { conflicts });
+    this.name = 'TrackedRevisionConflictError';
+  }
+}
+
+export class AcceptDateUnsupportedError extends DocumentToolError {
+  constructor() {
+    super('ACCEPT_DATE_UNSUPPORTED', 'Attached DOCX acceptance cannot restamp revisions. Omit date.');
+    this.name = 'AcceptDateUnsupportedError';
   }
 }

@@ -41,7 +41,7 @@ test('XLSX paginates cells, stages atomic inputs/formulas, exports privately, an
       expect(cells[3].formula).toBe('D3*2');
     } finally { reopened.close(); }
     await unchangedParts(baseline, exported, ['xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml', 'xl/workbook.xml', 'xl/calcChain.xml', '[Content_Types].xml', 'xl/_rels/workbook.xml.rels']);
-    const stale = book.proposeCells({ author: 'test', edits: [{ cell: page.cells[0].cell, input: '9' }] });
+    const stale = book.proposeCells({ author: 'test', edits: [{ cell: page.cells[1].cell, input: '9' }] });
     await expect(book.accept(pending.id, { tracked: true })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
     await book.accept(pending.id);
     expect(book.review(stale.id).stale).toBe(true);

@@ -202,6 +202,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   }
 
   protected override createProposal(value: AgentProposal<CellChange>, _steps: XlsxEditStep[]) {
+    if (this.ownsHandle) return undefined;
     return this.handle.propose(value.author, value.note || null, value.changes.map(change => {
       const { start } = corners(change.a1);
       return { sheet: this.resolveSheet(change.sheet).index, row: start.row, col: start.col, input: change.input };
@@ -213,7 +214,15 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   }
   protected override acceptProposal(id: string, steps: XlsxEditStep[]) {
     try {
+      const version = this.currentVersion();
       const result = this.handle.acceptProposal(id);
+      this.preserveSearchVersion(version);
+      for (const target of this.cells.values()) {
+        if (target.version !== version) continue;
+        const current = this.cellAt(target.sheet, target.a1);
+        target.before = current.before;
+        target.version = current.version;
+      }
       const calculation = this.handle.calculationStatus();
       return { applied: result.applied, version: this.currentVersion(), changedSheets: result.applied ? new Set(steps.map(step => step.target.sheetId)).size : 0, calculation: { changedCells: result.changed?.length ?? 0, cycleCells: 0, limitedCells: calculation.limitedCells.length, truncated: calculation.budgetExhausted ?? false } };
     } catch (error) {
@@ -222,6 +231,8 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     }
   }
   protected override rejectProposal(id: string) { this.handle.rejectProposal(id); }
+
+  protected override searchKey(hit: unknown) { return this.ownsHandle ? undefined : (hit as { ref: string }).ref; }
 
   protected currentVersion() { return this.handle.version(); }
   protected validate(steps: XlsxEditStep[], version: string) { unwrap(this.handle.validateEdits({ expectVersion: version, steps, source: 'agent' })); }

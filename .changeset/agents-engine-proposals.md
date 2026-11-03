@@ -5,4 +5,4 @@
 '@betteroffice/xlsx-react': patch
 ---
 
-Agent proposals now use engine proposals and reflect editor decisions. Adds opt-in DOCX `editPeer` with `proposeAsync`, `rejectAsync`, and `discardAsync`, XLSX `getProposalStatus` and `onProposalChange`, and opt-in DOCX `keepRevisions` to retain tracked revisions.
+Attached agent proposals use the shared engine; standalone behavior is unchanged. Adds opt-in DOCX `editPeer`, `proposeAsync`, `rejectAsync`, `discardAsync`, `keepRevisions`, typed `TrackedRevisionConflictError` and `AcceptDateUnsupportedError`, and XLSX `getProposalStatus` and `onProposalChange`.
