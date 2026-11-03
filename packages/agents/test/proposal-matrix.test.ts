@@ -32,7 +32,7 @@ const exceptions = {
 
 for (const mode of ['headless', 'attached', 'peer'] as const) {
   if (mode !== 'headless') for (const action of ['accept', 'reject'] as const) {
-    test(`DOCX partial editor decision followed by agent ${action} in ${mode} mode`, async () => {
+    test(`DOCX editor decision refuses agent ${action} in ${mode} mode`, async () => {
       const zip = await JSZip.loadAsync(await fixture());
       const xml = await zip.file('word/document.xml')!.async('string');
       zip.file('word/document.xml', xml.replace('Executive summary', 'alpha beta gamma'));
@@ -52,12 +52,18 @@ for (const mode of ['headless', 'attached', 'peer'] as const) {
           changes: [{ id: middle.id, state: action === 'accept' ? 'rejected' : 'accepted' }],
         }).ok).toBe(true);
         expect(doc.review(proposal.id).status).toBe('pending');
-        if (action === 'accept') await doc.accept(proposal.id);
-        else if (mode === 'peer') await doc.rejectAsync(proposal.id);
-        else doc.reject(proposal.id);
-        expect(doc.read(hits[0].ref).text).toBe(action === 'accept' ? 'ALPHA beta GAMMA' : 'alpha BETA gamma');
-        expect(doc.review(proposal.id).status).toBe('accepted');
-        expect(owner.session.getProposals().proposals).toHaveLength(0);
+        const before = owner.session.encodeState();
+        const registry = owner.session.getProposals();
+        const refuse = async () => {
+          if (action === 'accept') return doc.accept(proposal.id);
+          return mode === 'peer' ? doc.rejectAsync(proposal.id) : doc.reject(proposal.id);
+        };
+        await expect(refuse()).rejects.toMatchObject({ code: 'PROPOSAL_DECIDED_IN_EDITOR',
+          details: { records: [{ id: middle.id, state: action === 'accept' ? 'rejected' : 'accepted' }] },
+        });
+        expect(owner.session.encodeState()).toEqual(before);
+        expect(owner.session.getProposals()).toEqual(registry);
+        expect(doc.review(proposal.id).status).toBe('pending');
       } finally { doc.close(); owner.close(); }
     });
   }

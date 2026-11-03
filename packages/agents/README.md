@@ -100,9 +100,11 @@ including the CLI and MCP defaults, keep JS proposals. With a DOCX `editPeer`, u
 `proposeAsync`, `rejectAsync` and `discardAsync`; acceptance is already async.
 
 Agent refs, matches, cell handles and search cursors survive the agent's own
-proposal operations in attached mode. DOCX editor proposal decisions also preserve
-refs, matches and cursors. User edits can still expire them. XLSX
-attached proposals use engine acceptance guards, including cell styles and
+proposal operations in attached mode. DOCX editor decisions expire refs and saved
+matches in touched paragraphs, including rejections that leave visible text unchanged.
+Using an expired target throws `STALE_TARGET`; grep again for fresh targets. Matches
+in untouched paragraphs stay valid. Editor decisions expire search cursors as user
+edits do. XLSX attached proposals use engine acceptance guards, including cell styles and
 dependent previews, so unrelated user edits need not stale a proposal. Stale
 acceptance throws `STALE_TARGET` and leaves the proposal pending without writing
 cells. Headless XLSX retains whole-workbook proposal staleness.
@@ -116,11 +118,14 @@ DOCX pending proposals are live tracked changes in the shared editor session.
 Editor save includes them as tracked changes; agent read, grep and default export
 project the original text. Export with a proposal ID projects that proposal as
 accepted. Attached acceptance settles outside undo history; tracked acceptance
-retains revision IDs, author and timestamp only for edits accepted by the agent
-in that call. Editor-accepted edits settle to their previewed text in both sync
-and async peer mode. Agent decisions affect only undecided engine records; after
-settlement the group is rejected if every record was rejected, otherwise accepted.
-Partial editor acceptance is included in reads and target guards. Any attached accept
+retains the proposal's revision IDs, author and timestamp. Once the editor accepts
+or rejects any engine record in an agent proposal group, the editor owns the rest
+of that group. Agent accept, tracked accept, reject, discard and proposal-limit
+eviction throw `ProposalDecidedInEditorError` with code `PROPOSAL_DECIDED_IN_EDITOR`,
+without changing or withdrawing records, through both direct sessions and async
+peers. `details.records` names each decided record's `id` and `state`. List and
+review include per-record `records` and a derived `status`: pending while any record
+is proposed, then accepted if any was accepted, otherwise rejected. Any attached accept
 `date` option throws `AcceptDateUnsupportedError` with code
 `ACCEPT_DATE_UNSUPPORTED`. Headless tracked acceptance still honors `date`.
 

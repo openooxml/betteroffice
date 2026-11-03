@@ -1,4 +1,4 @@
-import type { DocxProposalRequest, DocxProposalResult, DocxProposalStateRequest, DocxProposalWithdrawRequest, YrsRevisionInfo, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxProposalRecord, DocxProposalRequest, DocxProposalResult, DocxProposalStateRequest, DocxProposalWithdrawRequest, YrsRevisionInfo, YrsSession } from '@betteroffice/docx/yrs';
 
 export interface ParagraphRef {
   ref: string;
@@ -77,6 +77,7 @@ export interface Proposal {
   status: 'pending' | 'accepted' | 'rejected';
   changes: ProposalChange[];
   staleRefs: string[];
+  records?: DocxProposalRecordStatus[];
 }
 
 export interface RenderedPage {
@@ -132,5 +133,14 @@ export class AcceptDateUnsupportedError extends DocumentToolError {
   constructor() {
     super('ACCEPT_DATE_UNSUPPORTED', 'Attached DOCX acceptance cannot restamp revisions. Omit date.');
     this.name = 'AcceptDateUnsupportedError';
+  }
+}
+
+export type DocxProposalRecordStatus = Pick<DocxProposalRecord, 'id' | 'state'>;
+
+export class ProposalDecidedInEditorError extends DocumentToolError {
+  constructor(readonly records: DocxProposalRecordStatus[]) {
+    super('PROPOSAL_DECIDED_IN_EDITOR', 'The editor has decided records in this proposal group. Finish the group in the editor.', { records });
+    this.name = 'ProposalDecidedInEditorError';
   }
 }
