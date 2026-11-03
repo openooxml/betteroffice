@@ -1501,8 +1501,19 @@ for (const keepRevisions of [false, true]) {
 it('versions reconciliation of undecided records', async () => {
   const session = await open();
   const before = snapshotOf(propose(session, replace('one', '00000003', 'this', 'that')));
+  const notifications: DocxProposalSnapshot[] = [];
+  const unsubscribe = session.onProposalChange(snapshot => notifications.push(snapshot));
   for (const revisionId of before.proposals[0]!.revisionIds) session.rejectChange({ revisionId });
-  expect(session.getProposals().previewVersion).toBeGreaterThan(before.previewVersion);
+  unsubscribe();
+  const after = session.getProposals();
+  expect(after.previewVersion).toBeGreaterThan(before.previewVersion);
+  expect(after.revision).toBeGreaterThan(before.revision!);
+  expect(after.proposals).toEqual([]);
+  expect(after.withdrawn).toMatchObject([{ id: 'one', state: 'rejected' }]);
+  expect(notifications.at(-1)).toEqual(after);
   expect(session.withdrawProposals({ expectVersion: session.version(), expectPreviewVersion: before.previewVersion, ids: ['one'] }))
     .toMatchObject({ ok: false, failure: { code: 'stale-preview' } });
+  expect(session.withdrawProposals({ expectVersion: before.version, expectPreviewVersion: before.previewVersion, ids: ['one'] }))
+    .toMatchObject({ ok: false, failure: { code: 'stale-preview' } });
+  expect(session.getProposals()).toEqual(after);
 });

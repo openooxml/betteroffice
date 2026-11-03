@@ -977,6 +977,7 @@ for (const finish of ['withdraw', 'keep-one', 'reconcile'] as const) {
       await doc.proposeAsync({ author: 'Agent', edits: [{ match: alpha.match, newText: 'ALPHA' }] });
       armed = true;
       await expect(doc.proposeAsync({ author: 'Agent', edits: [{ match: beta.match, newText: 'BETA' }, { match: forecast.match, newText: 'FORECAST' }] })).rejects.toMatchObject({ code: 'PROPOSAL_DECIDED_IN_EDITOR' });
+      expect(staged).toHaveLength(2);
       expect(doc.listProposals()).toHaveLength(2);
       await expect(doc.rejectAsync('proposal2')).rejects.toMatchObject({ code: 'PROPOSAL_DECIDED_IN_EDITOR' });
       await expect(doc.proposeAsync({ author: 'Agent', edits: [{ match: appendix.match, newText: 'APPENDIX' }] })).rejects.toMatchObject({ code: 'STALE_TARGET' });
@@ -1041,14 +1042,24 @@ for (const peer of [false, true]) {
     try {
       const hit = doc.grep({ query: 'alpha' }).matches[0];
       const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+      const ids = owner.session.getProposals().proposals.map(record => record.id);
       for (let index = 0; index < 300; index++) {
         tracking.ownStateVersions.set(`history${index}`, new Set(Array.from({ length: 300 }, (_, version) => version)));
         tracking.ownWithdrawals.add(`history${index}`);
       }
       await doc.rejectAsync(proposal.id);
-      expect(tracking.ownStateVersions.size).toBe(256);
-      expect(tracking.ownWithdrawals.size).toBe(256);
+      expect(tracking.ownStateVersions.size).toBeLessThanOrEqual(256);
+      expect(tracking.ownWithdrawals.size).toBeLessThanOrEqual(256);
       expect([...tracking.ownStateVersions.values()].every(versions => versions.size <= 256)).toBe(true);
+      expect(tracking.ownStateVersions.get('history299')?.has(299)).toBe(true);
+      expect(tracking.ownStateVersions.get('history299')?.has(0)).toBe(false);
+      expect(tracking.ownWithdrawals.has('history299')).toBe(true);
+      expect(tracking.ownStateVersions.has('history0')).toBe(false);
+      expect(tracking.ownWithdrawals.has('history0')).toBe(false);
+      for (const id of ids) {
+        expect(tracking.ownStateVersions.has(id)).toBe(false);
+        expect(tracking.ownWithdrawals.has(id)).toBe(false);
+      }
     } finally { doc.close(); owner.close(); }
   });
 }
