@@ -459,16 +459,19 @@ impl EditingDoc {
                                 para.view_slice_of_raw(start, chunk.start, &mut full);
                             }
                         }
-                        let key = if change.kind == crate::ChangeKind::Insertion {
-                            crate::INS
-                        } else {
-                            crate::DEL
+                        let key = match change.kind {
+                            crate::ChangeKind::Insertion => crate::INS,
+                            crate::ChangeKind::RunPropertiesChanged => crate::format::RPR_CHANGE,
+                            _ => crate::DEL,
                         };
-                        let inherited = chunk
-                            .attrs
-                            .get(key)
-                            .and_then(crate::queries::revision_parts)
-                            .is_some_and(|(id, ..)| id == change.revision_id);
+                        let inherited = chunk.attrs.get(key).is_some_and(|value| match value {
+                            Any::Array(changes) => changes.iter().any(|value| {
+                                crate::queries::revision_parts(value)
+                                    .is_some_and(|(id, ..)| id == change.revision_id)
+                            }),
+                            value => crate::queries::revision_parts(value)
+                                .is_some_and(|(id, ..)| id == change.revision_id),
+                        });
                         full.push_str(&crate::inline_content::revision_text(
                             content,
                             &change.revision_id,

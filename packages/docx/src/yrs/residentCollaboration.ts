@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { CollaborationError, type CollaborationTextInsertion } from '../collaboration/types';
 import { stateVectorClock } from '../collaboration/protocol';
 import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
@@ -71,7 +72,7 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
         if (insertion) remember(insertion);
         return { applied: insertion };
       } catch (error) {
-        if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
+        if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
         return { failed: error };
       }
     },
@@ -121,7 +122,7 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
             hooks.afterRemoteMerge?.(context);
             return { status: 'applied', ...state() };
           } catch (error) {
-            if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
+            if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
             return { status: 'refused', reason: 'invalid-update', ...state() };
           }
         },

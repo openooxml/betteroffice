@@ -212,7 +212,15 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
     if matches!(value, Any::Null | Any::Undefined | Any::Bool(false)) {
         return false;
     }
-    [INS, DEL, "pPrIns", "pPrDel", "pPrChange"].contains(&key)
+    [
+        INS,
+        DEL,
+        "pPrIns",
+        "pPrDel",
+        "pPrChange",
+        crate::format::RPR_CHANGE,
+    ]
+    .contains(&key)
         || ["trPrChange", "tcPrChange"].contains(&key)
         || ["trackedIns", "trackedDel", "trIns", "trDel"].contains(&key)
         || ["hyperlink", "bookmarks", "comment", "cellMarker"].contains(&key)

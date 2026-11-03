@@ -338,15 +338,15 @@ fn parse_run_property_changes(
 ) -> Option<Vec<RunPropertyChange>> {
     let changes: Vec<_> = r_pr?
         .children_named("w", "rPrChange")
-        .filter_map(|change| {
+        .map(|change| {
             let previous = parse_inline_run_properties(change.child("w", "rPr"), theme);
             let current = current.cloned();
-            (previous.is_some() || current.is_some()).then(|| RunPropertyChange {
+            RunPropertyChange {
                 node_type: RunPropertyChangeType::RunPropertyChange,
                 info: parse_property_change_info(change),
                 previous_formatting: previous,
                 current_formatting: current,
-            })
+            }
         })
         .collect();
     (!changes.is_empty()).then_some(changes)

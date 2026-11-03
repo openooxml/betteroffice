@@ -247,6 +247,8 @@ pub struct RunFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_revision_id: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_change: Option<crate::display_list::Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_order: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidi_level: Option<u8>,
