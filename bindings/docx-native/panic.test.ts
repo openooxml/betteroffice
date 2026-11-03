@@ -50,3 +50,32 @@ test.skipIf(process.env.BETTEROFFICE_NATIVE_TEST_HOOKS !== '1')('a panic mid-edi
     expect(() => document.free()).not.toThrow();
   }
 });
+
+for (const swallowed of [false, true]) {
+  test.skipIf(process.env.BETTEROFFICE_NATIVE_TEST_HOOKS !== '1')(`a panic in an edit made by an update observer stops delivery and fails the outer call (${swallowed ? 'observer swallows it' : 'observer lets it through'})`, () => {
+    const document = new EditSession(3);
+    const hooks = document as unknown as { panicAfterInsertForTest(story: string, paraId: string, text: string): void };
+    try {
+      document.open_docx(fixture, true);
+      const paragraphId = (JSON.parse(document.read_paragraphs_json(JSON.stringify({ story: 'body', view: 'accepted' }))) as { paragraphs: { paraId: string }[] }).paragraphs[0]!.paraId;
+      let panicked = false;
+      let afterPanic = 0;
+      document.set_update_observer(() => {
+        if (panicked) { afterPanic += 1; return; }
+        panicked = true;
+        if (!swallowed) { hooks.panicAfterInsertForTest('body', paragraphId, 'Nested '); return; }
+        try { hooks.panicAfterInsertForTest('body', paragraphId, 'Nested '); } catch {}
+      });
+      const outer = thrown(() => document.insert_text('body', paragraphId, 0, 'Outer '));
+      expect(panicked).toBe(true);
+      expect(afterPanic).toBe(0);
+      expect(outer).toBeInstanceOf(Error);
+      if (swallowed) expect((outer as Error).message).toBe(failedObject);
+      else expect(outer).toHaveProperty('code', 'GenericFailure');
+      expect((thrown(() => document.version()) as Error).message).toBe(failedObject);
+      expect(afterPanic).toBe(0);
+    } finally {
+      expect(() => document.free()).not.toThrow();
+    }
+  });
+}
