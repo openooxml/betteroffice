@@ -59,8 +59,9 @@ function formattingRangeContainsContainer(engine: DocxWorkerCommandEngine, range
     return segments.some(segment => {
       const at = offset;
       offset += segment.kind === 'text' ? segment.text.length : 1;
-      return Math.min(offset, end) > Math.max(at, start) && segment.kind === 'embed' &&
-        (segment.embedKind === 'field' || segment.embedKind === 'sdt');
+      return Math.min(offset, end) > Math.max(at, start) &&
+        (Object.hasOwn(segment.attributes, 'fieldResult') || segment.kind === 'embed' &&
+          (segment.embedKind === 'sdt' || segment.embedKind === 'field' && segment.payload.modelKind === 'field'));
     });
   });
 }

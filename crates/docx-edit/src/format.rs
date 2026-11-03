@@ -667,8 +667,11 @@ impl EditingDoc {
         }
         let chunks = crate::ops::snapshot_range(story, txn, range.start, range.end);
         if chunks.iter().any(|chunk| {
-            matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
-                if matches!(crate::map_string(map, txn, crate::KIND_KEY).as_deref(), Some("field" | "sdt")))
+            chunk.attrs.contains_key("fieldResult")
+                || matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                    if crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
+                        || (crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("field")
+                            && crate::map_string(map, txn, "modelKind").as_deref() == Some("field")))
         }) {
             return Err(OpError::SuggestedFormattingOverContainer);
         }
@@ -677,7 +680,12 @@ impl EditingDoc {
         for chunk in chunks {
             let start = chunk.start.max(range.start);
             let end = chunk.end().min(range.end);
-            if start >= end || matches!(chunk.kind, crate::ops::ChunkKind::Pilcrow(_)) {
+            if start >= end
+                || matches!(chunk.kind, crate::ops::ChunkKind::Pilcrow(_))
+                || matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                    if crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("field")
+                        && crate::map_string(map, txn, "modelKind").as_deref() == Some("commentReference"))
+            {
                 continue;
             }
             let mut current = chunk.attrs.clone();

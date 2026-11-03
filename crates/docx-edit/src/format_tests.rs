@@ -112,6 +112,103 @@ fn suggested_format_refuses_containers_without_mutation() {
 }
 
 #[test]
+fn suggested_bold_across_comment_reference_tracks_only_text() {
+    let engine = EngineSession::new(9313);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            r#"<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>hello</w:t></w:r>"#,
+            r#"<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p>"#,
+        )),
+    )
+    .unwrap();
+    let before = engine.doc().story_segments("body").unwrap();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 12),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    let after = engine.doc().story_segments("body").unwrap();
+    assert_eq!(after[1], before[1]);
+    assert!(matches!(&after[1].content, crate::SegmentContent::OtherEmbed { kind, payload }
+        if kind == "field" && payload.get("modelKind") == Some(&Any::from("commentReference"))));
+    let runs = attrs(&engine);
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].0, "hello");
+    assert_eq!(runs[1].0, " world");
+    for (_, attributes) in runs {
+        assert_eq!(attributes["bold"], true);
+        assert_eq!(attributes["rPrChange"][0]["info"]["author"], "Ada");
+    }
+    let revisions = engine.doc().list_revisions().unwrap();
+    assert!(!revisions.is_empty());
+    assert!(
+        revisions
+            .iter()
+            .all(|revision| revision.change.kind == ChangeKind::RunPropertiesChanged)
+    );
+    engine
+        .doc()
+        .reject_change(
+            &suggesting(),
+            &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+    assert_eq!(engine.doc().story_segments("body").unwrap(), before);
+}
+
+#[test]
+fn suggested_bold_refuses_projected_field_code_and_result_without_mutation() {
+    let engine = EngineSession::new(9314);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>text</w:t></w:r>",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            r#"<w:hyperlink w:anchor="top"><w:r><w:instrText>HYPERLINK</w:instrText></w:r></w:hyperlink>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            r#"<w:hyperlink w:anchor="top"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        )),
+    )
+    .unwrap();
+    let runs = attrs(&engine);
+    assert_eq!(runs[1].0, "HYPERLINK");
+    assert_eq!(runs[1].1["fieldResult"]["index"], -1);
+    assert_eq!(runs[2].0, "link");
+    assert_eq!(runs[2].1["fieldResult"]["index"], 0);
+    let before = engine.doc().encode_state_as_update_v1();
+    for (start, end) in [(4, 13), (13, 17), (0, 13), (0, 17)] {
+        for operation in ["toggle", "format", "clear"] {
+            let range = StoryRange::new("body", start, end);
+            let result = match operation {
+                "toggle" => engine
+                    .doc()
+                    .toggle_format(&suggesting(), range, SimpleFormat::Bold),
+                "clear" => engine.doc().clear_formatting(&suggesting(), range),
+                _ => engine.doc().format_range(
+                    &suggesting(),
+                    range,
+                    &InlineFormatDelta {
+                        bold: Patch::Set(true),
+                        ..Default::default()
+                    },
+                ),
+            };
+            assert_eq!(result, Err(OpError::SuggestedFormattingOverContainer));
+            assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+            assert_eq!(attrs(&engine), runs);
+            assert!(engine.doc().list_revisions().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
 fn plain_text_suggestions_and_plain_container_formatting_remain_supported() {
     let engine = EngineSession::new(9311);
     seed_from_docx(

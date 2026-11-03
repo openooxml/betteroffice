@@ -1066,6 +1066,114 @@ test('suggested formatting over containers refuses before calling the engine', a
   }
 }, TIMEOUT);
 
+test('suggested bold across a comment reference tracks text and preserves the anchor on save', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:commentRangeStart w:id="0"/><w:r><w:t>hello</w:t></w:r>' +
+    '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>' +
+    '<w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const before = arm.engine.storySegments('body');
+  const anchor = before.find(segment => segment.kind === 'embed' && segment.payload.modelKind === 'commentReference');
+  expect(anchor).toBeDefined();
+  const intent = command(arm, 'toggleMark', {
+    selection: selection(id, 0, 12), mark: { type: 'bold' },
+    suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
+  });
+  expect(execute(arm, intent).status).toBe('applied');
+  const after = arm.engine.storySegments('body');
+  expect(after.find(segment => segment.kind === 'embed' && segment.payload.modelKind === 'commentReference')).toEqual(anchor);
+  const runs = after.filter(segment => segment.kind === 'text');
+  expect(runs.map(segment => segment.text)).toEqual(['hello', ' world']);
+  for (const run of runs) expect(run.attributes).toMatchObject({
+    bold: true, rPrChange: [expect.objectContaining({ info: expect.objectContaining({ author: 'Writer' }) })],
+  });
+  const revisions = arm.engine.geometryReader.listRevisions();
+  expect(revisions.length).toBeGreaterThan(0);
+  expect(revisions.every(revision => revision.kind === 'rPrChange')).toBe(true);
+  const saved = await repackDocx(yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument()));
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml.match(/<w:rPrChange\s/g)).toHaveLength(2);
+  expect(xml.match(/<w:commentReference\s/g)).toHaveLength(1);
+  const reopened = await openCommandEngine([], { bytes: new Uint8Array(saved), clientId: 8102 });
+  expect(reopened.engine.geometryReader.listRevisions().length).toBeGreaterThan(0);
+  const reopenedRuns = reopened.engine.storySegments('body').filter(segment => segment.kind === 'text');
+  expect(reopenedRuns.map(segment => segment.text)).toEqual(['hello', ' world']);
+  expect(reopenedRuns.every(segment => segment.attributes.bold === true && segment.attributes.rPrChange !== undefined)).toBe(true);
+}, TIMEOUT);
+
+test('suggested formatting refuses projected complex field hyperlinks in code and result without mutation', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    '<w:hyperlink r:id="rIdLink"><w:r><w:instrText>HYPERLINK</w:instrText></w:r></w:hyperlink>' +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+    '<w:hyperlink r:id="rIdLink"><w:r><w:t>link</w:t></w:r></w:hyperlink>' +
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const session = wrapSession(arm.native, 8101);
+  const saveXml = async () => {
+    const saved = await repackDocx(yrsToDocument(session, arm.engine.propertyDocument()));
+    return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  };
+  const beforeXml = await saveXml();
+  const before = session.encodeState();
+  const segments = arm.engine.storySegments('body');
+  const runs = segments.filter(segment => segment.kind === 'text');
+  expect(runs).toMatchObject([
+    { text: 'text' },
+    { text: 'HYPERLINK', attributes: { fieldResult: { index: -1 } } },
+    { text: 'link', attributes: { fieldResult: { index: 0 } } },
+  ]);
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const cases = [
+    ['toggleMark', { mark: { type: 'bold' } }, 'toggleMark'],
+    ['toggleStrike', {}, 'formatRange'],
+    ['formatRange', { delta: { bold: true } }, 'formatRange'],
+    ['formatSelection', { delta: { bold: true } }, 'formatRange'],
+    ['clearFormatting', {}, 'clearFormatting'],
+  ] as const;
+  for (const [start, end] of [[4, 13], [13, 17], [0, 13], [0, 17]] as const) {
+    const selected = selection(id, start, end);
+    for (const [kind, payload, method] of cases) {
+      const intent = command(arm, kind, { ...payload, selection: selected, suggesting } as DocxCommandPayloads[typeof kind]);
+      const state = snapshot(arm);
+      const call = spyOn(arm.engine, method);
+      const capture = spyOn(arm.engine, 'beginUndoCapture');
+      try {
+        expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent)))
+          .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(call).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+        expect(snapshot(arm)).toEqual(state);
+      } finally {
+        call.mockRestore();
+        capture.mockRestore();
+      }
+    }
+    const range = storyRange(selected);
+    for (const apply of [
+      () => session.toggleMark(range, { type: 'bold' }, suggesting),
+      () => session.formatRange(range, { bold: true }, suggesting),
+      () => session.clearFormatting(range, suggesting),
+    ]) {
+      expect(apply).toThrow(SuggestedFormattingOverContainerError);
+      expect(session.encodeState()).toEqual(before);
+      expect(arm.engine.storySegments('body')).toEqual(segments);
+      expect(session.listRevisions()).toEqual([]);
+    }
+  }
+  expect(await saveXml()).toBe(beforeXml);
+}, TIMEOUT);
+
 test('suggested formatting checks containers across paragraphs and preserves plain text selections', async () => {
   const arm = await openCommandEngine([], { bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>first</w:t></w:r></w:p>' +
