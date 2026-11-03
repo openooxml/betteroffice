@@ -1296,3 +1296,41 @@ test('confirmed geometry preserves the screen-sized border band inside table cel
     expect(hitConfirmedGeometry(store, { x: 21.6, y: 50 }, 4)?.kind).toBe('text');
   } finally { store.dispose(); }
 });
+
+test('duplicate active frames refresh raster epochs without repainting confirmed content', () => {
+  const client = new FakeCommandClient('abc');
+  const paintFrame = mock(() => {});
+  const resync = mock(() => {});
+  const store = createPeerlessViewStore(client, { paintFrame, paintEcho() {}, restoreLine() {}, resync }, { echoEnabled: false });
+  try {
+    const before = store.getSnapshot().confirmed!;
+    const count = paintFrame.mock.calls.length;
+    const next = { ...before.frame, epoch: before.frame.epoch + 1 };
+    expect(installCoveringFrame(store, next)).toBe(false);
+    expect(store.getSnapshot().confirmed).toBe(before);
+    expect(store.getSnapshot().confirmed!.frame.epoch).toBe(next.epoch);
+    expect(paintFrame.mock.calls.length).toBe(count);
+    expect(resync).toHaveBeenCalledTimes(1);
+  } finally { store.dispose(); }
+});
+
+test('a quiet collaboration frame that advances the epoch asks the painter to resync', async () => {
+  const client = new FakeCommandClient('abc');
+  const paintFrame = mock(() => {});
+  const resync = mock(() => {});
+  const store = createPeerlessViewStore(client, { paintFrame, paintEcho() {}, restoreLine() {}, resync }, { echoEnabled: false });
+  try {
+    const before = store.getSnapshot().confirmed!;
+    const epoch = before.frame.epoch;
+    const count = paintFrame.mock.calls.length;
+    const operation = store.dispatch({ kind: 'collabPipe', payload: { provider: 1,
+      ops: [{ op: 'cursor', seq: 1, cursor: { slideId: 'slide' }, broadcast: true }], inputTime: 1, undoGroup: 'remote' } });
+    client.ack(1, { version: 'v0', dirtySlideIds: [], outcomes: [{ seq: 1, status: 'noop', committed: false }],
+      frame: frame('abc', 0, 1, { epoch: epoch + 1 }) });
+    await operation;
+    expect(store.getSnapshot().confirmed).toBe(before);
+    expect(store.getSnapshot().confirmed!.frame.epoch).toBe(epoch + 1);
+    expect(paintFrame.mock.calls.length).toBe(count);
+    expect(resync).toHaveBeenCalledTimes(1);
+  } finally { store.dispose(); }
+});
