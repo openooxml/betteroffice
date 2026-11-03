@@ -53,3 +53,21 @@ test('runs on other lines and list markers do not colour the caret', () => {
   const below = { ...run('#ff0000', 100, 160), glyphs: [{ id: 1, x: 100, y: 160, cluster: 0, advance: 60 }] } as DisplayPrimitive;
   expect(peerlessCaretColor(page(below, run('#ff0000', 100, 160, { listMarker: true })), caret)).toBe('#000');
 });
+
+test('caret just past a dark highlight reads against the page, not the highlight', () => {
+  const highlight = { kind: 'decoration', deco: 'highlight', x: 100, y: 98, w: 30, h: 22, color: '#000080' } as DisplayPrimitive;
+  expect(peerlessCaretColor(page(highlight, run('#ffffff', 100, 130)), caret)).toBe('#000');
+});
+
+test('header and footer shading and text colour the caret', () => {
+  const shading = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: '#1f1f1f' } as DisplayPrimitive;
+  const withHeader = { ...page(), header: { rId: 'rId1', kind: 'header', y: 0, height: 200, primitives: [shading, run('#ffffff', 100, 160)] } } as DisplayPage;
+  expect(peerlessCaretColor(withHeader, caret)).toBe('#ffffff');
+  const withFooter = { ...page(), footer: { rId: 'rId2', kind: 'footer', y: 0, height: 200, primitives: [shading] } } as DisplayPage;
+  expect(peerlessCaretColor(withFooter, caret)).toBe('#fff');
+});
+
+test('a dark page background gives a light caret', () => {
+  expect(peerlessCaretColor({ ...page(), background: '#101010' } as DisplayPage, caret)).toBe('#fff');
+  expect(peerlessCaretColor({ ...page(run('#e0e0e0', 100, 160)), background: '#101010' } as DisplayPage, caret)).toBe('#e0e0e0');
+});

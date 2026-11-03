@@ -99,3 +99,8 @@ test('docx worker caret follows white text on a dark highlight', async ({ page }
   await open(page, '', HIGHLIGHT, undefined, 4);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
+
+test('docx worker caret stays visible right after a dark highlight', async ({ page }) => {
+  await open(page, '', HIGHLIGHT);
+  expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
+});

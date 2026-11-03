@@ -1,4 +1,4 @@
-import type { DisplayPage, GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
+import type { DisplayPage, DisplayPrimitive, GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
 import type { DocxEchoRect } from '@betteroffice/docx/worker';
 
 type Rgb = readonly [number, number, number];
@@ -33,7 +33,16 @@ function contrast(a: Rgb, b: Rgb): number {
 }
 
 function covers(box: { x: number; y: number; w: number; h: number }, x: number, y: number): boolean {
-  return x >= box.x - EDGE && x <= box.x + box.w + EDGE && y >= box.y && y <= box.y + box.h;
+  return x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h;
+}
+
+function* paintOrder(page: DisplayPage): Generator<DisplayPrimitive> {
+  const watermarks = Math.min(page.watermarkPrimitiveCount ?? 0, page.primitives.length);
+  yield* page.primitives.slice(0, watermarks);
+  if (page.header) yield* page.header.primitives;
+  if (page.footer) yield* page.footer.primitives;
+  yield* page.primitives.slice(watermarks);
+  for (const area of page.noteAreas ?? []) yield* area.primitives ?? [];
 }
 
 function runExtent(run: GlyphRunPrimitive): { left: number; right: number; baseline: number } | null {
@@ -52,14 +61,15 @@ export function peerlessCaretColor(page: DisplayPage | undefined, caret: DocxEch
   if (!page) return '#000';
   const x = caret.x;
   const y = caret.y + caret.height / 2;
-  let fill: Rgb = WHITE;
+  const paintX = caret.x + Math.max(1, caret.width) / 2;
+  let fill: Rgb = parseColor(page.background) ?? WHITE;
   let before: GlyphRunPrimitive | undefined;
   let after: GlyphRunPrimitive | undefined;
-  for (const primitive of page.primitives) {
+  for (const primitive of paintOrder(page)) {
     if (primitive.kind === 'rect') {
-      if ((primitive.opacity ?? 1) >= 0.5 && covers(primitive, x, y)) fill = parseColor(primitive.fill) ?? fill;
+      if ((primitive.opacity ?? 1) >= 0.5 && covers(primitive, paintX, y)) fill = parseColor(primitive.fill) ?? fill;
     } else if (primitive.kind === 'decoration') {
-      if (primitive.deco === 'highlight' && covers(primitive, x, y)) fill = parseColor(primitive.color) ?? fill;
+      if (primitive.deco === 'highlight' && covers(primitive, paintX, y)) fill = parseColor(primitive.color) ?? fill;
     } else if (primitive.kind === 'glyphRun' && !primitive.listMarker && !primitive.hidden) {
       const extent = runExtent(primitive);
       if (!extent || extent.baseline < caret.y || extent.baseline > caret.y + caret.height) continue;
