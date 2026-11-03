@@ -68,7 +68,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         if: matrix.platform.zig
         with:
-          tool: cargo-zigbuild@0.20.1
+          tool: cargo-zigbuild@0.23.4
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
