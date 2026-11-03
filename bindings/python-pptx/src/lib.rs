@@ -2577,7 +2577,7 @@ impl PyPresentation {
         background: &str,
         max_shadow_pixels: Option<u64>,
     ) -> PyResult<PyPng> {
-        let target = betteroffice_pptx::SlideTarget {
+        let target = betteroffice_pptx::PngTarget {
             slide: png_target_index(target)?,
         };
         let options = RenderOptions {

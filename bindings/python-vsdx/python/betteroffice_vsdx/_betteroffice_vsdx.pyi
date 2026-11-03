@@ -2,7 +2,7 @@ from __future__ import annotations
 from os import PathLike
 from typing import TypedDict, final
 
-class PageTarget(TypedDict):
+class PngTarget(TypedDict):
     page: int
 
 
@@ -72,4 +72,4 @@ class Diagram:
     def pages(self) -> list[Page]: ...
     def __len__(self) -> int: ...
 
-    def render_png(self, target: PageTarget, *, scale: float = ...) -> Png: ...
+    def render_png(self, target: PngTarget, *, scale: float = ...) -> Png: ...

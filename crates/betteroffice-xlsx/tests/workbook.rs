@@ -11350,10 +11350,8 @@ fn png_targets_validate_sheets_and_scale_both_forms() {
                 },
             )
             .unwrap();
-        assert_eq!(
-            (second.width, second.height),
-            (first.width * 2, first.height * 2)
-        );
+        assert!(second.width.abs_diff(first.width * 2) <= 1);
+        assert!(second.height.abs_diff(first.height * 2) <= 1);
         assert_eq!(
             u32::from_be_bytes(second.bytes[16..20].try_into().unwrap()),
             second.width

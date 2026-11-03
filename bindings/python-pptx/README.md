@@ -236,7 +236,7 @@ print(png.width, png.height, png.skipped_images)   # 2560 1440 0
 png.write("slide-0.png")
 ```
 
-The `SlideTarget` dictionary uses a zero-based slide index. Scale defaults to 1.0;
+The `PngTarget` dictionary uses a zero-based slide index. Scale defaults to 1.0;
 `background` and `max_shadow_pixels` remain keyword-only options.
 
 `background` picks what fills the pixels the slide leaves uncovered: `"slide"`

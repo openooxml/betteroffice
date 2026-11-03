@@ -957,14 +957,14 @@ fn export_png_renders_scaled_raster_pages() {
     let diagram = Diagram::open(source).unwrap();
     let first = diagram
         .render_png(
-            betteroffice_vsdx::PageTarget { page: 0 },
+            betteroffice_vsdx::PngTarget { page: 0 },
             &betteroffice_vsdx::RenderOptions { scale: 1.0 },
         )
         .unwrap();
     assert_eq!(&first.bytes[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
     let second = diagram
         .render_png(
-            betteroffice_vsdx::PageTarget { page: 0 },
+            betteroffice_vsdx::PngTarget { page: 0 },
             &betteroffice_vsdx::RenderOptions { scale: 2.0 },
         )
         .unwrap();
@@ -973,7 +973,7 @@ fn export_png_renders_scaled_raster_pages() {
     assert!(
         diagram
             .render_png(
-                betteroffice_vsdx::PageTarget { page: 99 },
+                betteroffice_vsdx::PngTarget { page: 99 },
                 &betteroffice_vsdx::RenderOptions { scale: 1.0 }
             )
             .is_err()
@@ -981,7 +981,7 @@ fn export_png_renders_scaled_raster_pages() {
     assert!(
         diagram
             .render_png(
-                betteroffice_vsdx::PageTarget { page: 0 },
+                betteroffice_vsdx::PngTarget { page: 0 },
                 &betteroffice_vsdx::RenderOptions { scale: 0.0 }
             )
             .is_err()
@@ -995,7 +995,7 @@ fn png_targets_use_zero_based_pages_with_default_scale() {
         "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
     ))
     .unwrap();
-    let target = betteroffice_vsdx::PageTarget { page: 0 };
+    let target = betteroffice_vsdx::PngTarget { page: 0 };
     let first = diagram
         .render_png(target, &betteroffice_vsdx::RenderOptions::default())
         .unwrap();
@@ -1009,7 +1009,7 @@ fn png_targets_use_zero_based_pages_with_default_scale() {
     assert!(
         diagram
             .render_png(
-                betteroffice_vsdx::PageTarget {
+                betteroffice_vsdx::PngTarget {
                     page: diagram.pages().count()
                 },
                 &betteroffice_vsdx::RenderOptions::default()

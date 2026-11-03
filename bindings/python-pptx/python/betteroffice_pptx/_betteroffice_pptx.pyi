@@ -1,7 +1,7 @@
 import os
 from typing import TypedDict, Any, Callable, Literal, final, overload
 
-class SlideTarget(TypedDict):
+class PngTarget(TypedDict):
     slide: int
 
 
@@ -592,7 +592,7 @@ class Presentation:
         self, slide: int | str, x: float, y: float,
     ) -> HitTestResult | None: ...
     def render_slide(self, slide: int | str) -> DisplayList: ...
-    def render_png(self, target: SlideTarget, *, scale: float = ...,
+    def render_png(self, target: PngTarget, *, scale: float = ...,
                    background: str = ..., max_shadow_pixels: int | None = ...) -> Png: ...
     def save(self) -> bytes:
         """Serialize back to PPTX bytes, edits included."""

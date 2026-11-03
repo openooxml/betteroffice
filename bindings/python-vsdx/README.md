@@ -31,7 +31,7 @@ inherited master text.
 
 Errors raise `VsdxError`, or `ParseError` for invalid packages and XML.
 
-Render a zero-based page with a `PageTarget` dictionary. Scale defaults to 1.0.
+Render a zero-based page with a `PngTarget` dictionary. Scale defaults to 1.0.
 
 ```python
 png = diagram.render_png({"page": 0}, scale=2.0)

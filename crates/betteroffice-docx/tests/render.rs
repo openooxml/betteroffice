@@ -599,7 +599,7 @@ fn page_targets_validate_indexes_and_scale_dimensions() {
     document
         .register_font("Calibri", false, false, CARLITO)
         .unwrap();
-    let target = betteroffice_docx::PageTarget { page: 0 };
+    let target = betteroffice_docx::PngTarget { page: 0 };
     let first = document
         .render_png(target, &betteroffice_docx::RenderOptions::default())
         .unwrap();
@@ -612,7 +612,7 @@ fn page_targets_validate_indexes_and_scale_dimensions() {
     assert!(
         document
             .render_png(
-                betteroffice_docx::PageTarget { page: usize::MAX },
+                betteroffice_docx::PngTarget { page: usize::MAX },
                 &betteroffice_docx::RenderOptions::default()
             )
             .is_err()

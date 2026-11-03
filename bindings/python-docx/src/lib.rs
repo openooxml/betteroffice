@@ -1357,7 +1357,7 @@ impl PyDocument {
 
     #[pyo3(signature = (target, *, scale = 1.0))]
     fn render_png(&self, py: Python<'_>, target: &Bound<'_, PyAny>, scale: f32) -> PyResult<PyPng> {
-        let target = betteroffice_docx::PageTarget {
+        let target = betteroffice_docx::PngTarget {
             page: png_target_index(target)?,
         };
         let options = betteroffice_docx::RenderOptions { scale };

@@ -29,9 +29,9 @@ PNG rendering is enabled by default. Set `default-features = false` to omit
 raster support. Targets use zero-based slide indexes; the default scale is 1.0.
 
 ```rust
-use betteroffice_pptx::{RenderOptions, SlideTarget};
+use betteroffice_pptx::{RenderOptions, PngTarget};
 
-let png = presentation.render_png(SlideTarget { slide: 0 }, &RenderOptions::default())?;
+let png = presentation.render_png(PngTarget { slide: 0 }, &RenderOptions::default())?;
 ```
 
 Display lists carry vector geometry, images, shaped text, caret data, and

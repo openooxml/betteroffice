@@ -16,7 +16,7 @@ pub const MAX_PIXMAP_DIM: u32 = docx_raster::MAX_PAGE_DIM;
 pub const MAX_PIXMAP_PIXELS: u64 = docx_raster::MAX_PAGE_PIXELS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageTarget {
+pub struct PngTarget {
     pub page: usize,
 }
 
@@ -90,7 +90,7 @@ fn page_pixels(number: &Number, scale: f32) -> Option<u32> {
 }
 
 impl Document {
-    pub fn render_png(&self, target: PageTarget, options: &RenderOptions) -> Result<RenderedPage> {
+    pub fn render_png(&self, target: PngTarget, options: &RenderOptions) -> Result<RenderedPage> {
         if !options.scale.is_finite() || options.scale <= 0.0 {
             return Err(Error::Render("scale must be finite and positive".into()));
         }

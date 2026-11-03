@@ -57,10 +57,10 @@ raster support, and enable font features separately if needed.
 render a display list returned by `layout` with unchanged dimensions.
 
 ```rust
-use betteroffice_docx::{Document, PageTarget, RenderOptions};
+use betteroffice_docx::{Document, PngTarget, RenderOptions};
 
 let document = Document::open(&docx_bytes)?;
-let rendered = document.render_png(PageTarget { page: 0 }, &RenderOptions::default())?;
+let rendered = document.render_png(PngTarget { page: 0 }, &RenderOptions::default())?;
 ```
 
 Faces are capped at 256 and fonts at 32 MiB each, images at 256 and 32 MiB

@@ -12,7 +12,7 @@ pub use pptx_raster::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SlideTarget {
+pub struct PngTarget {
     pub slide: usize,
 }
 
@@ -31,7 +31,7 @@ impl Presentation {
     /// [`Presentation::register_font`] took; a picture the backend cannot draw
     /// is skipped and counted rather than failing the render. Glyph outlines and
     /// decoded images are cached on the deck.
-    pub fn render_png(&self, target: SlideTarget, options: &RenderOptions) -> Result<RenderedPng> {
+    pub fn render_png(&self, target: PngTarget, options: &RenderOptions) -> Result<RenderedPng> {
         let rendered = self.render_slide(target.slide)?;
         let mut images: AssetMap<'_> = self
             .media()

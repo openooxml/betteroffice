@@ -20,8 +20,8 @@ pub use presentation::{
 };
 #[cfg(feature = "raster")]
 pub use render::{
-    Background, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_SLIDE_DIM, MAX_SLIDE_PIXELS, RenderOptions,
-    RenderedPng, SlideTarget,
+    Background, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_SLIDE_DIM, MAX_SLIDE_PIXELS, PngTarget,
+    RenderOptions, RenderedPng,
 };
 pub use types::*;
 

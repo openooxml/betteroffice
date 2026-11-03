@@ -100,12 +100,12 @@ from ._betteroffice_pptx import (
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
 
-class SlideTarget(TypedDict):
+class PngTarget(TypedDict):
     slide: int
 
 
 __all__ = [
-    "SlideTarget",
+    "PngTarget",
     "decode_font_face",
     "AdjustEdit",
     "CaretAnchor",
@@ -896,7 +896,7 @@ class Presentation:
         """
         return json.loads(self._inner.apply_edits_json(_request_json(request)))
 
-    def render_png(self, target: SlideTarget, *, scale: float = 1.0,
+    def render_png(self, target: PngTarget, *, scale: float = 1.0,
                    background: str = "slide", max_shadow_pixels: "int | None" = None) -> Png:
         return self._inner.render_png(
             target, scale=scale, background=background, max_shadow_pixels=max_shadow_pixels

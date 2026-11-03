@@ -150,7 +150,7 @@ png.write("page-0.png")
 print(len(png), png.skipped_images)
 ```
 
-`render_png` accepts a `PageTarget` dictionary. For an existing layout, use
+`render_png` accepts a `PngTarget` dictionary. For an existing layout, use
 `document.render_display_list_png(layout.display_list, 0)`.
 
 `register_font` adds a family or replaces a bundled one:

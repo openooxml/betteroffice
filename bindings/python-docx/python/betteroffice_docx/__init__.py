@@ -32,12 +32,12 @@ from ._betteroffice_docx import (
 from ._betteroffice_docx import Document as _Document
 from ._betteroffice_docx import DocxError, __version__
 
-class PageTarget(TypedDict):
+class PngTarget(TypedDict):
     page: int
 
 
 __all__ = [
-    "PageTarget",
+    "PngTarget",
     "decode_font_face",
     "DisplayList",
     "Document",
@@ -313,7 +313,7 @@ class Document:
         """
         self._inner.register_image(rel_id, _as_bytes(data), scope=scope, part=part)
 
-    def render_png(self, target: PageTarget, *, scale: float = 1.0) -> Png:
+    def render_png(self, target: PngTarget, *, scale: float = 1.0) -> Png:
         return self._inner.render_png(target, scale=scale)
 
     def render_display_list_png(self, display_list: DisplayList, page: int = 0) -> Png:

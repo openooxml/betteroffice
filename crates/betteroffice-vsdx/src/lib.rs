@@ -57,7 +57,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(feature = "raster")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageTarget {
+pub struct PngTarget {
     pub page: usize,
 }
 
@@ -142,7 +142,7 @@ impl Diagram {
     #[cfg(feature = "raster")]
     pub fn render_png(
         &self,
-        target: PageTarget,
+        target: PngTarget,
         options: &RenderOptions,
     ) -> Result<vsdx_raster::RenderedPage> {
         vsdx_raster::render_page(&self.renderer()?, &self.package, target.page, options.scale)

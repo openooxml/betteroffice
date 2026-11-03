@@ -59,7 +59,7 @@ fn renders_every_slide_of_the_demo_deck() {
     for index in 0..presentation.slides().len() {
         let rendered = presentation
             .render_png(
-                betteroffice_pptx::SlideTarget { slide: index },
+                betteroffice_pptx::PngTarget { slide: index },
                 &RenderOptions::default(),
             )
             .unwrap();
@@ -74,7 +74,7 @@ fn renders_every_slide_of_the_demo_deck() {
 fn scale_multiplies_the_output_dimensions() {
     let rendered = deck()
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions {
                 scale: 2.0,
                 ..RenderOptions::default()
@@ -88,7 +88,7 @@ fn scale_multiplies_the_output_dimensions() {
 fn a_slide_past_the_deck_is_refused() {
     let error = deck()
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 99 },
+            betteroffice_pptx::PngTarget { slide: 99 },
             &RenderOptions::default(),
         )
         .unwrap_err();
@@ -104,7 +104,7 @@ fn text_without_a_registered_font_needs_one_for_layout_and_png() {
     assert!(error.to_string().contains("no font"), "{error}");
     let error = presentation
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions::default(),
         )
         .unwrap_err();
@@ -140,7 +140,7 @@ fn nested_text_without_fonts_is_refused() {
         assert!(error.to_string().contains("no font"), "{error}");
         let error = presentation
             .render_png(
-                betteroffice_pptx::SlideTarget { slide: 0 },
+                betteroffice_pptx::PngTarget { slide: 0 },
                 &RenderOptions::default(),
             )
             .unwrap_err();
@@ -177,7 +177,7 @@ fn a_text_free_slide_renders_png_without_fonts() {
     assert!(!has_text);
     let png = presentation
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions::default(),
         )
         .unwrap();
@@ -188,7 +188,7 @@ fn a_text_free_slide_renders_png_without_fonts() {
 fn a_scale_that_is_not_positive_is_refused() {
     let error = deck()
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions {
                 scale: 0.0,
                 ..RenderOptions::default()
@@ -204,7 +204,7 @@ fn a_scale_that_is_not_positive_is_refused() {
 fn the_render_is_not_a_blank_surface() {
     let rendered = deck()
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions::default(),
         )
         .unwrap();
@@ -232,13 +232,13 @@ fn repeated_renders_are_byte_identical() {
     let presentation = deck();
     let first = presentation
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 1 },
+            betteroffice_pptx::PngTarget { slide: 1 },
             &RenderOptions::default(),
         )
         .unwrap();
     let second = presentation
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 1 },
+            betteroffice_pptx::PngTarget { slide: 1 },
             &RenderOptions::default(),
         )
         .unwrap();
@@ -256,7 +256,7 @@ fn dumps_slides_when_asked() {
     for index in 0..presentation.slides().len() {
         let rendered = presentation
             .render_png(
-                betteroffice_pptx::SlideTarget { slide: index },
+                betteroffice_pptx::PngTarget { slide: index },
                 &RenderOptions {
                     scale: 2.0,
                     ..RenderOptions::default()
@@ -293,7 +293,7 @@ fn lum_brightness_and_contrast_reach_the_bitmap() {
 
     let png = deck
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions::default(),
         )
         .unwrap();
@@ -357,7 +357,7 @@ fn blip_effects_render_on_slides_layouts_and_masters() {
     ));
     let png = deck
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions::default(),
         )
         .unwrap();
@@ -389,7 +389,7 @@ fn pictures_received_from_a_peer_render_before_save() {
     let presentation = deck();
     let before = presentation
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions::default(),
         )
         .unwrap();
@@ -434,7 +434,7 @@ fn pictures_received_from_a_peer_render_before_save() {
     );
     let rendered = presentation
         .render_png(
-            betteroffice_pptx::SlideTarget { slide: 0 },
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions::default(),
         )
         .unwrap();
@@ -455,7 +455,7 @@ fn backstop_options() -> betteroffice_pptx::OpenOptions {
 #[test]
 fn png_targets_use_zero_based_indexes_with_default_scale() {
     let deck = deck();
-    let target = betteroffice_pptx::SlideTarget { slide: 0 };
+    let target = betteroffice_pptx::PngTarget { slide: 0 };
     let first = deck.render_png(target, &RenderOptions::default()).unwrap();
     let second = deck
         .render_png(
@@ -472,7 +472,7 @@ fn png_targets_use_zero_based_indexes_with_default_scale() {
     );
     assert!(
         deck.render_png(
-            betteroffice_pptx::SlideTarget {
+            betteroffice_pptx::PngTarget {
                 slide: deck.slides().len()
             },
             &RenderOptions::default()
