@@ -1,7 +1,7 @@
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, Cell, CellInput, CellRange, CellRef, CellValue, Error,
-    NumberFormatMutation, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch, Workbook,
-    WorkbookModel,
+    NumberFormatMutation, ProposalEditInput, ProposalRequest, ProtectedSheets, Sheet, SheetId,
+    StylePatch, Workbook, WorkbookModel,
 };
 use xlsx_model::{CellFormat, Protection, Xf};
 
@@ -320,4 +320,151 @@ fn undo_and_redo_replay_an_unlocked_edit_on_a_protected_sheet() {
     assert_eq!(input(&book, FORM, "B1"), "2");
     book.redo(options()).unwrap();
     assert_eq!(input(&book, FORM, "B1"), "typed");
+}
+
+fn protected_xml(book: &Workbook) -> String {
+    let parts = ooxml_opc::unzip_parts(&book.save().unwrap()).unwrap();
+    let sheet = parts
+        .into_iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    String::from_utf8(sheet.1).unwrap()
+}
+
+#[test]
+fn protected_sheets_allow_writes_locked_cells_and_keeps_the_protection() {
+    let mut book = workbook();
+    let allow = ProtectedSheets::Allow;
+    assert!(
+        book.edit_cell_with_protection(FORM, cell("A1"), "through", options(), allow)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        book.edit_cells_with_protection(FORM, &inputs(&[("C3", "=B1*2")]), options(), allow)
+            .unwrap()
+            .applied
+    );
+    book.patch_range_style_with_protection(FORM, range("A1"), bold(), options(), allow)
+        .unwrap();
+    book.set_range_number_format_with_protection(
+        FORM,
+        range("A1"),
+        NumberFormatMutation::Percent,
+        options(),
+        allow,
+    )
+    .unwrap();
+    book.apply_format_with_protection(FORM, range("C3"), captured(), options(), allow)
+        .unwrap();
+    assert_eq!(input(&book, FORM, "A1"), "through");
+    assert_eq!(input(&book, FORM, "C3"), "=B1*2");
+    assert_eq!(
+        book.selection_formatting(FORM, range("A1")).unwrap().bold,
+        Some(true)
+    );
+    assert!(protected_xml(&book).contains("<sheetProtection"));
+    let mut reopened = Workbook::open(&book.save().unwrap()).unwrap();
+    assert_eq!(
+        locked(reopened.edit_cell(FORM, cell("A1"), "after", options())),
+        r#"A1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(input(&reopened, FORM, "A1"), "through");
+}
+
+#[test]
+fn protected_sheets_refuse_and_the_default_raise_like_excel() {
+    let mut book = workbook();
+    let version = book.version();
+    let refuse = ProtectedSheets::Refuse;
+    assert_eq!(ProtectedSheets::default(), refuse);
+    let message = r#"A1 is locked on protected sheet "Form""#;
+    assert_eq!(
+        locked(book.edit_cell_with_protection(FORM, cell("A1"), "x", options(), refuse)),
+        message
+    );
+    assert_eq!(
+        locked(book.edit_cells_with_protection(FORM, &inputs(&[("A1", "x")]), options(), refuse)),
+        message
+    );
+    assert_eq!(
+        locked(book.patch_range_style_with_protection(
+            FORM,
+            range("B1"),
+            bold(),
+            options(),
+            refuse
+        )),
+        r#"sheet "Form" is protected"#
+    );
+    assert_eq!(
+        locked(book.edit_cell(FORM, cell("A1"), "x", options())),
+        message
+    );
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, FORM, "A1"), "1");
+}
+
+#[test]
+fn protected_sheets_allow_is_refused_on_a_collaborative_workbook() {
+    let source = workbook().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 7).unwrap();
+    let version = book.version();
+    let refused =
+        |result: betteroffice_xlsx::Result<betteroffice_xlsx::MutationResult>| match result {
+            Err(Error::InvalidRequest(message)) => message,
+            other => panic!("expected an invalid request, got {other:?}"),
+        };
+    let message = "protectedSheets allow requires a standalone agent workbook";
+    for target in [FORM, OPEN] {
+        assert_eq!(
+            refused(book.edit_cell_with_protection(
+                target,
+                cell("A1"),
+                "x",
+                options(),
+                ProtectedSheets::Allow
+            )),
+            message
+        );
+        assert_eq!(
+            refused(book.edit_cells_with_protection(
+                target,
+                &inputs(&[("A1", "x")]),
+                options(),
+                ProtectedSheets::Allow
+            )),
+            message
+        );
+        assert_eq!(
+            refused(book.patch_range_style_with_protection(
+                target,
+                range("A1"),
+                bold(),
+                options(),
+                ProtectedSheets::Allow
+            )),
+            message
+        );
+    }
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, FORM, "A1"), "1");
+}
+
+#[test]
+fn protected_sheets_values_other_than_refuse_or_allow_are_invalid_requests() {
+    assert_eq!(
+        ProtectedSheets::parse("refuse").unwrap(),
+        ProtectedSheets::Refuse
+    );
+    assert_eq!(
+        ProtectedSheets::parse("allow").unwrap(),
+        ProtectedSheets::Allow
+    );
+    for value in ["Allow", "", "yes"] {
+        assert!(matches!(
+            ProtectedSheets::parse(value),
+            Err(Error::InvalidRequest(message)) if message == "protectedSheets must be refuse or allow"
+        ));
+    }
 }

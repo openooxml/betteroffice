@@ -34,6 +34,11 @@ export async function updateWorkbook(bytes: Uint8Array): Promise<Uint8Array> {
 Cell input parses text, numbers, booleans, and formulas;
 formulas start with `=`. Editing a cell recalculates its dependents.
 
+On a protected sheet, `editCell`, `editCells`, `patchRangeStyle`, `setNumberFormat`,
+`applyFormat` and `moveChart` throw for locked cells, formats and chart moves the protection
+forbids, as Excel does. Pass `{ protectedSheets: 'allow' }` as their last argument to write
+through the protection, which stays in the file; a collaborative workbook refuses it.
+
 ## Entry points
 
 These entry points are exported from `@betteroffice/xlsx`:

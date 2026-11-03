@@ -23,8 +23,14 @@ export const WORKBOOK_REPLAY_MUTATORS = {
 
 export type WorkbookReplayMethod = keyof typeof WORKBOOK_REPLAY_MUTATORS;
 
+type DirectWriteMethod = 'editCell' | 'editCells' | 'patchRangeStyle' | 'setNumberFormat' | 'applyFormat' | 'moveChart';
+type WithoutLast<P extends unknown[]> = P extends [...infer Head, unknown] ? Head : P;
+/** Replayed arguments; a direct write's trailing `XlsxWriteOptions` never replays. */
+type WorkbookReplayArgs<K extends WorkbookReplayMethod> = K extends DirectWriteMethod
+  ? WithoutLast<Required<Parameters<WorkbookHandle[K]>>> : Parameters<WorkbookHandle[K]>;
+
 export type WorkbookReplayOp = {
-  [K in WorkbookReplayMethod]: { method: K; args: Parameters<WorkbookHandle[K]> }
+  [K in WorkbookReplayMethod]: { method: K; args: WorkbookReplayArgs<K> }
 }[WorkbookReplayMethod] & { calculation?: WorkbookCalculationContext };
 
 export interface WorkbookReplayEnvelope {

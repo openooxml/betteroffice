@@ -115,6 +115,7 @@ export type {
   WorkbookHandle,
   XlsxTextMatch,
   XlsxTextSearchOptions,
+  XlsxWriteOptions,
   WorkbookUpdateInfo,
   WorkbookUpdateListener,
   WorkbookUpdateOrigin,

@@ -127,6 +127,30 @@ describe('workbook edit peers', () => {
     }
   });
 
+  test('refuses protectedSheets options on replayed writes and stays usable', async () => {
+    const peer = openWorkbook(fixture, { calculation });
+    const session = await createTestWorkbookSession(fixture, undefined, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      const before = peer.cell(0, 0, 0).input;
+      const allow = { protectedSheets: 'allow' as const };
+      for (const write of [
+        () => edits.editCell(0, 0, 0, 'through', allow),
+        () => edits.editCells(0, [{ row: 0, col: 0, input: 'through' }], allow),
+        () => edits.patchRangeStyle(0, 'A1', { bold: true }, allow),
+        () => edits.setNumberFormat(0, 'A1', 'percent', allow),
+      ]) expect(write).toThrow(TypeError);
+      expect(peer.cell(0, 0, 0).input).toBe(before);
+      expect(edits.state).toBe('ready');
+      edits.editCell(0, 0, 0, 'typed');
+      await matchingDigest(1, 'editCell', edits, peer, session);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('serves an immediate frame after a peer sheet change without awaiting flush', async () => {
     for (const wrapHost of [undefined, batchRequests]) {
       const peer = openWorkbook(fixture, { calculation });

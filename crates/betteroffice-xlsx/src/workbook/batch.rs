@@ -1273,7 +1273,7 @@ impl Workbook {
             None if protection.is_none() => false,
             _ => {
                 return Err(Error::InvalidRequest(
-                    "protectedSheets must be refuse or allow".to_owned(),
+                    super::target::PROTECTED_SHEETS_VALUES.to_owned(),
                 ));
             }
         };
@@ -1281,7 +1281,7 @@ impl Workbook {
             .map_err(|error| Error::InvalidRequest(error.to_string()))?;
         if allow && (request.source != EditSource::Agent || self.is_collaborative()) {
             return Err(Error::InvalidRequest(
-                "protectedSheets allow requires a standalone agent workbook".to_owned(),
+                super::target::PROTECTED_SHEETS_STANDALONE.to_owned(),
             ));
         }
         Ok((request, allow))

@@ -81,8 +81,8 @@ use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
-    ProposalRequest, RenderOptions, Result, SelectionFormatting, SheetInfo, TextSearchMatch,
-    UnevaluatedCell, UpdateEvent, UpdateOrigin,
+    ProposalRequest, ProtectedSheets, RenderOptions, Result, SelectionFormatting, SheetInfo,
+    TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
 use batch::DocumentVersion;
 use staging::CommitHistory;
@@ -1580,8 +1580,26 @@ impl Workbook {
         patch: StylePatch,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.patch_range_style_with_protection(
+            sheet,
+            range,
+            patch,
+            options,
+            ProtectedSheets::Refuse,
+        )
+    }
+
+    /// [`Workbook::patch_range_style`] under a [`ProtectedSheets`] policy.
+    pub fn patch_range_style_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        patch: StylePatch,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
-        self.ensure_cells_formattable(sheet)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_ops(
             vec![Op::PatchRangeStyle {
                 sheet,
@@ -1599,8 +1617,26 @@ impl Workbook {
         format: NumberFormatMutation,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.set_range_number_format_with_protection(
+            sheet,
+            range,
+            format,
+            options,
+            ProtectedSheets::Refuse,
+        )
+    }
+
+    /// [`Workbook::set_range_number_format`] under a [`ProtectedSheets`] policy.
+    pub fn set_range_number_format_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: NumberFormatMutation,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
-        self.ensure_cells_formattable(sheet)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_ops(
             vec![Op::SetRangeNumberFormat {
                 sheet,
@@ -1731,8 +1767,20 @@ impl Workbook {
         format: CapturedFormat,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.apply_format_with_protection(sheet, range, format, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::apply_format`] under a [`ProtectedSheets`] policy.
+    pub fn apply_format_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: CapturedFormat,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
-        self.ensure_cells_formattable(sheet)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_ops(
             vec![Op::ApplyRangeFormat {
                 sheet,
@@ -1795,7 +1843,19 @@ impl Workbook {
         input: &str,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cell_marked(sheet, cell, input, options, &mut |_| {})
+        self.edit_cell_with_protection(sheet, cell, input, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_cell`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cell_with_protection(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.edit_cell_marked(sheet, cell, input, options, protection, &mut |_| {})
     }
 
     /// [`Workbook::edit_cell`] with its stages timed by `now`, a millisecond
@@ -1808,8 +1868,28 @@ impl Workbook {
         options: CalculationOptions,
         now: &mut impl FnMut() -> f64,
     ) -> Result<(MutationResult, EditProfile)> {
+        self.edit_cell_profiled_with_protection(
+            sheet,
+            cell,
+            input,
+            options,
+            ProtectedSheets::Refuse,
+            now,
+        )
+    }
+
+    /// [`Workbook::edit_cell_profiled`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cell_profiled_with_protection(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<(MutationResult, EditProfile)> {
         profiled(now, |mark| {
-            self.edit_cell_marked(sheet, cell, input, options, mark)
+            self.edit_cell_marked(sheet, cell, input, options, protection, mark)
         })
     }
 
@@ -1819,10 +1899,11 @@ impl Workbook {
         cell: CellRef,
         input: &str,
         options: CalculationOptions,
+        protection: ProtectedSheets,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
-        self.ensure_cells_writable(sheet, [cell])?;
+        self.ensure_cells_writable(sheet, [cell], protection)?;
         let names = DefinedFunctionNames::new(&self.model.defined_names);
         let (state, format) =
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
@@ -1868,6 +1949,18 @@ impl Workbook {
         edits: &[CellInput],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.edit_cells_with_protection(sheet, edits, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_cells`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cells_with_protection(
+        &mut self,
+        sheet: SheetId,
+        edits: &[CellInput],
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.admit_protected_sheets(protection)?;
         if edits.is_empty() {
             return Ok(MutationResult::default());
         }
@@ -1875,7 +1968,7 @@ impl Workbook {
         for edit in edits {
             self.validate_cell(edit.cell)?;
         }
-        self.ensure_cells_writable(sheet, edits.iter().map(|edit| edit.cell))?;
+        self.ensure_cells_writable(sheet, edits.iter().map(|edit| edit.cell), protection)?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
@@ -1969,7 +2062,11 @@ impl Workbook {
             .ok_or(Error::CellOutOfRange(destination))?;
         let target = CellRange::new(destination, CellRef::new(end_row, end_col));
         self.validate_bounded_range(sheet, target)?;
-        self.ensure_cells_writable(sheet, cells_in(source).chain(cells_in(target)))?;
+        self.ensure_cells_writable(
+            sheet,
+            cells_in(source).chain(cells_in(target)),
+            ProtectedSheets::Refuse,
+        )?;
         if source.start.row == destination.row && source.start.col == destination.col {
             return Ok(MutationResult::default());
         }
@@ -2372,7 +2469,7 @@ impl Workbook {
         let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
-            self.ensure_cells_writable(edit.sheet, [edit.cell])?;
+            self.ensure_cells_writable(edit.sheet, [edit.cell], ProtectedSheets::Refuse)?;
             let (state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -2479,7 +2576,7 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            self.ensure_cells_writable(sheet, [cell])?;
+            self.ensure_cells_writable(sheet, [cell], ProtectedSheets::Refuse)?;
             let (state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -2737,8 +2834,21 @@ impl Workbook {
         dy: f32,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.move_chart_with_protection(sheet, frame, dx, dy, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::move_chart`] under a [`ProtectedSheets`] policy.
+    pub fn move_chart_with_protection(
+        &mut self,
+        sheet: SheetId,
+        frame: &str,
+        dx: f32,
+        dy: f32,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         let sheet_ref = self.sheet(sheet)?;
-        self.ensure_objects_movable(sheet)?;
+        self.ensure_objects_movable(sheet, protection)?;
         let chart = sheet_ref
             .charts
             .iter()

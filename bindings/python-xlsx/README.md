@@ -274,6 +274,10 @@ editing.
 | `wb.render_png(sheet, ...)` | render to PNG |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
 
+`set`, `set_many`, `set_style` and `set_number_format` raise for a locked cell or a format a
+protected sheet forbids, as Excel does. `protected_sheets="allow"` writes through the protection,
+which stays in the file; a collaborative workbook refuses it.
+
 The following calculation calls (`open_recalculated`,
 `open_collaborative`, `recalculate`, `set`, `set_many`, `undo`, `redo`,
 `apply_update`, `propose`, `accept_proposal`, `set_number_format`, and

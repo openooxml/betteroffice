@@ -1,9 +1,9 @@
 ---
-"@betteroffice/xlsx": patch
+"@betteroffice/xlsx": minor
 "@betteroffice/xlsx-react": patch
-"@betteroffice/xlsx-native": patch
-"@betteroffice/python-xlsx": patch
-"@betteroffice/rust-crates": patch
+"@betteroffice/xlsx-native": minor
+"@betteroffice/python-xlsx": minor
+"@betteroffice/rust-crates": minor
 ---
 
-The editor and bindings now refuse typing, pasting, clearing or moving locked cells on protected sheets, and formatting or chart moves those sheets do not allow. `editCell` and `editCells` throw for locked cells instead of writing them.
+Editors and direct writes now refuse locked cells, formats and chart moves on protected sheets by default, like Excel. Direct writes accept opt-in `protectedSheets: "allow"` (Python `protected_sheets="allow"`), which writes through and keeps the protection.

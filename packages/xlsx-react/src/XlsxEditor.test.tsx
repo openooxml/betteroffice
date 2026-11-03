@@ -3290,6 +3290,26 @@ describe('XlsxEditor protected sheets', () => {
     });
   }
 
+  it('sends a typed edit to the engine without a protectedSheets opt-in, so it stays refused', async () => {
+    const book = await mountProtected();
+    const handle = book.api().handle;
+    const editCell = handle.editCell;
+    const calls: unknown[][] = [];
+    handle.editCell = (...args: Parameters<typeof editCell>) => {
+      calls.push(args);
+      return editCell(...args);
+    };
+    try {
+      await book.select(0);
+      await book.type('changed');
+      await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+    } finally {
+      handle.editCell = editCell;
+    }
+    expect(calls).toEqual([[0, 0, 0, 'changed']]);
+    expect(book.input(0)).toBe('1');
+  });
+
   it('writes an unlocked cell of a protected sheet', async () => {
     const book = await mountProtected();
     await book.select(1);

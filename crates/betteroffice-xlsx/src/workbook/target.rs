@@ -178,6 +178,34 @@ pub struct TextFound {
 
 pub type FindOutcome = std::result::Result<TextFound, EditRefusal>;
 
+/// Refusal of a `protectedSheets` value other than `refuse` or `allow`.
+pub(super) const PROTECTED_SHEETS_VALUES: &str = "protectedSheets must be refuse or allow";
+/// Refusal of `protectedSheets: allow` on a workbook that is not standalone.
+pub(super) const PROTECTED_SHEETS_STANDALONE: &str =
+    "protectedSheets allow requires a standalone agent workbook";
+
+/// Whether a direct write may change locked cells, formats and objects of protected sheets,
+/// as edit batches' `protectedSheets` opt-in does. The protection itself is kept either way.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ProtectedSheets {
+    /// Refuse writes protection forbids, as Excel does.
+    #[default]
+    Refuse,
+    /// Write through protection; refused on a collaborative workbook.
+    Allow,
+}
+
+impl ProtectedSheets {
+    /// Reads `refuse` or `allow`; any other value is an invalid request.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "refuse" => Ok(Self::Refuse),
+            "allow" => Ok(Self::Allow),
+            _ => Err(Error::InvalidRequest(PROTECTED_SHEETS_VALUES.to_owned())),
+        }
+    }
+}
+
 /// How a source sheet limits batch writes.
 enum SheetLock {
     NotWorksheet,
@@ -425,14 +453,27 @@ impl Workbook {
         ))
     }
 
+    /// Refuses `protectedSheets: allow` on a collaborative workbook, as edit batches do.
+    pub(super) fn admit_protected_sheets(&self, protection: ProtectedSheets) -> Result<()> {
+        if protection == ProtectedSheets::Allow && self.is_collaborative() {
+            return Err(Error::InvalidRequest(
+                PROTECTED_SHEETS_STANDALONE.to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Refuses user input into `cells` of `sheet` when one of them is locked on a protected
     /// sheet, the check edit batches make without the protected-sheet opt-in.
     pub(super) fn ensure_cells_writable(
         &self,
         sheet: SheetId,
         cells: impl IntoIterator<Item = CellRef>,
+        protection: ProtectedSheets,
     ) -> Result<()> {
-        if matches!(self.sheet_lock(sheet), Some(SheetLock::Protected { .. }))
+        self.admit_protected_sheets(protection)?;
+        if protection == ProtectedSheets::Refuse
+            && matches!(self.sheet_lock(sheet), Some(SheetLock::Protected { .. }))
             && let Some(message) = self.locked_cell(sheet, cells)
         {
             return Err(Error::LockedTarget(message));
@@ -441,19 +482,31 @@ impl Workbook {
     }
 
     /// Refuses formatting cells of a protected sheet that does not allow it.
-    pub(super) fn ensure_cells_formattable(&self, sheet: SheetId) -> Result<()> {
+    pub(super) fn ensure_cells_formattable(
+        &self,
+        sheet: SheetId,
+        protection: ProtectedSheets,
+    ) -> Result<()> {
+        self.admit_protected_sheets(protection)?;
         match self.sheet_lock(sheet) {
             Some(SheetLock::Protected {
                 format_cells: false,
-            }) => Err(self.protected_sheet(sheet)),
+            }) if protection == ProtectedSheets::Refuse => Err(self.protected_sheet(sheet)),
             _ => Ok(()),
         }
     }
 
     /// Refuses moving objects on a protected sheet.
-    pub(super) fn ensure_objects_movable(&self, sheet: SheetId) -> Result<()> {
+    pub(super) fn ensure_objects_movable(
+        &self,
+        sheet: SheetId,
+        protection: ProtectedSheets,
+    ) -> Result<()> {
+        self.admit_protected_sheets(protection)?;
         match self.sheet_lock(sheet) {
-            Some(SheetLock::Protected { .. }) => Err(self.protected_sheet(sheet)),
+            Some(SheetLock::Protected { .. }) if protection == ProtectedSheets::Refuse => {
+                Err(self.protected_sheet(sheet))
+            }
             _ => Ok(()),
         }
     }
