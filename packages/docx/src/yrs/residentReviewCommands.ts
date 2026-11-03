@@ -9,9 +9,9 @@ export const reviewCommandKeys = {
   removeComment: ['id', 'expectVersion'],
   acceptRevision: ['revisionId', 'expectVersion'],
   rejectRevision: ['revisionId', 'expectVersion'],
-  propose: ['proposals', 'expectVersion', 'hostProposal'],
+  propose: ['proposals', 'expectVersion', 'expectPreviewVersion', 'hostProposal'],
   setProposalStates: ['changes', 'expectVersion', 'expectPreviewVersion', 'hostProposal'],
-  withdrawProposals: ['ids', 'expectVersion', 'keepRevisions', 'hostProposal'],
+  withdrawProposals: ['ids', 'expectVersion', 'expectPreviewVersion', 'keepRevisions', 'hostProposal'],
 };
 
 export type ReviewCommand = Extract<DocxCommandIntent, { kind: keyof typeof reviewCommandKeys }>;

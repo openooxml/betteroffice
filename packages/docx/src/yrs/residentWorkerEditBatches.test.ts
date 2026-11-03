@@ -683,6 +683,8 @@ test('worker registry operations match a direct registry and hand their records 
   expect(main.getProposals()).toEqual({
     version: main.version(),
     previewVersion: handoff.proposals.previewVersion,
+    ...(handoff.proposals.revision ? { revision: handoff.proposals.revision } : {}),
+    ...(handoff.proposals.withdrawn?.length ? { withdrawn: handoff.proposals.withdrawn } : {}),
     proposals: handoff.proposals.entries.map(({ record }) => record),
   });
   expect(main.proposeChanges({ expectVersion: 'stale', proposals: proposals.slice(1) }).ok).toBe(true);
@@ -789,6 +791,8 @@ test('worker withdrawal refuses a revision joined by typing with a foreign stamp
   expect(restored.getProposals()).toEqual({
     version: restored.version(),
     previewVersion: handoff.proposals.previewVersion,
+    ...(handoff.proposals.revision ? { revision: handoff.proposals.revision } : {}),
+    ...(handoff.proposals.withdrawn?.length ? { withdrawn: handoff.proposals.withdrawn } : {}),
     proposals: handoff.proposals.entries.map(({ record }) => record),
   });
   const restoredState = restored.encodeState();

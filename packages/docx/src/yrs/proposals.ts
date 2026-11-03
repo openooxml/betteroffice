@@ -26,6 +26,8 @@ import type {
   DocxSessionParagraphAnchor,
 } from './paragraphIdentity';
 
+const MAX_WITHDRAWN_RECORDS = 256;
+
 export type DocxProposalState = 'proposed' | 'accepted' | 'rejected';
 
 /** Which non-overlapping matches of a search a proposal replaces; numbers count from 1. */
@@ -58,12 +60,15 @@ export type DocxProposalInput = {
 
 export interface DocxProposalRequest {
   expectVersion: string;
+  expectPreviewVersion?: number;
   proposals: readonly DocxProposalInput[];
 }
 
 export interface DocxProposalRecord {
   id: string;
   state: DocxProposalState;
+  stateVersion?: number;
+  decisionState?: 'accepted' | 'rejected';
   paragraph: DocxSessionParagraphAnchor;
   revisionIds: readonly string[];
   changed: boolean;
@@ -71,13 +76,17 @@ export interface DocxProposalRecord {
 
 export interface DocxProposalSnapshot {
   version: string;
+  revision?: number;
   /** Increments whenever a decision changes. */
   previewVersion: number;
   proposals: readonly DocxProposalRecord[];
+  withdrawn?: readonly DocxProposalRecord[];
 }
 
 /** @internal */
 export interface DocxProposalRegistryState {
+  revision?: number;
+  withdrawn?: readonly DocxProposalRecord[];
   previewVersion: number;
   entries: {
     record: DocxProposalRecord;
@@ -98,6 +107,7 @@ export type DocxProposalResult =
 /** Missing or remotely settled ids withdraw as a no-op, preserving accepted text. */
 export interface DocxProposalWithdrawRequest {
   expectVersion: string;
+  expectPreviewVersion?: number;
   ids: readonly string[];
   /** Release ownership while keeping ordinary tracked revisions. Off by default. */
   keepRevisions?: boolean;
@@ -601,21 +611,39 @@ export function executeProposalWithdrawal(
 /** The session holds update notifications until `propose` returns, so they see the round. */
 export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
   const records = new Map<string, DocxProposalRegistryState['entries'][number]>();
+  const withdrawnRecords = new Map<string, DocxProposalRecord>();
+  const keepWithdrawn = (record: DocxProposalRecord) => {
+    withdrawnRecords.delete(record.id);
+    withdrawnRecords.set(record.id, record);
+    for (const id of withdrawnRecords.keys()) {
+      if (withdrawnRecords.size <= MAX_WITHDRAWN_RECORDS) break;
+      withdrawnRecords.delete(id);
+    }
+  };
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
+  let revision = 0;
   let mirrored: { version: string; proposals: DocxProposalRegistryState } | null = null;
   let notifying = false;
   let renotify = false;
 
-  const snapshot = (): DocxProposalSnapshot => ({
-    version: mirrored?.version ?? session.version(),
-    previewVersion: mirrored?.proposals.previewVersion ?? previewVersion,
-    proposals: (mirrored?.proposals.entries ?? [...records.values()]).map(({ record }) => ({
-      ...record,
-      paragraph: { ...record.paragraph },
-      revisionIds: [...record.revisionIds],
-    })),
-  });
+  const snapshot = (): DocxProposalSnapshot => {
+    const currentRevision = mirrored ? mirrored.proposals.revision : revision;
+    const withdrawn = mirrored ? mirrored.proposals.withdrawn ?? [] : [...withdrawnRecords.values()];
+    return {
+      version: mirrored?.version ?? session.version(),
+      previewVersion: mirrored?.proposals.previewVersion ?? previewVersion,
+      ...(currentRevision ? { revision: currentRevision } : {}),
+      ...(withdrawn.length ? {
+        withdrawn: withdrawn.map(record => ({ ...record, paragraph: { ...record.paragraph }, revisionIds: [...record.revisionIds] })),
+      } : {}),
+      proposals: (mirrored?.proposals.entries ?? [...records.values()]).map(({ record }) => ({
+        ...record,
+        paragraph: { ...record.paragraph },
+        revisionIds: [...record.revisionIds],
+      })),
+    };
+  };
 
   /** Delivers the latest snapshot; a change made by a listener restarts delivery with a newer one. */
   const notify = (): void => {
@@ -660,6 +688,9 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     if (!request || typeof request !== 'object' || !Array.isArray(request.proposals)) {
       throw new TypeError('a proposal request needs a proposals array');
     }
+    if (request.expectPreviewVersion !== undefined && request.expectPreviewVersion !== previewVersion) {
+      return refuse({ code: 'stale-preview', message: 'the proposal decisions changed' });
+    }
     const fresh: Array<{ input: DocxProposalInput; key: string }> = [];
     const seen = new Map<string, string>();
     for (const input of request.proposals) {
@@ -700,6 +731,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     for (const [index, { input, key }] of fresh.entries()) {
       const { anchor, first, count } = result.planned[index]!;
       const receipts = result.receipts.slice(first, first + count);
+      withdrawnRecords.delete(input.id);
       records.set(input.id, {
         key,
         suggest: { author: input.suggest.author, date: input.suggest.date },
@@ -717,6 +749,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         },
       });
     }
+    revision += 1;
     notify();
     return { ok: true, snapshot: snapshot() };
   };
@@ -774,10 +807,11 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     for (const [id, state] of next) {
       const entry = records.get(id)!;
       if (entry.record.state === state) continue;
-      entry.record = { ...entry.record, state };
+      entry.record = { ...entry.record, state, stateVersion: previewVersion + 1, ...(state === 'proposed' ? {} : { decisionState: state }) };
       changed = true;
     }
     if (changed) {
+      revision += 1;
       previewVersion += 1;
       notify();
     }
@@ -795,6 +829,9 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     }
     for (const id of request.ids) {
       if (typeof id !== 'string') throw new TypeError('a proposal id must be a string');
+    }
+    if (request.expectPreviewVersion !== undefined && request.expectPreviewVersion !== previewVersion) {
+      return refuse({ code: 'stale-preview', message: 'the proposal decisions changed' });
     }
     const withdrawn = [...new Set(request.ids)].filter((id) => records.has(id));
     if (withdrawn.length === 0) return { ok: true, snapshot: snapshot() };
@@ -841,10 +878,13 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     if (!result.ok) return refuse(result.failure);
     let decided = false;
     for (const id of withdrawn) {
-      decided ||= records.get(id)!.record.state !== 'proposed';
+      const record = records.get(id)!.record;
+      decided ||= record.state !== 'proposed';
+      keepWithdrawn({ ...record, state: record.state === 'proposed' ? 'rejected' : record.state });
       records.delete(id);
     }
     if (decided) previewVersion += 1;
+    revision += 1;
     notify();
     return { ok: true, snapshot: snapshot() };
   };
@@ -867,15 +907,20 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         if (revisionIds.length === entry.record.revisionIds.length) continue;
         changed = true;
         decided ||= entry.record.state !== 'proposed';
-        if (revisionIds.length === 0) records.delete(id);
-        else entry.record = { ...entry.record, revisionIds };
+        if (revisionIds.length === 0) {
+          keepWithdrawn({ ...entry.record, state: entry.record.state === 'proposed' ? 'rejected' : entry.record.state });
+          records.delete(id);
+        } else entry.record = { ...entry.record, revisionIds };
       }
       if (decided) previewVersion += 1;
-      if (changed) notify();
+      if (changed) {
+        revision += 1;
+        notify();
+      }
     },
     exportState() {
       return structuredClone(
-        mirrored?.proposals ?? { previewVersion, entries: [...records.values()] }
+        mirrored?.proposals ?? { ...(revision ? { revision } : {}), ...(withdrawnRecords.size ? { withdrawn: [...withdrawnRecords.values()] } : {}), previewVersion, entries: [...records.values()] }
       );
     },
     mirror(mirror) {
@@ -891,8 +936,11 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         mirrored = structuredClone(mirror);
       } else if (mirrored) {
         records.clear();
+        withdrawnRecords.clear();
+        for (const record of mirrored.proposals.withdrawn ?? []) withdrawnRecords.set(record.id, record);
         for (const entry of mirrored.proposals.entries) records.set(entry.record.id, entry);
         previewVersion = mirrored.proposals.previewVersion;
+        revision = mirrored.proposals.revision ?? 0;
         mirrored = null;
       }
       if (visible() !== before) notify();
@@ -906,15 +954,18 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       };
     },
     reset() {
-      if (mirrored || records.size === 0) return;
+      if (mirrored || (records.size === 0 && withdrawnRecords.size === 0)) return;
       if ([...records.values()].some(({ record }) => record.state !== 'proposed'))
         previewVersion += 1;
       records.clear();
+      withdrawnRecords.clear();
+      revision += 1;
       notify();
     },
     destroy() {
       mirrored = null;
       records.clear();
+      withdrawnRecords.clear();
       listeners.clear();
     },
   };

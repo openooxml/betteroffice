@@ -283,6 +283,7 @@ describe('proposal registry', () => {
     expect(events).toHaveLength(4);
     expect(registry.snapshot()).toEqual({
       version: session.version(),
+      revision: next.proposals.revision,
       previewVersion: 2,
       proposals: next.proposals.entries.map(({ record }) => record),
     });
@@ -905,6 +906,48 @@ describe('YrsSession host proposals', () => {
     expect(session.listRevisions()).toEqual(proposed.revisions);
   });
 
+  it('guards staging and withdrawal against decisions without a content version change', async () => {
+    const session = await open();
+    const initial = snapshotOf(propose(session, replace('a', '00000003', 'this', 'that')));
+    const decided = snapshotOf(decide(session, [{ id: 'a', state: 'accepted' }]));
+    expect(decided.version).toBe(initial.version);
+    const unchanged = state(session);
+    expect(session.proposeChanges({ expectVersion: initial.version, expectPreviewVersion: initial.previewVersion,
+      proposals: [replace('b', '00000006', 'Tail', 'End')],
+    })).toMatchObject({ ok: false, failure: { code: 'stale-preview' } });
+    expect(session.withdrawProposals({ expectVersion: initial.version, expectPreviewVersion: initial.previewVersion,
+      ids: ['a'],
+    })).toMatchObject({ ok: false, failure: { code: 'stale-preview' } });
+    expect(state(session)).toEqual(unchanged);
+  });
+
+  it('versions engine records and registry snapshots through reversals and withdrawal', async () => {
+    const session = await open();
+    const initial = snapshotOf(propose(session, replace('a', '00000003', 'this', 'that')));
+    const decided = snapshotOf(decide(session, [{ id: 'a', state: 'accepted' }]));
+    const reversed = snapshotOf(decide(session, [{ id: 'a', state: 'proposed' }]));
+    const withdrawn = snapshotOf(session.withdrawProposals({ expectVersion: session.version(), ids: ['a'] }));
+    expect(decided.proposals[0]!.stateVersion).toBe(decided.previewVersion);
+    expect(reversed.proposals[0]!.stateVersion).toBe(reversed.previewVersion);
+    expect(reversed.proposals[0]!.decisionState).toBe('accepted');
+    expect(withdrawn.withdrawn).toEqual([{ ...reversed.proposals[0]!, state: 'rejected' }]);
+    expect(decided.revision!).toBeGreaterThan(initial.revision!);
+    expect(reversed.revision!).toBeGreaterThan(decided.revision!);
+    expect(withdrawn.revision!).toBeGreaterThan(reversed.revision!);
+  });
+
+  it('keeps only the most recent withdrawn records', async () => {
+    const session = await open();
+    let last = snapshotOf(propose(session, replace('w0', '00000003', 'this', 'that')));
+    for (let index = 0; index < 260; index += 1) {
+      last = snapshotOf(session.withdrawProposals({ expectVersion: session.version(), ids: [`w${index}`] }));
+      if (index < 259) propose(session, replace(`w${index + 1}`, '00000003', 'this', 'that'));
+    }
+    expect(last.withdrawn).toHaveLength(256);
+    expect(last.withdrawn![0]!.id).toBe('w4');
+    expect(last.withdrawn![255]!.id).toBe('w259');
+  });
+
   it('refuses stale, unknown and malformed decisions without changing the preview', async () => {
     const session = await open();
     snapshotOf(propose(session, replace('a', '00000003', 'this', 'that')));
@@ -1274,6 +1317,7 @@ describe('YrsSession host proposals', () => {
     session.openDocx(fixture(), false);
     expect(session.getProposals()).toEqual({
       version: session.version(),
+      revision: 3,
       previewVersion: 2,
       proposals: [],
     });
