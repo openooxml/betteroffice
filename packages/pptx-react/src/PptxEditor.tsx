@@ -306,7 +306,8 @@ function PptxBundledFontsEditor({ legacy, ...props }: (PptxEditorProps | WorkerE
   const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
   const fallback = <PptxEditorFallback {...props} file={file} />;
   return (
-    <PeerlessEditorBoundary onError={props.onError} className={props.className} style={props.style}>
+    <PeerlessEditorBoundary onError={props.onError} className={props.className}
+      style={(props as { style?: CSSProperties }).style}>
       <Suspense fallback={fallback}>
         <Resolver file={file} fonts={props.fonts} fallback={fallback}
           onReady={props.onReady as ((api: never) => unknown) | undefined} onError={props.onError}>
