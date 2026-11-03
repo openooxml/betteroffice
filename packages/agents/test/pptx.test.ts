@@ -890,3 +890,47 @@ test('PPTX paragraph proposals preserve rich paragraphs, created story refs and 
     expect(handle.listProposals()).toEqual([]);
   } finally { deck.close(); handle.dispose(); }
 });
+
+test('PPTX slide property proposals expose layout mappings, backgrounds, refs and atomic review', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const bytes = await readFile(new URL('../../../crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx', import.meta.url));
+  const initialized = await openPptx(bytes);
+  initialized.close();
+  const handle = openPresentation(bytes);
+  const deck = attachPptx(handle);
+  try {
+    const before = handle.snapshot();
+    const slide = before.slides[0]!;
+    const background = { type: 'gradient' as const, gradient: { type: 'linear', angle: 90, stops: [
+      { position: 0, color: { rgb: '123456' } }, { position: 100000, color: { rgb: 'ABCDEF' } },
+    ] } };
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { type: 'setSlideLayout', slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml', mapping: [[slide.shapes[0]!.id, 8]] },
+      { type: 'insertSlide', ref: 'new', afterSlideId: null, layoutPartPath: slide.layoutPartPath! },
+      { type: 'setSlideLayout', slideId: '@new', layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml' },
+      { type: 'setSlideBackground', slideId: '@new', background },
+    ] });
+    expect(proposal.changes.some(change => change.slideId === slide.id && change.kind === 'content')).toBe(true);
+    expect(handle.snapshot()).toEqual(before);
+    const preview = openPresentation(await deck.export(proposal.id));
+    try {
+      expect(preview.snapshot().slides[0]!.background).toEqual(background);
+      expect(preview.snapshot().slides[1]!.layoutPartPath).toBe('ppt/slideLayouts/slideLayout2.xml');
+    } finally { preview.dispose(); }
+    await deck.accept(proposal.id);
+    expect(handle.snapshot().slides[0]!.background).toEqual(background);
+    handle.undo();
+    expect(handle.snapshot()).toEqual(before);
+    const rejected = deck.propose({ author: 'agent', edits: [{ type: 'setSlideBackground', slideId: slide.id, background: null }] });
+    deck.reject(rejected.id);
+    expect(handle.snapshot()).toEqual(before);
+    for (const edit of [
+      { type: 'setSlideLayout' as const, slideId: slide.id, layoutPartPath: 'unknown.xml' },
+      { type: 'setSlideBackground' as const, slideId: slide.id, background: { type: 'solid' as const, color: { rgb: 'bad' } } },
+    ]) {
+      expect(() => deck.propose({ author: 'agent', edits: [edit] })).toThrow();
+      expect(handle.listProposals()).toEqual([]);
+      expect(handle.snapshot()).toEqual(before);
+    }
+  } finally { deck.close(); handle.dispose(); }
+});

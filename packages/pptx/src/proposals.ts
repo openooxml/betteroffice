@@ -4,6 +4,7 @@ import type {
   ShapeDraft,
   PresetShapeDraft,
   PictureDraft,
+  ShapeFill,
   ShapeRect,
   ShapeSnapshot,
   ShapeStroke,
@@ -63,6 +64,8 @@ export type ProposalEdit =
       shapeId: string;
       adjustments: Record<string, number>;
     }
+  | { type: 'setSlideLayout'; slideId: string; layoutPartPath: string; mapping?: [string, number][] }
+  | { type: 'setSlideBackground'; slideId: string; background: ShapeFill | null }
   | { type: 'setSlideNotes'; slideId: string; text: string };
 
 export interface ProposalStripEntry {

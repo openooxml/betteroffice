@@ -135,6 +135,8 @@ impl DeckSession {
                     | ProposalEdit::AddShape { .. }
                     | ProposalEdit::AddPicture { .. }
                     | ProposalEdit::RemoveShape { .. }
+                    | ProposalEdit::SetSlideLayout { .. }
+                    | ProposalEdit::SetSlideBackground { .. }
             )
         }) {
             let slide_id =
@@ -365,7 +367,9 @@ fn scoped_target<T: ReadTxn>(txn: &T, edit: &ProposalEdit) -> EditResult<(String
         | ProposalEdit::SetShapeAdjust {
             slide_id, shape_id, ..
         } => Ok((slide_id.clone(), Some(shape_id.clone()))),
-        ProposalEdit::SetSlideNotes { slide_id, .. } => Ok((slide_id.clone(), None)),
+        ProposalEdit::SetSlideNotes { slide_id, .. }
+        | ProposalEdit::SetSlideLayout { slide_id, .. }
+        | ProposalEdit::SetSlideBackground { slide_id, .. } => Ok((slide_id.clone(), None)),
         _ => Err(EditError::InvalidState(
             "structural edit requires proposal resolution".into(),
         )),

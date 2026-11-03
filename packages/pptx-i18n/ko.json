@@ -156,6 +156,8 @@
     "stalePreview": "이 미리 보기는 업데이트된 슬라이드를 사용합니다. 적용하면 변경된 대상을 덮어씁니다.",
     "geometry": "위치 및 크기 (x, y, 너비, 높이)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "레이아웃 변경됨",
+    "backgroundChanged": "배경 변경됨",
     "appearance": "모양 또는 텍스트 서식이 변경됨",
     "changedAgain": "대상이 다시 변경되었습니다. 적용하기 전에 새로 고친 미리 보기를 검토하세요.",
     "canvasTitle": "이 슬라이드의 변경 내용",

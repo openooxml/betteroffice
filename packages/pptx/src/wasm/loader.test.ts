@@ -1148,3 +1148,81 @@ test.each([{ bullet: true }, { alignment: 'ctr' as const }])('paragraph property
     expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
   } finally { source.dispose(); }
 });
+
+test.each(['setSlideLayout', 'setSlideBackground'] as const)('%s proposals render by ID and index, accept, reject and undo through the loader', async type => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx')));
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const edit: import('../proposals').ProposalEdit = type === 'setSlideLayout'
+      ? { type, slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml', mapping: [[slide.shapes[0]!.id, 8]] }
+      : { type, slideId: slide.id, background: { type: 'solid', color: { rgb: '123456' } } };
+    const proposal = source.propose('agent', null, [edit]);
+    expect(proposal.changes).toMatchObject([{ slideId: slide.id, shapeId: null, kind: 'content' }]);
+    expect(source.proposalSlideStrip(proposal.id)[0]!.status).toBe('changed');
+    const diff = source.layoutProposalDiffSlideById(proposal.id, slide.id);
+    expect(source.layoutProposalDiffSlide(proposal.id, 0).frame).toEqual(diff.frame);
+    expect(JSON.stringify(diff.frame)).toContain('#123456');
+    if (type === 'setSlideLayout') {
+      expect(diff.media?.find(asset => asset.assetId === 'ppt/media/proposal-pixel.png')!.bytes.byteLength).toBeGreaterThan(0);
+      expect(JSON.stringify(diff.frame)).toContain('ppt/media/proposal-pixel.png');
+      expect(diff.snapshot.slides[0]!.shapes[0]!.placeholder).toMatchObject({ index: 4 });
+    }
+    expect(source.snapshot()).toEqual(before);
+    source.rejectProposal(proposal.id);
+    expect(source.listProposals()).toHaveLength(0);
+    const accepted = source.propose('agent', null, [edit]);
+    const preview = source.previewProposal(accepted.id).snapshot;
+    source.acceptProposal(accepted.id);
+    expect(source.snapshot()).toEqual(preview);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+  } finally { source.dispose(); }
+});
+
+test('slide background refs, clear and invalid slide properties share proposal validation', async () => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx')));
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const background = { type: 'solid', color: { rgb: '123456' } };
+    const proposal = source.propose('agent', null, [
+      { type: 'insertSlide', ref: 'new', afterSlideId: null, layoutPartPath: slide.layoutPartPath! },
+      { type: 'setSlideLayout', slideId: '@new', layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml' },
+      { type: 'setSlideBackground', slideId: '@new', background },
+    ]);
+    expect(source.previewProposal(proposal.id).snapshot.slides[0]!.background).toEqual(background);
+    source.acceptProposal(proposal.id);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+    for (const edit of [
+      { type: 'setSlideLayout', slideId: slide.id, layoutPartPath: 'unknown.xml' },
+      { type: 'setSlideBackground', slideId: slide.id, background: { type: 'solid', color: { rgb: 'bad' } } },
+      { type: 'setSlideBackground', slideId: 'missing', background: null },
+    ] satisfies import('../proposals').ProposalEdit[]) {
+      expect(() => source.propose('agent', null, [edit])).toThrow();
+      expect(source.listProposals()).toHaveLength(0);
+      expect(source.snapshot()).toEqual(before);
+    }
+  } finally { source.dispose(); }
+});
+
+test('slide property proposal stale targets survive loader preview and forced acceptance', async () => {
+  const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx'));
+  for (const type of ['setSlideLayout', 'setSlideBackground'] as const) {
+    const source = openPresentation(bytes);
+    try {
+      const slide = source.snapshot().slides[0]!;
+      const edit: import('../proposals').ProposalEdit = type === 'setSlideLayout'
+        ? { type, slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml' }
+        : { type, slideId: slide.id, background: { type: 'solid', color: { rgb: '123456' } } };
+      const proposal = source.propose('agent', null, [edit]);
+      source.setSlideNotes(slide.id, 'Human notes');
+      const stale = source.layoutProposalDiffSlide(proposal.id, 0).proposal.staleTargets;
+      expect(stale).toEqual(type === 'setSlideLayout' ? [slide.id] : []);
+      if (type === 'setSlideLayout') expect(() => source.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      source.acceptProposal(proposal.id, { force: true });
+      expect(source.snapshot().slides[0]!.notes).toBe('Human notes');
+    } finally { source.dispose(); }
+  }
+});

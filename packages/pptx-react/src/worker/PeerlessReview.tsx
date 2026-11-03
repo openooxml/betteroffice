@@ -14,6 +14,7 @@ import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { peerlessFrameSource, peerlessProposalFrameSource } from './peerlessFrameSource';
 import { commitComposition, PptxCommandRefusedError } from './peerlessViewStore';
 import { ProposalShapeOutlines } from '../components/ProposalCanvas';
+import { proposalSlideLabels } from '../components/proposalLabels';
 import { proposalImages, proposalPaintChanges } from '../components/proposalImages';
 
 const location = { ...styles.link, cursor: 'default' };
@@ -132,11 +133,11 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
       }
     } finally { accepting.current = false; }
   };
-  const target = (change: Proposal['changes'][number]) => {
+  const target = (change: Proposal['changes'][number], proposal: Proposal) => {
     const slide = run.client.state.slides.findIndex((slide) => slide.id === change.slideId);
     return slide < 0 && change.kind === 'inserted' ? t('proposals.target', { slide: (change.afterIndex ?? 0) + 1, name: t('proposals.insertedSlide') })
       : slide < 0 ? t('proposals.targetMissing')
-      : t('proposals.target', { slide: slide + 1, name: change.after?.name || change.before?.name || t('notes.panelLabel') });
+      : t('proposals.target', { slide: slide + 1, name: proposalSlideLabels(change, proposal, t).join(', ') || change.after?.name || change.before?.name || t('notes.panelLabel') });
   };
   const preview = async (proposal: Proposal) => {
     setPreviewError(null);
@@ -183,8 +184,8 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
         {proposal.note && <p style={styles.note}>{proposal.note}</p>}
         <Suspense fallback={null}>
           {(state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id ? reviewed : proposal).changes.map((change, index) => <div key={index} style={styles.change}>
-            <span style={location}>{target(change)}</span>
-            <ProposalChangeDetails change={change} t={t} lang={lang} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />
+            <span style={location}>{target(change, proposal)}</span>
+            <ProposalChangeDetails change={change} proposal={proposal} t={t} lang={lang} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />
           </div>)}
           {proposal.staleTargets.length > 0 && state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id && <>
             <p style={styles.warning}>{t('proposals.stalePreview')}</p>

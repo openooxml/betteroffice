@@ -13,6 +13,9 @@ import initWasmModule, {
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { metafileImageBytes } from '../render/browserImage';
+import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
+import { frameAssetIds } from '../session/frame';
 import { presentationContexts } from './presentationContext';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
@@ -712,6 +715,21 @@ function openPresentationInternal(
   const jsonWasmCall = <T,>(operation: () => string, drainUpdates = false): T =>
     wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
 
+  const proposalMedia = (diff: ProposalDiffSlide): ProposalDiffSlide => {
+    const media: NonNullable<ProposalDiffSlide['media']> = [];
+    for (const assetId of frameAssetIds(diff.frame)) {
+      if (assetId.startsWith('pending-media:')) continue;
+      try {
+        let source = wasmCall(() => doc.mediaBytes(assetId));
+        if (isTiff(source) && source.byteLength <= MAX_TIFF_BYTES) source = decodeTiffImage(source);
+        const bytes = metafileImageBytes(source, () => wasmCall(() => doc.metafileSvg(assetId)));
+        if (!bytes.byteLength) continue;
+        media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
+      } catch {}
+    }
+    return { ...diff, media };
+  };
+
   const ensureUpdateObserver = (): void => {
     if (observerInstalled) return;
     wasmCall(() => doc.startUpdateObservation());
@@ -774,10 +792,10 @@ function openPresentationInternal(
       if (!isProposalsAvailable() || typeof renderer.layoutProposalDiffSlideByIdJson !== 'function') {
         throw new Error('Proposal slide previews are unavailable');
       }
-      return jsonWasmCall(() => renderer.layoutProposalDiffSlideByIdJson(doc, id, slideId));
+      return proposalMedia(jsonWasmCall<ProposalDiffSlide>(() => renderer.layoutProposalDiffSlideByIdJson(doc, id, slideId)));
     },
     layoutProposalDiffSlide(id, slideIndex) {
-      return jsonWasmCall(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex));
+      return proposalMedia(jsonWasmCall<ProposalDiffSlide>(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex)));
     },
     layoutProposalSlide(id, slideIndex) {
       return jsonWasmCall(() => renderer.layoutProposalSlideJson(doc, id, slideIndex));
