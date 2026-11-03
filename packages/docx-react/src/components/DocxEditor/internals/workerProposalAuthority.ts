@@ -347,6 +347,12 @@ export function registerWorkerProposalAuthority(
   const workerSnapshot = (): DocxProposalSnapshot | null => retirementReason ? retiredRegistry!.snapshot() : mirror ? {
     version: peerReady() ? session.version() : mirror.version,
     previewVersion: mirror.proposals.previewVersion,
+    ...(mirror.proposals.revision === undefined ? {} : { revision: mirror.proposals.revision }),
+    ...(mirror.proposals.withdrawn === undefined ? {} : {
+      withdrawn: mirror.proposals.withdrawn.map((record) => ({
+        ...record, paragraph: { ...record.paragraph }, revisionIds: [...record.revisionIds],
+      })),
+    }),
     proposals: mirror.proposals.entries.map(({ record }) => ({
       ...record, paragraph: { ...record.paragraph }, revisionIds: [...record.revisionIds],
     })),

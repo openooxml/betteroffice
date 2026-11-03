@@ -1357,6 +1357,52 @@ function editorRoundHarness(laidOut = async () => {}) {
   return { session, worker, authority, peerUpdated, events };
 }
 
+test('hybrid proposal reads retain result revisions and withdrawn records', async () => {
+  const h = editorRoundHarness();
+  await h.authority.initialize();
+  expect(await h.authority.getProposals(unusedMain)).toEqual({
+    version: 'worker-1', previewVersion: 0, proposals: [],
+  });
+  const paragraph = { kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'p1' };
+  const suggest = { author: 'Agent', date: '2026-01-01T00:00:00Z' };
+  const input = { id: 'hybrid', paragraph, suggest, op: 'insertText' as const, at: 'end' as const, text: '!' };
+  const record = { id: input.id, state: 'proposed' as const, paragraph, revisionIds: ['revision'], changed: true };
+  const proposed: DocxProposalSnapshot = {
+    version: 'worker-1', previewVersion: 0, revision: 1, proposals: [record],
+  };
+  h.worker.proposal.mockResolvedValue({
+    ...reply(), peerDiff: new Uint8Array(),
+    mirror: { version: proposed.version, proposals: {
+      revision: 1, previewVersion: 0, entries: [{ record, suggest, key: 'hybrid' }],
+    } },
+    result: { ok: true, snapshot: proposed },
+  });
+  const result = await h.authority.propose({ expectVersion: 'worker-1', proposals: [input] }, unusedMain);
+  expect(result).toEqual({ ok: true, snapshot: proposed });
+  const read = await h.authority.getProposals(unusedMain);
+  expect(read).toEqual(proposed);
+  expect(read.revision).toBe(1);
+
+  const withdrawn = { ...record, state: 'rejected' as const };
+  const after: DocxProposalSnapshot = {
+    version: 'worker-1', previewVersion: 1, revision: 2, proposals: [], withdrawn: [withdrawn],
+  };
+  h.worker.proposal.mockResolvedValue({
+    ...reply(), peerDiff: new Uint8Array(),
+    mirror: { version: after.version, proposals: {
+      revision: 2, previewVersion: 1, entries: [], withdrawn: [withdrawn],
+    } },
+    result: { ok: true, snapshot: after, withdrawnIds: [input.id] },
+  });
+  expect(await h.authority.withdraw({ expectVersion: 'worker-1', ids: [input.id] }, unusedMain))
+    .toEqual({ ok: true, snapshot: after, withdrawnIds: [input.id] });
+  const withdrawnRead = await h.authority.getProposals(unusedMain);
+  expect(withdrawnRead).toEqual(after);
+  withdrawnRead.withdrawn![0]!.paragraph.paraId = 'changed';
+  (withdrawnRead.withdrawn![0]!.revisionIds as string[]).push('changed');
+  expect(await h.authority.getProposals(unusedMain)).toEqual(after);
+});
+
 test('editor retries distinguish explicit replacement offsets after the document version advances', async () => {
   const h = editorRoundHarness();
   const paragraph = { kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'p1' };
