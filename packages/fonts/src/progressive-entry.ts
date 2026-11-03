@@ -21,20 +21,18 @@ const engineFaces = new WeakMap<FontDecoder, Map<string, Promise<ProgressiveFont
  * @public
  */
 export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFontFace> {
-  const { ref, base, url, timeoutMs, wasmUrl, decoder } = location;
+  const { ref, base, url, timeoutMs, decode, decoder } = location;
   let cache = faces;
   if (decoder !== undefined) {
     cache = engineFaces.get(decoder) ?? new Map();
     engineFaces.set(decoder, cache);
   }
-  const key = `${ref.sha256}|${base}|${timeoutMs ?? ''}|${wasmUrl?.href ?? ''}`;
+  const key = `${ref.sha256}|${base}|${timeoutMs ?? ''}`;
   let pending = cache.get(key);
   if (pending === undefined) {
     pending = openProgressiveFace(ref, {
       read: async (file) => readFontAsset(file, await url(file), timeoutMs),
-      decode: async (encoded, maxOutput) => (decoder === undefined
-        ? await (await import('./decode')).decodeFontFace(encoded, undefined, { codec: 'zstd', maxOutput, wasmUrl })
-        : await decoder(encoded, { codec: 'zstd', maxOutput })).font,
+      decode,
     });
     cache.set(key, pending);
     const current = pending;

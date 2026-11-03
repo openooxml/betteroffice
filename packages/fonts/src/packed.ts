@@ -133,6 +133,13 @@ async function loadFace(
   return pending;
 }
 
+/** @internal Decodes slice files the way a provider decodes its whole faces. */
+export function sliceDecoder(wasmUrl?: URL, decoder?: FontDecoder) {
+  return async (encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer> => (decoder === undefined
+    ? await (await import('./decode')).decodeFontFace(encoded, undefined, { codec: 'zstd', maxOutput, wasmUrl })
+    : await decoder(encoded, { codec: 'zstd', maxOutput })).font;
+}
+
 /** @internal The slice pointer of a sliced pack face. */
 export function sliceRefOf(file: string): SliceRef | undefined {
   return cjk.faces.find((entry) => entry.file === file)?.slices;

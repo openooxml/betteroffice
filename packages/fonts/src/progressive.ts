@@ -35,7 +35,9 @@ export interface SliceLocation {
   /** The URL of a pack file by its manifest path. */
   url(file: string): Promise<URL>;
   timeoutMs?: number;
-  wasmUrl?: URL;
+  /** Decompresses a zstd file to at most `maxOutput` bytes. */
+  decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
+  /** The host's decoder behind `decode`, when it has one; part of the shared face's identity. */
   decoder?: FontDecoder;
 }
 

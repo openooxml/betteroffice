@@ -159,6 +159,12 @@ test('opening rejects an index whose SHA-256 differs from the manifest pointer',
     .rejects.toThrow('SHA-256 mismatch');
 });
 
+test('the progressive entry reaches no module that reads import.meta, so classic workers can load it', async () => {
+  const build = await Bun.build({ entrypoints: [new URL('./progressive-entry.ts', import.meta.url).pathname], target: 'browser' });
+  expect(build.success).toBe(true);
+  expect(await build.outputs[0]!.text()).not.toContain('import.meta');
+});
+
 test('providers locate only sliced faces, keep whole-face loading, and share one opened face', async () => {
   const decoder: FontDecoder = (bytes, options) => decodeFontFace(bytes, options.dict, { codec: options.codec, maxOutput: options.maxOutput });
   const runtime = { decoder };
