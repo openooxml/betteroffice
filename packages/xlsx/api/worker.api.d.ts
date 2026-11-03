@@ -3563,6 +3563,7 @@ export interface ProposalCell {
     a1: string;
     oldText: string;
     newText: string;
+    stale?: boolean;
 }
 /**
  * A pending, un-applied set of cell changes an agent has staged for human

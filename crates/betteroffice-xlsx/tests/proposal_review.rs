@@ -561,7 +561,11 @@ fn formula_like_plain_text_inputs_are_not_rewritten() {
     let accepted = workbook.cell(SheetId(0), cell("D1")).unwrap();
     assert_eq!(accepted.input, "'=A1");
     assert!(!accepted.is_formula);
-    let stored = workbook.sheet(SheetId(0)).unwrap().cell(cell("D1")).unwrap();
+    let stored = workbook
+        .sheet(SheetId(0))
+        .unwrap()
+        .cell(cell("D1"))
+        .unwrap();
     assert_eq!(
         stored.value,
         betteroffice_xlsx::CellValue::Text {
@@ -728,7 +732,11 @@ fn invalid_formula_text_remains_literal_through_structural_edits() {
     let accepted = workbook.cell(SheetId(0), cell("C2")).unwrap();
     assert_eq!(accepted.input, "'=SUM(");
     assert!(!accepted.is_formula);
-    let stored = workbook.sheet(SheetId(0)).unwrap().cell(cell("C2")).unwrap();
+    let stored = workbook
+        .sheet(SheetId(0))
+        .unwrap()
+        .cell(cell("C2"))
+        .unwrap();
     assert_eq!(
         stored.value,
         betteroffice_xlsx::CellValue::Text {
