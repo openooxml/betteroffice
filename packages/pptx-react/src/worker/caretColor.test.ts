@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
+import type { Paint, PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
 import { pptxCaretColors } from './caretColor';
 
 const caret = { x: 120, y: 100, width: 1, height: 20 };
@@ -44,10 +44,17 @@ test('fills that do not cover the caret are ignored', () => {
 test('dark slide with no run or unreadable text falls back to white', () => {
   const dark = slide([], { kind: 'gradient', gradientType: 'linear', stops: [{ position: 0, color: '#000000' }, { position: 1, color: '#202020' }] });
   expect(pptxCaretColors(dark, null, null, caret).color).toBe('#ffffff');
-  expect(pptxCaretColors(dark, line({ start: 0, end: 5, color: '#111111' }), 2, caret).color).toBe('#ffffff');
+  expect(pptxCaretColors(slide([], { kind: 'solid', color: '#101010' }), line({ start: 0, end: 5, color: '#111111' }), 2, caret).color).toBe('#ffffff');
 });
 
 test('table cell shapes colour the caret background', () => {
   const table = { kind: 'table', objectId: 2, x: 100, y: 80, w: 300, h: 80, name: 'Table', label: 'Table', primitives: [shape('#1f3864')] } as SlidePrimitive;
   expect(pptxCaretColors(slide([table]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).background).toBe('#1f3864');
+});
+
+test('a gradient fill trusts the run colour, wherever the caret sits on it', () => {
+  const gradient = { kind: 'gradient', gradientType: 'linear', angleDeg: 0, stops: [{ position: 0, color: '#000000' }, { position: 0.6, color: '#eeeeee' }, { position: 0.8, color: '#f8f8f8' }, { position: 1, color: '#ffffff' }] } satisfies Paint;
+  const box = { kind: 'shape', objectId: 1, x: 100, y: 80, w: 300, h: 80, name: 'Box', geometry: 'rect', path: [], fill: gradient } as SlidePrimitive;
+  expect(pptxCaretColors(slide([box]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret)).toEqual({ color: '#ffffff', background: '#000000' });
+  expect(pptxCaretColors(slide([], gradient), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff' });
 });

@@ -44,7 +44,14 @@ function hex([r, g, b]: Rgb): string {
   return '#' + [r, g, b].map((channel) => channel.toString(16).padStart(2, '0')).join('');
 }
 
-function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePrimitive[], x: number, y: number, fill: Rgb): Rgb {
+interface Fill { color: Rgb; solid: boolean }
+
+function fillOf(paint: Paint | undefined): Fill | null {
+  const color = paintColor(paint);
+  return color && paint ? { color, solid: paint.kind === 'solid' } : null;
+}
+
+function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePrimitive[], x: number, y: number, fill: Fill): Fill {
   for (const primitive of primitives) {
     const transforms = [...parents, primitive];
     if (primitive.kind === 'table' || primitive.kind === 'chart') {
@@ -52,28 +59,31 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
       continue;
     }
     if (primitive.kind !== 'shape') continue;
-    const color = paintColor(primitive.fill);
-    if (!color) continue;
+    const paint = fillOf(primitive.fill);
+    if (!paint) continue;
     const box = transformedRect(transforms, { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h });
-    if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) fill = color;
+    if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) fill = paint;
   }
   return fill;
 }
 
 /**
  * Caret colours at a slide-space caret rect: the fill under the caret, and the
- * colour of the run the caret sits in as long as it reads against that fill;
+ * colour of the run the caret sits in as long as it reads against a solid fill
+ * (a gradient varies under the caret, so the run colour is trusted there);
  * else black or white by the fill.
  */
 export function pptxCaretColors(list: SlideDisplayList | null | undefined, line: PositionedTextLine | null | undefined,
   position: number | null | undefined, caret: CommandRect | null | undefined): { color: string; background: string } {
-  let fill = paintColor(list?.background) ?? parseColor(WHITE)!;
-  if (list && caret) fill = fillAt(list.primitives, [], caret.x + caret.width / 2, caret.y + caret.height / 2, fill);
+  let under: Fill = fillOf(list?.background) ?? { color: parseColor(WHITE)!, solid: true };
+  if (list && caret) under = fillAt(list.primitives, [], caret.x + caret.width / 2, caret.y + caret.height / 2, under);
+  const fill = under.color;
   const runs = line?.runs ?? [];
   const run = position === null || position === undefined ? undefined
     : runs.find((candidate) => candidate.start < position && position <= candidate.end)
       ?? runs.find((candidate) => candidate.start <= position && position <= candidate.end);
   const text = parseColor(run?.color);
+  if (run && text && !under.solid) return { color: run.color, background: luminance(text) < 0.18 ? WHITE : '#000000' };
   const background = hex(fill);
   if (run && text && contrast(text, fill) >= 2) return { color: run.color, background };
   return { color: luminance(fill) < 0.18 ? WHITE : '#000000', background };
