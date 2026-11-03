@@ -148,6 +148,9 @@ jobs:
           BETTEROFFICE_REQUIRE_WASM: "1"
         run: bun test scripts/wasm-memory.test.ts
 
+      - name: Check Wasm artifacts carry no rasterizer and renderPng keeps one shape
+        run: bun test scripts/wasm-no-raster.test.ts scripts/render-png-shape.test.ts
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
