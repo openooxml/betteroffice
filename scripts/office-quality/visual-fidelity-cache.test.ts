@@ -51,6 +51,6 @@ test('branch-head guard, least privilege, and score artifacts are unchanged', ()
   const artifacts = workflow.slice(workflow.indexOf('actions/upload-artifact@'));
   expect(artifacts).toContain('.source/office-quality/ci/report.json');
   expect(artifacts).toContain('${{ runner.temp }}/fidelity-report/section.md');
-  expect(artifacts).toContain('name: visual-fidelity-report-${{ matrix.format }}');
-  expect(artifacts).toContain('name: visual-fidelity-renders-${{ matrix.format }}');
+  expect(artifacts).toContain('name: visual-fidelity-report-${{ matrix.format }}-${{ matrix.shard }}');
+  expect(artifacts).toContain('name: visual-fidelity-renders-${{ matrix.format }}-${{ matrix.shard }}');
 });

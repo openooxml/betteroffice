@@ -20,9 +20,12 @@ test('one frozen plan feeds independent format jobs at the same source revision'
   expect(prepare.steps.find((step: any) => step.id === 'plan').env.QUALITY_COLLECTION).toBe('${{ inputs.collection }}');
   expect(prepare.outputs.formats).toBe('${{ steps.plan.outputs.formats }}');
   expect(measure.needs).toBe('prepare');
+  expect(prepare.outputs['measure-shards']).toBe('${{ steps.plan.outputs.measure-shards }}');
+  expect(prepare.steps.find((step: any) => step.id === 'plan').run)
+    .toContain('measure-shards=${JSON.stringify(measureMatrix(plan))}');
   expect(measure.strategy).toEqual({
     'fail-fast': false,
-    matrix: { format: '${{ fromJSON(needs.prepare.outputs.formats) }}' },
+    matrix: { include: '${{ fromJSON(needs.prepare.outputs.measure-shards) }}' },
   });
   const checkout = measure.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
   expect(checkout.with.ref).toBe('${{ needs.prepare.outputs.source-sha }}');
@@ -31,6 +34,7 @@ test('one frozen plan feeds independent format jobs at the same source revision'
   );
   expect(evaluate.env.QUALITY_PLAN).toBe('${{ runner.temp }}/fidelity-plan/plan.json');
   expect(evaluate.env.QUALITY_FORMAT).toBe('${{ matrix.format }}');
+  expect(evaluate.env.QUALITY_SHARD).toBe('${{ matrix.shard }}');
 });
 
 test('every job feeding the report runs on the runner image the plan recorded', () => {
@@ -73,23 +77,25 @@ test('only the reconciler publishes reports and renders after every format succe
   expect(publish.steps[1].env.SOURCE_SHA).toBe('${{ needs.prepare.outputs.source-sha }}');
 });
 
-test('artifact directories remain stable when a run selects only one format', () => {
+test('every measure shard has its own artifacts, and the reconciler collects them by pattern', () => {
   const downloads = publish.steps.filter(
     (step: any) => step.uses?.startsWith('actions/download-artifact@')
   );
-  expect(downloads.filter((step: any) => step.with.pattern).map((step: any) => step.with.pattern))
-    .toEqual(['docx-benchmark-report-*', 'xlsx-benchmark-report-*', 'xlsx-fidelity-report-*', 'roundtrip-report-*']);
-  for (const format of ['docx', 'pptx', 'xlsx']) {
-    for (const kind of ['report', 'renders']) {
-      const name = `visual-fidelity-${kind}-${format}`;
-      const matches = downloads.filter((step: any) => step.with.name === name);
-      expect(matches).toHaveLength(1);
-      expect(matches[0].with.path).toBe(`\${{ runner.temp }}/fidelity-parts/${name}`);
-      expect(matches[0].if).toBe(kind === 'renders'
-        ? `inputs.publish_renders && inputs.corpus_origin == '' && contains(fromJSON(needs.prepare.outputs.formats), '${format}')`
-        : `\${{ !inputs.private_corpus && contains(fromJSON(needs.prepare.outputs.formats), '${format}') }}`);
-    }
-  }
+  expect(downloads.filter((step: any) => step.with.pattern).map((step: any) => [step.with.pattern, step.with.path, step.if])).toEqual([
+    ['visual-fidelity-report-*', '${{ runner.temp }}/fidelity-parts', '${{ !inputs.private_corpus }}'],
+    ['visual-fidelity-renders-*', '${{ runner.temp }}/fidelity-parts', "inputs.publish_renders && inputs.corpus_origin == ''"],
+    ['docx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
+    ['xlsx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
+    ['xlsx-fidelity-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
+    ['roundtrip-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
+  ]);
+  expect(downloads.some((step: any) => String(step.with.name ?? '').startsWith('visual-fidelity-re'))).toBe(false);
+  for (const step of downloads.filter((step: any) => step.with.pattern)) expect(step.with['merge-multiple']).toBeUndefined();
+  const uploads = measure.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@'));
+  expect(uploads.map((step: any) => step.with.name)).toEqual([
+    'visual-fidelity-report-${{ matrix.format }}-${{ matrix.shard }}',
+    'visual-fidelity-renders-${{ matrix.format }}-${{ matrix.shard }}',
+  ]);
 });
 
 test('native builds and paired DOCX shards are isolated from browser measurements', () => {
@@ -184,7 +190,7 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
   const gated = Object.values<any>(workflow.jobs).flatMap((job) => job.steps ?? [])
     .filter((step: any) => step !== guard && step.name !== 'Keep report-only runs off the public render viewer' &&
       String(step.if ?? '').includes('publish_renders'));
-  expect(gated.length).toBe(6);
+  expect(gated.length).toBe(4);
   for (const step of gated) expect(String(step.if).startsWith(RENDERS)).toBe(true);
   const publishing = publish.steps.find((step: any) => String(step.run ?? '').includes('publish-renders.mjs'));
   expect(publishing.if).toBe(`${RENDERS} && !inputs.private_corpus && github.repository == 'openooxml/betteroffice'`);
