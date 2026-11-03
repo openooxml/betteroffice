@@ -21,7 +21,7 @@ const decode = mock(async (
   };
 });
 mock.module('./decode', () => ({ decodeFontFace: decode }));
-const { loadPackedFontBytes, readPackManifest } = await import('./packed');
+const { loadPackedFontBytes, readPackedFontBytes, readPackManifest } = await import('./packed');
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -75,6 +75,18 @@ for (const codec of ['zstd', 'woff2t+zstd'] as const) {
     expect(decode).toHaveBeenCalledTimes(2);
   });
 }
+
+test('the shared read returns the one decoded buffer, which owned copies leave intact', async () => {
+  const { face, manifest, resolveUrl } = fixture();
+  const first = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(new Uint8Array(first)).toEqual(bold);
+  expect(await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest)).toBe(first);
+  const owned = await loadPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(owned).not.toBe(first);
+  structuredClone(owned, { transfer: [owned] });
+  expect(first.byteLength).toBe(bold.byteLength);
+  expect(decode).toHaveBeenCalledTimes(2);
+});
 
 test('ignores unknown manifest and face fields, including slices, while loading unchanged', async () => {
   const { manifest, face, resolveUrl } = fixture();
