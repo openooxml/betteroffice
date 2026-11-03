@@ -23,7 +23,7 @@ export const pptxBundledFontsLoader = {
   },
 };
 type BundledFontsModule = Awaited<ReturnType<typeof pptxBundledFontsLoader.load>>;
-type BundledFontsChunk = { module: BundledFontsModule } | { error: Error } | { loading: true };
+type BundledFontsChunk = { module?: BundledFontsModule; error?: Error };
 
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 export const pptxLegacyEditorLoader = { load: () => import('./PptxLegacyEditorSession') };
@@ -305,16 +305,13 @@ function PptxAsyncEditorRoot(props: ResolvedFontProps<PptxAsyncEditorProps>) {
   return <PptxAsyncEditorSession {...props} file={file} />;
 }
 
-function useBundledFontsChunk(): BundledFontsChunk {
-  const [chunk, setChunk] = useState<BundledFontsChunk>({ loading: true });
+function useBundledFontsChunk(): BundledFontsChunk | undefined {
+  const [chunk, setChunk] = useState<BundledFontsChunk>();
   useEffect(() => {
-    let active = true;
-    pptxBundledFontsLoader.load().then((module) => {
-      if (active) setChunk({ module });
-    }, (cause: unknown) => {
-      if (active) setChunk({ error: new PptxWorkerEditorChunkLoadError(cause) });
-    });
-    return () => { active = false; };
+    pptxBundledFontsLoader.load().then(
+      (module) => setChunk({ module }),
+      (cause: unknown) => setChunk({ error: new PptxWorkerEditorChunkLoadError(cause) }),
+    );
   }, []);
   return chunk;
 }
@@ -331,10 +328,8 @@ function PptxBundledFontsEditor({ legacy, ...props }: (PptxEditorProps | WorkerE
   return (
     <PeerlessEditorBoundary onError={props.onError} className={props.className}
       style={(props as { style?: CSSProperties }).style}>
-      {'error' in chunk ? <ChunkError error={chunk.error} /> : 'module' in chunk ? (
-        <chunk.module.BundledFontsResolver file={file} fonts={props.fonts} fallback={fallback}
-          defaultFonts={(props as { defaultFonts?: boolean }).defaultFonts}
-          initialSlide={(props as { initialSlide?: number }).initialSlide}
+      {chunk?.error ? <ChunkError error={chunk.error} /> : chunk?.module ? (
+        <chunk.module.BundledFontsResolver file={file} fonts={props.fonts} fallback={fallback} session={props}
           onReady={props.onReady as ((api: never) => unknown) | undefined} onError={props.onError}>
           {(fonts, onReady, onError) => {
             const resolved = { ...props, file, fonts, onReady, onError };
