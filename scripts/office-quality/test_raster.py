@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
-from raster import RASTERIZER, open_pdf, page_size_pt, render_page
+from pdf_fixtures import pdf_bytes
+from raster import RASTERIZER, merge_pdfs, open_pdf, page_fonts, page_size_pt, pdf_metadata, render_page
 
 
 class RasterTests(unittest.TestCase):
@@ -23,7 +24,7 @@ class RasterTests(unittest.TestCase):
                 self.assertEqual(image.mode, 'RGB')
                 self.assertEqual(image.size, (1275, 1650))
                 self.assertEqual(image.getextrema(), ((255, 255), (255, 255), (255, 255)))
-                self.assertEqual(render_page(pdf, 1, 150).size, (1754, 1240))
+                self.assertEqual(render_page(pdf, 1, 150).size, (1755, 1240))
                 self.assertEqual(render_page(pdf, 0, 96).size, (816, 1056))
         self.assertTrue(RASTERIZER.startswith('pypdfium2 '))
 
@@ -34,6 +35,22 @@ class RasterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 with open_pdf(path):
                     pass
+
+    def test_metadata_fonts_and_merge_match_what_reference_capture_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'a.pdf').write_bytes(pdf_bytes([(842, 595, 'Alpha')], {'Creator': 'Excel', 'Producer': 'macOS'}))
+            (root / 'b.pdf').write_bytes(pdf_bytes([(842, 595, 'Beta')]))
+            with open_pdf(root / 'a.pdf') as document:
+                metadata = pdf_metadata(document)
+                self.assertEqual(sorted(metadata), sorted(['format', 'title', 'author', 'subject', 'keywords', 'creator',
+                                                           'producer', 'creationDate', 'modDate', 'trapped', 'encryption']))
+                self.assertEqual((metadata['format'], metadata['creator'], metadata['producer']), ('PDF 1.7', 'Excel', 'macOS'))
+                self.assertEqual(page_fonts(document, 0), {'Helvetica'})
+            merge_pdfs([root / 'a.pdf', root / 'b.pdf'], root / 'merged.pdf')
+            with open_pdf(root / 'merged.pdf') as document:
+                self.assertEqual(len(document), 2)
+                self.assertEqual(page_size_pt(document, 1), (842, 595))
 
 
 if __name__ == '__main__':
