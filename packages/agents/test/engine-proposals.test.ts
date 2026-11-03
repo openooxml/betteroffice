@@ -93,7 +93,8 @@ for (const peer of [false, true]) {
           const hit = doc.grep({ query }).matches[0];
           expect(hit.start).toBe(query === 'Quarterly report' ? 3 : 1);
           const replacement = query === 'Quarterly report' ? `Updated ${query}` : newText;
-          const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: replacement }] });
+          const input = { author: 'Agent', edits: [{ match: hit.match, newText: replacement }] };
+          const proposal = peer ? await doc.proposeAsync(input) : doc.propose(input);
           expect(doc.review(proposal.id).staleRefs).toEqual([]);
           const read = owner.session.readParagraphs({ story: 'body', view: 'accepted' });
           expect(read.ok && read.paragraphs.some(p => p.text === replacement)).toBe(true);

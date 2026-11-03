@@ -109,7 +109,7 @@ function replace(
   search: string,
   replaceWith: string,
   occurrence?: DocxOccurrence
-): DocxProposalInput {
+): Extract<DocxProposalInput, { op: 'replaceText' }> {
   return {
     id,
     paragraph: at(paraId),

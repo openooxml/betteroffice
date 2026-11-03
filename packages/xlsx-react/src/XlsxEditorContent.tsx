@@ -950,8 +950,22 @@ export function XlsxEditorContent({
               setError(e instanceof Error ? e.message : String(e));
             }
           });
-          const offProposals = handle.onProposalChange(refreshProposals);
-          unsubscribeUpdates = () => { offUpdates(); offProposals(); };
+          unsubscribeUpdates = offUpdates;
+          let offProposals: (() => void) | undefined;
+          try {
+            if (typeof handle.onProposalChange === 'function') {
+              const unsubscribe = handle.onProposalChange(() => {
+                if (!disposed && handle && handleRef.current === handle) refreshProposals();
+              });
+              if (typeof unsubscribe === 'function') offProposals = unsubscribe;
+            }
+          } catch {}
+          unsubscribeUpdates = () => {
+            try { offUpdates(); }
+            finally {
+              try { offProposals?.(); } catch {}
+            }
+          };
           pendingSheetViewRef.current = true;
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));

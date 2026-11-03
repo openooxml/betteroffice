@@ -51,7 +51,8 @@ for (const mode of ['headless', 'attached', 'peer'] as const) {
         const hit = doc.grep({ query: sample.oldText }).matches[0];
         const edit = hit.start === sample.start ? { match: hit.match, newText: sample.newText }
           : { ref: hit.ref, revision: hit.revision, start: sample.start, oldText: sample.oldText, newText: sample.newText };
-        const proposal = await doc.proposeAsync({ author: 'Agent', edits: [edit] });
+        const input = { author: 'Agent', edits: [edit] };
+        const proposal = mode === 'peer' ? await doc.proposeAsync(input) : doc.propose(input);
         expect(doc.read(hit.ref).text).toBe(sample.text);
         expect(doc.review(proposal.id).staleRefs).toEqual([]);
         const preview = await openDocx(await doc.export(proposal.id));
@@ -74,7 +75,8 @@ for (const mode of ['headless', 'attached', 'peer'] as const) {
       } } : {});
       try {
         const hit = doc.grep({ query: 'Closing note.' }).matches[0];
-        const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText }] });
+        const input = { author: 'Agent', edits: [{ match: hit.match, newText }] };
+        const proposal = mode === 'peer' ? await doc.proposeAsync(input) : doc.propose(input);
         expect(doc.read(hit.ref).text).toBe('\ufffcClosing note.');
         await doc.accept(proposal.id);
         expect(doc.read(hit.ref).text).toBe(`\ufffc${newText}`);
@@ -182,10 +184,13 @@ for (const mode of ['headless', 'attached', 'peer'] as const) {
           const page = doc.grep({ query: 'draft', story: 'body', limit: 1, cursor });
           return { hit: { target: page.matches[0].match, ref: page.matches[0].ref }, cursor: page.nextCursor };
         },
-        propose: (match, newText) => doc.proposeAsync({ author: 'Agent', edits: [{ match, newText }] }),
+        async propose(match, newText) {
+          const input = { author: 'Agent', edits: [{ match, newText: newText.split(' ')[0] }] };
+          return mode === 'peer' ? doc.proposeAsync(input) : doc.propose(input);
+        },
         review(id) { const review = doc.review(id); return { status: review.status, stale: review.staleRefs.length > 0 }; },
         accept: id => doc.accept(id),
-        reject: id => doc.rejectAsync(id),
+        async reject(id) { return mode === 'peer' ? doc.rejectAsync(id) : doc.reject(id); },
         async exportRead(id) {
           const reopened = await openDocx(await doc.export(id));
           try { return reopened.list({ story: 'body' }).items.map(p => reopened.read(p.ref).text); }
