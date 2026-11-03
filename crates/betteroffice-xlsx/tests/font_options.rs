@@ -178,7 +178,7 @@ mod shared_faces {
                 .render_png(
                     betteroffice_xlsx::PngTarget::Viewport {
                         sheet: SheetId(0),
-                        viewport: viewport
+                        viewport
                     },
                     &betteroffice_xlsx::RenderOptions::default()
                 )

@@ -2577,9 +2577,14 @@ impl PyPresentation {
         background: &str,
         max_shadow_pixels: Option<u64>,
     ) -> PyResult<PyPng> {
-        let target = betteroffice_pptx::PngTarget {
-            slide: png_target_index(target)?,
-        };
+        let slide = png_target_index(target)?;
+        let slides = self.all_slide_ids()?.len();
+        if slide >= slides {
+            return Err(PyIndexError::new_err(format!(
+                "slide index {slide} out of range for {slides} slide(s)"
+            )));
+        }
+        let target = betteroffice_pptx::PngTarget { slide };
         let options = RenderOptions {
             scale,
             background: parse_background(background)?,
