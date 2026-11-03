@@ -90,6 +90,9 @@ impl Drop for EngineCall {
             // SAFETY: the object registered itself from a method that is still on the stack.
             unsafe { (*object).set(true) };
         }
+        if failing {
+            crate::memory::release_to_os();
+        }
         if failing && !unwinding {
             panic!("{}", crate::memory::EXCEEDED);
         }
@@ -281,6 +284,9 @@ impl XlsxSnapshotBuilder {
     pub fn free(&mut self, env: Env) {
         let _call = EngineCall::release(env);
         self.inner = None;
+        if self.failed.get() {
+            crate::memory::release_to_os();
+        }
     }
 }
 
@@ -290,6 +296,9 @@ impl XlsxDocument {
     pub fn free(&mut self, env: Env) {
         let _call = EngineCall::release(env);
         self.inner = None;
+        if self.failed.get() {
+            crate::memory::release_to_os();
+        }
     }
 
     #[napi(catch_unwind, getter, js_name = "clientId")]

@@ -67,6 +67,20 @@ pub(crate) fn take_failed() -> usize {
     FAILED.try_with(|failed| failed.replace(0)).unwrap_or(0)
 }
 
+/// Returns freed heap pages to the operating system after a failed call, where the allocator keeps them.
+pub(crate) fn release_to_os() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only walks glibc's own arenas and takes no pointers.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> std::ffi::c_int;
+}
+
 // SAFETY: every call forwards to `System` unchanged; the counters only observe it.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
