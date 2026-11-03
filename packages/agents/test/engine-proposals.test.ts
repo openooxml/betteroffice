@@ -880,8 +880,9 @@ for (const phase of ['set', 'set-after', 'withdraw', 'withdraw-one'] as const) f
       const result = (action === 'accept' || action === 'tracked') ? doc.accept(proposal.id, { tracked: action === 'tracked' }) : action === 'reject' ? doc.rejectAsync(proposal.id) : doc.discardAsync(proposal.id);
       await expect(result).rejects.toMatchObject({ code: 'PROPOSAL_DECIDED_IN_EDITOR' });
       expect(withdrawals).toBe(phase === 'withdraw' || phase === 'withdraw-one' ? 1 : 0);
-      const states = [(action === 'accept' || action === 'tracked') ? 'rejected' : 'accepted', 'proposed'];
-      expect(owner.session.getProposals().proposals.map(record => record.state)).toEqual(phase === 'withdraw-one' ? ['proposed'] : states);
+      const states: ('proposed' | 'accepted' | 'rejected')[] = [(action === 'accept' || action === 'tracked') ? 'rejected' : 'accepted', 'proposed'];
+      const remaining: typeof states = phase === 'withdraw-one' ? ['proposed'] : states;
+      expect(owner.session.getProposals().proposals.map(record => record.state)).toEqual(remaining);
       expect(doc.review(proposal.id).records?.map(record => record.state)).toEqual(states);
       await expect(doc.accept(proposal.id)).rejects.toMatchObject({ code: 'PROPOSAL_DECIDED_IN_EDITOR' });
     } finally { doc.close(); owner.close(); }
