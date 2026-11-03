@@ -12,54 +12,67 @@ pub(crate) const DEFAULT_BUDGET: usize = 4 << 30;
 /// The message of the error a call unwinds with once its thread is over budget.
 pub(crate) const EXCEEDED: &str = "BetterOffice engine memory budget exceeded";
 
+struct Counters {
+    live: Cell<usize>,
+    budget: Cell<usize>,
+    over: Cell<bool>,
+    failed: Cell<usize>,
+}
+
 thread_local! {
-    static LIVE: Cell<usize> = const { Cell::new(0) };
-    static BUDGET: Cell<usize> = const { Cell::new(DEFAULT_BUDGET) };
-    static OVER: Cell<bool> = const { Cell::new(false) };
-    static FAILED: Cell<usize> = const { Cell::new(0) };
+    static COUNTERS: Counters = const {
+        Counters {
+            live: Cell::new(0),
+            budget: Cell::new(DEFAULT_BUDGET),
+            over: Cell::new(false),
+            failed: Cell::new(0),
+        }
+    };
 }
 
 struct CountingAllocator;
 
 fn grew(bytes: usize) {
-    let _ = LIVE.try_with(|live| {
-        let next = live.get().saturating_add(bytes);
-        live.set(next);
-        if next > BUDGET.try_with(Cell::get).unwrap_or(DEFAULT_BUDGET)
-            && !OVER.try_with(|over| over.replace(true)).unwrap_or(true)
-        {
-            let _ = FAILED.try_with(|failed| failed.set(bytes.max(1)));
+    let _ = COUNTERS.try_with(|counters| {
+        let next = counters.live.get().saturating_add(bytes);
+        counters.live.set(next);
+        if next > counters.budget.get() && !counters.over.replace(true) {
+            counters.failed.set(bytes.max(1));
         }
     });
 }
 
 fn shrank(bytes: usize) {
-    let _ = LIVE.try_with(|live| {
-        let next = live.get().saturating_sub(bytes);
-        live.set(next);
-        if next <= BUDGET.try_with(Cell::get).unwrap_or(DEFAULT_BUDGET) {
-            let _ = OVER.try_with(|over| over.set(false));
+    let _ = COUNTERS.try_with(|counters| {
+        let next = counters.live.get().saturating_sub(bytes);
+        counters.live.set(next);
+        if counters.over.get() && next <= counters.budget.get() {
+            counters.over.set(false);
         }
     });
 }
 
 /// Whether the calling thread's engine memory is past its budget.
 pub(crate) fn over_budget() -> bool {
-    OVER.try_with(Cell::get).unwrap_or(false)
+    COUNTERS.try_with(|counters| counters.over.get()).unwrap_or(false)
 }
 
 /// Sets the calling thread's budget in bytes; 0 restores the default.
 pub(crate) fn set_budget(bytes: usize) {
     let budget = if bytes == 0 { DEFAULT_BUDGET } else { bytes };
-    let _ = BUDGET.try_with(|slot| slot.set(budget));
-    if LIVE.try_with(Cell::get).unwrap_or(0) <= budget {
-        let _ = OVER.try_with(|over| over.set(false));
-    }
+    let _ = COUNTERS.try_with(|counters| {
+        counters.budget.set(budget);
+        if counters.live.get() <= budget {
+            counters.over.set(false);
+        }
+    });
 }
 
 /// The size of the allocation that took the calling thread past its budget, once.
 pub(crate) fn take_failed() -> usize {
-    FAILED.try_with(|failed| failed.replace(0)).unwrap_or(0)
+    COUNTERS
+        .try_with(|counters| counters.failed.replace(0))
+        .unwrap_or(0)
 }
 
 // SAFETY: every call forwards to `System` unchanged; the counters only observe it.
