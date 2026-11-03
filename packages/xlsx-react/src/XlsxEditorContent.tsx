@@ -862,6 +862,7 @@ export function XlsxEditorContent({
     staleFor,
     proposalsPending: () => coordinator.pending,
     canvasRef,
+    positionAtPoint: (clientX, clientY) => hostPointRef.current(clientX, clientY),
     t,
   });
   const beginPluginLoad = pluginHost.beginLoad;
@@ -944,7 +945,7 @@ export function XlsxEditorContent({
           }
           handleRef.current = handle;
           lastDocumentVersionRef.current = handle.version();
-          unsubscribeUpdates = handle.onUpdate((_update, _origin, { fromPeer }) => {
+          const offUpdates = handle.onUpdate((_update, _origin, { fromPeer }) => {
             if (disposed || !handle) return;
             cellClipboard.changed();
             mutationRef.current += 1;
@@ -959,6 +960,22 @@ export function XlsxEditorContent({
               setError(e instanceof Error ? e.message : String(e));
             }
           });
+          unsubscribeUpdates = offUpdates;
+          let offProposals: (() => void) | undefined;
+          try {
+            if (typeof handle.onProposalChange === 'function') {
+              const unsubscribe = handle.onProposalChange(() => {
+                if (!disposed && handle && handleRef.current === handle) refreshProposals();
+              });
+              if (typeof unsubscribe === 'function') offProposals = unsubscribe;
+            }
+          } catch {}
+          unsubscribeUpdates = () => {
+            try { offUpdates(); }
+            finally {
+              try { offProposals?.(); } catch {}
+            }
+          };
           pendingSheetViewRef.current = true;
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));
@@ -1192,7 +1209,7 @@ export function XlsxEditorContent({
     const sheetId = sheetInfoRef.current?.sheetIds[activeSheet];
     presentGrid(
       version !== null && sheetId !== undefined
-        ? { frame: dl, zoom, version, sheetId, viewport }
+        ? { frame: dl, zoom, version, sheetId, sheet: activeSheet, viewport }
         : null
     );
     setRenderError(null);

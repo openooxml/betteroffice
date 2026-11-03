@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import type { YrsLoc, YrsSession, YrsStorySegment } from './index';
 import type { DocxTextRange, DocxTextView } from './edits';
 import type { DocxParagraphAnchor } from './paragraphIdentity';
@@ -708,7 +709,7 @@ export function computeAnchorTargetGeometry(
     try {
       return geometry(resolveAnchorTarget(reader, target, version));
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       return anchorFailure('unsupported', error instanceof Error ? error.message : String(error));
     }
   });

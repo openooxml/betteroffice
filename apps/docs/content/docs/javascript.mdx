@@ -683,7 +683,10 @@ zoom and sheet switch. `geometry.getCellRect({ sheetId, row, col })` and
 `getRangeRect({ sheetId, range })` return pixels of the overlay layer, zoomed
 and clipped to the visible grid, frozen panes included; a cell scrolled out of
 view returns null, and merged areas are addressed as ranges.
-`getPositionAtPoint` is null until the editor exposes pointer queries. The
+`getPositionAtPoint(clientX, clientY)` hit-tests client coordinates through the
+editor's own hit test and returns the editor's `{ sheet, row, col }` with the
+layout's `sheetId`, `version` and `layoutId`, or null outside the grid, over a
+chart, for non-finite input and once that layout or workbook is gone. The
 overlay layer sits on the grid below the editor's selection and cell editor and
 ignores the pointer unless an element sets `pointer-events: auto`. Panels dock
 left, right or bottom of the grid, above the sheet tabs, and become drawers in a
@@ -761,6 +764,10 @@ span that holds tables, controls, section breaks, opaque XML, fields' cached
 results, or comments and bookmarks crossing it refuses, as does a step after
 which saving would move an opaque XML block; a batch holds at most 128 steps,
 1,048,576 inserted UTF-16 units and 1,024 new paragraphs.
+
+`DocxProposalInput` replacements accept an optional `at: { offset }` in the
+paragraph's accepted UTF-16 text. It selects the exact range instead of
+`occurrence`, and `search` must match at that offset.
 
 ## Edit PPTX in version-checked batches
 
@@ -888,6 +895,10 @@ a protected sheet need its protection to allow formatting cells. The React edito
 and calls `onSave` without downloading. They commit pending drafts, nudges and
 pastes first, and reject with `XlsxCommandAdmissionError` when that input
 cannot be written or the workbook is replaced meanwhile.
+
+`WorkbookHandle.isProposalStale(id)` checks a pending proposal with the engine's
+acceptance guards, including cell styles and dependent previews. It leaves the
+live workbook, history and proposal unchanged; an unknown ID throws.
 
 ## Export DOCX as structured content
 

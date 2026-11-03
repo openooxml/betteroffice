@@ -451,3 +451,26 @@ test.skipIf(engineKind === 'native')('wasm handles unregister finalizers on disp
   const counts = finalizationRegistrations.map(({ registry, live }) => `${registry}: ${live}`).join('\n');
   expect(finalizationRegistrations.reduce((total, { live }) => total + live, 0), counts).toBe(0);
 });
+
+test('worker editor access reads structural proposal strips and frames by ID', async () => {
+  const context = await setup();
+  try {
+    const { access, owner } = context;
+    const before = access.snapshot();
+    access.propose('agent', null, [
+      { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+      { type: 'setSlideNotes', slideId: '@draft', text: 'Preview only' },
+    ]);
+    await owner.flush();
+    const proposal = access.listProposals()[0]!;
+    const strip = access.proposalSlideStrip(proposal.id);
+    expect(strip[0]).toMatchObject({ slideId: proposal.refs!.draft, status: 'inserted', liveIndex: null });
+    expect(access.layoutProposalDiffSlideById(proposal.id, strip[0]!.slideId).snapshot.slides[0]!.notes).toBe('Preview only');
+    expect(access.snapshot()).toEqual(before);
+    access.acceptProposal(proposal.id);
+    await equal(context);
+    access.undo();
+    await owner.flush();
+    expect(access.snapshot()).toEqual(before);
+  } finally { await context.owner.dispose(); }
+});

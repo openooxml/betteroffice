@@ -32,7 +32,7 @@ export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () =>
     });
   }
   const accessMethods = ['snapshot', 'story', 'searchText', 'listProposals', 'comments', 'previewProposal',
-    'layoutSlide', 'layoutProposalSlide', 'layoutProposalDiffSlide', 'encodeStateVector', 'encodeStateAsUpdate',
+    'layoutSlide', 'layoutProposalSlide', 'layoutProposalDiffSlide', 'layoutProposalDiffSlideById', 'proposalSlideStrip', 'encodeStateVector', 'encodeStateAsUpdate',
     'exportStructured', 'exportMarkdown'] as const;
   const operations = Object.fromEntries([...accessMethods, ...PRESENTATION_COMMAND_MUTATIONS].map((method) => [
     method, (...args: unknown[]) => {

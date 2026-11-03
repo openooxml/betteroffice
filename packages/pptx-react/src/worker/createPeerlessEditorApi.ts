@@ -164,6 +164,8 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     ...mutations,
     encodeStateVector: () => read('encodeStateVector'),
     encodeStateAsUpdate: (vector) => read('encodeStateAsUpdate', vector),
+    proposalSlideStrip: (id) => read('proposalSlideStrip', id),
+    layoutProposalDiffSlideById: (id, slideId) => read('layoutProposalDiffSlideById', id, slideId),
     previewProposal: (id) => read('previewProposal', id), layoutSlide: (index) => read('layoutSlide', index),
     layoutProposalSlide: (id, index) => read('layoutProposalSlide', id, index), layoutProposalDiffSlide: (id, index) => read('layoutProposalDiffSlide', id, index),
     comments: () => read('comments'), snapshot: () => read('snapshot'), story: (id) => read('story', id), findText: api.findText,

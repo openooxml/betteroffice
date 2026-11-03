@@ -20,7 +20,12 @@ import {
   type XlsxPluginActivation,
   type XlsxPluginHost,
 } from './createXlsxPluginHost';
-import { createPluginGeometry, pluginLayout, type PaintedGrid } from './geometry';
+import {
+  createPluginGeometry,
+  pluginLayout,
+  type EditorPointQuery,
+  type PaintedGrid,
+} from './geometry';
 import { rowDecorationIndex, type RowDecorationSet, type RowGutterIndex } from './rowDecorations';
 import type { XlsxEditorPluginProps, XlsxPluginGeometry, XlsxPluginSelection } from './types';
 
@@ -48,6 +53,8 @@ export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
   selection: XlsxPluginSelection;
   /** The canvas the grid paints into. */
   canvasRef: RefObject<HTMLCanvasElement | null>;
+  /** The editor's hit test that plugin point queries go through; read at call time. */
+  positionAtPoint?: EditorPointQuery;
   t: TFunction;
 }
 
@@ -113,6 +120,9 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     const installed = (latest.current.plugins?.length ?? 0) > 0;
     const layout =
       installed && host.generation() !== null ? pluginLayout(painted, host.version()) : null;
+    const pointAt: EditorPointQuery | undefined = latest.current.positionAtPoint
+      ? (clientX, clientY) => latest.current.positionAtPoint?.(clientX, clientY) ?? null
+      : undefined;
     const proposals = () => {
       const options = latest.current;
       if (options.proposalsPending?.() || !options.selection || options.selection.sheetId !== layout?.sheetId) return null;
@@ -134,12 +144,13 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
               return { version: identity ? access.version(identity) : null,
                 painted: live ? paintedRef.current : null };
             },
-            proposals
+            proposals,
+            pointAt
           ) ?? null : createPluginGeometry(layout, painted, canvas, layer, () =>
               host.layoutId() === layout.id &&
               paintedRef.current === painted &&
               canvas.isConnected &&
-              layer.isConnected, proposals)
+              layer.isConnected, proposals, pointAt)
         : null;
     host.layoutChanged(layout);
     host.geometryChanged();
