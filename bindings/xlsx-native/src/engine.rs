@@ -17,6 +17,7 @@ pub struct DecodedFontFace {
 
 /// Decodes one font pack face using this engine's linked decoder.
 #[napi(
+    catch_unwind,
     js_name = "decodeFontFace",
     ts_args_type = "bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null",
     ts_return_type = "DecodedFontFace"
@@ -47,6 +48,9 @@ struct EngineCall {
 
 impl EngineCall {
     fn new(env: Env) -> Self {
+        if crate::memory::over_budget() {
+            panic!("{}", crate::memory::EXCEEDED);
+        }
         Self {
             previous: CURRENT_ENV.replace(Some(env)),
         }
@@ -56,10 +60,16 @@ impl EngineCall {
 impl Drop for EngineCall {
     fn drop(&mut self) {
         CURRENT_ENV.set(self.previous);
+        if !std::thread::panicking() && crate::memory::over_budget() {
+            panic!("{}", crate::memory::EXCEEDED);
+        }
     }
 }
 
 fn native_progress() {
+    if crate::memory::over_budget() {
+        panic!("{}", crate::memory::EXCEEDED);
+    }
     CURRENT_ENV.with(|current| {
         let Some(env) = current.get() else {
             return;
@@ -184,13 +194,13 @@ impl Default for XlsxSnapshotBuilder {
 
 #[napi]
 impl XlsxSnapshotBuilder {
-    #[napi(constructor)]
+    #[napi(catch_unwind, constructor)]
     pub fn new(env: Env) -> Self {
         let _call = EngineCall::new(env);
         Self::default()
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn push(&mut self, env: Env, chunk: Uint8Array) -> Result<()> {
         let chunk = chunk.to_vec();
         let _call = EngineCall::new(env);
@@ -201,7 +211,7 @@ impl XlsxSnapshotBuilder {
         inner.push(&chunk).map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn advance(&mut self, env: Env, records: u32, bytes: u32) -> Result<bool> {
         let _call = EngineCall::new(env);
         let inner = self
@@ -213,7 +223,7 @@ impl XlsxSnapshotBuilder {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn finish(&mut self, env: Env) -> Result<XlsxDocument> {
         let _call = EngineCall::new(env);
         let inner = self
@@ -228,7 +238,7 @@ impl XlsxSnapshotBuilder {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
         let _call = EngineCall::new(env);
         self.inner = None;
@@ -237,20 +247,20 @@ impl XlsxSnapshotBuilder {
 
 #[napi]
 impl XlsxDocument {
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
         let _call = EngineCall::new(env);
         self.inner = None;
     }
 
-    #[napi(getter, js_name = "clientId")]
+    #[napi(catch_unwind, getter, js_name = "clientId")]
     pub fn client_id(&self, env: Env) -> Result<f64> {
         let _call = EngineCall::new(env);
         Ok(self.document(env)?.client_id())
     }
 
     /// Checkpoints are only restorable by the same engine version and codec.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn recovery_checkpoint(
         &self,
         env: Env,
@@ -264,7 +274,7 @@ impl XlsxDocument {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn begin_peer_snapshot(&mut self, env: Env, records: u32, bytes: u32) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -272,7 +282,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn next_peer_snapshot_chunk(&mut self, env: Env) -> Result<Either<Uint8Array, Undefined>> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -284,14 +294,14 @@ impl XlsxDocument {
             })
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn end_peer_snapshot(&mut self, env: Env) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?.end_peer_snapshot();
         Ok(())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn adopt_peer_version(&mut self, env: Env, version: String) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -299,7 +309,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn peer_hydration_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -307,7 +317,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn set_calculation_context_json(&mut self, env: Env, context: String) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -315,19 +325,19 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn encode_state_vector(&self, env: Env) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         byte_result(env, self.document(env)?.encode_state_vector())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn encode_state_as_update(&self, env: Env) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         byte_result(env, self.document(env)?.encode_state_as_update())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn encode_diff(&self, env: Env, remote_state_vector: Uint8Array) -> Result<Uint8Array> {
         let remote_state_vector = remote_state_vector.to_vec();
         let _call = EngineCall::new(env);
@@ -337,7 +347,7 @@ impl XlsxDocument {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn apply_update_json(&mut self, env: Env, update: Uint8Array) -> Result<String> {
         let update = update.to_vec();
         let _call = EngineCall::new(env);
@@ -346,7 +356,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn start_update_observation(&mut self, env: Env) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -354,14 +364,14 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn clear_update_observation(&mut self, env: Env) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?.clear_update_observation();
         Ok(())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn drain_update_event(&self, env: Env) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -370,7 +380,7 @@ impl XlsxDocument {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn print_display_list_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -378,7 +388,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn display_list_json(&self, env: Env, viewport_json: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -386,7 +396,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn display_list_for_json(
         &self,
         env: Env,
@@ -399,7 +409,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn png_display_list_json(&self, env: Env, viewport_json: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -407,7 +417,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn range_png_display_list_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -415,7 +425,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn display_list_profiled_json(&self, env: Env, viewport_json: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -423,7 +433,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn chart_at_point_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -431,7 +441,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn move_chart_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -439,7 +449,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn render_png(&self, env: Env, viewport_json: String) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -448,7 +458,7 @@ impl XlsxDocument {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn render_range_png(&self, env: Env, args: String) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -457,7 +467,7 @@ impl XlsxDocument {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn sheet_info_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -465,13 +475,13 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn sheet_count(&self, env: Env) -> Result<u32> {
         let _call = EngineCall::new(env);
         Ok(self.document(env)?.sheet_count() as u32)
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn sheet_info_for_json(&self, env: Env, sheet: u32) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -479,7 +489,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn selection_data_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -487,7 +497,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn cell_rect_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -495,7 +505,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn recalculate_json(&mut self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -503,7 +513,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn calculation_status_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -511,7 +521,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn set_active_sheet(&mut self, env: Env, index: u32) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -519,7 +529,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn edit_cell_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -527,7 +537,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn edit_cell_profiled_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -535,7 +545,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn edit_cells_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -543,7 +553,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn move_range_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -551,7 +561,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn apply_ops_json(&mut self, env: Env, transaction_json: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -559,7 +569,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn charts_json(&self, env: Env, sheet: u32) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -567,7 +577,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn edit_charts_json(&mut self, env: Env, edits: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -575,7 +585,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn conditional_formats_json(&self, env: Env, sheet: u32) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -583,7 +593,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn apply_ops_profiled_json(
         &mut self,
         env: Env,
@@ -595,7 +605,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn undo_json(&mut self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -603,7 +613,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn redo_json(&mut self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -611,7 +621,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn cell_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -619,7 +629,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn search_text_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -627,7 +637,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn cell_position_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -635,7 +645,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn range_cells_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -643,7 +653,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn patch_range_style_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -651,7 +661,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn set_range_number_format_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -659,7 +669,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn selection_formatting_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -667,7 +677,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn capture_format_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -675,7 +685,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn apply_format_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -683,7 +693,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn merged_ranges_json(&self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -691,7 +701,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn visible_merged_ranges_json(
         &self,
         env: Env,
@@ -704,7 +714,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn history_state_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -712,7 +722,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn propose_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -720,7 +730,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn list_proposals_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -728,7 +738,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn accept_proposal_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -736,7 +746,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn reject_proposal_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -744,13 +754,13 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn document_version(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         Ok(self.document(env)?.document_version())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn read_cells_json(&self, env: Env, request: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -758,7 +768,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn list_defined_names_json(&self, env: Env, request: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -766,7 +776,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn find_text_json(&self, env: Env, request: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -774,7 +784,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn validate_edits_json(&self, env: Env, request: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -782,7 +792,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn apply_edits_json(&mut self, env: Env, request: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -790,7 +800,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn export_structured_json(&self, env: Env, options: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -798,7 +808,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn export_markdown_json(
         &self,
         env: Env,
@@ -811,7 +821,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn save_bytes(&self, env: Env) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -820,7 +830,7 @@ impl XlsxDocument {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
-    #[napi(factory)]
+    #[napi(catch_unwind, factory)]
     pub fn open(env: Env, bytes: Uint8Array) -> Result<Self> {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
@@ -829,7 +839,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi(factory, js_name = "openWithCalculationJson")]
+    #[napi(catch_unwind, factory, js_name = "openWithCalculationJson")]
     pub fn open_with_calculation_json(
         env: Env,
         bytes: Uint8Array,
@@ -843,7 +853,7 @@ impl XlsxDocument {
     }
 
     /// Checkpoints are only restorable by the same engine version and codec.
-    #[napi(factory, js_name = "openRecoveryCheckpoint")]
+    #[napi(catch_unwind, factory, js_name = "openRecoveryCheckpoint")]
     pub fn open_recovery_checkpoint(env: Env, bytes: Uint8Array, through_seq: f64) -> Result<Self> {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
@@ -852,7 +862,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi(factory, js_name = "openCollaborative")]
+    #[napi(catch_unwind, factory, js_name = "openCollaborative")]
     pub fn open_collaborative(env: Env, bytes: Uint8Array, client_id: f64) -> Result<Self> {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
@@ -861,7 +871,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi(factory, js_name = "openWithPeerHydrationJson")]
+    #[napi(catch_unwind, factory, js_name = "openWithPeerHydrationJson")]
     pub fn open_with_peer_hydration_json(
         env: Env,
         bytes: Uint8Array,
@@ -874,26 +884,30 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn version(env: Env) -> String {
         let _call = EngineCall::new(env);
         xlsx_engine::Session::version().to_owned()
     }
 }
 
-#[napi(js_name = "allocationFailure")]
-pub fn allocation_failure(env: Env) -> f64 {
-    let _call = EngineCall::new(env);
-    0.0
+#[napi(catch_unwind, js_name = "allocationFailure")]
+pub fn allocation_failure() -> f64 {
+    crate::memory::take_failed() as f64
 }
 
-#[napi(js_name = "displayListCellLimit")]
+#[napi(catch_unwind, js_name = "setHeapLimit")]
+pub fn set_heap_limit(bytes: f64) {
+    crate::memory::set_budget(if bytes.is_finite() && bytes > 0.0 { bytes as usize } else { 0 });
+}
+
+#[napi(catch_unwind, js_name = "displayListCellLimit")]
 pub fn display_list_cell_limit(env: Env) -> f64 {
     let _call = EngineCall::new(env);
     xlsx_engine::display_list_cell_limit()
 }
 
-#[napi(js_name = "exportXlsxStructuredJson")]
+#[napi(catch_unwind, js_name = "exportXlsxStructuredJson")]
 pub fn export_xlsx_structured_json(env: Env, bytes: Uint8Array, options: String) -> Result<String> {
     let bytes = bytes.to_vec();
     let _call = EngineCall::new(env);
@@ -901,7 +915,7 @@ pub fn export_xlsx_structured_json(env: Env, bytes: Uint8Array, options: String)
         .map_err(|error| map_error(env, error))
 }
 
-#[napi(js_name = "exportXlsxMarkdownJson")]
+#[napi(catch_unwind, js_name = "exportXlsxMarkdownJson")]
 pub fn export_xlsx_markdown_json(
     env: Env,
     bytes: Uint8Array,
@@ -914,14 +928,14 @@ pub fn export_xlsx_markdown_json(
         .map_err(|error| map_error(env, error))
 }
 
-#[napi(js_name = "renderXlsxMarkdownJson")]
+#[napi(catch_unwind, js_name = "renderXlsxMarkdownJson")]
 pub fn render_xlsx_markdown_json(env: Env, content: String, options: String) -> Result<String> {
     let _call = EngineCall::new(env);
     xlsx_engine::render_xlsx_markdown_json(&content, &options)
         .map_err(|error| map_error(env, error))
 }
 
-#[napi(js_name = "engineVersion")]
+#[napi(catch_unwind, js_name = "engineVersion")]
 pub fn engine_version(env: Env) -> String {
     let _call = EngineCall::new(env);
     env!("CARGO_PKG_VERSION").to_owned()

@@ -39,9 +39,12 @@ function replyError(error: unknown): ReplyError {
   return result;
 }
 
+const NATIVE_MEMORY_BUDGET_EXCEEDED = 'BetterOffice engine memory budget exceeded';
+
 function terminal(error: unknown): boolean {
   return error instanceof SessionFailure ||
-    (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError);
+    (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError) ||
+    (error instanceof Error && error.message === NATIVE_MEMORY_BUDGET_EXCEEDED);
 }
 
 function classify(error: unknown): SessionFailure {

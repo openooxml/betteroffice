@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module';
+import { engineKind } from '../wasm/engine';
 import JSZip from 'jszip';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -79,8 +81,17 @@ export async function numbersWorkbook(rows: number): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-/** Grows the engine memory to the wasm32 ceiling, so its next allocation fails the way a huge workbook's does. */
+function nativeBinding(): { setHeapLimit(bytes: number): void } {
+  return createRequire(import.meta.url)('../../../../bindings/xlsx-native/index.js');
+}
+
+/** Exhausts the engine memory, so its next allocation fails the way a huge workbook's does: the
+ * wasm memory grows to the wasm32 ceiling, the native engine's budget drops to one byte. */
 export function exhaustEngineMemory(): void {
+  if (engineKind === 'native') {
+    nativeBinding().setHeapLimit(1);
+    return;
+  }
   if (memories.length === 0) throw new Error('Engine memory was not recorded; call initRecordedWasm first');
   for (const memory of memories) {
     for (let pages = 1 << 15; pages >= 1; pages >>= 1) {
@@ -89,6 +100,11 @@ export function exhaustEngineMemory(): void {
       }
     }
   }
+}
+
+/** Restores the native engine memory budget after `exhaustEngineMemory`; wasm memories are per test file. */
+export function restoreEngineMemory(): void {
+  if (engineKind === 'native') nativeBinding().setHeapLimit(0);
 }
 
 export async function initRecordedWasm(): Promise<void> {
