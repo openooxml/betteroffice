@@ -178,6 +178,7 @@
     "accept": "Kabul Et",
     "reject": "Reddet",
     "forceApply": "Zorla uygula",
+    "forceBlockedReason": "Yapısal bir değişiklikten sonra bu öneri uygulanamaz.",
     "staleWarning": "Önerildiğinden bu yana değişen hücreler: {cells}"
   },
   "a11y": {

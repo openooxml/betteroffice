@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type {
@@ -23,23 +23,38 @@ export function useProposalCanvas(
 ) {
   const [enabled, setEnabled, enabledRef] = useSyncedState(true);
   const [selectedId, setSelectedId, selectedIdRef] = useSyncedState<string | null>(null);
+  const [previewSelection, setPreviewSelection] = useState<{
+    proposalId: string | null; slideId: string; version?: string; liveSlideId?: string;
+  } | null>(null);
   const slideId = snapshot?.slides[slideIndex]?.id;
   const available = useMemo(
     () =>
       proposals.filter((proposal) =>
-        proposal.changes.some((change) => change.slideId === slideId)
+        proposal.changes.some((change) => change.slideId === slideId) ||
+        (() => {
+          try { return handle?.proposalSlideStrip(proposal.id).some(entry => entry.status !== 'unchanged') ?? false; }
+          catch { return proposal.changes.some(change => change.kind && change.kind !== 'content'); }
+        })()
       ),
-    [proposals, slideId]
+    [proposals, slideId, handle, snapshot]
   );
   const selected =
     available.find((proposal) => proposal.id === selectedId) ??
     available[0] ??
     null;
+  const previewSlideId = previewSelection?.proposalId === selected?.id && previewSelection?.liveSlideId === slideId
+    && previewSelection?.version === handle?.version()
+    ? previewSelection?.slideId ?? null : null;
+  const selectSlide = useCallback((target: string, proposalId = selected?.id ?? null) => {
+    setPreviewSelection({ proposalId, slideId: target, liveSlideId: slideId, version: handle?.version() });
+  }, [selected?.id, slideId, handle]);
   const result = useMemo(() => {
     if (!enabled || !handle || !selected) return { diff: null, error: null };
     try {
       return {
-        diff: handle.layoutProposalDiffSlide(selected.id, slideIndex),
+        diff: previewSlideId || !slideId
+          ? handle.layoutProposalDiffSlideById(selected.id, previewSlideId ?? handle.proposalSlideStrip(selected.id)[0]!.slideId)
+          : handle.layoutProposalDiffSlide(selected.id, slideIndex),
         error: null,
       };
     } catch (error) {
@@ -48,13 +63,15 @@ export function useProposalCanvas(
         error: error instanceof Error ? error.message : String(error),
       };
     }
-  }, [enabled, handle, selected, slideIndex, snapshot]);
+  }, [enabled, handle, selected, slideIndex, slideId, snapshot, previewSlideId]);
   useEffect(() => {
     setEnabled(true);
     setSelectedId(null);
   }, [handle, setEnabled, setSelectedId]);
   return {
     ...result,
+    previewSlideId,
+    selectSlide,
     available,
     selected,
     enabled,

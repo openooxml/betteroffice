@@ -1,6 +1,7 @@
 import type { PositionedTextRun } from '@betteroffice/pptx';
 import type { CommandGeometryLine } from '@betteroffice/pptx/worker';
 import { applyPrimitiveTransform, retainCommandFrameRaster, type CommandFrameLease } from './commandFramePainter';
+import { invalidateCommandFrameCanvas } from './commandFrameRasters';
 import type {
   PeerlessActiveLine, PeerlessConfirmedFrame, PeerlessEcho, PeerlessPaintCheckpoint, PeerlessRect,
   PeerlessViewPainters, PeerlessViewSnapshot,
@@ -81,14 +82,14 @@ export function createLocalEchoPainter(
       releasePlate(plate); plate = undefined;
       held?.release();
       frame = view.confirmed;
-      held = retainCommandFrameRaster(frame, factor);
+      held = retainCommandFrameRaster(frame, factor, true);
       damaged = [];
       unsubscribe = subscribeRaster();
     }
     const raster = held?.raster;
     if (!raster?.ready) return null;
     const active = view.activeLine;
-    if (active && (!plate || plate.active.box !== active.box || plate.active.line !== active.line)) {
+    if (view.echo && active && (!plate || plate.active.box !== active.box || plate.active.line !== active.line)) {
       releasePlate(plate);
       const bounds = activeBounds(active);
       const right = Math.ceil((bounds.x + bounds.width) * factor) / factor;
@@ -112,6 +113,7 @@ export function createLocalEchoPainter(
       const width = Math.min(canvas.width, Math.ceil((bounds.x + bounds.width) * factor)) - x;
       const height = Math.min(canvas.height, Math.ceil((bounds.y + bounds.height) * factor)) - y;
       if (!raster || width <= 0 || height <= 0) continue;
+      invalidateCommandFrameCanvas(canvas);
       ctx.clearRect(x, y, width, height);
       ctx.drawImage(raster.canvas, x, y, width, height, x, y, width, height);
     }
@@ -127,6 +129,7 @@ export function createLocalEchoPainter(
     ctx.save();
     ctx.setTransform(factor, 0, 0, factor, 0, 0);
     if (view.echo && plate) {
+      invalidateCommandFrameCanvas(canvas);
       const { bounds, active } = plate;
       ctx.clearRect(bounds.x, bounds.y, bounds.width, bounds.height);
       ctx.drawImage(plate.background, bounds.x, bounds.y, bounds.width, bounds.height);
@@ -180,6 +183,7 @@ export function createLocalEchoPainter(
       ctx.fillStyle = '#3b82f640';
       for (const rect of view.selectionRects) {
         if (rect.width <= 0 || rect.height <= 0) continue;
+        invalidateCommandFrameCanvas(canvas);
         ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
         damaged.push(rect);
       }

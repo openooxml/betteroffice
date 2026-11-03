@@ -178,6 +178,7 @@
     "accept": "Accepteren",
     "reject": "Afwijzen",
     "forceApply": "Geforceerd toepassen",
+    "forceBlockedReason": "Dit voorstel kan na een structuurwijziging niet worden toegepast.",
     "staleWarning": "Cellen gewijzigd sinds het voorstel: {cells}"
   },
   "a11y": {

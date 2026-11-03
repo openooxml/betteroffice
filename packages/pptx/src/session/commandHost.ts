@@ -10,6 +10,7 @@ import { isCommandEnvelope } from '../../../../shared/office-session/commands/ty
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
+import type { ProposalDiffSlide } from '../proposals';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
@@ -18,7 +19,8 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame } from './commandFrame';
+import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes } from './commandFrame';
+import type { WorkerSlideFrame } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
@@ -62,6 +64,9 @@ function normalizeFontSize(size: number): number {
 }
 
 export interface PresentationCommandHostOptions {
+  onActiveFrame?(frame: WorkerSlideFrame): void;
+  activeFrameWanted?(): boolean;
+  onResetMedia?(): void;
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
   onPipeOutput?(): void;
   onDefaultFonts?(result: TransferResult<PresentationCommandAck & DefaultFontPayload>): void;
@@ -184,6 +189,7 @@ export function registerPresentationCommandHandlers(
     pendingMetafiles.clear();
     for (const [id, revision] of revisions) revisions.set(id, revision + 1);
     layouts.clear();
+    options.onResetMedia?.();
     return true;
   }
 
@@ -674,7 +680,7 @@ export function registerPresentationCommandHandlers(
     if (presentation().version() !== metadataVersion) refreshMetadata();
   }
 
-  function frame(slideId: string, retain = true): TransferResult<PresentationCommandFrame> {
+  function frame(slideId: string, retain = true, extracted?: Map<string, Uint8Array>): TransferResult<PresentationCommandFrame> {
     const opened = presentation();
     refreshTopology();
     const slideIndex = slideIndices.get(slideId);
@@ -689,7 +695,7 @@ export function registerPresentationCommandHandlers(
     layout ? undefined : (list) => {
       geometry = indexHitGeometry(list);
       layouts.set(slideId, { slideIndex, revision, list, geometry });
-    }, layout?.list, metafiles, pendingMetafiles);
+    }, layout?.list, metafiles, pendingMetafiles, extracted);
     if (pendingMetafiles.size && !metafiles.ready()) idleMetafiles();
     if (!geometry || !retain) return result;
     const { slideId: id, slideRevision, coversThroughSeq, documentEpoch: epoch, incarnation } = result.value;
@@ -699,6 +705,17 @@ export function registerPresentationCommandHandlers(
       geometry, version });
     while (frames.size > 257) frames.delete(frames.keys().next().value!);
     return result;
+  }
+
+  async function proposalFrame(diff: ProposalDiffSlide): Promise<TransferResult<ProposalDiffSlide>> {
+    const pending = new Set<string>();
+    const sent = new Set<string>();
+    let media = commandFrameMedia(presentation(), diff.frame, sent, metafiles, pending);
+    if (pending.size) {
+      await loadMetafiles().catch(() => {});
+      media = commandFrameMedia(presentation(), diff.frame, sent, metafiles);
+    }
+    return transferable({ ...diff, media }, media.map(({ bytes }) => bytes));
   }
 
   function authoritativeGeometry(slideId: string): CommandHitGeometryIndex | undefined {
@@ -724,7 +741,18 @@ export function registerPresentationCommandHandlers(
     }
     const edit = editState();
     refreshTopology();
-    const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId);
+    const extracted = options.onActiveFrame && (options.activeFrameWanted?.() ?? true) ? new Map<string, Uint8Array>() : undefined;
+    const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId, true, extracted);
+    if (result && extracted) {
+      const opened = presentation();
+      options.onActiveFrame!({ slideId: result.value.slideId, frameEpoch: result.value.epoch,
+        displayList: layouts.get(result.value.slideId)!.list,
+        mediaBytes(assetId) {
+          const bytes = extracted.get(assetId);
+          extracted.delete(assetId);
+          return bytes ?? commandFrameMediaBytes(opened, assetId, metafiles);
+        } });
+    }
     retainVersions();
     const updates = pendingUpdates.splice(0);
     const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
@@ -1301,7 +1329,7 @@ export function registerPresentationCommandHandlers(
       opened.addUndoBoundary();
       if (before === opened.version()) return false;
       admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: false,
-        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide'].includes(admitted.method) };
+        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide', 'acceptProposal'].includes(admitted.method) };
       refreshHistory(command.seq, admitted.receipt);
       if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
@@ -1741,7 +1769,14 @@ export function registerPresentationCommandHandlers(
         case 'previewProposal': return opened.previewProposal(args[0] as string);
         case 'layoutSlide': return opened.layoutSlide(args[0] as number);
         case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
-        case 'layoutProposalDiffSlide': return opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+        case 'proposalSlideStrip': return opened.proposalSlideStrip(args[0] as string);
+        case 'layoutProposalDiffSlideById':
+        case 'layoutProposalDiffSlide': {
+          const diff = method === 'layoutProposalDiffSlideById'
+            ? opened.layoutProposalDiffSlideById(args[0] as string, args[1] as string)
+            : opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+          return proposalFrame(diff);
+        }
         default: throw new TypeError('Unsupported access method');
       }
     },
@@ -1800,6 +1835,7 @@ export function registerPresentationCommandHandlers(
     selections.clear();
     revisions.clear();
     sentMedia.clear();
+    options.onResetMedia?.();
     frames.clear();
     layouts.clear();
     opened?.dispose();

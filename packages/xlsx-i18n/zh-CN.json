@@ -178,6 +178,7 @@
     "accept": "接受",
     "reject": "拒绝",
     "forceApply": "强制应用",
+    "forceBlockedReason": "结构更改后无法应用此提议。",
     "staleWarning": "提议后已更改的单元格: {cells}"
   },
   "a11y": {

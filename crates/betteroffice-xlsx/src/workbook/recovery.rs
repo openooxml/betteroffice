@@ -60,6 +60,8 @@ struct RecoveryHistory {
 struct RecoveryPreservedHistory {
     before: RecoveryPreserved,
     after: RecoveryPreserved,
+    proposals_before: Option<Vec<Proposal>>,
+    proposals_after: Option<Vec<Proposal>>,
 }
 
 struct RecoveryPreserved {
@@ -116,6 +118,8 @@ impl RecoveryPreservedHistory {
         let history = Self {
             before: RecoveryPreserved::capture(&history.before, states)?,
             after: RecoveryPreserved::capture(&history.after, states)?,
+            proposals_before: history.proposals_before.clone(),
+            proposals_after: history.proposals_after.clone(),
         };
         pulse();
         Ok(history)
@@ -125,6 +129,8 @@ impl RecoveryPreservedHistory {
         let history = PreservedStateHistory {
             before: self.before.restore(states)?,
             after: self.after.restore(states)?,
+            proposals_before: self.proposals_before,
+            proposals_after: self.proposals_after,
         };
         pulse();
         Ok(history)

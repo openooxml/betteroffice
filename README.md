@@ -92,8 +92,8 @@ files needs Node.js 20.16 or 22.3 and later, Bun or Deno.
 **Native bindings, Rust and Python.** The Rust format crates bundle all three packs by default and
 resolve faces in the same order, with nothing fetched; see the
 [Rust guide](https://docs.betteroffice.dev/docs/rust) to leave packs out or load them from your own
-location. `@betteroffice/pptx-native` installs the npm packs and reads each face from disk;
-`@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`. For Python, register
+location. `@betteroffice/pptx-native` and `@betteroffice/xlsx-native` install the npm packs and read
+each face from disk; `@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`. For Python, register
 the faces a document needs before rendering.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->

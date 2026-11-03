@@ -20,6 +20,22 @@ export async function peerlessFrameSource(run: PeerlessPresentation, index?: num
   return { frame: frame.displayList, resolveImage: lease.resolve, release: lease.release, confirmed: frame, index: position };
 }
 
+export async function peerlessProposalFrameSource(run: PeerlessPresentation, id: string, slideId?: string | null) {
+  run.require();
+  const index = run.client.state.slides.findIndex(slide => slide.id === run.client.state.activeSlideId);
+  const targetId = slideId ?? (index < 0 ? (await run.client.access!('proposalSlideStrip', id))[0]?.slideId : null);
+  const diff = targetId
+    ? await run.client.access!('layoutProposalDiffSlideById', id, targetId)
+    : await run.client.access!('layoutProposalDiffSlide', id, index);
+  run.require();
+  const lease = run.images.pin({ displayList: diff.frame, frame: { media: diff.media ?? [] } });
+  try {
+    await lease.ready;
+    run.require();
+    return { ...diff, resolveImage: lease.resolve, release: lease.release };
+  } catch (error) { lease.release(); throw error; }
+}
+
 export async function peerlessExportPng(run: PeerlessPresentation): Promise<{ png: Blob; index: number }> {
   const source = await peerlessFrameSource(run);
   const canvas = document.createElement('canvas');

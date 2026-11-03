@@ -178,6 +178,7 @@
     "accept": "Zaakceptuj",
     "reject": "Odrzuć",
     "forceApply": "Wymuś zastosowanie",
+    "forceBlockedReason": "Tej propozycji nie można zastosować po zmianie struktury.",
     "staleWarning": "Komórki zmienione od czasu propozycji: {cells}"
   },
   "a11y": {

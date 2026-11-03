@@ -124,6 +124,49 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
     Ok(restores)
 }
 
+#[doc(hidden)]
+pub fn remap_proposal_formula(
+    source: &str,
+    owner: SheetId,
+    sheet_names: &[String],
+    op: &Op,
+) -> Option<String> {
+    if let Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } = op {
+        let renamed = scan_sheet_rename(source, sheet_names.get(sheet.0 as usize)?, name);
+        return (!renamed.ambiguous && renamed.formula.len() <= MAX_FORMULA_BYTES)
+            .then_some(renamed.formula);
+    }
+    let Some(target) = structural_target(op) else {
+        return Some(source.to_string());
+    };
+    let names = sheet_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.to_lowercase(), SheetId(index as u32)))
+        .collect();
+    let index = SheetIndex {
+        names: &names,
+        target,
+        target_name: sheet_names.get(target.0 as usize)?,
+    };
+    if has_unresolvable_binding(source, &index) {
+        return None;
+    }
+    let expr = parse_formula(source).ok()?;
+    if contains_table_reference(&expr) {
+        return None;
+    }
+    let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &index);
+    let mut changed = false;
+    let rewritten = transform(&expr, op, &matches, &mut changed);
+    if !changed {
+        return Some(source.to_string());
+    }
+    let formula = rewritten.to_formula();
+    parse_formula(&formula).ok()?;
+    Some(formula)
+}
+
 pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
     let Some(target) = structural_target(op) else {
         return Vec::new();
