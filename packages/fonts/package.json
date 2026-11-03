@@ -18,8 +18,8 @@
       "import": "./dist/cdn.js"
     },
     "./progressive": {
-      "types": "./dist/progressive-entry.d.ts",
-      "import": "./dist/progressive-entry.js"
+      "types": "./dist/progressive.d.ts",
+      "import": "./dist/progressive.js"
     }
   },
   "files": [

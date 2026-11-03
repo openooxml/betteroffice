@@ -2,14 +2,13 @@ export * from './manifest';
 export type { FontDecoder } from './decode';
 import type { FontDecoder } from './decode';
 export type { BundledFontLoader, BundledFontSource } from './provider';
-export type { ProgressiveFontFace } from './progressive';
+export type { ProgressiveFontFace, SliceLocation } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { readFontAsset } from './asset';
-import { loadPackedFontBytes, loadProgressiveFace, isBaseLatinFont, isLatinFont, sliceRefOf } from './packed';
+import { loadPackedFontBytes, isBaseLatinFont, isLatinFont, sliceRefOf } from './packed';
 import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
-import type { ProgressiveFontFace } from './progressive';
+import type { SliceLocation } from './progressive';
 
 export interface FontAssetOptions {
   /**
@@ -222,21 +221,19 @@ async function sliceAssetUrl(file: string, baseUrl: URL | undefined): Promise<UR
     : `Font slice ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
 }
 
-function progressiveLoader(
+function sliceLocation(
   face: BundledFontFace,
   baseUrl: URL | undefined,
   runtime?: { decoder?: FontDecoder },
-): (() => Promise<ProgressiveFontFace>) | undefined {
-  if (sliceRefOf(face.file) === undefined) return undefined;
-  return () => loadProgressiveFace(
-    face,
-    (file) => sliceAssetUrl(file, baseUrl),
-    baseUrl?.href ?? '',
-    undefined,
-    baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
-    runtime,
-    readFontAsset,
-  );
+): SliceLocation | undefined {
+  const ref = sliceRefOf(face.file);
+  return ref && {
+    ref,
+    base: baseUrl?.href ?? '',
+    url: (file) => sliceAssetUrl(file, baseUrl),
+    wasmUrl: baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
+    decoder: runtime?.decoder,
+  };
 }
 
 /** Loads font bytes into consumer-owned buffers with retryable failures. */
@@ -335,6 +332,6 @@ export function createFontProvider(
       : { baseUrl: resolvedAssetBase(options.baseUrl) };
   return fontProvider(
     (face) => loadBundledFontBytes(face, resolvedOptions, runtime),
-    (face) => progressiveLoader(face, resolvedOptions?.baseUrl, runtime),
+    (face) => sliceLocation(face, resolvedOptions?.baseUrl, runtime),
   );
 }

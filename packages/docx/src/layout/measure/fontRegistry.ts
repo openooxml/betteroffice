@@ -1,4 +1,4 @@
-import type { ProgressiveFontFace } from '@betteroffice/fonts/progressive';
+import type { ProgressiveFontFace, SliceLocation } from '@betteroffice/fonts/progressive';
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
 
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
@@ -16,8 +16,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   measureAs?: string;
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
-  /** Opens a sliced face whose outlines load as they are needed. */
-  progressive?: () => Promise<ProgressiveFontFace>;
+  /** Locates a sliced face whose outlines load as they are needed. */
+  slices?: SliceLocation;
   /** @internal Precomputed base Latin coverage bits of the face. */
   coverage?: string;
 };
@@ -233,18 +233,18 @@ export class TextMeasureFontRegistry {
 
   /** Script-fallback faces registered from their skeleton and core, by font id. */
   private progressiveIds = new Map<number, ProgressiveFontFace>();
-  private readonly progressive: boolean;
+  private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
 
-  /** `progressive` registers sliced script-fallback faces from their skeleton and core. */
+  /** `progressive` opens sliced faces, which register from their skeleton and core. */
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
-    progressive?: boolean;
+    progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
   }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
     this.baseLatinSource = opts?.baseLatin;
-    this.progressive = opts?.progressive === true;
+    this.progressive = opts?.progressive;
   }
 
   /** The sliced faces registered from their skeleton and core, by font id. */
@@ -683,8 +683,9 @@ export class TextMeasureFontRegistry {
 
   /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
   private registerFaceLoader(loader: BundledFontLoader, label: string): Promise<number> {
-    const open = this.progressive ? loader.progressive : undefined;
-    if (open === undefined) return this.registerLoader(loader);
+    const open = this.progressive;
+    const slices = loader.slices;
+    if (open === undefined || slices === undefined) return this.registerLoader(loader);
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
@@ -692,7 +693,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         let face: ProgressiveFontFace;
         try {
-          face = await open();
+          face = await open(slices);
         } catch (error) {
           this.warnFailure(
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +

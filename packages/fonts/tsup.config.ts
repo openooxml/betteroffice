@@ -3,7 +3,7 @@ import { defineConfig } from 'tsup';
 // Plain Node cannot type-strip packages; dist remains beside assets so
 // import.meta.url paths stay valid.
 export default defineConfig({
-  entry: ['src/index.ts', 'src/cdn.ts', 'src/progressive-entry.ts'],
+  entry: { index: 'src/index.ts', cdn: 'src/cdn.ts', progressive: 'src/progressive-entry.ts' },
   format: ['esm'],
   dts: { resolve: true },
   splitting: false,

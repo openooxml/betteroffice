@@ -1,3 +1,4 @@
+import type { FontDecoder } from './decode';
 import { chunkEntries, parseSkeleton, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
 
@@ -20,6 +21,22 @@ export interface ProgressiveFontFace {
   onUpdate(listener: (revision: number) => void): () => void;
   /** Whether every outline is loaded. */
   complete(): boolean;
+}
+
+/**
+ * Where a sliced face's files are and how to decode them: what a font loader
+ * carries as `slices`, which `openSlicedFace` from `@betteroffice/fonts/progressive` opens.
+ * @public
+ */
+export interface SliceLocation {
+  ref: SliceRef;
+  /** The asset base the files resolve against; part of the shared face's identity. */
+  base: string;
+  /** The URL of a pack file by its manifest path. */
+  url(file: string): Promise<URL>;
+  timeoutMs?: number;
+  wasmUrl?: URL;
+  decoder?: FontDecoder;
 }
 
 /** @internal A face row's pointer to its slice index. */
@@ -69,14 +86,12 @@ export interface SliceSource {
   timeoutMs?: number;
 }
 
-/** Each package entry bundles its own copy of this module, so the opened files travel on the face. */
-const OPENED = Symbol.for('betteroffice.slices');
-type Opened = { [OPENED]?: [SliceRef, SliceIndex, SliceTransport] };
+const opened = new WeakMap<ProgressiveFontFace, [SliceRef, SliceIndex, SliceTransport]>();
 const sources = new WeakMap<ProgressiveFontFace, Promise<SliceSource>>();
 
 /** @internal The files of a face `openProgressiveFace` opened with a transport that names URLs. */
 export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> | undefined {
-  const entry = (face as Opened)[OPENED];
+  const entry = opened.get(face);
   const url = entry?.[2].url;
   if (!entry || !url) return undefined;
   const [ref, index, { timeoutMs }] = entry;
@@ -164,8 +179,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     return next;
   };
 
-  const face: ProgressiveFontFace & Opened = {
-    [OPENED]: [ref, index, transport],
+  const face: ProgressiveFontFace = {
     get revision() {
       return revision;
     },
@@ -198,5 +212,6 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       return loaded.size === files.size + 1;
     },
   };
+  opened.set(face, [ref, index, transport]);
   return face;
 }

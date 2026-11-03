@@ -4,7 +4,8 @@ import pack from '../../fonts-cjk/assets/manifest.json';
 import { createFontProvider as cdn } from './cdn';
 import { decodeFontFace, type FontDecoder } from './decode';
 import { createFontProvider } from './index';
-import { openProgressiveFace, sliceSourceOf, type SliceRef, type SliceTransport } from './progressive';
+import { openProgressiveFace, sliceSourceOf, type SliceLocation, type SliceRef, type SliceTransport } from './progressive';
+import { openSlicedFace } from './progressive-entry';
 import { chunkEntries, parseSkeleton } from './slices';
 
 const assets = new URL('../../fonts-cjk/assets/', import.meta.url);
@@ -158,22 +159,24 @@ test('opening rejects an index whose SHA-256 differs from the manifest pointer',
     .rejects.toThrow('SHA-256 mismatch');
 });
 
-test('providers add a progressive opener only to sliced faces and keep whole-face loading', async () => {
+test('providers locate only sliced faces, keep whole-face loading, and share one opened face', async () => {
   const decoder: FontDecoder = (bytes, options) => decodeFontFace(bytes, options.dict, { codec: options.codec, maxOutput: options.maxOutput });
   const runtime = { decoder };
   for (const provider of [createFontProvider({ baseUrl: assets }, runtime), cdn({ baseUrl: assets }, runtime)]) {
-    const sliced = provider.resolveScriptFallback('cjk-jp', false, false) as { progressive?: unknown } & (() => Promise<ArrayBuffer>);
-    expect(typeof sliced.progressive).toBe('function');
+    const sliced = provider.resolveScriptFallback('cjk-jp', false, false) as { slices?: SliceLocation } & (() => Promise<ArrayBuffer>);
+    expect(sliced.slices?.ref).toEqual(jpRef);
+    expect(sliced.slices?.decoder).toBe(decoder);
     expect(sha(await sliced())).toBe(jp.sha256);
-    const latin = provider.resolve('Arial', false, false) as { progressive?: unknown } | undefined;
-    expect(latin?.progressive).toBeUndefined();
+    const latin = provider.resolve('Arial', false, false) as { slices?: unknown } | undefined;
+    expect(latin?.slices).toBeUndefined();
   }
-  const loader = createFontProvider({ baseUrl: assets }, runtime).resolveScriptFallback('cjk-jp', false, false) as unknown as {
-    progressive: () => Promise<{ revision: number; complete(): boolean }>;
-  };
-  const face = await loader.progressive();
+  const { slices } = createFontProvider({ baseUrl: assets }, runtime).resolveScriptFallback('cjk-jp', false, false) as unknown as { slices: SliceLocation };
+  const face = await openSlicedFace(slices);
   expect(face.revision).toBeGreaterThanOrEqual(1);
-  expect(await loader.progressive()).toBe(face);
+  expect(await openSlicedFace(slices)).toBe(face);
+  const failing = { ...slices, base: 'https://failing.example/', url: async () => { throw new Error('no such file'); } };
+  await expect(openSlicedFace(failing)).rejects.toThrow('no such file');
+  await expect(openSlicedFace({ ...failing, url: slices.url })).resolves.toBeDefined();
 });
 
 test('a face opened with file URLs names every slice file and the fetch timeout for another realm', async () => {
@@ -187,8 +190,5 @@ test('a face opened with file URLs names every slice file and the fetch timeout 
   expect(Object.keys(source.urls).sort()).toEqual(files.sort());
   expect(source.urls[index.chunks[0]!.file]).toBe(resolved(index.chunks[0]!.file).href);
   expect(sliceSourceOf(face)).toBe(sliceSourceOf(face));
-  const copy = await import(`./progressive.ts?entry=${Date.now()}`) as typeof import('./progressive');
-  expect(copy.sliceSourceOf).not.toBe(sliceSourceOf);
-  expect((await copy.sliceSourceOf(face)!).urls).toEqual(source.urls);
   expect(sliceSourceOf(await openProgressiveFace(jpRef, transport([])))).toBeUndefined();
 });

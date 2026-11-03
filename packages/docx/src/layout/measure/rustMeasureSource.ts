@@ -1,4 +1,3 @@
-import { sliceSourceOf } from '@betteroffice/fonts/progressive';
 import type { ProgressiveFontSpec } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
@@ -130,13 +129,17 @@ export function createRustMeasureSource(options: {
       const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
-    }), progressive: options.progressive },
+    }), progressive: options.progressive
+      ? async (slices) => (await import('@betteroffice/fonts/progressive')).openSlicedFace(slices)
+      : undefined },
   );
   let compat: CompatibilityFlags | undefined;
 
   return {
     async progressiveFonts() {
       const specs: ProgressiveFontSpec[] = [];
+      if (registry.progressiveFaces().size === 0) return specs;
+      const { sliceSourceOf } = await import('@betteroffice/fonts/progressive');
       for (const [slot, face] of registry.progressiveFaces()) {
         const source = await sliceSourceOf(face);
         if (source) specs.push({ slot, source });

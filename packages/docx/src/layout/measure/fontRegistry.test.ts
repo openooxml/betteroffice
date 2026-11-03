@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
+import type { SliceLocation } from '@betteroffice/fonts/progressive';
 import { TextMeasureFontRegistry } from './fontRegistry';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
@@ -355,10 +356,10 @@ test('progressive registration registers a sliced script face from its skeleton 
   };
   const run = async (progressive: boolean, open: () => Promise<typeof face>) => {
     const lengths: number[] = [];
-    const loader = Object.assign(async () => whole, { progressive: open });
+    const loader = Object.assign(async () => whole, { slices: {} as SliceLocation });
     const registry = new TextMeasureFontRegistry(
       { registerFont: (bytes) => lengths.push(bytes.byteLength) },
-      { progressive, bundled: { resolve: () => undefined, resolveScriptFallback: () => loader } },
+      { progressive: progressive ? open : undefined, bundled: { resolve: () => undefined, resolveScriptFallback: () => loader } },
     );
     const ids = await registry.getScriptFallbackIds(['cjk-jp', 'cjk-jp']);
     return { ids, lengths, faces: registry.progressiveFaces(), registry };
@@ -395,13 +396,13 @@ test('a family mapped to a sliced face registers it progressively once, shared w
   };
   const lengths: number[] = [];
   const views: string[] = [];
-  const loader = Object.assign(async () => new ArrayBuffer(32), { measureAs: 'MS Gothic', progressive: async () => face });
+  const loader = Object.assign(async () => new ArrayBuffer(32), { measureAs: 'MS Gothic', slices: {} as SliceLocation });
   const registry = new TextMeasureFontRegistry(
     {
       registerFont: (bytes) => lengths.push(bytes.byteLength),
       registerSubstituteFont: (id, family) => { views.push(family); return 100 + id; },
     },
-    { progressive: true, bundled: { resolve: () => loader, resolveScriptFallback: () => loader } },
+    { progressive: async () => face, bundled: { resolve: () => loader, resolveScriptFallback: () => loader } },
   );
   const chain = await registry.getFontIdChain('MS Gothic', false, false);
   const [script] = await registry.getScriptFallbackIds(['cjk-jp']);
