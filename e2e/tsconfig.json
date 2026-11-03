@@ -23,6 +23,7 @@
     "noUnusedParameters": true,
     "paths": {
       "#session-worker": ["../packages/docx/src/yrs/sessionWorker.node.ts"],
+      "#session-scope": ["../packages/docx/src/yrs/sessionScope.node.ts"],
       "@betteroffice/docx/worker": [
         "../packages/docx/src/worker.ts"
       ],

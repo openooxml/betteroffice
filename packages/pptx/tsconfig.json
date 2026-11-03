@@ -18,7 +18,8 @@
     "declarationMap": true,
     "types": ["bun", "node"],
     "paths": {
-      "#session-worker": ["./src/session/sessionWorker.node.ts"]
+      "#session-worker": ["./src/session/sessionWorker.node.ts"],
+      "#session-scope": ["./src/session/sessionScope.node.ts"]
     }
   },
   "include": ["src"],

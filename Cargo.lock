@@ -185,6 +185,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "image",
  "png",
@@ -324,6 +325,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-ooxml-raster"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "png",
+ "tiny-skia",
+]
+
+[[package]]
 name = "betteroffice-ooxml-text"
 version = "0.5.1"
 dependencies = [
@@ -420,6 +431,7 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
@@ -570,6 +582,7 @@ name = "betteroffice-vsdx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-render",
@@ -695,10 +708,10 @@ dependencies = [
 name = "betteroffice-xlsx-raster"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-ooxml-raster",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-render",
  "libm",
- "png",
  "rustybuzz",
  "serde",
  "serde_json",
@@ -997,7 +1010,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1421,6 +1434,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1725,7 +1750,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2019,10 +2044,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2156,9 +2181,9 @@ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
 
 [[package]]
 name = "typenum"
@@ -2465,7 +2490,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2671,14 +2696,15 @@ checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
 ]
 

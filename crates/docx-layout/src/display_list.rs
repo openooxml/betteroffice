@@ -794,6 +794,10 @@ pub struct TextRunPrimitive {
     pub paint_clip: Option<ClipRect>,
     /// CSS font shorthand.
     pub font: String,
+    /// Script faces its paragraph needs, as the layout's font collection resolves them.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<Box<Vec<String>>>,
     pub color: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub letter_spacing: Option<Number>,
@@ -3740,6 +3744,27 @@ fn row_parent_revision_id(row: &TableRowIn) -> Option<i64> {
 }
 
 /// Returns CSS font shorthand for a run.
+#[allow(clippy::box_collection)]
+fn boxed_scripts(scripts: &[String]) -> Option<Box<Vec<String>>> {
+    (!scripts.is_empty()).then(|| Box::new(scripts.to_vec()))
+}
+
+fn paragraph_scripts(runs: &[RunIn]) -> Vec<String> {
+    ooxml_text::paragraph_scripts_with_languages(
+        runs.iter().filter_map(|run| match run {
+            RunIn::Text(text) => Some((
+                text.text.as_str(),
+                text.fmt
+                    .language
+                    .as_ref()
+                    .and_then(|language| language.east_asia.as_deref()),
+            )),
+            _ => None,
+        }),
+        false,
+    )
+}
+
 fn css_font(fmt: &RunFormattingIn) -> String {
     styled_css_font(
         fmt,
@@ -4010,6 +4035,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         width: px(width),
         paint_clip: None,
         font,
+        scripts: None,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
         word_spacing: None,
@@ -6565,6 +6591,7 @@ pub(crate) fn emit_paragraph_fragment(
 
     let mut line_top = origin_y;
     let mut last_line: Option<LinePaintMetrics> = None;
+    let scripts = paragraph_scripts(&block.runs);
     for idx in frag.from_line..frag.to_line.min(total_lines) {
         let line = &measure.lines[idx];
         // lead skip reserves vertical space above the line (float push-down)
@@ -6596,6 +6623,7 @@ pub(crate) fn emit_paragraph_fragment(
             },
             &block_ref,
             ctx,
+            &scripts,
         );
         for primitive in &mut prims[line_stamp_from..] {
             if let Some(attrs) = doc_attrs_mut(primitive) {
@@ -6622,6 +6650,7 @@ pub(crate) fn emit_paragraph_fragment(
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
             paint_clip: None,
             font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
+            scripts: None,
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
             word_spacing: None,
@@ -6916,6 +6945,7 @@ fn emit_line(
     geom: LineGeom,
     block_ref: &BlockRef,
     ctx: &RenderCtx<'_>,
+    scripts: &[String],
 ) -> Option<LinePaintMetrics> {
     let echo_start = prims.len();
     let segments = resolve_line_segments(&block.runs, line);
@@ -7097,6 +7127,7 @@ fn emit_line(
             width: px(slot_width),
             paint_clip: None,
             font: resolved_css_font(ctx.shape, marker, &marker_format),
+            scripts: boxed_scripts(scripts),
             color: color.to_owned(),
             letter_spacing: None,
             word_spacing: None,
@@ -7360,6 +7391,7 @@ fn emit_line(
                     ctx.shape,
                     auto_space,
                     item.field,
+                    scripts,
                 );
                 if item.pm_start.is_some() {
                     emitted_positioned_text = true;
@@ -7595,6 +7627,7 @@ fn emit_line(
                 width: px(0.0),
                 paint_clip: None,
                 font: css_font(&RunFormattingIn::default()),
+                scripts: None,
                 color: "#000000".to_string(),
                 letter_spacing: None,
                 word_spacing: None,
@@ -7745,6 +7778,7 @@ fn emit_tab_leader(
             width: px(width),
             paint_clip: None,
             font,
+            scripts: None,
             color: run_color(&fmt),
             letter_spacing: None,
             word_spacing: None,
@@ -7866,6 +7900,7 @@ fn emit_text_segment(
     shape: Option<&ShapeFonts<'_>>,
     auto_space: ooxml_text::AutoSpace,
     field: Option<&FieldRunIn>,
+    scripts: &[String],
 ) {
     let font_px = effective_font_px_of(fmt);
     let paint_baseline = baseline_y_of(fmt, baseline);
@@ -8059,6 +8094,7 @@ fn emit_text_segment(
             width: px(width),
             paint_clip,
             font: resolved_css_font(shape, text, fmt),
+            scripts: boxed_scripts(scripts),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
             word_spacing,
@@ -10093,6 +10129,7 @@ impl PlotSink for PrimitiveSink<'_> {
                     letter_spacing: (font.letter_spacing_px != 0.0)
                         .then(|| px(font.letter_spacing_px)),
                     font: font.css(),
+                    scripts: None,
                     color,
                     word_spacing: None,
                     rtl: None,
@@ -14109,6 +14146,23 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn paragraph_scripts_take_kana_and_hangul_context_across_runs() {
+        let runs = |texts: &[&str]| -> Vec<RunIn> {
+            texts
+                .iter()
+                .map(|text| {
+                    serde_json::from_value(serde_json::json!({"kind": "text", "text": text}))
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(paragraph_scripts(&runs(&["骨", "かな"])), ["cjk-jp"]);
+        assert_eq!(paragraph_scripts(&runs(&["骨", "한국"])), ["cjk-kr"]);
+        assert_eq!(paragraph_scripts(&runs(&["骨"])), ["cjk-sc"]);
+        assert!(paragraph_scripts(&runs(&["Latin"])).is_empty());
+    }
     use super::*;
 
     #[test]

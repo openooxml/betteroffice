@@ -502,6 +502,9 @@ fn validate_formula(source: &str) -> std::result::Result<(), String> {
     if source.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES {
         return Err("exceeds the formula length limit".to_owned());
     }
+    if xlsx_ops::is_formula_source(source) {
+        return Ok(());
+    }
     parse_formula(source)
         .map(|_| ())
         .map_err(|error| format!("does not parse: {error}"))
@@ -1145,6 +1148,10 @@ impl Workbook {
         // the staged values were computed before the batch, so a batch that
         // changes the currency evidence recalculates every formula
         graph.computed_with_currency_of(&self.model);
+        match &self.graph {
+            Some(previous) => graph.adopt_unevaluated(previous),
+            None => super::assume_unevaluated(&graph, &self.last_calculation),
+        }
         let recalculated = recalc_after_with_seed(
             &mut prepared.model,
             &mut graph,

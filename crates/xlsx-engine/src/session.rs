@@ -1706,7 +1706,7 @@ mod tests {
         assert!(position["y"].as_f64().unwrap() > 0.0);
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
         session.set_active_sheet(1).unwrap();
         assert!(
@@ -2396,7 +2396,7 @@ mod tests {
         assert!(result.contains(r#""limitedCells":["A3"]"#), "{result}");
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":["A3"]}"#
+            r#"{"limitedCells":["A3"],"unevaluatedCells":[]}"#
         );
     }
 
@@ -2425,7 +2425,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
     }
 

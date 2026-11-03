@@ -218,36 +218,10 @@ impl Document {
         };
         let mut requests = Vec::new();
         let mut collect = |primitives: &[Primitive]| {
-            for primitive in primitives {
-                if let Primitive::Text(run) = primitive
-                    && let Some((style, family)) = run.font.split_once("px")
-                {
-                    let family = family
-                        .trim()
-                        .split(',')
-                        .next()
-                        .unwrap_or_default()
-                        .trim_matches(['\'', '"']);
-                    let bold = style.split_whitespace().any(|word| {
-                        matches!(word, "bold" | "bolder")
-                            || word.parse::<u16>().is_ok_and(|weight| weight >= 600)
-                    });
-                    let italic = style
-                        .split_whitespace()
-                        .any(|word| matches!(word, "italic" | "oblique"));
-                    requests.push(FontRequirement {
-                        key: chain_key(family, bold, italic),
-                        family: family.to_owned(),
-                        bold,
-                        italic,
-                        scripts: ooxml_text::paragraph_scripts_with_han_fallback(
-                            [run.text.as_str()],
-                            false,
-                        ),
-                        characters: Default::default(),
-                    });
-                }
-            }
+            requests.extend(primitives.iter().filter_map(|primitive| match primitive {
+                Primitive::Text(run) => text_requirement(run),
+                _ => None,
+            }));
         };
         collect(&page.primitives);
         for parts in [&page.header, &page.footer].into_iter().flatten() {
@@ -260,5 +234,99 @@ impl Document {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .resolve(&self.font_manager, &requests)
+    }
+}
+
+#[cfg(all(feature = "fonts", feature = "raster"))]
+fn text_requirement(run: &docx_layout::display_list::TextRunPrimitive) -> Option<FontRequirement> {
+    let (style, family) = run.font.split_once("px")?;
+    let family = family
+        .trim()
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim_matches(['\'', '"']);
+    let bold = style.split_whitespace().any(|word| {
+        matches!(word, "bold" | "bolder") || word.parse::<u16>().is_ok_and(|weight| weight >= 600)
+    });
+    let italic = style
+        .split_whitespace()
+        .any(|word| matches!(word, "italic" | "oblique"));
+    Some(FontRequirement {
+        key: chain_key(family, bold, italic),
+        family: family.to_owned(),
+        bold,
+        italic,
+        scripts: text_scripts(run),
+        characters: Default::default(),
+    })
+}
+
+#[cfg(all(feature = "fonts", feature = "raster"))]
+fn text_scripts(run: &docx_layout::display_list::TextRunPrimitive) -> Vec<String> {
+    let own = ooxml_text::paragraph_scripts_with_han_fallback([run.text.as_str()], false);
+    let Some(paragraph) = run.scripts.as_deref().filter(|scripts| !scripts.is_empty()) else {
+        return own;
+    };
+    let regional = paragraph
+        .iter()
+        .any(|script| matches!(script.as_str(), "cjk-jp" | "cjk-kr" | "cjk-tc"));
+    let mut scripts = paragraph.clone();
+    for script in own {
+        if (regional && script == "cjk-sc") || scripts.contains(&script) {
+            continue;
+        }
+        scripts.push(script);
+    }
+    scripts
+}
+
+#[cfg(all(test, feature = "fonts", feature = "raster"))]
+mod tests {
+    use super::text_requirement;
+    use docx_layout::display_list::TextRunPrimitive;
+
+    fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {
+        serde_json::from_value(serde_json::json!({
+            "text": text, "x": 0.0, "baselineY": 0.0, "width": 10.0,
+            "font": "bold 16px 'MS Mincho', serif", "color": "#000000", "scripts": scripts
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn text_requirements_keep_their_own_scripts_next_to_the_paragraph_choice() {
+        let field = text_requirement(&run("مرحبا", &["cjk-jp"])).unwrap();
+        assert_eq!(field.scripts, ["cjk-jp", "arabic"]);
+        let marker = text_requirement(&run("١.", &["cjk-jp"])).unwrap();
+        assert_eq!(marker.scripts, ["cjk-jp", "arabic"]);
+        assert_eq!(
+            text_requirement(&run("骨", &["cjk-jp"])).unwrap().scripts,
+            ["cjk-jp"]
+        );
+        assert_eq!(
+            text_requirement(&run("骨", &["cjk-sc"])).unwrap().scripts,
+            ["cjk-sc"]
+        );
+    }
+
+    #[test]
+    fn text_requirements_take_the_paragraph_scripts() {
+        let japanese = text_requirement(&run("骨", &["cjk-jp"])).unwrap();
+        assert_eq!(
+            (japanese.family.as_str(), japanese.bold),
+            ("MS Mincho", true)
+        );
+        assert_eq!(japanese.scripts, ["cjk-jp"]);
+        assert_eq!(
+            text_requirement(&run("漢字", &[])).unwrap().scripts,
+            ["cjk-sc"]
+        );
+        assert!(
+            text_requirement(&run("Latin", &[]))
+                .unwrap()
+                .scripts
+                .is_empty()
+        );
     }
 }

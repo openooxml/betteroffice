@@ -66,6 +66,7 @@ Per-layer crates for single pipeline stages:
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement and line breaking.
 - [betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff): the token diff behind proposal previews and DOCX comparison.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): shared DrawingML colors, themes and geometry.
+- [betteroffice-ooxml-raster](https://crates.io/crates/betteroffice-ooxml-raster): shared PNG encoding, color parsing, path and glyph outline helpers for the raster crates.
 - [betteroffice-metafile](https://crates.io/crates/betteroffice-metafile): EMF, EMF+ and WMF replay into vector drawings and SVG.
 - [betteroffice-fonts](https://crates.io/crates/betteroffice-fonts): shared font pack decoding and optional native family resolution.
 - [betteroffice-fonts-latin](https://crates.io/crates/betteroffice-fonts-latin): bundled Latin and RTL font bytes.

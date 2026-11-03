@@ -82,7 +82,7 @@ use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
     ProposalRequest, RenderOptions, Result, SelectionFormatting, SheetInfo, TextSearchMatch,
-    UpdateEvent, UpdateOrigin,
+    UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
 use batch::DocumentVersion;
 use staging::CommitHistory;
@@ -366,15 +366,37 @@ fn sheet_content(
     }
 }
 
-/// The cycle and limited cells of a calculation, order aside.
-fn calculation_status(result: &CalculationResult) -> [BTreeSet<(u32, u32, u32)>; 2] {
+/// A reported cell by sheet, row and column, with the functions it names.
+type ReportedCell = (u32, u32, u32, Vec<String>);
+
+/// The cycle, limited and unevaluated cells of a calculation, order aside.
+fn calculation_status(result: &CalculationResult) -> [BTreeSet<ReportedCell>; 3] {
     let cells = |cells: &[CellAddress]| {
         cells
             .iter()
-            .map(|address| (address.sheet.0, address.cell.row, address.cell.col))
+            .map(|address| {
+                (
+                    address.sheet.0,
+                    address.cell.row,
+                    address.cell.col,
+                    Vec::new(),
+                )
+            })
             .collect()
     };
-    [cells(&result.cycle_cells), cells(&result.limited_cells)]
+    let unevaluated = result
+        .unevaluated_cells
+        .iter()
+        .map(|cell| {
+            let CellAddress { sheet, cell: at } = cell.address;
+            (sheet.0, at.row, at.col, cell.functions.clone())
+        })
+        .collect();
+    [
+        cells(&result.cycle_cells),
+        cells(&result.limited_cells),
+        unevaluated,
+    ]
 }
 
 /// On the used range's edge — the only place removing a cell can shrink it.
@@ -613,7 +635,9 @@ impl Workbook {
     }
 
     pub fn open_for_read(bytes: &[u8]) -> Result<Self> {
-        Self::open_internal(bytes, false, None)
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.derive_unevaluated(None);
+        Ok(workbook)
     }
 
     /// Opens a replica. `client_id` must be unique among connected peers.
@@ -798,7 +822,7 @@ impl Workbook {
             },
         };
         let version_nonce = batch::mint_nonce();
-        Ok(Self {
+        let mut workbook = Self {
             authority,
             mode,
             pending_remote_updates: Vec::new(),
@@ -836,7 +860,11 @@ impl Workbook {
             )?,
             #[cfg(all(feature = "fonts", feature = "raster"))]
             fonts: Mutex::new(crate::font::FontRegistry::default()),
-        })
+        };
+        if build_graph {
+            workbook.derive_unevaluated(None);
+        }
+        Ok(workbook)
     }
 
     fn require_snapshot_standalone(&self) -> crate::snapshot::SnapshotResult<()> {
@@ -2080,10 +2108,10 @@ impl Workbook {
     }
 
     /// A recalculation that moves any value moves [`Workbook::version`] too, since values
-    /// and display text can be guarded, as does one that changes what a structured export
-    /// reports about results: the cells left in a cycle or at a limit, or, on the first
-    /// calculation, formulas the file stored no result for. One that moves none of these
-    /// leaves it. Such a recalculation also notifies observers with an empty
+    /// and display text can be guarded, as does one that changes what reads and structured
+    /// exports report about results: the cells left in a cycle, at a limit or unevaluated,
+    /// or, on the first calculation, formulas the file stored no result for. One that moves
+    /// none of these leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
     /// the recalculated values. The recalculation at open does not, except that a file
     /// asking for a full calculation on load (`calcPr` `fullCalcOnLoad` or `forceFullCalc`)
@@ -2345,10 +2373,17 @@ impl Workbook {
                 options.now_serial,
             );
             validate_cell_state(&state)?;
-            preview
-                .sheet_mut(edit.sheet)
-                .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                .set_cell(edit.cell, state.into());
+            if format.is_some()
+                || !cell_states_semantically_equal(
+                    &current_cell_state(&preview, edit.sheet, edit.cell),
+                    &state,
+                )
+            {
+                preview
+                    .sheet_mut(edit.sheet)
+                    .ok_or(Error::SheetOutOfRange(edit.sheet))?
+                    .set_cell(edit.cell, state.into());
+            }
             if let Some(format) = format {
                 xlsx_ops::apply_in_place(&mut preview, &format)?;
             }
@@ -3312,9 +3347,47 @@ impl Workbook {
         result
     }
 
+    /// Derives what a recalculation would leave unevaluated, for a session
+    /// opened or restored without one, under the calculation context it was
+    /// saved with, if any: the uncomputable calls the formulas reach over the
+    /// values held and the cells reading them, not the engine's other gaps.
+    pub(crate) fn derive_unevaluated(&mut self, context: Option<CalculationOptions>) {
+        if self.may_call_uncomputable() {
+            self.ensure_graph();
+            let graph = self.graph.as_ref().expect("graph initialized");
+            let now_serial = context.and_then(|context| context.now_serial);
+            xlsx_calc::derive_unevaluated(&self.model, graph, now_serial, self.rand_seed);
+            self.adopt_derived_unevaluated();
+        }
+    }
+
+    /// takes the list a derivation marked on the graph as the session's.
+    pub(crate) fn adopt_derived_unevaluated(&mut self) {
+        if let Some(graph) = &self.graph {
+            self.last_calculation.unevaluated_cells = unevaluated_cells(&graph.unevaluated_cells());
+        }
+    }
+
+    /// whether any formula's text may call an uncomputable function, so a
+    /// workbook without one derives nothing and builds no graph for it.
+    fn may_call_uncomputable(&self) -> bool {
+        let may_call = xlsx_calc::functions::may_call_uncomputable;
+        self.model
+            .defined_names
+            .iter()
+            .any(|defined| may_call(&defined.formula))
+            || self.model.sheets.iter().any(|sheet| {
+                sheet
+                    .iter_cells()
+                    .any(|(_, cell)| cell.formula.as_deref().is_some_and(may_call))
+            })
+    }
+
     fn ensure_graph(&mut self) {
         if self.graph.is_none() {
-            self.graph = Some(DepGraph::build(&self.model));
+            let graph = DepGraph::build(&self.model);
+            assume_unevaluated(&graph, &self.last_calculation);
+            self.graph = Some(graph);
         }
     }
 
@@ -3627,6 +3700,17 @@ fn profiled<T>(
     ))
 }
 
+/// marks on `graph` the cells `calculation` left unevaluated.
+fn assume_unevaluated(graph: &DepGraph, calculation: &CalculationResult) {
+    graph.assume_unevaluated(calculation.unevaluated_cells.iter().map(|cell| {
+        xlsx_calc::UnevaluatedCell {
+            sheet: cell.address.sheet,
+            cell: cell.address.cell,
+            functions: cell.functions.clone(),
+        }
+    }));
+}
+
 fn calculation_result(result: &RecalcResult) -> CalculationResult {
     CalculationResult {
         changed: result
@@ -3645,7 +3729,21 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
             .map(|&(sheet, cell)| CellAddress { sheet, cell })
             .collect(),
         budget_exhausted: result.budget_exhausted,
+        unevaluated_cells: unevaluated_cells(&result.unevaluated_cells),
     }
+}
+
+fn unevaluated_cells(cells: &[xlsx_calc::UnevaluatedCell]) -> Vec<UnevaluatedCell> {
+    cells
+        .iter()
+        .map(|cell| UnevaluatedCell {
+            address: CellAddress {
+                sheet: cell.sheet,
+                cell: cell.cell,
+            },
+            functions: cell.functions.clone(),
+        })
+        .collect()
 }
 
 /// the collaboration document carries cells, not the rectangle a `t="array"`
@@ -4673,7 +4771,17 @@ fn edit_cell_state(
         .number_format;
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
-    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    let kept = match &parsed {
+        xlsx_ops::ParsedInput::Formula(text) => kept_formula(workbook, sheet, cell, text),
+        _ => None,
+    };
+    let mut state = match kept {
+        Some(stored) => CellState {
+            formula: Some(stored.to_owned()),
+            ..CellState::default()
+        },
+        None => xlsx_ops::cell_state_from_parsed(input, parsed),
+    };
     state.formula = state.formula.map(|typed| {
         committed_formula(
             typed,
@@ -4753,6 +4861,18 @@ fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, o
         }
         _ => {}
     }
+}
+
+/// The formula `cell` stores when `typed` is that text, or that text without the leading `=`
+/// some producers store; re-committing keeps it even when the engine cannot parse it.
+fn kept_formula<'a>(
+    workbook: &'a WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    typed: &str,
+) -> Option<&'a str> {
+    stored_formula(workbook, sheet, cell)
+        .filter(|stored| *stored == typed || stored.strip_prefix('=') == Some(typed))
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {

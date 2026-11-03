@@ -216,9 +216,14 @@ class RangeRead(TypedDict):
     cells: List[List[CellRead]]
 
 
+class UnevaluatedCellAddress(CellAddress):
+    functions: List[str]
+
+
 class ReadCalculation(TypedDict):
     cycleCells: List[CellAddress]
     limitedCells: List[CellAddress]
+    unevaluatedCells: List[UnevaluatedCellAddress]
     truncated: bool
 
 

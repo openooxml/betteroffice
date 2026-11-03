@@ -5,6 +5,7 @@
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import type { XlsxTextMatch, XlsxTextSearchOptions } from '../index';
 
 import {
@@ -143,10 +144,40 @@ describe('wasm loader', () => {
       expect(info.frozenCols).toBe(0);
       expect(info.initialScrollX).toBe(0);
       expect(info.initialScrollY).toBe(0);
-      expect(handle.calculationStatus()).toEqual({ limitedCells: [] });
+      expect(handle.calculationStatus()).toEqual({ limitedCells: [], unevaluatedCells: [] });
       const position = handle.cellPosition(0, 7, 2);
       expect(position.x).toBeGreaterThan(0);
       expect(position.y).toBeGreaterThan(0);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('keeps and reports formulas no offline engine can compute', async () => {
+    const zip = await JSZip.loadAsync(sampleBytes());
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+      + '<c r="A1" t="str"><f>IFERROR(_xlfn.WEBSERVICE("http://x"),"fallback")</f><v>live</v></c>'
+      + '<c r="B1"><f>LEN(A1)*2</f><v>9</v></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const handle = openWorkbook(bytes, { calculation: { nowSerial: 45000, randSeed: 1 } });
+    try {
+      const reported = [
+        { address: 'A1', functions: ['WEBSERVICE'] },
+        { address: 'B1', functions: ['WEBSERVICE'] },
+      ];
+      expect(handle.calculationStatus().unevaluatedCells).toEqual(reported);
+      const read = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B1' } }] });
+      if (!read.ok) throw new Error('read refused');
+      expect(read.ranges[0].cells[0].map((cell) => cell.displayText)).toEqual(['live', '9']);
+      expect(read.calculation.unevaluatedCells?.map(({ a1, functions }) => ({ address: a1, functions })))
+        .toEqual(reported);
+      handle.editCell(0, 2, 0, '=WEBSERVICE("http://x")');
+      expect(handle.calculationStatus().unevaluatedCells).toEqual([
+        ...reported,
+        { address: 'A3', functions: ['WEBSERVICE'] },
+      ]);
+      handle.editCell(0, 0, 0, 'plain');
+      expect(handle.calculationStatus().unevaluatedCells).toEqual([{ address: 'A3', functions: ['WEBSERVICE'] }]);
     } finally {
       handle.dispose();
     }
@@ -162,7 +193,7 @@ describe('wasm loader', () => {
       expect(status.budgetExhausted).toBe(true);
       expect(status.limitedCells.length).toBeGreaterThan(0);
       handle.editCell(0, 0, 22, '1');
-      expect(handle.calculationStatus()).toEqual({ limitedCells: [] });
+      expect(handle.calculationStatus()).toEqual({ limitedCells: [], unevaluatedCells: [] });
     } finally {
       handle.dispose();
     }

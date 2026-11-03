@@ -184,6 +184,10 @@ pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     )
 }
 
+pub(crate) fn contains_text_box(element: &XmlElement) -> bool {
+    element.name == "w:txbxContent" || element.child_elements().any(contains_text_box)
+}
+
 pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
     has_block_bookmarks(element, false)
 }

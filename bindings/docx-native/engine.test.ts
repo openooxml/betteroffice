@@ -904,6 +904,28 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('prime_save_seed_states_slice answers each slice as wasm does', () => {
+    const expected = new wasm.EditSession(63);
+    const actual = new native.EditSession(63);
+    try {
+      expected.seed_from_docx(fixture, 'opening');
+      actual.seed_from_docx(fixture, 'opening');
+      for (const [paragraphs, inflated, bytes] of [[0, 0, 1], [1_000, 64 * 1024 * 1024, 1], [1_000, 64 * 1024 * 1024, 1]]) {
+        expect(actual.prime_save_seed_states_slice(paragraphs, inflated, bytes))
+          .toBe(expected.prime_save_seed_states_slice(paragraphs, inflated, bytes));
+      }
+      let answer = 1;
+      for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+        answer = expected.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64);
+        expect(actual.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64)).toBe(answer);
+      }
+      expect(read(actual)).toEqual(read(expected));
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
   test('RunInheritance resolves the same attributes and formatting', () => {
     const expectedSession = new wasm.EditSession(71);
     const actualSession = new native.EditSession(71);

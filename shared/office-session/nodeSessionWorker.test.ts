@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
-import { createSessionWorker, sessionWorkerScope } from './nodeSessionWorker';
+import { createSessionWorker } from './nodeSessionWorker';
+import { sessionWorkerScope } from './nodeSessionScope';
 
 const original = Object.getOwnPropertyDescriptor(process, 'getBuiltinModule');
 const threads: FakeThread[] = [];

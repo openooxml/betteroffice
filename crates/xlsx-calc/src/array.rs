@@ -669,7 +669,7 @@ fn identity(slice: &[CellValue]) -> String {
             CellValue::Empty => key.push_str("n:0"),
             CellValue::Number { value } => {
                 key.push_str("n:");
-                key.push_str(&crate::eval::format_number(*value + 0.0));
+                key.push_str(&crate::eval::exact_number_text(*value + 0.0));
             }
             CellValue::Text { value } => {
                 key.push_str("t:");
@@ -742,10 +742,7 @@ fn call(name: &str, func: Option<Func>, args: &[Expr], ctx: &EvalContext<'_>) ->
             lift(f, args, ctx, lifted_positions(&upper))
         }
         Some(f) => Value::Scalar(f.call(args, ctx)),
-        None => {
-            ctx.record_unsupported_function();
-            Value::error(ErrorValue::Name)
-        }
+        None => Value::error(crate::eval::unimplemented_call(name, ctx)),
     }
 }
 
@@ -1230,6 +1227,7 @@ fn anchorarray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         return Value::error(ErrorValue::Ref);
     };
     let Some(range) = ctx.provider.spill_range(sid, *cell) else {
+        ctx.note_read(sid, *cell);
         return Value::Scalar(normalize_provider_value(ctx.provider.value(sid, *cell)));
     };
     let area = Area {
@@ -1862,8 +1860,8 @@ fn whole_axis(arg: Option<&Expr>) -> bool {
     })
 }
 
-/// a single condition still picks one branch lazily; an array condition
-/// evaluates both and chooses per element.
+/// a single condition picks one branch lazily; an array condition chooses
+/// per element, evaluating only the branches some element picks.
 fn if_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     if !(2..=3).contains(&args.len()) {
         return Value::error(ErrorValue::Value);
@@ -1882,12 +1880,25 @@ fn if_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             Err(error) => Value::error(error),
         };
     }
-    let whenever = evaluate_array(&args[1], ctx);
+    let (rows, cols) = condition.dims();
+    let picks = |branch: bool| {
+        (0..rows).any(|row| {
+            (0..cols).any(|col| {
+                matches!(to_bool(&condition.broadcast(row, col)), Ok(picked) if picked == branch)
+            })
+        })
+    };
+    let unpicked = || Value::Scalar(CellValue::Empty);
+    let whenever = if picks(true) {
+        evaluate_array(&args[1], ctx)
+    } else {
+        unpicked()
+    };
     let otherwise = match args.get(2) {
-        Some(arg) => evaluate_array(arg, ctx),
+        Some(arg) if picks(false) => evaluate_array(arg, ctx),
+        Some(_) => unpicked(),
         None => Value::Scalar(CellValue::Bool { value: false }),
     };
-    let (rows, cols) = condition.dims();
     result((|| {
         let mut cells = Cells::reserve(ctx, rows, cols)?;
         for row in 0..rows {
@@ -1949,6 +1960,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     // an array primary still needs the fallback's shape, because a longer
     // fallback pads the primary and that padding is caught in turn
     let checkpoint = ctx.unsupported_checkpoint();
+    let called = ctx.uncomputable_checkpoint();
     let spent = ctx.budget_error_checkpoint();
     let other = evaluate_array(&args[1], ctx);
     // both sides answer elementwise, so a block shorter than its fallback
@@ -1960,6 +1972,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
         // the fallback never reached the result, so neither its gaps nor what
         // it spent getting there may discard the answer
         ctx.handle_unsupported_since(checkpoint);
+        ctx.discard_uncomputable_since(called);
         ctx.handle_budget_errors_since(spent);
         return value;
     }

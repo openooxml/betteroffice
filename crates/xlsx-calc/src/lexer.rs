@@ -10,6 +10,47 @@ use crate::{ColumnRange, RowRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
+/// how many significant digits of a number literal excel keeps; the rest
+/// read as zeros.
+const LITERAL_DIGITS: usize = 15;
+/// the smallest literal excel refuses; 9.99999999999999E+307 is the largest
+/// it accepts.
+const LITERAL_LIMIT: f64 = 1e308;
+/// the smallest nonzero literal excel is known to accept: 1E-309 is taken
+/// and 1E-310 refused; where between the two the boundary lies is not known.
+const LITERAL_SMALLEST: f64 = 1e-309;
+
+/// a literal's value inside excel's range: past either end there is none,
+/// and one below the smallest normal double reads as 0, as Excel rewrites it.
+fn literal_in_range(value: f64) -> Option<f64> {
+    if value >= LITERAL_LIMIT || (value != 0.0 && value < LITERAL_SMALLEST) {
+        return None;
+    }
+    Some(if value < f64::MIN_POSITIVE {
+        0.0
+    } else {
+        value
+    })
+}
+
+/// a number literal as excel reads it: digits past the fifteenth significant
+/// one become zeros before the text is converted.
+fn literal_value(text: &str) -> Option<f64> {
+    let split = text.find(['e', 'E']).unwrap_or(text.len());
+    let (mantissa, exponent) = text.split_at(split);
+    let mut kept = String::with_capacity(text.len());
+    let mut significant = 0;
+    for c in mantissa.chars() {
+        if c.is_ascii_digit() && (significant > 0 || c != '0') {
+            significant += 1;
+            kept.push(if significant > LITERAL_DIGITS { '0' } else { c });
+        } else {
+            kept.push(c);
+        }
+    }
+    kept.push_str(exponent);
+    kept.parse().ok()
+}
 
 /// a positioned lexer/parser error, the single error type of `parse_formula`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,12 +307,10 @@ impl Lexer<'_> {
             }
         }
         let text = &self.input[start..self.pos];
-        let value = text
-            .parse::<f64>()
-            .map_err(|_| ParseError::new(start, format!("malformed number {text:?}")))?;
-        if !value.is_finite() {
-            return Err(ParseError::new(start, "number is outside the finite range"));
-        }
+        let value = literal_value(text)
+            .ok_or_else(|| ParseError::new(start, format!("malformed number {text:?}")))?;
+        let value = literal_in_range(value)
+            .ok_or_else(|| ParseError::new(start, "number is outside the range excel accepts"))?;
         Ok(TokKind::Num(value))
     }
 
@@ -763,6 +802,65 @@ mod tests {
 
     #[test]
     fn rejects_non_finite_number_literals() {
-        assert!(lex("1e999").unwrap_err().message.contains("finite"));
+        assert!(lex("1e999").unwrap_err().message.contains("range"));
+    }
+
+    fn number(src: &str) -> f64 {
+        match lex(src).unwrap()[0].kind {
+            TokKind::Num(value) => value,
+            ref other => panic!("{src} lexed as {other:?}"),
+        }
+    }
+
+    /// Excel 365 for Mac result: ATANH(0.9999999999999999) is ATANH of
+    /// 0.999999999999999, so the literal keeps fifteen significant digits.
+    #[test]
+    fn number_literals_keep_fifteen_significant_digits() {
+        assert_eq!(number("0.9999999999999999"), 0.999_999_999_999_999);
+        assert_eq!(number("9007199254740993"), 9_007_199_254_740_990.0);
+        assert_eq!(number("123456789012345678E2"), 1.234_567_890_123_45e19);
+        assert_eq!(
+            number("0.000001234567890123456789"),
+            1.234_567_890_123_45e-6
+        );
+        assert_eq!(number("1.00000000000000"), 1.0);
+        assert_eq!(number("0.1"), 0.1);
+    }
+
+    /// Excel 365 for Mac result: 9.99999999999999E+307 is accepted, a literal
+    /// of 1E+308 or more cannot be entered.
+    #[test]
+    fn number_literals_stop_below_1e308() {
+        assert_eq!(number("9.99999999999999E+307"), 9.999_999_999_999_99e307);
+        assert_eq!(number("9.9999999999999999E307"), 9.999_999_999_999_99e307);
+        for src in ["1E308", "1e+308", "1.5E308", "10E307", "1E309"] {
+            assert!(lex(src).is_err(), "{src}");
+        }
+    }
+
+    /// Excel 365 for Mac result: 2.2250738585072E-308*1, 1E-308*1, 100E-310*1,
+    /// 0.1E-307*1, 0.00001E-303*1, 9E-309*1 and 1E-309*1 are 0, Excel
+    /// rewriting the literal to 0; formulas holding 1E-310, 10E307 or 0.1E309
+    /// are refused, the limits going by the value; 0.1234567890123459 reads
+    /// as 0.123456789012345.
+    #[test]
+    fn literal_limits_go_by_the_value() {
+        for src in [
+            "2.2250738585072E-308",
+            "1E-308",
+            "100E-310",
+            "0.1E-307",
+            "0.00001E-303",
+            "9E-309",
+            "1E-309",
+            "0E-400",
+        ] {
+            assert_eq!(number(src).to_bits(), 0, "{src}");
+        }
+        assert_eq!(number("2.2250738585073E-308"), 2.225_073_858_507_3e-308);
+        assert_eq!(number("0.1234567890123459"), 0.123_456_789_012_345);
+        for src in ["1E-310", "10E307", "0.1E309"] {
+            assert!(lex(src).is_err(), "{src}");
+        }
     }
 }

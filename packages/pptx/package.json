@@ -36,6 +36,10 @@
     "#session-worker": {
       "node": "./dist/sessionWorker.node.js",
       "default": "./dist/sessionWorker.browser.js"
+    },
+    "#session-scope": {
+      "node": "./dist/sessionScope.node.js",
+      "default": "./dist/sessionScope.browser.js"
     }
   },
   "exports": {
