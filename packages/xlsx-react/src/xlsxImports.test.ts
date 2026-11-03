@@ -47,6 +47,8 @@ test('default editor static chunks exclude the legacy and in-thread editors', as
   expect(deferredModules.map((path) => [path, staticInputs.has(path), deferredInputs.has(path)]))
     .toEqual(deferredModules.map((path) => [path, false, true]));
   expect(staticInputs.has('packages/xlsx-react/src/worker/XlsxWorkerEditor.tsx')).toBe(true);
+  expect(staticInputs.has('packages/xlsx/src/wasm/loader.ts')).toBe(false);
+  expect(deferredInputs.has('packages/xlsx/src/wasm/loader.ts')).toBe(true);
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
   expect(bytes).toBeLessThan(STATIC_GZIP_BUDGET);

@@ -1,3 +1,5 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
+
 export function residentMediaImages(
   engine: { mediaDataUrl(token: string): string | null },
   hosted?: ReadonlyMap<string, ImageBitmap>,
@@ -13,7 +15,7 @@ export function residentMediaImages(
         if (!url?.startsWith('data:image/')) return null;
         return createImageBitmap(await (await fetch(url)).blob());
       })().catch(error => {
-        if (error instanceof WebAssembly.RuntimeError) throw error;
+        if (isEngineTrap(error)) throw error;
         return null;
       });
       images.set(source, image);

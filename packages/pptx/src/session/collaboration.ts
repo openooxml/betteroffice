@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { createCollaborationPipeHost } from '../../../../shared/collaboration-pipe/worker';
 import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
 import { CollaborationError, type PptxPresenceCursor, type PptxPresencePeer } from '../collaboration/types';
@@ -17,7 +18,7 @@ export function createPresentationCollaboration(opened: PresentationHandle, onOu
         const before = opened.version();
         try { opened.applyUpdate(update); }
         catch (error) {
-          if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || opened.version() !== before) throw error;
+          if (!(error instanceof Error) || isEngineTrap(error) || opened.version() !== before) throw error;
           return { failed: error };
         }
       }

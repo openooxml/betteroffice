@@ -92,6 +92,49 @@ DOCX and PPTX documents stage text edits with `grep`, `read` and `propose`; work
 browser, pass the module bytes as `wasm`. DOCX previews in a browser need a custom
 `DocumentRenderer` instead of the Node canvas renderer.
 
+## Attached mode
+
+`attachXlsx(handle, { editPeer? })` and `attachDocx(session, { editPeer? })` route
+proposals through the shared editor engine. Standalone `openXlsx` and `openDocx`,
+including the CLI and MCP defaults, keep JS proposals. With a DOCX `editPeer`, use
+`proposeAsync`, `rejectAsync` and `discardAsync`; acceptance is already async.
+
+Agent refs, matches, cell handles and search cursors survive the agent's own
+proposal operations in attached mode. DOCX editor decisions expire refs and saved
+matches in touched paragraphs, including rejections that leave visible text unchanged.
+Using an expired target throws `STALE_TARGET`; grep again for fresh targets. Matches
+in untouched paragraphs stay valid. Editor decisions expire search cursors as user
+edits do. XLSX attached proposals use engine acceptance guards, including cell styles and
+dependent previews, so unrelated user edits need not stale a proposal. Stale
+acceptance throws `STALE_TARGET` and leaves the proposal pending without writing
+cells. Headless XLSX retains whole-workbook proposal staleness.
+
+XLSX accept receipt diagnostic counts come from engine acceptance: `changedCells`
+counts reported dependent addresses, `cycleCells` is 0, `limitedCells` counts
+calculation-status addresses, `truncated` reflects the calculation budget, and
+`changedSheets` counts applied target sheets.
+
+DOCX pending proposals are live tracked changes in the shared editor session.
+Editor save includes them as tracked changes; agent read, grep and default export
+project the original text. Export with a proposal ID projects that proposal as
+accepted. Attached acceptance settles outside undo history; tracked acceptance
+retains the proposal's revision IDs, author and timestamp. Once the editor accepts
+or rejects any engine record in an agent proposal group, the editor owns the rest
+of that group. Agent accept, tracked accept, reject, discard and proposal-limit
+eviction throw `ProposalDecidedInEditorError` with code `PROPOSAL_DECIDED_IN_EDITOR`,
+without changing or withdrawing records, through both direct sessions and async
+peers. `details.records` names each decided record's `id` and `state`. List and
+review include per-record `records` and a derived `status`: pending while any record
+is proposed, then accepted if any was accepted, otherwise rejected. Any attached accept
+`date` option throws `AcceptDateUnsupportedError` with code
+`ACCEPT_DATE_UNSUPPORTED`. Headless tracked acceptance still honors `date`.
+
+Proposals over or next to existing tracked changes can throw
+`TrackedRevisionConflictError` with code `TRACKED_REVISION_CONFLICT`. Its
+`conflicts` list contains each conflicting `revisionId`, `author`, `kind`, `range`
+and paragraph `ref` (also available in `details.conflicts`). Headless insertion
+beside a tracked run retains its existing behavior.
+
 ## MCP tools
 
 | tool | purpose |

@@ -151,6 +151,9 @@ jobs:
       - name: Check exact JSON number parsing in every artifact
         run: bun test scripts/serde-json-exact.test.ts
 
+      - name: Check Wasm artifacts carry no rasterizer and renderPng keeps one shape
+        run: bun test scripts/wasm-no-raster.test.ts scripts/render-png-shape.test.ts
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
@@ -609,3 +612,13 @@ jobs:
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"
+
+      - name: Test panics through the test hooks
+        env:
+          BETTEROFFICE_NATIVE_TEST_HOOKS: "1"
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          for package in $(node scripts/native-bindings.mjs --paths); do
+            bunx napi build --cwd "$package" --platform --release --features test-hooks -- --locked
+            bun test "$package/panic.test.ts"
+          done
