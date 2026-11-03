@@ -539,6 +539,12 @@
     "tableInserted": "Eklenen tablo",
     "tableDeleted": "Silinen tablo"
   },
+  "pasteOptions": {
+    "button": "Yapıştırma Seçenekleri (Ctrl)",
+    "keepSource": "Kaynak Biçimlendirmesini Koru",
+    "merge": "Biçimlendirmeyi Birleştir",
+    "textOnly": "Yalnızca Metni Koru"
+  },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",
     "textMenuAriaLabel": "Metin düzenleme menüsü",

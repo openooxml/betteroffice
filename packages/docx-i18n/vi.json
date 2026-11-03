@@ -539,6 +539,12 @@
     "tableInserted": "Đã chèn bảng",
     "tableDeleted": "Đã xóa bảng"
   },
+  "pasteOptions": {
+    "button": "Tùy chọn dán (Ctrl)",
+    "keepSource": "Giữ định dạng nguồn",
+    "merge": "Hợp nhất định dạng",
+    "textOnly": "Chỉ giữ văn bản"
+  },
   "contextMenu": {
     "ariaLabel": "Menu hành động AI",
     "textMenuAriaLabel": "Menu chỉnh sửa văn bản",

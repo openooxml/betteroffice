@@ -539,6 +539,12 @@
     "tableInserted": "Вставлена таблица",
     "tableDeleted": "Удалена таблица"
   },
+  "pasteOptions": {
+    "button": "Параметры вставки (Ctrl)",
+    "keepSource": "Сохранить форматирование источника",
+    "merge": "Объединить форматирование",
+    "textOnly": "Сохранить только текст"
+  },
   "contextMenu": {
     "ariaLabel": "Меню действий ИИ",
     "textMenuAriaLabel": "Меню редактирования текста",

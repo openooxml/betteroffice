@@ -555,6 +555,15 @@ export function admitInputIntents(
   }
 }
 
+/** @internal Submits one input intent and returns its admission, for callers that act on the outcome. */
+export function submitInputIntent(
+  admission: PeerlessInputAdmission,
+  intent: PeerlessInputIntent,
+  options: PeerlessAdmissionOptions
+): PeerlessAdmissionResult {
+  return submitAdmission(admission, intent, options);
+}
+
 /** @internal */
 export function submitFormattingIntent(
   _admission: PeerlessInputAdmission,
@@ -570,6 +579,7 @@ type AdmissionIntent = PeerlessInputIntent | PeerlessFormattingIntent;
 const SUGGESTED = {
   insertText: true, replaceSelection: true, deleteBackward: true, deleteForward: true, paragraphBreak: true, lineBreak: true,
   pasteFragment: true,
+  replacePasteFragment: true,
   applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
   formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,

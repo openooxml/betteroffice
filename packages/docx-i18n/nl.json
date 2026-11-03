@@ -539,6 +539,12 @@
     "tableInserted": "Tabel ingevoegd",
     "tableDeleted": "Tabel verwijderd"
   },
+  "pasteOptions": {
+    "button": "Plakopties (Ctrl)",
+    "keepSource": "Bronopmaak behouden",
+    "merge": "Opmaak samenvoegen",
+    "textOnly": "Alleen tekst behouden"
+  },
   "contextMenu": {
     "ariaLabel": "Menu voor AI-acties",
     "textMenuAriaLabel": "Menu voor tekstbewerking",

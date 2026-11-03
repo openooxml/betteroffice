@@ -190,7 +190,7 @@ function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActi
   return <PeerlessCaret caret={caret} input={input} />;
 }
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, queryEngineReady }: {
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, pasteOptions, onReplacePasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, queryEngineReady }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
@@ -200,6 +200,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   onDisplayWindowChange(start: number, end: number): void;
   onClipboard?(cut: boolean): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
+  pasteOptions?: boolean;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, plain?: boolean): Promise<boolean> | false;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
@@ -657,6 +659,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     <CanvasA11yLiveRegion active getSelectionContext={getSelectionContext} notifyRef={notify} />
     <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
       onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
+      pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment}
       caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
     <div ref={column} style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
       <div data-docx-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
@@ -792,6 +795,8 @@ export interface PeerlessPagedEditorProps {
   onDisplayWindowChange?(window: readonly [number, number]): void;
   onClipboard?(cut: boolean): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
+  pasteOptions?: boolean;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, plain?: boolean): Promise<boolean> | false;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
@@ -812,7 +817,7 @@ export interface PeerlessPictureMoves {
 }
 
 /** @internal */
-export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures }: PeerlessPagedEditorProps): ReactElement | null {
+export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, pasteOptions, onReplacePasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures }: PeerlessPagedEditorProps): ReactElement | null {
   const { t } = useTranslation();
   const [queryEngineReady, setQueryEngineReady] = useState(() => !!loadedRustDisplayListQueryEngine());
   useEffect(() => {
@@ -926,7 +931,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} pictures={pictures} queryEngineReady={queryEngineReady} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} pictures={pictures} queryEngineReady={queryEngineReady} />}
     {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       {t('editor.recoverableTextNotice')}

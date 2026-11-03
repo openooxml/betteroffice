@@ -539,6 +539,12 @@
     "tableInserted": "تم إدراج جدول",
     "tableDeleted": "تم حذف جدول"
   },
+  "pasteOptions": {
+    "button": "خيارات اللصق (Ctrl)",
+    "keepSource": "الاحتفاظ بتنسيق المصدر",
+    "merge": "دمج التنسيق",
+    "textOnly": "الاحتفاظ بالنص فقط"
+  },
   "contextMenu": {
     "ariaLabel": "قائمة إجراءات الذكاء الاصطناعي",
     "textMenuAriaLabel": "قائمة تحرير النص",

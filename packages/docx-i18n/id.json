@@ -539,6 +539,12 @@
     "tableInserted": "Menyisipkan tabel",
     "tableDeleted": "Menghapus tabel"
   },
+  "pasteOptions": {
+    "button": "Opsi Tempel (Ctrl)",
+    "keepSource": "Pertahankan Pemformatan Sumber",
+    "merge": "Gabungkan Pemformatan",
+    "textOnly": "Pertahankan Teks Saja"
+  },
   "contextMenu": {
     "ariaLabel": "Menu tindakan AI",
     "textMenuAriaLabel": "Menu pengeditan teks",

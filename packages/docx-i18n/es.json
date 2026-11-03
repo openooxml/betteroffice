@@ -539,6 +539,12 @@
     "tableInserted": "Tabla insertada",
     "tableDeleted": "Tabla eliminada"
   },
+  "pasteOptions": {
+    "button": "Opciones de pegado (Ctrl)",
+    "keepSource": "Mantener formato de origen",
+    "merge": "Combinar formato",
+    "textOnly": "Mantener solo texto"
+  },
   "contextMenu": {
     "ariaLabel": "Menú de acciones de IA",
     "textMenuAriaLabel": "Menú de edición de texto",

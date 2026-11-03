@@ -539,6 +539,12 @@
     "tableInserted": "Вставлено таблицю",
     "tableDeleted": "Видалено таблицю"
   },
+  "pasteOptions": {
+    "button": "Параметри вставлення (Ctrl)",
+    "keepSource": "Зберегти форматування джерела",
+    "merge": "Об'єднати форматування",
+    "textOnly": "Зберегти лише текст"
+  },
   "contextMenu": {
     "ariaLabel": "Меню дій ШІ",
     "textMenuAriaLabel": "Меню редагування тексту",

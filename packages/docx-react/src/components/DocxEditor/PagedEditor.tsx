@@ -232,6 +232,7 @@ export interface PagedEditorProps {
   firstPageFooterContent?: HeaderFooter | null;
   /** Whether the editor is read-only. */
   readOnly?: boolean;
+  pasteOptions?: boolean;
   holdInput?: boolean;
   inputScope?: number;
   inputQueries?: DisplayListQueries | null;
@@ -554,6 +555,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       readOnly = false,
+      pasteOptions = true,
       holdInput = false,
       inputScope,
       inputQueries,
@@ -1693,6 +1695,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // the focus event bubbles up here and would bounce focus back to
         // the body input, making the inputs impossible to edit.
         if (target.closest('.oox-hyperlink-popup')) return;
+        if (target.closest('[data-paste-options]')) return;
         focusBodyInput();
         setIsFocused(true);
       },
@@ -1711,7 +1714,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       // Keep selection visible when focus moves to toolbar or dropdown portals
       if (
         relatedTarget?.closest(
-          '[role="toolbar"], [data-radix-popper-content-wrapper], [data-radix-select-content], .docx-table-options-dropdown'
+          '[role="toolbar"], [data-radix-popper-content-wrapper], [data-radix-select-content], .docx-table-options-dropdown, [data-paste-options]'
         )
       ) {
         return;
@@ -1756,6 +1759,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // refocusing the body input here would steal focus mid-type and route
         // keys (e.g. space) into the document instead of the input.
         if (target?.closest('.oox-hyperlink-popup')) return;
+        if (target?.closest('[data-paste-options]')) return;
         // Ensure the input surface is focused if the user types.
         if (!yrsInputRef.current?.isFocused()) {
           focusBodyInput();
@@ -1800,7 +1804,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // Don't steal focus from sidebar inputs
         if (
           (e.target as HTMLElement).closest('.docx-comments-sidebar') ||
-          (e.target as HTMLElement).closest('.docx-unified-sidebar')
+          (e.target as HTMLElement).closest('.docx-unified-sidebar') ||
+          (e.target as HTMLElement).closest('[data-paste-options]')
         )
           return;
         // Focus the input surface if clicking outside pages area
@@ -2252,6 +2257,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             applyPendingSelection={applyPendingSelection}
             seedSelection={viewerDocumentRead === undefined && !holdInput}
             session={yrsCore.session}
+            pasteOptions={pasteOptions}
             story={activeYrsRootStory}
             isSuggesting={isSuggesting}
             author={author}

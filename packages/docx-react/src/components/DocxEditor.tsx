@@ -317,6 +317,13 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
+   * Whether to show the paste options control after a paste that carried
+   * formatting, letting the user re-apply that paste with merged or
+   * text-only formatting as part of the same undo step (default: true).
+   * Set false to never show it; the Ctrl shortcut that opens it is off too.
+   */
+  pasteOptions?: boolean;
+  /**
    * Experimental: paint a display-only preview of a document's first pages
    * before the whole document is opened, then hand them over to it. The editor
    * is read-only and plugins wait until the full document is open. Ignored
@@ -930,6 +937,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     initialZoom = 1.0,
     showHiddenText = false,
     readOnly: readOnlyProp = false,
+    pasteOptions = true,
     previewFirstPage = false,
     allowHostProposals = false,
     showHostProposalsInSidebar = false,
@@ -2768,6 +2776,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
               readOnly={readOnly}
+              pasteOptions={pasteOptions}
               holdInput={holdOpeningInput}
               inputScope={yrsSeedGeneration}
               inputQueries={viewerSession ? undefined : canvasRenderer.inputQueries}

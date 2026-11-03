@@ -51,8 +51,8 @@ import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevision
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
-import { admitInputIntents } from './inputAdmission';
-import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
+import { admitInputIntents, submitInputIntent, type PeerlessAdmissionResult } from './inputAdmission';
+import type { DocxClipboardFragment, DocxCommandSelection, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
@@ -1017,6 +1017,19 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     props.onPaste?.();
     return true;
   }, [controller, props.onPaste]);
+  const onReplacePasteFragment = useCallback((fragment: DocxClipboardFragment, selection: DocxCommandSelection, plain = false): Promise<boolean> | false => {
+    const current = active.current;
+    if (!current) return false;
+    if (!isPasteFragmentAllowed(controller.commands.store)) return false;
+    const applied = (result: PeerlessAdmissionResult): Promise<boolean> =>
+      result.status === 'submitted'
+        ? result.ticket.ack.then((outcome) => outcome.status === 'applied', () => false)
+        : result.status === 'held'
+          ? result.released.then(applied, () => false)
+          : Promise.resolve(false);
+    return applied(submitInputIntent(current.binding.admission, { kind: 'replacePasteFragment', payload: { fragment, selection, ...(plain ? { plain: true as const } : {}) } },
+      { inputTime: performance.now(), source: 'paste', fence: true }));
+  }, [controller]);
   const selectionAnchor = useCallback(() => {
     const frame = controller.getSnapshot().view?.geometry;
     const rect = frame?.selectionRects[0];
@@ -1361,7 +1374,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           overlay={workerCollaboration.overlay(displayWindow)}
-          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={setDragSelecting} pictures={pictureMoves}
+          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={props.pasteOptions} onReplacePasteFragment={onReplacePasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={setDragSelecting} pictures={pictureMoves}
           pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />

@@ -539,6 +539,12 @@
     "tableInserted": "Inserted table",
     "tableDeleted": "Deleted table"
   },
+  "pasteOptions": {
+    "button": "Paste Options (Ctrl)",
+    "keepSource": "Keep Source Formatting",
+    "merge": "Merge Formatting",
+    "textOnly": "Keep Text Only"
+  },
   "contextMenu": {
     "ariaLabel": "AI actions menu",
     "textMenuAriaLabel": "Text editing menu",

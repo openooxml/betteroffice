@@ -310,6 +310,31 @@ describe('vertically merged rows on copy', () => {
   });
 });
 
+describe('validClipboardFragment runs', () => {
+  test('accepts runs that join to the paragraph text and rejects mismatches', () => {
+    expect(validClipboardFragment({
+      paragraphs: [{
+        text: 'Bold link',
+        pStyle: 'Heading1',
+        list: 'numbered',
+        runs: [
+          { text: 'Bold ', format: { bold: true, fontSize: 20, fontFamily: { ascii: 'Georgia' }, color: { rgb: 'FF0000' } } },
+          { text: 'link', href: 'https://example.com' },
+        ],
+      }],
+    })).toBe(true);
+    expect(validClipboardFragment({
+      paragraphs: [{ text: 'Bold', runs: [{ text: 'Other' }] }],
+    })).toBe(false);
+    expect(validClipboardFragment({
+      paragraphs: [{ text: 'x', runs: [{ text: 'x', href: 'not a url' }] }],
+    })).toBe(false);
+    expect(validClipboardFragment({
+      paragraphs: [{ text: 'x', list: 'roman' as never }],
+    })).toBe(false);
+  });
+});
+
 describe('validClipboardFragment spans', () => {
   function fragmentWithSpan(tcPr: Record<string, unknown>): unknown {
     return {
@@ -503,6 +528,85 @@ describe('applyClipboardFragment', () => {
     );
     expect(calls).toEqual(['delete', 'table', 'text:a', 'split', 'text:b']);
     expect(caret).toEqual({ story: 'body', paraId: 'p0n', offset: 1 });
+  });
+
+  test('applies run formatting, hyperlinks and paragraph style from runs', () => {
+    const calls: string[] = [];
+    const base = fakeEngine(calls);
+    const engine = {
+      ...base,
+      formatRange: (range: { start: { offset: number }; end: { offset: number } }, delta: unknown) => {
+        calls.push(`format:${range.start.offset}-${range.end.offset}:${JSON.stringify(delta)}`);
+      },
+      setHyperlink: (range: { start: { offset: number }; end: { offset: number } }, link: { href: string } | null) => {
+        calls.push(`link:${range.start.offset}-${range.end.offset}:${link?.href ?? 'none'}`);
+      },
+      applyParagraphStyle: (_range: unknown, styleId: string) => { calls.push(`style:${styleId}`); },
+    } as unknown as ClipboardPasteEngine;
+    const caret = applyClipboardFragment(
+      engine,
+      { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } },
+      {
+        paragraphs: [{
+          text: 'Bold link',
+          pStyle: 'Heading1',
+          runs: [
+            { text: 'Bold ', format: { bold: true } },
+            { text: 'link', href: 'https://example.com' },
+          ],
+        }],
+      },
+    );
+    expect(calls).toEqual([
+      'text:Bold ',
+      'format:0-5:{"bold":true}',
+      'link:0-5:none',
+      'text:link',
+      'format:5-9:{"bold":null}',
+      'link:5-9:https://example.com',
+      'style:Heading1',
+    ]);
+    expect(caret).toEqual({ story: 'body', paraId: 'p0', offset: 9 });
+  });
+
+  test('applies pasted list kinds to their paragraphs', () => {
+    const calls: string[] = [];
+    const engine = {
+      ...fakeEngine(calls),
+      setParagraphAttrs: (range: { start: { paraId: string } }, attrs: { numPr: { numId: number }; listIsBullet: boolean }) => {
+        calls.push(`list:${range.start.paraId}:${attrs.numPr.numId}:${attrs.listIsBullet}`);
+      },
+    } as unknown as ClipboardPasteEngine;
+    applyClipboardFragment(
+      engine,
+      { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } },
+      { paragraphs: [{ text: 'a', list: 'bullet' }, { text: 'b', list: 'numbered' }] },
+    );
+    expect(calls).toEqual(['text:a', 'split', 'text:b', 'list:p0:1:true', 'list:p0n:2:false']);
+  });
+
+  test('paragraph styles are applied after splitting so later paragraphs do not inherit them', () => {
+    const calls: string[] = [];
+    const engine = {
+      ...fakeEngine(calls),
+      applyParagraphStyle: (range: { start: { paraId: string } }, styleId: string) => { calls.push(`style:${range.start.paraId}:${styleId}`); },
+    } as unknown as ClipboardPasteEngine;
+    applyClipboardFragment(
+      engine,
+      { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } },
+      { paragraphs: [{ text: 'Heading', pStyle: 'Heading2' }, { text: 'Body' }] },
+    );
+    expect(calls).toEqual(['text:Heading', 'split', 'text:Body', 'style:p0:Heading2']);
+  });
+
+  test('a fragment link must use http, https, mailto or an anchor', () => {
+    const fragment = (href: string) => ({ paragraphs: [{ text: 'x', runs: [{ text: 'x', href }] }] });
+    for (const href of ['https://example.com', 'HTTP://example.com', 'mailto:a@example.com', '#_Toc1']) {
+      expect(validClipboardFragment(fragment(href))).toBe(true);
+    }
+    for (const href of ['javascript:alert(1)', 'JavaScript:alert(1)', 'data:text/html,x', 'vbscript:x', 'file:///etc/passwd', 'relative/path']) {
+      expect(validClipboardFragment(fragment(href))).toBe(false);
+    }
   });
 
   test('leaves a collapsed range alone and skips empty text', () => {
