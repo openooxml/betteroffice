@@ -321,6 +321,7 @@ impl FontSource {
 #[derive(Clone, Debug, Default)]
 pub struct BundledFonts {
     options: BundledFontOptions,
+    directories: HashMap<FontPack, PathBuf>,
 }
 
 impl BundledFonts {
@@ -359,13 +360,73 @@ impl BundledFonts {
                 }
             }
         }
-        Ok(Self { options })
+        Ok(Self {
+            options,
+            directories: HashMap::new(),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn from_pack_directories(directories: Vec<(FontPack, PathBuf)>) -> Result<Self, FontError> {
+        for (index, (pack, directory)) in directories.iter().enumerate() {
+            if directories[..index].iter().any(|(known, _)| known == pack) {
+                return Err(FontError::InvalidFontOptions(format!(
+                    "duplicate {pack} pack"
+                )));
+            }
+            if directory.as_os_str().is_empty() || directory.to_string_lossy().contains("://")
+            {
+                return Err(FontError::InvalidFontOptions(
+                    "pack directory must be a local directory".into(),
+                ));
+            }
+        }
+        let mut bundled = Self {
+            options: BundledFontOptions {
+                packs: Vec::new(),
+                base_url: None,
+            },
+            directories: HashMap::new(),
+        };
+        for (pack, mut directory) in directories {
+            if directory.is_relative() {
+                directory = std::env::current_dir()
+                    .map_err(|source| FontError::Io {
+                        path: directory.clone(),
+                        source,
+                    })?
+                    .join(directory);
+            }
+            let path = directory.join("manifest.json");
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(FontError::Io { path, source }),
+            };
+            let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            if !catalog()
+                .faces
+                .iter()
+                .filter(|face| face.pack == pack)
+                .all(|face| {
+                    manifest.get("version").and_then(serde_json::Value::as_str)
+                        == Some(face.version.as_str())
+                })
+            {
+                continue;
+            }
+            bundled.options.packs.push(pack);
+            bundled.directories.insert(pack, directory);
+        }
+        Ok(bundled)
     }
 
     pub fn preload(&self) -> Result<(), FontError> {
         for face in &catalog().faces {
             if self.options.packs.contains(&face.pack) {
-                load_decoded(&self.options, face)?;
+                load_decoded(&self.options, &self.directories, face)?;
             }
         }
         Ok(())
@@ -379,16 +440,17 @@ impl BundledFonts {
             .ok_or_else(|| {
                 FontError::InvalidFontOptions("face is outside the bundled catalog".into())
             })?;
-        Ok(load_decoded(&self.options, known)?.font.clone())
+        Ok(load_decoded(&self.options, &self.directories, known)?.font.clone())
     }
 
     fn handle(&self, face: &'static BundledFontFace) -> FontFaceHandle {
         let options = self.options.clone();
+        let directories = self.directories.clone();
         let mut handle = FontFaceHandle::new(
             &face.family,
             face.weight == 700,
             face.style == "italic",
-            move || Ok(load_decoded(&options, face)?.font.clone()),
+            move || Ok(load_decoded(&options, &directories, face)?.font.clone()),
         );
         if face.family == "Selawik" {
             handle.measure_as = face.metric_compat_with.clone();
@@ -444,6 +506,7 @@ impl FontProvider for BundledFonts {
 #[derive(Eq, Hash, PartialEq)]
 struct CacheKey {
     base: Option<PathBuf>,
+    directory: Option<PathBuf>,
     pack: FontPack,
     file: &'static str,
 }
@@ -462,7 +525,11 @@ fn missing(pack: FontPack, base: Option<&Path>, file: &str, version: &str) -> Fo
     FontError::MissingFontPack { pack, action }
 }
 
-fn encoded(options: &BundledFontOptions, face: &BundledFontFace) -> Result<Vec<u8>, FontError> {
+fn encoded(
+    options: &BundledFontOptions,
+    directories: &HashMap<FontPack, PathBuf>,
+    face: &BundledFontFace,
+) -> Result<Vec<u8>, FontError> {
     if !options.packs.contains(&face.pack) {
         return Err(FontError::MissingFontPack {
             pack: face.pack,
@@ -471,6 +538,19 @@ fn encoded(options: &BundledFontOptions, face: &BundledFontFace) -> Result<Vec<u
                 face.pack,
                 face.pack.feature()
             ),
+        });
+    }
+    if let Some(directory) = directories.get(&face.pack) {
+        let path = directory.join(&face.file);
+        return std::fs::read(&path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                FontError::MissingFontPack {
+                    pack: face.pack,
+                    action: format!("deploy {}", path.display()),
+                }
+            } else {
+                FontError::Io { path, source }
+            }
         });
     }
     if let Some(base) = &options.base_url {
@@ -525,10 +605,11 @@ fn encoded(options: &BundledFontOptions, face: &BundledFontFace) -> Result<Vec<u
 
 fn load_decoded(
     options: &BundledFontOptions,
+    directories: &HashMap<FontPack, PathBuf>,
     face: &'static BundledFontFace,
 ) -> Result<Arc<Decoded>, FontError> {
     if !options.packs.contains(&face.pack) {
-        encoded(options, face)?;
+        encoded(options, directories, face)?;
     }
     static CACHE: OnceLock<Mutex<FaceCache>> = OnceLock::new();
     let cell = {
@@ -539,6 +620,7 @@ fn load_decoded(
         cache
             .entry(CacheKey {
                 base: options.base_url.clone(),
+                directory: directories.get(&face.pack).cloned(),
                 pack: face.pack,
                 file: &face.file,
             })
@@ -558,11 +640,11 @@ fn load_decoded(
             .ok_or_else(|| {
                 FontError::InvalidFontData(format!("invalid dictionary for {}", face.file))
             })?;
-        Some(load_decoded(options, dict)?)
+        Some(load_decoded(options, directories, dict)?)
     } else {
         None
     };
-    let bytes = encoded(options, face)?;
+    let bytes = encoded(options, directories, face)?;
     if bytes.len() != face.encoded_length {
         return Err(FontError::InvalidFontData(format!(
             "encoded length mismatch for {}",

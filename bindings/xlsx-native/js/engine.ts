@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import type * as Wasm from '../../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 
 export type { InitInput } from '../../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
@@ -15,7 +16,22 @@ type Engine = Pick<
   | 'renderXlsxMarkdownJson'
 >;
 
-const binding = createRequire(import.meta.url)('../index.js') as Engine;
+type NativeFontLoader = {
+  configureFontPacks(latin?: string, intl?: string, cjk?: string): boolean;
+};
+
+const require = createRequire(import.meta.url);
+const binding = require('../index.js') as Engine & NativeFontLoader;
+
+function packDirectory(pack: 'latin' | 'intl' | 'cjk'): string | undefined {
+  try {
+    return join(dirname(require.resolve(`@betteroffice/fonts-${pack}/package.json`)), 'assets');
+  } catch {
+    return undefined;
+  }
+}
+
+binding.configureFontPacks(packDirectory('latin'), packDirectory('intl'), packDirectory('cjk'));
 
 export const XlsxDocument = binding.XlsxDocument;
 export type XlsxDocument = Wasm.XlsxDocument;
