@@ -272,6 +272,40 @@ fn take_pending_exception(env: Env) -> Option<napi::sys::napi_value> {
     }
 }
 
+fn is_panic_exception(env: Env, exception: napi::sys::napi_value) -> bool {
+    let mut code = std::ptr::null_mut();
+    let mut expected = std::ptr::null_mut();
+    let mut equal = false;
+    // SAFETY: the values belong to the handle scope of the call running on this thread.
+    unsafe {
+        napi::sys::napi_get_named_property(env.raw(), exception, c"code".as_ptr(), &mut code)
+            == napi::sys::Status::napi_ok
+            && napi::sys::napi_create_string_utf8(
+                env.raw(),
+                c"GenericFailure".as_ptr(),
+                14,
+                &mut expected,
+            ) == napi::sys::Status::napi_ok
+            && napi::sys::napi_strict_equals(env.raw(), code, expected, &mut equal)
+                == napi::sys::Status::napi_ok
+            && equal
+    }
+}
+
+/// The error an outer call fails with after an update observer made its object fail: the panic
+/// if the observer let it through, else the failed-object error.
+fn trap_exception(
+    env: Env,
+    thrown: Option<napi::sys::napi_value>,
+) -> Option<napi::sys::napi_value> {
+    if let Some(exception) = thrown.filter(|exception| is_panic_exception(env, *exception)) {
+        return Some(exception);
+    }
+    let _ = take_pending_exception(env);
+    let _ = throw_error(&env, FAILED_OBJECT);
+    take_pending_exception(env)
+}
+
 struct DeliveringUpdates<'a> {
     running: &'a Cell<bool>,
     env: Env,
@@ -383,7 +417,7 @@ impl EditSession {
     }
 
     fn deliver_updates(&self) {
-        if self.delivering.get() {
+        if self.delivering.get() || self.failure.borrow().is_some() {
             return;
         }
         let Ok(core) = self.core.try_borrow_mut() else {
@@ -397,7 +431,7 @@ impl EditSession {
             return;
         };
         self.delivering.set(true);
-        let _delivery = DeliveringUpdates {
+        let mut delivery = DeliveringUpdates {
             running: &self.delivering,
             env: update.env,
             exception: take_pending_exception(update.env),
@@ -416,7 +450,11 @@ impl EditSession {
                     .borrow_back(&env)?
                     .apply(Null, (bytes, u32::from(remote)).into())
             })();
-            let _ = take_pending_exception(env);
+            let thrown = take_pending_exception(env);
+            if self.failure.borrow().is_some() {
+                delivery.exception = trap_exception(env, thrown);
+                return;
+            }
             next = self.next_update();
         }
     }
