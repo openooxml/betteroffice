@@ -100,6 +100,9 @@ export declare class XlsxSnapshotBuilder {
 
 export declare function allocationFailure(): number
 
+/** Internal, called by the package loader. */
+export declare function configureFontPacks(latin?: string | undefined | null, intl?: string | undefined | null, cjk?: string | undefined | null): boolean
+
 export interface DecodedFontFace {
   font: Uint8Array
   payload?: Uint8Array

@@ -860,6 +860,7 @@ export function XlsxEditorContent({
     staleFor,
     proposalsPending: () => coordinator.pending,
     canvasRef,
+    positionAtPoint: (clientX, clientY) => hostPointRef.current(clientX, clientY),
     t,
   });
   const beginPluginLoad = pluginHost.beginLoad;
@@ -1206,7 +1207,7 @@ export function XlsxEditorContent({
     const sheetId = sheetInfoRef.current?.sheetIds[activeSheet];
     presentGrid(
       version !== null && sheetId !== undefined
-        ? { frame: dl, zoom, version, sheetId, viewport }
+        ? { frame: dl, zoom, version, sheetId, sheet: activeSheet, viewport }
         : null
     );
     setRenderError(null);

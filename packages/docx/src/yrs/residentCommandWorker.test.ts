@@ -3896,6 +3896,35 @@ test('typing a character used elsewhere still hints when its run chain lacks cov
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+for (const coverage of [false, true]) test(`typing a character late in a paragraph that starts with an uncovered emoji hints when its run chain lacks it${coverage ? ' (coverage-only chain)' : ''}`, async () => {
+  const text = `\u{1F600}${'\u05d0'.repeat(300)}`;
+  const { worker, client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>A</w:t></w:r></w:p>' +
+    `<w:p w14:paraId="00000002"><w:r><w:rPr><w:rFonts w:ascii="Subset" w:hAnsi="Subset"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`,
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = event => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  try {
+    const data = (path: string) => new Uint8Array(readFileSync(resolve(process.cwd(), path)));
+    await client.edit(intent(1, 0, 'setFontEnvironment', {
+      faces: [
+        { family: 'Liberation Sans', data: data('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf') },
+        { family: 'Subset', data: data('packages/fonts/assets/NotoSansHebrew-Regular.ttf') },
+      ], chains: { 'liberation sans|0|0': [0], 'subset|0|0': [1], ...(coverage ? { '@betteroffice/fonts/coverage': [1] } : {}) }, families: ['Liberation Sans', 'Subset'],
+    }));
+    await client.fontRequirements(LAYOUT);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: [...text].reduce((n, c) => n + c.length, 0) };
+    await client.edit(intent(2, 0, 'select', { selection: { anchor: at, focus: at } }));
+    expect(hints).toEqual([]);
+    await client.edit(intent(3, 0, 'insertText', { text: '\u03a9' }));
+    expect(hints).toEqual([{ session: 'd1-command-worker', incarnation: 1, epoch: 1 }]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('an edit in a script without a fallback face in the requirements hints the host once until it asks again', async () => {
   const { worker, client } = await openWorker();
   const hints: unknown[] = [];

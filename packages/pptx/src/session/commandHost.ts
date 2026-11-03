@@ -10,6 +10,7 @@ import { isCommandEnvelope } from '../../../../shared/office-session/commands/ty
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
+import type { ProposalDiffSlide } from '../proposals';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
@@ -18,7 +19,7 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame, commandFrameMediaBytes } from './commandFrame';
+import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes } from './commandFrame';
 import type { WorkerSlideFrame } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
@@ -706,6 +707,17 @@ export function registerPresentationCommandHandlers(
     return result;
   }
 
+  async function proposalFrame(diff: ProposalDiffSlide): Promise<TransferResult<ProposalDiffSlide>> {
+    const pending = new Set<string>();
+    const sent = new Set<string>();
+    let media = commandFrameMedia(presentation(), diff.frame, sent, metafiles, pending);
+    if (pending.size) {
+      await loadMetafiles().catch(() => {});
+      media = commandFrameMedia(presentation(), diff.frame, sent, metafiles);
+    }
+    return transferable({ ...diff, media }, media.map(({ bytes }) => bytes));
+  }
+
   function authoritativeGeometry(slideId: string): CommandHitGeometryIndex | undefined {
     let geometry = [...frames.values()].find((entry) => entry.tag.slideId === slideId &&
       entry.tag.coversThroughSeq === throughSeq && entry.tag.slideRevision === revisions.get(slideId))?.geometry;
@@ -1317,7 +1329,7 @@ export function registerPresentationCommandHandlers(
       opened.addUndoBoundary();
       if (before === opened.version()) return false;
       admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: false,
-        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide'].includes(admitted.method) };
+        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide', 'acceptProposal'].includes(admitted.method) };
       refreshHistory(command.seq, admitted.receipt);
       if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
@@ -1757,7 +1769,14 @@ export function registerPresentationCommandHandlers(
         case 'previewProposal': return opened.previewProposal(args[0] as string);
         case 'layoutSlide': return opened.layoutSlide(args[0] as number);
         case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
-        case 'layoutProposalDiffSlide': return opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+        case 'proposalSlideStrip': return opened.proposalSlideStrip(args[0] as string);
+        case 'layoutProposalDiffSlideById':
+        case 'layoutProposalDiffSlide': {
+          const diff = method === 'layoutProposalDiffSlideById'
+            ? opened.layoutProposalDiffSlideById(args[0] as string, args[1] as string)
+            : opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+          return proposalFrame(diff);
+        }
         default: throw new TypeError('Unsupported access method');
       }
     },

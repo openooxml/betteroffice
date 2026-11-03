@@ -1,3 +1,4 @@
+import { presentationContexts } from '../wasm/presentationContext';
 import type { PptxEditStep } from '../edits';
 import type { ProposalEdit } from '../proposals';
 import type { PresentationHandle } from '../wasm/loader';
@@ -58,6 +59,10 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     catch { return null; }
     if (handle.listProposals().length >= 64) return null;
     const fields = new Map<ProposalEdit['type'], readonly string[]>([
+      ['insertSlide', ['ref', 'afterSlideId', 'layoutPartPath']],
+      ['duplicateSlide', ['ref', 'slideId', 'afterSlideId']],
+      ['deleteSlide', ['slideId']],
+      ['moveSlide', ['slideId', 'afterSlideId']],
       ['replaceText', ['storyId', 'start', 'end', 'text', 'style']],
       ['formatText', ['storyId', 'start', 'end', 'patch']],
       ['setParagraphAlignment', ['storyId', 'start', 'end', 'alignment']],
@@ -103,6 +108,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!content.ok) return null;
     const steps: PptxEditStep[] = [];
     const canonicalEdits: ProposalEdit[] = [];
+    const structural = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide'].includes(edit?.type));
     for (const candidate of edits) {
       if (!candidate || typeof candidate !== 'object') return null;
       const keys = fields.get(candidate.type);
@@ -114,6 +120,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         edit.type === 'setShapeRect' && !onlyKeys(edit.rect, ['x', 'y', 'width', 'height']) ||
         edit.type === 'setShapeStroke' && !onlyKeys(edit.stroke, ['color', 'widthPt'])) return null;
       canonicalEdits.push(edit);
+      if (structural) continue;
       if ('storyId' in edit) {
         const story = content.stories.find((story) => story.storyId === edit.storyId);
         if (!story) return null;
@@ -127,12 +134,20 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         else return null;
       } else {
         if (!['setShapeRect', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'setSlideNotes'].includes(edit.type)) return null;
+        if (edit.type === 'insertSlide' || edit.type === 'duplicateSlide' || edit.type === 'deleteSlide' || edit.type === 'moveSlide') return null;
         const { type, ...fields } = edit;
         const { slideId, ...rest } = fields;
         const shapeId = 'shapeId' in rest ? rest.shapeId : undefined;
         if ('shapeId' in rest) delete (rest as { shapeId?: string }).shapeId;
         steps.push({ op: type, target: shapeId === undefined ? { slideId } : { slideId, shapeId }, ...rest } as PptxEditStep);
       }
+    }
+    if (structural) {
+      const context = presentationContexts.get(handle);
+      if (!context || typeof context.doc.validateProposalJson !== 'function') return null;
+      try { context.jsonWasmCall(() => context.doc.validateProposalJson(JSON.stringify({ agentId: agent, note, edits: canonicalEdits }))); }
+      catch { return null; }
+      return () => handle.propose(agent, note, canonicalEdits);
     }
     const expectVersion = handle.version();
     try { if (!handle.validateEdits({ expectVersion, steps }).ok) return null; }
@@ -147,6 +162,8 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!proposal) return null;
     if (method === 'rejectProposal') return () => handle.rejectProposal(proposal.id);
     if (args[1]?.force !== undefined && typeof args[1].force !== 'boolean' || proposal.staleTargets.length && !args[1]?.force) return null;
+    try { handle.previewProposal(proposal.id); }
+    catch { return null; }
     return () => handle.acceptProposal(proposal.id, args[1]);
   }
   if (method === 'insertSlide') {

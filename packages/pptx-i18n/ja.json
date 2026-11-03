@@ -168,7 +168,12 @@
     "canvasStale": "対象が変更されました。適用する前に［確認の詳細］を開いて更新されたプレビューを確認してください。",
     "previousPosition": "変更前",
     "proposedPosition": "変更後",
-    "loadingDiff": "変更を読み込んでいます…"
+    "loadingDiff": "変更を読み込んでいます…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "その他のコントロール",
