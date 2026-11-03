@@ -16,7 +16,7 @@ import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 import { PresentationFailure } from './components/PresentationFailure';
 import type { PptxBundledFont, ResolvedFontProps } from './bundledFonts';
 
-const pptxBundledFontsLoader = { load: () => import('./bundledFonts') };
+export const pptxBundledFontsLoader = { load: () => import('./bundledFonts') };
 
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 export const pptxLegacyEditorLoader = { load: () => import('./PptxLegacyEditorSession') };
@@ -306,16 +306,18 @@ function PptxBundledFontsEditor({ legacy, ...props }: (PptxEditorProps | WorkerE
   const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
   const fallback = <PptxEditorFallback {...props} file={file} />;
   return (
-    <Suspense fallback={fallback}>
-      <Resolver file={file} fonts={props.fonts} fallback={fallback}
-        onReady={props.onReady as ((api: never) => unknown) | undefined} onError={props.onError}>
-        {(fonts, onReady, onError) => {
-          const resolved = { ...props, file, fonts, onReady, onError };
-          return legacy ? <PptxLegacySessionLoader editorProps={resolved as ResolvedFontProps<GeneralEditorSessionProps>} />
-            : <PptxAsyncEditorSession {...resolved as PptxAsyncEditorInternalProps} />;
-        }}
-      </Resolver>
-    </Suspense>
+    <PeerlessEditorBoundary onError={props.onError} className={props.className} style={props.style}>
+      <Suspense fallback={fallback}>
+        <Resolver file={file} fonts={props.fonts} fallback={fallback}
+          onReady={props.onReady as ((api: never) => unknown) | undefined} onError={props.onError}>
+          {(fonts, onReady, onError) => {
+            const resolved = { ...props, file, fonts, onReady, onError };
+            return legacy ? <PptxLegacySessionLoader editorProps={resolved as ResolvedFontProps<GeneralEditorSessionProps>} />
+              : <PptxAsyncEditorSession {...resolved as PptxAsyncEditorInternalProps} />;
+          }}
+        </Resolver>
+      </Suspense>
+    </PeerlessEditorBoundary>
   );
 }
 

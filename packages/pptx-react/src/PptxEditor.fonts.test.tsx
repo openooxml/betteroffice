@@ -5,7 +5,7 @@ import { act, render, waitFor } from '@testing-library/react';
 import * as bundledFonts from '@betteroffice/fonts';
 import * as pptxWorker from '@betteroffice/pptx/worker';
 import type { BundledFontFace, PptxBundledFont } from './index';
-import { PptxEditor, pptxPeerlessEditorLoader, type PptxAsyncEditorProps } from './PptxEditor';
+import { PptxEditor, pptxBundledFontsLoader, pptxPeerlessEditorLoader, PptxWorkerEditorChunkLoadError, type PptxAsyncEditorProps } from './PptxEditor';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import { peerlessSessionOpener } from './worker/usePeerlessPresentation';
 import { FONT_FALLBACK_MESSAGE } from './fontFaces';
@@ -237,4 +237,16 @@ test('decoder preparation failures warn and preserve host byte faces', async () 
   expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
   expect(load).not.toHaveBeenCalled();
   expect(opener.mock.calls[0]![1]!.fonts).toEqual([byteFace]);
+});
+
+test('a failed descriptor chunk load reports through onError without crashing the host', async () => {
+  const failed = spyOn(pptxBundledFontsLoader, 'load').mockRejectedValue(new Error('chunk unavailable'));
+  restorers.push(() => failed.mockRestore());
+  const onError = mock((_error: Error) => {});
+  const view = render(<div data-testid="host"><PptxEditor file={await deck()} fonts={[{ face, baseUrl }]} onError={onError} /></div>);
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toBeInstanceOf(PptxWorkerEditorChunkLoadError);
+  expect(view.getByTestId('host')).toBeDefined();
+  expect(prepare).not.toHaveBeenCalled();
+  view.unmount();
 });
