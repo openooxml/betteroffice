@@ -19,7 +19,8 @@ function sameFont(left: Font, right: Font): boolean {
   if ('face' in left || 'face' in right) {
     return 'face' in left && 'face' in right && left.face.file === right.face.file &&
       left.face.family === right.face.family && left.face.weight === right.face.weight &&
-      left.face.style === right.face.style && left.baseUrl?.toString() === right.baseUrl?.toString();
+      left.face.style === right.face.style && left.face.metricCompatWith === right.face.metricCompatWith &&
+      left.baseUrl?.toString() === right.baseUrl?.toString();
   }
   return left.family === right.family && (left.bold ?? false) === (right.bold ?? false) &&
     (left.italic ?? false) === (right.italic ?? false) &&

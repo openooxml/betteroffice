@@ -179,6 +179,29 @@ test('changing the file releases the old worker and ignores its pending fonts', 
   expect(secondRelease).toHaveBeenCalledTimes(1);
 });
 
+test('two editors on one file each release their own handle, so unmounting one keeps the other loading', async () => {
+  const pending = deferred<ArrayBuffer>();
+  load.mockReturnValue(pending.promise);
+  const firstRelease = mock(() => {});
+  const secondRelease = mock(() => {});
+  prepare.mockReturnValueOnce({ decoder, release: firstRelease, take })
+    .mockReturnValueOnce({ decoder, release: secondRelease, take });
+  const file = await deck();
+  const firstReady = mock((_api: PptxAsyncEditorApi) => {});
+  const secondReady = mock((_api: PptxAsyncEditorApi) => {});
+  const first = render(<PptxEditor file={file} fonts={[{ face, baseUrl }]} defaultFonts={false} onReady={firstReady} />);
+  const second = render(<PptxEditor file={file} fonts={[{ face, baseUrl }]} defaultFonts={false} onReady={secondReady} />);
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  first.unmount();
+  expect(firstRelease).toHaveBeenCalledTimes(1);
+  expect(secondRelease).not.toHaveBeenCalled();
+  await act(async () => { pending.resolve(fontBytes.slice().buffer as ArrayBuffer); });
+  await waitFor(() => expect(secondReady).toHaveBeenCalledTimes(1));
+  expect(opener.mock.calls.at(-1)![1]!.fonts).toEqual([{ family: face.family, bold: false, italic: false, bytes: fontBytes }]);
+  expect(firstReady).not.toHaveBeenCalled();
+  second.unmount();
+});
+
 test('an in-thread editor releases the prepared worker after decoding', async () => {
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   restorers.push(() => warn.mockRestore());
@@ -225,6 +248,7 @@ const changedDescriptors: { name: string; font: PptxBundledFont }[] = [
   { name: 'weight', font: { face: { ...face, weight: 700 }, baseUrl } },
   { name: 'style', font: { face: { ...face, style: 'italic' }, baseUrl } },
   { name: 'base URL', font: { face, baseUrl: 'https://example.test/other-fonts/' } },
+  { name: 'substituted font', font: { face: { ...face, metricCompatWith: 'Arial' }, baseUrl } },
 ];
 for (const { name, font } of changedDescriptors) {
   test(`changing a descriptor's ${name} resolves new faces and releases the old worker`, async () => {

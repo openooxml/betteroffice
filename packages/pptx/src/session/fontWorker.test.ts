@@ -15,7 +15,9 @@ test('preparation decodes before open and hands the same worker to its editor', 
   const h = factory();
   const source = new Uint8Array([1, 2, 3]);
   const prepared = h.client.preparePresentationFontDecoder(source);
-  expect(h.client.preparePresentationFontDecoder(source)).toBe(prepared);
+  const again = h.client.preparePresentationFontDecoder(source);
+  expect(again).not.toBe(prepared);
+  again.release();
   try {
     const backing = new Uint8Array([99, 0, 1, 0, 0, 99]);
     const result = await prepared.decoder(backing.subarray(1, 5), { codec: 'zstd' });
@@ -157,4 +159,36 @@ test('a coverage prefetch in flight cannot answer the adopting client', async ()
     expect(decode.id).toBe(1);
     expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[0]);
   } finally { prepared.release(); h.workers[0]?.terminate(); }
+});
+
+test('two editors preparing one file share a worker until both release it', async () => {
+  const h = factory();
+  const source = new Uint8Array([4, 5, 6]);
+  const first = h.client.preparePresentationFontDecoder(source);
+  const second = h.client.preparePresentationFontDecoder(source);
+  try {
+    expect(h.workers).toHaveLength(1);
+    const pending = second.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
+    first.release();
+    expect(h.workers[0]!.terminated).toBe(false);
+    expect(new Uint8Array((await pending).font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+    await expect(first.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).rejects.toThrow('released');
+    second.release();
+    expect(h.workers[0]!.terminated).toBe(true);
+  } finally { first.release(); second.release(); h.workers[0]?.terminate(); }
+});
+
+test('a session adopts a shared worker only once the other editor has released it', async () => {
+  const h = factory();
+  const source = new Uint8Array([7, 8, 9]);
+  const first = h.client.preparePresentationFontDecoder(source);
+  const second = h.client.preparePresentationFontDecoder(source);
+  try {
+    expect(h.client.takePresentationFontWorker(source)).toBeUndefined();
+    expect(new Uint8Array((await second.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array([0, 1, 0, 0]));
+    first.release();
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[0]);
+    expect(h.workers[0]!.terminated).toBe(false);
+  } finally { first.release(); second.release(); h.workers[0]?.terminate(); }
 });
