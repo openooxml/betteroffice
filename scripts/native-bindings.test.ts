@@ -721,6 +721,15 @@ describe('native package public names', () => {
     );
   });
 
+  test('every native function catches panics, so a panic fails its call instead of aborting the process', () => {
+    for (const path of NATIVE_PACKAGES) {
+      const source = read(`${path}/src/engine.rs`);
+      const functions = [...source.matchAll(/#\[napi(\((?:[^\]]|\n)*?\))?\]\s*(?:(?:\/\/\/[^\n]*\n\s*|#\[[^\n]*\]\s*)*)pub\s+fn\s+(\w+)/g)];
+      expect(functions.length).toBeGreaterThan(0);
+      expect(functions.filter((match) => !match[1]?.includes('catch_unwind')).map((match) => match[2])).toEqual([]);
+    }
+  });
+
   test('the dist workflow collects the renamed binaries', () => {
     expect(distWorkflowText).toContain('betteroffice-${{ inputs.binding }}-native.*.node');
   });

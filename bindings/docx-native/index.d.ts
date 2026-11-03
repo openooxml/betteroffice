@@ -11,6 +11,8 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 
 export declare class EditSession {
   free(): void
+  /** @internal Test hook: panics inside a call on this object. */
+  panicForTest(): void
   register_measure_font(bytes: Uint8Array): number
   decode_font(bytes: Uint8Array): Uint8Array
   take_base_latin_miss(): boolean

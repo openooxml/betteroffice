@@ -11,6 +11,8 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 
 export declare class XlsxDocument {
   free(): void
+  /** @internal Test hook: panics inside a call on this object. */
+  panicForTest(): void
   get clientId(): number
   /** Checkpoints are only restorable by the same engine version and codec. */
   recoveryCheckpoint(throughSeq: number, preserveHistory?: boolean | undefined | null): Uint8Array

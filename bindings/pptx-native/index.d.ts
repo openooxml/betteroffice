@@ -11,6 +11,8 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 
 export declare class PptxDocument {
   free(): void
+  /** @internal Test hook: panics inside a call on this object. */
+  panicForTest(): void
   static openReplayBaseline(source: Uint8Array, clientId?: number | undefined | null, initialUpdate?: Uint8Array | undefined | null): PptxDocument
   static openPeerDeckJson(source: Uint8Array, identityJson: string, initialUpdate?: Uint8Array | undefined | null): PptxDocument
   static openCollaborative(bytes: Uint8Array, clientId: number): PptxDocument
