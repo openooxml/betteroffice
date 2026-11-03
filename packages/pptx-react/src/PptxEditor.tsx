@@ -3,7 +3,7 @@ import type {
   PptxFontFace, PptxPresence, PptxReadRequest, PptxReadResult, PptxValidationResult, PresentationHandle,
 } from '@betteroffice/pptx';
 import type { Translations } from '@betteroffice/pptx-i18n';
-import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties, type JSX, type ReactNode } from 'react';
+import { Component, lazy, Suspense, useEffect, useMemo, useState, type CSSProperties, type JSX, type ReactNode } from 'react';
 import { LocaleProvider, useTranslation } from './i18n';
 import type { PptxCommandStore } from './commands/types';
 import type { PptxEditorPluginProps, PptxPlugin } from './plugins/types';
@@ -14,7 +14,9 @@ import { LEGACY_SYNC_API } from './runtimeOptions';
 import { warnPptxEngine } from './engineWarnings';
 import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 import { PresentationFailure } from './components/PresentationFailure';
-import { useResolvedFonts, type PptxBundledFont, type ResolvedFontProps } from './bundledFonts';
+import type { PptxBundledFont, ResolvedFontProps } from './bundledFonts';
+
+const pptxBundledFontsLoader = { load: () => import('./bundledFonts') };
 
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 export const pptxLegacyEditorLoader = { load: () => import('./PptxLegacyEditorSession') };
@@ -278,28 +280,42 @@ export function PptxEditor(props: PptxEditorProps): JSX.Element;
 export function PptxEditor(props:
   PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
   CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
-  return <LocaleProvider i18n={props.i18n}><PptxResolvedEditor {...props} /></LocaleProvider>;
+  const legacy = props[LEGACY_SYNC_API] === true;
+  const descriptors = props.fonts.some((font) => 'face' in font);
+  return (
+    <LocaleProvider i18n={props.i18n}>
+      {descriptors ? <PptxBundledFontsEditor {...props} legacy={legacy} /> : legacy ? (
+        <PptxLegacySessionLoader editorProps={props as ResolvedFontProps<GeneralEditorSessionProps>} />
+      ) : (
+        <PptxAsyncEditorRoot {...props as ResolvedFontProps<PptxAsyncEditorProps>} />
+      )}
+    </LocaleProvider>
+  );
 }
 
-function PptxResolvedEditor(props: PptxEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
-  CollaborationSessionProps | PptxLegacyEditorProps) {
-  const legacy = props[LEGACY_SYNC_API] === true;
+function PptxAsyncEditorRoot(props: ResolvedFontProps<PptxAsyncEditorProps>) {
   const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
-  const { fonts, release } = useResolvedFonts(file, props.fonts);
-  type ReadyApi = PptxEditorApi | PptxAsyncEditorApi | PptxWorkerEditorApi | PptxWorkerViewerApi;
-  const onReady = useCallback((api: ReadyApi) => {
-    release();
-    return (props.onReady as ((api: ReadyApi) => void | (() => void)) | undefined)?.(api);
-  }, [props.onReady, release]);
-  const onError = useCallback((error: Error) => {
-    release();
-    props.onError?.(error);
-  }, [props.onError, release]);
-  const resolved = { ...props, file, fonts, onReady, onError };
-  return fonts === undefined ? <PptxEditorFallback {...props} file={file} /> : legacy ? (
-    <PptxLegacySessionLoader editorProps={resolved as ResolvedFontProps<GeneralEditorSessionProps>} />
-  ) : (
-    <PptxAsyncEditorSession {...resolved as PptxAsyncEditorInternalProps} />
+  return <PptxAsyncEditorSession {...props} file={file} />;
+}
+
+function PptxBundledFontsEditor({ legacy, ...props }: (PptxEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps |
+  WorkerSessionProps | CollaborationSessionProps | PptxLegacyEditorProps) & { legacy: boolean }) {
+  const [Resolver] = useState(() => lazy(() => pptxBundledFontsLoader.load().then(
+    (module) => ({ default: module.BundledFontsResolver }),
+    (cause: unknown) => { throw new PptxWorkerEditorChunkLoadError(cause); })));
+  const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
+  const fallback = <PptxEditorFallback {...props} file={file} />;
+  return (
+    <Suspense fallback={fallback}>
+      <Resolver file={file} fonts={props.fonts} fallback={fallback}
+        onReady={props.onReady as ((api: never) => unknown) | undefined} onError={props.onError}>
+        {(fonts, onReady, onError) => {
+          const resolved = { ...props, file, fonts, onReady, onError };
+          return legacy ? <PptxLegacySessionLoader editorProps={resolved as ResolvedFontProps<GeneralEditorSessionProps>} />
+            : <PptxAsyncEditorSession {...resolved as PptxAsyncEditorInternalProps} />;
+        }}
+      </Resolver>
+    </Suspense>
   );
 }
 

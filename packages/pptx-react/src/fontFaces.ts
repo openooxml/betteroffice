@@ -1,4 +1,3 @@
-import type { PptxBundledFont } from './bundledFonts';
 import type { PptxFontFace } from '@betteroffice/pptx';
 import type { PptxPaintFont } from '../../../shared/office-session/render/pptxWorkerRender';
 import { useMemo, useRef } from 'react';
@@ -67,16 +66,11 @@ export async function installBrowserFonts(fonts: readonly PptxFontFace[], curren
   return installed;
 }
 
-export function useStableFonts<T extends PptxFontFace | PptxBundledFont>(fonts: readonly T[]): readonly T[] {
+export function useStableFonts(fonts: readonly PptxFontFace[]): readonly PptxFontFace[] {
   const stable = useRef(fonts);
   if (stable.current === fonts) return stable.current;
   if (stable.current.length !== fonts.length || !stable.current.every((left, index) => {
     const right = fonts[index];
-    if ('face' in left || 'face' in right) {
-      return 'face' in left && 'face' in right && left.face.file === right.face.file &&
-        left.face.family === right.face.family && left.face.weight === right.face.weight &&
-        left.face.style === right.face.style && left.baseUrl?.toString() === right.baseUrl?.toString();
-    }
     return left.family === right.family && (left.bold ?? false) === (right.bold ?? false) &&
       (left.italic ?? false) === (right.italic ?? false) &&
       (left.bytes === right.bytes || (left.bytes.length === right.bytes.length &&

@@ -1,7 +1,7 @@
 import type { BundledFontFace } from '@betteroffice/fonts';
 import type { PptxFontFace } from '@betteroffice/pptx';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useFontWarning, useStableFonts } from './fontFaces';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useFontWarning } from './fontFaces';
 
 /** A bundled face decoded before opening the presentation. */
 export interface PptxBundledFont {
@@ -12,13 +12,41 @@ export interface PptxBundledFont {
 type Font = PptxFontFace | PptxBundledFont;
 export type ResolvedFontProps<T> = Omit<T, 'fonts'> & { fonts: readonly PptxFontFace[] };
 
-export function useResolvedFonts(file: Uint8Array | undefined, fonts: readonly Font[]) {
-  const stable = useStableFonts(fonts);
+function sameFont(left: Font, right: Font): boolean {
+  if ('face' in left || 'face' in right) {
+    return 'face' in left && 'face' in right && left.face.file === right.face.file &&
+      left.face.family === right.face.family && left.face.weight === right.face.weight &&
+      left.face.style === right.face.style && left.baseUrl?.toString() === right.baseUrl?.toString();
+  }
+  return left.family === right.family && (left.bold ?? false) === (right.bold ?? false) &&
+    (left.italic ?? false) === (right.italic ?? false) &&
+    (left.bytes === right.bytes || (left.bytes.length === right.bytes.length &&
+      left.bytes.every((byte, offset) => byte === right.bytes[offset])));
+}
+
+function useStableDescriptors(fonts: readonly Font[]): readonly Font[] {
+  const stable = useRef(fonts);
+  if (stable.current === fonts) return stable.current;
+  if (stable.current.length !== fonts.length || !stable.current.every((left, index) => sameFont(left, fonts[index]!))) {
+    stable.current = fonts;
+  }
+  return stable.current;
+}
+
+export interface BundledFontsResolverProps {
+  file: Uint8Array | undefined;
+  fonts: readonly Font[];
+  fallback: ReactNode;
+  onReady?: (api: never) => unknown;
+  onError?: (error: Error) => void;
+  children: (fonts: readonly PptxFontFace[], onReady: (api: never) => unknown, onError: (error: Error) => void) => ReactNode;
+}
+
+/** Loads bundled face descriptors with the prepared session worker's decoder, then renders the editor with byte faces. */
+export function BundledFontsResolver({ file, fonts, fallback, onReady, onError, children }: BundledFontsResolverProps) {
+  const stable = useStableDescriptors(fonts);
   const identity = useMemo(() => ({}), [file, stable]);
-  const bytes = useMemo(() => {
-    const faces = stable.filter((font): font is PptxFontFace => !('face' in font));
-    return faces.length === stable.length ? stable as readonly PptxFontFace[] : faces;
-  }, [stable]);
+  const bytes = useMemo(() => stable.filter((font): font is PptxFontFace => !('face' in font)), [stable]);
   const pending = !!file && bytes.length !== stable.length;
   const warnFonts = useFontWarning(identity);
   const owner = useRef<{ identity: object; release(): void } | null>(null);
@@ -32,8 +60,8 @@ export function useResolvedFonts(file: Uint8Array | undefined, fonts: readonly F
     let active = true;
     let prepared: { release(): void } | undefined;
     const current = () => active;
-    const release = () => { prepared?.release(); prepared = undefined; };
-    owner.current = { identity, release };
+    const releasePrepared = () => { prepared?.release(); prepared = undefined; };
+    owner.current = { identity, release: releasePrepared };
     void (async () => {
       try {
         const { loadBundledFonts } = await import('./bundledFontsLoad');
@@ -43,12 +71,15 @@ export function useResolvedFonts(file: Uint8Array | undefined, fonts: readonly F
         const loaded = await loading.fonts;
         if (current()) setResolved({ identity, fonts: loaded });
       } catch {
-        release();
+        releasePrepared();
         if (current()) { warnFonts(); setResolved({ identity, fonts: bytes }); }
       }
     })();
-    return () => { active = false; release(); };
+    return () => { active = false; releasePrepared(); };
   }, [file, pending, stable, identity, bytes, warnFonts]);
 
-  return { fonts: pending ? resolved?.identity === identity ? resolved.fonts : undefined : bytes, release };
+  const ready = useCallback((api: never) => { release(); return onReady?.(api); }, [onReady, release]);
+  const failed = useCallback((error: Error) => { release(); onError?.(error); }, [onError, release]);
+  const loaded = pending ? resolved?.identity === identity ? resolved.fonts : undefined : bytes;
+  return loaded === undefined ? fallback : children(loaded, ready, failed);
 }
