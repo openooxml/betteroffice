@@ -1,3 +1,6 @@
+import { privateCorpus } from './private-corpus.mjs';
+import { privateMode } from './private-step.mjs';
+
 export const CORPUS_ORIGIN = 'https://corpus.betteroffice.dev';
 export const DEFAULT_COLLECTION = 'office-quality';
 export const MAX_SAMPLES = 8000;
@@ -10,6 +13,10 @@ function isFolderName(value) {
 
 export function corpusOrigin(environment = process.env) {
   const value = environment.QUALITY_CORPUS_ORIGIN?.trim();
+  if (privateMode(environment)) {
+    if (value) throw new Error('Private corpus runs read the private bucket, not QUALITY_CORPUS_ORIGIN');
+    return privateCorpus(environment, 'read').base;
+  }
   if (!value) return CORPUS_ORIGIN;
   let url;
   try {
