@@ -528,7 +528,7 @@
     "paragraphMarkInserted": "Wstawiono podział akapitu",
     "paragraphMarkDeleted": "Usunięto podział akapitu",
     "paragraphPropertiesChanged": "Zmieniono właściwości akapitu",
-    "runPropertiesChanged": null,
+    "runPropertiesChanged": "Zmieniono formatowanie tekstu",
     "rowInserted": "Wstawiono wiersz",
     "rowDeleted": "Usunięto wiersz",
     "rowPropertiesChanged": "Zmieniono właściwości wiersza",

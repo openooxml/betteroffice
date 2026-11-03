@@ -528,7 +528,7 @@
     "paragraphMarkInserted": "段落記号が挿入されました",
     "paragraphMarkDeleted": "段落記号が削除されました",
     "paragraphPropertiesChanged": "段落のプロパティが変更されました",
-    "runPropertiesChanged": null,
+    "runPropertiesChanged": "テキストの書式が変更されました",
     "rowInserted": "行が挿入されました",
     "rowDeleted": "行が削除されました",
     "rowPropertiesChanged": "行のプロパティが変更されました",

@@ -199,14 +199,16 @@ fn suggested_hyperlink_refuses_existing_run_property_changes_without_mutation() 
             SimpleFormat::Bold,
         )
         .unwrap();
-    for hyperlink in [None, Some(Any::from_json(r##"{"href":"#target"}"##).unwrap())] {
+    for hyperlink in [
+        None,
+        Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+    ] {
         let before = engine.doc().encode_state_as_update_v1();
         let runs = attrs(&engine);
-        let result = engine.doc().set_hyperlink(
-            &suggesting(),
-            StoryRange::new("body", 1, 5),
-            hyperlink,
-        );
+        let result =
+            engine
+                .doc()
+                .set_hyperlink(&suggesting(), StoryRange::new("body", 1, 5), hyperlink);
         assert_eq!(result, Err(OpError::OverlapsTrackedChange));
         assert_eq!(engine.doc().encode_state_as_update_v1(), before);
         assert_eq!(attrs(&engine), runs);
@@ -279,7 +281,7 @@ fn generated_run_change_serializes_and_reopens() {
     let mut context = docx_parse::serializer::SerializerContext::new(
         &docx_parse::serializer::SerializerDeterminism {
             seed: "0".repeat(64),
-            now: "2026-10-01T12:00:00Z".to_owned(),
+            now: "2000-01-01T00:00:00.000Z".to_owned(),
         },
     )
     .unwrap();

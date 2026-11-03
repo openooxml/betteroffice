@@ -137,11 +137,17 @@ test('insert_table_row copies formatting without inheriting run property revisio
     tableCell('Header') + tableCell('Value'),
     cell + tableCell('Amount'),
   ]));
+  const template = hit(doc, 'Template');
+  const changes = [{ info: { id: 8, author: 'Prior' }, previousFormatting: { bold: true }, formatting: { italic: true } }];
+  doc.session.applyRawOps(template.story, [{ op: 'format', index: 0, len: 8, attrs: { rPrChange: changes } }]);
+  expect(doc.session.storySegments(template.story).find(segment => segment.kind === 'text')?.attributes.rPrChange).toEqual(changes);
   const { receipt, xml } = await edited(doc, [
     { op: 'insert_table_row', row: hit(doc, 'Template').ref, position: 'after', cells: ['Copied', 'Cell'] },
   ]);
   const [ref] = receipt.results[0].refs as string[];
   expect(doc.read(ref).runs[0].formatting.italic).toBe(true);
+  expect(doc.session.storySegments(doc.read(ref).story).every(segment => segment.attributes.rPrChange == null)).toBe(true);
+  expect(doc.session.storySegments(template.story).find(segment => segment.kind === 'text')?.attributes.rPrChange).toEqual(changes);
   const tableRows = rows(xml);
   expect(tableRows[1]).toContain('<w:rPrChange ');
   expect(tableRows[2]).not.toContain('<w:rPrChange ');

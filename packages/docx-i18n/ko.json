@@ -528,7 +528,7 @@
     "paragraphMarkInserted": "단락 나누기 삽입됨",
     "paragraphMarkDeleted": "단락 나누기 삭제됨",
     "paragraphPropertiesChanged": "단락 속성 변경됨",
-    "runPropertiesChanged": null,
+    "runPropertiesChanged": "텍스트 서식 변경됨",
     "rowInserted": "행 삽입됨",
     "rowDeleted": "행 삭제됨",
     "rowPropertiesChanged": "행 속성 변경됨",

@@ -528,7 +528,7 @@
     "paragraphMarkInserted": "Quebra de parágrafo inserida",
     "paragraphMarkDeleted": "Quebra de parágrafo excluída",
     "paragraphPropertiesChanged": "Propriedades do parágrafo alteradas",
-    "runPropertiesChanged": null,
+    "runPropertiesChanged": "Formatação do texto alterada",
     "rowInserted": "Linha inserida",
     "rowDeleted": "Linha excluída",
     "rowPropertiesChanged": "Propriedades da linha alteradas",

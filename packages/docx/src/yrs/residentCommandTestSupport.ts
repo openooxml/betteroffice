@@ -57,7 +57,7 @@ export interface OpenedCommandArm extends CommandArm {
 
 export async function openCommandEngine(
   texts = ['Alpha beta', 'Second'],
-  options: { editState?: boolean; bodyXml?: string; stylesXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
+  options: { editState?: boolean; bodyXml?: string; stylesXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number; bytes?: Uint8Array } = {}
 ): Promise<OpenedCommandArm> {
   const initial = stateAt(null);
   const unloaded = {} as DocxWorkerCommandEngine;
@@ -146,7 +146,7 @@ export async function openCommandEngine(
   };
   const engine = Object.assign({}, methods, resident);
   owned.push(engine);
-  const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+  const bytes = options.bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts));
   if (options.checkpoint) {
     raw.open_docx(bytes, false, undefined, undefined);
     engine.loadState(options.checkpoint);

@@ -528,7 +528,7 @@
     "paragraphMarkInserted": "Вставлен разрыв абзаца",
     "paragraphMarkDeleted": "Удалён разрыв абзаца",
     "paragraphPropertiesChanged": "Изменены свойства абзаца",
-    "runPropertiesChanged": null,
+    "runPropertiesChanged": "Изменено форматирование текста",
     "rowInserted": "Вставлена строка",
     "rowDeleted": "Удалена строка",
     "rowPropertiesChanged": "Изменены свойства строки",

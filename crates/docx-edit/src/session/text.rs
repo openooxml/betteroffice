@@ -6,9 +6,7 @@ use super::args::{
     parse_para_attr_delta, text_receipt_json,
 };
 use super::{EditSessionCore, EngineError, EngineResult};
-use crate::{
-    EditCtx, FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange,
-};
+use crate::{FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange};
 
 impl EditSessionCore {
     pub fn insert_text(

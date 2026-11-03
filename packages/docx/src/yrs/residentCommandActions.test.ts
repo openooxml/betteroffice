@@ -14,6 +14,7 @@ import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand 
 import { createResidentCommandHost } from './residentCommandHost';
 import { resolveCommandSelection } from './residentCommandAnchors';
 import { readResidentProperties } from './residentProperties';
+import { propertyCommandTarget } from './residentPropertyCommands';
 import { wrapSession } from './yrsSessionFacade';
 import { yrsToDocument } from './yrsToDocument';
 import type {
@@ -1062,8 +1063,7 @@ test('suggested formatting survives save and reopen and rejection restores the o
   expect(xml.match(/<w:rPrChange\s/g)).toHaveLength(3);
   expect(xml).toContain('w:author="Writer"');
   expect(xml).toMatch(/<w:rPrChange[^>]*><w:rPr><w:i\s*\/><\/w:rPr><\/w:rPrChange>/);
-  const reopened = await openCommandEngine();
-  reopened.engine.openDocx(new Uint8Array(saved), undefined, 'format-reopened');
+  const reopened = await openCommandEngine([], { bytes: new Uint8Array(saved), clientId: 8102 });
   const revisions = reopened.engine.geometryReader.listRevisions();
   expect(revisions.length).toBeGreaterThan(0);
   expect(revisions.every(revision => revision.kind === 'rPrChange')).toBe(true);
@@ -1128,6 +1128,7 @@ test('suggested hyperlinks refuse existing revisions before changing links or di
       });
       const before = snapshot(arm);
       const segments = arm.engine.storySegments('body');
+      expect(propertyCommandTarget(arm.engine, intent as DocxCommandIntent)).toBe('unsupported-suggesting');
       expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
       expect(snapshot(arm)).toEqual(before);
       expect(arm.engine.storySegments('body')).toEqual(segments);
@@ -1195,8 +1196,7 @@ test('suggested hyperlink replacement saves both targets and rejection restores 
   expect(xml).toContain('w:anchor="new"');
   expect(xml).toContain('<w:ins ');
   expect(xml).toContain('<w:del ');
-  const reopened = await openCommandEngine();
-  reopened.engine.openDocx(new Uint8Array(saved), undefined, 'hyperlink-reopened');
+  const reopened = await openCommandEngine([], { bytes: new Uint8Array(saved), clientId: 8102 });
   for (const revisionId of new Set(reopened.engine.geometryReader.listRevisions().map(revision => revision.revisionId))) {
     reopened.engine.rejectChange({ revisionId });
   }
