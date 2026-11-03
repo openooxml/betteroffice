@@ -87,9 +87,7 @@ fn suggested_format_refuses_containers_without_mutation() {
             let before = engine.doc().encode_state_as_update_v1();
             let range = StoryRange::new("body", 0, end);
             let result = match operation {
-                "toggle" => engine
-                    .doc()
-                    .toggle_format(&ctx, range, SimpleFormat::Bold),
+                "toggle" => engine.doc().toggle_format(&ctx, range, SimpleFormat::Bold),
                 "clear" => engine.doc().clear_formatting(&ctx, range),
                 _ => engine.doc().format_range(
                     &ctx,
@@ -135,8 +133,10 @@ fn suggested_bold_across_comment_reference_tracks_only_text() {
     assert_eq!(receipt.revision_ids.len(), 1);
     let after = engine.doc().story_segments("body").unwrap();
     assert_eq!(after[1], before[1]);
-    assert!(matches!(&after[1].content, crate::SegmentContent::OtherEmbed { kind, payload }
-        if kind == "field" && payload.get("modelKind") == Some(&Any::from("commentReference"))));
+    assert!(
+        matches!(&after[1].content, crate::SegmentContent::OtherEmbed { kind, payload }
+        if kind == "field" && payload.get("modelKind") == Some(&Any::from("commentReference")))
+    );
     let runs = attrs(&engine);
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].0, "hello");
@@ -170,7 +170,7 @@ fn suggested_bold_refuses_projected_field_code_and_result_without_mutation() {
         &document(concat!(
             "<w:p><w:r><w:t>text</w:t></w:r>",
             r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-            r#"<w:hyperlink w:anchor="top"><w:r><w:instrText>HYPERLINK</w:instrText></w:r></w:hyperlink>"#,
+            r#"<w:hyperlink w:anchor="top"><w:r><w:t>HYPERLINK</w:t></w:r></w:hyperlink>"#,
             r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
             r#"<w:hyperlink w:anchor="top"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#,
             r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
@@ -267,16 +267,7 @@ fn suggested_container_formatting_keeps_its_typed_session_error() {
         let author = Some("Ada".to_owned());
         let date = Some("2026-10-01T12:00:00Z".to_owned());
         let result = match operation {
-            "format" => core.format_range(
-                "body",
-                id,
-                0,
-                id,
-                5,
-                r#"{"bold":true}"#,
-                author,
-                date,
-            ),
+            "format" => core.format_range("body", id, 0, id, 5, r#"{"bold":true}"#, author, date),
             "clear" => core.clear_formatting("body", id, 0, id, 5, author, date),
             _ => core.toggle_mark(
                 "body",

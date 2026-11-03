@@ -1044,7 +1044,7 @@ test('suggested formatting over containers refuses before calling the engine', a
       ['clearFormatting', {}, 'clearFormatting'],
     ] as const;
     for (const [kind, payload, method] of cases) {
-      const intent = command(arm, kind, { ...payload, selection: selection(paragraph.paraId, 0, span.end - span.start), suggesting } as DocxCommandPayloads[typeof kind]);
+      const intent = command(arm, kind, { ...payload, selection: selection(paragraph.paraId, 0, span.length), suggesting } as DocxCommandPayloads[typeof kind]);
       const before = snapshot(arm);
       const segments = arm.engine.storySegments('body');
       const call = spyOn(arm.engine, method);
@@ -1112,7 +1112,7 @@ test('suggested formatting refuses projected complex field hyperlinks in code an
   const arm = await openCommandEngine([], { bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' +
     '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
-    '<w:hyperlink r:id="rIdLink"><w:r><w:instrText>HYPERLINK</w:instrText></w:r></w:hyperlink>' +
+    '<w:hyperlink r:id="rIdLink"><w:r><w:t>HYPERLINK</w:t></w:r></w:hyperlink>' +
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
     '<w:hyperlink r:id="rIdLink"><w:r><w:t>link</w:t></w:r></w:hyperlink>' +
     '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
@@ -1183,7 +1183,7 @@ test('suggested formatting checks containers across paragraphs and preserves pla
   const secondSpan = arm.engine.geometryReader.paragraphSpans('body')[1]!;
   const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
   const before = snapshot(arm);
-  const mixed = { anchor: { story: 'body', paraId: second!.paraId, offset: secondSpan.end - secondSpan.start },
+  const mixed = { anchor: { story: 'body', paraId: second!.paraId, offset: secondSpan.length },
     focus: { story: 'body', paraId: first!.paraId, offset: 0 } };
   expect(execute(arm, command(arm, 'toggleMark', { selection: mixed, mark: { type: 'bold' }, suggesting })))
     .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
@@ -1209,7 +1209,7 @@ test('direct formatting callers receive a typed container refusal without mutati
   const session = wrapSession(arm.native, 8101);
   const paragraph = arm.engine.paragraphs('body')[0]!;
   const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
-  const range = storyRange(selection(paragraph.paraId, 0, span.end - span.start));
+  const range = storyRange(selection(paragraph.paraId, 0, span.length));
   const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
   const before = session.encodeState();
   for (const apply of [
@@ -1244,7 +1244,7 @@ test('refused formatting preserves imported container run property changes on sa
   const paragraph = arm.engine.paragraphs('body')[0]!;
   const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
   expect(execute(arm, command(arm, 'toggleMark', {
-    selection: selection(paragraph.paraId, 0, span.end - span.start), mark: { type: 'bold' },
+    selection: selection(paragraph.paraId, 0, span.length), mark: { type: 'bold' },
     suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
   }))).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
   expect(await saveXml()).toBe(before);
