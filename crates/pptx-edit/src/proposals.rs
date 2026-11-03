@@ -17,6 +17,33 @@ use crate::{
     deny_unknown_fields
 )]
 pub enum ProposalEdit {
+    InsertSlide {
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(deserialize_with = "required_anchor")]
+        after_slide_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout_part_path: Option<String>,
+    },
+    DuplicateSlide {
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        slide_id: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_anchor"
+        )]
+        after_slide_id: Option<Option<String>>,
+    },
+    DeleteSlide {
+        slide_id: String,
+    },
+    MoveSlide {
+        slide_id: String,
+        #[serde(deserialize_with = "required_anchor")]
+        after_slide_id: Option<String>,
+    },
     ReplaceText {
         story_id: String,
         start: u32,
@@ -63,6 +90,52 @@ pub enum ProposalEdit {
     },
 }
 
+fn required_anchor<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+fn present_anchor<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+fn present_index<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<usize>>, D::Error> {
+    Option::<usize>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProposalChangeKind {
+    Content,
+    Inserted,
+    Deleted,
+    Moved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProposalStripStatus {
+    Unchanged,
+    Changed,
+    Inserted,
+    Deleted,
+    Moved,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposalStripEntry {
+    pub slide_id: String,
+    pub status: ProposalStripStatus,
+    pub live_index: Option<usize>,
+    pub preview_index: Option<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProposalRequest {
@@ -74,6 +147,20 @@ pub struct ProposalRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposalChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ProposalChangeKind>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_index"
+    )]
+    pub before_index: Option<Option<usize>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_index"
+    )]
+    pub after_index: Option<Option<usize>>,
     pub slide_id: String,
     pub shape_id: Option<String>,
     pub before: Option<ShapeSnapshot>,
@@ -99,6 +186,8 @@ pub struct Proposal {
     pub edits: Vec<ProposalEdit>,
     pub changes: Vec<ProposalChange>,
     pub stale_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refs: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -134,10 +223,23 @@ pub type ProposalResult<T> = Result<T, ProposalError>;
 pub(crate) struct ProposalStore {
     next_id: u64,
     pending: Vec<Proposal>,
+    baselines: HashMap<String, ProposalBaseline>,
     /// Memoized previews of pending proposals, keyed on proposal id and the
     /// doc's epoch; a preview is a pure function of the proposal's edits and
     /// the doc state.
     pub(crate) previews: HashMap<String, (u64, ProposalPreview)>,
+}
+
+pub(crate) struct ProposalStage {
+    pub session: DeckSession,
+    pub snapshot: DeckSnapshot,
+    pub refs: BTreeMap<String, String>,
+    pub resolved: Vec<ProposalEdit>,
+}
+
+struct ProposalBaseline {
+    snapshot: DeckSnapshot,
+    edits: Vec<ProposalEdit>,
 }
 
 impl ProposalStore {
@@ -174,8 +276,13 @@ impl DeckSession {
             ));
         }
         let before = self.snapshot()?;
-        let (_, snapshot) = self.preview_edits(&before, &request.edits)?;
-        let changes = changes_for(&before, &snapshot, &request.edits)?;
+        let ProposalStage {
+            snapshot,
+            refs,
+            resolved,
+            ..
+        } = self.preview_edits(&request.edits, false)?;
+        let changes = changes_for(&before, &snapshot, &resolved)?;
         let mut store = self.proposals.borrow_mut();
         store.next_id += 1;
         let proposal = Proposal {
@@ -185,7 +292,15 @@ impl DeckSession {
             edits: request.edits,
             changes,
             stale_targets: Vec::new(),
+            refs,
         };
+        store.baselines.insert(
+            proposal.id.clone(),
+            ProposalBaseline {
+                snapshot: before,
+                edits: resolved,
+            },
+        );
         store.pending.push(proposal.clone());
         let epoch = self.epoch();
         store.previews.insert(
@@ -210,7 +325,7 @@ impl DeckSession {
             .iter()
             .map(|proposal| {
                 let mut proposal = proposal.clone();
-                proposal.stale_targets = stale_targets(&snapshot, &proposal);
+                proposal.stale_targets = self.proposal_stale_targets(&snapshot, &proposal);
                 proposal
             })
             .collect())
@@ -226,10 +341,36 @@ impl DeckSession {
         }
         self.proposals.borrow_mut().previews.remove(id);
         let before = self.snapshot()?;
-        let (_, snapshot) = self.preview_edits(&before, &proposal.edits)?;
-        proposal.stale_targets = stale_targets(&before, &proposal);
-        proposal.changes = changes_for(&before, &snapshot, &proposal.edits)?;
+        let ProposalStage {
+            snapshot,
+            refs,
+            resolved,
+            ..
+        } = self.preview_edits(&proposal.edits, true)?;
+        proposal.stale_targets = self.proposal_stale_targets(&before, &proposal);
+        proposal.changes = changes_for(&before, &snapshot, &resolved)?;
+        proposal.refs = refs;
         let preview = ProposalPreview { proposal, snapshot };
+        if let Some(pending) = self
+            .proposals
+            .borrow_mut()
+            .pending
+            .iter_mut()
+            .find(|proposal| proposal.id == id)
+        {
+            pending.refs = preview.proposal.refs.clone();
+            if pending.edits.iter().any(|edit| {
+                matches!(
+                    edit,
+                    ProposalEdit::InsertSlide { .. }
+                        | ProposalEdit::DuplicateSlide { .. }
+                        | ProposalEdit::DeleteSlide { .. }
+                        | ProposalEdit::MoveSlide { .. }
+                )
+            }) {
+                pending.changes = preview.proposal.changes.clone();
+            }
+        }
         self.proposals
             .borrow_mut()
             .previews
@@ -238,9 +379,8 @@ impl DeckSession {
     }
 
     pub fn proposal_preview_session(&self, id: &str) -> ProposalResult<DeckSession> {
-        let proposal = self.pending_proposal(id)?;
-        let before = self.snapshot()?;
-        Ok(self.preview_edits(&before, &proposal.edits)?.0)
+        let proposal = self.preview_proposal(id)?.proposal;
+        Ok(self.preview_edits(&proposal.edits, true)?.session)
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> ProposalResult<ProposalAcceptance> {
@@ -268,27 +408,44 @@ impl DeckSession {
     ) -> ProposalResult<(CompactProposalAcceptance, DeckSnapshot)> {
         let proposal = self.pending_proposal(id)?;
         let before = self.snapshot()?;
-        let stale = stale_targets(&before, &proposal);
+        let stale = self.proposal_stale_targets(&before, &proposal);
         if !force && !stale.is_empty() {
             return Err(ProposalError::Stale(stale));
         }
-        let (preview, snapshot) = self.preview_edits(&before, &proposal.edits)?;
+        let ProposalStage {
+            session: preview,
+            snapshot,
+            resolved,
+            ..
+        } = self.preview_edits(&proposal.edits, force)?;
         let applied = before != snapshot;
         if applied {
             let (_, update) = preview.staged_update(&self.doc.transact().state_vector())?;
-            self.adopt(&preview, update, Adoption::Proposal)?;
+            let structural = proposal.edits.iter().any(|edit| {
+                matches!(
+                    edit,
+                    ProposalEdit::InsertSlide { .. }
+                        | ProposalEdit::DuplicateSlide { .. }
+                        | ProposalEdit::DeleteSlide { .. }
+                        | ProposalEdit::MoveSlide { .. }
+                )
+            });
+            if structural {
+                self.add_undo_barrier();
+            }
+            let adopted = self.adopt(&preview, update, Adoption::Proposal);
+            if structural {
+                self.add_undo_barrier();
+            }
+            adopted?;
         }
         self.reject_proposal(id);
-        let changed_targets = proposal
-            .changes
+        let changed_targets = changes_for(&before, &snapshot, &resolved)?
             .iter()
             .filter(|change| {
-                capture(&snapshot, &change.slide_id, change.shape_id.as_deref()).is_ok_and(
-                    |after| {
-                        capture(&before, &change.slide_id, change.shape_id.as_deref())
-                            .is_ok_and(|before| after != before)
-                    },
-                )
+                change.kind.is_some()
+                    || change.before != change.after
+                    || change.old_text != change.new_text
             })
             .map(ProposalChange::key)
             .collect::<BTreeSet<_>>()
@@ -307,6 +464,7 @@ impl DeckSession {
     pub fn reject_proposal(&self, id: &str) -> bool {
         let mut store = self.proposals.borrow_mut();
         store.previews.remove(id);
+        store.baselines.remove(id);
         let before = store.pending.len();
         store.pending.retain(|proposal| proposal.id != id);
         before != store.pending.len()
@@ -322,31 +480,251 @@ impl DeckSession {
             .ok_or_else(|| ProposalError::NotFound(id.to_owned()))
     }
 
-    /// Applies `edits` to a hydrated clone of the live doc — never the live
-    /// doc itself, so a preview produces no observable update events and
-    /// leaves `encode_state_as_update_v1` byte-identical — validates it, and
-    /// returns the scratch session together with the validated snapshot.
-    fn preview_edits(
-        &self,
-        before: &DeckSnapshot,
-        edits: &[ProposalEdit],
-    ) -> ProposalResult<(DeckSession, DeckSnapshot)> {
-        for edit in edits {
-            let (slide_id, shape_id) = target(before, edit)?;
-            check_target(before, &slide_id, shape_id.as_deref())?;
+    fn proposal_stale_targets(&self, snapshot: &DeckSnapshot, proposal: &Proposal) -> Vec<String> {
+        let store = self.proposals.borrow();
+        let Some(baseline) = store.baselines.get(&proposal.id) else {
+            return Vec::new();
+        };
+        stale_targets(snapshot, baseline)
+    }
+
+    pub fn proposal_slide_strip(&self, id: &str) -> ProposalResult<Vec<ProposalStripEntry>> {
+        let live = self.snapshot()?;
+        let preview = self.preview_proposal(id)?;
+        let mut entries: Vec<_> = preview
+            .snapshot
+            .slides
+            .iter()
+            .enumerate()
+            .map(|(index, slide)| {
+                let live_index = live.slides.iter().position(|old| old.id == slide.id);
+                let status = if live_index.is_none() {
+                    ProposalStripStatus::Inserted
+                } else if preview.proposal.changes.iter().any(|change| {
+                    change.slide_id == slide.id && change.kind == Some(ProposalChangeKind::Moved)
+                }) {
+                    ProposalStripStatus::Moved
+                } else if preview.proposal.changes.iter().any(|change| {
+                    change.slide_id == slide.id
+                        && (change.before != change.after || change.old_text != change.new_text)
+                }) {
+                    ProposalStripStatus::Changed
+                } else {
+                    ProposalStripStatus::Unchanged
+                };
+                ProposalStripEntry {
+                    slide_id: slide.id.clone(),
+                    status,
+                    live_index,
+                    preview_index: Some(index),
+                }
+            })
+            .collect();
+        for (index, slide) in live.slides.iter().enumerate() {
+            if !preview
+                .snapshot
+                .slides
+                .iter()
+                .any(|next| next.id == slide.id)
+            {
+                entries.insert(
+                    index.min(entries.len()),
+                    ProposalStripEntry {
+                        slide_id: slide.id.clone(),
+                        status: ProposalStripStatus::Deleted,
+                        live_index: Some(index),
+                        preview_index: None,
+                    },
+                );
+            }
         }
+        Ok(entries)
+    }
+
+    pub(crate) fn preview_edits(
+        &self,
+        edits: &[ProposalEdit],
+        force: bool,
+    ) -> ProposalResult<ProposalStage> {
         let preview = self.stage()?;
+        let mut refs = BTreeMap::new();
+        let mut resolved = Vec::with_capacity(edits.len());
         for edit in edits {
-            apply_edit(&preview, edit)?;
+            let edit = resolve_edit(edit, &refs)?;
+            let reference = match &edit {
+                ProposalEdit::InsertSlide { reference, .. }
+                | ProposalEdit::DuplicateSlide { reference, .. } => reference.as_ref(),
+                _ => None,
+            };
+            if let Some(reference) = reference
+                && (reference.is_empty()
+                    || reference.starts_with('@')
+                    || refs.contains_key(reference))
+            {
+                return Err(ProposalError::Invalid(format!(
+                    "invalid or duplicate ref {reference:?}"
+                )));
+            }
+            let created = apply_structural_edit(&preview, &edit, force)?;
+            if let Some(reference) = reference {
+                refs.insert(
+                    reference.clone(),
+                    created.expect("creating edit returns a slide id"),
+                );
+            }
+            resolved.push(edit);
         }
         let snapshot = preview.validated_snapshot()?;
-        Ok((preview, snapshot))
+        Ok(ProposalStage {
+            session: preview,
+            snapshot,
+            refs,
+            resolved,
+        })
+    }
+}
+
+fn resolve_edit(
+    edit: &ProposalEdit,
+    refs: &BTreeMap<String, String>,
+) -> ProposalResult<ProposalEdit> {
+    let resolve = |id: &mut String| -> ProposalResult<()> {
+        if let Some(reference) = id.strip_prefix('@') {
+            *id = refs
+                .get(reference)
+                .cloned()
+                .ok_or_else(|| ProposalError::Invalid(format!("unknown ref {reference:?}")))?;
+        }
+        Ok(())
+    };
+    let mut edit = edit.clone();
+    match &mut edit {
+        ProposalEdit::InsertSlide {
+            after_slide_id: Some(id),
+            ..
+        } => resolve(id)?,
+        ProposalEdit::DuplicateSlide {
+            slide_id,
+            after_slide_id,
+            ..
+        } => {
+            resolve(slide_id)?;
+            if let Some(Some(id)) = after_slide_id {
+                resolve(id)?;
+            }
+        }
+        ProposalEdit::MoveSlide {
+            slide_id,
+            after_slide_id,
+        } => {
+            resolve(slide_id)?;
+            if let Some(id) = after_slide_id {
+                resolve(id)?;
+            }
+        }
+        ProposalEdit::DeleteSlide { slide_id }
+        | ProposalEdit::SetSlideNotes { slide_id, .. }
+        | ProposalEdit::SetShapeRect { slide_id, .. }
+        | ProposalEdit::SetShapeFill { slide_id, .. }
+        | ProposalEdit::SetShapeStroke { slide_id, .. }
+        | ProposalEdit::SetShapeAdjust { slide_id, .. } => resolve(slide_id)?,
+        _ => {}
+    }
+    Ok(edit)
+}
+
+fn apply_structural_edit(
+    session: &DeckSession,
+    edit: &ProposalEdit,
+    force: bool,
+) -> ProposalResult<Option<String>> {
+    let context = EditCtx::local("proposal");
+    let index_after = |anchor: Option<&str>, moving: Option<&str>| -> ProposalResult<u32> {
+        let snapshot = session.snapshot()?;
+        if let Some(id) = moving {
+            check_target(&snapshot, id, None)?;
+        }
+        let slides: Vec<_> = snapshot
+            .slides
+            .iter()
+            .filter(|slide| Some(slide.id.as_str()) != moving)
+            .collect();
+        match anchor {
+            None => Ok(0),
+            Some(id) if Some(id) == moving => snapshot
+                .slides
+                .iter()
+                .position(|slide| slide.id == id)
+                .map(|index| index as u32)
+                .ok_or_else(|| EditError::SlideNotFound(id.into()).into()),
+            Some(id) => slides
+                .iter()
+                .position(|slide| slide.id == id)
+                .map(|index| index as u32 + 1)
+                .or_else(|| force.then_some(slides.len() as u32))
+                .ok_or_else(|| EditError::SlideNotFound(id.into()).into()),
+        }
+    };
+    match edit {
+        ProposalEdit::InsertSlide {
+            after_slide_id,
+            layout_part_path,
+            ..
+        } => {
+            let index = index_after(after_slide_id.as_deref(), None)?;
+            Ok(Some(
+                session
+                    .insert_slide(&context, index, layout_part_path.as_deref())?
+                    .slide_id,
+            ))
+        }
+        ProposalEdit::DuplicateSlide {
+            slide_id,
+            after_slide_id,
+            ..
+        } => {
+            check_target(&session.snapshot()?, slide_id, None)?;
+            let anchor = after_slide_id
+                .as_ref()
+                .map_or(Some(slide_id.as_str()), |id| id.as_deref());
+            let index = index_after(anchor, None)?;
+            Ok(Some(
+                session.duplicate_slide(&context, slide_id, index)?.slide_id,
+            ))
+        }
+        ProposalEdit::DeleteSlide { slide_id } => {
+            session.delete_slide(&context, slide_id)?;
+            Ok(None)
+        }
+        ProposalEdit::MoveSlide {
+            slide_id,
+            after_slide_id,
+        } => {
+            let index = index_after(after_slide_id.as_deref(), Some(slide_id))?;
+            session.move_slide(&context, slide_id, index)?;
+            Ok(None)
+        }
+        _ => {
+            let snapshot = session.snapshot()?;
+            let (slide_id, shape_id) = target(&snapshot, edit)?;
+            check_target(&snapshot, &slide_id, shape_id.as_deref())?;
+            apply_edit(session, edit)?;
+            Ok(None)
+        }
     }
 }
 
 pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
     let context = EditCtx::local("proposal");
     match edit {
+        ProposalEdit::InsertSlide { .. }
+        | ProposalEdit::DuplicateSlide { .. }
+        | ProposalEdit::DeleteSlide { .. }
+        | ProposalEdit::MoveSlide { .. } => {
+            return Err(EditError::InvalidState(
+                "structural edit requires proposal resolution".into(),
+            ));
+        }
         ProposalEdit::ReplaceText {
             story_id,
             start,
@@ -475,6 +853,12 @@ fn target(
     edit: &ProposalEdit,
 ) -> Result<(String, Option<String>), EditError> {
     match edit {
+        ProposalEdit::InsertSlide { .. }
+        | ProposalEdit::DuplicateSlide { .. }
+        | ProposalEdit::DeleteSlide { .. }
+        | ProposalEdit::MoveSlide { .. } => Err(EditError::InvalidState(
+            "structural edit requires proposal resolution".into(),
+        )),
         ProposalEdit::ReplaceText { story_id, .. }
         | ProposalEdit::FormatText { story_id, .. }
         | ProposalEdit::SetParagraphAlignment { story_id, .. } => snapshot
@@ -542,39 +926,121 @@ fn changes_for(
     after: &DeckSnapshot,
     edits: &[ProposalEdit],
 ) -> Result<Vec<ProposalChange>, EditError> {
-    let targets = edits
-        .iter()
-        .map(|edit| target(before, edit))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    targets
-        .into_iter()
-        .map(|(slide_id, shape_id)| {
-            let (before, old_text) = capture(before, &slide_id, shape_id.as_deref())?;
-            let (after, new_text) = capture(after, &slide_id, shape_id.as_deref())?;
-            Ok(ProposalChange {
+    let mut changes = BTreeMap::new();
+    for edit in edits {
+        if matches!(
+            edit,
+            ProposalEdit::InsertSlide { .. }
+                | ProposalEdit::DuplicateSlide { .. }
+                | ProposalEdit::DeleteSlide { .. }
+                | ProposalEdit::MoveSlide { .. }
+        ) {
+            continue;
+        }
+        let (slide_id, shape_id) = target(after, edit).or_else(|_| target(before, edit))?;
+        let (old, old_text) = capture(before, &slide_id, shape_id.as_deref()).unwrap_or_default();
+        let (new, new_text) = capture(after, &slide_id, shape_id.as_deref()).unwrap_or_default();
+        changes.insert(
+            (slide_id.clone(), shape_id.clone()),
+            ProposalChange {
                 slide_id,
                 shape_id,
-                before,
-                after,
+                before: old,
+                after: new,
                 old_text,
                 new_text,
-            })
-        })
-        .collect()
+                kind: None,
+                before_index: None,
+                after_index: None,
+            },
+        );
+    }
+    let ids: BTreeSet<_> = before
+        .slides
+        .iter()
+        .chain(&after.slides)
+        .map(|slide| slide.id.clone())
+        .collect();
+    for slide_id in ids {
+        let before_index = before.slides.iter().position(|slide| slide.id == slide_id);
+        let after_index = after.slides.iter().position(|slide| slide.id == slide_id);
+        let kind = match (before_index, after_index) {
+            (None, Some(_)) => Some(ProposalChangeKind::Inserted),
+            (Some(_), None) => Some(ProposalChangeKind::Deleted),
+            (Some(a), Some(b)) if a != b && edits.iter().any(|edit| matches!(edit, ProposalEdit::MoveSlide { slide_id: id, .. } if id == &slide_id)) => Some(ProposalChangeKind::Moved),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let key = (slide_id.clone(), None);
+            let change = changes.entry(key).or_insert_with(|| ProposalChange {
+                slide_id: slide_id.clone(),
+                shape_id: None,
+                before: None,
+                after: None,
+                old_text: capture(before, &slide_id, None).unwrap_or_default().1,
+                new_text: capture(after, &slide_id, None).unwrap_or_default().1,
+                kind: None,
+                before_index: None,
+                after_index: None,
+            });
+            change.kind = Some(kind);
+            change.before_index = Some(before_index);
+            change.after_index = Some(after_index);
+        }
+    }
+    Ok(changes.into_values().collect())
 }
 
-fn stale_targets(snapshot: &DeckSnapshot, proposal: &Proposal) -> Vec<String> {
-    proposal
-        .changes
-        .iter()
-        .filter(|change| {
-            capture(snapshot, &change.slide_id, change.shape_id.as_deref())
-                .map_or(true, |(shape, text)| {
-                    shape != change.before || text != change.old_text
-                })
-        })
-        .map(ProposalChange::key)
-        .collect()
+fn stale_targets(snapshot: &DeckSnapshot, baseline: &ProposalBaseline) -> Vec<String> {
+    let original = |id: &str| baseline.snapshot.slides.iter().find(|slide| slide.id == id);
+    let live = |id: &str| snapshot.slides.iter().find(|slide| slide.id == id);
+    let mut stale = BTreeSet::new();
+    for edit in &baseline.edits {
+        if let Ok((slide_id, shape_id)) = target(&baseline.snapshot, edit)
+            && original(&slide_id).is_some()
+            && capture(snapshot, &slide_id, shape_id.as_deref()).ok()
+                != capture(&baseline.snapshot, &slide_id, shape_id.as_deref()).ok()
+        {
+            stale.insert(shape_id.unwrap_or(slide_id));
+        }
+    }
+    for edit in &baseline.edits {
+        let (source, anchor, fingerprint) = match edit {
+            ProposalEdit::InsertSlide { after_slide_id, .. } => {
+                (None, after_slide_id.as_deref(), false)
+            }
+            ProposalEdit::DuplicateSlide {
+                slide_id,
+                after_slide_id,
+                ..
+            } => (
+                Some(slide_id.as_str()),
+                after_slide_id
+                    .as_ref()
+                    .map_or(Some(slide_id.as_str()), |id| id.as_deref()),
+                true,
+            ),
+            ProposalEdit::DeleteSlide { slide_id } => (Some(slide_id.as_str()), None, true),
+            ProposalEdit::MoveSlide {
+                slide_id,
+                after_slide_id,
+            } => (Some(slide_id.as_str()), after_slide_id.as_deref(), false),
+            _ => continue,
+        };
+        if let Some(id) = source
+            && let Some(before) = original(id)
+            && (live(id).is_none() || (fingerprint && live(id) != Some(before)))
+        {
+            stale.insert(id.to_owned());
+        }
+        if let Some(id) = anchor
+            && original(id).is_some()
+            && live(id).is_none()
+        {
+            stale.insert(id.to_owned());
+        }
+    }
+    stale.into_iter().collect()
 }
 
 #[cfg(test)]

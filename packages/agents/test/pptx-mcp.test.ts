@@ -258,3 +258,25 @@ for (const flavor of ['legacy', 'modern'] as const) test(`PPTX MCP ${flavor} com
     } finally { reopened.close(); }
   } finally { await context.dispose(); }
 });
+
+test('office_propose exposes slide structure edits with local refs', async () => {
+  const context = await connect();
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await context.client.callTool({ name, arguments: args });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    return result.structuredContent as Record<string, any>;
+  };
+  try {
+    const { document } = await call('office_open', { path: 'deck.pptx' });
+    const outline = await call('pptx_outline', { document });
+    const pending = await call('office_propose', { document, author: 'agent', edits: [
+      { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+      { type: 'duplicateSlide', ref: 'copy', slideId: '@draft' },
+      { type: 'moveSlide', slideId: '@copy', afterSlideId: outline.slides[0].id },
+      { type: 'deleteSlide', slideId: '@draft' },
+    ] });
+    expect((await call('pptx_outline', { document })).total).toBe(outline.total);
+    await call('office_accept', { document, proposal: pending.id });
+    expect((await call('pptx_outline', { document })).total).toBe(outline.total + 1);
+  } finally { await context.dispose(); }
+});

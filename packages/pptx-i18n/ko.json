@@ -168,7 +168,12 @@
     "canvasStale": "대상이 변경되었습니다. 적용하기 전에 검토 세부 정보를 열어 업데이트된 미리 보기를 확인하세요.",
     "previousPosition": "이전",
     "proposedPosition": "제안됨",
-    "loadingDiff": "변경 내용을 불러오는 중…"
+    "loadingDiff": "변경 내용을 불러오는 중…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "컨트롤 더 보기",

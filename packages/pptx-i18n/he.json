@@ -168,7 +168,12 @@
     "canvasStale": "היעדים השתנו. פתח את פרטי הבדיקה כדי לבדוק את התצוגה המעודכנת לפני ההחלה.",
     "previousPosition": "קודם",
     "proposedPosition": "מוצע",
-    "loadingDiff": "טוען שינויים…"
+    "loadingDiff": "טוען שינויים…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "פקדים נוספים",

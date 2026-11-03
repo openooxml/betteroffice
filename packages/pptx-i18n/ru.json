@@ -168,7 +168,12 @@
     "canvasStale": "Цели изменились. Откройте «Сведения о проверке», чтобы просмотреть обновлённый просмотр перед применением.",
     "previousPosition": "Предыдущее",
     "proposedPosition": "Предлагаемое",
-    "loadingDiff": "Загрузка изменений…"
+    "loadingDiff": "Загрузка изменений…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Дополнительные элементы управления",

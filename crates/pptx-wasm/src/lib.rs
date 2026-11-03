@@ -194,6 +194,18 @@ impl PptxRenderer {
             .map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = layoutProposalDiffSlideByIdJson)]
+    pub fn layout_proposal_diff_slide_by_id_json(
+        &self,
+        document: &PptxDocument,
+        id: &str,
+        slide_id: &str,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .layout_proposal_diff_slide_by_id_json(document.session(), id, slide_id)
+            .map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = layoutProposalDiffSlideJson)]
     pub fn layout_proposal_diff_slide_json(
         &self,
