@@ -750,6 +750,10 @@ results, or comments and bookmarks crossing it refuses, as does a step after
 which saving would move an opaque XML block; a batch holds at most 128 steps,
 1,048,576 inserted UTF-16 units and 1,024 new paragraphs.
 
+`DocxProposalInput` replacements accept an optional `at: { offset }` in the
+paragraph's accepted UTF-16 text. It selects the exact range instead of
+`occurrence`, and `search` must match at that offset.
+
 ## Edit PPTX in version-checked batches
 
 A presentation handle reads slides and story text with the version they were
@@ -876,6 +880,10 @@ a protected sheet need its protection to allow formatting cells. The React edito
 and calls `onSave` without downloading. They commit pending drafts, nudges and
 pastes first, and reject with `XlsxCommandAdmissionError` when that input
 cannot be written or the workbook is replaced meanwhile.
+
+`WorkbookHandle.isProposalStale(id)` checks a pending proposal with the engine's
+acceptance guards, including cell styles and dependent previews. It leaves the
+live workbook, history and proposal unchanged; an unknown ID throws.
 
 ## Export DOCX as structured content
 

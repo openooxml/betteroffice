@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import type { YrsCellLoc, YrsLoc, YrsTableRange } from './index';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
@@ -13,7 +14,7 @@ export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSel
   try {
     return engine.cellSelection();
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     return null;
   }
 }
