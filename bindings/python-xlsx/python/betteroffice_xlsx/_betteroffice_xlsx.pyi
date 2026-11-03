@@ -8,12 +8,12 @@ class Viewport(TypedDict):
     height: float
 
 class ViewportTarget(TypedDict):
-    sheet: int
+    sheet: int | str
     viewport: Viewport
 
 class PngRangeTarget(TypedDict):
-    sheet: int
-    range: str
+    sheet: int | str
+    range: str | dict[str, object]
 
 
 __version__: str
@@ -232,7 +232,16 @@ class Workbook:
         text_wrapping: str | None = ...,
         now_serial: float | None = ...,
     ) -> Mutation: ...
-    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = ...) -> Png: ...
+    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = ..., max_width: int | None = ..., max_height: int | None = ...) -> Png: ...
+    def render_sheet(
+        self,
+        sheet: int | str,
+        *,
+        scale: float = ...,
+        range: str | None = ...,
+        max_width: int | None = ...,
+        max_height: int | None = ...,
+    ) -> Png: ...
     def save(self) -> bytes: ...
     def save_path(self, path: str | os.PathLike[str]) -> None: ...
     def __len__(self) -> int: ...

@@ -2,4 +2,4 @@
 '@betteroffice/python-xlsx': minor
 ---
 
-Changes `render_png` to accept `{"sheet": 0, "range": "A1:B2"}` or `{"sheet": 0, "viewport": {...}}`, with keyword-only `scale=1.0`. Replace sheet names and range keywords with zero-based target dictionaries; dimension caps are no longer arguments.
+`render_png` takes a target: `{"sheet": name_or_index, "range": ...}` or `{"sheet": name_or_index, "viewport": {...}}`, with `scale`, `max_width` and `max_height` as keywords. `range` is an A1 string or an address dictionary. For the old `render_png(sheet)`, which frames the used range, call `render_sheet(sheet)`.

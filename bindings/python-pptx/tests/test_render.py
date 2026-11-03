@@ -117,7 +117,21 @@ def test_png_is_exported(deck):
     assert "Png" in bo.__all__
 
 
-@pytest.mark.parametrize("target", [None, 0, {}, {"slide": -1}, {"slide": True}, {"slide": "0"}, {"page": 0}, {"slide": 0, "extra": 1}])
+@pytest.mark.parametrize("target", [None, 0, {}, {"page": 0}, {"slide": 0, "extra": 1}])
 def test_rejects_invalid_slide_targets(deck, target):
     with pytest.raises(bo.RangeError):
         deck.render_png(target)
+
+
+def test_slide_target_keeps_the_slide_key_errors(deck):
+    with pytest.raises(IndexError):
+        deck.render_png({"slide": -1})
+    with pytest.raises(TypeError):
+        deck.render_png({"slide": True})
+    with pytest.raises(KeyError):
+        deck.render_png({"slide": "no-such-slide"})
+
+
+def test_slide_target_takes_an_index_or_an_id(deck):
+    slide_id = deck.slide_ids[0]
+    assert deck.render_png({"slide": slide_id}).bytes == deck.render_png({"slide": 0}).bytes

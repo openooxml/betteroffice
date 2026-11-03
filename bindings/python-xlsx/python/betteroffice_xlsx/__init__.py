@@ -33,6 +33,7 @@ from ._betteroffice_xlsx import export_xlsx_markdown_json as _export_xlsx_markdo
 from ._betteroffice_xlsx import export_xlsx_structured_json as _export_xlsx_structured_json
 from ._betteroffice_xlsx import render_xlsx_markdown_json as _render_xlsx_markdown_json
 from .edits import (
+    RangeAddress,
     EditRequest,
     EditResult,
     EditStep,
@@ -60,12 +61,12 @@ class Viewport(TypedDict):
     height: float
 
 class ViewportTarget(TypedDict):
-    sheet: int
+    sheet: "int | str"
     viewport: Viewport
 
 class PngRangeTarget(TypedDict):
-    sheet: int
-    range: str
+    sheet: "int | str"
+    range: "str | RangeAddress"
 
 
 __all__ = [
@@ -149,8 +150,30 @@ class Sheet:
     def formula(self, address: str) -> "str | None":
         return self._workbook.formula(self._index, address)
 
-    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = 1.0) -> Png:
-        return self._workbook.render_png(target, scale=scale)
+    def render_png(
+        self,
+        target: ViewportTarget | PngRangeTarget,
+        *,
+        scale: float = 1.0,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        return self._workbook.render_png(
+            target, scale=scale, max_width=max_width, max_height=max_height
+        )
+
+    def render_sheet(
+        self,
+        *,
+        scale: float = 1.0,
+        range: "str | None" = None,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        """Render this sheet to PNG, framing its used range when no range is given."""
+        return self._workbook.render_sheet(
+            self._index, scale=scale, range=range, max_width=max_width, max_height=max_height
+        )
 
     def __repr__(self) -> str:
         return f"Sheet({self.name!r})"
@@ -223,8 +246,32 @@ class Workbook:
         """Set a cell from what a user would type."""
         return self._inner.set(sheet, address, _as_input(value), now_serial=now_serial)
 
-    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = 1.0) -> Png:
-        return self._inner.render_png(target, scale=scale)
+    def render_png(
+        self,
+        target: ViewportTarget | PngRangeTarget,
+        *,
+        scale: float = 1.0,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        """Render a viewport or range of a sheet to PNG."""
+        return self._inner.render_png(
+            target, scale=scale, max_width=max_width, max_height=max_height
+        )
+
+    def render_sheet(
+        self,
+        sheet: SheetKey,
+        *,
+        scale: float = 1.0,
+        range: "str | None" = None,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        """Render a sheet to PNG, framing its used range when no range is given."""
+        return self._inner.render_sheet(
+            sheet, scale=scale, range=range, max_width=max_width, max_height=max_height
+        )
 
     def save(self) -> bytes:
         """Serialize back to XLSX bytes."""

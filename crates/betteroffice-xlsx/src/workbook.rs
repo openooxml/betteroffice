@@ -2788,7 +2788,16 @@ impl Workbook {
             return Err(Error::InvalidScale(options.scale));
         }
         match target {
-            crate::PngTarget::Viewport { sheet, viewport } => {
+            crate::PngTarget::Viewport {
+                sheet,
+                mut viewport,
+            } => {
+                if let Some(width) = options.max_width {
+                    viewport.width = viewport.width.min(width as f32 / options.scale);
+                }
+                if let Some(height) = options.max_height {
+                    viewport.height = viewport.height.min(height as f32 / options.scale);
+                }
                 validate_viewport(&viewport)?;
                 let width = (viewport.width * options.scale).ceil().max(1.0) as u32;
                 let height = (viewport.height * options.scale).ceil().max(1.0) as u32;

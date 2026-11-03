@@ -101,7 +101,7 @@ from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
 
 class PngTarget(TypedDict):
-    slide: int
+    slide: "int | str"
 
 
 __all__ = [

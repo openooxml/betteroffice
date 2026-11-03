@@ -95,18 +95,14 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
     }
 }
 
-fn png_target_index(target: &Bound<'_, PyAny>) -> PyResult<usize> {
+fn png_target_slide<'py>(target: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let invalid =
-        || RangeError::new_err("target must be a dict containing only a nonnegative slide index");
+        || RangeError::new_err("target must be a dict containing only a slide index or ID");
     let target = target.cast::<PyDict>().map_err(|_| invalid())?;
     if target.len() != 1 {
         return Err(invalid());
     }
-    let index = target.get_item("slide")?.ok_or_else(invalid)?;
-    if index.is_instance_of::<PyBool>() {
-        return Err(invalid());
-    }
-    index.extract::<usize>().map_err(|_| invalid())
+    target.get_item("slide")?.ok_or_else(invalid)
 }
 
 fn map_error(error: CoreError) -> PyErr {
@@ -2577,13 +2573,7 @@ impl PyPresentation {
         background: &str,
         max_shadow_pixels: Option<u64>,
     ) -> PyResult<PyPng> {
-        let slide = png_target_index(target)?;
-        let slides = self.all_slide_ids()?.len();
-        if slide >= slides {
-            return Err(PyIndexError::new_err(format!(
-                "slide index {slide} out of range for {slides} slide(s)"
-            )));
-        }
+        let slide = self.resolve_slide_index(&png_target_slide(target)?)?;
         let target = betteroffice_pptx::PngTarget { slide };
         let options = RenderOptions {
             scale,

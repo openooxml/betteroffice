@@ -46,9 +46,9 @@ png.write("preview.png")
 print(png.width, png.height)
 ```
 
-PNG targets use zero-based sheet indexes. Pass a `PngRangeTarget` dictionary with
-`sheet` and an A1 `range`, or a `ViewportTarget` dictionary with `sheet` and
-`viewport: {"x": 0, "y": 0, "width": 640, "height": 480}`. Scale defaults to 1.0.
+PNG targets take a sheet name or zero-based index, with either a `viewport` or a `range`
+(an A1 string or an address dictionary). `max_width` and `max_height` cap the output for
+both. `render_sheet(sheet)` frames the sheet's used range when no range is given.
 
 
 Rendering is the same grid layout and display list the browser editor uses, so
@@ -276,7 +276,8 @@ editing.
 | `wb.diff(sv)` / `apply_update(u)` / `state_vector()` / `state_as_update()` | exchange Yrs updates |
 | `wb.client_id` / `wb.is_collaborative` | which kind of workbook you are holding |
 | `wb.active_sheet` / `set_active_sheet(...)` | read or persist the active tab |
-| `wb.render_png(target, *, scale=1.0)` | render a range or viewport to PNG |
+| `wb.render_png(target, *, scale=1.0, max_width=None, max_height=None)` | render a range or viewport to PNG |
+| `wb.render_sheet(sheet, *, scale=1.0, range=None, max_width=None, max_height=None)` | render a sheet to PNG, framing its used range by default |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
 
 The following calculation calls (`open_recalculated`,

@@ -612,11 +612,55 @@ def test_viewport_png_target_scales_and_validates_sheet(sample_bytes):
         {"sheet": 99, "viewport": target["viewport"]},
     ]
     for invalid_target in invalid_targets:
-        with pytest.raises(bo.RangeError):
+        with pytest.raises(IndexError):
             workbook.render_png(invalid_target)
 
 
-@pytest.mark.parametrize("target", [None, 0, {}, {"sheet": 0}, {"sheet": True, "range": "A1"}, {"sheet": -1, "range": "A1"}, {"sheet": "Budget", "range": "A1"}, {"sheet": 0, "range": "A1", "viewport": {}}, {"sheet": 0, "viewport": {}}, {"sheet": 0, "range": 1}])
+@pytest.mark.parametrize("target", [None, 0, {}, {"sheet": 0}, {"sheet": 0, "range": "A1", "viewport": {}}, {"sheet": 0, "viewport": {}}, {"sheet": 0, "range": 1}])
 def test_rejects_invalid_png_targets(sample_bytes, target):
     with pytest.raises(bo.RangeError):
         bo.Workbook.open(sample_bytes).render_png(target)
+
+
+def test_png_target_takes_a_sheet_name_or_index_and_any_range_form(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    by_index = workbook.render_png({"sheet": 0, "range": "A1:D12"})
+    name = workbook.sheet_names[0]
+    assert workbook.render_png({"sheet": name, "range": "A1:D12"}).bytes == by_index.bytes
+    a1 = {"kind": "a1", "a1": "A1:D12"}
+    assert workbook.render_png({"sheet": 0, "range": a1}).bytes == by_index.bytes
+    row_col = {"kind": "rowCol", "start": {"row": 0, "col": 0}, "end": {"row": 11, "col": 3}}
+    assert workbook.render_png({"sheet": 0, "range": row_col}).bytes == by_index.bytes
+
+
+@pytest.mark.parametrize("range_address", [{}, {"kind": "a1"}, {"kind": "rowCol", "start": {"row": 0, "col": 0}}, {"kind": "other"}, 1])
+def test_rejects_invalid_png_ranges(sample_bytes, range_address):
+    with pytest.raises(bo.RangeError):
+        bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": range_address})
+
+
+def test_png_dimension_caps_apply_to_both_target_forms(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    viewport = {"sheet": 0, "viewport": {"x": 0, "y": 0, "width": 128, "height": 64}}
+    for target in (viewport, {"sheet": 0, "range": "A1:D12"}):
+        png = workbook.render_png(target, max_width=40, max_height=30)
+        assert (png.width, png.height) == (40, 30)
+
+
+def test_render_sheet_frames_the_used_range(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    framed = workbook.render_sheet(0)
+    assert framed.width > 0 and framed.height > 0
+    capped = workbook.render_sheet(0, max_width=40)
+    assert capped.width == 40
+    assert workbook.render_sheet(0, range="A1:D12").bytes == workbook.render_png({"sheet": 0, "range": "A1:D12"}).bytes
+
+
+def test_png_target_keeps_the_sheet_key_errors(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    with pytest.raises(IndexError):
+        workbook.render_png({"sheet": -1, "range": "A1"})
+    with pytest.raises(TypeError):
+        workbook.render_png({"sheet": True, "range": "A1"})
+    with pytest.raises(KeyError):
+        workbook.render_png({"sheet": "no-such-sheet", "range": "A1"})

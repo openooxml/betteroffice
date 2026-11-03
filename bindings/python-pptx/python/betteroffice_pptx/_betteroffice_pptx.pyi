@@ -2,7 +2,7 @@ import os
 from typing import TypedDict, Any, Callable, Literal, final, overload
 
 class PngTarget(TypedDict):
-    slide: int
+    slide: int | str
 
 
 from .render import HitTestResult, PresentationInspection, ProposalDiffSlide

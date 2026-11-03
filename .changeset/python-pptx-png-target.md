@@ -2,4 +2,4 @@
 '@betteroffice/python-pptx': minor
 ---
 
-Changes `render_png` to accept `{"slide": 0}` with keyword-only scale, background and shadow options. Replace positional slide indexes with zero-based targets; translate slide IDs to indexes before rendering.
+`render_png` takes a target: `render_png(slide)` becomes `render_png({"slide": slide})`, still by index or ID, with scale, background and shadow options as keywords.

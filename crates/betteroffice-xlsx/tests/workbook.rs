@@ -11319,6 +11319,34 @@ fn unrelated_currency_format_edits_refresh_formula_results() {
 
 #[cfg(feature = "raster")]
 #[test]
+fn png_dimension_caps_apply_to_both_target_forms() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = RenderOptions {
+        max_width: Some(40),
+        max_height: Some(30),
+        ..Default::default()
+    };
+    for target in [
+        betteroffice_xlsx::PngTarget::Viewport {
+            sheet: SheetId(0),
+            viewport: Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 128.0,
+                height: 64.0,
+            },
+        },
+        betteroffice_xlsx::PngTarget::Range {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:D12").unwrap(),
+        },
+    ] {
+        let rendered = workbook.render_png(target, &options).unwrap();
+        assert_eq!((rendered.width, rendered.height), (40, 30));
+    }
+}
+
+#[test]
 fn png_targets_validate_sheets_and_scale_both_forms() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
     let viewport = Viewport {
