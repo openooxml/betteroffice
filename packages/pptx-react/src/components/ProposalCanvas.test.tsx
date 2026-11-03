@@ -1,9 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { initWasm, openPresentation } from '@betteroffice/pptx';
 import type { ProposalDiffSlide, TextParagraphDraft } from '@betteroffice/pptx';
-import { ProposalCanvasOverlay, ProposalShapeOutlines, useProposalCanvas } from './ProposalCanvas';
+import { ProposalCanvasOverlay, useProposalCanvas } from './ProposalCanvas';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -49,18 +49,17 @@ test.each([
     expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
     expect(diff.textChanges.length > 0).toBe(paragraphs.length > 1);
     let painted: ProposalDiffSlide | null = null;
-    let target: string | null = null;
-    const view = render(<>
+    const onTarget = mock((_slideId: string, _shapeId: string) => {});
+    const view = render(
       <ProposalCanvasOverlay diff={diff} current={before} frame={diff.frame} slideIndex={0} scale={1}
-        resolveImage={() => null} onTarget={() => {}} onPainted={value => { painted = value; }} />
-      <ProposalShapeOutlines diff={diff} current={before} frame={diff.frame} scale={1} onTarget={(_slide, shapeId) => { target = shapeId; }} />
-    </>);
+        resolveImage={() => null} onTarget={onTarget} onPainted={value => { painted = value; }} />
+    );
     await waitFor(() => expect(painted).toBe(diff));
     expect(view.getByRole('img').getAttribute('data-ready')).toBe('true');
     const outline = view.getByTestId('pptx-proposal-canvas-target');
     expect(outline.getAttribute('data-shape-change')).toBe('changed');
     fireEvent.click(outline);
-    expect(target).toBe(shape.id);
+    expect(onTarget).toHaveBeenCalledWith(before.slides[0]!.id, shape.id);
     if (paragraphs.length > 1) {
       expect(paintedText.join('')).toContain('First');
       expect(paintedText.join('')).toContain('Second');

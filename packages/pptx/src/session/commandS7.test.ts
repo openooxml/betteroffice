@@ -501,7 +501,8 @@ test('worker paragraph proposals validate drafts, preview rewrites, accept and u
     const created = session.handle().listProposals()[0]!;
     expect(created.changes[0]!.newText).toBe('Ref bullet');
     state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'rejectProposal', args: [created.id] } });
-    expect(state.outcomes[0]!.status).toBe('applied');
+    expect(state.outcomes[0]!.status).toBe('noop');
+    expect(session.handle().listProposals()).toHaveLength(0);
     expect(session.handle().snapshot()).toEqual(before);
   } finally { await session.dispose(); }
 });

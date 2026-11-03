@@ -489,7 +489,7 @@ test('in-thread paragraph proposals replay, preview and undo with the worker rep
     await owner.flush();
     expect(access.snapshot()).toEqual(before);
     expect(JSON.parse(context.workerDoc.listProposalsJson())[0].edits[0].type).toBe('setStoryParagraphs');
-    const diff = access.layoutProposalDiffSlide(proposal.id, 0);
+    const diff = access.layoutProposalDiffSlideById(proposal.id, before.slides[0]!.id);
     expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
     expect(diff.textChanges.some(change => change.kind === 'deletion')).toBe(true);
     access.acceptProposal(proposal.id);

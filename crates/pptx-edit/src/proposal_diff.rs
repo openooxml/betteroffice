@@ -13,9 +13,9 @@ use crate::deck::{
 use crate::inherit::{SlideContext, record_inherited};
 use crate::proposals::shape_text;
 use crate::{
-    DeckSession, DeckSnapshot, EditError, EditResult, Proposal, ProposalChange, ProposalEdit,
-    ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot, TextRunSnapshot,
-    TextStyle,
+    DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot, Proposal, ProposalChange,
+    ProposalEdit, ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot,
+    TextRunSnapshot, TextStyle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,77 +520,108 @@ fn tokens(runs: &[TextRunSnapshot]) -> Vec<Token> {
     result
 }
 
+#[derive(PartialEq)]
+enum StoryTokenKind {
+    Text(Token),
+    ParagraphBreak,
+}
+
+struct StoryToken<'a> {
+    kind: StoryTokenKind,
+    paragraph: &'a ParagraphSnapshot,
+}
+
+impl PartialEq for StoryToken<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+fn story_tokens(story: &StorySnapshot) -> Vec<StoryToken<'_>> {
+    story
+        .paragraphs
+        .iter()
+        .flat_map(|paragraph| {
+            tokens(&paragraph.runs)
+                .into_iter()
+                .map(move |token| StoryToken {
+                    kind: StoryTokenKind::Text(token),
+                    paragraph,
+                })
+                .chain(std::iter::once(StoryToken {
+                    kind: StoryTokenKind::ParagraphBreak,
+                    paragraph,
+                }))
+        })
+        .collect()
+}
+
 fn diff_story(
     before: &StorySnapshot,
     after: &mut StorySnapshot,
     changes: &mut Vec<ProposalTextChange>,
 ) {
-    for (index, paragraph) in before.paragraphs.iter().enumerate() {
-        if !after.paragraphs.iter().any(|next| next.id == paragraph.id) {
-            let mut deleted = paragraph.clone();
-            deleted.runs.clear();
-            after
-                .paragraphs
-                .insert(index.min(after.paragraphs.len()), deleted);
-        }
-    }
+    let old = story_tokens(before);
+    let new = story_tokens(after);
+    let mut paragraphs = Vec::new();
+    let mut runs: Vec<TextRunSnapshot> = Vec::new();
     let mut offset = 0;
-    for paragraph in &mut after.paragraphs {
-        let old = before.paragraphs.iter().find(|old| old.id == paragraph.id);
-        let old = tokens(old.map_or(&[], |paragraph| &paragraph.runs));
-        let new = tokens(&paragraph.runs);
-        let mut runs: Vec<TextRunSnapshot> = Vec::new();
-        for (token, kind) in diff_tokens(&old, &new) {
-            let start = offset;
-            offset += token.text.encode_utf16().count() as u32;
-            let mut style = token.style.clone();
-            if let Some(kind) = kind {
-                style.color = Some(
-                    match kind {
-                        ProposalTextChangeKind::Insertion => "#166534",
-                        ProposalTextChangeKind::Deletion => "#b91c1c",
-                    }
-                    .into(),
-                );
-                if let Some(last) = changes.last_mut()
-                    && last.story_id == after.id
-                    && last.kind == kind
-                    && last.end == start
-                {
-                    last.end = offset;
-                } else {
-                    changes.push(ProposalTextChange {
-                        story_id: after.id.clone(),
-                        start,
-                        end: offset,
-                        kind,
-                    });
+    for (token, kind) in diff_tokens(&old, &new) {
+        let StoryTokenKind::Text(token_text) = &token.kind else {
+            let mut paragraph = token.paragraph.clone();
+            paragraph.runs = std::mem::take(&mut runs);
+            paragraphs.push(paragraph);
+            offset += 1;
+            continue;
+        };
+        let start = offset;
+        offset += token_text.text.encode_utf16().count() as u32;
+        let mut style = token_text.style.clone();
+        if let Some(kind) = kind {
+            style.color = Some(
+                match kind {
+                    ProposalTextChangeKind::Insertion => "#166534",
+                    ProposalTextChangeKind::Deletion => "#b91c1c",
                 }
-            }
-            if let Some(last) = runs.last_mut()
-                && last.style == style
+                .into(),
+            );
+            if let Some(last) = changes.last_mut()
+                && last.story_id == after.id
+                && last.kind == kind
+                && last.end == start
             {
-                last.text.push_str(&token.text);
+                last.end = offset;
             } else {
-                runs.push(TextRunSnapshot {
-                    text: token.text.clone(),
-                    style,
+                changes.push(ProposalTextChange {
+                    story_id: after.id.clone(),
+                    start,
+                    end: offset,
+                    kind,
                 });
             }
         }
-        paragraph.runs = runs;
-        offset += 1;
+        if let Some(last) = runs.last_mut()
+            && last.style == style
+        {
+            last.text.push_str(&token_text.text);
+        } else {
+            runs.push(TextRunSnapshot {
+                text: token_text.text.clone(),
+                style,
+            });
+        }
     }
+    after.paragraphs = paragraphs;
     after.length = offset;
 }
 
 /// Proposal previews coarsen a middle whose LCS table would exceed this many cells.
 const PREVIEW_LCS_CELLS: usize = 250_000;
 
-fn diff_tokens<'a>(
-    old: &'a [Token],
-    new: &'a [Token],
-) -> Vec<(&'a Token, Option<ProposalTextChangeKind>)> {
+fn diff_tokens<'a, T: PartialEq>(
+    old: &'a [T],
+    new: &'a [T],
+) -> Vec<(&'a T, Option<ProposalTextChangeKind>)> {
     use ProposalTextChangeKind::{Deletion, Insertion};
     let limits = DiffLimits::new(usize::MAX, PREVIEW_LCS_CELLS, LimitFallback::ReplaceMiddle);
     let diff = ooxml_diff::diff_tokens(old, new, limits)
