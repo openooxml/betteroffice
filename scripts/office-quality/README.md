@@ -119,7 +119,7 @@ the public Office references, so a page can be compared by swiping or by a diffe
 
 ## Office references
 
-Requires macOS and desktop Word, PowerPoint, or Excel, and `requirements-reference.txt` (the benchmark requirements plus PyMuPDF, which only the reference capture tools use). Run exports serially into fresh directories:
+Requires macOS and desktop Word, PowerPoint, or Excel. Office exports a PDF, which is kept as `reference.pdf` and is the source of truth: the PNGs are rasterized from it with pypdfium2 at 150 DPI, each page sized to its points × DPI / 72 rounded up (with a 0.001 px tolerance), so references can be rebuilt reproducibly from the stored PDFs. Run exports serially into fresh directories:
 
 ```sh
 .source/office-quality/venv/bin/python scripts/office-quality/reference.py \

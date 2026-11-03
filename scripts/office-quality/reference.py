@@ -11,7 +11,7 @@ import tempfile
 import time
 import zipfile
 
-import fitz
+from raster import open_pdf, page_fonts, page_size_pt, pdf_metadata, render_page
 from xlsx_reference import export_profile
 
 OFFICE = {
@@ -104,23 +104,24 @@ end run
         else:
             subprocess.run(['osascript', '-', str(source), str(pdf)], input=script,
                            text=True, capture_output=True, check=True, timeout=args.timeout + 5)
-        with fitz.open(pdf) as document:
-            if document.page_count == 0:
+        with open_pdf(pdf) as document:
+            if len(document) == 0:
                 raise ValueError('Office exported no pages')
             fonts = set()
             page_bounds = []
-            for index, page in enumerate(document):
-                pixmap = page.get_pixmap(dpi=args.dpi, alpha=False)
-                pixmap.save(args.out / f'page_{index + 1:04d}.png')
-                fonts.update(font[3] for font in page.get_fonts())
+            for index in range(len(document)):
+                image = render_page(document, index, args.dpi)
+                image.save(args.out / f'page_{index + 1:04d}.png')
+                fonts.update(page_fonts(document, index))
                 if extension == '.docx' and args.dpi == 150:
-                    page_bounds.append(dict(width_pt=page.rect.width, height_pt=page.rect.height,
-                                            width_px=pixmap.width, height_px=pixmap.height))
+                    width_pt, height_pt = page_size_pt(document, index)
+                    page_bounds.append(dict(width_pt=width_pt, height_pt=height_pt,
+                                            width_px=image.width, height_px=image.height))
             if page_bounds:
                 record['capture_profile'] = dict(kind='office-page-bounds', pages=page_bounds)
-            record.update(status='ok', pages=len(document), fonts=sorted(fonts), pdf_metadata=document.metadata)
+            record.update(status='ok', pages=len(document), fonts=sorted(fonts), pdf_metadata=pdf_metadata(document))
         shutil.copy2(pdf, args.out / 'reference.pdf')
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, OSError, fitz.FileDataError) as error:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, OSError) as error:
         record['error'] = getattr(error, 'stderr', None) or str(error)
         record['staging_directory'] = str(stage)
         raise SystemExit(f'Office export failed. Check its permission/dialog state before retrying. {record["error"]}') from error
