@@ -560,6 +560,10 @@
     "moveImage": "移動圖片",
     "columnWidth": "欄寬"
   },
+  "selectionToolbar": {
+    "label": "選取工具列",
+    "focusHint": "按 Alt+F10 將焦點移到選取工具列"
+  },
   "documentOutline": {
     "ariaLabel": "文件大綱",
     "closeAriaLabel": "關閉大綱",

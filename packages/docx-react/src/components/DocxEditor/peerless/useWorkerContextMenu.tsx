@@ -231,6 +231,25 @@ export function useWorkerContextMenu(options: {
       } else await options.commands.execute('tableAction', action as never);
     } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); }
   };
+  const pastePlainText = async () => {
+    const binding = options.binding();
+    if (!binding) return;
+    const snapshot = structuredClone(binding.viewStore.getSnapshot());
+    const openedSelection = snapshot.workerSelection;
+    try {
+      const text = await navigator.clipboard.readText();
+      const current = options.binding();
+      if (current !== binding) throw new Error('Document was replaced');
+      const latest = current.viewStore.getSnapshot();
+      if (!sameContextTarget('pasteAsPlainText', snapshot, latest)) throw new Error('Context menu target changed');
+      if (options.environment().readOnly || options.environment().mode === 'viewing') return;
+      const intents = normalizeInputEvent({ source: 'paste', text, eventId: 1, inputTime: performance.now() },
+        { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null }).intents;
+      if (openedSelection && intents[0]?.kind === 'replaceSelection') intents[0].payload.selection = openedSelection;
+      admitInputIntents(current.admission, intents, { source: 'paste', fence: true });
+      options.onPaste?.();
+    } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); }
+  };
   const applyObject = async (intent: PeerlessPropertyIntent) => {
     const origin = dialog?.menu;
     if (!origin || !options.submit) return false;
@@ -245,7 +264,7 @@ export function useWorkerContextMenu(options: {
       return true;
     } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); return false; }
   };
-  return { open, element: <>{menu && <TextContextMenu isOpen position={menu.position} hasSelection={hasSelection}
+  return { open, pastePlainText, element: <>{menu && <TextContextMenu isOpen position={menu.position} hasSelection={hasSelection}
     isEditable={!readOnly} items={items} onAction={(value) => { void action(value); }} onClose={close} />}
     {dialog?.menu.object && <WorkerObjectDialog action={dialog.action} target={dialog.menu.object} apply={applyObject} close={() => setDialog(null)} />}</> };
 }

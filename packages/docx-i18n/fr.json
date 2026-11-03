@@ -560,6 +560,10 @@
     "moveImage": "Déplacer l’image",
     "columnWidth": "Largeur de colonne"
   },
+  "selectionToolbar": {
+    "label": "Barre d'outils de sélection",
+    "focusHint": "Appuyez sur Alt+F10 pour déplacer le focus vers la barre d'outils de sélection"
+  },
   "documentOutline": {
     "ariaLabel": "Plan du document",
     "closeAriaLabel": "Fermer le plan",

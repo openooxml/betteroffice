@@ -560,6 +560,10 @@
     "moveImage": "移动图片",
     "columnWidth": "列宽"
   },
+  "selectionToolbar": {
+    "label": "选择工具栏",
+    "focusHint": "按 Alt+F10 将焦点移到选择工具栏"
+  },
   "documentOutline": {
     "ariaLabel": "文档大纲",
     "closeAriaLabel": "关闭大纲",

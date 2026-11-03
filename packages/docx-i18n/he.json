@@ -560,6 +560,10 @@
     "moveImage": "הזז תמונה",
     "columnWidth": "רוחב עמודה"
   },
+  "selectionToolbar": {
+    "label": "סרגל הכלים של הבחירה",
+    "focusHint": "הקש Alt+F10 כדי להעביר את המוקד לסרגל הכלים של הבחירה"
+  },
   "documentOutline": {
     "ariaLabel": "מתווה המסמך",
     "closeAriaLabel": "סגור מתווה",

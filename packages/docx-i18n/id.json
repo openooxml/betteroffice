@@ -560,6 +560,10 @@
     "moveImage": "Pindahkan gambar",
     "columnWidth": "Lebar kolom"
   },
+  "selectionToolbar": {
+    "label": "Bilah alat pilihan",
+    "focusHint": "Tekan Alt+F10 untuk memindahkan fokus ke bilah alat pilihan"
+  },
   "documentOutline": {
     "ariaLabel": "Struktur dokumen",
     "closeAriaLabel": "Tutup struktur dokumen",

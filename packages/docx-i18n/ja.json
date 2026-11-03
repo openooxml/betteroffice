@@ -560,6 +560,10 @@
     "moveImage": "画像の移動",
     "columnWidth": "列の幅"
   },
+  "selectionToolbar": {
+    "label": "選択ツールバー",
+    "focusHint": "Alt+F10キーを押すと、選択ツールバーにフォーカスを移動します"
+  },
   "documentOutline": {
     "ariaLabel": "ドキュメントのアウトライン",
     "closeAriaLabel": "アウトラインを閉じる",

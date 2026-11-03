@@ -560,6 +560,10 @@
     "moveImage": "चित्र ले जाएं",
     "columnWidth": "स्तंभ की चौड़ाई"
   },
+  "selectionToolbar": {
+    "label": "चयन टूलबार",
+    "focusHint": "फ़ोकस को चयन टूलबार पर ले जाने के लिए Alt+F10 दबाएँ"
+  },
   "documentOutline": {
     "ariaLabel": "दस्तावेज़ की रूपरेखा",
     "closeAriaLabel": "रूपरेखा बंद करें",

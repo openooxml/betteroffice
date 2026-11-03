@@ -560,6 +560,10 @@
     "moveImage": "Di chuyển hình ảnh",
     "columnWidth": "Độ rộng cột"
   },
+  "selectionToolbar": {
+    "label": "Thanh công cụ vùng chọn",
+    "focusHint": "Nhấn Alt+F10 để di chuyển tiêu điểm đến thanh công cụ vùng chọn"
+  },
   "documentOutline": {
     "ariaLabel": "Dàn ý tài liệu",
     "closeAriaLabel": "Đóng dàn ý",

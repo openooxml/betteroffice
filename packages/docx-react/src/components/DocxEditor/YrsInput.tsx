@@ -67,6 +67,8 @@ export interface YrsInputRef {
   focus(): void;
   blur(): void;
   isFocused(): boolean;
+  /** The hidden text input element. */
+  inputElement?(): HTMLTextAreaElement | null;
   flushPendingInput(): Promise<void>;
   /**
    * Runs `operation` in input order, after input accepted before the call and
@@ -1936,6 +1938,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       focus: () => textareaRef.current?.focus({ preventScroll: true }),
       blur: () => textareaRef.current?.blur(),
       isFocused: () => document.activeElement === textareaRef.current,
+      inputElement: () => textareaRef.current,
       flushPendingInput,
       runAfterPendingInput,
       hasPendingInput,

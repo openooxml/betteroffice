@@ -404,6 +404,8 @@ export interface PagedEditorRef {
   blur(): void;
   /** Check if focused. */
   isFocused(): boolean;
+  /** @internal The editor's text input element, which may be portaled outside the editor root. */
+  getInputElement?(): HTMLElement | null;
   /** Undo. */
   undo(): boolean;
   /** Redo. */

@@ -560,6 +560,10 @@
     "moveImage": "Mover imagem",
     "columnWidth": "Largura da coluna"
   },
+  "selectionToolbar": {
+    "label": "Barra de ferramentas de seleção",
+    "focusHint": "Pressione Alt+F10 para mover o foco para a barra de ferramentas de seleção"
+  },
   "documentOutline": {
     "ariaLabel": "Estrutura do documento",
     "closeAriaLabel": "Fechar estrutura",
