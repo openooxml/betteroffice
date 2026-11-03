@@ -582,37 +582,7 @@ impl StoryParser<'_, '_> {
         } else {
             Vec::new()
         };
-        let mut shape = crate::shape::parse_shape_from_drawing(drawing).unwrap_or_else(|| {
-            let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
-            shape.id = text_box.id;
-            shape.name = text_box.name;
-            shape.position = text_box.position;
-            shape.wrap = text_box.wrap;
-            shape.fill = text_box.fill;
-            shape.outline = text_box.outline;
-            shape
-        });
-        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
-        shape.text_body = Some(ShapeTextBody {
-            vertical: body.as_ref().and_then(|body| {
-                body.vertical
-                    .as_deref()
-                    .filter(|value| *value != "horizontal")
-                    .map(|_| true)
-            }),
-            rotation: body.as_ref().and_then(|body| body.rotation),
-            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
-            anchor_center: body.as_ref().and_then(|body| body.anchor_center),
-            auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
-            margins: text_box.margins.map(|margins| RelativeRect {
-                left: margins.left,
-                top: margins.top,
-                right: margins.right,
-                bottom: margins.bottom,
-            }),
-            content,
-        });
-        shape.text_body_properties = shape.text_body_properties.or(body);
+        let mut shape = crate::text_box::text_box_shape(drawing, text_box, content);
         crate::text_box::capture_bookmark_source(&mut shape, source);
         let mut target = run_index;
         if target >= paragraph.content.len() {

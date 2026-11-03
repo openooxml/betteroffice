@@ -60,10 +60,10 @@ fn content_paths(element: &XmlElement, path: &mut Vec<u32>, paths: &mut Vec<Vec<
 /// Whether the model still says what its retained source says, apart from text and media. A
 /// stored hash can differ without an edit when it was computed with other number parsing.
 fn matches_source(drawing: &XmlElement, shape: &Shape) -> bool {
-    let Some(mut baseline) = crate::shape::parse_shape_from_drawing(drawing) else {
+    let Some(text_box) = crate::text_box::parse_text_box(drawing) else {
         return false;
     };
-    crate::paragraph::apply_shape_metadata(&mut baseline, drawing);
+    let baseline = crate::text_box::text_box_shape(drawing, text_box, Vec::new());
     crate::smart_art::frame_model(&baseline) == crate::smart_art::frame_model(shape)
         && crate::text_box::group_model_sha256(&baseline)
             == crate::text_box::group_model_sha256(shape)

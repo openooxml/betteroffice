@@ -1278,4 +1278,11 @@ fn a_stale_stored_hash_does_not_redraw_an_unedited_text_box() {
     let xml = part(&save(&source, &model), "textbox");
     assert!(xml.contains("<a:glow"), "{xml}");
     assert!(xml.contains(r#"rot="58432""#), "{xml}");
+
+    let shape = model
+        .pointer_mut("/document/content/1/content/0/content/0/shape")
+        .unwrap();
+    shape["textBody"]["anchor"] = json!("ctr");
+    let xml = part(&save(&source, &model), "textbox");
+    assert!(xml.contains(r#"anchor="ctr""#), "{xml}");
 }
