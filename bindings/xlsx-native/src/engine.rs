@@ -40,10 +40,23 @@ pub fn decode_font_face(
 
 thread_local! {
     static CURRENT_ENV: Cell<Option<Env>> = const { Cell::new(None) };
+    static CURRENT_OBJECT: Cell<*const Cell<bool>> = const { Cell::new(std::ptr::null()) };
+}
+
+const FAILED_OBJECT: &str = "This engine object failed in an earlier call and can only be freed";
+
+fn enter_object(failed: &Cell<bool>, env: Env) -> Result<()> {
+    if failed.get() {
+        return Err(map_error(env, EngineError::error(FAILED_OBJECT)));
+    }
+    CURRENT_OBJECT.set(failed);
+    Ok(())
 }
 
 struct EngineCall {
     previous: Option<Env>,
+    previous_object: *const Cell<bool>,
+    budget: bool,
 }
 
 impl EngineCall {
@@ -51,16 +64,33 @@ impl EngineCall {
         if crate::memory::over_budget() {
             panic!("{}", crate::memory::EXCEEDED);
         }
+        Self::enter(env, true)
+    }
+
+    fn release(env: Env) -> Self {
+        Self::enter(env, false)
+    }
+
+    fn enter(env: Env, budget: bool) -> Self {
         Self {
             previous: CURRENT_ENV.replace(Some(env)),
+            previous_object: CURRENT_OBJECT.replace(std::ptr::null()),
+            budget,
         }
     }
 }
 
 impl Drop for EngineCall {
     fn drop(&mut self) {
+        let object = CURRENT_OBJECT.replace(self.previous_object);
         CURRENT_ENV.set(self.previous);
-        if !std::thread::panicking() && crate::memory::over_budget() {
+        let unwinding = std::thread::panicking();
+        let failing = unwinding || (self.budget && crate::memory::over_budget());
+        if failing && !object.is_null() {
+            // SAFETY: the object registered itself from a method that is still on the stack.
+            unsafe { (*object).set(true) };
+        }
+        if failing && !unwinding {
             panic!("{}", crate::memory::EXCEEDED);
         }
     }
@@ -163,21 +193,25 @@ fn map_error(env: Env, error: EngineError) -> Error {
 #[napi]
 pub struct XlsxDocument {
     inner: Option<Document>,
+    failed: Cell<bool>,
 }
 
 #[napi]
 pub struct XlsxSnapshotBuilder {
     inner: Option<SnapshotBuilder>,
+    failed: Cell<bool>,
 }
 
 impl XlsxDocument {
     fn document(&self, env: Env) -> Result<&Document> {
+        enter_object(&self.failed, env)?;
         self.inner
             .as_ref()
             .ok_or_else(|| map_error(env, EngineError::error("XlsxDocument was freed")))
     }
 
     fn document_mut(&mut self, env: Env) -> Result<&mut Document> {
+        enter_object(&self.failed, env)?;
         self.inner
             .as_mut()
             .ok_or_else(|| map_error(env, EngineError::error("XlsxDocument was freed")))
@@ -188,6 +222,7 @@ impl Default for XlsxSnapshotBuilder {
     fn default() -> Self {
         Self {
             inner: Some(SnapshotBuilder::new(native_host())),
+            failed: Cell::new(false),
         }
     }
 }
@@ -204,6 +239,7 @@ impl XlsxSnapshotBuilder {
     pub fn push(&mut self, env: Env, chunk: Uint8Array) -> Result<()> {
         let chunk = chunk.to_vec();
         let _call = EngineCall::new(env);
+        enter_object(&self.failed, env)?;
         let inner = self
             .inner
             .as_mut()
@@ -214,6 +250,7 @@ impl XlsxSnapshotBuilder {
     #[napi(catch_unwind)]
     pub fn advance(&mut self, env: Env, records: u32, bytes: u32) -> Result<bool> {
         let _call = EngineCall::new(env);
+        enter_object(&self.failed, env)?;
         let inner = self
             .inner
             .as_mut()
@@ -226,6 +263,7 @@ impl XlsxSnapshotBuilder {
     #[napi(catch_unwind)]
     pub fn finish(&mut self, env: Env) -> Result<XlsxDocument> {
         let _call = EngineCall::new(env);
+        enter_object(&self.failed, env)?;
         let inner = self
             .inner
             .take()
@@ -234,13 +272,14 @@ impl XlsxSnapshotBuilder {
             .finish()
             .map(|document| XlsxDocument {
                 inner: Some(document),
+                failed: Cell::new(false),
             })
             .map_err(|error| map_error(env, error))
     }
 
     #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 }
@@ -249,7 +288,7 @@ impl XlsxSnapshotBuilder {
 impl XlsxDocument {
     #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 
@@ -366,8 +405,11 @@ impl XlsxDocument {
 
     #[napi(catch_unwind)]
     pub fn clear_update_observation(&mut self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        self.document_mut(env)?.clear_update_observation();
+        let _call = EngineCall::release(env);
+        self.inner
+            .as_mut()
+            .ok_or_else(|| map_error(env, EngineError::error("XlsxDocument was freed")))?
+            .clear_update_observation();
         Ok(())
     }
 
@@ -835,7 +877,10 @@ impl XlsxDocument {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
         Document::open(&bytes, native_host())
-            .map(|inner| Self { inner: Some(inner) })
+            .map(|inner| Self {
+                inner: Some(inner),
+                failed: Cell::new(false),
+            })
             .map_err(|error| map_error(env, error))
     }
 
@@ -848,7 +893,10 @@ impl XlsxDocument {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
         Document::open_with_calculation_json(&bytes, &context, native_host())
-            .map(|inner| Self { inner: Some(inner) })
+            .map(|inner| Self {
+                inner: Some(inner),
+                failed: Cell::new(false),
+            })
             .map_err(|error| map_error(env, error))
     }
 
@@ -858,7 +906,10 @@ impl XlsxDocument {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
         Document::open_recovery_checkpoint(&bytes, through_seq, native_host())
-            .map(|inner| Self { inner: Some(inner) })
+            .map(|inner| Self {
+                inner: Some(inner),
+                failed: Cell::new(false),
+            })
             .map_err(|error| map_error(env, error))
     }
 
@@ -867,7 +918,10 @@ impl XlsxDocument {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
         Document::open_collaborative(&bytes, client_id, native_host())
-            .map(|inner| Self { inner: Some(inner) })
+            .map(|inner| Self {
+                inner: Some(inner),
+                failed: Cell::new(false),
+            })
             .map_err(|error| map_error(env, error))
     }
 
@@ -880,7 +934,10 @@ impl XlsxDocument {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
         Document::open_with_peer_hydration_json(&bytes, &hydration, native_host())
-            .map(|inner| Self { inner: Some(inner) })
+            .map(|inner| Self {
+                inner: Some(inner),
+                failed: Cell::new(false),
+            })
             .map_err(|error| map_error(env, error))
     }
 
@@ -894,6 +951,11 @@ impl XlsxDocument {
 #[napi(catch_unwind, js_name = "allocationFailure")]
 pub fn allocation_failure() -> f64 {
     crate::memory::take_failed() as f64
+}
+
+#[napi(catch_unwind, js_name = "engineHeapLiveBytes")]
+pub fn engine_heap_live_bytes() -> f64 {
+    crate::memory::live() as f64
 }
 
 #[napi(catch_unwind, js_name = "setHeapLimit")]

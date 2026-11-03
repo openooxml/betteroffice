@@ -81,7 +81,7 @@ export async function numbersWorkbook(rows: number): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-function nativeBinding(): { setHeapLimit(bytes: number): void } {
+function nativeBinding(): { setHeapLimit(bytes: number): void; engineHeapLiveBytes(): number } {
   return createRequire(import.meta.url)('../../../../bindings/xlsx-native/index.js');
 }
 
@@ -100,6 +100,17 @@ export function exhaustEngineMemory(): void {
       }
     }
   }
+}
+
+/** Leaves the engine about `bytes` of headroom, so a large enough next operation runs out of memory
+ * inside the operation: the native budget sits `bytes` above the live bytes; wasm memory is exhausted. */
+export function limitEngineMemoryHeadroom(bytes: number): void {
+  if (engineKind === 'native') {
+    const binding = nativeBinding();
+    binding.setHeapLimit(binding.engineHeapLiveBytes() + bytes);
+    return;
+  }
+  exhaustEngineMemory();
 }
 
 /** Restores the native engine memory budget after `exhaustEngineMemory`; wasm memories are per test file. */

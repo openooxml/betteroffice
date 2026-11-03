@@ -8,6 +8,7 @@ import {
   SESSION_SUPERSEDED, SessionFailure, type MethodHandlers, type MethodPolicies, type MethodPolicy,
   type SessionEvents, type SessionMethods, type SessionScheduler,
 } from './types';
+import { isEngineTrap } from './trap';
 
 export interface SessionHostOptions<M extends SessionMethods, C> {
   handlers: MethodHandlers<M, C>;
@@ -39,12 +40,8 @@ function replyError(error: unknown): ReplyError {
   return result;
 }
 
-const NATIVE_MEMORY_BUDGET_EXCEEDED = 'BetterOffice engine memory budget exceeded';
-
 function terminal(error: unknown): boolean {
-  return error instanceof SessionFailure ||
-    (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError) ||
-    (error instanceof Error && error.message === NATIVE_MEMORY_BUDGET_EXCEEDED);
+  return error instanceof SessionFailure || isEngineTrap(error);
 }
 
 function classify(error: unknown): SessionFailure {

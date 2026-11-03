@@ -68,6 +68,11 @@ pub(crate) fn set_budget(bytes: usize) {
     });
 }
 
+/// The calling thread's live engine bytes.
+pub(crate) fn live() -> usize {
+    COUNTERS.try_with(|counters| counters.live.get()).unwrap_or(0)
+}
+
 /// The size of the allocation that took the calling thread past its budget, once.
 pub(crate) fn take_failed() -> usize {
     COUNTERS

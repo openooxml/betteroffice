@@ -38,6 +38,7 @@ import {
 } from './replay';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 import { decodeWorkbookRecovery, isCollaborativeWorkbookRecovery, restoreWorkbookCommandState, type WorkbookRecovery } from './recovery';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -357,7 +358,7 @@ export function createWorkbookSessionHost(
       } catch (error) {
         const message = `Workbook replay diverged at sequence ${envelope.sequence} (${op.method})`;
         throw new SessionFailure(
-          error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', message,
+          isEngineTrap(error) ? 'trap' : 'crash', message,
           `${message}: ${error instanceof Error ? error.message : String(error)}`
         );
       }

@@ -15,6 +15,7 @@ import {
   type WorkbookSharedCommand, type WorkbookSharedWireAck, type WorkbookWireAck,
   type CommandStatus, type WorkbookSharedOutcome,
 } from './commandProtocol';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 
 function projectionEquals(
   previous: WorkbookCommandSelection | Partial<WorkbookEditState> | undefined,
@@ -116,7 +117,7 @@ export function createWorkbookCommandHost(options: {
       try { reply = applyWorkbookCommandIntent(handle, state, intent, refusal, false, options.applyPipe); }
       catch (error) {
         failure = error instanceof SessionFailure ? error : new SessionFailure(
-          error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', 'Workbook command failed',
+          isEngineTrap(error) ? 'trap' : 'crash', 'Workbook command failed',
           error instanceof Error ? error.message : String(error));
         throw failure;
       }
