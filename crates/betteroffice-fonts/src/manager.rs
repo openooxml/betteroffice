@@ -146,7 +146,9 @@ impl FontManager {
             });
         }
         let provider = source.provider()?;
-        let packs = provider.as_ref().and_then(|provider| provider.bundled_packs());
+        let packs = provider
+            .as_ref()
+            .and_then(|provider| provider.bundled_packs());
         Ok(Self { provider, packs })
     }
 
@@ -377,8 +379,7 @@ impl BundledFonts {
                     "duplicate {pack} pack"
                 )));
             }
-            if directory.as_os_str().is_empty() || directory.to_string_lossy().contains("://")
-            {
+            if directory.as_os_str().is_empty() || directory.to_string_lossy().contains("://") {
                 return Err(FontError::InvalidFontOptions(
                     "pack directory must be a local directory".into(),
                 ));
@@ -440,7 +441,9 @@ impl BundledFonts {
             .ok_or_else(|| {
                 FontError::InvalidFontOptions("face is outside the bundled catalog".into())
             })?;
-        Ok(load_decoded(&self.options, &self.directories, known)?.font.clone())
+        Ok(load_decoded(&self.options, &self.directories, known)?
+            .font
+            .clone())
     }
 
     fn handle(&self, face: &'static BundledFontFace) -> FontFaceHandle {

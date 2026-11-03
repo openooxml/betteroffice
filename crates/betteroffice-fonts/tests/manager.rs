@@ -109,14 +109,21 @@ fn provider_managers_offer_only_faces_of_found_packs() {
     let manager =
         FontManager::new(&FontSource::Provider(Arc::new(none)), FontLoading::OnDemand).unwrap();
     for (family, scripts) in [("Calibri", vec![]), ("MS Mincho", vec!["Hani".to_string()])] {
-        assert!(manager.resolve(family, false, false, &scripts, LastResortOffice::Word).is_empty());
+        assert!(
+            manager
+                .resolve(family, false, false, &scripts, LastResortOffice::Word)
+                .is_empty()
+        );
     }
     let root = tempfile::tempdir().unwrap();
     deploy_flat(root.path());
     let latin =
         BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();
-    let manager =
-        FontManager::new(&FontSource::Provider(Arc::new(latin)), FontLoading::OnDemand).unwrap();
+    let manager = FontManager::new(
+        &FontSource::Provider(Arc::new(latin)),
+        FontLoading::OnDemand,
+    )
+    .unwrap();
     for family in ["Calibri", "MS Mincho", "Unknown Family"] {
         let faces = manager.resolve(
             family,
@@ -171,12 +178,12 @@ fn flat_pack_directories_do_not_share_cached_bytes() {
     deploy_flat(first.path());
     deploy_flat(second.path());
     let face = resolve_metric_compat_face("Calibri", false, false).unwrap();
-    let provider = BundledFonts::from_pack_directories(vec![(FontPack::Latin, first.path().into())])
-        .unwrap();
+    let provider =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, first.path().into())]).unwrap();
     assert!(provider.load_face(face).is_ok());
     std::fs::write(second.path().join(&face.file), [0]).unwrap();
-    let corrupt = BundledFonts::from_pack_directories(vec![(FontPack::Latin, second.path().into())])
-        .unwrap();
+    let corrupt =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, second.path().into())]).unwrap();
     assert!(matches!(
         corrupt.load_face(face),
         Err(FontError::InvalidFontData(_))
