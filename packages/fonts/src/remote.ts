@@ -204,8 +204,10 @@ export function unicodeRangeIncludes(range: string | null, point: number): boole
 /**
  * The provider's slices of the look-alike for an Office `family` in `face`, or in its regular face
  * when the look-alike lacks that weight or style. With `options.text`, only the slices covering one
- * of its characters; without it, every slice, or none for a face in more than 12 slices. Empty when
- * the table has no look-alike or the provider is off. Fetch their bytes with `fetchRemoteFontSlices`.
+ * of its characters, or none when the face comes in several files some of which name no
+ * `unicode-range` (their characters are unknown, as in Bunny's CJK stylesheets); without it, every
+ * slice, or none for a face in more than 12 slices. Empty when the table has no look-alike or the
+ * provider is off. Fetch their bytes with `fetchRemoteFontSlices`.
  */
 export async function remoteFontSlices(
   family: string, face: RemoteFaceRequest, options: RemoteFontLoadOptions = {},
@@ -222,6 +224,7 @@ export async function remoteFontSlices(
   }
   options.signal?.throwIfAborted();
   if (options.text === undefined) return rules.length > MAX_FACES ? [] : rules;
+  if (rules.length > 1 && rules.some((rule) => rule.unicodeRange === null)) return [];
   const points = new Set<number>();
   for (const character of options.text) points.add(character.codePointAt(0)!);
   return rules.filter((rule) => {

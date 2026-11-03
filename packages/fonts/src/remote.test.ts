@@ -547,6 +547,15 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a face whose files do not all name their characters is not loaded by text', async () => {
+    const css = ['U+0000-00FF', null, null].map((range, index) => `@font-face { font-family: 'Noto Sans SC'; font-style: normal; font-weight: 400; src: url(https://fonts.bunny.net/sc/${index}.woff2) format('woff2');${range ? ` unicode-range: ${range};` : ''} }`).join('\n');
+    const fetch = mock(async () => new Response(css));
+    const options = { fetch: fetch as unknown as typeof globalThis.fetch, provider: { cssUrl: 'https://fonts.example.com/rangeless/css' } };
+    expect(await remoteFontSlices('SimHei', { weight: 400, style: 'normal' }, { ...options, text: 'A中' })).toEqual([]);
+    expect(await remoteFontSlices('SimHei', { weight: 400, style: 'normal' }, options)).toHaveLength(3);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('slices sharing a file but not a range register separately', async () => {
     const original = globalThis.FontFace;
     globalThis.FontFace = class { constructor(readonly family: string, readonly source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}

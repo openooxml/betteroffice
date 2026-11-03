@@ -53,9 +53,11 @@ fetches only the files covering the characters it paints, and fetches another fi
 typed or shown characters need it. The requests carry the look-alike's family name, the requested
 weight and style and the chosen files, plus what every browser request carries (IP address, user
 agent); no document text is sent, though the files requested show which character ranges the shown
-text uses. Chinese, Japanese and Korean look-alikes come in about a hundred such files, so those
-ranges are finer; install `@betteroffice/fonts-cjk` to keep those families local. A family installed
-on the viewer's machine is used directly and never fetched.
+text uses. Bunny's stylesheets for the Chinese, Japanese and Korean look-alikes leave the range of
+most of their files unnamed, so those families are not fetched from Bunny; Google's name every
+range, and with `'google'` only the touched files are fetched. Install `@betteroffice/fonts-cjk` to
+keep those families local. A family installed on the viewer's machine is used directly and never
+fetched.
 
 A fetched face is used for both measuring and painting, so layout always matches what is drawn.
 The spreadsheet editor measures and paints text in the browser and uses fetched faces today. The
