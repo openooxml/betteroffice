@@ -45,7 +45,7 @@ Both engines bound their input the same way. A package is refused above 512 MiB 
 
 The budget counts live engine allocations, not process memory, and allocations are checked as the
 engine works, so process memory can exceed it: in a measurement with the budget lowered to 1 GiB,
-opening a 1,000,000-row workbook peaked about 36% above the budget, from allocator overhead and the
+opening a 1,000,000-row workbook peaked about 40% above the budget, from allocator overhead and the
 JavaScript side. When you open
 documents from untrusted sources with this package on a server, set the container or cgroup memory
 limit above the budget of every thread that opens documents, with headroom for that overshoot, or

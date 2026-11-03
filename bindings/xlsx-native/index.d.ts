@@ -110,6 +110,8 @@ export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: 
 
 export declare function displayListCellLimit(): number
 
+export declare function engineHeapLiveBytes(): number
+
 export declare function engineVersion(): string
 
 export declare function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdownOptions: string): string
