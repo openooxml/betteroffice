@@ -218,20 +218,21 @@ test('a collected handle with a decode in flight does not stop the worker for a 
   const source = new Uint8Array([3, 1, 4]);
   const first = h.client.preparePresentationFontDecoder(source);
   const pending = first.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
-  const second = h.client.preparePresentationFontDecoder(source);
+  let next: ReturnType<typeof h.client.preparePresentationFontDecoder> | undefined;
   try {
-    expect(cleanups).toHaveLength(2);
+    expect(cleanups).toHaveLength(1);
     const entry = cleanups[0]!;
     entry.cleanup(entry.held);
-    const third = h.client.preparePresentationFontDecoder(source);
-    second.release();
+    expect(h.workers[0]!.terminated).toBe(false);
+    next = h.client.preparePresentationFontDecoder(source);
+    expect(h.workers).toHaveLength(1);
     releaseCompile();
     expect(new Uint8Array((await pending).font)).toEqual(new Uint8Array([0, 1, 0, 0]));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(h.workers[0]!.terminated).toBe(false);
-    expect(new Uint8Array((await third.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).font))
+    expect(new Uint8Array((await next.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).font))
       .toEqual(new Uint8Array([0, 1, 0, 0]));
-    third.release();
+    next.release();
     expect(h.workers[0]!.terminated).toBe(true);
-  } finally { second.release(); releaseCompile(); h.workers[0]?.terminate(); }
+  } finally { next?.release(); releaseCompile(); h.workers[0]?.terminate(); }
 });
