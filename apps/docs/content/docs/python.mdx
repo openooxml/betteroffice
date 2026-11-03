@@ -51,9 +51,13 @@ remain distinct from text values such as the string `"#DIV/0!"`.
 ## Render a sheet
 
 ```python
-png = wb.render_png("Sheet1", scale=2.0, range="A1:H40")
+png = wb.render_png({"sheet": "Sheet1", "range": "A1:H40"}, scale=2.0)
 png.write("preview.png")
 ```
+
+The target takes a sheet name or index, with an A1 `range` or a `viewport`;
+`max_width` and `max_height` cap the output. `render_sheet("Sheet1")` frames the
+sheet's used range.
 
 Spreadsheet rendering uses the bundled fonts. Opening, recalculating,
 rendering, and saving release the GIL, allowing these operations to run across
@@ -128,8 +132,9 @@ paragraphs, tables, and sections, edits plain single-run paragraphs, and saves
 DOCX files while preserving unsupported package content.
 
 `layout` paginates an input containing measured blocks and layout options.
-`render_png` renders a page from that layout with the bundled fonts and any
-registered with `register_font`.
+`render_png({"page": 0})` lays the document out and renders a page with the bundled
+fonts and any registered with `register_font`; `render_display_list_png` renders a
+page from an existing layout.
 
 `export_structured` returns anchored content in the shared camelCase schema;
 `export_markdown` renders Markdown:
@@ -166,7 +171,8 @@ the JavaScript package's `compareDocx` offers it.
 
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,
 edits shapes and text, and saves `.pptx` files. `render_slide` returns a display
-list; `render_png` produces PNG bytes and reads embedded images from the file.
+list; `render_png({"slide": 0})` produces PNG bytes, taking a slide index or ID, and
+reads embedded images from the file.
 Rendering uses the bundled fonts; `register_font` adds or replaces a family.
 
 A `Presentation` must be used and released on the thread that opened it.
