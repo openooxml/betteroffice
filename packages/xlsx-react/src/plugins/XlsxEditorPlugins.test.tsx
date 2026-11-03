@@ -2676,4 +2676,45 @@ describe('XlsxEditor plugin adapters', () => {
     place(1);
     expect(query(...point)).not.toBeNull();
   });
+  editorTest('superseded contexts answer no geometry queries', async () => {
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugin = (revision: number) =>
+      defineXlsxPlugin<null>({
+        id: 'acme.point',
+        revision,
+        createState: () => null,
+        onEvent(context) {
+          contexts.push(context);
+        },
+      });
+    const { api, view, rerender } = await mount({ plugins: [plugin(1)], file: charted });
+    await until(() => last(contexts)?.geometry?.layout.zoom === 1);
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, VIEWPORT.width, VIEWPORT.height);
+    const retained = last(contexts);
+    const geometry = retained.geometry!;
+    const grid = api().handle.displayList(geometry.layout.viewport).grid!;
+    const row = grid.rowIndices?.[3] ?? grid.startRow + 3;
+    const col = grid.colIndices?.[0] ?? grid.startCol;
+    const rect = cellRect(grid, row, col)!;
+    const point = [40 + rect.x + rect.w / 2, 60 + rect.y + rect.h / 2] as const;
+    const target = { sheetId: 'sheet:0', row, col };
+    const range = { sheetId: 'sheet:0', range: { top: row, left: col, bottom: row, right: col } };
+    expect(geometry.getPositionAtPoint!(...point)).toMatchObject({ row, col });
+    expect(geometry.getCellRect(target)).not.toBeNull();
+    expect(geometry.getRangeRect(range)).not.toBeNull();
+
+    const duringCleanup: unknown[] = [];
+    retained.onCleanup(() => {
+      duringCleanup.push([geometry.getPositionAtPoint!(...point), geometry.getCellRect(target)]);
+    });
+    rerender({ plugins: [plugin(2)], file: charted });
+    await until(() => retained.lifetimeSignal.aborted && duringCleanup.length === 1);
+    expect(duringCleanup).toEqual([[null, null]]);
+    expect(geometry.getPositionAtPoint!(...point)).toBeNull();
+    expect(geometry.getCellRect(target)).toBeNull();
+    expect(geometry.getRangeRect(range)).toBeNull();
+    await until(() => last(contexts) !== retained && last(contexts).geometry !== null);
+    expect(last(contexts).geometry!.getPositionAtPoint!(...point)).toMatchObject({ row, col });
+  });
 });

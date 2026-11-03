@@ -206,12 +206,12 @@ export function createXlsxPluginHost(
       read: clients.read,
       commands: clients.commands,
       edits: clients.edits,
-      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? 'identity' in access ? {
+      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? {
         layout: geometry.layout,
         getCellRect: (target) => invocation.refusal() ? null : geometry.getCellRect(target),
         getRangeRect: (target) => invocation.refusal() ? null : geometry.getRangeRect(target),
         getPositionAtPoint: point && ((clientX, clientY) => invocation.refusal() ? null : point(clientX, clientY)),
-      } : geometry : null,
+      } : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),
