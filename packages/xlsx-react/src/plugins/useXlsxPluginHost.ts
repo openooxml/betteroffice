@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -20,9 +21,17 @@ import {
   type XlsxPluginHost,
 } from './createXlsxPluginHost';
 import { createPluginGeometry, pluginLayout, type PaintedGrid } from './geometry';
+import { rowDecorationIndex, type RowDecorationSet, type RowGutterIndex } from './rowDecorations';
 import type { XlsxEditorPluginProps, XlsxPluginGeometry, XlsxPluginSelection } from './types';
 
 const NO_ACTIVATIONS: readonly XlsxPluginActivation[] = Object.freeze([]);
+const NO_DECORATIONS: readonly RowDecorationSet[] = Object.freeze([]);
+
+/** The frame the canvas shows, for chrome that follows every paint. */
+export interface PaintedGridStore {
+  get(): PaintedGrid | null;
+  subscribe(listener: () => void): () => void;
+}
 
 export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
   createClients?: typeof createPluginClients;
@@ -55,6 +64,9 @@ export interface XlsxPluginHostBinding {
    * in the same step, so retained geometry of an earlier frame refuses at once.
    */
   presentGrid(painted: PaintedGrid | null): void;
+  /** Current row decorations of the active sheet by row, or null when the gutter is hidden. */
+  rowGutter: RowGutterIndex | null;
+  painted: PaintedGridStore;
 }
 
 function proposalSignature(options: UseXlsxPluginHostOptions, version: string): string {
@@ -69,6 +81,19 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   const geometryRef = useRef<XlsxPluginGeometry | null>(null);
   const paintedRef = useRef<PaintedGrid | null>(null);
   const layerRef = useRef<HTMLDivElement | null>(null);
+  const [paintedStore] = useState(() => {
+    const listeners = new Set<() => void>();
+    return {
+      get: () => paintedRef.current,
+      subscribe(listener: () => void) {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+      emit() {
+        for (const listener of [...listeners]) listener();
+      },
+    };
+  });
 
   const [host] = useState(() =>
     createXlsxPluginHost({
@@ -160,6 +185,11 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   }, [host, options.handle, proposalState]);
 
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
+  const decorations = managed && activations.length ? host.rowDecorations() : NO_DECORATIONS;
+  const activeSheetId = options.selection?.sheetId ?? null;
+  const t = options.t;
+  const rowGutter = useMemo(() => rowDecorationIndex(decorations, activeSheetId,
+    (row) => t('a11y.rowHeaderLabel', { row: row + 1 })), [decorations, activeSheetId, t]);
 
   useEffect(() => {
     if (managed) host.selectionChanged(options.selection);
@@ -170,11 +200,12 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   }, [managed, publish]);
 
   const presentGrid = useCallback(
-    (painted: PaintedGrid | null) => {
-      paintedRef.current = painted;
-      if (!painted || (latest.current.plugins?.length ?? 0) > 0) publish();
+    (next: PaintedGrid | null) => {
+      paintedRef.current = next;
+      if (!next || (latest.current.plugins?.length ?? 0) > 0) publish();
+      paintedStore.emit();
     },
-    [publish]
+    [paintedStore, publish]
   );
 
   const overlayLayerRef = useCallback(
@@ -197,5 +228,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     overlayLayerRef,
     beginLoad,
     presentGrid,
+    rowGutter,
+    painted: paintedStore,
   };
 }

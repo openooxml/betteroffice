@@ -194,6 +194,7 @@
     "toolbarGroup": "プラグイン",
     "panelTabs": "プラグイン パネル",
     "collapsePanel": "{title} を折りたたむ",
-    "expandPanel": "{title} を展開する"
+    "expandPanel": "{title} を展開する",
+    "rowGutter": "プラグインの行マーカー"
   }
 }
