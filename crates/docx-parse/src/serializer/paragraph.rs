@@ -438,12 +438,12 @@ fn field_runs(node: &InlineNode) -> Vec<&Run> {
     }
 }
 
-fn field_run_text_length(run: &Run) -> usize {
+fn field_run_length(run: &Run) -> usize {
     run.content
         .iter()
         .map(|content| match content {
             RunContent::Text { text, .. } => text.encode_utf16().count(),
-            _ => 0,
+            _ => 1,
         })
         .sum()
 }
@@ -470,11 +470,7 @@ fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
             bookmarks.push((offset, node));
         } else {
             for run in field_runs(node) {
-                offset = offset.saturating_add(if in_place {
-                    1
-                } else {
-                    field_run_text_length(run)
-                });
+                offset = offset.saturating_add(if in_place { 1 } else { field_run_length(run) });
             }
         }
     }
@@ -485,7 +481,7 @@ fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
     let mut total = 0usize;
     boundaries.push(total);
     for run in &field.field_result {
-        total = total.saturating_add(field_run_text_length(run));
+        total = total.saturating_add(field_run_length(run));
         boundaries.push(total);
     }
     for (offset, node) in &mut bookmarks {

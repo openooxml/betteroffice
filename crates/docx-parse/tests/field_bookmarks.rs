@@ -512,3 +512,17 @@ fn mid_run_bookmark_offsets_widen_to_whole_result_runs() {
     );
     assert_order(&xml, &[START, "<w:r><w:t>Heading text</w:t></w:r>", STOP]);
 }
+
+#[test]
+fn restyled_tab_result_keeps_its_enclosing_bookmark() {
+    let result = format!("{START}<w:r><w:tab/></w:r>{STOP}");
+    let xml = rewritten_field_result(
+        &result,
+        json!([{"type": "run", "formatting": {"bold": true}, "content": [{"type": "tab"}]}]),
+        "",
+    );
+    assert_order(
+        &xml,
+        &[START, "<w:r><w:rPr><w:b/></w:rPr><w:tab/></w:r>", STOP],
+    );
+}
