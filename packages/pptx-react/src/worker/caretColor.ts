@@ -58,20 +58,23 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
       fill = fillAt(primitive.primitives, transforms, x, y, fill);
       continue;
     }
-    if (primitive.kind !== 'shape') continue;
-    const paint = fillOf(primitive.fill);
-    if (!paint) continue;
+    if (primitive.kind !== 'shape' && primitive.kind !== 'image') continue;
+    const paint = primitive.kind === 'shape' ? fillOf(primitive.fill) : null;
+    if (primitive.kind === 'shape' && !paint) continue;
     const box = transformedRect(transforms, { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h });
-    if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) fill = paint;
+    if (!(x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height)) continue;
+    const exact = primitive.kind === 'shape' && primitive.geometry === 'rect' &&
+      transforms.every(({ transform }) => !transform?.rotationDeg && !transform?.flipH && !transform?.flipV);
+    fill = paint && exact ? paint : { color: paint?.color ?? fill.color, solid: false };
   }
   return fill;
 }
 
 /**
  * Caret colours at a slide-space caret rect: the fill under the caret, and the
- * colour of the run the caret sits in as long as it reads against a solid fill
- * (a gradient varies under the caret, so the run colour is trusted there);
- * else black or white by the fill.
+ * colour of the run the caret sits in as long as it reads against a known
+ * solid fill; else black or white by the fill. Over a gradient, an image or a
+ * shape whose painted area is not its box, the run colour is trusted.
  */
 export function pptxCaretColors(list: SlideDisplayList | null | undefined, line: PositionedTextLine | null | undefined,
   position: number | null | undefined, caret: CommandRect | null | undefined): { color: string; background: string } {

@@ -58,3 +58,14 @@ test('a gradient fill trusts the run colour, wherever the caret sits on it', () 
   expect(pptxCaretColors(slide([box]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret)).toEqual({ color: '#ffffff', background: '#000000' });
   expect(pptxCaretColors(slide([], gradient), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff' });
 });
+
+test('rotated or non-rectangular shapes and images make the fill unknown, so the run colour is trusted', () => {
+  const dark = { kind: 'solid', color: '#000000' } satisfies Paint;
+  const rotated = { ...shape('#ffffff'), transform: { rotationDeg: 45 } } as SlidePrimitive;
+  expect(pptxCaretColors(slide([rotated], dark), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).color).toBe('#ffffff');
+  const ellipse = { ...shape('#ffffff'), geometry: 'ellipse' } as SlidePrimitive;
+  expect(pptxCaretColors(slide([ellipse], dark), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).color).toBe('#ffffff');
+  const image = { kind: 'image', objectId: 3, x: 100, y: 80, w: 300, h: 80 } as SlidePrimitive;
+  expect(pptxCaretColors(slide([image]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).color).toBe('#ffffff');
+  expect(pptxCaretColors(slide([shape('#ffffff')], dark), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).color).toBe('#000000');
+});
