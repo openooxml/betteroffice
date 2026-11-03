@@ -5,7 +5,7 @@ import { fetchAsset } from './asset-cache.mjs';
 import { CHANNELS, TRIALS, digest } from './docx-benchmark.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const METHOD = 'xlsx-uncached-recalculation-v1';
 export const ABS_TOLERANCE = 1e-9;
@@ -130,7 +130,7 @@ export async function stageXlsx(planPath, shard, output, cacheDir) {
     const root = resolve(output, sample.id);
     await mkdir(root, { recursive: true });
     for (const [asset, name] of [[sample.metadata.source, 'source.xlsx'], [sample.metadata.calculation.reference, 'expected.json'], [sample.metadata.calculation.input, 'input.xlsx']]) {
-      await writeFile(resolve(root, name), await fetchAsset(asset, sample.id, download, { cacheDir, origin: CORPUS_ORIGIN, maximum: 64 * 1024 * 1024 }));
+      await writeFile(resolve(root, name), await fetchAsset(asset, sample.id, download, { cacheDir, origin: corpusOrigin(), maximum: 64 * 1024 * 1024 }));
     }
     console.log(`XLSX shard ${shard}: staged ${sample.id}`);
   });

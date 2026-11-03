@@ -1,5 +1,20 @@
 use super::{EditSessionCore, EngineError, EngineResult};
 
+#[cfg(test)]
+#[path = "../../tests/support/base_latin_coverage.rs"]
+mod coverage_fixture;
+
+#[cfg(test)]
+#[test]
+fn base_latin_misses_follow_transformed_text_and_font_chains() {
+    let core = EditSessionCore::new(9670, super::Host::deterministic());
+    coverage_fixture::check(
+        |bytes| core.register_measure_font(bytes).unwrap(),
+        |input| core.measure_paragraph_json(input).is_ok(),
+        || core.take_base_latin_miss(),
+    );
+}
+
 impl EditSessionCore {
     /// Registers raw sfnt bytes in this session's resident measurement store
     /// and returns the font id that measurement and display inputs reference.
@@ -40,6 +55,11 @@ impl EditSessionCore {
 
     pub fn decode_font(&self, bytes: &[u8]) -> EngineResult<Vec<u8>> {
         crate::decode_resident_font(bytes).map_err(EngineError::message)
+    }
+
+    pub fn take_base_latin_miss(&self) -> bool {
+        let _fonts = self.fonts.enter();
+        docx_layout::take_base_latin_miss()
     }
 
     /// Drops every registered measurement font (ids restart at zero) and

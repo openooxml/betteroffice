@@ -14,6 +14,7 @@ export declare class EditSession {
   register_measure_font(bytes: Uint8Array): number
   update_measure_font_outlines(fontId: number, bytes: Uint8Array): void
   decode_font(bytes: Uint8Array): Uint8Array
+  take_base_latin_miss(): boolean
   register_substitute_measure_font(base: number, requestedFamily: string): number
   clear_measure_fonts(): void
   measure_paragraph_json(input: string): string
@@ -154,6 +155,7 @@ export declare class EditSession {
   paragraph_id_count(story: string, paraId: string): number
   paragraph_identities(): string
   prime_save_seed_states(paragraphs: number, inflated: number): boolean
+  prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
   paragraph_save_plan(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number

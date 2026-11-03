@@ -343,6 +343,7 @@ describe('docx native engine parity', () => {
       expectPlainBytes(decoded);
       expect(decoded).toEqual(expected.decode_font(fontBytes));
       expect(decoded).toEqual(fontBytes);
+      expect(actual.take_base_latin_miss()).toBe(expected.take_base_latin_miss());
       const echo = actual.echo_glyph_set_json(font, 11, true, 'Ab!');
       expect(echo).toBe(expected.echo_glyph_set_json(font, 11, true, 'Ab!'));
       const glyph = JSON.parse(echo).glyphIds[0] as number;
@@ -895,6 +896,28 @@ describe('docx native engine parity', () => {
       for (const [paragraphs, inflated] of [[0, 0], [1, 0], [1_000, 64 * 1024 * 1024]]) {
         expect(actual.prime_save_seed_states(paragraphs, inflated))
           .toBe(expected.prime_save_seed_states(paragraphs, inflated));
+      }
+      expect(read(actual)).toEqual(read(expected));
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
+  test('prime_save_seed_states_slice answers each slice as wasm does', () => {
+    const expected = new wasm.EditSession(63);
+    const actual = new native.EditSession(63);
+    try {
+      expected.seed_from_docx(fixture, 'opening');
+      actual.seed_from_docx(fixture, 'opening');
+      for (const [paragraphs, inflated, bytes] of [[0, 0, 1], [1_000, 64 * 1024 * 1024, 1], [1_000, 64 * 1024 * 1024, 1]]) {
+        expect(actual.prime_save_seed_states_slice(paragraphs, inflated, bytes))
+          .toBe(expected.prime_save_seed_states_slice(paragraphs, inflated, bytes));
+      }
+      let answer = 1;
+      for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+        answer = expected.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64);
+        expect(actual.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64)).toBe(answer);
       }
       expect(read(actual)).toEqual(read(expected));
     } finally {

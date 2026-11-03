@@ -868,6 +868,11 @@ export class EditSession {
      * inflated package budgets.
      */
     prime_save_seed_states(paragraphs: number, inflated: number): boolean;
+    /**
+     * One slice of [`Self::prime_save_seed_states`], digesting about `max_bytes` bytes of the
+     * stories: 0 once the states are known, 1 when more slices are needed, 2 when declined.
+     */
+    prime_save_seed_states_slice(paragraphs: number, inflated: number, max_bytes: number): number;
     proposal_revision_ranges_json(ids_json: string): string;
     /**
      * Versioned paragraph texts:
@@ -1334,6 +1339,7 @@ export class EditSession {
      * table. Errors on an unknown story.
      */
     table_payload(story: string, table_index: number): string | undefined;
+    take_base_latin_miss(): boolean;
     /**
      * Applies one run mark over `[start, end)`. `mark_json`:
      * `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
@@ -1901,6 +1907,7 @@ export interface InitOutput {
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
     readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
+    readonly editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1981,6 +1988,7 @@ export interface InitOutput {
     readonly editsession_story_segment_units: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_take_base_latin_miss: (a: number) => number;
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;

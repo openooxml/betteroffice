@@ -187,6 +187,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     getPositionAtPoint: (x, y) => apiBridgeRef.current?.getPositionAtPoint?.(x, y) ?? null,
     coordinator: () => coordinatorRef.current,
     readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false,
     clearSelection: () => apiBridgeRef.current?.clearSelection(),
     focus,
     refreshProposals: () => apiBridgeRef.current?.refreshProposals(),
@@ -678,7 +679,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (!painted || painted.request.generation !== runRef.current?.generation) return null;
       return positionAtPoint(painted.displayList, painted.request.sheet, canvasRef.current, x, y);
     },
-    coordinator: () => coordinator, readOnly: () => propsRef.current.readOnly ?? false, focus,
+    coordinator: () => coordinator, readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false, focus,
     clearSelection: () => {
       coordinator.settle(); setEditing(null); setFormulaDraft(null); setSelection(null); setSelectedChart(null);
       setCapturedFormat(null); commands.refresh();
@@ -708,7 +710,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [run, active, selection, selectedChart]);
   const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
-    selection: pluginSelection, canvasRef, t });
+    selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t });
   const presentGridRef = useRef(pluginHost.presentGrid);
   presentGridRef.current = pluginHost.presentGrid;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
@@ -1570,7 +1572,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     requestSave,
     peer: () => run?.peer ?? null, editPeer: () => run?.editPeer ?? null,
     status: () => run?.ready ? 'ready' : run && !run.failure || loading ? 'loading' : 'empty',
-    readOnly: () => propsRef.current.readOnly ?? false, collaborative: () => false,
+    readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false, collaborative: () => false,
     mutation: () => mutationRef.current, generation: () => run?.generation ?? 0,
     view: () => ({ sheet: activeRef.current, selection: selectionRef.current, chartSelected: chartRef.current !== null,
       zoom: zoomRef.current, capturedFormat: capturedFormatRef.current, borderStyle: borderStyleRef.current,
@@ -1751,7 +1754,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       {isProposalsAvailable() && <ToolbarCommandButton id="proposalsPanel" />}
     </div>
   </EditorToolbar>;
-  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? props.readOnly ? null : defaultToolbar : props.toolbar;
+  const reviewToolbar = props.allowHostProposals && isProposalsAvailable() ? <ToolbarCommandButton id="proposalsPanel" /> : null;
+  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? props.readOnly ? reviewToolbar : defaultToolbar : props.toolbar;
   const renderDock = (placement: DockPlacement) => pluginHost.managed ? <PluginDock host={pluginHost.host}
     placement={placement} activations={pluginHost.activations.filter((activation) => activation.plugin.panel?.placement === placement)}
     available={dockArea} /> : null;

@@ -97,6 +97,7 @@ pub struct ParseBudget<'a> {
     media_error: Option<String>,
     group_text_box_bytes: usize,
     group_text_box_depth: usize,
+    paragraph_runs: Vec<Option<usize>>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -120,6 +121,7 @@ impl<'a> ParseBudget<'a> {
             media_error: None,
             group_text_box_bytes: 0,
             group_text_box_depth: 0,
+            paragraph_runs: Vec::new(),
         }
     }
 
@@ -198,6 +200,16 @@ impl<'a> ParseBudget<'a> {
         let within = serde_json::to_writer(&mut meter, value).is_ok();
         self.group_text_box_bytes = if within { meter.used } else { limit };
         within
+    }
+
+    /// Records, for each `w:r` of the paragraph just parsed, the index of the run it became in
+    /// the paragraph content, or `None` when a field absorbed it.
+    pub(crate) fn record_paragraph_runs(&mut self, runs: Vec<Option<usize>>) {
+        self.paragraph_runs = runs;
+    }
+
+    pub(crate) fn take_paragraph_runs(&mut self) -> Vec<Option<usize>> {
+        std::mem::take(&mut self.paragraph_runs)
     }
 
     /// XML events charged so far.

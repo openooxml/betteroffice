@@ -26,6 +26,7 @@ export interface WorkerPaintResult extends WorkerFramePaint {
   geometry: GridMeta | undefined;
   sequence: number;
   coversThroughSeq?: number;
+  provisional?: true;
 }
 
 export type WorkerPaintTransaction = (painted: WorkerPaintResult, publish: () => void) => void;
@@ -143,6 +144,17 @@ export class PeerlessWorkerPaintSource {
     }
   }
 
+  installProvisional(paint: WorkerFramePaint, request: WorkerPaintRequest): boolean {
+    if (!this.current || this.failed || !sameRequest(this.capture(), request)) return false;
+    try {
+      this.publish('worker', snapshot(request), paint, this.lastPaint?.sequence ?? 0, undefined, true);
+      return true;
+    } catch (error) {
+      this.fail(error);
+      return false;
+    }
+  }
+
   queuePipeFrame(frame: WorkbookCommandFrame, request: WorkerPaintRequest): boolean {
     if (!this.accepts(frame, request)) return false;
     if (!this.pipeFrame || frame.coversThroughSeq > this.pipeFrame.frame.coversThroughSeq ||
@@ -159,7 +171,8 @@ export class PeerlessWorkerPaintSource {
   }
 
   advanceCoverage(version: string, coversThroughSeq: number): boolean {
-    if (!this.current || this.failed || this.pipeFrame || !this.lastPaint || this.paintedRevision !== this.revision || this.lastPaint.version !== version ||
+    if (!this.current || this.failed || this.pipeFrame || !this.lastPaint || this.lastPaint.provisional ||
+      this.paintedRevision !== this.revision || this.lastPaint.version !== version ||
       !sameRequest(this.capture(), this.lastPaint.request, false) || !Number.isSafeInteger(coversThroughSeq) ||
       coversThroughSeq < this.commandCoverage) return false;
     if (coversThroughSeq > this.commandCoverage) {
@@ -255,17 +268,18 @@ export class PeerlessWorkerPaintSource {
 
   private publish(
     source: WorkerPaintResult['source'], request: WorkerPaintRequest,
-    paint: WorkerFramePaint, sequence: number, coversThroughSeq?: number
+    paint: WorkerFramePaint, sequence: number, coversThroughSeq?: number, provisional = false
   ): WorkerPaintResult {
     const painted: WorkerPaintResult = {
       ...paint, source, request, sequence, geometry: paint.displayList.grid,
       ...(coversThroughSeq === undefined ? {} : { coversThroughSeq }),
+      ...(provisional ? { provisional: true as const } : {}),
     };
     const previous = this.lastPaint;
     const previousSequence = this.lastFrameSequence;
     const previousCoverage = this.commandCoverage;
     this.lastPaint = painted;
-    this.lastFrameSequence = Math.max(this.lastFrameSequence, sequence);
+    if (!provisional) this.lastFrameSequence = Math.max(this.lastFrameSequence, sequence);
     if (coversThroughSeq !== undefined) this.commandCoverage = coversThroughSeq;
     try {
       let publish = () => { this.options.publish(painted); };
@@ -282,7 +296,7 @@ export class PeerlessWorkerPaintSource {
       }
       throw error;
     }
-    this.paintedRevision = this.revision;
+    if (!provisional) this.paintedRevision = this.revision;
     if (this.pipeFrame && coversThroughSeq !== undefined &&
       coversThroughSeq >= this.pipeFrame.frame.coversThroughSeq) this.cancelPipeFrame();
     this.options.onInstalled?.(painted);

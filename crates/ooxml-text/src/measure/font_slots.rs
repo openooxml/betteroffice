@@ -61,6 +61,18 @@ pub(super) fn char_slot(
     }
 }
 
+pub fn font_slot_characters(
+    text: &str,
+    complex_script: bool,
+    east_asia_hint: bool,
+) -> impl Iterator<Item = (char, usize)> + '_ {
+    let mut previous = FontSlot::HAnsi;
+    text.chars().map(move |ch| {
+        previous = char_slot(ch, complex_script, east_asia_hint, previous);
+        (ch, previous.index())
+    })
+}
+
 /// Whether measuring a text run takes faces from its East Asian or its
 /// complex-script `w:rFonts` slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

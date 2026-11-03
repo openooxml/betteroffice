@@ -252,10 +252,13 @@ export type ResidentEngineSession = Pick<
   /** With `initialUpdate`, the shared state replaces the package's stories. */
   openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array; state?: Uint8Array }): string;
   decodeFont(bytes: Uint8Array): Uint8Array;
+  takeBaseLatinMiss?(): boolean;
   openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
   /** Caches save seed states while unchanged, within a paragraph and inflated package budget. */
   primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
+  /** One slice of {@link primeSaveSeedStates} digesting about `maxBytes` bytes: 0 known, 1 more to do, 2 declined. */
+  primeSaveSeedStatesSlice(maxParagraphs: number, maxInflatedBytes: number, maxBytes: number): number;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
@@ -927,6 +930,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       ) as DocxContentControlsResult,
     storiesChangedSince,
     decodeFont: bytes => session.decode_font(bytes),
+    takeBaseLatinMiss: () => session.take_base_latin_miss(),
     openSourceDocx: (bytes, options) => {
       session.set_media_tokens(options.mediaTokens === true);
       const state = options.state ?? options.initialUpdate;
@@ -966,6 +970,8 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       parsedStoryRevision = syncStoryRevisions();
     },
     primeSaveSeedStates: (maxParagraphs, maxInflatedBytes) => session.prime_save_seed_states(maxParagraphs, maxInflatedBytes),
+    primeSaveSeedStatesSlice: (maxParagraphs, maxInflatedBytes, maxBytes) =>
+      session.prime_save_seed_states_slice(maxParagraphs, maxInflatedBytes, maxBytes),
     saveDocument: async (host, comments, record) => {
       if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');

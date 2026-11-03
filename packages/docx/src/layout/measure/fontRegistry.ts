@@ -1,5 +1,14 @@
-/** Builds deterministic embedded, bundled, script, and last-resort font chains. */
 import type { ProgressiveFontFace } from '@betteroffice/fonts/progressive';
+import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
+
+async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
+  try {
+    const words = (await import('./cmapCoverage')).fontCoverageWords(data);
+    return words && wordsCoverage(words);
+  } catch {
+    return undefined;
+  }
+}
 
 /** A lazy face loader with measurement and fallback options. */
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
@@ -9,6 +18,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   onlyIfPrimaryFails?: boolean;
   /** Opens a sliced face whose outlines load as they are needed. */
   progressive?: () => Promise<ProgressiveFontFace>;
+  /** @internal Precomputed base Latin coverage bits of the face. */
+  coverage?: string;
 };
 
 /** Byte sink of the wasm text engine (`crates/docx-text` FontStore). */
@@ -17,7 +28,7 @@ export interface TextEngineFontSink {
    * Register raw sfnt bytes with the engine; returns its font id.
    * Throws on unparseable bytes.
    */
-  registerFont(bytes: Uint8Array): number;
+  registerFont(bytes: Uint8Array, face?: { family: string; bold: boolean; italic: boolean }): number;
   /**
    * Register a measurement view of `id` carrying the vertical metrics and
    * advance pitch Word measures `family` with, and return its id — the
@@ -48,6 +59,8 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
  * @public
  */
 export interface BundledFontProvider {
+  /** @internal */
+  resolveBaseLatin?(bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
@@ -171,6 +184,12 @@ function evictFailedPromise<K, V>(
 }
 
 export class TextMeasureFontRegistry {
+  private coverage = new Map<number, FontCoverage>();
+  /** Ids whose coverage is a known lower bound, with the loader that yields their exact coverage. */
+  private inexact = new Map<number, () => Promise<FontCoverage | undefined>>();
+  private baseLatinResults = new Map<string, { ids: number[]; characters: Set<string>; earlier: string; failed?: Set<string> }>();
+  private readonly baseLatinSource: BundledFontProviderSource | undefined;
+  private baseLatinLoaders = new WeakMap<BundledFontLoader, BundledFontLoader>();
   private readonly sink: TextEngineFontSink;
   private readonly bundledSource: BundledFontProviderSource | undefined;
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
@@ -179,6 +198,7 @@ export class TextMeasureFontRegistry {
 
   /** Normalized family → embedded faces of the current document. */
   private facesByFamily = new Map<string, EmbeddedFaceInput[]>();
+  private appFacesByFamily = new Map<string, EmbeddedFaceInput[]>();
   /**
    * Per-face registration memo, keyed by face object identity so re-feeding
    * the same faces (or sharing one face across several chains) never
@@ -216,9 +236,14 @@ export class TextMeasureFontRegistry {
   private readonly progressive: boolean;
 
   /** `progressive` registers sliced script-fallback faces from their skeleton and core. */
-  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProviderSource; progressive?: boolean }) {
+  constructor(sink: TextEngineFontSink, opts?: {
+    bundled?: BundledFontProviderSource;
+    baseLatin?: BundledFontProviderSource;
+    progressive?: boolean;
+  }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
+    this.baseLatinSource = opts?.baseLatin;
     this.progressive = opts?.progressive === true;
   }
 
@@ -251,14 +276,18 @@ export class TextMeasureFontRegistry {
    * by object identity keep their registration. Script-fallback
    * registrations are document-independent and survive.
    */
-  setEmbeddedFaces(faces: EmbeddedFaceInput[]): void {
+  setEmbeddedFaces(faces: EmbeddedFaceInput[], appFaces: EmbeddedFaceInput[] = []): void {
+    this.baseLatinResults.clear();
     this.generation++;
     this.facesByFamily = new Map();
-    for (const face of faces) {
-      const key = familyKey(face.family);
-      const list = this.facesByFamily.get(key);
-      if (list) list.push(face);
-      else this.facesByFamily.set(key, [face]);
+    this.appFacesByFamily = new Map();
+    for (const [source, byFamily] of [[faces, this.facesByFamily], [appFaces, this.appFacesByFamily]] as const) {
+      for (const face of source) {
+        const key = familyKey(face.family);
+        const list = byFamily.get(key);
+        if (list) list.push(face);
+        else byFamily.set(key, [face]);
+      }
     }
     this.chains = new Map();
     this.chainResults = new Map();
@@ -310,6 +339,86 @@ export class TextMeasureFontRegistry {
     return resolution?.ids;
   }
 
+  coverageOf(id: number): FontCoverage | undefined {
+    return this.coverage.get(id);
+  }
+
+  /** Characters the base Latin tier settled for `key`, without those whose face failed to load. */
+  settledBaseLatinCharacters(key: string): Set<string> {
+    const result = this.baseLatinResults.get(key);
+    return new Set([...(result?.characters ?? [])].filter(character => !result?.failed?.has(character)));
+  }
+
+  getCachedBaseLatinIds(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+    characters?: readonly string[],
+    earlier?: readonly number[],
+    key = chainKey(family, bold, italic),
+  ): readonly number[] | undefined {
+    if (earlier?.length === 0 || earlier?.some(id => !this.coverage.has(id))) return [];
+    const result = this.baseLatinResults.get(key);
+    if (characters?.length) {
+      if (result && earlier !== undefined && result.earlier !== earlier.join(',')) return undefined;
+      const ids = [...(earlier ?? []), ...(result?.ids ?? [])];
+      for (const character of characters) {
+        if (result?.characters.has(character)) continue;
+        if (baseLatinCandidate(character, false) && (!baseLatinAlias(character) || symbolFamily(family)) &&
+          !ids.some(id => this.coverage.get(id)?.(character))) return undefined;
+        result?.characters.add(character);
+      }
+    }
+    return result?.ids ?? [];
+  }
+
+  async prepareBaseLatin(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+    characters: readonly string[],
+    earlier: readonly number[],
+    key = chainKey(family, bold, italic),
+  ): Promise<boolean> {
+    const generation = this.generation;
+    const aliases = symbolFamily(family);
+    const uncovered = () => earlier.length === 0 || earlier.some(id => !this.coverage.has(id)) ? [] : characters.filter((character) =>
+      baseLatinCandidate(character, false) && (!baseLatinAlias(character) || aliases) &&
+      !earlier.some((id) => this.coverage.get(id)?.(character)));
+    let missing = uncovered();
+    if (missing.length > 0 && earlier.some((id) => this.inexact.has(id))) {
+      await Promise.all(earlier.map((id) => this.exactCoverage(id)));
+      missing = uncovered();
+    }
+    const ids: number[] = [];
+    let failed: Set<string> | undefined;
+    if (missing.length > 0) {
+      try {
+        const { loadBaseLatinFaces } = await import('./baseLatinFaces');
+        await loadBaseLatinFaces({
+          bold, italic, missing, ids,
+          provider: async () => {
+            const provider = await this.bundled();
+            if (provider?.resolveBaseLatin) return provider;
+            const source = this.baseLatinSource;
+            return typeof source === 'function' ? source() : source;
+          },
+          wrapped: this.baseLatinLoaders,
+          register: (loader, face) => this.registerLoader(loader, face),
+          coverage: (id) => this.coverage.get(id),
+          candidate: baseLatinCandidate,
+        });
+      } catch {
+        failed = new Set(missing);
+        this.warnFailure(`[fontRegistry] base Latin face for "${family}" failed to load; falling back`);
+      }
+    }
+    if (generation !== this.generation) return false;
+    const previous = this.baseLatinResults.get(key)?.ids ?? [];
+    this.baseLatinResults.set(key, { ids, characters: new Set(characters), earlier: earlier.join(','), failed });
+    return previous.length !== ids.length || previous.some((id, index) => ids[index] !== id);
+  }
+
   /** Resolves unique script fallbacks in order; stable misses cache and failures retry. */
   getScriptFallbackIds(scripts: FontScript[]): Promise<number[]> {
     const unique = [...new Set(scripts)];
@@ -355,6 +464,10 @@ export class TextMeasureFontRegistry {
    * document changes.
    */
   clear(): void {
+    this.coverage.clear();
+    this.inexact.clear();
+    this.baseLatinResults.clear();
+    this.baseLatinLoaders = new WeakMap();
     this.generation++;
     this.bundledPromise = undefined;
     this.faceIds = new WeakMap();
@@ -384,11 +497,13 @@ export class TextMeasureFontRegistry {
     const ids: number[] = [];
     let retryable = false;
 
-    const face = this.pickEmbeddedFace(family, bold, italic);
-    if (face) {
-      const id = await this.registerFace(face);
-      if (id !== null) ids.push(id);
-      else retryable = true;
+    for (const byFamily of [this.facesByFamily, this.appFacesByFamily]) {
+      const face = this.pickEmbeddedFace(family, bold, italic, byFamily);
+      if (face) {
+        const id = await this.registerFace(face);
+        if (id !== null && !ids.includes(id)) ids.push(id);
+        else if (id === null) retryable = true;
+      }
     }
 
     const bundled = await this.bundled();
@@ -487,9 +602,10 @@ export class TextMeasureFontRegistry {
   private pickEmbeddedFace(
     family: string,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    byFamily: ReadonlyMap<string, EmbeddedFaceInput[]>,
   ): EmbeddedFaceInput | undefined {
-    const faces = this.facesByFamily.get(familyKey(family));
+    const faces = byFamily.get(familyKey(family));
     if (!faces) return undefined;
     const weight = bold ? 'bold' : 'normal';
     const style = italic ? 'italic' : 'normal';
@@ -509,7 +625,12 @@ export class TextMeasureFontRegistry {
     const substitute = this.sink.registerSubstituteFont;
     if (!substitute) return base;
     try {
-      return substitute.call(this.sink, base, family);
+      const id = substitute.call(this.sink, base, family);
+      const coverage = this.coverage.get(base);
+      if (coverage) this.coverage.set(id, coverage);
+      const exact = this.inexact.get(base);
+      if (exact) this.inexact.set(id, exact);
+      return id;
     } catch (error) {
       this.warnFailure(
         `[fontRegistry] measurement view of the substitute for "${family}" failed; ` +
@@ -521,20 +642,48 @@ export class TextMeasureFontRegistry {
   }
 
   /** Register raw bytes exactly once per buffer identity (see `bufferIds`). */
-  private registerBuffer(bytes: ArrayBuffer): Promise<number> {
+  private registerBuffer(
+    bytes: ArrayBuffer,
+    face?: { family: string; bold: boolean; italic: boolean },
+    known?: BundledFontLoader,
+  ): Promise<number> {
     let pending = this.bufferIds.get(bytes);
     if (!pending) {
       const ids = this.bufferIds;
-      pending = Promise.resolve().then(() => this.sink.registerFont(new Uint8Array(bytes)));
+      pending = Promise.resolve().then(async () => {
+        const data = new Uint8Array(bytes);
+        const id = face ? this.sink.registerFont(data, face) : this.sink.registerFont(data);
+        const bits = known?.coverage;
+        const coverage = bits === undefined ? await parsedCoverage(data) : coverageFromBits(bits);
+        if (coverage) {
+          this.coverage.set(id, coverage);
+          if (bits !== undefined) {
+            let exact: Promise<FontCoverage | undefined> | undefined;
+            this.inexact.set(id, () => (exact ??= known!().then((bytes) => parsedCoverage(new Uint8Array(bytes)))));
+          }
+        }
+        return id;
+      });
       evictFailedPromise(ids, bytes, pending, () => false);
       ids.set(bytes, pending);
     }
     return pending;
   }
 
+  /** Replaces a known lower bound by the face's exact coverage. */
+  private async exactCoverage(id: number): Promise<void> {
+    const exact = this.inexact.get(id);
+    if (!exact) return;
+    let coverage: FontCoverage | undefined;
+    try { coverage = await exact(); } catch {}
+    if (this.inexact.get(id) !== exact) return;
+    this.inexact.delete(id);
+    if (coverage) this.coverage.set(id, coverage);
+  }
+
   /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
-  private registerFaceLoader(loader: () => Promise<ArrayBuffer>, label: string): Promise<number> {
-    const open = this.progressive ? (loader as BundledFontLoader).progressive : undefined;
+  private registerFaceLoader(loader: BundledFontLoader, label: string): Promise<number> {
+    const open = this.progressive ? loader.progressive : undefined;
     if (open === undefined) return this.registerLoader(loader);
     let pending = this.loaderIds.get(loader);
     if (!pending) {
@@ -549,9 +698,11 @@ export class TextMeasureFontRegistry {
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
               `${error instanceof Error ? error.message : String(error)}`
           );
-          return this.registerBuffer(await loader());
+          return this.registerBuffer(await loader(), undefined, loader);
         }
-        const id = await this.registerBuffer(face.bytes());
+        const known = loader.coverage === undefined ? undefined
+          : Object.assign(async () => face.bytes(), { coverage: loader.coverage });
+        const id = await this.registerBuffer(face.bytes(), undefined, known);
         if (generation === this.generation) this.progressiveIds.set(id, face);
         return id;
       })();
@@ -561,11 +712,11 @@ export class TextMeasureFontRegistry {
     return pending;
   }
 
-  private registerLoader(loader: () => Promise<ArrayBuffer>): Promise<number> {
+  private registerLoader(loader: BundledFontLoader, face?: { family: string; bold: boolean; italic: boolean }): Promise<number> {
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
-      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes));
+      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes, face, loader));
       evictFailedPromise(ids, loader, pending, () => false);
       ids.set(loader, pending);
     }

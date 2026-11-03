@@ -1,0 +1,136 @@
+//! Per-thread live-byte accounting for the native engine. Allocations are never refused: past the
+//! budget the thread's over-budget flag goes up, and the engine's progress checkpoints unwind the
+//! call so the session fails with an out-of-memory error, as a WebAssembly engine at its memory
+//! limit does.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+/// The largest memory a wasm32 engine can address.
+pub(crate) const DEFAULT_BUDGET: usize = 4 << 30;
+
+/// The start of the message of the error a call unwinds with once its thread is over budget.
+pub(crate) const EXCEEDED: &str = "BetterOffice engine memory budget exceeded";
+
+thread_local! {
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+    static BUDGET: Cell<usize> = const { Cell::new(DEFAULT_BUDGET) };
+    static OVER: Cell<bool> = const { Cell::new(false) };
+    static FAILED: Cell<usize> = const { Cell::new(0) };
+}
+
+struct CountingAllocator;
+
+fn grew(bytes: usize) {
+    let _ = LIVE.try_with(|live| {
+        let next = live.get().saturating_add(bytes);
+        live.set(next);
+        if next > budget() && !OVER.try_with(|over| over.replace(true)).unwrap_or(true) {
+            let _ = FAILED.try_with(|failed| failed.set(bytes.max(1)));
+        }
+    });
+}
+
+fn shrank(bytes: usize) {
+    let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(bytes)));
+}
+
+fn budget() -> usize {
+    BUDGET.try_with(Cell::get).unwrap_or(DEFAULT_BUDGET)
+}
+
+/// Whether an allocation took the calling thread past its budget since its current engine call
+/// began; later frees do not lower it.
+pub(crate) fn over_budget() -> bool {
+    OVER.try_with(Cell::get).unwrap_or(false)
+}
+
+/// Sets the calling thread's budget in bytes; 0 restores the default. A budget below the live
+/// bytes puts the thread over budget at once.
+pub(crate) fn set_budget(bytes: usize) {
+    let budget = if bytes == 0 { DEFAULT_BUDGET } else { bytes };
+    let _ = BUDGET.try_with(|slot| slot.set(budget));
+    let live = LIVE.try_with(Cell::get).unwrap_or(0);
+    let over = live > budget;
+    let _ = OVER.try_with(|slot| slot.set(over));
+    if over {
+        let _ = FAILED.try_with(|failed| failed.set(live - budget));
+    }
+}
+
+/// The calling thread's live engine bytes.
+pub(crate) fn live() -> usize {
+    LIVE.try_with(Cell::get).unwrap_or(0)
+}
+
+/// Starts a budget-checked engine call; false when it must fail at once. An outermost call that
+/// starts within the budget forgets the crossing an earlier call left; a nested call inherits it.
+pub(crate) fn begin_call(outermost: bool) -> bool {
+    if over_budget() && (!outermost || live() > budget()) {
+        return false;
+    }
+    if outermost {
+        let _ = OVER.try_with(|over| over.set(false));
+        let _ = FAILED.try_with(|failed| failed.set(0));
+    }
+    true
+}
+
+/// The error message of a call that ran past the budget, with the allocation that crossed it.
+pub(crate) fn exceeded() -> String {
+    let bytes = FAILED.try_with(Cell::get).unwrap_or(0).max(1);
+    format!("{EXCEEDED} ({bytes} bytes over a {}-byte budget)", budget())
+}
+
+/// Returns freed heap pages to the operating system after a failed call, where the allocator keeps them.
+pub(crate) fn release_to_os() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only walks glibc's own arenas and takes no pointers.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> std::ffi::c_int;
+}
+
+// SAFETY: every call forwards to `System` unchanged; the counters only observe it.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            grew(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            grew(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+        shrank(layout.size());
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let moved = unsafe { System.realloc(pointer, layout, new_size) };
+        if !moved.is_null() {
+            if new_size >= layout.size() {
+                grew(new_size - layout.size());
+            } else {
+                shrank(layout.size() - new_size);
+            }
+        }
+        moved
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;

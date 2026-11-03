@@ -639,6 +639,20 @@ test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', 
   }
 }, TIMEOUT);
 
+test('worker scheduler turns go through the turn channel the worker was given', async () => {
+  const { client, worker, engine } = await openWorker();
+  try {
+    const before = worker.turnPosts;
+    const version = engine.proposalEngine.version();
+    const reads = await Promise.all([0, 1, 2].map(() =>
+      client.documentReadAt({ kind: 'rangeHighlights', ranges: [], expectVersion: version }, version)));
+    expect(reads.map(read => read.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(worker.turnPosts).toBeGreaterThan(before);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test('d1a_worker_keeps_sticky_provenance_until_document_epoch_replacement', async () => {
   const { client, worker, engine, init, initial, point } = await openWorker();
   try {
@@ -3851,6 +3865,34 @@ test('worker geometry exposes picture rotation for resize admission', async () =
   } });
   try {
     expect(initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')).toMatchObject({ rotation: 90 });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('typing a character used elsewhere still hints when its run chain lacks coverage', async () => {
+  const { worker, client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>A</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:rPr><w:rFonts w:ascii="Subset" w:hAnsi="Subset"/></w:rPr><w:t>א</w:t></w:r></w:p>',
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = event => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  try {
+    const data = (path: string) => new Uint8Array(readFileSync(resolve(process.cwd(), path)));
+    await client.edit(intent(1, 0, 'setFontEnvironment', {
+      faces: [
+        { family: 'Liberation Sans', data: data('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf') },
+        { family: 'Subset', data: data('packages/fonts/assets/NotoSansHebrew-Regular.ttf') },
+      ], chains: { 'liberation sans|0|0': [0], 'subset|0|0': [1] }, families: ['Liberation Sans', 'Subset'],
+    }));
+    await client.fontRequirements(LAYOUT);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 1 };
+    await client.edit(intent(2, 0, 'select', { selection: { anchor: at, focus: at } }));
+    expect(hints).toEqual([]);
+    await client.edit(intent(3, 0, 'insertText', { text: 'A' }));
+    expect(hints).toEqual([{ session: 'd1-command-worker', incarnation: 1, epoch: 1 }]);
   } finally { client.destroy(); }
 }, TIMEOUT);
 

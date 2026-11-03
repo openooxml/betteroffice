@@ -276,6 +276,10 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    pub fn take_base_latin_miss(&self) -> bool {
+        self.core.take_base_latin_miss()
+    }
+
     /// Registers a measurement view of `base` carrying the vertical metrics
     /// and advance pitch Word measures `requested_family` with — for a face
     /// this host had to substitute. Returns `base` for a family whose metrics
@@ -2711,6 +2715,18 @@ impl EditSession {
     /// inflated package budgets.
     pub fn prime_save_seed_states(&self, paragraphs: u32, inflated: u32) -> bool {
         self.core.prime_save_seed_states(paragraphs, inflated)
+    }
+
+    /// One slice of [`Self::prime_save_seed_states`], digesting about `max_bytes` bytes of the
+    /// stories: 0 once the states are known, 1 when more slices are needed, 2 when declined.
+    pub fn prime_save_seed_states_slice(
+        &self,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+    ) -> u32 {
+        self.core
+            .prime_save_seed_states_slice(paragraphs, inflated, max_bytes)
     }
 
     /// The paragraph IDs a save applies, as the package writer's

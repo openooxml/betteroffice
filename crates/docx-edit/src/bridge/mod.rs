@@ -773,6 +773,7 @@ fn walk_story_chunks<T: ReadTxn>(
         mut paragraph_pm_units,
         mut pm_cursor,
         mut at_block_boundary,
+        mut at_unit_boundary,
         mut section_margins,
         ..
     } = initial;
@@ -796,6 +797,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_units,
                 pm_cursor,
                 at_block_boundary,
+                at_unit_boundary,
                 section_margins,
                 stories: map.story_count(),
                 paragraphs: map.paragraph_count(),
@@ -813,11 +815,13 @@ fn walk_story_chunks<T: ReadTxn>(
     }
     let mut plain = local::ParagraphSeed::default();
     let mut paragraph_chunk_start = 0;
+    let mut paragraph_at_unit_start = at_unit_boundary;
     let mut paragraph_has_hyperlink_size = false;
     let mut paragraph_has_toc_field = false;
     for (chunk_index, diff) in chunks.iter().enumerate() {
         if at_block_boundary && paragraph_start == story_index {
             paragraph_chunk_start = chunk_index;
+            paragraph_at_unit_start = at_unit_boundary;
             paragraph_has_hyperlink_size = false;
             paragraph_has_toc_field = false;
         }
@@ -882,6 +886,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     local.run_size_sources.unchanged(
                         &para_id,
                         story_id,
+                        paragraph_at_unit_start,
                         txn,
                         &chunks[paragraph_chunk_start..=chunk_index],
                         comments.markers(paragraph_start, story_index + 1),
@@ -990,6 +995,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    at_unit_boundary = true;
                     continue;
                 }
                 let joinable = !sectioned
@@ -1063,6 +1069,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    at_unit_boundary = true;
                     continue;
                 }
                 let mut paragraph_blocks = flush_paragraph_parts(
@@ -1118,6 +1125,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = true;
             }
             Out::YMap(table)
                 if shared_map_string(table, txn, "_kind").as_deref() == Some("table") =>
@@ -1180,6 +1188,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = false;
             }
             Out::YMap(page_break)
                 if matches!(
@@ -1266,6 +1275,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = false;
             }
             Out::YMap(block_sdt)
                 if shared_map_string(block_sdt, txn, "_kind").as_deref() == Some("blockSdt") =>
@@ -1332,6 +1342,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = false;
             }
             Out::YMap(note_ref)
                 if shared_map_string(note_ref, txn, "_kind").as_deref() == Some("noteRef") =>

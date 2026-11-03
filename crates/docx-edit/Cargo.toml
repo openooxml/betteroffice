@@ -18,6 +18,7 @@ name = "docx_edit"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+base-latin = ["docx-layout/base-latin"]
 # The JS/wasm session boundary (src/wasm.rs). Off by default so native builds
 # and `cargo test` never pull the wasm-bindgen stack; wasm-pack builds pass
 # `--features wasm` (driven by scripts/build-docx-wasm.ts).
