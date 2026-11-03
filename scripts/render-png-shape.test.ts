@@ -80,7 +80,7 @@ const CHECKS: Record<string, () => boolean> = Object.fromEntries(FORMATS.flatMap
 const PENDING = [
   'docx js', 'docx native renderPng', 'docx python', 'docx rust',
   'pptx js', 'pptx native renderPng', 'pptx python', 'pptx rust',
-  'vsdx js', 'vsdx native renderPng', 'vsdx python', 'vsdx rust',
+  'vsdx native renderPng', 'vsdx python', 'vsdx rust',
   'xlsx js', 'xlsx python', 'xlsx rust',
 ];
 

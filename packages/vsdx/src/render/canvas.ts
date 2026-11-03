@@ -1,7 +1,7 @@
 import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, ShapeShadow, Stroke, TextBoxPrimitive, TextRun } from '../types';
 
 export type CanvasImageResolver = (assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
-export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; }
+export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; outlineMissingImages?: boolean; fontFamily?: (family: string) => string; }
 export interface PageCanvasLike { width: number; height: number; style: { width: string; height: string }; }
 export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplayList, 'width' | 'height'>, dpr: number, scale = 1): number {
   const cssWidth = list.width * scale, cssHeight = list.height * scale;
@@ -55,20 +55,20 @@ export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplay
   await Promise.all(pending.values());
   if (options.signal?.aborted || paintRequests.get(ctx) !== request) return;
   ctx.save();
-  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); const device = { a: dpr * scale, b: 0, c: 0, d: dpr * scale }; for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images, device); }
+  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); const device = { a: dpr * scale, b: 0, c: 0, d: dpr * scale }; for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images, device, options.outlineMissingImages, options.fontFamily); }
   finally { ctx.restore(); }
 }
-function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>, device: Linear): void {
+function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>, device: Linear, outlineMissing = false, fontFamily?: (family: string) => string): void {
   ctx.save();
   try {
     const transform = 'transform' in primitive ? primitive.transform ?? identity() : identity(); ctx.transform(paintTransform.a, paintTransform.b, paintTransform.c, paintTransform.d, paintTransform.e, paintTransform.f); ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
     const linear = compose(compose(device, paintTransform), transform);
     switch (primitive.kind) {
       case 'shape': paintShape(ctx, primitive, linear); break;
-      case 'image': { const source = images.get(primitive.assetId); if (source) { ctx.translate(0, 2 * primitive.y + primitive.height); ctx.scale(1, -1); ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); } break; }
-      case 'textBox': paintTextBox(ctx, primitive); break;
+      case 'image': { const source = images.get(primitive.assetId); if (source) { ctx.translate(0, 2 * primitive.y + primitive.height); ctx.scale(1, -1); ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); } else if (outlineMissing) strokePlaceholder(ctx, primitive); break; }
+      case 'textBox': paintTextBox(ctx, primitive, fontFamily); break;
       case 'placeholder': paintPlaceholder(ctx, primitive); break;
-      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images, linear); break;
+      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images, linear, outlineMissing, fontFamily); break;
     }
   } finally { ctx.restore(); }
 }
@@ -112,7 +112,7 @@ function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint, box: { x: numbe
   return gradient;
 }
 function stroke(ctx: CanvasRenderingContext2D, value: Stroke): void { ctx.strokeStyle = value.color; ctx.lineWidth = value.width; ctx.setLineDash(value.dashed ? [Math.max(3, value.width * 2), Math.max(2, value.width)] : []); ctx.stroke(); }
-function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void {
+function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive, fontFamily?: (family: string) => string): void {
   ctx.translate(0, 2 * text.y + text.height); ctx.scale(1, -1); ctx.textBaseline = 'top';
   let offset = 0;
   const runs = text.paragraphs.flatMap(paragraph => paragraph.runs.map(run => {
@@ -124,14 +124,14 @@ function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): vo
     const start = Math.max(line.start, entry.start), end = Math.min(line.end, entry.end);
     if (start >= end) continue;
     const x = line.caretStops.find(stop => stop.position === start)?.x ?? line.x;
-    paintTextRun(ctx, entry.run, utf8Slice(entry.run.text, start - entry.start, end - entry.start), x, line.y);
+    paintTextRun(ctx, fontFamily ? { ...entry.run, family: fontFamily(entry.run.family) } : entry.run, utf8Slice(entry.run.text, start - entry.start, end - entry.start), x, line.y);
   }
 }
 const TEXT_UNITS_PER_INCH = 96;
 function paintTextRun(ctx: CanvasRenderingContext2D, run: TextRun, value: string, x: number, y: number): void {
   ctx.save();
   ctx.scale(1 / TEXT_UNITS_PER_INCH, 1 / TEXT_UNITS_PER_INCH);
-  ctx.font = `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${run.sizeIn * TEXT_UNITS_PER_INCH}px ${quote(run.family)}`;
+  ctx.font = canvasFontFor(run, run.sizeIn * TEXT_UNITS_PER_INCH);
   (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.fillStyle = run.color;
   ctx.fillText(value, x * TEXT_UNITS_PER_INCH, y * TEXT_UNITS_PER_INCH);
@@ -139,5 +139,8 @@ function paintTextRun(ctx: CanvasRenderingContext2D, run: TextRun, value: string
 }
 function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength; }
 function utf8Slice(value: string, start: number, end: number): string { return new TextDecoder().decode(new TextEncoder().encode(value).slice(start, end)); }
+/** The canvas font string a text run paints with. */
+export function canvasFontFor(run: Pick<TextRun, 'family' | 'bold' | 'italic'>, sizePx: number): string { return `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${sizePx}px ${quote(run.family)}`; }
 function quote(family: string): string { return family.includes(' ') ? JSON.stringify(family) : family; }
-function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void { ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]); ctx.fillStyle = '#5d6675'; ctx.font = '12px sans-serif'; ctx.fillText(value.reason, value.x + 6, value.y + 16, Math.max(0, value.width - 12)); }
+function strokePlaceholder(ctx: CanvasRenderingContext2D, value: { x: number; y: number; width: number; height: number }): void { ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]); }
+function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void { strokePlaceholder(ctx, value); ctx.fillStyle = '#5d6675'; ctx.font = '12px sans-serif'; ctx.fillText(value.reason, value.x + 6, value.y + 16, Math.max(0, value.width - 12)); }

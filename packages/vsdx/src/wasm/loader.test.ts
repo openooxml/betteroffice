@@ -144,18 +144,22 @@ describe('VSDX wasm boundary', () => {
     }
   });
 
-  test('exports a scaled PNG per diagram page', () => {
+  test('renders a page through the canvas backend without moving the hit-test page', async () => {
+    const restore = stubOffscreenCanvas();
     const diagram = openDiagram(textAccounting, { clientId: 9015 });
     try {
-      const first = diagram.exportPng(0, 1);
-      expect([first[0], first[1], first[2], first[3]]).toEqual([0x89, 0x50, 0x4e, 0x47]);
-      const second = diagram.exportPng(0, 2);
-      expect(second.byteLength).toBeGreaterThan(first.byteLength);
-      expect(() => diagram.exportPng(-1, 1)).toThrow('non-negative integer');
-      expect(() => diagram.exportPng(0, 0)).toThrow('positive number');
-      expect(() => diagram.exportPng(99, 1)).toThrow();
+      const list = diagram.layoutPage(0);
+      const before = diagram.hitTest(list.width / 2, list.height / 2);
+      const png = await diagram.renderPng({ page: 0 }, { scale: 2 });
+      expect([...png]).toEqual([...new TextEncoder().encode('png')]);
+      expect(restore.sizes).toEqual([[Math.ceil(list.width * 2), Math.ceil(list.height * 2)]]);
+      expect(diagram.hitTest(list.width / 2, list.height / 2)).toEqual(before);
+      await expect(diagram.renderPng({ page: -1 })).rejects.toThrow('non-negative integer');
+      await expect(diagram.renderPng({ page: 0 }, { scale: 0 })).rejects.toThrow('positive number');
+      await expect(diagram.renderPng({ page: 99 })).rejects.toThrow();
     } finally {
       diagram.dispose();
+      restore.restore();
     }
   });
 
@@ -972,3 +976,24 @@ test('hit testing returns a shape ID accepted by editing commands', () => {
     expect(flattenShapes(diagram.snapshot().pages[0].shapes).find(shape => shape.id === hit!.shapeId)?.cells.find(cell => cell.name === 'PinX')?.formula).toBe('0.25');
   } finally { diagram.dispose(); }
 });
+
+function stubOffscreenCanvas() {
+  const sizes: [number, number][] = [];
+  const original = globalThis.OffscreenCanvas;
+  class Stub {
+    constructor(width: number, height: number) { sizes.push([width, height]); }
+    getContext() {
+      return new Proxy({} as Record<string, unknown>, {
+        get(target, property) {
+          if (property === 'measureText') return () => ({ width: 1 });
+          if (property === 'createLinearGradient' || property === 'createRadialGradient') return () => ({ addColorStop: () => undefined });
+          return property in target ? target[property as string] : () => undefined;
+        },
+        set(target, property, value) { target[property as string] = value; return true; },
+      });
+    }
+    convertToBlob(options: { type: string }) { return Promise.resolve(new Blob(['png'], { type: options.type })); }
+  }
+  (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas = Stub;
+  return { sizes, restore() { (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas = original; } };
+}

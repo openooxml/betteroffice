@@ -1,5 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion, decodeFontFace as decodePackedFontFace } from './generated/vsdx_wasm.js';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { renderPng as renderEnginePng } from './enginePng';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
   await initWasm();
@@ -10,6 +11,7 @@ import type { InitInput } from './generated/vsdx_wasm.js';
 import type { CellLocator, CellFormulaReceipt, CellWriteProbe, CellWriteQuery, CollaborationUpdateOrigin, ConnectedShapeReceipt, ConnectorGlue, ConnectorRoutePoint, ConnectorRouteReceipt, DiagramSnapshot, DocumentMaster, RawValidationIssue, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, PageLayer, ShapeDataReceipt, ShapeDataWrite, ShapeReceipt, ShapeTreeGlue, TextReceipt, ValidationIssue, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
+export interface RenderPngOptions { scale?: number; signal?: AbortSignal; }
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
 export interface CollaborationResync { update: Uint8Array; }
 export interface ShapeMove { pageId: string; shapeId: string; xFormula: string; yFormula: string; }
@@ -23,7 +25,7 @@ export interface DiagramHandle {
   layoutPage(pageIndex: number): PageDisplayList;
   exportPdf(): Uint8Array;
   exportSvg(): string[];
-  exportPng(pageIndex: number, scale?: number): Uint8Array;
+  renderPng(target: { page: number }, options?: RenderPngOptions): Promise<Uint8Array>;
   pageLayers(pageIndex: number): PageLayer[];
   validate(): ValidationIssue[];
   validatePage(pageIndex: number): ValidationIssue[];
@@ -74,6 +76,7 @@ export function initWasm(input: WasmInitInput = new URL('./generated/vsdx_wasm_b
   initialization = initWasmModule({ module_or_path: input }).then(() => { initialized = true; }, error => { initialization = undefined; throw toError(error); });
   return initialization;
 }
+function faceKey(face: VsdxFontFace): string { return JSON.stringify([face.family, face.bold ?? false, face.italic ?? false]); }
 export function isWasmAvailable(): boolean { return typeof WebAssembly === 'object'; }
 export function wasmVersion(): string { requireInitialized(); return rendererVersion(); }
 export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {}): DiagramHandle {
@@ -140,6 +143,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     finally { depth--; if (depth === 0) flush(); }
   };
   const json = <T>(operation: () => string, drainUpdates = false): T => JSON.parse(wasm(operation, drainUpdates)) as T;
+  const faces = new Map((options.fonts ?? []).map(face => [faceKey(face), face]));
   return {
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
     masters: () => {
@@ -149,7 +153,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       }
       return masters;
     },
-    registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
+    registerFont: face => { const id = wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)); faces.set(faceKey(face), face); return id; },
     pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),
     validate: () => mapValidationIssues(json<RawValidationIssue[]>(() => renderer.validateJson(doc)), json<DiagramSnapshot>(() => doc.snapshotJson())),
     validatePage: (pageIndex) => {
@@ -171,10 +175,19 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     },
     exportPdf: () => wasm(() => renderer.exportPdf(doc).slice()),
     exportSvg: () => json<string[]>(() => renderer.exportSvgJson(doc)),
-    exportPng: (pageIndex, scale = 1) => {
-      if (!Number.isInteger(pageIndex) || pageIndex < 0) throw new Error('VSDX page index must be a non-negative integer');
+    renderPng: async ({ page }, options = {}) => {
+      if (!Number.isInteger(page) || page < 0) throw new Error('VSDX page index must be a non-negative integer');
+      const scale = options.scale ?? 1;
       if (!Number.isFinite(scale) || scale <= 0) throw new Error('VSDX PNG scale must be a positive number');
-      return wasm(() => renderer.exportPng(doc, pageIndex, scale).slice());
+      return renderEnginePng({
+        renderer, doc, fonts: () => [...faces.values()],
+        displayList: (index) => {
+          const list = json<PageDisplayList>(() => renderer.pageDisplayListJson(doc, index));
+          if (list.contractVersion !== 7) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+          return list;
+        },
+        media: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
+      }, { page }, { ...options, scale });
     },
     hitTest: (x, y) => {
       const hit = json<HitTestResult | null>(() => renderer.hitTestJson(x, y));
