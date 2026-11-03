@@ -74,3 +74,28 @@ export const pptxProposalSlideEditSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('moveSlide'), slideId: id, afterSlideId: id.nullable() }).strict(),
 ]);
 export type PptxProposalSlideEdit = z.infer<typeof pptxProposalSlideEditSchema>;
+
+const proposalRect = z.object({
+  x: z.number().safe(), y: z.number().safe(), width: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), height: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict().describe('Shape rectangle in EMU (12700 EMU per point).');
+const proposalRef = id.optional().describe('Proposal-local name, without @. Later targets may use @name.');
+const proposalStory = id.describe('Story ID, or @ref for the first text story of a shape created earlier in this proposal.');
+export const pptxProposalShapeEditSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('addTextBox'), ref: proposalRef, slideId: id, draft: z.object({ name: id, rect: proposalRect, text, style: pptxRunStyleSchema }).strict() }).strict(),
+  z.object({ type: z.literal('addShape'), ref: proposalRef, slideId: id, draft: z.object({ name: id, rect: proposalRect, geometry: id, fill: color.nullable().optional() }).strict() }).strict(),
+  z.object({ type: z.literal('addPicture'), ref: proposalRef, slideId: id, draft: z.object({ name: id, rect: proposalRect, contentType: z.enum(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp', 'image/tiff', 'image/webp', 'image/svg+xml']), mediaBase64: z.string().min(4).max(4 * Math.ceil(8 * 1024 * 1024 / 3)) }).strict() }).strict(),
+  z.object({ type: z.literal('removeShape'), slideId: id, shapeId: id }).strict(),
+]);
+export const pptxProposalEditSchema = z.discriminatedUnion('type', [
+  ...pptxProposalSlideEditSchema.options,
+  ...pptxProposalShapeEditSchema.options,
+  z.object({ type: z.literal('replaceText'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text, style: pptxRunStyleSchema.nullable().optional() }).strict(),
+  z.object({ type: z.literal('formatText'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), patch: pptxRunStyleSchema }).strict(),
+  z.object({ type: z.literal('setParagraphAlignment'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), alignment: z.enum(['l', 'ctr', 'r', 'just', 'justLow', 'dist', 'thaiDist']).nullable() }).strict(),
+  z.object({ type: z.literal('setShapeRect'), slideId: id, shapeId: id, rect: proposalRect }).strict(),
+  z.object({ type: z.literal('setShapeFill'), slideId: id, shapeId: id, color: color.nullable() }).strict(),
+  z.object({ type: z.literal('setShapeStroke'), slideId: id, shapeId: id, stroke: z.object({ color: color.nullable().optional(), widthPt: z.number().nonnegative().nullable().optional() }).strict() }).strict(),
+  z.object({ type: z.literal('setShapeAdjust'), slideId: id, shapeId: id, adjustments: z.record(z.string(), z.number().finite()) }).strict(),
+]);
+export type PptxProposalShapeEdit = z.infer<typeof pptxProposalShapeEditSchema>;
+export type PptxProposalEdit = z.infer<typeof pptxProposalEditSchema>;

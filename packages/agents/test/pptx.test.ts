@@ -673,3 +673,67 @@ test('agent slide proposals drop editor decisions before listing and staging lim
     expect(deck.listProposals()).toMatchObject([{ id: pending.id, status: 'pending' }]);
   } finally { deck.close(); handle.dispose(); }
 });
+
+test('mixed shape proposals preserve sequential typed story edits alongside batch matches', async () => {
+  const bytes = await presentationFixture();
+  const initialized = await openPptx(bytes);
+  initialized.close();
+  const handle = openPresentation(bytes);
+  const deck = attachPptx(handle);
+  try {
+    const before = handle.snapshot();
+    const story = deck.list().items[0].story;
+    const first = deck.grep({ query: 'Keep', story }).matches[0];
+    const second = deck.grep({ query: 'paragraph', story }).matches[0];
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { match: first.match, newText: 'Preserve all of' },
+      { type: 'insertSlide', ref: 'slide', afterSlideId: null },
+      { type: 'addTextBox', ref: 'box', slideId: '@slide', draft: { name: 'Sequential box', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'First' },
+      { type: 'formatText', storyId: '@box', start: 0, end: 5, patch: { bold: true } },
+      { match: second.match, newText: 'text' },
+      { type: 'replaceText', storyId: '@box', start: 5, end: 5, text: ' second' },
+    ] });
+    expect(handle.snapshot()).toEqual(before);
+    await deck.accept(proposal.id);
+    const box = handle.snapshot().slides[0]!.shapes.find(shape => shape.name === 'Sequential box')!;
+    const runs = box.textStories[0]!.paragraphs[0]!.runs;
+    expect(runs.map(run => run.text).join('')).toBe('First second');
+    expect(runs[0]!.style.bold).toBe(true);
+    expect(deck.read(deck.grep({ query: 'Preserve' }).matches[0].ref).text).toBe('Preserve all of this text.');
+    handle.undo();
+    expect(handle.snapshot()).toEqual(before);
+  } finally { deck.close(); handle.dispose(); }
+});
+
+test('PPTX shape proposals expose refs, story targeting, previews, acceptance, and rejection', async () => {
+  const handle = openPresentation(await presentationFixture(), { clientId: 732 });
+  const deck = attachPptx(handle);
+  try {
+    const before = handle.snapshot();
+    const slide = before.slides[0]!;
+    const rect = { x: 100000, y: 100000, width: 1000000, height: 500000 };
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { type: 'insertSlide', ref: 'slide', afterSlideId: null },
+      { type: 'addTextBox', ref: 'box', slideId: '@slide', draft: { name: 'Box', rect, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Filled' },
+      { type: 'formatText', storyId: '@box', start: 0, end: 6, patch: { bold: true } },
+      { type: 'setShapeFill', slideId: '@slide', shapeId: '@box', color: '#123456' },
+      { type: 'addShape', ref: 'shape', slideId: '@slide', draft: { name: 'Card', rect, geometry: 'rect' } },
+      { type: 'addPicture', ref: 'image', slideId: '@slide', draft: { name: 'Pixel', rect, contentType: 'image/png', mediaBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' } },
+      { type: 'removeShape', slideId: slide.id, shapeId: slide.shapes[0]!.id },
+    ] });
+    expect(proposal.changes.some(change => change.kind === 'deleted')).toBe(true);
+    expect(handle.snapshot()).toEqual(before);
+    const preview = openPresentation(await deck.export(proposal.id));
+    try { expect(preview.snapshot().slides[0]!.shapes.some(shape => shape.name === 'Box')).toBe(true); }
+    finally { preview.dispose(); }
+    await deck.accept(proposal.id);
+    expect(handle.snapshot().slides[0]!.shapes).toHaveLength(3);
+    handle.undo();
+    expect(handle.snapshot()).toEqual(before);
+    const rejected = deck.propose({ author: 'agent', edits: [{ type: 'addShape', slideId: slide.id, draft: { name: 'Rejected', rect, geometry: 'rect' } }] });
+    deck.reject(rejected.id);
+    expect(handle.listProposals()).toHaveLength(0);
+  } finally { deck.close(); handle.dispose(); }
+});

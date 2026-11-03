@@ -1,5 +1,6 @@
 import { deck, open, replyControl, story, type } from './peerlessTestHarness';
 import { expect, mock, spyOn, test } from 'bun:test';
+import { readFile } from 'node:fs/promises';
 import type { PresentationHandle } from '@betteroffice/pptx';
 import JSZip from 'jszip';
 import * as frameSources from './peerlessFrameSource';
@@ -11,6 +12,13 @@ function composition(input: HTMLElement, kind: string, text = ''): void {
   const event = new Event(kind, { bubbles: true });
   Object.defineProperty(event, 'data', { value: text });
   input.dispatchEvent(event);
+}
+
+async function tiffPicture(): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await readFile(new URL('../../../pptx/src/render/fixtures/tiff-image.pptx', import.meta.url)));
+  const path = Object.keys(zip.files).find(name => /\.tiff?$/i.test(name));
+  if (!path) throw new Error('TIFF fixture required');
+  return zip.file(path)!.async('uint8array');
 }
 
 test('proposal diff commits composition before removing the input', async () => {
@@ -251,18 +259,19 @@ test('structural proposals show ghost strip entries and accept from the canvas r
   expect((await access.snapshot()).slides[0]!.notes).toBe('Draft');
 });
 
-test('inserted layout background images paint in ghost thumbnails and canvas previews', async () => {
+test.each(['png', 'tiff'])('inserted layout background images paint in ghost thumbnails and canvas previews (%s)', async (extension) => {
   const zip = await JSZip.loadAsync(await deck());
-  const imageId = 'ppt/media/layout-background.png';
+  const imageId = `ppt/media/layout-background.${extension}`;
   const layout = 'ppt/slideLayouts/slideLayout1.xml';
   const p = 'http://schemas.openxmlformats.org/presentationml/2006/main';
   const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const rels = 'http://schemas.openxmlformats.org/package/2006/relationships';
   zip.file(layout, `<p:sldLayout xmlns:p="${p}" xmlns:a="${a}" xmlns:r="${r}" type="blank"><p:cSld name="Picture background"><p:bg><p:bgPr><a:blipFill><a:blip r:embed="picture"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:bgPr></p:bg><p:spTree/></p:cSld></p:sldLayout>`);
-  zip.file('ppt/slideLayouts/_rels/slideLayout1.xml.rels', `<Relationships xmlns="${rels}"><Relationship Id="picture" Type="${r}/image" Target="../media/layout-background.png"/></Relationships>`);
-  zip.file(imageId, Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), char => char.charCodeAt(0)));
-  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', `<Default Extension="png" ContentType="image/png"/><Override PartName="/${layout}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/></Types>`));
+  zip.file('ppt/slideLayouts/_rels/slideLayout1.xml.rels', `<Relationships xmlns="${rels}"><Relationship Id="picture" Type="${r}/image" Target="../media/layout-background.${extension}"/></Relationships>`);
+  zip.file(imageId, extension === 'tiff' ? await tiffPicture()
+    : Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), char => char.charCodeAt(0)));
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', `<Default Extension="${extension}" ContentType="image/${extension}"/><Override PartName="/${layout}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/></Types>`));
   const bitmap = { width: 1, height: 1, close: mock(() => {}) } as unknown as ImageBitmap;
   const originalBitmap = Object.getOwnPropertyDescriptor(globalThis, 'createImageBitmap');
   Object.defineProperty(globalThis, 'createImageBitmap', { configurable: true, value: mock(async () => bitmap) });
@@ -283,6 +292,11 @@ test('inserted layout background images paint in ghost thumbnails and canvas pre
   const load = frameSources.peerlessProposalFrameSource;
   const source = spyOn(frameSources, 'peerlessProposalFrameSource').mockImplementation(async (...args) => {
     const result = await load(...args);
+    if (result.proposal.changes.some(change => change.kind === 'inserted' && !change.shapeId && change.slideId === result.snapshot.slides[0]?.id)) {
+      const media = result.media?.find(asset => asset.assetId === imageId);
+      expect(media).toBeDefined();
+      if (extension === 'tiff') expect([...new Uint8Array(media!.bytes).subarray(0, 4)]).toEqual([137, 80, 78, 71]);
+    }
     const release = mock(result.release);
     releases.push(release);
     return { ...result, resolveImage: (id: string) => { resolve(id); return result.resolveImage(id); }, release };
@@ -308,4 +322,75 @@ test('inserted layout background images paint in ghost thumbnails and canvas pre
     if (originalBitmap) Object.defineProperty(globalThis, 'createImageBitmap', originalBitmap);
     else Reflect.deleteProperty(globalThis, 'createImageBitmap');
   }
+});
+
+test('pending TIFF proposal pictures convert in the worker for thumbnails and canvas previews', async () => {
+  const bytes = await tiffPicture();
+  const error = mock(() => {});
+  const value = await open({ onError: error });
+  const originalBitmap = Object.getOwnPropertyDescriptor(globalThis, 'createImageBitmap');
+  const decode = mock(async (blob: Blob) => {
+    expect([...new Uint8Array(await blob.arrayBuffer()).subarray(0, 4)]).toEqual([137, 80, 78, 71]);
+    return { width: 1, height: 1, close: mock(() => {}) } as unknown as ImageBitmap;
+  });
+  Object.defineProperty(globalThis, 'createImageBitmap', { configurable: true, value: decode });
+  const convert = value.client.preparePicture!;
+  const prepare = mock((picture: ArrayBuffer) => convert.call(value.client, picture));
+  value.client.preparePicture = prepare;
+  try {
+    const access = await value.api.handleAsync();
+    await act(async () => {
+      const proposal = await access.propose('reviewer', 'TIFF picture', [
+        { type: 'insertSlide', ref: 'slide', afterSlideId: null },
+        { type: 'addPicture', slideId: '@slide', draft: { name: 'TIFF picture', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, contentType: 'image/tiff', mediaBase64: Buffer.from(bytes).toString('base64') } },
+      ]);
+      await value.api.commands.execute('proposalSelect', { proposalId: proposal.id });
+      await value.api.commands.execute('proposalDiff', { enabled: true });
+    });
+    const ghost = await waitFor(() => value.view.getByTestId('pptx-proposal-slide-inserted'));
+    await waitFor(() => expect(decode).toHaveBeenCalled());
+    await act(async () => { fireEvent.click(ghost); });
+    await waitFor(() => expect(value.view.getByTestId('pptx-proposal-canvas-target').getAttribute('data-shape-change')).toBe('inserted'));
+    expect(prepare.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(decode.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(error).not.toHaveBeenCalled();
+  } finally {
+    value.client.preparePicture = convert;
+    if (originalBitmap) Object.defineProperty(globalThis, 'createImageBitmap', originalBitmap);
+    else Reflect.deleteProperty(globalThis, 'createImageBitmap');
+  }
+});
+
+test('shape review shows insertion outlines, deletion strikes, and shape details', async () => {
+  const value = await open();
+  const target = await story(value.api);
+  const access = await value.api.handleAsync();
+  await act(async () => {
+    const proposal = await access.propose('reviewer', 'Shape changes', [
+      { type: 'addTextBox', ref: 'box', slideId: target.slideId, draft: { name: 'Inserted box', rect: { x: 100000, y: 100000, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Filled' },
+      { type: 'removeShape', slideId: target.slideId, shapeId: target.shapeId },
+    ]);
+    await value.api.commands.execute('proposalsPanel', { open: true });
+    await value.api.commands.execute('proposalSelect', { proposalId: proposal.id });
+    await value.api.commands.execute('proposalDiff', { enabled: true });
+  });
+  await waitFor(() => expect(value.view.queryByTestId('pptx-proposal-shape-strike')).not.toBeNull());
+  const targets = value.view.getAllByTestId('pptx-proposal-canvas-target');
+  const inserted = targets.find(element => element.getAttribute('data-shape-change') === 'inserted')!;
+  expect(inserted.style.borderStyle).toBe('dashed');
+  expect(targets.some(element => element.getAttribute('data-shape-change') === 'deleted')).toBe(true);
+  expect(value.view.getAllByText('Inserted shape').length).toBeGreaterThan(0);
+  expect(value.view.getAllByText('Deleted shape').length).toBeGreaterThan(0);
+});
+
+test('worker async proposal API preserves the typed cumulative picture cap', async () => {
+  const value = await open();
+  const target = await story(value.api);
+  const access = await value.api.handleAsync();
+  const picture = (size: number): import('@betteroffice/pptx').ProposalEdit => ({ type: 'addPicture', slideId: target.slideId, draft: {
+    name: 'Picture', rect: { x: 0, y: 0, width: 100000, height: 100000 }, contentType: 'image/png', mediaBase64: Buffer.alloc(size).toString('base64'),
+  } });
+  await expect(access.propose('reviewer', null, [picture(4 * 1024 * 1024), picture(4 * 1024 * 1024 + 1)])).rejects.toMatchObject({ name: 'ProposalPictureMediaTooLargeError', code: 'proposalPictureMediaTooLarge' });
+  expect(await access.listProposals()).toHaveLength(0);
 });

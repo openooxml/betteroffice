@@ -25,6 +25,67 @@ pub enum ProposalTextChangeKind {
     Deletion,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProposalShapeChangeKind {
+    Inserted,
+    Deleted,
+    Moved,
+    Resized,
+    Changed,
+    Reordered,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposalShapeChange {
+    pub shape_id: String,
+    pub kind: ProposalShapeChangeKind,
+}
+
+fn proposal_shape_changes(proposal: &Proposal, slide_id: &str) -> Vec<ProposalShapeChange> {
+    if !proposal.edits.iter().any(|edit| {
+        matches!(
+            edit,
+            ProposalEdit::AddTextBox { .. }
+                | ProposalEdit::AddShape { .. }
+                | ProposalEdit::AddPicture { .. }
+                | ProposalEdit::RemoveShape { .. }
+                | ProposalEdit::SetShapeRect { .. }
+                | ProposalEdit::SetShapeFill { .. }
+                | ProposalEdit::SetShapeStroke { .. }
+                | ProposalEdit::SetShapeAdjust { .. }
+        )
+    }) {
+        return Vec::new();
+    }
+    proposal
+        .changes
+        .iter()
+        .filter_map(|change| {
+            if change.slide_id != slide_id {
+                return None;
+            }
+            let shape_id = change.shape_id.clone()?;
+            let kind = match (&change.before, &change.after) {
+                (None, Some(_)) => ProposalShapeChangeKind::Inserted,
+                (Some(_), None) => ProposalShapeChangeKind::Deleted,
+                (Some(before), Some(after))
+                    if before.width != after.width || before.height != after.height =>
+                {
+                    ProposalShapeChangeKind::Resized
+                }
+                (Some(before), Some(after)) if before.x != after.x || before.y != after.y => {
+                    ProposalShapeChangeKind::Moved
+                }
+                (Some(before), Some(after)) if before != after => ProposalShapeChangeKind::Changed,
+                _ => return None,
+            };
+            Some(ProposalShapeChange { shape_id, kind })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposalTextChange {
@@ -48,6 +109,8 @@ pub struct ProposalDiffPreview {
 pub struct ProposalSlideDiff {
     pub proposal: Proposal,
     pub scope: SlideScope,
+    #[serde(default)]
+    pub shape_changes: Vec<ProposalShapeChange>,
     pub snapshot: DeckSnapshot,
     pub text_changes: Vec<ProposalTextChange>,
 }
@@ -67,6 +130,10 @@ impl DeckSession {
                     | ProposalEdit::DuplicateSlide { .. }
                     | ProposalEdit::DeleteSlide { .. }
                     | ProposalEdit::MoveSlide { .. }
+                    | ProposalEdit::AddTextBox { .. }
+                    | ProposalEdit::AddShape { .. }
+                    | ProposalEdit::AddPicture { .. }
+                    | ProposalEdit::RemoveShape { .. }
             )
         }) {
             let slide_id =
@@ -151,6 +218,7 @@ impl DeckSession {
             }
         }
         Ok(ProposalSlideDiff {
+            shape_changes: proposal_shape_changes(&proposal, &scope.slide.id),
             proposal,
             snapshot: DeckSnapshot {
                 width_emu: scope.width_emu,
@@ -191,6 +259,7 @@ impl DeckSession {
             scope.slide = slide.clone();
         }
         Ok(ProposalSlideDiff {
+            shape_changes: proposal_shape_changes(&diff.proposal, &scope.slide.id),
             proposal: diff.proposal,
             snapshot: DeckSnapshot {
                 width_emu: scope.width_emu,
@@ -212,8 +281,28 @@ impl DeckSession {
     pub fn preview_proposal_diff(&self, id: &str) -> ProposalResult<ProposalDiffPreview> {
         let preview = self.preview_proposal(id)?;
         let mut snapshot = preview.snapshot;
+        let before = self.snapshot()?;
+        for slide in &mut snapshot.slides {
+            if let Some(original) = before.slides.iter().find(|old| old.id == slide.id) {
+                for (index, shape) in original.shapes.iter().enumerate() {
+                    if preview.proposal.changes.iter().any(|change| {
+                        change.slide_id == slide.id
+                            && change.shape_id.as_deref() == Some(shape.id.as_str())
+                            && change.before.is_some()
+                            && change.after.is_none()
+                    }) {
+                        slide
+                            .shapes
+                            .insert(index.min(slide.shapes.len()), shape.clone());
+                    }
+                }
+            }
+        }
         let mut text_changes = Vec::new();
         for change in &preview.proposal.changes {
+            if change.after.is_none() {
+                continue;
+            }
             let Some(before) = &change.before else {
                 continue;
             };

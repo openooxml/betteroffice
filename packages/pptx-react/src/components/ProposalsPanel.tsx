@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
+import { decodePresentationImage, paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver,
   DeckSnapshot,
@@ -15,6 +15,7 @@ import { commandReason } from '../commands/evaluate';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { useTranslation } from '../i18n';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
+import { proposalImages } from './proposalImages';
 import { proposalsPanelStyles as styles } from './proposalsPanelStyles';
 
 const ProposalChangeDetails = lazy(() => import('./ProposalDetails').then((module) => ({ default: module.ProposalChangeDetails })));
@@ -134,7 +135,7 @@ export function ProposalsPanel({
     const index = snapshot.slides.findIndex(
       (slide) => slide.id === change.slideId
     );
-    const label = change.kind === 'inserted' ? t('proposals.insertedSlide')
+    const label = change.shapeId ? (change.after ?? change.before)?.name || t('proposals.appearance') : change.kind === 'inserted' ? t('proposals.insertedSlide')
       : change.kind === 'deleted' ? t('proposals.deletedSlide') : change.before?.name || t('notes.panelLabel');
     return index < 0 && change.kind === 'inserted' ? t('proposals.target', { slide: (change.afterIndex ?? 0) + 1, name: label })
       : index < 0
@@ -360,6 +361,7 @@ export function ProposalsPanel({
               <PreviewCanvas
                 label={t('proposals.after')}
                 frame={preview.after}
+                snapshot={preview.data.snapshot}
                 resolveImage={resolveImage}
               />
             </div>
@@ -404,12 +406,16 @@ export function ProposalsPanel({
 function PreviewCanvas({
   label,
   frame,
+  snapshot,
   resolveImage,
 }: {
   label: string;
   frame: SlideDisplayList;
+  snapshot?: DeckSnapshot;
   resolveImage: CanvasImageResolver;
 }) {
+  const { t } = useTranslation();
+  const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -424,7 +430,8 @@ function PreviewCanvas({
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(scratch, frame, dpr, scale);
     setError(null);
-    void paintSlide(context, frame, dpr, scale, { resolveImage })
+    const images = snapshot ? proposalImages({ snapshot }, resolveImage, decodeImageError, decodePresentationImage) : null;
+    void paintSlide(context, frame, dpr, scale, { resolveImage: images?.resolveImage ?? resolveImage })
       .then(() => {
         if (cancelled) return;
         sizeCanvasForSlide(target, frame, dpr, scale);
@@ -434,11 +441,11 @@ function PreviewCanvas({
       .catch((value) => {
         if (!cancelled)
           setError(value instanceof Error ? value.message : String(value));
-      });
+      }).finally(() => images?.release());
     return () => {
       cancelled = true;
     };
-  }, [frame, resolveImage]);
+  }, [frame, snapshot, resolveImage, decodeImageError]);
   return (
     <figure style={styles.figure}>
       <figcaption style={styles.caption}>{label}</figcaption>

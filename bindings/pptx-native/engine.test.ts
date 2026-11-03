@@ -562,3 +562,34 @@ describe('pptx native engine parity', () => {
     expect(native.engineVersion()).toBe(require('./package.json').version);
   });
 });
+
+test('shape proposal refs, deleted frames, and picture cap match wasm', () => {
+  const fixture = new Uint8Array(readFileSync(new URL('../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url)));
+  const docs = [wasm.PptxDocument.openCollaborative(fixture, 8), native.PptxDocument.openCollaborative(fixture, 8)];
+  const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+  try {
+    const slide = JSON.parse(docs[0].snapshotJson()).slides[0];
+    const rect = { x: 0, y: 0, width: 1000000, height: 500000 };
+    const request = JSON.stringify({ agentId: 'parity', edits: [
+      { type: 'addTextBox', ref: 'box', slideId: slide.id, draft: { name: 'Box', rect, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Filled' },
+      { type: 'addShape', slideId: slide.id, draft: { name: 'Shape', rect, geometry: 'rect' } },
+      { type: 'addPicture', slideId: slide.id, draft: { name: 'Image', rect, contentType: 'image/png', mediaBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' } },
+      { type: 'removeShape', slideId: slide.id, shapeId: slide.shapes[0].id },
+    ] });
+    expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+    const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+    const diffs = renderers.map((renderer, i) => JSON.parse(renderer.layoutProposalDiffSlideByIdJson(docs[i], proposals[i].id, slide.id)));
+    expect(diffs[0]).toEqual(diffs[1]);
+    expect(diffs[0].shapeChanges).toContainEqual({ shapeId: slide.shapes[0].id, kind: 'deleted' });
+    for (const doc of docs) doc.rejectProposalJson(JSON.stringify({ id: proposals[0].id }));
+    const large = JSON.stringify({ agentId: 'parity', edits: [{ type: 'addPicture', slideId: slide.id, draft: {
+      name: 'Oversize', rect, contentType: 'image/png', mediaBase64: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64'),
+    } }] });
+    const failure = expectThrownParity(() => docs[0].proposeJson(large), () => docs[1].proposeJson(large));
+    expect(JSON.parse(failure as string).code).toBe('proposalPictureMediaTooLarge');
+  } finally {
+    for (const renderer of renderers) renderer.free();
+    for (const doc of docs) doc.free();
+  }
+});

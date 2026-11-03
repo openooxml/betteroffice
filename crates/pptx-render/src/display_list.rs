@@ -10,6 +10,8 @@ pub struct ProposalDiffSlide {
     pub proposal: pptx_edit::Proposal,
     pub snapshot: pptx_edit::DeckSnapshot,
     pub text_changes: Vec<pptx_edit::ProposalTextChange>,
+    #[serde(default)]
+    pub shape_changes: Vec<pptx_edit::ProposalShapeChange>,
     pub frame: SurfaceDisplayList,
 }
 
@@ -18,13 +20,17 @@ impl Serialize for ProposalDiffSlide {
     where
         S: serde::Serializer,
     {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "proposal": self.proposal,
             "snapshot": self.snapshot,
             "textChanges": self.text_changes,
             "frame": self.frame,
-        })
-        .serialize(serializer)
+        });
+        if !self.shape_changes.is_empty() {
+            value["shapeChanges"] = serde_json::to_value(&self.shape_changes)
+                .map_err(serde::ser::Error::custom)?;
+        }
+        value.serialize(serializer)
     }
 }
 

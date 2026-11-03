@@ -171,6 +171,8 @@
     "loadingDiff": "Değişiklikler yükleniyor…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null
