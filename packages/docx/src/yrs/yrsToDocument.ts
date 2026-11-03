@@ -612,9 +612,13 @@ function runPropertyChanges(attributes: Attrs, format: RunFormatter): Pick<Run, 
     const previous = asObject(change.previousAttributes);
     const info = asObject(change.info);
     const generated = typeof info?.id === 'string' && !Number.isFinite(Number(info.id));
-    return previous && generated ? { ...change, previousFormatting: format({
-      ...previous, _sourceRunFormatting: attributes._sourceRunFormatting,
-    }) } : change;
+    return {
+      type: 'runPropertyChange',
+      ...change,
+      ...(previous && generated ? { previousFormatting: format({
+        ...previous, _sourceRunFormatting: attributes._sourceRunFormatting,
+      }) } : {}),
+    };
   });
   return { propertyChanges: propertyChanges(changes) as Run['propertyChanges'] };
 }

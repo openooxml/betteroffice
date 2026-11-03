@@ -4920,7 +4920,7 @@ mod tests {
         let target = r#"{"kind":"search","text":"beta","within":{"kind":"paragraph","story":"body","paraId":"00000001"},"view":"accepted"}"#;
         let formatted = envelope(
             &session
-                .format_text_target_json(target, r#"{"bold":true}"#, None, None)
+                .format_text_target_json(target, r#"{"bold":true}"#)
                 .unwrap(),
         );
         assert_eq!(formatted["ok"], true);
