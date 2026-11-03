@@ -490,7 +490,7 @@ impl EditingDoc {
         {
             attrs.insert(Arc::from(counterpart), Any::Null);
         }
-        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs);
+        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs)?;
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {
@@ -517,7 +517,7 @@ impl EditingDoc {
         crate::check_range(&story, &txn, range.start, len)?;
         (range.start, range.end) =
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
-        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs);
+        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs)?;
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {
@@ -641,7 +641,7 @@ impl EditingDoc {
             .into_keys()
             .map(|key| (Arc::from(key.as_str()), Any::Null))
             .collect();
-        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs);
+        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs)?;
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {
@@ -658,16 +658,23 @@ impl EditingDoc {
         story: &TextRef,
         range: &StoryRange,
         delta: Attrs,
-    ) -> Vec<String> {
+    ) -> OpResult<Vec<String>> {
         if !ctx.is_suggesting() {
             if !delta.is_empty() {
                 story.format(txn, range.start, range.end - range.start, delta);
             }
-            return Vec::new();
+            return Ok(Vec::new());
+        }
+        let chunks = crate::ops::snapshot_range(story, txn, range.start, range.end);
+        if chunks.iter().any(|chunk| {
+            matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                if matches!(crate::map_string(map, txn, crate::KIND_KEY).as_deref(), Some("field" | "sdt")))
+        }) {
+            return Err(OpError::SuggestedFormattingOverContainer);
         }
         let mut revision_ids = Vec::new();
         let mut new_id = None;
-        for chunk in crate::ops::snapshot_range(story, txn, range.start, range.end) {
+        for chunk in chunks {
             let start = chunk.start.max(range.start);
             let end = chunk.end().min(range.end);
             if start >= end || matches!(chunk.kind, crate::ops::ChunkKind::Pilcrow(_)) {
@@ -731,7 +738,7 @@ impl EditingDoc {
             patch.insert(Arc::from(RPR_CHANGE), Any::Array(Arc::from(changes)));
             story.format(txn, start, end - start, patch);
         }
-        revision_ids
+        Ok(revision_ids)
     }
 }
 

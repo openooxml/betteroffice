@@ -177,6 +177,12 @@ fn map_error(env: Env, error: EngineError) -> Error {
                 exception.set_named_property("code", code)?;
                 env.throw(exception)
             }
+            EngineErrorKind::SuggestedFormattingOverContainer => {
+                let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
+                exception.set_named_property("name", "SuggestedFormattingOverContainerError")?;
+                exception.set_named_property("code", "suggested-formatting-over-container")?;
+                env.throw(exception)
+            }
         }
     })();
     match result {

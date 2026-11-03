@@ -1,4 +1,5 @@
 import { DocxSectionError, type SectionInfo } from './sections';
+import { formattingFailure } from './formattingError';
 import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
@@ -346,7 +347,11 @@ export function wrapSession(
   let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     if (displayOnly) throw new Error('A document preview is display-only');
-    return mutateAlways(operation);
+    try {
+      return mutateAlways(operation);
+    } catch (error) {
+      throw formattingFailure(error);
+    }
   };
   const mutateAlways = <T>(operation: () => T): T => {
     invalidateReadCaches();

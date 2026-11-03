@@ -1,5 +1,6 @@
 import type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
 export { DocxSectionError } from './sections';
+export { SuggestedFormattingOverContainerError } from './formattingError';
 export type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
 /**
  * Typed facade over the Rust yrs editing core (`crates/docx-edit`).

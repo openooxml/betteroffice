@@ -274,7 +274,7 @@ impl EditSessionCore {
             .doc()
             .format_range(&ctx, StoryRange::new(story, start, end), &delta)
             .map(|_| ())
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 
     pub fn set_hyperlink(
@@ -325,7 +325,7 @@ impl EditSessionCore {
             .doc()
             .clear_formatting(&ctx, StoryRange::new(story, start, end))
             .map(|_| ())
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 
     pub fn next_paragraph_style(

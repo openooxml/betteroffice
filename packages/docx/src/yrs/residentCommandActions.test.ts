@@ -17,6 +17,7 @@ import { readResidentProperties } from './residentProperties';
 import { propertyCommandTarget } from './residentPropertyCommands';
 import { wrapSession } from './yrsSessionFacade';
 import { yrsToDocument } from './yrsToDocument';
+import { SuggestedFormattingOverContainerError } from './index';
 import type {
   DocxCommandEnvelope, DocxCommandIntent, DocxCommandPayload, DocxCommandPayloads, DocxCommandSelection, DocxEditState,
 } from './residentCommandProtocol';
@@ -1019,6 +1020,126 @@ test('setObjectProperties aligns side presets at the text margins and round-trip
       expect(new TextDecoder().decode(unzipContainer(new Uint8Array(resaved))['word/document.xml'])).toContain(horizontalXml);
     }
   }
+}, TIMEOUT);
+
+const simpleFormatField = '<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>';
+const inlineFormatControl = '<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>';
+const complexFormatField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>field</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
+
+test('suggested formatting over containers refuses before calling the engine', async () => {
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  for (const containers of [simpleFormatField, inlineFormatControl, simpleFormatField + inlineFormatControl, complexFormatField]) {
+    const arm = await openCommandEngine([], { bodyXml:
+      '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' + containers + '</w:p>',
+    });
+    const paragraph = arm.engine.paragraphs('body')[0]!;
+    const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
+    const cases = [
+      ['toggleMark', { mark: { type: 'bold' } }, 'toggleMark'],
+      ['toggleStrike', {}, 'formatRange'],
+      ['formatRange', { delta: { bold: true } }, 'formatRange'],
+      ['formatRange', { delta: {} }, 'formatRange'],
+      ['formatSelection', { delta: { bold: true } }, 'formatRange'],
+      ['clearFormatting', {}, 'clearFormatting'],
+    ] as const;
+    for (const [kind, payload, method] of cases) {
+      const intent = command(arm, kind, { ...payload, selection: selection(paragraph.paraId, 0, span.end - span.start), suggesting } as DocxCommandPayloads[typeof kind]);
+      const before = snapshot(arm);
+      const segments = arm.engine.storySegments('body');
+      const call = spyOn(arm.engine, method);
+      const capture = spyOn(arm.engine, 'beginUndoCapture');
+      try {
+        expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent)))
+          .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(call).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+        expect(snapshot(arm)).toEqual(before);
+        expect(arm.engine.storySegments('body')).toEqual(segments);
+        expect(arm.engine.geometryReader.listRevisions()).toEqual([]);
+      } finally {
+        call.mockRestore();
+        capture.mockRestore();
+      }
+    }
+  }
+}, TIMEOUT);
+
+test('suggested formatting checks containers across paragraphs and preserves plain text selections', async () => {
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>first</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>text</w:t></w:r>' + simpleFormatField + inlineFormatControl + '</w:p>',
+  });
+  const [first, second] = arm.engine.paragraphs('body');
+  const secondSpan = arm.engine.geometryReader.paragraphSpans('body')[1]!;
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const before = snapshot(arm);
+  const mixed = { anchor: { story: 'body', paraId: second!.paraId, offset: secondSpan.end - secondSpan.start },
+    focus: { story: 'body', paraId: first!.paraId, offset: 0 } };
+  expect(execute(arm, command(arm, 'toggleMark', { selection: mixed, mark: { type: 'bold' }, suggesting })))
+    .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+  expect(snapshot(arm)).toEqual(before);
+  expect(execute(arm, command(arm, 'toggleMark', {
+    selection: selection(second!.paraId, 0, 4), mark: { type: 'bold' }, suggesting,
+  })).status).toBe('applied');
+  expect(arm.engine.geometryReader.listRevisions()).toEqual([
+    expect.objectContaining({ kind: 'rPrChange', author: suggesting.name }),
+  ]);
+  expect(execute(arm, command(arm, 'toggleMark', {
+    selection: selection(second!.paraId, 4, 6), mark: { type: 'bold' },
+  })).status).toBe('applied');
+  const embeds = arm.engine.paragraphSegments('body', [1])[0]!.filter(segment => segment.kind === 'embed');
+  expect(embeds).toHaveLength(2);
+  expect(embeds.every(segment => segment.attributes.bold === true && segment.attributes.rPrChange === undefined)).toBe(true);
+}, TIMEOUT);
+
+test('direct formatting callers receive a typed container refusal without mutation', async () => {
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' + simpleFormatField + inlineFormatControl + '</w:p>',
+  });
+  const session = wrapSession(arm.native, 8101);
+  const paragraph = arm.engine.paragraphs('body')[0]!;
+  const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
+  const range = storyRange(selection(paragraph.paraId, 0, span.end - span.start));
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const before = session.encodeState();
+  for (const apply of [
+    () => session.toggleMark(range, { type: 'bold' }, suggesting),
+    () => session.formatRange(range, { bold: true }, suggesting),
+    () => session.clearFormatting(range, suggesting),
+  ]) {
+    expect(apply).toThrow(SuggestedFormattingOverContainerError);
+    expect(session.encodeState()).toEqual(before);
+    expect(session.listRevisions()).toEqual([]);
+  }
+}, TIMEOUT);
+
+test('refused formatting preserves imported container run property changes on save', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const importedRun = '<w:r><w:rPr><w:i/><w:rPrChange w:id="41" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>field</w:t></w:r>';
+  const containers = (simpleFormatField + complexFormatField + inlineFormatControl)
+    .replaceAll('<w:r><w:t>field</w:t></w:r>', importedRun)
+    .replace('<w:r><w:t>control</w:t></w:r>', importedRun);
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' + containers + '</w:p>',
+  });
+  const session = wrapSession(arm.native, 8101);
+  const saveXml = async () => {
+    const saved = await repackDocx(yrsToDocument(session, arm.engine.propertyDocument()));
+    return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  };
+  const before = await saveXml();
+  expect(before.match(/<w:rPrChange\s/g)).toHaveLength(3);
+  const paragraph = arm.engine.paragraphs('body')[0]!;
+  const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
+  expect(execute(arm, command(arm, 'toggleMark', {
+    selection: selection(paragraph.paraId, 0, span.end - span.start), mark: { type: 'bold' },
+    suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
+  }))).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+  expect(await saveXml()).toBe(before);
 }, TIMEOUT);
 
 test('formatting commands forward the suggesting author and create reviewable run changes', async () => {

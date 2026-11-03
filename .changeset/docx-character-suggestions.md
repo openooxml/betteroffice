@@ -4,4 +4,4 @@
 "@betteroffice/docx-i18n": patch
 ---
 
-Suggesting mode now tracks character formatting and hyperlink edits, with review actions and saved revisions. Adds optional `suggesting` authors to `toggleMark`, `formatRange`, `clearFormatting` and `setHyperlink`.
+Suggesting mode now tracks character formatting and hyperlink edits through optional `suggesting` authors on `toggleMark`, `formatRange`, `clearFormatting` and `setHyperlink`. Character formatting over fields or inline content controls is refused with `SuggestedFormattingOverContainerError`; commands return `unsupported-suggesting`.

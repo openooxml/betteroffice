@@ -105,6 +105,16 @@ impl From<EngineError> for JsValue {
                 value.into()
             }
             EngineErrorKind::Message => JsValue::from_str(&error.message),
+            EngineErrorKind::SuggestedFormattingOverContainer => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("SuggestedFormattingOverContainerError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("suggested-formatting-over-container"),
+                );
+                value.into()
+            }
         }
     }
 }

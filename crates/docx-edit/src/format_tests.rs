@@ -43,6 +43,169 @@ fn attrs(engine: &EngineSession) -> Vec<(String, Value)> {
 }
 
 #[test]
+fn suggested_format_refuses_containers_without_mutation() {
+    let simple = r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>"#;
+    let control = r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>"#;
+    let complex = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        "<w:r><w:instrText> PAGE </w:instrText></w:r>",
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        "<w:r><w:t>field</w:t></w:r>",
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+    );
+    for containers in [
+        simple.to_owned(),
+        control.to_owned(),
+        format!("{simple}{control}"),
+        complex.to_owned(),
+    ] {
+        for (operation, origin) in [
+            ("format", crate::EditOrigin::Local),
+            ("format", crate::EditOrigin::Agent),
+            ("toggle", crate::EditOrigin::Local),
+            ("clear", crate::EditOrigin::Local),
+            ("empty", crate::EditOrigin::Local),
+        ] {
+            let ctx = EditCtx {
+                origin,
+                ..suggesting()
+            };
+            let engine = EngineSession::new(9310);
+            seed_from_docx(
+                engine.doc(),
+                &document(&format!(
+                    "<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>text</w:t></w:r>{containers}</w:p>"
+                )),
+            )
+            .unwrap();
+            let end = engine
+                .doc()
+                .paragraph_index("body")
+                .unwrap()
+                .pilcrow_at(0)
+                .unwrap();
+            let before = engine.doc().encode_state_as_update_v1();
+            let range = StoryRange::new("body", 0, end);
+            let result = match operation {
+                "toggle" => engine
+                    .doc()
+                    .toggle_format(&ctx, range, SimpleFormat::Bold),
+                "clear" => engine.doc().clear_formatting(&ctx, range),
+                _ => engine.doc().format_range(
+                    &ctx,
+                    range,
+                    &InlineFormatDelta {
+                        bold: if operation == "empty" {
+                            Patch::Keep
+                        } else {
+                            Patch::Set(true)
+                        },
+                        ..Default::default()
+                    },
+                ),
+            };
+            assert_eq!(result, Err(OpError::SuggestedFormattingOverContainer));
+            assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+            assert!(engine.doc().list_revisions().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn plain_text_suggestions_and_plain_container_formatting_remain_supported() {
+    let engine = EngineSession::new(9311);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>text</w:t></w:r>",
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>"#,
+            r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>"#,
+            "</w:p>",
+        )),
+    )
+    .unwrap();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 4),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    assert_eq!(attrs(&engine)[0].1["bold"], true);
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &EditCtx::local("Ada", "2026-10-01T12:00:00Z"),
+            StoryRange::new("body", 4, 6),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    assert!(receipt.revision_ids.is_empty());
+    let segments = engine.doc().story_segments("body").unwrap();
+    for segment in &segments[1..3] {
+        assert_eq!(segment.attributes.get("bold"), Some(&Any::Bool(true)));
+        assert!(!segment.attributes.contains_key(RPR_CHANGE));
+    }
+    assert_eq!(engine.doc().list_revisions().unwrap().len(), 1);
+}
+
+#[test]
+fn suggested_container_formatting_keeps_its_typed_session_error() {
+    let core = crate::session::EditSessionCore::new(9312, crate::session::Host::deterministic());
+    seed_from_docx(
+        core.engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>text</w:t></w:r>",
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>"#,
+            "</w:p>",
+        )),
+    )
+    .unwrap();
+    let paragraphs: Value = serde_json::from_str(&core.paragraphs("body").unwrap()).unwrap();
+    let id = paragraphs[0]["paraId"].as_str().unwrap();
+    let before = core.encode_state();
+    for operation in ["format", "toggle", "font", "clear"] {
+        let author = Some("Ada".to_owned());
+        let date = Some("2026-10-01T12:00:00Z".to_owned());
+        let result = match operation {
+            "format" => core.format_range(
+                "body",
+                id,
+                0,
+                id,
+                5,
+                r#"{"bold":true}"#,
+                author,
+                date,
+            ),
+            "clear" => core.clear_formatting("body", id, 0, id, 5, author, date),
+            _ => core.toggle_mark(
+                "body",
+                id,
+                0,
+                id,
+                5,
+                if operation == "font" {
+                    r#"{"type":"fontFamily","value":"Arial"}"#
+                } else {
+                    r#"{"type":"bold"}"#
+                },
+                author,
+                date,
+            ),
+        };
+        assert_eq!(
+            result.unwrap_err().kind,
+            crate::session::EngineErrorKind::SuggestedFormattingOverContainer
+        );
+        assert_eq!(core.encode_state(), before);
+        assert!(core.engine.doc().list_revisions().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn suggested_format_captures_previous_run_properties() {
     let engine = engine();
     let receipt = engine

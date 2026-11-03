@@ -46,6 +46,25 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const IDENTITY_KEYS = new Set(['paraId', '_kind', 'ooxmlParaId', 'sourceParaId', 'paraOrigin']);
 
+function formattingRangeContainsContainer(engine: DocxWorkerCommandEngine, range: YrsStoryRange): boolean {
+  if (collapsed(range)) return false;
+  const spans = engine.geometryReader.paragraphSpans(range.story);
+  const first = spans.findIndex(span => span.paraId === range.start.paraId);
+  const last = spans.findIndex(span => span.paraId === range.end.paraId);
+  const indices = Array.from({ length: last - first + 1 }, (_, index) => first + index);
+  return engine.paragraphSegments(range.story, indices).some((segments, index) => {
+    const start = index === 0 ? range.start.offset : 0;
+    const end = index === indices.length - 1 ? range.end.offset : Infinity;
+    let offset = 0;
+    return segments.some(segment => {
+      const at = offset;
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+      return Math.min(offset, end) > Math.max(at, start) && segment.kind === 'embed' &&
+        (segment.embedKind === 'field' || segment.embedKind === 'sdt');
+    });
+  });
+}
+
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
     (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -717,6 +736,9 @@ export function preflightDocxCommand(
   }
   if (readOnly) return refuse('read-only');
   if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
+  if (['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind) &&
+    'suggesting' in command.payload && command.payload.suggesting !== undefined &&
+    formattingRangeContainsContainer(engine, resolved.range)) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);

@@ -253,7 +253,7 @@ pub(crate) fn apply_mark(
     };
     if let Some(format) = simple {
         doc.toggle_format(ctx, range, format)
-            .map_err(EngineError::message)?;
+            .map_err(EngineError::from)?;
         return Ok(());
     }
     let delta = match kind {
@@ -290,7 +290,7 @@ pub(crate) fn apply_mark(
         other => return Err(EngineError::message(format!("unknown mark type {other:?}"))),
     };
     doc.format_range(ctx, range, &delta)
-        .map_err(EngineError::message)?;
+        .map_err(EngineError::from)?;
     Ok(())
 }
 
