@@ -626,7 +626,7 @@ function pictureFrame(frame: PresentationCommandFrame, assetId: string): Present
 function heldImage() {
   const image = deferred<CanvasImageSource | null>();
   const resolve = Object.assign((_assetId: string) => image.promise, { release: mock(() => {}) });
-  const cache = spyOn(pptxWorker, 'browserFrameImages').mockReturnValue({ resolve: () => resolve, dispose: mock(() => {}) });
+  const cache = spyOn(pptxWorker, 'browserFrameImages').mockReturnValue({ resolve: () => resolve, trim: mock(() => {}), dispose: mock(() => {}) });
   restorers.push(() => cache.mockRestore());
   return { image, release() {
     const source = new Image();

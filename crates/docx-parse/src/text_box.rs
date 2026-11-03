@@ -174,6 +174,34 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     }));
 }
 
+/// The group model without its frame, text-box text and media sources, which a replay
+/// updates in place or which differ only by how the media was resolved.
+pub(crate) fn group_model_sha256(shape: &Shape) -> String {
+    fn clear(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(body) = map
+                    .get_mut("textBody")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    body.insert("content".to_owned(), serde_json::Value::Array(Vec::new()));
+                }
+                map.retain(|_, value| {
+                    !value
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("media:") || text.starts_with("data:"))
+                });
+                map.values_mut().for_each(clear);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(clear),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(shape).expect("shape model");
+    clear(&mut value);
+    crate::smart_art::other_value_sha256(value)
+}
+
 pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     use sha2::{Digest, Sha256};
 
@@ -182,6 +210,19 @@ pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
         "{:x}",
         Sha256::digest(serde_json::to_vec(&model).expect("text box content"))
     )
+}
+
+/// An `mc:AlternateContent` holding a bookmarked text box next to another drawing in one
+/// branch: no single shape can own its source, so each drawing keeps its own.
+pub(crate) fn shares_a_bookmarked_branch(element: &XmlElement) -> bool {
+    has_bookmarked_text_box(element)
+        && element.child_elements().any(|branch| {
+            branch
+                .child_elements()
+                .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+                .count()
+                > 1
+        })
 }
 
 pub(crate) fn contains_text_box(element: &XmlElement) -> bool {
@@ -195,12 +236,19 @@ pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
 fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
     let in_text_box = in_text_box || element.name == "w:txbxContent";
     if in_text_box && element.name == "w:p" {
-        return false;
+        return contains_bookmark_boundary(element);
     }
     (in_text_box && crate::block::has_direct_block_bookmark(element))
         || element
             .child_elements()
             .any(|child| has_block_bookmarks(child, in_text_box))
+}
+
+fn contains_bookmark_boundary(element: &XmlElement) -> bool {
+    element.child_elements().any(|child| {
+        matches!(child.local_name(), "bookmarkStart" | "bookmarkEnd")
+            || contains_bookmark_boundary(child)
+    })
 }
 
 pub(crate) fn source_xml(source: &XmlElement) -> String {

@@ -17,6 +17,8 @@ mod read;
 mod shapes;
 #[cfg(feature = "svg")]
 mod svg;
+#[cfg(feature = "svg")]
+mod svg_session;
 mod text;
 mod transform;
 mod wmf;
@@ -31,6 +33,8 @@ pub use shapes::{MetafileDrawing, MetafileOp, MetafileStroke, decode};
 pub use svg::{
     MAX_SVG_BYTES, Svg, placeholder_svg, to_svg, to_svg_with_budget, to_svg_with_limits,
 };
+#[cfg(feature = "svg")]
+pub use svg_session::SvgSession;
 
 use std::cell::Cell;
 use std::rc::Rc;

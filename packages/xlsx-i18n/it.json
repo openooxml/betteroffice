@@ -178,6 +178,7 @@
     "accept": "Accetta",
     "reject": "Rifiuta",
     "forceApply": "Applica comunque",
+    "forceBlockedReason": "Questa proposta non può essere applicata dopo una modifica strutturale.",
     "staleWarning": "Celle modificate dopo la proposta: {cells}"
   },
   "a11y": {

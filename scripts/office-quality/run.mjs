@@ -10,6 +10,7 @@ import { download } from './download.mjs';
 import { fetchAsset, resolveAssetCacheDir } from './asset-cache.mjs';
 import { corpusOrigin } from './samples.mjs';
 import { preparePlan, selectPlanSamples, validatePlan } from './plan.mjs';
+import { measureShard } from './measure-shards.mjs';
 
 const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
@@ -179,10 +180,15 @@ async function viewer(overrides = {}) {
 
 const plan = await checkoutPlan();
 const requestedFormat = process.env.QUALITY_FORMAT?.trim() || null;
-const { formats: selectedFormats, samples: selectedPlanSamples } = selectPlanSamples(
+const { formats: selectedFormats, samples: formatSamples } = selectPlanSamples(
   plan,
   requestedFormat
 );
+const requestedShard = process.env.QUALITY_SHARD?.trim() || null;
+if (requestedShard !== null && (!requestedFormat || !/^(0|[1-9][0-9]{0,3})$/.test(requestedShard)))
+  throw new Error('QUALITY_SHARD needs QUALITY_FORMAT and a shard index');
+const shardIds = requestedShard === null ? null : new Set(measureShard(plan, requestedFormat, Number(requestedShard)).samples);
+const selectedPlanSamples = shardIds ? formatSamples.filter((sample) => shardIds.has(sample.id)) : formatSamples;
 const samples = [];
 for (const sample of selectedPlanSamples) samples.push(await reference(sample));
 for (const format of selectedFormats) {
@@ -268,6 +274,7 @@ const report = {
   versions: plan.versions,
   react_version: plan.react_version,
   ...(requestedFormat ? { format: requestedFormat } : {}),
+  ...(requestedShard !== null ? { shard: Number(requestedShard) } : {}),
   samples: samples.map(({ source, directory, ...sample }) => sample),
 };
 await writeFile(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');

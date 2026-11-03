@@ -23,7 +23,7 @@ use crate::types::{
     TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
     TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
-use ooxml_text::{FontSlotUse, LineBox, LineSpacingRule, apply_spacing_rule, font_slot_use};
+use ooxml_text::{FontSlotUse, LineBox, LineSpacingRule, apply_spacing_rule};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
@@ -231,6 +231,63 @@ pub struct FontRequirement {
     pub italic: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<String>,
+    #[serde(
+        rename = "characterBits",
+        skip_serializing_if = "FontCharacters::is_empty"
+    )]
+    pub characters: FontCharacters,
+}
+
+#[derive(Clone, Debug)]
+pub struct FontCharacters([u32; 64]);
+
+impl Default for FontCharacters {
+    fn default() -> Self {
+        Self([0; 64])
+    }
+}
+
+impl FontCharacters {
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(|&word| word == 0)
+    }
+
+    fn insert(&mut self, ch: char) {
+        if let Some(index) = ooxml_text::font_store::base_latin_character_index(ch) {
+            self.0[index / 32] |= 1 << (index % 32);
+        }
+    }
+
+    fn extend(&mut self, other: &Self) {
+        for (word, added) in self.0.iter_mut().zip(other.0) {
+            *word |= added;
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = char> + '_ {
+        ooxml_text::font_store::BASE_LATIN_RANGES
+            .into_iter()
+            .flat_map(|(start, end)| (start..=end).filter_map(char::from_u32))
+            .chain(ooxml_text::font_store::BASE_LATIN_ALIASES)
+            .enumerate()
+            .filter_map(|(index, ch)| (self.0[index / 32] & (1 << (index % 32)) != 0).then_some(ch))
+    }
+}
+
+impl Serialize for FontCharacters {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use std::fmt::Write;
+        let length = self
+            .0
+            .iter()
+            .rposition(|&word| word != 0)
+            .map_or(0, |index| index + 1);
+        let mut bits = String::with_capacity(length * 8);
+        for word in &self.0[..length] {
+            write!(bits, "{word:08x}").unwrap();
+        }
+        serializer.serialize_str(&bits)
+    }
 }
 
 /// The fonts `blocks` need, text naming no family taking `default_family`, the family
@@ -258,20 +315,20 @@ pub fn collect_font_requirements_into<'a>(
     collector.merge_named_into(requirements);
 }
 
-/// Fonts any revision preview may need. Returns false when any of them needs a
-/// script fallback, whose chain order a superset cannot keep exact. Keeps every
-/// named family, as [`collect_font_requirements_into`] does.
+/// Fonts any revision preview may need. Returns false for script fallbacks or
+/// numbered markers requiring exact collection. Keeps every named family.
 pub fn collect_preview_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
     requirements: &mut BTreeMap<String, FontRequirement>,
 ) -> bool {
     let mut collector = FontRequirementCollector::default();
-    collector.collect_preview(blocks, default_family);
+    let stable_markers = collector.collect_preview(blocks, default_family);
     collector.merge_named_into(requirements);
-    requirements
-        .values()
-        .all(|requirement| requirement.scripts.is_empty())
+    stable_markers
+        && requirements
+            .values()
+            .all(|requirement| requirement.scripts.is_empty())
 }
 
 /// Gathers the fonts of several block runs (a document's body, headers, footers
@@ -300,14 +357,14 @@ impl FontRequirementCollector {
         }
     }
 
-    /// Adds the fonts any revision preview of `blocks` may need, as
-    /// [`collect_preview_font_requirements_into`] does.
+    /// Adds preview fonts and returns whether marker characters stay valid.
     pub fn collect_preview<'a>(
         &mut self,
         blocks: impl IntoIterator<Item = &'a LayoutBlock>,
         default_family: &str,
-    ) {
+    ) -> bool {
         let blocks: Vec<&LayoutBlock> = blocks.into_iter().collect();
+        let mut stable_markers = true;
         // A preview hiding the drawings that split a paragraph joins its segments.
         let mut segment_scripts = HashMap::<String, Vec<String>>::new();
         for block in &blocks {
@@ -334,6 +391,7 @@ impl FontRequirementCollector {
                 let Some(attrs) = &paragraph.attrs else {
                     return;
                 };
+                stable_markers &= attrs.num_pr.is_none() || attrs.list_is_bullet == Some(true);
                 if attrs.num_pr.is_none()
                     && attrs.list_marker.is_none()
                     && attrs.list_is_bullet.is_none()
@@ -361,6 +419,10 @@ impl FontRequirementCollector {
                 } else {
                     std::slice::from_ref(&marker_style)
                 };
+                let mut characters = FontCharacters::default();
+                for ch in attrs.list_marker.as_deref().unwrap_or("").chars() {
+                    characters.insert(ch);
+                }
                 for family in paragraph
                     .runs
                     .iter()
@@ -378,10 +440,12 @@ impl FontRequirementCollector {
                     let family = attrs.list_marker_font_family.as_deref().unwrap_or(family);
                     for &(bold, italic) in styles {
                         self.name(family, bold, italic, &scripts, true);
+                        self.characters(family, bold, italic, characters.clone());
                     }
                 }
             });
         }
+        stable_markers
     }
 
     /// The requirements measurement can reach, keyed as
@@ -396,24 +460,35 @@ impl FontRequirementCollector {
     /// an implicit entry kept here would lead the scripts a later call names.
     fn merge_named_into(mut self, requirements: &mut BTreeMap<String, FontRequirement>) {
         self.used.extend(self.named.keys().cloned());
+        for (key, requirement) in &self.implicit {
+            if let Some(named) = self.named.get_mut(key) {
+                named.characters.extend(&requirement.characters);
+            }
+        }
         self.implicit.clear();
         self.merge_into(requirements);
     }
 
     fn merge_into(self, requirements: &mut BTreeMap<String, FontRequirement>) {
         let Self {
-            named,
+            mut named,
             implicit,
             used,
         } = self;
         for (key, requirement) in implicit {
-            if !named.contains_key(&key) {
-                requirements.entry(key).or_insert(requirement);
+            if let Some(named) = named.get_mut(&key) {
+                named.characters.extend(&requirement.characters);
+            } else {
+                requirements
+                    .entry(key)
+                    .and_modify(|kept| kept.characters.extend(&requirement.characters))
+                    .or_insert(requirement);
             }
         }
         for (key, requirement) in named {
             match requirements.entry(key) {
                 Entry::Occupied(mut kept) => {
+                    kept.get_mut().characters.extend(&requirement.characters);
                     let scripts = &mut kept.get_mut().scripts;
                     for script in requirement.scripts {
                         if !scripts.contains(&script) {
@@ -441,6 +516,15 @@ impl FontRequirementCollector {
     fn reach(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String]) {
         let key = add_font_requirement(family, bold, italic, scripts, &mut self.implicit);
         self.used.insert(key);
+    }
+
+    fn characters(&mut self, family: &str, bold: bool, italic: bool, characters: FontCharacters) {
+        let key = add_font_requirement(family, bold, italic, &[], &mut self.implicit);
+        self.implicit
+            .get_mut(&key)
+            .unwrap()
+            .characters
+            .extend(&characters);
     }
 }
 
@@ -543,6 +627,7 @@ fn add_font_requirement(
             bold,
             italic,
             scripts: Vec::new(),
+            characters: FontCharacters::default(),
         });
     for script in scripts {
         if !requirement.scripts.contains(script) {
@@ -578,13 +663,45 @@ fn collect_paragraph_font_requirements(
         let italic = formatting.italic.unwrap_or(false);
         let slots = formatting.font_slots.as_ref();
         let complex_script = formatting.complex_script.unwrap_or(false);
-        let mut slot_use = text.map_or_else(FontSlotUse::default, |text| {
-            font_slot_use(
-                &text.text,
-                complex_script,
-                slots.and_then(|slots| slots.hint.as_deref()),
-            )
-        });
+        let content = match run {
+            Run::Text(text) => text.text.as_str(),
+            Run::Field(field) => field
+                .fallback
+                .as_deref()
+                .filter(|text| !text.is_empty())
+                .unwrap_or("1"),
+            _ => "",
+        };
+        let hint = slots.and_then(|slots| slots.hint.as_deref()) == Some("eastAsia");
+        let mut characters: [FontCharacters; 4] =
+            std::array::from_fn(|_| FontCharacters::default());
+        let mut slot_use = FontSlotUse::default();
+        for (ch, slot) in
+            ooxml_text::font_slot_characters(content, complex_script && text.is_some(), hint)
+        {
+            if text.is_some() {
+                slot_use.east_asia |= slot == 2;
+                slot_use.complex_script |= slot == 3;
+            }
+            if formatting.all_caps != Some(true) || text.is_none() {
+                characters[slot].insert(ch);
+            }
+            if text.is_some()
+                && (formatting.all_caps == Some(true) || formatting.small_caps == Some(true))
+            {
+                let language = formatting
+                    .language
+                    .as_ref()
+                    .and_then(|language| match slot {
+                        2 => language.east_asia.as_deref().or(language.latin.as_deref()),
+                        3 => language.bidi.as_deref().or(language.latin.as_deref()),
+                        _ => language.latin.as_deref(),
+                    });
+                for upper in ooxml_text::uppercase_for_language(ch, language) {
+                    characters[slot].insert(upper);
+                }
+            }
+        }
         // Text typed into a complex-script run measures with its cs slot too.
         slot_use.complex_script |= complex_script;
         let cs_bold = formatting.bold_cs.unwrap_or(bold);
@@ -653,6 +770,28 @@ fn collect_paragraph_font_requirements(
                 scripts,
             );
         }
+        for (slot, characters) in characters.into_iter().enumerate() {
+            if characters.is_empty() {
+                continue;
+            }
+            let selected = slots.and_then(|slots| match slot {
+                0 => slots.ascii.as_deref(),
+                1 => slots.h_ansi.as_deref(),
+                2 => slots.east_asia.as_deref(),
+                _ => slots.cs.as_deref(),
+            });
+            let family = if text.is_some() {
+                selected.unwrap_or(text_unnamed)
+            } else {
+                run_family
+            };
+            let (bold, italic) = if text.is_some() && slot == 3 {
+                (cs_bold, cs_italic)
+            } else {
+                (bold, italic)
+            };
+            collector.characters(family, bold, italic, characters);
+        }
     }
     if let Some(attrs) = &paragraph.attrs
         && attrs
@@ -689,6 +828,21 @@ fn collect_paragraph_font_requirements(
             attrs.list_marker_bold.unwrap_or(false),
             attrs.list_marker_italic.unwrap_or(false),
             scripts,
+        );
+        let family = attrs
+            .list_marker_font_family
+            .as_deref()
+            .or_else(|| first_text_run.and_then(|text| text.fmt.font_family.as_deref()))
+            .unwrap_or(default_family);
+        let mut characters = FontCharacters::default();
+        for ch in attrs.list_marker.as_deref().unwrap_or("").chars() {
+            characters.insert(ch);
+        }
+        collector.characters(
+            family,
+            attrs.list_marker_bold.unwrap_or(false),
+            attrs.list_marker_italic.unwrap_or(false),
+            characters,
         );
     }
 }
@@ -4574,6 +4728,63 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "base-latin")]
+    fn first_font_invalidates_backstop_only_extents() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = MeasurementConfig {
+            font_chains: BTreeMap::from([(
+                "requested|0|0".to_owned(),
+                vec![ooxml_text::FontId::base_latin(false, false).to_u32()],
+            )]),
+            defaults: json!({"fontFamily": "Requested", "fontSize": 12}),
+            ..Default::default()
+        };
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "backstop-run", "runs": [
+                {"kind": "text", "text": "Latin", "fontFamily": "Requested"}
+            ]
+        }))
+        .unwrap();
+        let identity = crate::measure_font_cache_identity(&config.font_chains);
+        assert_eq!(
+            identity,
+            crate::measure_font_cache_identity(&BTreeMap::new())
+        );
+        let backstop = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_ne!(backstop.lines[0].synthetic_fallback, Some(true));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Hit(_)
+        ));
+        let font = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+        assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
+        assert_ne!(
+            identity,
+            crate::measure_font_cache_identity(&config.font_chains)
+        );
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()) - before, 1);
+        config
+            .font_chains
+            .insert("requested|0|0".to_owned(), vec![0]);
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let real = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_ne!(
+            serde_json::to_vec(&backstop).unwrap(),
+            serde_json::to_vec(&real).unwrap()
+        );
+    }
+
+    #[test]
     fn first_font_invalidates_extents_without_a_matching_chain() {
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
@@ -7398,6 +7609,25 @@ mod tests {
         let mut named = BTreeMap::new();
         collect_font_requirements_into(&blocks, "Calibri", &mut named);
         assert!(named.contains_key("aptos|1|0"));
+    }
+
+    #[test]
+    fn preview_collects_hidden_literal_marker_characters_for_surviving_families() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "hidden-marker", "attrs": {
+                "listMarker": "Ω", "listMarkerHidden": true, "listMarkerBold": true
+            }, "runs": [
+                {"kind": "text", "text": "First", "fontFamily": "First"},
+                {"kind": "text", "text": "Second", "fontFamily": "Second"}
+            ]
+        }))
+        .unwrap();
+        let mut collector = FontRequirementCollector::default();
+        assert!(collector.collect_preview([&block], "Default"));
+        let requirements = collector.finish();
+        for key in ["first|1|0", "second|1|0", "default|1|0"] {
+            assert_eq!(requirements[key].characters.iter().collect::<String>(), "Ω");
+        }
     }
 
     #[test]

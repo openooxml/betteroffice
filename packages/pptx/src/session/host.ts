@@ -16,7 +16,10 @@ import {
   type PresentationHandle, type PresentationPeerHandle,
 } from '../wasm/loader';
 import { frameAssetIds } from './frame';
+import { createMetafileSvg } from './metafileSvg';
 import { registerPresentationCommandHandlers } from './commandHost';
+import type { listenPptxWorkerRender } from './workerRender';
+import { PPTX_RENDER_REPLY, type PptxRenderReply } from '../../../../shared/office-session/render/pptxWorkerRender';
 import type { PresentationCommandEvents, PresentationCommandMethods } from './commandProtocol';
 import type { PresentationSharedMethods } from './commandSharedAdapter';
 import type { DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
@@ -57,6 +60,7 @@ export async function initializePresentationEditorWasm(source?: ArrayBuffer | We
 export function createPresentationSessionHost(
   transport: SessionTransport,
   options: {
+    workerRender?: ReturnType<typeof listenPptxWorkerRender>;
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
     initEditorWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<WebAssembly.Module | undefined>;
   } = {}
@@ -74,6 +78,16 @@ export function createPresentationSessionHost(
   let metadataCache: { version: string; value: ReturnType<typeof presentationMetadata> } | undefined;
   const encoder = new TextEncoder();
   const sentMedia = new Set<string>();
+  const metafiles = engineKind === 'native' ? {
+    start: async () => {}, ready: () => true,
+    convert: (assetId: string, _bytes: Uint8Array) => presentation().metafileSvg(assetId),
+  } : createMetafileSvg();
+
+  async function loadMetafiles(): Promise<void> {
+    try {
+      await metafiles.start();
+    } catch {}
+  }
 
   function presentation(): PresentationHandle | PresentationPeerHandle {
     if (disposed) throw new Error('Presentation session is disposed');
@@ -159,7 +173,7 @@ export function createPresentationSessionHost(
       }
       return result;
     },
-    frame(_, slideIndex) {
+    async frame(_, slideIndex) {
       const opened = presentation();
       const frameVersion = opened.version();
       const slideCount = metadata(opened, frameVersion).slides.length;
@@ -170,6 +184,8 @@ export function createPresentationSessionHost(
         : presentationDisplayListJson(opened as PresentationHandle, slideIndex);
       const displayList = encoder.encode(json).buffer;
       const media: PresentationWireFrame['media'] = [];
+      const sources = new Map<string, Uint8Array>();
+      let needsMetafiles = false;
       for (const assetId of frameAssetIds(JSON.parse(json) as SlideDisplayList)) {
         if (sentMedia.has(assetId)) continue;
         let bytes: Uint8Array;
@@ -177,11 +193,26 @@ export function createPresentationSessionHost(
         if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
           try { bytes = decodeTiffImage(bytes); } catch {}
         }
-        bytes = metafileImageBytes(bytes, () => opened.metafileSvg(assetId));
+        sources.set(assetId, bytes);
+        if (!metafiles.ready() && !needsMetafiles) {
+          metafileImageBytes(bytes, () => { needsMetafiles = true; return undefined; });
+        }
+      }
+      if (needsMetafiles) {
+        await loadMetafiles();
+        presentation();
+      }
+      const pendingMetafiles = new Set<string>();
+      for (const [assetId, source] of sources) {
+        const bytes = metafileImageBytes(source, () => {
+          if (metafiles.ready()) return metafiles.convert(assetId, source);
+          pendingMetafiles.add(assetId);
+          return undefined;
+        });
         media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
       }
       epoch += 1;
-      for (const { assetId } of media) sentMedia.add(assetId);
+      for (const { assetId } of media) if (!pendingMetafiles.has(assetId)) sentMedia.add(assetId);
       return transferable({ displayList, version: frameVersion, epoch, slideIndex, media },
         [displayList, ...media.map(({ bytes }) => bytes)]);
     },
@@ -256,11 +287,12 @@ export function createPresentationSessionHost(
       }
     },
     flush: (_, expectedSequence, expectedVersion) => position(expectedSequence, expectedVersion),
-    editorFrame(_, slideId) {
+    async editorFrame(_, slideId) {
       editorPresentation(false);
       const index = metadata().slides.findIndex((slide) => slide.id === slideId);
-      const frame = handlers.frame(null, index) as TransferResult<PresentationWireFrame>;
-      return transferable({ ...frame.value, slideId, sequence }, frame.transfer);
+      const frameSequence = sequence;
+      const frame = await handlers.frame(null, index) as TransferResult<PresentationWireFrame>;
+      return transferable({ ...frame.value, slideId, sequence: frameSequence }, frame.transfer);
     },
     editorSave(_, expectedSequence, expectedVersion) {
       position(expectedSequence, expectedVersion);
@@ -272,7 +304,14 @@ export function createPresentationSessionHost(
   let pipeOutputTimer: ReturnType<typeof setTimeout> | undefined;
   const fontInstallation = createCommandFontInstallation((request, transfer) => host.emit('defaultFontInstall', request, transfer));
   const commands = registerPresentationCommandHandlers({ initWasm: options.initWasm,
-    installDefaultFonts: fontInstallation.install,
+    onActiveFrame: options.workerRender?.frame,
+    activeFrameWanted: options.workerRender?.active,
+    onResetMedia: options.workerRender?.resetMedia,
+    installDefaultFonts: async (faces) => {
+      const installed = await fontInstallation.install(faces);
+      options.workerRender?.defaultFonts(installed);
+      return installed;
+    },
     onDefaultFonts: (result) => host.emit('defaultFonts', result.value, result.transfer), onPipeOutput() {
     if (disposed || pipeOutputTimer !== undefined) return;
     pipeOutputTimer = setTimeout(() => {
@@ -281,13 +320,43 @@ export function createPresentationSessionHost(
       if (output) host.emit('collaborationPipe', output.batches, output.transfer);
     }, 0);
   } });
+  let queued: Promise<void> | undefined;
+  const send = (message: unknown, transfer: Transferable[] | undefined, reply?: PptxRenderReply) => {
+    if (reply && !disposed) {
+      try {
+        transport.post({ ...(message as object), [PPTX_RENDER_REPLY]: reply },
+          reply.kind === 'raster' ? [...(transfer ?? []), reply.bitmap] : transfer);
+        return;
+      } catch {}
+    }
+    if (reply?.kind === 'raster') reply.bitmap.close();
+    transport.post(message, transfer);
+  };
   const replyTransport: SessionTransport = { ...transport,
     listen: (listener) => transport.listen((message) => { if (!fontInstallation.receive(message)) listener(message); }),
     post(message, transfer) {
       const output = isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')
         ? commands.drainPipe() : undefined;
-      transport.post(output ? { ...(message as object), collabPipe: output.batches } : message,
-        output ? [...(transfer ?? []), ...output.transfer] : transfer);
+      const value = output ? { ...(message as object), collabPipe: output.batches } : message;
+      const list = output ? [...(transfer ?? []), ...output.transfer] : transfer;
+      const render = options.workerRender;
+      if (!queued && !render?.pending()) {
+        transport.post(value, list);
+        render?.afterReply();
+        return;
+      }
+      const reply = render?.pending() ? render.paintNow() : undefined;
+      const next = Promise.all([queued, reply]).then(([, painted]) => {
+        try { send(value, list, painted); } catch (error) {
+          try {
+            transport.post({ protocol: 1, kind: 'failure', code: 'message',
+              message: `Session could not post a message: ${error instanceof Error ? error.message : String(error)}` });
+          } catch {}
+        }
+        render?.afterReply();
+      });
+      queued = next;
+      void next.then(() => { if (queued === next) queued = undefined; });
     },
   };
   const host = createSessionHost<
@@ -297,7 +366,7 @@ export function createPresentationSessionHost(
     policies: { ...PRESENTATION_SESSION_POLICIES, ...PRESENTATION_EDITOR_POLICIES, ...commands.policies },
     context: null, onDispose() {
       if (pipeOutputTimer !== undefined) clearTimeout(pipeOutputTimer);
-      try { dispose(); } finally { fontInstallation.dispose(); commands.dispose(); }
+      try { dispose(); } finally { fontInstallation.dispose(); commands.dispose(); options.workerRender?.dispose(); }
     },
   });
   return host;

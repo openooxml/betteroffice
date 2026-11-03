@@ -7,12 +7,14 @@ import {
   decodeTiffImage, presentationDisplayListJson, type PresentationHandle,
 } from '../wasm/loader';
 import type { PresentationCommandFrame } from './commandProtocol';
+import type { MetafileSvg } from './metafileSvg';
 import { frameAssetIds } from './frame';
 
 type FrameTags = Omit<PresentationCommandFrame, 'displayList' | 'media'>;
 
 export function buildCommandFrame(
-  handle: PresentationHandle, tags: FrameTags, sentMedia: ReadonlySet<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList
+  handle: PresentationHandle, tags: FrameTags, sentMedia: ReadonlySet<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList,
+  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
 ): TransferResult<PresentationCommandFrame> {
   const list = cached ?? JSON.parse(presentationDisplayListJson(handle, tags.slideIndex)) as SlideDisplayList;
   function visit(primitives: SlidePrimitive[]): void {
@@ -47,13 +49,25 @@ export function buildCommandFrame(
   for (const assetId of frameAssetIds(list)) {
     if (sentMedia.has(assetId)) continue;
     let bytes: Uint8Array;
-    try { bytes = handle.mediaBytes(assetId); } catch { continue; }
-    if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
-      try { bytes = decodeTiffImage(bytes); } catch {}
-    }
-    bytes = metafileImageBytes(bytes, () => handle.metafileSvg(assetId));
+    try { bytes = commandFrameMediaBytes(handle, assetId, metafiles, pendingMetafiles); } catch { continue; }
+    extracted?.set(assetId, bytes);
     media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
   }
   return transferable({ ...tags, displayList, media },
     [displayList, ...media.map(({ bytes }) => bytes)]);
+}
+
+export function commandFrameMediaBytes(
+  handle: PresentationHandle, assetId: string, metafiles?: MetafileSvg, pendingMetafiles?: Set<string>,
+): Uint8Array {
+  let bytes = handle.mediaBytes(assetId);
+  if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
+    try { bytes = decodeTiffImage(bytes); } catch {}
+  }
+  const source = bytes;
+  return metafileImageBytes(source, () => {
+    if (metafiles?.ready()) return metafiles.convert(assetId, source);
+    pendingMetafiles?.add(assetId);
+    return undefined;
+  });
 }

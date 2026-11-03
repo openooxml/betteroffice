@@ -16,6 +16,7 @@ name = "ooxml_text"
 crate-type = ["rlib"]
 
 [dependencies]
+base-latin = { workspace = true, optional = true }
 ooxml-drawingml.workspace = true
 skrifa = "0.44"
 rustybuzz = "0.20"
@@ -23,6 +24,9 @@ unicode-linebreak = "0.1"
 unicode-bidi = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[features]
+base-latin = ["dep:base-latin"]
 
 [dev-dependencies]
 betteroffice-fonts.workspace = true

@@ -256,15 +256,17 @@ test('worker frame media resolution requests an SVG display copy once', () => {
   view.setUint32(40, 0x464d4520, true);
   const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"/>');
   let replays = 0;
-  const handle = { mediaBytes: () => bytes, metafileSvg: () => { replays++; return svg; } } as unknown as wasm.PresentationHandle;
+  const handle = { mediaBytes: () => bytes } as unknown as wasm.PresentationHandle;
+  const metafiles = { start: async () => {}, ready: () => true,
+    convert: () => { replays++; return svg; } };
   const sent = new Set<string>();
   const tags = { slideId: 'slide', slideIndex: 0, slideRevision: 1, coversThroughSeq: 1,
     documentEpoch: 1, incarnation: 'worker', epoch: 1, version: 'v1' };
   expect(replays).toBe(0);
-  const frame = buildCommandFrame(handle, tags, sent, undefined, displayList).value;
+  const frame = buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles).value;
   expect(frame.media).toEqual([{ assetId: 'picture', bytes: svg.buffer }]);
   expect(replays).toBe(1);
   sent.add('picture');
-  expect(buildCommandFrame(handle, tags, sent, undefined, displayList).value.media).toEqual([]);
+  expect(buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles).value.media).toEqual([]);
   expect(replays).toBe(1);
 });

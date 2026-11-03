@@ -255,6 +255,57 @@ describe('workbook commands', () => {
     } finally { await session.dispose(); }
   });
 
+  test('worker proposal refresh retains targets deleted by structural commands', async () => {
+    const { session, handle } = await trackedSession();
+    try {
+      await session.submit(command(session, 1, 'propose', {
+        args: ['agent', null, [{ sheet: 0, row: 20, col: 4, input: '7' }]],
+      }));
+      await session.submit(command(session, 2, 'applyOps', {
+        args: [[{ type: 'insertRows', sheet: 0, at: 20, count: 2 }]],
+      }));
+      expect(handle.listProposals()[0]?.cells[0]?.a1).toBe('E23');
+      await session.submit(command(session, 3, 'applyOps', {
+        args: [[{ type: 'deleteRows', sheet: 0, at: 22, count: 1 }]],
+      }));
+      const refreshed = await session.submit(command(session, 4, 'applyOps', {
+        toolbar: { id: 'refreshProposals', args: null },
+      }));
+      expect(refreshed).toMatchObject({ status: 'applied', result: {
+        proposals: [{ cells: [{ a1: 'E23', stale: true }] }],
+      } });
+      const proposal = handle.listProposals()[0]!;
+      expect(() => handle.acceptProposal(proposal.id, { force: true })).toThrow(wasm.StaleProposalError);
+    } finally { await session.dispose(); }
+  });
+
+  test('read-only host proposals permit only proposing and deciding proposals', async () => {
+    const { session, handle } = await trackedSession();
+    try {
+      await session.submit(command(session, 1, 'setReadOnly', { readOnly: true, allowHostProposals: true }));
+      const proposed = await session.submit(command(session, 2, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '7' }]],
+      }));
+      expect(proposed).toMatchObject({ status: 'applied', committed: false });
+      const id = (proposed.result as wasm.Proposal).id;
+      expect(await session.submit(command(session, 3, 'editCell', { args: [0, 0, 0, '99'] })))
+        .toMatchObject({ status: 'refused', reason: 'read-only' });
+      expect(await session.submit(command(session, 4, 'acceptProposal', { args: [id] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(handle.cell(0, 0, 0).input).toBe('7');
+      const second = await session.submit(command(session, 5, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '8' }]],
+      }));
+      expect(await session.submit(command(session, 6, 'rejectProposal', { args: [(second.result as wasm.Proposal).id] })))
+        .toMatchObject({ status: 'applied', committed: false });
+      await session.submit(command(session, 7, 'setReadOnly', { readOnly: true }));
+      expect(await session.submit(command(session, 8, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '9' }]],
+      }))).toMatchObject({ status: 'refused', reason: 'read-only' });
+      expect(session.editState.readOnly).toBe(true);
+    } finally { await session.dispose(); }
+  });
+
   test('refresh proposals returns proposals in read-only sessions without mutation', async () => {
     const { session, handle } = await trackedSession();
     try {

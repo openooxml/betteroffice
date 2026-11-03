@@ -157,7 +157,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
   };
   const environment = (executing: boolean): XlsxCommandEnvironment => {
     refreshSubscription();
-    if (executing && admission) return admission.env;
+    if (executing && admission) return { ...admission.env, allowHostProposals: bridge().allowHostProposals?.() };
     const current = bridge();
     const view = current.view();
     const session = current.session();
@@ -168,6 +168,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
     const sheet = restored ? state.sheets?.find((entry) => entry.id === restored.sheetId)?.index ?? view.sheet : view.sheet;
     return {
       status: current.status(), readOnly: current.readOnly() || current.coordinator.readOnly || state.readOnly === true,
+      allowHostProposals: current.allowHostProposals?.(),
       collaborative: current.collaborative(),
       selection: view.chartSelected ? 'chart' : range ? {
         sheet, ...range, merged: state.mergedRanges ?? [],

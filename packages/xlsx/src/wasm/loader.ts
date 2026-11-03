@@ -22,6 +22,7 @@ import initWasmModule, {
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
   await initWasm();
@@ -433,6 +434,7 @@ export interface ProposalCell {
   a1: string;
   oldText: string;
   newText: string;
+  stale?: boolean;
 }
 
 /**
@@ -445,6 +447,7 @@ export interface Proposal {
   agentId: string;
   note: string | null;
   cells: ProposalCell[];
+  forceBlocked?: boolean;
 }
 
 /** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */
@@ -1025,7 +1028,7 @@ function wrapWorkbookDocument(
         failure = error;
         failed = true;
       }
-      if (drainUpdates) {
+      if (drainUpdates && !(failed && isEngineTrap(failure))) {
         try {
           drainWasmUpdates();
         } catch (error) {

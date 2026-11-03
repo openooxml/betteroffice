@@ -7,7 +7,7 @@ import type { Translations } from '@betteroffice/xlsx-i18n';
 import type { XlsxCommandStore } from './commands/types';
 import type { XlsxEditorPluginProps } from './plugins/types';
 import { LEGACY_SYNC_API } from './runtimeOptions';
-import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
+import type { XlsxProposalRequest, XlsxProposalResult, XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 
 export interface XlsxPointPosition {
@@ -49,6 +49,7 @@ export interface XlsxEditorApi {
   focus: () => void;
   handle: WorkbookHandle;
   refreshProposals: () => void;
+  proposeChanges?(request: XlsxProposalRequest): Promise<XlsxProposalResult>;
   /**
    * Writes the open cell entry and returns the workbook bytes at once. Throws
    * {@link XlsxSaveRefusedError} rather than return bytes without accepted
@@ -152,6 +153,7 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  allowHostProposals?: boolean;
   /**
    * Replaces the default toolbar: omitted keeps it (hidden when read-only),
    * `null` removes it, and supplied chrome renders instead, also when

@@ -947,31 +947,160 @@ fn rewriting_comment_metadata_rejects_bookmarks_in_nested_blocks() {
     );
 }
 
-#[test]
-fn bookmarked_alternate_content_rejects_multiple_drawing_owners() {
-    let source = drawing_fixture(false);
-    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+fn rewrite_document(source: &[u8], rewrite: impl FnOnce(&mut String)) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(source).unwrap();
     let (_, bytes) = parts
         .iter_mut()
         .find(|(name, _)| name == "word/document.xml")
         .unwrap();
     let mut xml = String::from_utf8(bytes.clone()).unwrap();
-    let start = xml.find("<w:drawing>").unwrap();
-    let end = xml.find("</w:drawing>").unwrap() + "</w:drawing>".len();
-    let drawing = xml[start..end]
-        .replace("'&#55;'", "'9'")
-        .replace(r#"w:id="7""#, r#"w:id="9""#);
-    xml.insert_str(end, &drawing);
+    rewrite(&mut xml);
     *bytes = xml.into_bytes();
-    let source = ooxml_opc::rezip_parts(&parts).unwrap();
-    let Err(error) = parse_docx_s9_wire(&source, S9ParseOptions::default()) else {
-        panic!("multiple bookmarked drawing owners were accepted");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("bookmarked alternate content has multiple drawings")
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn with_second_drawing(source: &[u8]) -> Vec<u8> {
+    rewrite_document(source, |xml| {
+        let start = xml.find("<w:drawing>").unwrap();
+        let end = xml.find("</w:drawing>").unwrap() + "</w:drawing>".len();
+        let second = xml[start..end]
+            .replace("'&#55;'", "'9'")
+            .replace(r#"w:id="7""#, r#"w:id="9""#)
+            .replace(r#"w:id="21""#, r#"w:id="29""#);
+        xml.insert_str(end, &second);
+    })
+}
+
+fn with_plain_shape(source: &[u8]) -> Vec<u8> {
+    rewrite_document(source, |xml| {
+        let end = xml.find("</w:drawing>").unwrap() + "</w:drawing>".len();
+        xml.insert_str(
+            end,
+            r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="30" name="Plain"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvPr id="30"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="ellipse"/></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+    })
+}
+
+fn host_edit(model: &mut Value) {
+    model["document"]["content"][1]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"run","content":[{"type":"text","text":"Host edit"}]}));
+}
+
+fn with_media(source: &[u8], rewrite: impl FnOnce(&mut String)) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(source).unwrap();
+    let mut rewrite = Some(rewrite);
+    for (name, bytes) in &mut parts {
+        let Ok(xml) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        let mut xml = xml.to_owned();
+        match name.as_str() {
+            "word/document.xml" => rewrite.take().unwrap()(&mut xml),
+            "word/_rels/document.xml.rels" => xml = xml.replace("</Relationships>", r#"<Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/></Relationships>"#),
+            "[Content_Types].xml" => xml = xml.replace("</Types>", r#"<Default Extension="png" ContentType="image/png"/></Types>"#),
+            _ => continue,
+        }
+        *bytes = xml.into_bytes();
+    }
+    parts.push((
+        "word/media/pixel.png".to_owned(),
+        base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        )
+        .unwrap(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn bookmarked_alternate_content_kept_whole_for_its_preview_is_written_once() {
+    let source = alternate_text_box(
+        &inline_bookmark_paragraph("00000002", 21, "Inside"),
+        &p("00000004", "Fallback"),
     );
+    let source = with_media(&source, |xml| {
+        let end = xml.find("</w:drawing>").unwrap() + "</w:drawing>".len();
+        xml.insert_str(end, r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="40" name="Chart"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex" r:id="missing"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#);
+        let start = xml.find("<mc:Fallback>").unwrap() + "<mc:Fallback>".len();
+        let end = xml.find("</mc:Fallback>").unwrap();
+        xml.replace_range(start..end, r#"<w:drawing><wp:inline><wp:extent cx="9525" cy="9525"/><wp:docPr id="41" name="Picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="41" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="image"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#);
+    });
+    let source_xml = part(&source, "textbox");
+    let mut model = package(&source);
+    for edit in [false, true] {
+        if edit {
+            model["document"]["content"][0]["content"][0]["content"][0]["text"] = json!("Edited");
+            host_edit(&mut model);
+        }
+        let xml = part(&save(&source, &model), "textbox");
+        for fragment in [
+            "<w:txbxContent",
+            "<w:bookmarkStart",
+            "<w:bookmarkEnd",
+            ">Inside<",
+            "chartex",
+            "r:embed=\"image\"",
+        ] {
+            assert_eq!(
+                xml.matches(fragment).count(),
+                source_xml.matches(fragment).count(),
+                "{edit} {fragment}: {xml}"
+            );
+        }
+    }
+}
+
+fn two_paragraph_bookmarked_drawings(fallback: &str) -> Vec<u8> {
+    with_second_drawing(&alternate_text_box(
+        &inline_bookmark_paragraph("00000002", 21, "Inside"),
+        &p("00000004", fallback),
+    ))
+}
+
+#[test]
+fn bookmarked_alternate_content_with_two_drawings_keeps_each_drawing() {
+    let block = with_second_drawing(&drawing_fixture(false));
+    let paragraph = two_paragraph_bookmarked_drawings("Fallback");
+    let shaped = with_plain_shape(&alternate_text_box(
+        &inline_bookmark_paragraph("00000002", 21, "Inside"),
+        &p("00000004", "Fallback"),
+    ));
+    for (name, source) in [
+        ("block", block),
+        ("paragraph", paragraph),
+        ("plain shape", shaped),
+    ] {
+        let source_xml = part(&source, "textbox");
+        let choice = &source_xml
+            [source_xml.find("<mc:Choice").unwrap()..source_xml.find("</mc:Choice>").unwrap()];
+        let mut model = package(&source);
+        for edit in [false, true] {
+            if edit {
+                model["document"]["content"][0]["content"][0]["content"][0]["text"] =
+                    json!("Edited");
+                host_edit(&mut model);
+            }
+            let xml = part(&save(&source, &model), "textbox");
+            for fragment in [
+                "<w:drawing",
+                "<w:txbxContent",
+                "<w:bookmarkStart",
+                "<w:bookmarkEnd",
+                ">Anchor<",
+                ">Inside<",
+                "prst=\"ellipse\"",
+            ] {
+                assert_eq!(
+                    xml.matches(fragment).count(),
+                    choice.matches(fragment).count(),
+                    "{name} {edit} {fragment}: {xml}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -1028,5 +1157,94 @@ fn a_vml_image_with_a_text_box_keeps_its_block_bookmarks() {
         assert_eq!(xml.matches(END).count(), 1, "{xml}");
         assert!(xml.contains("<v:imagedata"), "{xml}");
         assert!(xml.contains("<v:textbox>"), "{xml}");
+    }
+}
+
+fn inline_bookmark_paragraph(id: &str, bookmark: u32, text: &str) -> String {
+    format!(
+        r#"<w:p w14:paraId="{id}"><w:r><w:t>Before</w:t></w:r><w:bookmarkStart w:id="{bookmark}" w:name="Inline{bookmark}"/><w:r><w:t>{text}</w:t></w:r><w:bookmarkEnd w:id="{bookmark}"/></w:p>"#
+    )
+}
+
+fn alternate_text_box(choice: &str, fallback: &str) -> Vec<u8> {
+    let source = fixture("textbox", choice);
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap();
+    let mut xml = String::from_utf8(bytes.clone()).unwrap();
+    let start = xml.find("<w:drawing>").unwrap();
+    let end = xml.find("</w:drawing>").unwrap() + "</w:drawing>".len();
+    let drawing = xml[start..end].to_owned();
+    let pict = format!(
+        r#"<w:pict><v:rect style="width:72pt;height:72pt"><v:textbox><w:txbxContent>{fallback}</w:txbxContent></v:textbox></v:rect></w:pict>"#
+    );
+    xml.replace_range(start..end, &format!(r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml"><mc:Choice Requires="wps">{drawing}</mc:Choice><mc:Fallback>{pict}</mc:Fallback></mc:AlternateContent>"#));
+    *bytes = xml.into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn paragraph_bookmarks_in_text_boxes_survive_a_save() {
+    let plain = p("00000003", "Plain");
+    for (name, source) in [
+        (
+            "drawing",
+            fixture(
+                "textbox",
+                &inline_bookmark_paragraph("00000002", 21, "Inside"),
+            ),
+        ),
+        (
+            "choice",
+            alternate_text_box(&inline_bookmark_paragraph("00000002", 21, "Inside"), &plain),
+        ),
+        (
+            "fallback",
+            alternate_text_box(&plain, &inline_bookmark_paragraph("00000004", 21, "Inside")),
+        ),
+        (
+            "both",
+            alternate_text_box(
+                &inline_bookmark_paragraph("00000002", 21, "Inside"),
+                &inline_bookmark_paragraph("00000004", 22, "Inside"),
+            ),
+        ),
+        (
+            "same id in both copies",
+            alternate_text_box(
+                &inline_bookmark_paragraph("00000002", 21, "Inside"),
+                &inline_bookmark_paragraph("00000004", 21, "Inside"),
+            ),
+        ),
+    ] {
+        let model = package(&source);
+        for rewritten in [false, true] {
+            let mut model = model.clone();
+            if rewritten {
+                model["document"]["content"][1]["content"][0]["content"][0]["shape"]["textBody"]
+                    ["content"][0]["content"][0]["content"][0]["text"] = json!("Edited box");
+            }
+            let xml = part(&save(&source, &model), "textbox");
+            if rewritten {
+                assert!(xml.contains("Edited box"), "{name}: {xml}");
+            }
+            for id in [21, 22] {
+                let source_xml = part(&source, "textbox");
+                let start = format!(r#"<w:bookmarkStart w:id="{id}""#);
+                let end = format!(r#"<w:bookmarkEnd w:id="{id}"/>"#);
+                assert_eq!(
+                    xml.matches(&start).count(),
+                    source_xml.matches(&start).count(),
+                    "{name} {rewritten} {id}: {xml}"
+                );
+                assert_eq!(
+                    xml.matches(&end).count(),
+                    source_xml.matches(&end).count(),
+                    "{name} {rewritten} {id}: {xml}"
+                );
+            }
+        }
     }
 }
