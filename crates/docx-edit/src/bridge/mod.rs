@@ -4909,8 +4909,44 @@ fn stamp_logical_order(runs: &mut [Run]) {
 }
 
 fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunFormatting {
+    let mut projected: Option<Attrs> = None;
+    let mut format_change = None;
+    if let Some(Any::Array(changes)) = attribute(attributes, crate::format::RPR_CHANGE) {
+        for change in changes.iter().rev() {
+            match env.revision_decision(change) {
+                Some(RevisionPreview::Rejected) => {
+                    let projected =
+                        projected.get_or_insert_with(|| attributes.cloned().unwrap_or_default());
+                    let current = projected
+                        .iter()
+                        .map(|(key, value)| (key.to_string(), value.clone()))
+                        .collect();
+                    for (key, value) in crate::format::previous_run_properties(&current, change) {
+                        if value == Any::Null {
+                            projected.remove(&key);
+                        } else {
+                            projected.insert(key, value);
+                        }
+                    }
+                }
+                Some(RevisionPreview::Accepted) => {}
+                None => {
+                    if let Some((id, author, date)) = crate::queries::revision_parts(change) {
+                        format_change = Some(docx_layout::display_list::Revision {
+                            revision_id: numeric_id(&id, env).to_string(),
+                            author,
+                            date,
+                            kind: docx_layout::display_list::RevisionKind::Format,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let attributes = projected.as_ref().or(attributes);
     let mut result = RunFormatting {
         bold: mark_bool(attributes, "bold"),
+        format_change,
         ..RunFormatting::default()
     };
     if let Some(map) = attribute_map(attributes, "bold")

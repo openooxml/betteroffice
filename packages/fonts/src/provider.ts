@@ -18,6 +18,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   onlyIfPrimaryFails?: boolean;
   /** @internal Base Latin characters the face is known to cover, as coverage bits. */
   coverage?: string;
+  /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
+  readOnlyBytes?: () => Promise<ArrayBuffer>;
 };
 
 /** Structural provider contract keeps this package independent of the engine. */
@@ -63,6 +65,7 @@ export interface BundledFontSource {
 
 export function fontProvider(
   loadBytes: (face: BundledFontFace) => Promise<ArrayBuffer>,
+  readBytes?: (face: BundledFontFace) => Promise<ArrayBuffer>,
 ): BundledFontSource {
   const loaders = new Map<string, BundledFontLoader>();
   const load = (
@@ -73,7 +76,10 @@ export function fontProvider(
     let loader = loaders.get(key);
     if (loader === undefined) {
       const coverage = knownCoverage(face.file);
-      loader = Object.assign(() => loadBytes(face), options, coverage === undefined ? undefined : { coverage });
+      loader = Object.assign(() => loadBytes(face), options, coverage === undefined ? undefined : {
+        coverage,
+        ...(readBytes && { readOnlyBytes: () => readBytes(face) }),
+      });
       loaders.set(key, loader);
     }
     return loader;

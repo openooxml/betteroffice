@@ -2163,6 +2163,10 @@ pub(crate) fn mark_run_formatting<'a>(
             }
             "strike" => ("strike", Any::Bool(true)),
             "highlight" => match value {
+                Any::Map(_) => match field("color") {
+                    Some(color) => ("highlight", color),
+                    None => continue,
+                },
                 Any::String(color) => match color.strip_prefix('#') {
                     Some(rgb) => {
                         let fill = HashMap::from([("rgb".to_owned(), Any::from(rgb))]);
@@ -2216,6 +2220,15 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
             attrs.insert(mark.name.clone(), Value::Bool(true));
         } else if mark.name == "snapToGrid" {
             attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
+        } else if mark.name == crate::format::RPR_CHANGE {
+            attrs.insert(
+                mark.name.clone(),
+                mark.attrs
+                    .iter()
+                    .find(|(key, _)| key == "changes")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or(Value::Null),
+            );
         } else if mark.name == "highlight" {
             attrs.insert(
                 "highlight".to_owned(),
@@ -2316,6 +2329,28 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
                     .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
             }
         }
+    }
+    if let Some(Value::Array(changes)) = field(Some(run), "propertyChanges") {
+        let changes: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                let mut change = change.clone();
+                let previous =
+                    styles.run_formatting(style_formatting, change.get("previousFormatting"));
+                let attrs = marks_to_attrs(&formatting_to_marks(previous.as_ref()));
+                if let Some(change) = change.as_object_mut() {
+                    change.insert(
+                        "previousAttributes".to_owned(),
+                        serde_json::to_value(attrs).unwrap(),
+                    );
+                }
+                change
+            })
+            .collect();
+        marks.push(mark(
+            crate::format::RPR_CHANGE,
+            ordered_object([("changes", Value::Array(changes))]),
+        ));
     }
     marks
 }

@@ -131,13 +131,25 @@ async function loadFace(
   return pending;
 }
 
+function packFor(face: BundledFontFace): PackManifest {
+  return isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl;
+}
+
 export async function loadPackedFontBytes(
   face: BundledFontFace,
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
   timeoutMs?: number,
   wasmUrl?: URL,
-  manifest: PackManifest = isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl,
+  manifest: PackManifest = packFor(face),
   runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<ArrayBuffer> {
   return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font.slice(0);
+}
+
+/** @internal The cached decoded face, shared with every caller: read it, never change or transfer it. */
+export async function readPackedFontBytes(
+  ...args: Parameters<typeof loadPackedFontBytes>
+): Promise<ArrayBuffer> {
+  const [face, resolveUrl, timeoutMs, wasmUrl, manifest = packFor(face), runtime] = args;
+  return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font;
 }

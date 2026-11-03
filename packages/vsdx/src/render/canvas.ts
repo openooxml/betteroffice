@@ -127,7 +127,16 @@ function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): vo
     paintTextRun(ctx, entry.run, utf8Slice(entry.run.text, start - entry.start, end - entry.start), x, line.y);
   }
 }
-function paintTextRun(ctx: CanvasRenderingContext2D, run: TextRun, value: string, x: number, y: number): void { ctx.font = `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${run.sizeIn}px ${quote(run.family)}`; ctx.fillStyle = run.color; ctx.fillText(value, x, y); }
+const TEXT_UNITS_PER_INCH = 96;
+function paintTextRun(ctx: CanvasRenderingContext2D, run: TextRun, value: string, x: number, y: number): void {
+  ctx.save();
+  ctx.scale(1 / TEXT_UNITS_PER_INCH, 1 / TEXT_UNITS_PER_INCH);
+  ctx.font = `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${run.sizeIn * TEXT_UNITS_PER_INCH}px ${quote(run.family)}`;
+  (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
+  ctx.fillStyle = run.color;
+  ctx.fillText(value, x * TEXT_UNITS_PER_INCH, y * TEXT_UNITS_PER_INCH);
+  ctx.restore();
+}
 function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength; }
 function utf8Slice(value: string, start: number, end: number): string { return new TextDecoder().decode(new TextEncoder().encode(value).slice(start, end)); }
 function quote(family: string): string { return family.includes(' ') ? JSON.stringify(family) : family; }
