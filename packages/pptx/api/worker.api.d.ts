@@ -412,6 +412,16 @@ export declare function browserFrameImages(options?: {
     }): CanvasImageResolver & {
         release(): void;
     };
+    trim(): void;
+    dispose(): void;
+};
+export declare function createBrowserFrameImages(decode: (bytes: Uint8Array, errorMessage: string) => Promise<CanvasImageSource>): {
+    resolve(frame: {
+        media: ReadonlyMap<string, Uint8Array>;
+    }): CanvasImageResolver & {
+        release(): void;
+    };
+    trim(): void;
     dispose(): void;
 };
 

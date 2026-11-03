@@ -46,7 +46,9 @@ async function deck(pictureSlide?: number, hiddenFromScan = false, slideTwoFont?
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-function connection() {
+type HostOptions = NonNullable<Parameters<typeof createPresentationSessionHost>[1]>;
+
+function connection(workerRender?: HostOptions['workerRender']) {
   const pair = createInProcessPair();
   let openId: number | undefined;
   let acknowledged = false;
@@ -55,7 +57,7 @@ function connection() {
     if (isHostMessage(message) && message.kind === 'reply' && message.id === openId && message.ok) acknowledged = true;
     messages.push(message);
     pair.host.post(message, transfer);
-  } }, { initWasm: async () => {} });
+  } }, { initWasm: async () => {}, workerRender });
   return { host, messages, get acknowledged() { return acknowledged; }, transport: {
     ...pair.client, post(message: unknown, transfer?: Transferable[]) {
       if (isClientMessage(message) && message.kind === 'call' && message.method === 'openCommandEditor') openId = message.id;
@@ -305,6 +307,32 @@ wasmTest('a failed opening load retries after the first frame and repaints', asy
   await repainted.promise;
   expect(new Uint8Array(client.state.frame!.media[0]!.bytes)).toEqual(svg);
 });
+
+wasmTest('a late metafile repaint drops the worker raster media cached from the empty first frame', async () => {
+  const pending = deferred<MetafileSvgModule>();
+  loader(() => pending.promise);
+  const events: string[] = [];
+  const frames: { mediaBytes(assetId: string): Uint8Array }[] = [];
+  const workerRender = {
+    transport: undefined as never, active: () => true, pending: () => false, afterReply() {},
+    paintNow: async () => undefined, defaultFonts() {}, dispose() {},
+    frame(frame: { mediaBytes(assetId: string): Uint8Array }) { frames.push(frame); events.push('frame'); },
+    resetMedia() { events.push('reset'); },
+  } as unknown as NonNullable<Parameters<typeof connection>[0]>;
+  const wire = connection(workerRender);
+  const client = await createPresentationCommandClient(await deck(1), options, wire.transport);
+  clients.push(client);
+  expect(frames[0]?.mediaBytes('ppt/media/picture.emf').byteLength).toBe(0);
+  expect(events).not.toContain('reset');
+  const repainted = deferred<void>();
+  client.subscribe(() => repainted.resolve());
+  pending.resolve(svgModule());
+  await repainted.promise;
+  const reset = events.indexOf('reset');
+  expect(reset).toBeGreaterThan(-1);
+  expect(events.lastIndexOf('frame')).toBeGreaterThan(reset);
+  expect(isSvg(frames[frames.length - 1]!.mediaBytes('ppt/media/picture.emf'))).toBe(true);
+}, 10_000);
 
 wasmTest('an opening load times out and later repaints without another client request', async () => {
   const pending = deferred<MetafileSvgModule>();

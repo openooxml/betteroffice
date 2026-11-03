@@ -5,10 +5,13 @@ import { sessionWasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
 import { initWasm } from '../wasm/loader';
 import { createPresentationSessionHost, initializePresentationEditorWasm } from './host';
+import { listenPptxWorkerRender } from './workerRender';
 
 function startWorker(scope: SessionScope): void {
-  const transport = createScopeTransport(scope);
+  const workerRender = listenPptxWorkerRender(createScopeTransport(scope));
+  const transport = workerRender.transport;
   const host = createPresentationSessionHost(transport, {
+    workerRender,
     initWasm: engineKind === 'native' ? initWasm : createWorkerWasmInitializer(transport, sessionWasmAssetUrl(), initWasm, compileSessionWasm),
     initEditorWasm: initializePresentationEditorWasm,
   });

@@ -18,7 +18,8 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame } from './commandFrame';
+import { buildCommandFrame, commandFrameMediaBytes } from './commandFrame';
+import type { WorkerSlideFrame } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
@@ -62,6 +63,9 @@ function normalizeFontSize(size: number): number {
 }
 
 export interface PresentationCommandHostOptions {
+  onActiveFrame?(frame: WorkerSlideFrame): void;
+  activeFrameWanted?(): boolean;
+  onResetMedia?(): void;
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
   onPipeOutput?(): void;
   onDefaultFonts?(result: TransferResult<PresentationCommandAck & DefaultFontPayload>): void;
@@ -184,6 +188,7 @@ export function registerPresentationCommandHandlers(
     pendingMetafiles.clear();
     for (const [id, revision] of revisions) revisions.set(id, revision + 1);
     layouts.clear();
+    options.onResetMedia?.();
     return true;
   }
 
@@ -674,7 +679,7 @@ export function registerPresentationCommandHandlers(
     if (presentation().version() !== metadataVersion) refreshMetadata();
   }
 
-  function frame(slideId: string, retain = true): TransferResult<PresentationCommandFrame> {
+  function frame(slideId: string, retain = true, extracted?: Map<string, Uint8Array>): TransferResult<PresentationCommandFrame> {
     const opened = presentation();
     refreshTopology();
     const slideIndex = slideIndices.get(slideId);
@@ -689,7 +694,7 @@ export function registerPresentationCommandHandlers(
     layout ? undefined : (list) => {
       geometry = indexHitGeometry(list);
       layouts.set(slideId, { slideIndex, revision, list, geometry });
-    }, layout?.list, metafiles, pendingMetafiles);
+    }, layout?.list, metafiles, pendingMetafiles, extracted);
     if (pendingMetafiles.size && !metafiles.ready()) idleMetafiles();
     if (!geometry || !retain) return result;
     const { slideId: id, slideRevision, coversThroughSeq, documentEpoch: epoch, incarnation } = result.value;
@@ -724,7 +729,14 @@ export function registerPresentationCommandHandlers(
     }
     const edit = editState();
     refreshTopology();
-    const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId);
+    const extracted = options.onActiveFrame && (options.activeFrameWanted?.() ?? true) ? new Map<string, Uint8Array>() : undefined;
+    const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId, true, extracted);
+    if (result && extracted) {
+      const opened = presentation();
+      options.onActiveFrame!({ slideId: result.value.slideId, frameEpoch: result.value.epoch,
+        displayList: layouts.get(result.value.slideId)!.list,
+        mediaBytes: (assetId) => extracted.get(assetId) ?? commandFrameMediaBytes(opened, assetId, metafiles) });
+    }
     retainVersions();
     const updates = pendingUpdates.splice(0);
     const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
@@ -1800,6 +1812,7 @@ export function registerPresentationCommandHandlers(
     selections.clear();
     revisions.clear();
     sentMedia.clear();
+    options.onResetMedia?.();
     frames.clear();
     layouts.clear();
     opened?.dispose();

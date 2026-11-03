@@ -1,3 +1,4 @@
+import { attachPptxWorkerRender, pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { createSessionWorker } from '#session-worker';
@@ -75,6 +76,7 @@ export function createPptxWorkerSession(
   let disposed = false;
   let disposal: Promise<void> | undefined;
   let client: PresentationCommandClient | undefined;
+  let renderFacade: PresentationCommandClient | undefined;
   let offClientFailure: (() => void) | undefined;
   let failedState: PresentationCommandOpenResult | undefined;
   let rejectEnded!: (error: Error) => void;
@@ -151,6 +153,7 @@ export function createPptxWorkerSession(
     },
   };
   Object.assign(input, { pptxDefaultFontInstaller: (options as PptxWorkerSessionOptions & DefaultFontInstallation).pptxDefaultFontInstaller });
+  const render = options.worker ? undefined : attachPptxWorkerRender(monitored);
   const opening = createSharedPresentationCommandClient(bytes, input, monitored).then((opened) => {
     client = opened;
     offClientFailure = opened.subscribeFailure(fail);
@@ -174,6 +177,7 @@ export function createPptxWorkerSession(
       subscribeFailure: (listener) => session.subscribeFailure(listener),
       dispose: () => session.dispose(),
     } satisfies PresentationCommandClient;
+    if (render) { renderFacade = facade; pptxWorkerRenderClients.set(facade, render); }
     const pipe = presentationCollaborationPipes.get(opened);
     if (pipe) presentationCollaborationPipes.set(facade, pipe);
     const sharedInput = presentationSharedInputs.get(opened);
@@ -202,6 +206,9 @@ export function createPptxWorkerSession(
       disposed = true;
       rejectEnded(new PptxWorkerEditorDisposedError());
       options.signal?.removeEventListener('abort', abort);
+      render?.dispose();
+      pptxWorkerRenderClients.delete(session);
+      if (renderFacade) pptxWorkerRenderClients.delete(renderFacade);
       offError();
       offClientFailure?.();
       listeners.clear();
@@ -214,6 +221,7 @@ export function createPptxWorkerSession(
       return disposal;
     },
   };
+  if (render) pptxWorkerRenderClients.set(session, render);
   function abort(): void { void session.dispose(); }
   options.signal?.addEventListener('abort', abort, { once: true });
   if (options.signal?.aborted) abort();
