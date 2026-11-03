@@ -5,7 +5,7 @@ import baseLatinManifest from '../assets/base-latin.json';
 import { readFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
 import type { BundledFontFace } from './manifest';
-import { openProgressiveFace, type ProgressiveFontFace, type SliceRef } from './progressive';
+import type { SliceRef } from './progressive';
 import { sha256 } from './sha256';
 
 interface PackFace {
@@ -133,51 +133,9 @@ async function loadFace(
   return pending;
 }
 
-const progressiveFaces = new Map<string, Promise<ProgressiveFontFace>>();
-const engineProgressiveFaces = new WeakMap<FontDecoder, Map<string, Promise<ProgressiveFontFace>>>();
-
 /** @internal The slice pointer of a sliced pack face. */
 export function sliceRefOf(file: string): SliceRef | undefined {
   return cjk.faces.find((entry) => entry.file === file)?.slices;
-}
-
-/**
- * @internal One shared progressive face per sliced face, asset base and decoder;
- * a failed open is dropped so a later call retries.
- */
-export function loadProgressiveFace(
-  face: BundledFontFace,
-  resolveFile: (file: string) => Promise<URL>,
-  base: string,
-  timeoutMs?: number,
-  wasmUrl?: URL,
-  runtime?: { decoder?: FontDecoder },
-  readFile: typeof readFontBytes = readFontBytes,
-): Promise<ProgressiveFontFace> {
-  const ref = sliceRefOf(face.file);
-  if (ref === undefined) return Promise.reject(new Error(`Bundled font ${face.file} is not sliced`));
-  const decoder = runtime?.decoder;
-  let cache = progressiveFaces;
-  if (decoder !== undefined) {
-    cache = engineProgressiveFaces.get(decoder) ?? new Map();
-    engineProgressiveFaces.set(decoder, cache);
-  }
-  const key = `${cjk.version}|${face.file}|${ref.sha256}|${base}|${timeoutMs ?? ''}|${wasmUrl?.href ?? ''}`;
-  let pending = cache.get(key);
-  if (pending === undefined) {
-    pending = openProgressiveFace(ref, {
-      read: async (file) => readFile(file, await resolveFile(file), timeoutMs),
-      decode: async (encoded, maxOutput) => (decoder === undefined
-        ? await (await import('./decode')).decodeFontFace(encoded, undefined, { codec: 'zstd', maxOutput, wasmUrl })
-        : await decoder(encoded, { codec: 'zstd', maxOutput })).font,
-    });
-    cache.set(key, pending);
-    const current = pending;
-    pending.catch(() => {
-      if (cache.get(key) === current) cache.delete(key);
-    });
-  }
-  return pending;
 }
 
 export async function loadPackedFontBytes(

@@ -16,6 +16,10 @@
     "./cdn": {
       "types": "./dist/cdn.d.ts",
       "import": "./dist/cdn.js"
+    },
+    "./progressive": {
+      "types": "./dist/progressive.d.ts",
+      "import": "./dist/progressive.js"
     }
   },
   "files": [

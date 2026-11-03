@@ -10,7 +10,7 @@ import {
   type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
-import type { ProgressiveFontFace } from './progressive';
+import type { SliceLocation } from './progressive';
 import { knownCoverage } from './coverage';
 
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
@@ -18,10 +18,11 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   measureAs?: string;
   onlyIfPrimaryFails?: boolean;
   /**
-   * Present for a face shipped in slices: opens it as a face whose outlines load
-   * as they are needed. Calling the loader itself still yields the whole face.
+   * Present for a face shipped in slices: `openSlicedFace` from
+   * `@betteroffice/fonts/progressive` opens it as a face whose outlines load as
+   * they are needed. Calling the loader itself still yields the whole face.
    */
-  progressive?: () => Promise<ProgressiveFontFace>;
+  slices?: SliceLocation;
   /** @internal Base Latin characters the face is known to cover, as coverage bits. */
   coverage?: string;
 };
@@ -69,7 +70,7 @@ export interface BundledFontSource {
 
 export function fontProvider(
   loadBytes: (face: BundledFontFace) => Promise<ArrayBuffer>,
-  loadProgressive?: (face: BundledFontFace) => (() => Promise<ProgressiveFontFace>) | undefined,
+  locateSlices?: (face: BundledFontFace) => SliceLocation | undefined,
 ): BundledFontSource {
   const loaders = new Map<string, BundledFontLoader>();
   const load = (
@@ -79,9 +80,9 @@ export function fontProvider(
     const key = `${face.file}|${options?.measureAs ?? ''}|${options?.onlyIfPrimaryFails ?? false}`;
     let loader = loaders.get(key);
     if (loader === undefined) {
-      const progressive = loadProgressive?.(face);
+      const slices = locateSlices?.(face);
       const coverage = knownCoverage(face.file);
-      loader = Object.assign(() => loadBytes(face), options, progressive ? { progressive } : undefined,
+      loader = Object.assign(() => loadBytes(face), options, slices ? { slices } : undefined,
         coverage === undefined ? undefined : { coverage });
       loaders.set(key, loader);
     }

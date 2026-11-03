@@ -1,3 +1,4 @@
+import type { FontDecoder } from './decode';
 import { chunkEntries, parseSkeleton, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
 
@@ -20,6 +21,22 @@ export interface ProgressiveFontFace {
   onUpdate(listener: (revision: number) => void): () => void;
   /** Whether every outline is loaded. */
   complete(): boolean;
+}
+
+/**
+ * Where a sliced face's files are and how to decode them: what a font loader
+ * carries as `slices`, which `openSlicedFace` from `@betteroffice/fonts/progressive` opens.
+ * @public
+ */
+export interface SliceLocation {
+  ref: SliceRef;
+  /** The asset base the files resolve against; part of the shared face's identity. */
+  base: string;
+  /** The URL of a pack file by its manifest path. */
+  url(file: string): Promise<URL>;
+  timeoutMs?: number;
+  wasmUrl?: URL;
+  decoder?: FontDecoder;
 }
 
 /** @internal A face row's pointer to its slice index. */
