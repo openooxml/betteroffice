@@ -731,10 +731,20 @@ describe('native package public names', () => {
   });
 
   test('panic test hooks stay out of shipped binaries and still run in CI', () => {
-    const job = read('.github/workflows/ci.yml');
-    expect(job).toContain('--features test-hooks -- --locked');
-    expect(job).toContain('BETTEROFFICE_NATIVE_TEST_HOOKS: "1"');
-    expect(job).toContain('bun test "$package/panic.test.ts"');
+    const hooks = ci.jobs['native-hooks'];
+    expect(hooks.name).toBe('Native panic hooks');
+    expect(hooks['timeout-minutes']).toBe(30);
+    expect(hooks.needs).toBeUndefined();
+    expect(hooks.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2').with)
+      .toEqual({ workspaces: 'bindings', key: 'native-hooks' });
+    const panics = hooks.steps.find((step: any) => step.name === 'Test panics through the test hooks');
+    expect(panics.env.BETTEROFFICE_NATIVE_TEST_HOOKS).toBe('1');
+    expect(panics.run).toContain('bunx napi build --cwd "$package" --platform --profile hooks --features test-hooks -- --locked');
+    expect(panics.run).toContain('bun test "$package/panic.test.ts"');
+    expect(JSON.stringify(ci.jobs.native)).not.toContain('test-hooks');
+    const profile = Bun.TOML.parse(read('bindings/Cargo.toml')) as any;
+    expect(profile.profile.hooks).toEqual({ inherits: 'release', lto: false });
+    expect(profile.profile.release.panic).toBeUndefined();
     expect(distWorkflowText).not.toContain('test-hooks');
     for (const path of NATIVE_PACKAGES) {
       expect(read(`${path}/Cargo.toml`)).toContain('test-hooks = []');
