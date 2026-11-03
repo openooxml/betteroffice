@@ -405,18 +405,23 @@ for (const geometry of ['rotated', 'group', 'grouped child'] as const) {
     expect(before).not.toBeNull();
     expect(before).not.toEqual({ x: target.x * frame.width / snapshot.widthEmu, y: target.y * frame.height / snapshot.heightEmu,
       width: target.width * frame.width / snapshot.widthEmu, height: target.height * frame.height / snapshot.heightEmu });
+    const moved = slide.shapes[0]!;
     let proposalId = '';
     await act(async () => {
-      const proposal = await access.propose('reviewer', 'Move transformed shape', [{ type: 'setShapeRect', slideId: slide.id, shapeId: target.id,
-        rect: { x: target.x + 500000, y: target.y + 300000, width: target.width, height: target.height } }]);
+      const proposal = await access.propose('reviewer', 'Move transformed shape', [
+        { type: 'setShapeRect', slideId: slide.id, shapeId: moved.id,
+          rect: { x: moved.x + 500000, y: moved.y + 300000, width: moved.width, height: moved.height } },
+        ...(geometry === 'grouped child' ? [{ type: 'formatText' as const, storyId: target.textStories[0]!.id, start: 0, end: 5, patch: { bold: true } }] : []),
+      ]);
       proposalId = proposal.id;
       await value.api.commands.execute('proposalSelect', { proposalId });
       await value.api.commands.execute('proposalDiff', { enabled: true });
     });
     const diff = await access.layoutProposalDiffSlide(proposalId, 0);
     const after = renderedShapeBounds(diff.frame, diff.proposal.changes.find(change => change.shapeId === target.id)!.after!)!;
-    const old = await waitFor(() => value.view.getByTestId('pptx-proposal-old-bounds'));
-    const proposed = value.view.getByTestId('pptx-proposal-canvas-target');
+    const proposed = await waitFor(() => value.view.getByRole('button', { name: `reviewer: ${target.name}` }));
+    const old = proposed.parentElement!.querySelector<HTMLElement>('[data-testid="pptx-proposal-old-bounds"]')!;
+    expect(old).not.toBeNull();
     const scale = parseFloat(proposed.style.width) / after.width;
     expect(parseFloat(old.style.left)).toBeCloseTo(before.x * scale);
     expect(parseFloat(old.style.top)).toBeCloseTo(before.y * scale);

@@ -152,7 +152,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
         for (const [other, range] of ranges) {
           if (other === index || range.storyId !== replacement.storyId) continue;
           const overlaps = range.start === range.end
-            ? replacement.start <= range.start && replacement.end >= range.start
+            ? replacement.start <= range.start && replacement.end > range.start
             : replacement.start === replacement.end
               ? replacement.start > range.start && replacement.start < range.end
               : replacement.start < range.end && replacement.end > range.start;

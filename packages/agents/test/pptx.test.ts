@@ -745,6 +745,49 @@ for (const [matchFirst, end] of [[false, 5], [true, 5], [false, 6], [true, 6]] a
   });
 }
 
+for (const matchFirst of [false, true]) {
+  test(`mixed story proposals refuse replacement of deleted match text, match first: ${matchFirst}`, async () => {
+    const deck = await openPptx(await pptxFixture('abc def'));
+    try {
+      const hit = deck.grep({ query: 'abc ' }).matches[0]!;
+      const match = { match: hit.match, newText: '' };
+      const typed = { type: 'replaceText' as const, storyId: hit.story, start: 0, end: 3, text: 'replacement' };
+      const version = deck.overview().version;
+      let refusal: unknown;
+      try { deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] }); }
+      catch (error) { refusal = error; }
+      expect(refusal).toMatchObject({ name: 'DocumentToolError', code: 'OVERLAPPING_EDITS' });
+      expect(deck.listProposals()).toEqual([]);
+      expect(deck.overview().version).toBe(version);
+      expect(deck.read(hit.ref).text).toBe('abc def');
+    } finally { deck.close(); }
+  });
+
+  for (const [query, start, end, text, expected] of [
+    ['abc ', 0, 0, 'X', 'Xdef'],
+    ['def', 0, 4, 'prefix ', 'prefix '],
+    ['def', 4, 4, 'X', 'abc X'],
+  ] as const) {
+    test(`mixed story proposals allow deletion boundary edits for ${query} at [${start},${end}], match first: ${matchFirst}`, async () => {
+      const deck = await openPptx(await pptxFixture('abc def'));
+      try {
+        const hit = deck.grep({ query }).matches[0]!;
+        const match = { match: hit.match, newText: '' };
+        const typed = { type: 'replaceText' as const, storyId: hit.story, start, end, text };
+        const version = deck.overview().version;
+        const proposal = deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] });
+        expect(deck.overview().version).toBe(version);
+        expect(deck.read(hit.ref).text).toBe('abc def');
+        const preview = await openPptx(await deck.export(proposal.id));
+        try { expect(preview.read(preview.grep({ query: expected }).matches[0]!.ref).text).toBe(expected); }
+        finally { preview.close(); }
+        await deck.accept(proposal.id);
+        expect(deck.read(hit.ref).text).toBe(expected);
+      } finally { deck.close(); }
+    });
+  }
+}
+
 test('mixed story proposals keep typed offsets and local refs in staging order across length-changing matches', async () => {
   const deck = await openPptx(await pptxFixture('abc def ghi'));
   try {
