@@ -731,6 +731,7 @@ describe('native package public names', () => {
   });
 
   test('panic test hooks stay out of shipped binaries and still run in CI', () => {
+    const ci = Bun.YAML.parse(read('.github/workflows/ci.yml')) as any;
     const hooks = ci.jobs['native-hooks'];
     expect(hooks.name).toBe('Native panic hooks');
     expect(hooks['timeout-minutes']).toBe(30);

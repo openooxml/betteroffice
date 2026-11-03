@@ -642,6 +642,5 @@ jobs:
         run: |
           for package in $(node scripts/native-bindings.mjs --paths); do
             bunx napi build --cwd "$package" --platform --profile hooks --features test-hooks -- --locked
-            bun run --cwd "$package" --if-present build:js
             bun test "$package/panic.test.ts"
           done
