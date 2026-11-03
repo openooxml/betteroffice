@@ -28,7 +28,7 @@ test('every failed render, timing, calculation, parse, roundtrip and probe becom
   const records = failureRecords({
     ...sample('alpha'),
     calculations: { libreoffice: { status: 'failed', error: 'Recalculation results changed between trials' } },
-    roundtrip_probe: { status: 'failed', error: 'probe failed' },
+    roundtrip_probe: { status: 'unavailable', error: 'probe timed out' },
   });
   expect(records.map(({ area, channel, stage }) => [area, channel, stage])).toEqual([
     ['render', 'published', 'capture'],
@@ -77,4 +77,28 @@ test('counts per format carry area, channel and stage only', () => {
     { area: 'timing', channel: 'published', stage: 'timing', count: 2 },
   ]);
   expect(failureCounts(report, 'xlsx')).toEqual([]);
+});
+
+test('a document without a usable probe counts once, and a usable probe counts nothing', () => {
+  const unavailable = failureRecords({ id: 'x', format: 'xlsx', roundtrip_probe: { status: 'unavailable', error: 'No unambiguous plain-text or numeric-literal edit candidate' } });
+  expect(unavailable).toEqual([{ area: 'probe', channel: null, stage: 'probe', error: 'No unambiguous plain-text or numeric-literal edit candidate' }]);
+  expect(failureRecords({ id: 'y', format: 'xlsx', roundtrip_probe: { status: 'ok', part: 'xl/worksheets/sheet1.xml' } })).toEqual([]);
+});
+
+test('long messages normalize in linear time', () => {
+  for (const message of ['a'.repeat(200000), 'ab://'.repeat(40000), '/'.repeat(200000), `${'f'.repeat(100000)} ${'1'.repeat(100000)}`]) {
+    const started = performance.now();
+    expect(normalizeReason(message).length).toBeLessThanOrEqual(160);
+    expect(performance.now() - started).toBeLessThan(200);
+  }
+});
+
+test('a failure is scrubbed of its own document even when the plan holds thousands', () => {
+  const samples = Array.from({ length: 6000 }, (_, index) => ({
+    ...sample(`doc-${index}`), comparisons: [{ channel: 'published', status: 'failed', stage: 'capture', error: `timeout opening doc-${index}.docx` }],
+  }));
+  const started = performance.now();
+  const clusters = failureClusters({ samples });
+  expect(performance.now() - started).toBeLessThan(5000);
+  expect(clusters.find((cluster) => cluster.area === 'render')).toMatchObject({ reason: 'timeout opening <sample>.docx', count: 6000 });
 });
