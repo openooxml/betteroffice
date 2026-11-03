@@ -78,10 +78,13 @@ const CHECKS: Record<string, () => boolean> = Object.fromEntries(FORMATS.flatMap
 ]));
 
 const PENDING = [
-  'docx js', 'docx native renderPng', 'docx python', 'docx rust',
-  'pptx js', 'pptx native renderPng', 'pptx python', 'pptx rust',
-  'vsdx js', 'vsdx native renderPng', 'vsdx python', 'vsdx rust',
-  'xlsx js', 'xlsx python', 'xlsx rust',
+  'docx js',
+  'docx native renderPng',
+  'pptx js',
+  'pptx native renderPng',
+  'vsdx js',
+  'vsdx native renderPng',
+  'xlsx js',
 ];
 
 describe('the shape checks tell right from wrong', () => {
