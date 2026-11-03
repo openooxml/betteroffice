@@ -33,6 +33,8 @@ pub struct ProposedEdit {
     pub a1: String,
     pub old_text: String,
     pub new_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
 }
 
 /// a pending agent proposal; serializes with `edits` presented as `cells`.
@@ -124,6 +126,7 @@ mod tests {
             a1: a1.to_string(),
             old_text: old.to_string(),
             new_text: new.to_string(),
+            stale: None,
         }
     }
 

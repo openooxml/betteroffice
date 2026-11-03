@@ -178,6 +178,7 @@
     "accept": "Terima",
     "reject": "Tolak",
     "forceApply": "Terapkan paksa",
+    "forceBlockedReason": "Usulan ini tidak dapat diterapkan setelah perubahan struktur.",
     "staleWarning": "Sel berubah sejak diusulkan: {cells}"
   },
   "a11y": {

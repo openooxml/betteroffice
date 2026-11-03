@@ -698,6 +698,8 @@ fn preserved_history(count: usize) -> Vec<RecoveryPreservedHistory> {
                 state: 0,
                 axes: vec![None],
             },
+            proposals_before: None,
+            proposals_after: None,
         })
         .collect()
 }

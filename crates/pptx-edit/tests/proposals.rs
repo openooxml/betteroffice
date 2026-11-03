@@ -541,3 +541,313 @@ fn scoped_diff_preview_rejects_unknown_ids_and_out_of_range_slides() {
             .is_err()
     );
 }
+
+#[test]
+fn slide_structure_previews_accepts_rejects_and_undoes_atomically() {
+    for kind in ["insertSlide", "duplicateSlide", "deleteSlide", "moveSlide"] {
+        let session = DeckSession::open(FILE, 520).unwrap();
+        let before = session.snapshot().unwrap();
+        let first = &before.slides[0].id;
+        let edit = match kind {
+            "insertSlide" => serde_json::json!({"type": kind, "ref": "new", "afterSlideId": first}),
+            "duplicateSlide" => serde_json::json!({"type": kind, "ref": "new", "slideId": first}),
+            "deleteSlide" => serde_json::json!({"type": kind, "slideId": first}),
+            _ => {
+                serde_json::json!({"type": kind, "slideId": first, "afterSlideId": before.slides.last().unwrap().id})
+            }
+        };
+        let edit: ProposalEdit = serde_json::from_value(edit).unwrap();
+        let rejected = session.propose(request(vec![edit.clone()])).unwrap();
+        assert!(session.reject_proposal(&rejected.id));
+        assert_eq!(session.snapshot().unwrap(), before);
+        let proposal = session.propose(request(vec![edit])).unwrap();
+        let state = session.encode_state_as_update_v1();
+        let preview = session.preview_proposal(&proposal.id).unwrap();
+        let strip = session.proposal_slide_strip(&proposal.id).unwrap();
+        assert!(
+            strip
+                .iter()
+                .any(|entry| entry.status != pptx_edit::ProposalStripStatus::Unchanged)
+        );
+        let target = proposal
+            .changes
+            .iter()
+            .find(|change| change.kind.is_some())
+            .unwrap();
+        let diff = session
+            .preview_proposal_diff_slide_by_id(&proposal.id, &target.slide_id)
+            .unwrap();
+        assert_eq!(diff.scope.slide.id, target.slide_id);
+        assert_eq!(session.encode_state_as_update_v1(), state);
+        session.accept_proposal(&proposal.id, false).unwrap();
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+        assert!(session.redo());
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+    }
+}
+
+#[test]
+fn slide_refs_chain_and_invalid_refs_are_atomic() {
+    let session = DeckSession::open(FILE, 521).unwrap();
+    let before = session.snapshot().unwrap();
+    let edits = serde_json::from_value(serde_json::json!([
+        {"type": "insertSlide", "ref": "s1", "afterSlideId": null},
+        {"type": "setSlideNotes", "slideId": "@s1", "text": "Draft notes"},
+        {"type": "duplicateSlide", "ref": "s2", "slideId": "@s1", "afterSlideId": "@s1"},
+        {"type": "moveSlide", "slideId": "@s2", "afterSlideId": null}
+    ]))
+    .unwrap();
+    let proposal = session.propose(request(edits)).unwrap();
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert_eq!(preview.snapshot.slides[0].id, proposal.refs["s2"]);
+    assert_eq!(preview.snapshot.slides[1].id, proposal.refs["s1"]);
+    assert_eq!(preview.snapshot.slides[0].notes, "Draft notes");
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+    for edits in [
+        serde_json::json!([{"type": "setSlideNotes", "slideId": "@missing", "text": "x"}]),
+        serde_json::json!([
+            {"type": "insertSlide", "ref": "same", "afterSlideId": null},
+            {"type": "insertSlide", "ref": "same", "afterSlideId": null}
+        ]),
+    ] {
+        assert!(matches!(
+            session.propose(request(serde_json::from_value(edits).unwrap())),
+            Err(ProposalError::Invalid(_))
+        ));
+        assert_eq!(session.snapshot().unwrap(), before);
+    }
+}
+
+#[test]
+fn structural_stale_rules_and_forced_missing_targets() {
+    for kind in ["deleteSlide", "duplicateSlide"] {
+        let session = DeckSession::open(FILE, 522).unwrap();
+        let before = session.snapshot().unwrap();
+        let source = &before.slides[0].id;
+        let proposal = session
+            .propose(request(vec![
+                serde_json::from_value(serde_json::json!({"type": kind, "slideId": source}))
+                    .unwrap(),
+            ]))
+            .unwrap();
+        session
+            .set_slide_notes(&EditCtx::local("human"), source, "New work")
+            .unwrap();
+        assert_eq!(
+            session.proposals().unwrap()[0].stale_targets,
+            vec![source.clone()]
+        );
+        assert!(matches!(
+            session.accept_proposal(&proposal.id, false),
+            Err(ProposalError::Stale(_))
+        ));
+        session
+            .delete_slide(&EditCtx::local("human"), source)
+            .unwrap();
+        assert!(session.accept_proposal(&proposal.id, true).is_err());
+    }
+    for kind in ["insertSlide", "moveSlide", "duplicateSlide"] {
+        let session = DeckSession::open(FILE, 523).unwrap();
+        let before = session.snapshot().unwrap();
+        let source = &before.slides[0].id;
+        let anchor = &before.slides[1].id;
+        let mut edit = serde_json::json!({"type": kind, "afterSlideId": anchor});
+        if kind != "insertSlide" {
+            edit["slideId"] = source.clone().into();
+        }
+        let proposal = session
+            .propose(request(vec![serde_json::from_value(edit).unwrap()]))
+            .unwrap();
+        session
+            .move_slide(&EditCtx::local("human"), anchor, 0)
+            .unwrap();
+        assert!(session.proposals().unwrap()[0].stale_targets.is_empty());
+        session
+            .set_slide_notes(&EditCtx::local("human"), anchor, "Anchor content")
+            .unwrap();
+        assert!(session.proposals().unwrap()[0].stale_targets.is_empty());
+        session
+            .delete_slide(&EditCtx::local("human"), anchor)
+            .unwrap();
+        assert!(
+            session.proposals().unwrap()[0]
+                .stale_targets
+                .contains(anchor)
+        );
+        assert!(matches!(
+            session.accept_proposal(&proposal.id, false),
+            Err(ProposalError::Stale(_))
+        ));
+        let preview = session.preview_proposal(&proposal.id).unwrap();
+        session.accept_proposal(&proposal.id, true).unwrap();
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+        let last = session
+            .snapshot()
+            .unwrap()
+            .slides
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        if kind == "moveSlide" {
+            assert_eq!(&last, source);
+        } else {
+            assert!(!before.slides.iter().any(|slide| slide.id == last));
+        }
+    }
+}
+
+#[test]
+fn structural_proposals_keep_edit_and_pending_limits() {
+    let session = DeckSession::open(FILE, 524).unwrap();
+    let edit: ProposalEdit =
+        serde_json::from_value(serde_json::json!({"type": "insertSlide", "afterSlideId": null}))
+            .unwrap();
+    assert!(session.propose(request(vec![])).is_err());
+    assert!(session.propose(request(vec![edit.clone(); 257])).is_err());
+    let maximum = session.propose(request(vec![edit.clone(); 256])).unwrap();
+    session.reject_proposal(&maximum.id);
+    for _ in 0..64 {
+        session.propose(request(vec![edit.clone()])).unwrap();
+    }
+    assert!(session.propose(request(vec![edit])).is_err());
+}
+
+#[test]
+fn duplicate_destination_distinguishes_omitted_and_null() {
+    let session = DeckSession::open(FILE, 525).unwrap();
+    let source = session.snapshot().unwrap().slides[0].id.clone();
+    for (destination, expected) in [(None, 1), (Some(serde_json::Value::Null), 0)] {
+        let mut value =
+            serde_json::json!({"type": "duplicateSlide", "ref": "copy", "slideId": source});
+        if let Some(destination) = destination {
+            value["afterSlideId"] = destination;
+        }
+        let edit: ProposalEdit = serde_json::from_value(value.clone()).unwrap();
+        let serialized = serde_json::to_value(&edit).unwrap();
+        assert_eq!(serialized.get("afterSlideId"), value.get("afterSlideId"));
+        let proposal = session.propose(request(vec![edit])).unwrap();
+        assert_eq!(
+            session
+                .preview_proposal(&proposal.id)
+                .unwrap()
+                .snapshot
+                .slides[expected]
+                .id,
+            proposal.refs["copy"]
+        );
+        session.reject_proposal(&proposal.id);
+    }
+}
+
+#[test]
+fn missing_moved_slide_errors_even_when_forced_and_ref_ids_refresh() {
+    let session = DeckSession::open(FILE, 526).unwrap();
+    let source = session.snapshot().unwrap().slides[0].id.clone();
+    let proposal = session
+        .propose(request(vec![ProposalEdit::MoveSlide {
+            slide_id: source.clone(),
+            after_slide_id: None,
+        }]))
+        .unwrap();
+    session
+        .delete_slide(&EditCtx::local("human"), &source)
+        .unwrap();
+    assert!(matches!(
+        session.accept_proposal(&proposal.id, true),
+        Err(ProposalError::Edit(pptx_edit::EditError::SlideNotFound(_)))
+    ));
+    session.reject_proposal(&proposal.id);
+    let proposal = session
+        .propose(request(
+            serde_json::from_value(serde_json::json!([
+                {"type": "insertSlide", "ref": "draft", "afterSlideId": null},
+                {"type": "setSlideNotes", "slideId": "@draft", "text": "Draft"}
+            ]))
+            .unwrap(),
+        ))
+        .unwrap();
+    session
+        .insert_slide(&EditCtx::local("human"), 0, None)
+        .unwrap();
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert_ne!(preview.proposal.refs["draft"], proposal.refs["draft"]);
+    assert_eq!(session.proposals().unwrap()[0].refs, preview.proposal.refs);
+    assert_eq!(
+        session.proposals().unwrap()[0].changes,
+        preview.proposal.changes
+    );
+    assert!(preview.proposal.stale_targets.is_empty());
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+}
+
+#[test]
+fn accepted_slide_structure_syncs_as_an_ordinary_update() {
+    let session = DeckSession::open(FILE, 527).unwrap();
+    let peer = DeckSession::open(FILE, 528).unwrap();
+    let before = session.snapshot().unwrap();
+    let proposal = session
+        .propose(request(
+            serde_json::from_value(serde_json::json!([
+                {"type": "duplicateSlide", "ref": "copy", "slideId": before.slides[0].id},
+                {"type": "setSlideNotes", "slideId": "@copy", "text": "Copied notes"},
+                {"type": "moveSlide", "slideId": "@copy", "afterSlideId": null}
+            ]))
+            .unwrap(),
+        ))
+        .unwrap();
+    session.accept_proposal(&proposal.id, false).unwrap();
+    peer.apply_update_v1(
+        &session
+            .encode_diff_v1(&peer.encode_state_vector_v1())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(peer.snapshot().unwrap(), session.snapshot().unwrap());
+    assert!(peer.proposals().unwrap().is_empty());
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+    peer.apply_update_v1(
+        &session
+            .encode_diff_v1(&peer.encode_state_vector_v1())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(peer.snapshot().unwrap(), before);
+}
+
+#[test]
+fn structural_accept_is_isolated_in_manual_undo_capture() {
+    let session = DeckSession::open(FILE, 529).unwrap();
+    session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+    let first = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_notes(&EditCtx::local("human"), &first, "Before acceptance")
+        .unwrap();
+    let before = session.snapshot().unwrap();
+    let proposal = session
+        .propose(request(
+            serde_json::from_value(serde_json::json!([
+                {"type": "insertSlide", "ref": "new", "afterSlideId": null},
+                {"type": "setSlideNotes", "slideId": "@new", "text": "Proposal notes"}
+            ]))
+            .unwrap(),
+        ))
+        .unwrap();
+    session.accept_proposal(&proposal.id, false).unwrap();
+    let accepted = session.snapshot().unwrap();
+    session
+        .set_slide_notes(&EditCtx::local("human"), &first, "After acceptance")
+        .unwrap();
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), accepted);
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+    assert!(session.can_undo());
+}

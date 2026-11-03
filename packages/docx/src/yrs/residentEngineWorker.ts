@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
@@ -680,7 +681,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             try {
               preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as DocxFontEnvironment));
             } catch (error) {
-              if (error instanceof WebAssembly.RuntimeError) throw error;
+              if (isEngineTrap(error)) throw error;
               return { status: 'refused' as const, reason: 'invalid-font-environment', selection: hooks.selection(), editState: hooks.editState() };
             }
           }
@@ -727,7 +728,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const result = await hooks.apply(command, context);
         if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) {
           try { relayout(); } catch (error) {
-            if (error instanceof WebAssembly.RuntimeError) throw error;
+            if (isEngineTrap(error)) throw error;
             throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
@@ -1180,7 +1181,7 @@ function completeCommandPrefix(host: DocxCommandHost): Promise<boolean> {
 
 /** A sliced region layout that a change in between abandoned. */
 function abandonedRegionLayout(error: unknown): boolean {
-  if (error instanceof WebAssembly.RuntimeError) return false;
+  if (isEngineTrap(error)) return false;
   const message = error instanceof Error ? error.message : String(error);
   return message === 'no region layout to resume' ||
     message === 'the document or its fonts changed since the region layout began';
@@ -1362,7 +1363,7 @@ let paintedCaretPageId: string | null = null;
 let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
-let trap: WebAssembly.RuntimeError | null = null;
+let trap: Error | null = null;
 let projectionFailure: SessionFailure | null = null;
 // A bootstrap laid out only the body's first pages: the request to finish
 // it, then the finished layout until `completeLayout` hands it over.
@@ -1414,7 +1415,7 @@ let handlingId = 0;
 const trappedIds = new Set<number>();
 
 onDisplayListQuerySourceFailure((error) => {
-  if (error instanceof WebAssembly.RuntimeError) trapped(handlingId, error);
+  if (isEngineTrap(error)) trapped(handlingId, error as Error);
 });
 
 /** Least time between two progress notices. */
@@ -1607,8 +1608,8 @@ function replyFailure(id: number, error: unknown): void {
     });
     return;
   }
-  if (failure instanceof WebAssembly.RuntimeError) {
-    trapped(id, failure);
+  if (isEngineTrap(failure)) {
+    trapped(id, failure as Error);
     return;
   }
   reply({
@@ -1621,7 +1622,7 @@ function replyFailure(id: number, error: unknown): void {
 }
 
 /** A trap leaves the module unusable: `id` is answered as terminal, and nothing succeeds after. */
-function trapped(id: number, error: WebAssembly.RuntimeError): void {
+function trapped(id: number, error: Error): void {
   if (trappedIds.has(id)) return;
   trappedIds.add(id);
   trap = error;
@@ -1649,7 +1650,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
       reply({ id: request.id, ok: true, decodedFontFace: face },
         face.payload === undefined ? [face.font] : [face.font, face.payload]);
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       const message = error instanceof Error ? error.message : String(error);
       reply({ id: request.id, ok: false, error: message, commandError: { name: 'Error', message } });
     }
@@ -1820,7 +1821,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
           [stateVector, ...embeddedFontFaces.map(face => face.data)]);
       }
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       if (opening && session === opening) destroySession(true);
       else opening?.destroy();
       if (replaced && await reopenSourceCut(replaced)) throw new SourceCutKeptError(error instanceof Error ? error.message : String(error));
@@ -1852,7 +1853,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
               request.previewParagraphBudget
             );
     } catch (error) {
-      if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
+      if (!(isEngineTrap(error))) opening.destroy();
       throw error;
     }
     if (hostJson === null) {
@@ -2192,7 +2193,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
       );
     } catch (error) {
       if (trap) throw trap;
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       reply({
         id: request.id,
         ok: false,
@@ -2805,7 +2806,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     );
   } catch (error) {
     if (trap) throw trap;
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     reply({
       id: request.id,
@@ -3065,7 +3066,7 @@ function previewFontRequirements(
   } catch (error) {
     // The host reads them itself and meets the failure there.
     if (trap) throw trap;
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     return null;
   }
 }
@@ -3126,7 +3127,7 @@ async function completeProvisionalLayout(): Promise<void> {
       try {
         layoutJson = session.resumeRegionLayout(ALL_BLOCKS).layoutJson;
       } catch (error) {
-        if (error instanceof WebAssembly.RuntimeError) throw error;
+        if (isEngineTrap(error)) throw error;
       }
     }
     completedLayout = {
@@ -3248,7 +3249,7 @@ function scheduleCompletion(completion: SlicedCompletion): void {
       if (slicedCompletion === completion) slicedCompletion = null;
       if (!completion.commandOwner) replyFailure(completion.id, error);
       else if (completion.commandOwner === commandHost) {
-        if (error instanceof WebAssembly.RuntimeError) replyFailure(0, error);
+        if (isEngineTrap(error)) replyFailure(0, error);
         else reply({ id: 0, ok: false, terminal: true, failureCode: 'message',
           error: error instanceof Error ? error.message : String(error) });
       }
@@ -3280,7 +3281,7 @@ async function completionSlice(completion: SlicedCompletion, budgetMs: number): 
     try {
       progress = owner ? owner.resume(completion.blocks) : session.resumeRegionLayout(completion.blocks);
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (
         message !== 'no region layout to resume' &&
@@ -3636,7 +3637,7 @@ async function reopenSourceCut(source: DocxSourceOpenRequest): Promise<boolean> 
     if (adoptResidentSource(opening, source)) return true;
     opening.destroy();
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     if (session === opening) destroySession(true);
     else opening.destroy();
   }
@@ -3803,8 +3804,8 @@ async function replayOffscreen(
           return session!.outlineGlyphJson(fontId, glyphId);
         } catch (error) {
           // The raster paints on with browser text, so running out of memory is answered here.
-          if (error instanceof WebAssembly.RuntimeError && editFailedAllocationBytes() > 0) {
-            trapped(handlingId, error);
+          if (isEngineTrap(error) && editFailedAllocationBytes() > 0) {
+            trapped(handlingId, error as Error);
           }
           throw error;
         }
@@ -3961,7 +3962,7 @@ function primeSaveSeedStatesOnce(): void {
     idleAfterInputMs: COMPLETION_IDLE_MS,
     onStale: () => 'continue',
     fail: (error) => {
-      if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+      if (isEngineTrap(error)) trapped(0, error as Error);
     },
     run: (budgetMs) => {
       if (session !== owner || trap) return 'done';
@@ -4029,7 +4030,7 @@ function saveWarmupHasHeadroom(): boolean {
   try {
     memory = wasmModuleMemories().find((module) => module.label === 'docx-edit');
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+    if (isEngineTrap(error)) trapped(0, error as Error);
     return false;
   }
   const limit = Math.min(configured ?? WASM32_MEMORY_LIMIT_BYTES,
@@ -4081,8 +4082,8 @@ function scheduleSaveWarmup(): void {
       await warmResidentSave(() => yieldSaveWarmup(attempt));
       if (!attempt.cancelled) saveWarmupFinished = true;
     }).catch((error: unknown) => {
-      if (error instanceof WebAssembly.RuntimeError) {
-        trapped(0, error);
+      if (isEngineTrap(error)) {
+        trapped(0, error as Error);
         return;
       }
       if (!attempt.cancelled && session === owner) saveWarmupFinished = true;

@@ -108,7 +108,8 @@ export function ProposalsPanel({ proposals, staleFor, style }: ProposalsPanelPro
       ) : (
         proposals.map((proposal) => {
           const color = proposalColor(proposal.agentId);
-          const stale = staleFor[proposal.id];
+          const reportedStale = proposal.cells.filter((cell) => cell.stale).map((cell) => cell.a1);
+          const stale = reportedStale.length > 0 ? reportedStale : staleFor[proposal.id];
           return (
             <div
               key={proposal.id}
@@ -163,6 +164,11 @@ export function ProposalsPanel({ proposals, staleFor, style }: ProposalsPanelPro
                   }}
                 >
                   {t('proposals.staleWarning', { cells: stale.join(', ') })}
+                  {proposal.forceBlocked && (
+                    <div data-testid="xlsx-proposal-force-blocked">
+                      {t('proposals.forceBlockedReason')}
+                    </div>
+                  )}
                 </div>
               )}
               <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
@@ -172,7 +178,7 @@ export function ProposalsPanel({ proposals, staleFor, style }: ProposalsPanelPro
                   label={t('proposals.accept')}
                   testId="xlsx-proposal-accept"
                 />
-                {stale && stale.length > 0 && (
+                {stale && stale.length > 0 && !proposal.forceBlocked && (
                   <ReviewButton
                     id="proposalAccept"
                     args={{ proposalId: proposal.id, force: true }}

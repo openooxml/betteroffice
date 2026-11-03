@@ -420,7 +420,14 @@ async function flow(page: Page, arm: Arm, readOnly: boolean, options = '') {
     expect(snapshot.version).toBe(before.version);
     expect(snapshot.previewVersion).toBe(before.previewVersion + 1);
     expect(snapshot.proposals).toEqual(before.proposals.map((proposal) =>
-      ids.includes(proposal.id) ? { ...proposal, state } : proposal
+      ids.includes(proposal.id)
+        ? {
+          ...proposal,
+          state,
+          stateVersion: snapshot.previewVersion,
+          ...(state === 'proposed' ? {} : { decisionState: state }),
+        }
+        : proposal
     ));
   };
   for (const id of IDS.slice(0, 4)) {

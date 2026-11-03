@@ -1,11 +1,11 @@
 import { editCharts, listCharts, readChartText, type XlsxChartEdit, type XlsxChartTextRead } from './xlsx-charts';
 import {
-  initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
+  initWasm, isPngExportAvailable, openWorkbook, StaleProposalError, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
 } from '@betteroffice/xlsx';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
 import { setAutoFilter, applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxProtectionOptions, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
-import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
+import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type AgentProposal, type PrototypeOptions } from './prototype';
 
 export interface XlsxOptions extends PrototypeOptions { editPeer?: WorkbookEditPeer }
 
@@ -44,7 +44,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   }
 
   static attach(handle: WorkbookHandle, options: XlsxOptions = {}) {
-    const attached = options.editPeer ? new Proxy(handle, { get: (target, key) => key === 'applyEdits' || key === 'applyOps' ? options.editPeer![key] : Reflect.get(target, key) }) : handle;
+    const attached = options.editPeer ? new Proxy(handle, { get: (target, key) => key === 'applyEdits' || key === 'applyOps' || key === 'propose' || key === 'acceptProposal' || key === 'rejectProposal' ? options.editPeer![key] : Reflect.get(target, key) }) : handle;
     return new XlsxAgentWorkbook(attached, options.name, false, options.editPeer);
   }
 
@@ -200,6 +200,40 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     }
     return this.stage(input, changes, steps, version);
   }
+
+  protected override createProposal(value: AgentProposal<CellChange>, _steps: XlsxEditStep[]) {
+    if (this.ownsHandle) return undefined;
+    return this.handle.propose(value.author, value.note || null, value.changes.map(change => {
+      const { start } = corners(change.a1);
+      return { sheet: this.resolveSheet(change.sheet).index, row: start.row, col: start.col, input: change.input };
+    })).id;
+  }
+  protected override proposalStatus(id: string) { return this.handle.getProposalStatus(id); }
+  protected override proposalStale(id: string, _steps: XlsxEditStep[]) {
+    return this.handle.isProposalStale(id);
+  }
+  protected override acceptProposal(id: string, steps: XlsxEditStep[]) {
+    try {
+      const version = this.currentVersion();
+      const result = this.handle.acceptProposal(id);
+      this.preserveSearchVersion(version);
+      for (const target of this.cells.values()) {
+        if (target.version !== version) continue;
+        const current = this.cellAt(target.sheet, target.a1);
+        target.before = current.before;
+        target.version = current.version;
+      }
+      const calculation = this.handle.calculationStatus();
+      return { applied: result.applied, version: this.currentVersion(), changedSheets: result.applied ? new Set(steps.map(step => step.target.sheetId)).size : 0, calculation: { changedCells: result.changed?.length ?? 0, cycleCells: 0, limitedCells: calculation.limitedCells.length, truncated: calculation.budgetExhausted ?? false } };
+    } catch (error) {
+      if (error instanceof StaleProposalError) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.', { cells: error.cells, targets: error.targets });
+      if ((error instanceof Error ? error.message : String(error)).startsWith('Stale proposal:')) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.');
+      throw error;
+    }
+  }
+  protected override rejectProposal(id: string) { this.handle.rejectProposal(id); }
+
+  protected override searchKey(hit: unknown) { return this.ownsHandle ? undefined : (hit as { ref: string }).ref; }
 
   protected currentVersion() { return this.handle.version(); }
   protected validate(steps: XlsxEditStep[], version: string) { unwrap(this.handle.validateEdits({ expectVersion: version, steps, source: 'agent' })); }
