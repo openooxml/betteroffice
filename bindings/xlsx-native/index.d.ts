@@ -117,3 +117,5 @@ export declare function exportXlsxMarkdownJson(bytes: Uint8Array, options: strin
 export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string
 
 export declare function renderXlsxMarkdownJson(content: string, options: string): string
+
+export declare function setHeapLimit(bytes: number): void

@@ -898,7 +898,11 @@ pub fn allocation_failure() -> f64 {
 
 #[napi(catch_unwind, js_name = "setHeapLimit")]
 pub fn set_heap_limit(bytes: f64) {
-    crate::memory::set_budget(if bytes.is_finite() && bytes > 0.0 { bytes as usize } else { 0 });
+    crate::memory::set_budget(if bytes.is_finite() && bytes > 0.0 {
+        bytes as usize
+    } else {
+        0
+    });
 }
 
 #[napi(catch_unwind, js_name = "displayListCellLimit")]
