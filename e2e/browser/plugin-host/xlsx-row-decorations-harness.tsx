@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { useEffect, useState } from 'react';
+import { initWasm, openWorkbook } from '@betteroffice/xlsx';
 import {
   XlsxEditor,
   defineXlsxPlugin,
@@ -25,7 +26,24 @@ const ITEMS: Omit<XlsxPluginRowDecoration, 'sheetId'>[] = [
   { id: 'd', row: 4, kind: 'dot', tone: 'success', tooltip: 'Dot' },
   { id: 'e', row: 4, kind: 'badge', text: 'OK' },
   { id: 'f', row: 6, kind: 'badge', text: 'WIDE' },
+  ...Array.from({ length: 9_000 }, (_, index): Omit<XlsxPluginRowDecoration, 'sheetId'> => ({
+    id: `short${index}`, row: 8, kind: index % 2 ? 'dot' : 'badge', text: index % 2 ? undefined : 'NOTE',
+    tooltip: `Short ${index}`,
+  })),
 ];
+
+/** The sample workbook with row 9 at 7.5 pt. */
+async function shortRowWorkbook(): Promise<Uint8Array> {
+  await initWasm();
+  const bytes = new Uint8Array(await (await fetch(workbookUrl)).arrayBuffer());
+  const workbook = openWorkbook(bytes);
+  try {
+    workbook.applyOps([{ type: 'setRowHeight', sheet: 0, row: 8, height: 7.5 }]);
+    return workbook.save();
+  } finally {
+    workbook.dispose();
+  }
+}
 
 const rows = defineXlsxPlugin<null>({
   id: 'probe.rows',
@@ -44,9 +62,7 @@ const PLUGINS = [rows];
 function Harness() {
   const [file, setFile] = useState<Uint8Array | null>(null);
   useEffect(() => {
-    void fetch(workbookUrl)
-      .then((response) => response.arrayBuffer())
-      .then((bytes) => setFile(new Uint8Array(bytes)));
+    void shortRowWorkbook().then(setFile);
   }, []);
   if (!file) return null;
   return (

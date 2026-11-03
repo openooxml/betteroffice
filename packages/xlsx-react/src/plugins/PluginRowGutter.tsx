@@ -75,6 +75,7 @@ function moreStyle(scale: number, width: number, height: number): CSSProperties 
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    pointerEvents: 'none',
   };
 }
 
@@ -82,7 +83,8 @@ function moreStyle(scale: number, width: number, height: number): CSSProperties 
  * The row gutter at the left of the grid: plugin row decorations on the rows of the painted
  * frame, at its row offsets, so frozen, hidden and resized rows place them as the canvas does.
  * The shown items split the gutter's width, each a full-height button; a `+n` count sits in the
- * top right corner, no wider than one item, so everything stays inside the gutter. The editor
+ * top right corner, no wider than one item, so everything stays inside the gutter. The count
+ * lets the pointer through to the item under it; the row's title names the hidden items. The editor
  * renders it only while `rowGutter` has items and moves its grid right by
  * `ROW_GUTTER_WIDTH * zoom` meanwhile.
  */
@@ -120,6 +122,7 @@ export const PluginRowGutter = memo(function PluginRowGutter({
       <div
         key={row}
         data-row={row}
+        title={line.more > 0 ? line.tooltip : undefined}
         style={{
           position: 'absolute',
           left: 0,
