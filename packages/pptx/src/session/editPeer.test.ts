@@ -482,13 +482,15 @@ test('in-thread paragraph proposals replay, preview and undo with the worker rep
   try {
     const before = access.snapshot();
     const shape = before.slides[0]!.shapes[0]!;
-    const proposal = access.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id, paragraphs: [
+    access.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id, paragraphs: [
       { alignment: 'ctr', bullet: true, runs: [{ text: 'First', style: { bold: true } }] },
       { bullet: false, runs: [{ text: 'Second', style: {} }] },
     ] }]);
     await owner.flush();
     expect(access.snapshot()).toEqual(before);
-    expect(JSON.parse(context.workerDoc.listProposalsJson())[0].edits[0].type).toBe('setStoryParagraphs');
+    expect(access.listProposals()).toHaveLength(1);
+    const proposal = access.listProposals()[0]!;
+    expect(JSON.parse(context.workerDoc.listProposalsJson())).toEqual([proposal]);
     const diff = access.layoutProposalDiffSlideById(proposal.id, before.slides[0]!.id);
     expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
     expect(diff.textChanges.some(change => change.kind === 'deletion')).toBe(true);
