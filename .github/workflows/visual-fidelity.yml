@@ -1285,6 +1285,7 @@ jobs:
             ${{ runner.temp }}/fidelity-report/report.json
             ${{ runner.temp }}/fidelity-report/section.md
             ${{ runner.temp }}/fidelity-report/aggregate.json
+            ${{ runner.temp }}/fidelity-report/failures.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1303,7 +1304,7 @@ jobs:
         env: *private-write
         run: |
           cd "$RUNNER_TEMP/fidelity-report"
-          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity report.json section.md aggregate.json
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity report.json section.md aggregate.json failures.json
 
       - name: Keep the private logs
         if: always() && inputs.private_corpus

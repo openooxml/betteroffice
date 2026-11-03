@@ -229,6 +229,7 @@ test('the aggregate carries per-format counts and means and nothing that names a
       commit: { ssim: 0.7, scored: 2, total: 2, exact_pages: 0, paged: 1, page_error: 1 },
       libreoffice: null,
     },
+    failures: [],
   });
   expect(aggregate.formats.pptx.samples).toBe(0);
   expect(aggregate.formats.pptx.fidelity.commit).toEqual({ ssim: null, scored: 0, total: 0, exact_pages: 0, paged: 0, page_error: 0 });
@@ -241,4 +242,16 @@ test('the aggregate refuses the same invalid reports the README refuses', () => 
   const input = report();
   input.commit = 'short';
   expect(() => aggregateReport(input)).toThrow('Expected a full commit SHA');
+});
+
+test('the aggregate counts failures by area, channel and stage without their messages', () => {
+  const input = report();
+  input.samples[0].comparisons[1] = {
+    channel: 'commit', renderer_source_commit: commit, status: 'failed', stage: 'capture',
+    error: 'navigation to https://corpus.betteroffice.dev/demo/source.docx failed',
+  } as any;
+  const aggregate = aggregateReport(input);
+  expect(aggregate.formats.docx.failures).toEqual([{ area: 'render', channel: 'commit', stage: 'capture', count: 1 }]);
+  const text = JSON.stringify(aggregate);
+  for (const leak of ['demo', 'navigation', 'corpus.betteroffice.dev']) expect(text.includes(leak) && leak).toBe(false);
 });
