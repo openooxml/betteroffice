@@ -16,41 +16,74 @@ const TONES: Record<Tone, { ink: string; fill: string }> = {
   danger: { ink: '#a50e0e', fill: '#fad2cf' },
 };
 
-const BASE: CSSProperties = {
-  flex: 'none',
+const GUTTER_BORDER = 1;
+
+const SLOT: CSSProperties = {
+  position: 'absolute',
+  top: 0,
   boxSizing: 'border-box',
   margin: 0,
-  padding: 0,
   border: 'none',
+  background: 'transparent',
   font: 'inherit',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  overflow: 'hidden',
 };
 
-function badgeStyle(tone: Tone, scale: number): CSSProperties {
+function markStyle(item: XlsxPluginRowDecoration, scale: number): CSSProperties {
+  const tone = TONES[item.tone ?? 'neutral'];
+  if (item.kind === 'dot') {
+    const size = 6 * scale;
+    return { flex: 'none', width: size, height: size, maxWidth: '100%', maxHeight: '100%', borderRadius: '50%',
+      background: tone.ink };
+  }
   return {
-    ...BASE,
-    maxWidth: (ROW_GUTTER_WIDTH - 2) * scale,
+    display: 'block',
+    minWidth: 0,
+    maxWidth: '100%',
+    maxHeight: '100%',
+    boxSizing: 'border-box',
     padding: `0 ${scale}px`,
     borderRadius: 3 * scale,
-    background: TONES[tone].fill,
-    color: TONES[tone].ink,
+    background: tone.fill,
+    color: tone.ink,
     fontSize: 8 * scale,
     lineHeight: `${10 * scale}px`,
     whiteSpace: 'nowrap',
     overflow: 'hidden',
+    textOverflow: 'ellipsis',
   };
 }
 
-function itemStyle(item: XlsxPluginRowDecoration, scale: number): CSSProperties {
-  const tone = item.tone ?? 'neutral';
-  if (item.kind === 'badge') return { ...badgeStyle(tone, scale), cursor: 'pointer' };
-  const size = 6 * scale;
-  return { ...BASE, width: size, height: size, borderRadius: '50%', background: TONES[tone].ink, cursor: 'pointer' };
+function moreStyle(scale: number, width: number, height: number): CSSProperties {
+  return {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    maxWidth: width,
+    maxHeight: height,
+    boxSizing: 'border-box',
+    padding: `0 ${scale}px`,
+    borderRadius: 2 * scale,
+    background: TONES.neutral.fill,
+    color: TONES.neutral.ink,
+    fontSize: 6 * scale,
+    lineHeight: `${7 * scale}px`,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  };
 }
 
 /**
  * The row gutter at the left of the grid: plugin row decorations on the rows of the painted
  * frame, at its row offsets, so frozen, hidden and resized rows place them as the canvas does.
- * The editor renders it only while `rowGutter` has items and moves its grid right by
+ * The shown items split the gutter's width, each a full-height button; a `+n` count sits in the
+ * top right corner, no wider than one item, so everything stays inside the gutter. The editor
+ * renders it only while `rowGutter` has items and moves its grid right by
  * `ROW_GUTTER_WIDTH * zoom` meanwhile.
  */
 export const PluginRowGutter = memo(function PluginRowGutter({
@@ -73,6 +106,7 @@ export const PluginRowGutter = memo(function PluginRowGutter({
     event.stopPropagation();
     host.activateRowDecoration(entry);
   };
+  const inner = ROW_GUTTER_WIDTH * zoom - GUTTER_BORDER;
   const rows: ReactElement[] = [];
   const frame = painted && painted.sheetId === index.sheetId ? painted.frame : null;
   const grid = frame?.grid;
@@ -81,6 +115,7 @@ export const PluginRowGutter = memo(function PluginRowGutter({
     const line = index.rows.get(row);
     const height = (grid.rowOffsets[local + 1] - grid.rowOffsets[local]) * scale;
     if (!line || !(height > 0) || grid.rowOffsets[local] >= frame.height) continue;
+    const slot = inner / line.shown.length;
     rows.push(
       <div
         key={row}
@@ -89,16 +124,12 @@ export const PluginRowGutter = memo(function PluginRowGutter({
           position: 'absolute',
           left: 0,
           top: grid.rowOffsets[local] * scale,
-          width: '100%',
+          width: inner,
           height,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: scale,
           overflow: 'hidden',
         }}
       >
-        {line.shown.map(({ entry, label }) => (
+        {line.shown.map(({ entry, label }, position) => (
           <button
             key={`${entry.key}\u0000${entry.item.id}`}
             type="button"
@@ -109,9 +140,11 @@ export const PluginRowGutter = memo(function PluginRowGutter({
             onClick={() => host.activateRowDecoration(entry)}
             onKeyDown={onKeyDown(entry)}
             onKeyUp={(event) => { if (event.key === ' ') event.preventDefault(); }}
-            style={itemStyle(entry.item, scale)}
+            style={{ ...SLOT, left: position * slot, width: slot, height, padding: `0 ${scale}px` }}
           >
-            {entry.item.kind === 'badge' ? entry.item.text : null}
+            <span aria-hidden style={markStyle(entry.item, scale)}>
+              {entry.item.kind === 'badge' ? entry.item.text : null}
+            </span>
           </button>
         ))}
         {line.more > 0 && (
@@ -120,7 +153,7 @@ export const PluginRowGutter = memo(function PluginRowGutter({
             data-testid="xlsx-row-decoration-more"
             aria-label={line.tooltip}
             title={line.tooltip}
-            style={badgeStyle('neutral', scale)}
+            style={moreStyle(scale, slot, height)}
           >
             {`+${line.more}`}
           </span>
@@ -139,11 +172,11 @@ export const PluginRowGutter = memo(function PluginRowGutter({
           position: 'absolute',
           top: 0,
           left: 0,
-          width: ROW_GUTTER_WIDTH * zoom,
+          width: inner + GUTTER_BORDER,
           height: painted ? painted.frame.height * scale : 0,
           overflow: 'hidden',
           boxSizing: 'border-box',
-          borderRight: '1px solid #e0e0e0',
+          borderRight: `${GUTTER_BORDER}px solid #e0e0e0`,
           background: '#f8f9fa',
         }}
       >
