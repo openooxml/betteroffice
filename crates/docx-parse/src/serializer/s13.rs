@@ -661,7 +661,7 @@ fn write_docx_s13_parts_with_warnings(
 /// The part's `w:drawing` elements whose graphic is a group or canvas, keyed by `wp:docPr` id.
 fn group_drawings_in_part(xml: &str) -> HashMap<String, String> {
     let mut drawings = HashMap::new();
-    if !xml.contains("/wordprocessingGroup\"") && !xml.contains("/wordprocessingCanvas\"") {
+    if !xml.contains("/wordprocessingGroup") && !xml.contains("/wordprocessingCanvas") {
         return drawings;
     }
     let mut repeated = HashSet::new();
@@ -673,11 +673,22 @@ fn group_drawings_in_part(xml: &str) -> HashMap<String, String> {
             .map_or(name, |(_, local)| local)
             .to_owned()
     };
+    let declarations = |tag: &crate::paragraph_identity::Tag<'_>| -> Vec<(String, String)> {
+        tag.attributes
+            .iter()
+            .filter_map(|(name, range)| {
+                name.strip_prefix("xmlns:")
+                    .map(|prefix| (prefix.to_owned(), xml[range.clone()].to_owned()))
+            })
+            .collect()
+    };
     let mut depth = 0usize;
+    let mut scopes: Vec<Vec<(String, String)>> = Vec::new();
     let mut open: Vec<(usize, usize, usize)> = Vec::new();
     for (index, tag) in tags.iter().enumerate() {
         if tag.end {
             depth = depth.saturating_sub(1);
+            scopes.pop();
             if local(tag.name) == "drawing"
                 && let Some(&(at, start, first)) = open.last()
                 && at == depth
@@ -707,10 +718,41 @@ fn group_drawings_in_part(xml: &str) -> HashMap<String, String> {
                             .map(|(_, range)| xml[range.clone()].to_owned())
                     });
                 if group && let Some(id) = id {
-                    if drawings
-                        .insert(id.clone(), xml[start..tag.range.end].to_owned())
-                        .is_some()
-                    {
+                    let mut span = xml[start..tag.range.end].to_owned();
+                    let mut used = HashSet::new();
+                    let mut declared = HashSet::new();
+                    for tag in &tags[first - 1..=index] {
+                        if let Some((prefix, _)) = tag.name.split_once(':') {
+                            used.insert(prefix.to_owned());
+                        }
+                        for (name, _) in &tag.attributes {
+                            if let Some(prefix) = name.strip_prefix("xmlns:") {
+                                declared.insert(prefix.to_owned());
+                            } else if let Some((prefix, _)) = name.split_once(':') {
+                                used.insert(prefix.to_owned());
+                            }
+                        }
+                    }
+                    let mut bindings = String::new();
+                    for prefix in used {
+                        if prefix == "xml" || prefix == "xmlns" || declared.contains(&prefix) {
+                            continue;
+                        }
+                        if let Some((_, uri)) = scopes
+                            .iter()
+                            .skip(1)
+                            .rev()
+                            .flat_map(|scope| scope.iter().rev())
+                            .find(|(bound, _)| *bound == prefix)
+                        {
+                            bindings.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
+                        }
+                    }
+                    if !bindings.is_empty() {
+                        let name_end = tags[first - 1].name.len() + 1;
+                        span.insert_str(name_end, &bindings);
+                    }
+                    if drawings.insert(id.clone(), span).is_some() {
                         repeated.insert(id);
                     }
                 }
@@ -722,6 +764,7 @@ fn group_drawings_in_part(xml: &str) -> HashMap<String, String> {
         }
         if !tag.empty {
             depth += 1;
+            scopes.push(declarations(tag));
         }
     }
     drawings.retain(|id, _| !repeated.contains(id));

@@ -107,7 +107,7 @@ pub(super) fn replay_group(
     let mut hashes = Vec::with_capacity(bodies.len());
     for (body, has_box) in bodies.iter().zip(&mask) {
         let current = crate::text_box::content_sha256(&body.content);
-        let unchanged = !*has_box
+        let unchanged = (!*has_box && (mapped || body.content.is_empty()))
             || (mapped
                 && element_at(drawing, &containers[kept])
                     .is_some_and(|container| same_text(container, &body.content, context)));
