@@ -59,8 +59,6 @@ export const pptxdocument_insertTableColumnJson: (a: number, b: number, c: numbe
 export const pptxdocument_insertTableRowJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_insertTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
-export const pptxdocument_proposalSlideStripJson: (a: number, b: number, c: number) => [number, number, number, number];
-export const pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
 export const pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
@@ -73,6 +71,7 @@ export const pptxdocument_openPeerDeckJson: (a: number, b: number, c: number, d:
 export const pptxdocument_openReplayBaseline: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
 export const pptxdocument_peerHydrationJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_previewProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_proposalSlideStripJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_readCommandContentJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_readContentJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -113,6 +112,7 @@ export const pptxdocument_undoJson: (a: number) => [number, number, number, numb
 export const pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
 export const pptxdocument_undoReceiptJson: (a: number) => [number, number, number, number];
 export const pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_version: () => [number, number];
 export const pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

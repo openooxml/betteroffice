@@ -20,9 +20,9 @@ export declare class PptxDocument {
   adoptPeerIdentity(): void
   replayJson(envelope: string): string
   proposeJson(args: string): string
-  proposalSlideStripJson(id: string): string;
-  validateProposalJson(args: string): string;
+  validateProposalJson(args: string): string
   listProposalsJson(): string
+  proposalSlideStripJson(id: string): string
   previewProposalJson(args: string): string
   acceptProposalJson(args: string): string
   rejectProposalJson(args: string): string
@@ -127,7 +127,7 @@ export declare class PptxRenderer {
   /** Requested faces with optional script coverage buckets, before layout. */
   requestedFontFacesJson(document: PptxDocument, slideId?: string | undefined | null): string
   layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
-  layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slideId: string): string;
+  layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slideId: string): string
   layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
 }
 
