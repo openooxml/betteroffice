@@ -3925,6 +3925,7 @@ export interface Proposal {
     agentId: string;
     note: string | null;
     cells: ProposalCell[];
+    forceBlocked?: boolean;
 }
 /** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */
 export interface StaleProposalTarget extends XlsxCellAddress {
