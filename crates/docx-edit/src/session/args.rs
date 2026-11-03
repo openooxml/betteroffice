@@ -231,15 +231,17 @@ pub(crate) fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> EngineResul
 /// {"type":"fontFamily"|"color","value":string} |
 /// {"type":"fontSize","value":number}`. The six simple types toggle; font,
 /// size and color set.
-pub(crate) fn apply_mark(doc: &EditingDoc, range: StoryRange, mark_json: &str) -> EngineResult<()> {
+pub(crate) fn apply_mark(
+    doc: &EditingDoc,
+    ctx: &EditCtx,
+    range: StoryRange,
+    mark_json: &str,
+) -> EngineResult<()> {
     let value: Value = serde_json::from_str(mark_json).map_err(EngineError::message)?;
     let kind = value
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| EngineError::message("mark JSON requires a string \"type\""))?;
-    // Formatting is never itself a tracked change, so the caret's suggest mode
-    // is irrelevant here.
-    let ctx = EditCtx::local(String::new(), String::new());
     let simple = match kind {
         "bold" => Some(SimpleFormat::Bold),
         "italic" => Some(SimpleFormat::Italic),
@@ -250,8 +252,8 @@ pub(crate) fn apply_mark(doc: &EditingDoc, range: StoryRange, mark_json: &str) -
         _ => None,
     };
     if let Some(format) = simple {
-        doc.toggle_format(&ctx, range, format)
-            .map_err(EngineError::message)?;
+        doc.toggle_format(ctx, range, format)
+            .map_err(EngineError::from)?;
         return Ok(());
     }
     let delta = match kind {
@@ -287,8 +289,8 @@ pub(crate) fn apply_mark(doc: &EditingDoc, range: StoryRange, mark_json: &str) -
         }
         other => return Err(EngineError::message(format!("unknown mark type {other:?}"))),
     };
-    doc.format_range(&ctx, range, &delta)
-        .map_err(EngineError::message)?;
+    doc.format_range(ctx, range, &delta)
+        .map_err(EngineError::from)?;
     Ok(())
 }
 

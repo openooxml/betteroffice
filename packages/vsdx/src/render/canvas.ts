@@ -143,4 +143,17 @@ function utf8Slice(value: string, start: number, end: number): string { return n
 export function canvasFontFor(run: Pick<TextRun, 'family' | 'bold' | 'italic'>, sizePx: number): string { return `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${sizePx}px ${quote(run.family)}`; }
 function quote(family: string): string { return family.includes(' ') ? JSON.stringify(family) : family; }
 function strokePlaceholder(ctx: CanvasRenderingContext2D, value: { x: number; y: number; width: number; height: number }): void { ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]); }
-function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void { strokePlaceholder(ctx, value); ctx.fillStyle = '#5d6675'; ctx.font = '12px sans-serif'; ctx.fillText(value.reason, value.x + 6, value.y + 16, Math.max(0, value.width - 12)); }
+const PLACEHOLDER_LABEL_IN = 10 / 72;
+function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void {
+  strokePlaceholder(ctx, value);
+  if (!value.reason) return;
+  ctx.save();
+  ctx.translate(value.x, value.y);
+  ctx.scale(1 / TEXT_UNITS_PER_INCH, -1 / TEXT_UNITS_PER_INCH);
+  ctx.font = `${PLACEHOLDER_LABEL_IN * TEXT_UNITS_PER_INCH}px sans-serif`;
+  (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#5d6675';
+  ctx.fillText(value.reason, 0, PLACEHOLDER_LABEL_IN * 0.8 * TEXT_UNITS_PER_INCH);
+  ctx.restore();
+}

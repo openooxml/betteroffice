@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, mock, test } from 'bun:test';
 import { createFontProvider as createCdnFontProvider } from './cdn';
 import { createFontProvider } from './index';
 import { fontProvider } from './provider';
@@ -47,6 +47,18 @@ test('shared loaders stay lazy and return independently owned buffers after tran
   new Uint8Array(second).fill(0);
   expect(new Uint8Array(await coverage())).toEqual(bytes);
   expect(loaded).toEqual(Array(3).fill('LiberationSans-Regular.ttf.zst'));
+});
+
+test('faces with known coverage expose the shared read, separate from owned copies', async () => {
+  const shared = new ArrayBuffer(16);
+  const copy = mock(async () => new ArrayBuffer(16));
+  const read = mock(async () => shared);
+  const loader = fontProvider(copy, read).resolve('Calibri', false, false)!;
+  expect(loader.coverage).toBeDefined();
+  expect(await loader.readOnlyBytes!()).toBe(shared);
+  expect(copy).not.toHaveBeenCalled();
+  expect(await loader()).not.toBe(shared);
+  expect(fontProvider(copy).resolve('Calibri', false, false)!.readOnlyBytes).toBeUndefined();
 });
 
 test('shared face loaders keep conditional fallback and measurement metadata separate', () => {

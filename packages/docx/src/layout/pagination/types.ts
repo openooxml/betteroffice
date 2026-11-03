@@ -186,6 +186,7 @@ export type RunFormatting = {
   changeDate?: string;
   /** Revision ID of the tracked change (for sidebar matching) */
   changeRevisionId?: number;
+  formatChange?: { author: string; date: string; revisionId: string; kind: 'format' };
   /** Logical source-order index, independent of bidi visual paint order. */
   logicalOrder?: number;
   /** Resolved Unicode bidi embedding level. Undefined = resolve downstream. */

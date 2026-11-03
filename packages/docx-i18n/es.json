@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "Salto de párrafo insertado",
     "paragraphMarkDeleted": "Salto de párrafo eliminado",
     "paragraphPropertiesChanged": "Propiedades del párrafo modificadas",
+    "runPropertiesChanged": "Formato del texto modificado",
     "rowInserted": "Fila insertada",
     "rowDeleted": "Fila eliminada",
     "rowPropertiesChanged": "Propiedades de la fila modificadas",
