@@ -1,6 +1,5 @@
 import type { BundledFontFace } from '@betteroffice/fonts';
 import type { PptxFontFace } from '@betteroffice/pptx';
-import type { preparePresentationFontDecoder } from '@betteroffice/pptx/worker';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFontWarning, useStableFonts } from './fontFaces';
 
@@ -31,30 +30,18 @@ export function useResolvedFonts(file: Uint8Array | undefined, fonts: readonly F
   useEffect(() => {
     if (!file || !pending) return;
     let active = true;
-    let prepared: ReturnType<typeof preparePresentationFontDecoder> | undefined;
+    let prepared: { release(): void } | undefined;
     const current = () => active;
     const release = () => { prepared?.release(); prepared = undefined; };
     owner.current = { identity, release };
     void (async () => {
       try {
-        const [{ preparePresentationFontDecoder: prepare }, { loadBundledFontBytes }] = await Promise.all([
-          import('@betteroffice/pptx/worker'), import('@betteroffice/fonts'),
-        ]);
+        const { loadBundledFonts } = await import('./bundledFontsLoad');
         if (!current()) return;
-        prepared = prepare(file);
-        const { decoder } = prepared;
-        const loaded = await Promise.all(stable.map(async (font): Promise<PptxFontFace | undefined> => {
-          if (!('face' in font)) return font;
-          try {
-            const bytes = await loadBundledFontBytes(font.face, { baseUrl: font.baseUrl }, { decoder });
-            return { family: font.face.family, bold: font.face.weight === 700,
-              italic: font.face.style === 'italic', bytes: new Uint8Array(bytes) };
-          } catch {
-            if (current()) warnFonts();
-            return undefined;
-          }
-        }));
-        if (current()) setResolved({ identity, fonts: loaded.filter((font): font is PptxFontFace => font !== undefined) });
+        const loading = loadBundledFonts(file, stable, () => { if (current()) warnFonts(); });
+        prepared = loading;
+        const loaded = await loading.fonts;
+        if (current()) setResolved({ identity, fonts: loaded });
       } catch {
         release();
         if (current()) { warnFonts(); setResolved({ identity, fonts: bytes }); }
