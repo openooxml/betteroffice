@@ -97,7 +97,7 @@ describe('@betteroffice/xlsx-native', () => {
     zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
     zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>`);
     const { openWorkbookSession, workbookSessionRecovery } = await entry('./worker');
-    const session: WorkbookSession = await openWorkbookSession(await zip.generateAsync({ type: 'uint8array' }));
+    const session: WorkbookSession = await openWorkbookSession(await zip.generateAsync({ type: 'uint8array' }), { includeEditState: true });
     let seq = 0;
     const send = <K extends WorkbookCommandKind>(kind: K, payload: WorkbookCommandPayload<K>) => session.submit({
       ...session.commandIdentity, basis: session.confirmedBasis, seq: ++seq, kind, payload,
