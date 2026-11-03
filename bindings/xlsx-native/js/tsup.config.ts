@@ -29,7 +29,7 @@ export default defineConfig({
   },
   tsconfig: `${source}/tsconfig.json`,
   splitting: true,
-  external: ['#session-worker', '#session-scope'],
+  external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker', '#session-scope'],
   sourcemap: false,
   clean: true,
   treeshake: true,

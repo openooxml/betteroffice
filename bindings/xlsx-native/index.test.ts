@@ -25,7 +25,12 @@ describe('@betteroffice/xlsx-native', () => {
         import: conditions.import,
       });
     }
-    expect(manifest.dependencies).toBeUndefined();
+    expect(manifest.dependencies).toEqual({
+      ...wasmManifest.dependencies,
+      '@betteroffice/fonts-cjk': 'workspace:^',
+      '@betteroffice/fonts-intl': 'workspace:^',
+      '@betteroffice/fonts-latin': 'workspace:^',
+    });
     expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({
       type: 'module',
       imports: {
