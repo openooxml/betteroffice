@@ -267,8 +267,9 @@ test('inserted layout background images paint in ghost thumbnails and canvas pre
   const originalBitmap = Object.getOwnPropertyDescriptor(globalThis, 'createImageBitmap');
   Object.defineProperty(globalThis, 'createImageBitmap', { configurable: true, value: mock(async () => bitmap) });
   const draws = new Map<HTMLCanvasElement, unknown[]>();
-  const context = HTMLCanvasElement.prototype.getContext;
-  const paint = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((function (this: HTMLCanvasElement, ...args: unknown[]) {
+  const paint = spyOn(HTMLCanvasElement.prototype, 'getContext');
+  const context = paint.getMockImplementation()!;
+  paint.mockImplementation((function (this: HTMLCanvasElement, ...args: unknown[]) {
     const result = Reflect.apply(context, this, args) as CanvasRenderingContext2D | null;
     if (!result) return result;
     const canvas = this;
@@ -277,7 +278,7 @@ test('inserted layout background images paint in ghost thumbnails and canvas pre
       return Reflect.get(target, key);
     } });
   }) as HTMLCanvasElement['getContext']);
-  const resolve = mock((id: string) => {});
+  const resolve = mock((_id: string) => {});
   const releases: ReturnType<typeof mock>[] = [];
   const load = frameSources.peerlessProposalFrameSource;
   const source = spyOn(frameSources, 'peerlessProposalFrameSource').mockImplementation(async (...args) => {
@@ -305,7 +306,7 @@ test('inserted layout background images paint in ghost thumbnails and canvas pre
     expect(resolve).toHaveBeenCalledWith(imageId);
     await waitFor(() => { for (const release of releases) expect(release).toHaveBeenCalledTimes(1); });
   } finally {
-    source.mockRestore(); paint.mockRestore();
+    source.mockRestore(); paint.mockImplementation(context);
     if (originalBitmap) Object.defineProperty(globalThis, 'createImageBitmap', originalBitmap);
     else Reflect.deleteProperty(globalThis, 'createImageBitmap');
   }

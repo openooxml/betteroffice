@@ -602,6 +602,10 @@ export interface ProposalTextChange {
 export interface ProposalDiffSlide extends ProposalPreview {
     frame: SlideDisplayList;
     textChanges: ProposalTextChange[];
+    media?: {
+        assetId: string;
+        bytes: ArrayBuffer;
+    }[];
 }
 export interface ProposalAcceptance {
     proposalId: string;
