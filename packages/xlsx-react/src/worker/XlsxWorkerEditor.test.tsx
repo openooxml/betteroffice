@@ -3241,6 +3241,70 @@ describe('peerless workbook worker editor', () => {
     });
   }
 
+  const neighborPrefetched = async (neighborDelay = 0) => {
+    const host = peerlessHarness();
+    const sample = await host.frame({ x: 0, y: 0, width: 800, height: 600 });
+    host.frame.mockClear();
+    host.frame.mockImplementation(async (viewport, options) => {
+      if (options?.sheet === 1 && neighborDelay) await new Promise((resolve) => setTimeout(resolve, neighborDelay));
+      return {
+        ...sample, viewport, sheet: options?.sheet ?? 0,
+        displayList: { ...sample.displayList, commands: options?.sheet === 1 ? [...sample.displayList.commands,
+          { op: 'text' as const, text: 'second-sheet', x: 200, y: 66, fontSize: 11, color: '#000000' }]
+          : sample.displayList.commands },
+      };
+    });
+    const view = await host.mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
+    expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
+    const settled = host.frame.mock.calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    expect(host.frame.mock.calls.length).toBe(settled);
+    const canvas = () => view.container.querySelector('canvas')!;
+    return { host, view, canvas };
+  };
+
+  it('a sheet tab switch paints the prefetched neighbor frame before the worker replies', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    const frames = host.frame.mock.calls.length;
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'true' });
+    const command = host.sent[host.sent.length - 1];
+    if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(canvas().dataset.commandCoverage).not.toBe(String(command.seq));
+    await act(async () => host.ack(command, { selection: command.payload.selection, paint: true }));
+    await advance();
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'false' });
+    expect(canvas().dataset.commandCoverage).toBe(String(command.seq));
+    expect(host.frame.mock.calls.length).toBeGreaterThanOrEqual(frames);
+  });
+
+  it('a neighbor too slow to prepare is neither painted provisionally nor prepared again', async () => {
+    const { host, view, canvas } = await neighborPrefetched(60);
+    const neighborCalls = () => host.frame.mock.calls.filter(([, options]) => options?.sheet === 1).length;
+    expect(neighborCalls()).toBe(1);
+    await act(async () => host.push({ throughSeq: 0, version: 'v1', statuses: [], editState: { canUndo: false } }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); });
+    expect(neighborCalls()).toBe(1);
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a proposal change drops the prefetched neighbor frame', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v1',
+      statuses: [{ seq: 0, status: 'applied', committed: false, result: { remoteUpdate: true, proposals: [] } }] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a neighbor frame prefetched before an edit is not painted after it', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v2', statuses: [] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
   it('cross-sheet hyperlinks reveal their target even when the initial sheet view arrives later', async () => {
     const host = peerlessHarness();
     const frame = await host.frame({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });

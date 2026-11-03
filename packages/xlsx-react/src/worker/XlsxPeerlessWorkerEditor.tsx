@@ -51,7 +51,9 @@ import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { XlsxAsyncExportBridge } from './createAsyncEditorApi';
 import { PeerlessWorkbookSession, type PeerlessSessionWorkbookProps } from './usePeerlessSessionWorkbook';
 import { usePeerlessSessionWorkbook } from './usePeerlessSessionWorkbook';
-import { PeerlessWorkerPaintSource, type WorkerPaintRequest, type WorkerPaintResult } from './PeerlessWorkerPaintSource';
+import {
+  PeerlessWorkerPaintSource, type WorkerFramePaint, type WorkerPaintRequest, type WorkerPaintResult,
+} from './PeerlessWorkerPaintSource';
 
 import { CellClipboard, clipboardHtml, newClipboardMarker, parseCellClipboardText, readCellClipboard, type CellPaste } from '../clipboard';
 import { WorkerCellEcho } from './WorkerCellEcho';
@@ -130,6 +132,24 @@ function samePaintRequest(painted: WorkerPaintResult, request: WorkerPaintReques
     previous.navigation === request.navigation && previous.zoom === request.zoom &&
     previous.dpr === request.dpr && previous.width === request.width && previous.height === request.height &&
     JSON.stringify(previous.viewport) === JSON.stringify(request.viewport);
+}
+
+const NEIGHBOR_FRAME_DELAY_MS = 400;
+const NEIGHBOR_FRAME_EDIT_DELAY_MS = 1500;
+const NEIGHBOR_FRAME_BUDGET_MS = 24;
+
+interface NeighborFrame {
+  sheetId: string;
+  proposals: string;
+  request: WorkerPaintRequest;
+  paint: WorkerFramePaint;
+}
+
+function sameFrameRequest(left: WorkerPaintRequest, right: WorkerPaintRequest): boolean {
+  return left.generation === right.generation && left.sheet === right.sheet && left.zoom === right.zoom &&
+    left.dpr === right.dpr && left.width === right.width && left.height === right.height &&
+    left.viewport.x === right.viewport.x && left.viewport.y === right.viewport.y &&
+    left.viewport.width === right.viewport.width && left.viewport.height === right.viewport.height;
 }
 
 function revealAxis(position: number, size: number, frozen: boolean, scroll: number, body: number,
@@ -227,6 +247,12 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
   const sheetSelections = useMemo(() => new Map<string, Selection>(), [run]);
   const sheetScrolls = useMemo(() => new Map<string, { x: number; y: number }>(), [run]);
+  const neighborFrames = useMemo(() => new Map<number, NeighborFrame>(), [run]);
+  const neighborTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const neighborRevision = useRef(0);
+  const neighborVersion = useRef<string | undefined>(undefined);
+  const costlyNeighbors = useMemo(() => new Set<string>(), [run]);
+  const scheduleNeighborFrames = useRef(() => {});
   const sheetId = (sheet: number) => (ownerRef.current?.session.editState.sheets ??
     ownerRef.current?.session.state.sheets)?.find((entry) => entry.index === sheet)?.id;
   const sheetSelection = (sheet: number): Selection => {
@@ -881,7 +907,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         const painted = source?.painted;
         const request = source?.captureCommandFrame();
         const seq = pendingNavigation?.ticket?.seq;
-        if (source && seq && painted?.version === expectVersion && request &&
+        if (source && seq && painted && !painted.provisional && painted.version === expectVersion && request &&
           samePaintRequest(painted, { ...request, navigation: painted.request.navigation })) {
           source.install({ ...owner.session.commandIdentity, sheet: request.sheet, viewport: request.viewport,
             requestGeneration: request.requestGeneration!, zoom: request.zoom, dpr: request.dpr,
@@ -1008,6 +1034,30 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       echo.dispose(); source.dispose(); coordinator.retire(); draftController.dispose();
       if (sourceRef.current === source) sourceRef.current = null;
       if (echoRef.current === echo) echoRef.current = null;
+    };
+  }, [run, coordinator, draftController, capture]);
+  useEffect(() => {
+    neighborFrames.clear();
+    neighborRevision.current += 1;
+  }, [proposals, neighborFrames]);
+  useEffect(() => {
+    const source = sourceRef.current;
+    if (!run || !source) return;
+    const unregister = source.registerPaintTransaction((painted, publish) => {
+      publish();
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.dataset.paintedSheet = String(painted.request.sheet);
+        canvas.dataset.provisional = painted.provisional ? 'true' : 'false';
+      }
+      if (!painted.provisional && painted.request.sheet === activeRef.current) scheduleNeighborFrames.current();
+    });
+    if (source.painted && !source.painted.provisional) scheduleNeighborFrames.current();
+    return () => {
+      unregister();
+      neighborRevision.current += 1;
+      if (neighborTimer.current !== null) clearTimeout(neighborTimer.current);
+      neighborTimer.current = null;
     };
   }, [run, coordinator, draftController, capture]);
 
@@ -1171,14 +1221,85 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       void ticket.result.catch((error) => { reject!(error); report(error); });
     } else void written.catch((error) => { reject!(error); report(error); });
   };
+  const settledFor = (owner: NonNullable<typeof run>) => ownerRef.current === owner && owner.ready && owner.current &&
+    !owner.retiring && !owner.failure && !coordinator.pending && !draftController.ownsFocus &&
+    owner.session.throughSeq >= coordinator.submittedThroughSeq;
+  const proposalState = () => `${proposalsRevision.current}:${proposalsMutation.current}`;
+  const prefetchNeighborFrames = async (owner: NonNullable<typeof run>, revision: number) => {
+    const version = owner.session.confirmedBasis.version;
+    const proposalsAt = proposalState();
+    neighborVersion.current = version;
+    const live = () => revision === neighborRevision.current && settledFor(owner) &&
+      owner.session.confirmedBasis.version === version && proposalState() === proposalsAt;
+    const sheets = catalogRef.current;
+    const at = sheets.findIndex((entry) => entry.index === activeRef.current);
+    const neighbors = at < 0 ? [] : [sheets[at + 1], sheets[at - 1]].filter(
+      (entry): entry is WorkbookSheetSummary => entry !== undefined);
+    for (const index of [...neighborFrames.keys()]) {
+      if (!neighbors.some((entry) => entry.index === index)) neighborFrames.delete(index);
+    }
+    for (const neighbor of neighbors) {
+      const current = capture();
+      if (!current || !live()) return;
+      if (costlyNeighbors.has(neighbor.id)) continue;
+      const cached = neighborFrames.get(neighbor.index);
+      const position = sheetScrolls.get(neighbor.id);
+      if (cached && cached.sheetId === neighbor.id && cached.paint.version === version && cached.proposals === proposalsAt &&
+        (!position || position.x === cached.request.viewport.x && position.y === cached.request.viewport.y) &&
+        cached.request.generation === current.generation && cached.request.zoom === current.zoom &&
+        cached.request.dpr === current.dpr && cached.request.width === current.width &&
+        cached.request.height === current.height) continue;
+      neighborFrames.delete(neighbor.index);
+      const view = await owner.session.call.sheetView(neighbor.index);
+      if (!live() || view.sheet !== neighbor.index) return;
+      const started = performance.now();
+      const frame = await owner.session.call.frame({ x: position?.x ?? view.initialScrollX,
+        y: position?.y ?? view.initialScrollY, width: current.viewport.width, height: current.viewport.height },
+      { sheet: neighbor.index });
+      if (performance.now() - started > NEIGHBOR_FRAME_BUDGET_MS) {
+        costlyNeighbors.add(neighbor.id);
+        continue;
+      }
+      if (!live() || frame.version !== version || frame.sheet !== neighbor.index) return;
+      neighborFrames.set(neighbor.index, { sheetId: neighbor.id, proposals: proposalsAt,
+        request: { ...current, sheet: neighbor.index, viewport: { ...frame.viewport } },
+        paint: { displayList: frame.displayList, mergedRanges: frame.mergedRanges ?? [], version: frame.version } });
+      paintWithDefaultFonts.preload(frame.displayList, live);
+    }
+  };
+  scheduleNeighborFrames.current = () => {
+    const owner = ownerRef.current;
+    if (neighborTimer.current !== null) clearTimeout(neighborTimer.current);
+    neighborTimer.current = null;
+    const revision = ++neighborRevision.current;
+    if (!owner) return;
+    neighborTimer.current = setTimeout(() => {
+      neighborTimer.current = null;
+      if (revision === neighborRevision.current && settledFor(owner)) {
+        void prefetchNeighborFrames(owner, revision).catch(() => {});
+      }
+    }, neighborVersion.current === undefined || neighborVersion.current === owner.session.confirmedBasis.version
+      ? NEIGHBOR_FRAME_DELAY_MS : NEIGHBOR_FRAME_EDIT_DELAY_MS);
+  };
+  const paintNeighborFrame = (sheet: number) => {
+    const owner = ownerRef.current;
+    const source = sourceRef.current;
+    const entry = neighborFrames.get(sheet);
+    if (!owner || !source || !entry || entry.sheetId !== sheetId(sheet) || !settledFor(owner) ||
+      entry.paint.version !== owner.session.confirmedBasis.version || entry.proposals !== proposalState()) return;
+    const request = capture();
+    if (request && sameFrameRequest(entry.request, request)) source.installProvisional(entry.paint, request);
+  };
   const navigate = (sheet: number, next?: Selection) => {
     if (!run?.ready || run.failure || draftController.isComposing('cell') || draftController.isComposing('formula')) return;
     draftController.commit('cell'); draftController.commit('formula');
     const selected = next ?? sheetSelection(sheet);
     selectionNavigation.select(selected, { ...navigationOptions(), apply: (resolved) => {
       const target = rangeTarget(sheet, resolved);
+      const switching = sheet !== activeRef.current;
       placeSelection(sheet, resolved);
       if (next) reveal(sheet, resolved.anchor);
+      else if (switching) paintNeighborFrame(sheet);
       command({ kind: 'setActiveSheet', payload: { args: [sheet], target, selection: target } });
       return true;
     } }, sheet, true);
