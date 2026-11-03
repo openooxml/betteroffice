@@ -70,31 +70,18 @@ Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/mi
 
 ## Fonts
 
-Layout needs the fonts a document names. BetterOffice ships open substitutes with the same
-advance widths as the Microsoft core fonts (Carlito for Calibri, Caladea for Cambria, Liberation
-Sans, Serif and Mono for Arial, Times New Roman and Courier New) plus script coverage, so line
-breaks and pagination match Office without the original fonts installed. DOCX layout resolves a
-face in this order: fonts embedded in the document, fonts your app configures, the bundled packs,
-then a last resort fallback.
+BetterOffice bundles metric-compatible replacements for Microsoft's core fonts (Carlito for Calibri, Caladea for Cambria, Liberation for Arial, Times New Roman and Courier New), so line breaks and pagination match Office without the originals. Faces ship compressed: zstd, plus the WOFF2 glyf/loca transform for TrueType faces.
+
+- **Web:** a face loads on demand, only when a document uses it. Fonts we don't bundle are fetched on demand from Bunny Fonts by default (no logging, EU-based); switch to Google, your own URL, or turn remote fonts off. The spreadsheet editor does this today; the document and presentation editors use a generic fallback for those fonts until they measure with the fetched faces.
+- **Native, Rust and Python:** fonts are bundled and read locally; nothing is fetched.
 
 | Pack | Covers | Size |
-|---|---|---|
-| [`@betteroffice/fonts-latin`](https://www.npmjs.com/package/@betteroffice/fonts-latin) | Office core families, common presentation families, Hebrew and Arabic | 4.6 MB |
-| [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl) | 23 more scripts, among them Thai, Devanagari and other Indic scripts, Armenian, Georgian and Ethiopic | 2.2 MB |
-| [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) | Simplified and Traditional Chinese, Japanese, Korean | 26.7 MB |
+|---|---|---:|
+| `@betteroffice/fonts-latin` | Office core families, Hebrew, Arabic | 4.6 MB |
+| `@betteroffice/fonts-intl` | 23 more scripts, incl. Thai, Indic, Armenian, Georgian, Ethiopic | 2.2 MB |
+| `@betteroffice/fonts-cjk` | Chinese (Simplified and Traditional), Japanese, Korean | 26.7 MB |
 
-**Node.js, Bun and Deno.** `@betteroffice/docx` and `@betteroffice/pptx` depend on the font
-manager [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), which installs
-`fonts-latin`. Add `fonts-intl` or `fonts-cjk` to cover those scripts. DOCX reads each face from the
-installed package files the first time a document needs it; nothing is downloaded. Reading package
-files needs Node.js 20.16 or 22.3 and later, Bun or Deno.
-
-**Native bindings, Rust and Python.** The Rust format crates bundle all three packs by default and
-resolve faces in the same order, with nothing fetched; see the
-[Rust guide](https://docs.betteroffice.dev/docs/rust) to leave packs out or load them from your own
-location. `@betteroffice/pptx-native` installs the npm packs and reads each face from disk;
-`@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`. For Python, register
-the faces a document needs before rendering.
+See [Fonts](https://docs.betteroffice.dev/docs/fonts) for resolution order, runtimes and remote font settings.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks

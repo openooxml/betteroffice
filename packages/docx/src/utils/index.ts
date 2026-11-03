@@ -69,6 +69,8 @@ export {
   isFontLoaded,
   setGoogleFontsEnabled,
   isGoogleFontsEnabled,
+  setRemoteFontProvider,
+  getRemoteFontProvider,
   isLoading,
   getLoadedFonts,
   onFontsLoaded,

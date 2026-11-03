@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use betteroffice_fonts::catalog::catalog;
-use betteroffice_fonts::{BundledFontOptions, FontPack, FontSource, set_default_font_source};
+use betteroffice_fonts::{
+    BundledFontOptions, FontPack, FontSource, resolve_word_family_substitute,
+    set_default_font_source,
+};
 use pyo3::exceptions::{
     PyModuleNotFoundError, PyOSError, PyRuntimeError, PyRuntimeWarning, PyValueError,
 };
@@ -110,6 +113,12 @@ pub fn font_packs() -> Option<(PathBuf, Vec<&'static str>)> {
             options.packs.iter().map(|pack| pack.as_str()).collect(),
         )
     })
+}
+
+/// The substitution table entry for an Office family name as `(remote, generic)`, or None.
+#[pyfunction]
+pub fn font_substitute(family: &str) -> Option<(Option<String>, String)> {
+    resolve_word_family_substitute(family).map(|entry| (entry.remote.clone(), entry.generic.clone()))
 }
 
 /// Decodes a font pack face, returning font bytes and an optional transformed payload.

@@ -12,6 +12,10 @@ def decode_font_face(
     """Decode a font pack face and return font bytes and an optional transformed payload."""
     ...
 
+def font_substitute(family: str) -> tuple[str | None, str] | None:
+    """The substitution table entry for an Office family name as (remote family, generic family)."""
+    ...
+
 def inspect_presentation(
     data: bytes, *, include_media: bool = ...,
 ) -> PresentationInspection: ...

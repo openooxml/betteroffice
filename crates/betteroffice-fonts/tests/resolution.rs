@@ -5,7 +5,7 @@ use betteroffice_fonts::{
     LastResortOffice, resolve_bundled_family_face, resolve_digit_advance,
     resolve_glyph_fallback_face, resolve_last_resort_choice, resolve_last_resort_face,
     resolve_light_variant_face, resolve_metric_compat_face, resolve_metric_compat_family,
-    resolve_script_fallback_face,
+    resolve_script_fallback_face, resolve_word_family_substitute,
 };
 use serde_json::{Value, json};
 
@@ -59,6 +59,8 @@ fn replays_typescript_resolution_cases() {
             "lastResortChoice": choices,
             "lastResortFace": last_resort,
             "glyphFallbackFace": glyph_fallback,
+            "wordFamilySubstitute": resolve_word_family_substitute(family)
+                .map(|entry| json!({ "remote": entry.remote, "generic": entry.generic })),
         });
         assert_eq!(answer, case["answer"], "{query}");
     }

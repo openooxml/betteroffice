@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::catalog::{BundledFontFace, catalog};
+use crate::catalog::{BundledFontFace, WordFamilySubstitute, catalog};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -31,6 +31,11 @@ fn whitespace(ch: char) -> bool {
 
 fn key(family: &str) -> String {
     family.trim_matches(whitespace).to_lowercase()
+}
+
+/// The substitution table entry for an Office family name, matched case-insensitively.
+pub fn resolve_word_family_substitute(family: &str) -> Option<&'static WordFamilySubstitute> {
+    catalog().word_family_substitutes.get(&key(family))
 }
 
 fn matches_style(face: &BundledFontFace, bold: bool, italic: bool) -> bool {

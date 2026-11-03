@@ -1,5 +1,6 @@
 import { useCallback, useLayoutEffect, useRef } from 'react';
 import type { DisplayList, WorkbookSession } from '@betteroffice/xlsx';
+import type { RemoteFontProvider } from '@betteroffice/fonts/remote';
 import type { createDefaultFontPainter } from './defaultFonts';
 
 export const defaultFontPainterModule = { load: () => import('./defaultFonts') };
@@ -7,7 +8,9 @@ export const defaultFontPainterModule = { load: () => import('./defaultFonts') }
 export function useDefaultFonts(
   owner: unknown, decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
   defaultFonts: boolean | undefined, repaint: () => void, settled?: () => void,
+  remoteFonts?: RemoteFontProvider,
 ) {
+  const remote = JSON.stringify(remoteFonts ?? 'bunny');
   const repaintRef = useRef(repaint);
   repaintRef.current = repaint;
   const settledRef = useRef(settled);
@@ -20,7 +23,7 @@ export function useDefaultFonts(
     void defaultFontPainterModule.load().then(({ createDefaultFontPainter }) => {
       if (state.current !== current) return;
       current.painter = createDefaultFontPainter(decoder, () => repaintRef.current(),
-        { onSettled: () => settledRef.current?.() });
+        { onSettled: () => settledRef.current?.(), remoteFonts: JSON.parse(remote) as RemoteFontProvider });
       if (current.last) current.painter.adopt(current.last);
     }, () => {
       if (state.current !== current) return;
@@ -32,7 +35,7 @@ export function useDefaultFonts(
       current.painter?.dispose();
       if (state.current === current) state.current = undefined;
     };
-  }, [owner, decoder, defaultFonts]);
+  }, [owner, decoder, defaultFonts, remote]);
   return useCallback((displayList: DisplayList, paint: () => void): boolean => {
     const current = state.current;
     if (current?.painter) return current.painter.paint(displayList, paint);

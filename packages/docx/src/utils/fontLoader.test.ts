@@ -16,6 +16,11 @@ const {
   onFontsLoaded,
   registerDocumentFaces,
   setGoogleFontsEnabled,
+  setRemoteFontProvider,
+  getRemoteFontProvider,
+  isGoogleFontsEnabled,
+  getGoogleFontEquivalent,
+  FONT_MAPPING,
 } = await import('./fontLoader');
 type BufferFaceInput = import('./fontLoader').BufferFaceInput;
 
@@ -65,7 +70,7 @@ class FakeFontFaceSetLoadEvent extends Event {
 }
 
 beforeAll(() => {
-  setGoogleFontsEnabled(true);
+  setRemoteFontProvider('bunny');
   Object.assign(globalThis, { FontFace: FakeFontFace, FontFaceSetLoadEvent: FakeFontFaceSetLoadEvent });
   const probe = {
     font: '',
@@ -101,7 +106,7 @@ beforeAll(() => {
 afterEach(() => {
   jest.useRealTimers();
   configureDefaultFonts({});
-  setGoogleFontsEnabled(true);
+  setRemoteFontProvider('bunny');
   added.length = 0;
   dispatched.length = 0;
   statusAtConstruction = 'loaded';
@@ -412,7 +417,7 @@ test('a mapped retry after an absent equivalent keeps the deadline it started wi
     },
   });
   let settled = false;
-  const direct = loadFont('Fira Code');
+  const direct = loadFont('Fira Mono');
   const mapped = loadFontWithMapping('Monaco').finally(() => {
     settled = true;
   });
@@ -512,7 +517,7 @@ test('a hosted family skips implicit browser faces through its mapped name while
     await scope.loadFontsWithMapping(['Georgia', 'DM Serif Display']);
     expect(new Set(added.map(face => face.family))).toEqual(new Set(['DM Serif Display']));
     expect(added.map(face => face.style)).toEqual(['normal', 'italic']);
-    expect(resolveFamily.mock.calls.some(([family]) => family === 'Georgia' || family === 'Tinos')).toBe(false);
+    expect(resolveFamily.mock.calls.some(([family]) => family === 'Georgia' || family === 'Gelasio')).toBe(false);
     expect(document.head.textContent).toContain('/georgia-bold.woff2');
     expect(googleLinks()).toHaveLength(0);
   } finally { scope.dispose(); create.mockRestore(); resolveFamily.mockRestore(); }
@@ -619,17 +624,41 @@ const googleRequests = (append: { mock: { calls: unknown[][] } }) =>
     node instanceof HTMLLinkElement && node.href.includes('fonts.googleapis.com')
   ).length;
 
-test('without configuration a family the fonts manager lacks still asks Google', async () => {
+test('a family the fonts manager lacks never adds a remote stylesheet, whatever the provider', async () => {
   const create = lackingManager();
   const append = spyOn(document.head, 'appendChild');
   try {
-    expect(await loadFont('Unbundled Sans Local')).toBe(false);
-    expect(googleRequests(append)).toBe(1);
+    for (const provider of ['bunny', 'google', { cssUrl: 'https://fonts.example.eu/css' }] as const) {
+      setRemoteFontProvider(provider);
+      expect(await loadFont(`Unbundled Sans ${JSON.stringify(provider)}`)).toBe(false);
+      await loadFontWithMapping('Tahoma');
+    }
+    expect(append.mock.calls.filter(([node]) => node instanceof HTMLLinkElement)).toHaveLength(0);
+    expect(googleLinks()).toHaveLength(0);
     expect(added).toHaveLength(0);
   } finally {
     append.mockRestore();
     create.mockRestore();
   }
+});
+
+test('the remote provider defaults to Bunny and the Google toggle is sugar for it', () => {
+  expect(getRemoteFontProvider()).toBe('bunny');
+  expect(isGoogleFontsEnabled()).toBe(false);
+  setGoogleFontsEnabled(true);
+  expect(getRemoteFontProvider()).toBe('google');
+  expect(isGoogleFontsEnabled()).toBe(true);
+  setGoogleFontsEnabled(false);
+  expect(getRemoteFontProvider()).toBe('off');
+  setRemoteFontProvider({ cssUrl: new URL('https://fonts.example.eu/css') });
+  expect(getRemoteFontProvider()).toEqual({ cssUrl: 'https://fonts.example.eu/css' });
+});
+
+test('look-alikes come from the shared substitution table', () => {
+  expect(getGoogleFontEquivalent(' Georgia ')).toBe('Gelasio');
+  expect(getGoogleFontEquivalent('pmingliu')).toBe('Noto Serif TC');
+  expect(getGoogleFontEquivalent('Brand Sans')).toBe('Brand Sans');
+  for (const [family, remote] of Object.entries(FONT_MAPPING)) expect([family, getGoogleFontEquivalent(family)]).toEqual([family, remote]);
 });
 
 test('an unknown family stays absent across implicit manager loaders', async () => {
@@ -642,30 +671,9 @@ test('an unknown family stays absent across implicit manager loaders', async () 
   const append = spyOn(document.head, 'appendChild');
   try {
     expect(await loadFontWithMapping('Brand Sans')).toBe(false);
-    expect(googleRequests(append)).toBe(1);
+    expect(googleRequests(append)).toBe(0);
     expect(added).toHaveLength(0);
   } finally { append.mockRestore(); }
-});
-
-test('a family neither the manager nor Google serves is asked for once, and its link removed', async () => {
-  const create = lackingManager();
-  const append = spyOn(document.head, 'appendChild');
-  const now = Date.now;
-  try {
-    expect(await loadFont('Unserved Google Face')).toBe(false);
-    expect(googleRequests(append)).toBe(1);
-    expect(googleLinks()).toHaveLength(0);
-    expect(await loadFont('Unserved Google Face')).toBe(false);
-    expect(googleRequests(append)).toBe(1);
-    Date.now = () => now() + 5 * 60_000;
-    expect(await loadFont('Unserved Google Face')).toBe(false);
-    expect(googleRequests(append)).toBe(2);
-    expect(googleLinks()).toHaveLength(0);
-  } finally {
-    Date.now = now;
-    append.mockRestore();
-    create.mockRestore();
-  }
 });
 
 test('a document declaring thousands of embedded families registers only the first 256', async () => {

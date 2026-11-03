@@ -207,7 +207,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     () => {
       if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled';
       repaintHeldPreview();
-    });
+    }, props.remoteFonts);
   const paintPreview = (canvas: HTMLCanvasElement, displayList: DisplayList, request: WorkerPaintRequest) => {
     const context = canvas.getContext('2d');
     if (!context) throw new Error('Preview canvas context is unavailable');

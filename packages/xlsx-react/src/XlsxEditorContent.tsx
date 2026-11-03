@@ -413,6 +413,7 @@ export function XlsxEditorContent({
   className,
   readOnly = false,
   defaultFonts,
+  remoteFonts,
   toolbar,
   showToolbar = true,
   i18n,
@@ -832,7 +833,7 @@ export function XlsxEditorContent({
   const [openedHandle, setOpenedHandle] = useState<WorkbookHandle | null>(null);
   const paintWithDefaultFonts = useDefaultFonts(openedHandle, null, defaultFonts,
     () => setRevision((revision) => revision + 1),
-    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; }, remoteFonts);
   const pluginSelection = useMemo<XlsxPluginSelection>(() => {
     const sheetId = sheetInfo?.sheetIds[activeSheet];
     if (sheetId === undefined) return null;

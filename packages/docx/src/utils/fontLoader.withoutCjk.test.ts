@@ -110,24 +110,20 @@ afterAll(() => {
   if (ownsDom) GlobalRegistrator.unregister();
 });
 
-test('a missing CJK module leaves SimSun to Google without registering or caching Latin substitutes', async () => {
+test('a missing CJK module leaves SimSun on its fallback without a remote request or cached Latin substitutes', async () => {
   expect(await loadFontWithMapping('SimSun')).toBe(false);
   expect(importCjk).toHaveBeenCalled();
-  expect(google.map((url) => new URL(url).searchParams.get('family'))).toEqual([
-    'Noto Serif SC:ital,wght@0,400;0,700;1,400;1,700',
-  ]);
+  expect(google).toEqual([]);
   expect(added).toEqual([]);
   expect(isFontLoaded('SimSun')).toBe(false);
   expect(isFontLoaded('Noto Serif SC')).toBe(false);
   expect(await loadFontWithMapping('SimSun')).toBe(false);
-  expect(google).toHaveLength(1);
+  expect(google).toEqual([]);
 });
 
-test('a script family whose pack is not installed uses Google without a managed substitute', async () => {
+test('a script family whose pack is not installed stays on its fallback without a managed substitute', async () => {
   expect(await loadFontWithMapping('Noto Sans Devanagari')).toBe(false);
-  expect(google.map((url) => new URL(url).searchParams.get('family'))).toEqual([
-    'Noto Sans Devanagari:ital,wght@0,400;0,700;1,400;1,700',
-  ]);
+  expect(google).toEqual([]);
   expect(added).toEqual([]);
   expect(isFontLoaded('Noto Sans Devanagari')).toBe(false);
 });
@@ -157,11 +153,11 @@ test('missing CJK remains absent when Google is disabled', async () => {
   expect(isFontLoaded('PMingLiU')).toBe(false);
 });
 
-test('a CJK module that fails to load leaves its family to Google', async () => {
+test('a CJK module that fails to load leaves its family on its fallback', async () => {
   importCjk.mockImplementation(() => { throw new TypeError('CJK chunk unavailable'); });
   try {
     expect(await loadFontWithMapping('Batang')).toBe(false);
-    expect(google.length).toBeGreaterThan(0);
+    expect(google).toEqual([]);
     expect(added).toEqual([]);
     expect(isFontLoaded('Batang')).toBe(false);
   } finally { importCjk.mockImplementation(missingCjkAddon); }

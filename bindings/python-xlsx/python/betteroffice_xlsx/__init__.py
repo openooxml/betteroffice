@@ -11,6 +11,7 @@ from typing import Any, Iterable, Iterator, Mapping, Union
 
 from ._betteroffice_xlsx import (
     decode_font_face,
+    font_substitute,
     Calculation,
     CellError,
     CollaborativeStateError,
@@ -55,6 +56,7 @@ from .exports import (
 
 __all__ = [
     "decode_font_face",
+    "font_substitute",
     "Calculation",
     "CellError",
     "CellValue",

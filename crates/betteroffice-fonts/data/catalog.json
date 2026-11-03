@@ -1632,6 +1632,324 @@
     "바탕": "malgun gothic",
     "궁서": "malgun gothic"
   },
+  "wordFamilySubstitutes": {
+    "arial": {
+      "remote": "Arimo",
+      "generic": "sans-serif"
+    },
+    "helvetica": {
+      "remote": "Arimo",
+      "generic": "sans-serif"
+    },
+    "helvetica neue": {
+      "remote": "Arimo",
+      "generic": "sans-serif"
+    },
+    "arial narrow": {
+      "remote": "Archivo Narrow",
+      "generic": "sans-serif"
+    },
+    "arial black": {
+      "remote": "Archivo Black",
+      "generic": "sans-serif"
+    },
+    "calibri": {
+      "remote": "Carlito",
+      "generic": "sans-serif"
+    },
+    "calibri light": {
+      "remote": "Carlito",
+      "generic": "sans-serif"
+    },
+    "cambria": {
+      "remote": "Caladea",
+      "generic": "serif"
+    },
+    "times new roman": {
+      "remote": "Tinos",
+      "generic": "serif"
+    },
+    "times": {
+      "remote": "Tinos",
+      "generic": "serif"
+    },
+    "courier new": {
+      "remote": "Cousine",
+      "generic": "monospace"
+    },
+    "courier": {
+      "remote": "Cousine",
+      "generic": "monospace"
+    },
+    "georgia": {
+      "remote": "Gelasio",
+      "generic": "serif"
+    },
+    "comic sans ms": {
+      "remote": "Comic Neue",
+      "generic": "cursive"
+    },
+    "verdana": {
+      "remote": "Open Sans",
+      "generic": "sans-serif"
+    },
+    "tahoma": {
+      "remote": "Open Sans",
+      "generic": "sans-serif"
+    },
+    "segoe ui": {
+      "remote": "Open Sans",
+      "generic": "sans-serif"
+    },
+    "lucida sans": {
+      "remote": "Open Sans",
+      "generic": "sans-serif"
+    },
+    "lucida sans unicode": {
+      "remote": "Open Sans",
+      "generic": "sans-serif"
+    },
+    "lucida grande": {
+      "remote": "Open Sans",
+      "generic": "sans-serif"
+    },
+    "trebuchet ms": {
+      "remote": "Fira Sans",
+      "generic": "sans-serif"
+    },
+    "franklin gothic": {
+      "remote": "Libre Franklin",
+      "generic": "sans-serif"
+    },
+    "franklin gothic book": {
+      "remote": "Libre Franklin",
+      "generic": "sans-serif"
+    },
+    "franklin gothic medium": {
+      "remote": "Libre Franklin",
+      "generic": "sans-serif"
+    },
+    "century gothic": {
+      "remote": "Questrial",
+      "generic": "sans-serif"
+    },
+    "impact": {
+      "remote": "Anton",
+      "generic": "sans-serif"
+    },
+    "garamond": {
+      "remote": "EB Garamond",
+      "generic": "serif"
+    },
+    "palatino linotype": {
+      "remote": "EB Garamond",
+      "generic": "serif"
+    },
+    "palatino": {
+      "remote": "EB Garamond",
+      "generic": "serif"
+    },
+    "book antiqua": {
+      "remote": "EB Garamond",
+      "generic": "serif"
+    },
+    "consolas": {
+      "remote": "Inconsolata",
+      "generic": "monospace"
+    },
+    "lucida console": {
+      "remote": "Inconsolata",
+      "generic": "monospace"
+    },
+    "monaco": {
+      "remote": "Fira Mono",
+      "generic": "monospace"
+    },
+    "ms mincho": {
+      "remote": "Noto Serif JP",
+      "generic": "serif"
+    },
+    "ms pmincho": {
+      "remote": "Noto Serif JP",
+      "generic": "serif"
+    },
+    "ｍｓ 明朝": {
+      "remote": "Noto Serif JP",
+      "generic": "serif"
+    },
+    "ｍｓ ｐ明朝": {
+      "remote": "Noto Serif JP",
+      "generic": "serif"
+    },
+    "yu mincho": {
+      "remote": "Noto Serif JP",
+      "generic": "serif"
+    },
+    "游明朝": {
+      "remote": "Noto Serif JP",
+      "generic": "serif"
+    },
+    "ms gothic": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "ms pgothic": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "ms ui gothic": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "ｍｓ ゴシック": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "ｍｓ ｐゴシック": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "meiryo": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "メイリオ": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "yu gothic": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "游ゴシック": {
+      "remote": "Noto Sans JP",
+      "generic": "sans-serif"
+    },
+    "simsun": {
+      "remote": "Noto Serif SC",
+      "generic": "serif"
+    },
+    "nsimsun": {
+      "remote": "Noto Serif SC",
+      "generic": "serif"
+    },
+    "宋体": {
+      "remote": "Noto Serif SC",
+      "generic": "serif"
+    },
+    "fangsong": {
+      "remote": "Noto Serif SC",
+      "generic": "serif"
+    },
+    "仿宋": {
+      "remote": "Noto Serif SC",
+      "generic": "serif"
+    },
+    "kaiti": {
+      "remote": "Noto Serif SC",
+      "generic": "serif"
+    },
+    "楷体": {
+      "remote": "Noto Serif SC",
+      "generic": "serif"
+    },
+    "simhei": {
+      "remote": "Noto Sans SC",
+      "generic": "sans-serif"
+    },
+    "黑体": {
+      "remote": "Noto Sans SC",
+      "generic": "sans-serif"
+    },
+    "microsoft yahei": {
+      "remote": "Noto Sans SC",
+      "generic": "sans-serif"
+    },
+    "微软雅黑": {
+      "remote": "Noto Sans SC",
+      "generic": "sans-serif"
+    },
+    "dengxian": {
+      "remote": "Noto Sans SC",
+      "generic": "sans-serif"
+    },
+    "等线": {
+      "remote": "Noto Sans SC",
+      "generic": "sans-serif"
+    },
+    "pmingliu": {
+      "remote": "Noto Serif TC",
+      "generic": "serif"
+    },
+    "mingliu": {
+      "remote": "Noto Serif TC",
+      "generic": "serif"
+    },
+    "新細明體": {
+      "remote": "Noto Serif TC",
+      "generic": "serif"
+    },
+    "細明體": {
+      "remote": "Noto Serif TC",
+      "generic": "serif"
+    },
+    "dfkai-sb": {
+      "remote": "Noto Serif TC",
+      "generic": "serif"
+    },
+    "標楷體": {
+      "remote": "Noto Serif TC",
+      "generic": "serif"
+    },
+    "microsoft jhenghei": {
+      "remote": "Noto Sans TC",
+      "generic": "sans-serif"
+    },
+    "微軟正黑體": {
+      "remote": "Noto Sans TC",
+      "generic": "sans-serif"
+    },
+    "malgun gothic": {
+      "remote": "Noto Sans KR",
+      "generic": "sans-serif"
+    },
+    "맑은 고딕": {
+      "remote": "Noto Sans KR",
+      "generic": "sans-serif"
+    },
+    "gulim": {
+      "remote": "Noto Sans KR",
+      "generic": "sans-serif"
+    },
+    "굴림": {
+      "remote": "Noto Sans KR",
+      "generic": "sans-serif"
+    },
+    "dotum": {
+      "remote": "Noto Sans KR",
+      "generic": "sans-serif"
+    },
+    "돋움": {
+      "remote": "Noto Sans KR",
+      "generic": "sans-serif"
+    },
+    "batang": {
+      "remote": "Noto Serif KR",
+      "generic": "serif"
+    },
+    "바탕": {
+      "remote": "Noto Serif KR",
+      "generic": "serif"
+    },
+    "gungsuh": {
+      "remote": "Noto Serif KR",
+      "generic": "serif"
+    },
+    "궁서": {
+      "remote": "Noto Serif KR",
+      "generic": "serif"
+    }
+  },
   "unvendoredNotoSerif": {
     "noto serif tc": "Noto Sans TC",
     "noto serif jp": "Noto Sans JP",

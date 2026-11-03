@@ -2,6 +2,7 @@ import type {
   Selection, WorkbookHandle, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult,
   XlsxReadRequest, XlsxReadResult, XlsxValidationResult,
 } from '@betteroffice/xlsx';
+import type { RemoteFontProvider } from '@betteroffice/fonts/remote';
 import type { CollaborationAwareness, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import type { XlsxCommandStore } from './commands/types';
@@ -126,6 +127,11 @@ interface XlsxHostProps {
 export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHostProps {
   /** Load bundled workbook fonts. Defaults to true. */
   defaultFonts?: boolean;
+  /**
+   * Where fonts with no bundled metric-compatible face are fetched from. Defaults to `'bunny'`
+   * (fonts.bunny.net); `'off'` never fetches.
+   */
+  remoteFonts?: RemoteFontProvider;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: false;
   onError?: (error: Error) => void;

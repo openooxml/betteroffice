@@ -34,7 +34,7 @@ function browser(gate: Promise<void> = Promise.resolve()) {
   const remove = mock((face: Face) => { added.splice(added.indexOf(face), 1); });
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
   Object.defineProperty(globalThis, 'document', { configurable: true,
-    value: { fonts: { add: (face: Face) => added.push(face), delete: remove } } });
+    value: { fonts: { add: (face: Face) => added.push(face), delete: remove, [Symbol.iterator]: () => added[Symbol.iterator]() } } });
   return { added, remove };
 }
 
@@ -69,8 +69,24 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
     createFontProvider: create,
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>;
   const imported = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue(module);
-  restorers.push(() => imported.mockRestore());
-  return { imported, create, metric, bundled, module };
+  const remoteGate = { wait: Promise.resolve() as Promise<void> };
+  const remoteLoads = mock(async (family: string, alias: string, face: { weight: number; style: string }, fontSet: FontFaceSet,
+    options: { provider?: unknown; signal?: AbortSignal }) => {
+    if (family !== 'Tahoma') return [];
+    await remoteGate.wait;
+    options.signal?.throwIfAborted();
+    const font = { family: alias, remote: 'Open Sans', weight: face.weight, style: face.style, provider: options.provider };
+    fontSet.add(font as unknown as FontFace);
+    return [font as unknown as FontFace];
+  });
+  const remote = {
+    resolveWordFamilySubstitute: (family: string) => family === 'Tahoma' ? { remote: 'Open Sans', generic: 'sans-serif' } : undefined,
+    loadRemoteFontFaces: remoteLoads,
+    isRemoteFontFace: (face: object) => 'remote' in face,
+  } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.loadRemote>>;
+  const remoteImported = spyOn(xlsxDefaultFontManager, 'loadRemote').mockResolvedValue(remote);
+  restorers.push(() => imported.mockRestore(), () => remoteImported.mockRestore());
+  return { imported, create, metric, bundled, module, remoteImported, remoteLoads, remoteGate };
 }
 
 function decoder() { return mock<FontDecoder>(async () => ({ font: new Uint8Array([0, 1, 0, 0]).buffer })); }
@@ -212,6 +228,190 @@ test('unknown families register nothing', async () => {
   expect(added).toHaveLength(0);
   expect(decode).not.toHaveBeenCalled();
   expect(repaint).not.toHaveBeenCalled();
+});
+
+test('a family without a bundled face loads its look-alike from the remote provider under its own name', async () => {
+  const { added } = browser();
+  const { remoteLoads } = provider();
+  const repaint = mock(() => {});
+  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'Tahoma', bold: true }));
+  expect(added).toEqual([expect.objectContaining({ family: 'Tahoma', remote: 'Open Sans', weight: 700, style: 'normal', provider: 'bunny' })]);
+  expect(repaint).toHaveBeenCalledTimes(1);
+  await createDefaultFontPainter(decoder(), repaint, { remoteFonts: 'google' }).load(display({ family: 'Tahoma', bold: true }));
+  expect(remoteLoads.mock.calls.map((call) => call[4].provider)).toEqual(['bunny', 'google']);
+});
+
+test('remote look-alikes load for the painted characters and again only for newly painted ones', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('Abc'));
+  await painter.load(cell('bcA'));
+  expect(painter.paint(cell('Abc'), () => {})).toBe(true);
+  await painter.load(cell('Abcδ'));
+  expect(painter.paint(cell('Abcδ'), () => {})).toBe(true);
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['Abc', 'δ']);
+  expect(repaint).toHaveBeenCalledTimes(2);
+});
+
+test('a registered look-alike does not count as a locally installed family for later characters', async () => {
+  const { added } = browser();
+  const { fonts } = (globalThis as unknown as { document: { fonts: FontFaceSet } }).document;
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts, createElement: () => ({ getContext: () => {
+    let font = '';
+    return { set font(value: string) { font = value; }, get font() { return font; },
+      measureText: () => ({ width: font.includes('"Tahoma"') && added.some((face) => face.family === 'Tahoma') ? 2 : 1 }) };
+  } }) } });
+  const { remoteLoads } = provider();
+  const painter = createDefaultFontPainter(decoder(), mock(() => {}));
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('A'));
+  await painter.load(cell('AŁ'));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł']);
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(true);
+  await createDefaultFontPainter(decoder(), mock(() => {})).load(cell('A'));
+  expect(remoteLoads).toHaveBeenCalledTimes(3);
+});
+
+test('characters painted while a failing remote load is pending are requested once it settles', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  const gate = deferred<void>();
+  remoteLoads.mockImplementationOnce(async () => { await gate.promise; throw new Error('404'); });
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  const first = painter.load(cell('A'));
+  for (let tick = 0; tick < 50 && remoteLoads.mock.calls.length === 0; tick++) await Promise.resolve();
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(false);
+  gate.resolve();
+  await first;
+  for (let wait = 0; wait < 100 && repaint.mock.calls.length === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'AŁ']);
+  expect(repaint).toHaveBeenCalledTimes(1);
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(true);
+});
+
+test('a failed load of newly painted characters settles and is retried only by a later paint', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  const settled = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), mock(() => {}), { onSettled: settled });
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('A'));
+  remoteLoads.mockImplementationOnce(async () => { throw new Error('404'); });
+  expect(painter.paint(cell('AŁ'), () => {})).toBe(false);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł']);
+  expect(settled).toHaveBeenCalledTimes(1);
+  expect(painter.paint(cell('Ł'), () => {})).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A', 'Ł', 'Ł']);
+});
+
+test('number format fill and padding characters count as painted characters', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [{
+    op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
+    numberFormat: { left: 0, width: 80, parts: [{ offset: 0, kind: 'fill', character: 'Ł' }] },
+  } as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['7#Ł']);
+});
+
+test('a partly failed remote load repaints for the slices it registered and retries only on a later paint', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  remoteLoads.mockImplementationOnce(async () => {
+    throw Object.assign(new Error('Some remote font slices failed to load'), { faces: [{ family: 'Tahoma', remote: 'Open Sans' }] });
+  });
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const cell = (text: string): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text } as TextCmd] });
+  await painter.load(cell('AŁ'));
+  expect(repaint).toHaveBeenCalledTimes(1);
+  remoteLoads.mockImplementationOnce(async () => { throw Object.assign(new Error('Some remote font slices failed to load'), { faces: [] }); });
+  await painter.load(cell('AŁ'));
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['AŁ', 'AŁ']);
+  expect(repaint).toHaveBeenCalledTimes(1);
+});
+
+test('characters the General format generates when it shortens a number are requested', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [{
+    op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
+    numberFormat: { left: 0, width: 80, parts: [], general: 7 },
+  } as unknown as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['7#012345689.-E+']);
+});
+
+test('whitespace the canvas paints as a space requests the space character', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: 'A\tA' } as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A\t ']);
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [{
+    op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
+    numberFormat: { left: 0, width: 80, parts: [{ offset: 1, kind: 'fill', character: '\t' }] },
+  } as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A\t ', '7#\t ']);
+});
+
+test('a face the host registered under the family keeps the remote provider away', async () => {
+  const { added } = browser();
+  const { remoteLoads } = provider();
+  (globalThis as unknown as { document: { fonts: FontFaceSet } }).document.fonts.add(new FontFace('Tahoma', new ArrayBuffer(4)) as never);
+  await createDefaultFontPainter(decoder(), mock(() => {})).load(display({ family: 'Tahoma' }));
+  expect(remoteLoads).not.toHaveBeenCalled();
+  expect(added).toHaveLength(1);
+});
+
+test('disposing the painter, as switching remote fonts off does, aborts its remote load before anything registers', async () => {
+  const { added } = browser();
+  const { remoteLoads, remoteGate } = provider();
+  const gate = deferred<void>();
+  remoteGate.wait = gate.promise;
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const loading = painter.load(display({ family: 'Tahoma' }));
+  for (let tick = 0; tick < 20 && remoteLoads.mock.calls.length === 0; tick++) await Promise.resolve();
+  expect(remoteLoads).toHaveBeenCalledTimes(1);
+  const signal = remoteLoads.mock.calls[0]![4].signal!;
+  painter.dispose();
+  expect(signal.aborted).toBe(true);
+  gate.resolve();
+  await loading;
+  expect(added).toEqual([]);
+  expect(repaint).not.toHaveBeenCalled();
+});
+
+test('remote fonts off, bundled faces and locally installed families never reach the provider', async () => {
+  const { added } = browser();
+  const { remoteLoads, remoteImported } = provider();
+  const repaint = mock(() => {});
+  await createDefaultFontPainter(decoder(), repaint, { remoteFonts: 'off' }).load(display({ family: 'Tahoma' }));
+  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'Calibri' }));
+  expect(remoteImported).not.toHaveBeenCalled();
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+    fonts: (globalThis.document as Document).fonts,
+    createElement: () => ({ getContext: () => {
+      let font = '';
+      return { set font(value: string) { font = value; }, get font() { return font; },
+        measureText: () => ({ width: font.includes('Tahoma') ? 2 : 1 }) };
+    } }),
+  } });
+  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'Tahoma', italic: true }));
+  expect(remoteLoads).not.toHaveBeenCalled();
+  expect(added.map((face) => (face as unknown as { family: string }).family)).toEqual(['Calibri']);
 });
 
 test('a missing CJK pack cannot install its Latin fallback under MS Gothic', async () => {

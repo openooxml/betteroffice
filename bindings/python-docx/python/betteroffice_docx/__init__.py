@@ -7,6 +7,7 @@ from typing import Any, Iterator, Mapping, Sequence, Union
 
 from ._betteroffice_docx import (
     decode_font_face,
+    font_substitute,
     DisplayList,
     Edit,
     EditError,
@@ -34,6 +35,7 @@ from ._betteroffice_docx import DocxError, __version__
 
 __all__ = [
     "decode_font_face",
+    "font_substitute",
     "DisplayList",
     "Document",
     "DocxError",
