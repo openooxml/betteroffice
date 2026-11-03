@@ -9,7 +9,7 @@ use std::cell::Cell;
 /// The largest memory a wasm32 engine can address.
 pub(crate) const DEFAULT_BUDGET: usize = 4 << 30;
 
-/// The message of the error a call unwinds with once its thread is over budget.
+/// The start of the message of the error a call unwinds with once its thread is over budget.
 pub(crate) const EXCEEDED: &str = "BetterOffice engine memory budget exceeded";
 
 thread_local! {
@@ -71,19 +71,15 @@ pub(crate) fn begin_call(outermost: bool) -> bool {
     }
     if outermost {
         let _ = OVER.try_with(|over| over.set(false));
+        let _ = FAILED.try_with(|failed| failed.set(0));
     }
     true
 }
 
-/// Forgets the failure an earlier call left once an outermost call completes, so it cannot
-/// describe a later, unrelated failure. Calls that fail or are refused keep it for classification.
-pub(crate) fn completed() {
-    let _ = FAILED.try_with(|failed| failed.set(0));
-}
-
-/// The size of the allocation that took the calling thread past its budget, once.
-pub(crate) fn take_failed() -> usize {
-    FAILED.try_with(|failed| failed.replace(0)).unwrap_or(0)
+/// The error message of a call that ran past the budget, with the allocation that crossed it.
+pub(crate) fn exceeded() -> String {
+    let bytes = FAILED.try_with(Cell::get).unwrap_or(0).max(1);
+    format!("{EXCEEDED} ({bytes} bytes over a {}-byte budget)", budget())
 }
 
 /// Returns freed heap pages to the operating system after a failed call, where the allocator keeps them.

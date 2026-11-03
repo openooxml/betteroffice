@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -40,50 +40,45 @@ pub fn decode_font_face(
 
 thread_local! {
     static CURRENT_ENV: Cell<Option<Env>> = const { Cell::new(None) };
-    static CURRENT_OBJECT: Cell<*const Cell<bool>> = const { Cell::new(std::ptr::null()) };
-    static REFUSED: Cell<bool> = const { Cell::new(false) };
+    static CURRENT_OBJECT: Cell<*const Failure> = const { Cell::new(std::ptr::null()) };
 }
 
 const FAILED_OBJECT: &str = "This engine object failed in an earlier call and can only be freed";
 
-fn enter_object(failed: &Cell<bool>, env: Env) -> Result<()> {
-    if failed.get() {
-        REFUSED.set(true);
-        return Err(map_error(env, EngineError::error(FAILED_OBJECT)));
+/// Why an engine object failed: every later call except free() refuses with this message.
+type Failure = RefCell<Option<String>>;
+
+fn enter_object(failure: &Failure, env: Env) -> Result<()> {
+    if let Some(message) = failure.borrow().as_deref() {
+        return Err(map_error(env, EngineError::error(message)));
     }
-    CURRENT_OBJECT.set(failed);
+    CURRENT_OBJECT.set(failure);
     Ok(())
 }
 
 struct EngineCall {
     previous: Option<Env>,
-    previous_object: *const Cell<bool>,
+    previous_object: *const Failure,
     budget: bool,
-    outermost: bool,
 }
 
 impl EngineCall {
     fn new(env: Env) -> Self {
-        let outermost = CURRENT_ENV.get().is_none();
-        if !crate::memory::begin_call(outermost) {
-            panic!("{}", crate::memory::EXCEEDED);
+        if !crate::memory::begin_call(CURRENT_ENV.get().is_none()) {
+            panic!("{}", crate::memory::exceeded());
         }
-        if outermost {
-            REFUSED.set(false);
-        }
-        Self::enter(env, true, outermost)
+        Self::enter(env, true)
     }
 
     fn release(env: Env) -> Self {
-        Self::enter(env, false, false)
+        Self::enter(env, false)
     }
 
-    fn enter(env: Env, budget: bool, outermost: bool) -> Self {
+    fn enter(env: Env, budget: bool) -> Self {
         Self {
             previous: CURRENT_ENV.replace(Some(env)),
             previous_object: CURRENT_OBJECT.replace(std::ptr::null()),
             budget,
-            outermost,
         }
     }
 }
@@ -93,26 +88,31 @@ impl Drop for EngineCall {
         let object = CURRENT_OBJECT.replace(self.previous_object);
         CURRENT_ENV.set(self.previous);
         let unwinding = std::thread::panicking();
-        let failing = unwinding || (self.budget && crate::memory::over_budget());
+        let over = crate::memory::over_budget();
+        let failing = unwinding || (self.budget && over);
         if failing && !object.is_null() {
+            let message = if over {
+                crate::memory::exceeded()
+            } else {
+                FAILED_OBJECT.to_owned()
+            };
             // SAFETY: the object registered itself from a method that is still on the stack.
-            unsafe { (*object).set(true) };
+            if let Ok(mut failure) = unsafe { &*object }.try_borrow_mut() {
+                failure.get_or_insert(message);
+            }
         }
         if failing {
             crate::memory::release_to_os();
         }
         if failing && !unwinding {
-            panic!("{}", crate::memory::EXCEEDED);
-        }
-        if self.outermost && !failing && !REFUSED.get() {
-            crate::memory::completed();
+            panic!("{}", crate::memory::exceeded());
         }
     }
 }
 
 fn native_progress() {
     if crate::memory::over_budget() {
-        panic!("{}", crate::memory::EXCEEDED);
+        panic!("{}", crate::memory::exceeded());
     }
     CURRENT_ENV.with(|current| {
         let Some(env) = current.get() else {
@@ -207,25 +207,25 @@ fn map_error(env: Env, error: EngineError) -> Error {
 #[napi]
 pub struct XlsxDocument {
     inner: Option<Document>,
-    failed: Cell<bool>,
+    failure: Failure,
 }
 
 #[napi]
 pub struct XlsxSnapshotBuilder {
     inner: Option<SnapshotBuilder>,
-    failed: Cell<bool>,
+    failure: Failure,
 }
 
 impl XlsxDocument {
     fn document(&self, env: Env) -> Result<&Document> {
-        enter_object(&self.failed, env)?;
+        enter_object(&self.failure, env)?;
         self.inner
             .as_ref()
             .ok_or_else(|| map_error(env, EngineError::error("XlsxDocument was freed")))
     }
 
     fn document_mut(&mut self, env: Env) -> Result<&mut Document> {
-        enter_object(&self.failed, env)?;
+        enter_object(&self.failure, env)?;
         self.inner
             .as_mut()
             .ok_or_else(|| map_error(env, EngineError::error("XlsxDocument was freed")))
@@ -236,7 +236,7 @@ impl Default for XlsxSnapshotBuilder {
     fn default() -> Self {
         Self {
             inner: Some(SnapshotBuilder::new(native_host())),
-            failed: Cell::new(false),
+            failure: RefCell::new(None),
         }
     }
 }
@@ -253,7 +253,7 @@ impl XlsxSnapshotBuilder {
     pub fn push(&mut self, env: Env, chunk: Uint8Array) -> Result<()> {
         let chunk = chunk.to_vec();
         let _call = EngineCall::new(env);
-        enter_object(&self.failed, env)?;
+        enter_object(&self.failure, env)?;
         let inner = self
             .inner
             .as_mut()
@@ -264,7 +264,7 @@ impl XlsxSnapshotBuilder {
     #[napi(catch_unwind)]
     pub fn advance(&mut self, env: Env, records: u32, bytes: u32) -> Result<bool> {
         let _call = EngineCall::new(env);
-        enter_object(&self.failed, env)?;
+        enter_object(&self.failure, env)?;
         let inner = self
             .inner
             .as_mut()
@@ -277,7 +277,7 @@ impl XlsxSnapshotBuilder {
     #[napi(catch_unwind)]
     pub fn finish(&mut self, env: Env) -> Result<XlsxDocument> {
         let _call = EngineCall::new(env);
-        enter_object(&self.failed, env)?;
+        enter_object(&self.failure, env)?;
         let inner = self
             .inner
             .take()
@@ -286,7 +286,7 @@ impl XlsxSnapshotBuilder {
             .finish()
             .map(|document| XlsxDocument {
                 inner: Some(document),
-                failed: Cell::new(false),
+                failure: RefCell::new(None),
             })
             .map_err(|error| map_error(env, error))
     }
@@ -295,7 +295,7 @@ impl XlsxSnapshotBuilder {
     pub fn free(&mut self, env: Env) {
         let _call = EngineCall::release(env);
         self.inner = None;
-        if self.failed.get() {
+        if self.failure.borrow().is_some() {
             crate::memory::release_to_os();
         }
     }
@@ -307,7 +307,7 @@ impl XlsxDocument {
     pub fn free(&mut self, env: Env) {
         let _call = EngineCall::release(env);
         self.inner = None;
-        if self.failed.get() {
+        if self.failure.borrow().is_some() {
             crate::memory::release_to_os();
         }
     }
@@ -899,7 +899,7 @@ impl XlsxDocument {
         Document::open(&bytes, native_host())
             .map(|inner| Self {
                 inner: Some(inner),
-                failed: Cell::new(false),
+                failure: RefCell::new(None),
             })
             .map_err(|error| map_error(env, error))
     }
@@ -915,7 +915,7 @@ impl XlsxDocument {
         Document::open_with_calculation_json(&bytes, &context, native_host())
             .map(|inner| Self {
                 inner: Some(inner),
-                failed: Cell::new(false),
+                failure: RefCell::new(None),
             })
             .map_err(|error| map_error(env, error))
     }
@@ -928,7 +928,7 @@ impl XlsxDocument {
         Document::open_recovery_checkpoint(&bytes, through_seq, native_host())
             .map(|inner| Self {
                 inner: Some(inner),
-                failed: Cell::new(false),
+                failure: RefCell::new(None),
             })
             .map_err(|error| map_error(env, error))
     }
@@ -940,7 +940,7 @@ impl XlsxDocument {
         Document::open_collaborative(&bytes, client_id, native_host())
             .map(|inner| Self {
                 inner: Some(inner),
-                failed: Cell::new(false),
+                failure: RefCell::new(None),
             })
             .map_err(|error| map_error(env, error))
     }
@@ -956,7 +956,7 @@ impl XlsxDocument {
         Document::open_with_peer_hydration_json(&bytes, &hydration, native_host())
             .map(|inner| Self {
                 inner: Some(inner),
-                failed: Cell::new(false),
+                failure: RefCell::new(None),
             })
             .map_err(|error| map_error(env, error))
     }
@@ -970,7 +970,7 @@ impl XlsxDocument {
 
 #[napi(catch_unwind, js_name = "allocationFailure")]
 pub fn allocation_failure() -> f64 {
-    crate::memory::take_failed() as f64
+    0.0
 }
 
 /// @internal Test hook: the calling thread's live engine bytes.
