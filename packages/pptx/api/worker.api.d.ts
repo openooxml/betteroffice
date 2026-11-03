@@ -1013,6 +1013,8 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
     result: PptxReadResult;
 }
 export type PresentationCommandMethods = FontDecoderMethods & {
+    /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
+    prefetchCoverageFonts(scripts: string[]): void;
     openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
     command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
     thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -1051,6 +1053,7 @@ export interface PresentationCommandClient {
 }
 export declare const PRESENTATION_COMMAND_METHODS: {
     decodeFontFace: true;
+    prefetchCoverageFonts: true;
     openCommandEditor: true;
     command: true;
     thumbnailFrame: true;
@@ -1202,7 +1205,15 @@ interface PreparedFontWorker {
     release(): void;
     take(): Worker;
 }
-export declare function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer): PreparedFontWorker;
+/**
+ * Starts the session worker for `source` early and returns its font decoder; the editor that opens the same
+ * `source` object adopts the worker. Unless `defaultFonts` is false, the worker also starts fetching the CJK
+ * coverage faces the opening slide needs. Pass the `defaultFonts` and `activeSlideIndex` the editor will use.
+ */
+export declare function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer, options?: {
+    defaultFonts?: boolean;
+    activeSlideIndex?: number;
+}): PreparedFontWorker;
 export declare function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined;
 export {};
 

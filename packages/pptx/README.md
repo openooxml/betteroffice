@@ -52,13 +52,15 @@ manages rendering and user input.
 
 Hosts loading bundled bytes themselves can import `preparePresentationFontDecoder` from
 `@betteroffice/pptx/worker` to decode in a worker; the editor session for the same `file` object
-then reuses that worker. Call `release()` on the prepared decoder if no session adopts it.
+then reuses that worker. Call `release()` on the prepared decoder if no session adopts it. Pass the
+`defaultFonts` and `activeSlideIndex` the editor will use: unless `defaultFonts` is false, the worker also
+starts fetching the CJK coverage faces of the opening slide while you load your fonts.
 
 ```ts
 import { preparePresentationFontDecoder } from '@betteroffice/pptx/worker';
 import { loadBundledFontBytes, resolveMetricCompatFace } from '@betteroffice/fonts';
 
-const { decoder, release } = preparePresentationFontDecoder(file);
+const { decoder, release } = preparePresentationFontDecoder(file, { activeSlideIndex: 0 });
 const face = resolveMetricCompatFace('Arial', false, false)!;
 const bytes = await loadBundledFontBytes(face, { baseUrl }, { decoder });
 ```

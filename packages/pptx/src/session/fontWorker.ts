@@ -6,6 +6,7 @@ import { shipsWasmAsset } from '../wasm/asset';
 import type { PresentationCommandMethods } from './commandProtocol';
 
 type Methods = Pick<PresentationCommandMethods, 'decodeFontFace'>;
+const UNTRACKED_CALL_ID = 2 ** 40;
 
 interface PreparedFontWorker {
   decoder: FontDecoder;
@@ -22,12 +23,19 @@ const Registry = (globalThis as unknown as {
 }).FinalizationRegistry;
 const abandonedWorkers = Registry ? new Registry(release => release()) : undefined;
 
-export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer): PreparedFontWorker {
+/**
+ * Starts the session worker for `source` early and returns its font decoder; the editor that opens the same
+ * `source` object adopts the worker. Unless `defaultFonts` is false, the worker also starts fetching the CJK
+ * coverage faces the opening slide needs. Pass the `defaultFonts` and `activeSlideIndex` the editor will use.
+ */
+export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
+  options: { defaultFonts?: boolean; activeSlideIndex?: number } = {}): PreparedFontWorker {
   const existing = preparedWorkers.get(source);
   if (existing && !existing.retired()) return existing.prepared;
   const owner = createPreparedFontWorker();
   preparedWorkers.set(source, owner);
   abandonedWorkers?.register(owner.prepared.decoder, owner.abandon, owner.token);
+  if (options.defaultFonts !== false) owner.prefetchCoverage(source, options.activeSlideIndex ?? 0);
   return owner.prepared;
 }
 
@@ -71,6 +79,11 @@ function createPreparedFontWorker() {
   return {
     token,
     retired: () => retired,
+    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number): void {
+      void import('./coverageScan').then((scan) => scan.activeSlideCoverageScripts(source, activeSlideIndex)).then((scripts) => {
+        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: [scripts] }, []);
+      }).catch(() => {});
+    },
     abandon() { abandoned = true; if (active === 0) release(); },
     prepared: {
       decoder: (bytes, options) => retired

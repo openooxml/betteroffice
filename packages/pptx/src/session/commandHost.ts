@@ -52,6 +52,7 @@ const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
 export const commandDefaultFontModule = { load: () => import('./commandDefaultFonts') };
+const COVERAGE_SCRIPTS = new Set<unknown>(['cjk-jp', 'cjk-kr', 'cjk-sc', 'cjk-tc']);
 
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
@@ -1581,6 +1582,14 @@ export function registerPresentationCommandHandlers(
       const face = await decodeFontFace(bytes, input);
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
     },
+    prefetchCoverageFonts(_, scripts) {
+      if (disposed || handle || opening || !Array.isArray(scripts)) return;
+      const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
+      if (!coverage.length) return;
+      void commandDefaultFontModule.load().then((fonts) => {
+        if (!disposed) fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts));
+      }).catch(() => {});
+    },
     async openCommandEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation command session is disposed');
       if (handle || opening) throw new Error('Presentation command session is already open');
@@ -1824,6 +1833,7 @@ export function registerPresentationCommandHandlers(
 
   return { handlers, policies: {
     decodeFontFace: { lane: 'interactive' },
+    prefetchCoverageFonts: { lane: 'interactive' },
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),

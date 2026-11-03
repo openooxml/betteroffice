@@ -3,7 +3,10 @@ import type { PptxFontFace } from '@betteroffice/pptx';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useFontWarning } from './fontFaces';
 
-/** A bundled face decoded before opening the presentation. */
+/**
+ * A bundled face decoded before opening the presentation. It serves the font it substitutes
+ * (`face.metricCompatWith`, e.g. Arial for Liberation Sans), or its own family when it substitutes none.
+ */
 export interface PptxBundledFont {
   face: BundledFontFace;
   baseUrl?: string | URL;
@@ -37,19 +40,23 @@ export interface BundledFontsResolverProps {
   file: Uint8Array | undefined;
   fonts: readonly Font[];
   fallback: ReactNode;
+  defaultFonts?: boolean;
+  initialSlide?: number;
   onReady?: (api: never) => unknown;
   onError?: (error: Error) => void;
   children: (fonts: readonly PptxFontFace[], onReady: (api: never) => unknown, onError: (error: Error) => void) => ReactNode;
 }
 
 /** Loads bundled face descriptors with the prepared session worker's decoder, then renders the editor with byte faces. */
-export function BundledFontsResolver({ file, fonts, fallback, onReady, onError, children }: BundledFontsResolverProps) {
+export function BundledFontsResolver({ file, fonts, fallback, defaultFonts, initialSlide, onReady, onError, children }: BundledFontsResolverProps) {
   const stable = useStableDescriptors(fonts);
   const identity = useMemo(() => ({}), [file, stable]);
   const bytes = useMemo(() => stable.filter((font): font is PptxFontFace => !('face' in font)), [stable]);
   const pending = !!file && bytes.length !== stable.length;
   const warnFonts = useFontWarning(identity);
   const owner = useRef<{ identity: object; release(): void } | null>(null);
+  const session = useRef({ defaultFonts, initialSlide });
+  session.current = { defaultFonts, initialSlide };
   const [resolved, setResolved] = useState<{ identity: object; fonts: readonly PptxFontFace[] } | null>(null);
   const release = useCallback(() => {
     if (owner.current?.identity === identity) owner.current.release();
@@ -66,7 +73,9 @@ export function BundledFontsResolver({ file, fonts, fallback, onReady, onError, 
       try {
         const { loadBundledFonts } = await import('./bundledFontsLoad');
         if (!current()) return;
-        const loading = loadBundledFonts(file, stable, () => { if (current()) warnFonts(); });
+        const { defaultFonts, initialSlide } = session.current;
+        const loading = loadBundledFonts(file, stable, () => { if (current()) warnFonts(); }, { defaultFonts,
+          activeSlideIndex: Number.isInteger(initialSlide) ? Math.max(0, initialSlide! - 1) : 0 });
         prepared = loading;
         const loaded = await loading.fonts;
         if (current()) setResolved({ identity, fonts: loaded });

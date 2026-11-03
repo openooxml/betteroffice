@@ -16,7 +16,14 @@ import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 import { PresentationFailure } from './components/PresentationFailure';
 import type { PptxBundledFont, ResolvedFontProps } from './bundledFonts';
 
-export const pptxBundledFontsLoader = { load: () => import('./bundledFonts') };
+export const pptxBundledFontsLoader = {
+  load: () => {
+    void import('./bundledFontsLoad').catch(() => {});
+    return import('./bundledFonts');
+  },
+};
+type BundledFontsModule = Awaited<ReturnType<typeof pptxBundledFontsLoader.load>>;
+type BundledFontsChunk = { module: BundledFontsModule } | { error: Error } | { loading: true };
 
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 export const pptxLegacyEditorLoader = { load: () => import('./PptxLegacyEditorSession') };
@@ -298,26 +305,44 @@ function PptxAsyncEditorRoot(props: ResolvedFontProps<PptxAsyncEditorProps>) {
   return <PptxAsyncEditorSession {...props} file={file} />;
 }
 
+function useBundledFontsChunk(): BundledFontsChunk {
+  const [chunk, setChunk] = useState<BundledFontsChunk>({ loading: true });
+  useEffect(() => {
+    let active = true;
+    pptxBundledFontsLoader.load().then((module) => {
+      if (active) setChunk({ module });
+    }, (cause: unknown) => {
+      if (active) setChunk({ error: new PptxWorkerEditorChunkLoadError(cause) });
+    });
+    return () => { active = false; };
+  }, []);
+  return chunk;
+}
+
+function ChunkError({ error }: { error: Error }): never {
+  throw error;
+}
+
 function PptxBundledFontsEditor({ legacy, ...props }: (PptxEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps |
   WorkerSessionProps | CollaborationSessionProps | PptxLegacyEditorProps) & { legacy: boolean }) {
-  const [Resolver] = useState(() => lazy(() => pptxBundledFontsLoader.load().then(
-    (module) => ({ default: module.BundledFontsResolver }),
-    (cause: unknown) => { throw new PptxWorkerEditorChunkLoadError(cause); })));
+  const chunk = useBundledFontsChunk();
   const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
   const fallback = <PptxEditorFallback {...props} file={file} />;
   return (
     <PeerlessEditorBoundary onError={props.onError} className={props.className}
       style={(props as { style?: CSSProperties }).style}>
-      <Suspense fallback={fallback}>
-        <Resolver file={file} fonts={props.fonts} fallback={fallback}
+      {'error' in chunk ? <ChunkError error={chunk.error} /> : 'module' in chunk ? (
+        <chunk.module.BundledFontsResolver file={file} fonts={props.fonts} fallback={fallback}
+          defaultFonts={(props as { defaultFonts?: boolean }).defaultFonts}
+          initialSlide={(props as { initialSlide?: number }).initialSlide}
           onReady={props.onReady as ((api: never) => unknown) | undefined} onError={props.onError}>
           {(fonts, onReady, onError) => {
             const resolved = { ...props, file, fonts, onReady, onError };
             return legacy ? <PptxLegacySessionLoader editorProps={resolved as ResolvedFontProps<GeneralEditorSessionProps>} />
               : <PptxAsyncEditorSession {...resolved as PptxAsyncEditorInternalProps} />;
           }}
-        </Resolver>
-      </Suspense>
+        </chunk.module.BundledFontsResolver>
+      ) : fallback}
     </PeerlessEditorBoundary>
   );
 }
