@@ -36,7 +36,7 @@ export function bundlePaths(paths) {
   return unique.filter((path) => !unique.some((other) => other !== path && path.startsWith(`${other}/`))).sort();
 }
 
-async function send(corpus, method, url, options, request, sleep) {
+async function send(corpus, method, url, options, request, sleep, read = (response) => response.body?.cancel?.()) {
   for (let attempt = 0; ; attempt++) {
     let response;
     try {
@@ -47,13 +47,14 @@ async function send(corpus, method, url, options, request, sleep) {
         redirect: 'error',
         signal: AbortSignal.timeout(15 * 60_000),
       });
+      if (response.ok) return { response, body: await read(response) };
     } catch (error) {
       if (attempt + 1 >= ATTEMPTS) throw new Error(`Private bucket ${method} failed: ${error.message}`);
       await sleep(backoffMs(attempt));
       continue;
     }
-    if (response.ok || !isTransientStatus(response.status) || attempt + 1 >= ATTEMPTS) return response;
     await response.body?.cancel?.();
+    if (!isTransientStatus(response.status) || attempt + 1 >= ATTEMPTS) return { response, body: undefined };
     await sleep(backoffMs(attempt));
   }
 }
@@ -95,9 +96,9 @@ export function createStore(environment = process.env, {
     let token = '';
     do {
       const query = `list-type=2&prefix=${uriEncode(prefix)}${token ? `&continuation-token=${uriEncode(token)}` : ''}`;
-      const response = await send(corpus, 'GET', `${corpus.base}?${query}`, {}, request, sleep);
+      const { response, body } = await send(corpus, 'GET', `${corpus.base}?${query}`, {}, request, sleep, (ok) => ok.text());
       if (!response.ok) throw new Error(`Private bucket listing failed (HTTP ${response.status})`);
-      const page = parseListing(await response.text());
+      const page = parseListing(body);
       keys.push(...page.keys);
       if (page.next && page.next === token) throw new Error('Private bucket listing did not advance');
       token = page.next;
@@ -107,9 +108,9 @@ export function createStore(environment = process.env, {
 
   async function fetchBundle(key, file) {
     const corpus = reader();
-    const response = await send(corpus, 'GET', objectUrl(corpus, key), {}, request, sleep);
+    const { response, body: bytes } = await send(corpus, 'GET', objectUrl(corpus, key), {}, request, sleep,
+      async (ok) => Buffer.from(await ok.arrayBuffer()));
     if (!response.ok) throw new Error(`Private bundle ${key} is unavailable (HTTP ${response.status})`);
-    const bytes = Buffer.from(await response.arrayBuffer());
     const expected = response.headers.get('x-amz-meta-sha256');
     if (!expected || sha256Hex(bytes) !== expected) throw new Error(`Private bundle ${key} failed its integrity check`);
     await writeFile(file, bytes);
@@ -136,13 +137,12 @@ export function createStore(environment = process.env, {
         if ((await stat(bundle)).size > MAX_BUNDLE_BYTES) throw new Error(`Private bundle ${name} exceeds ${MAX_BUNDLE_BYTES} bytes`);
         const body = await readFile(bundle);
         const digest = sha256Hex(body);
-        const response = await send(corpus, 'PUT', objectUrl(corpus, key), {
+        const { response } = await send(corpus, 'PUT', objectUrl(corpus, key), {
           body,
           payloadHash: digest,
           headers: { 'content-type': 'application/gzip', 'x-amz-meta-sha256': digest },
         }, request, sleep);
         if (!response.ok) throw new Error(`Private bundle ${name} upload failed (HTTP ${response.status})`);
-        await response.body?.cancel?.();
         return { name, bytes: body.length, skipped: false };
       } finally {
         await rm(scratch, { recursive: true, force: true });

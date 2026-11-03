@@ -69,7 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ inputs.private_corpus && github.sha || inputs.branch }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -77,11 +77,23 @@ jobs:
         id: source
         env:
           TARGET_BRANCH: ${{ inputs.branch }}
+          PRIVATE_CORPUS: ${{ inputs.private_corpus }}
         run: |
-          git check-ref-format --branch "$TARGET_BRANCH"
           source_sha=$(git rev-parse HEAD)
-          remote_sha=$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | cut -f1)
-          test "$source_sha" = "$remote_sha"
+          if [ "$PRIVATE_CORPUS" = true ]; then
+            case "$TARGET_BRANCH" in
+              '' | main) ;;
+              *) echo "::error::Private corpus runs measure only main: the bucket keys never reach code from another branch"; exit 1 ;;
+            esac
+            if [ "$source_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::Private corpus runs measure only the main commit the workflow was dispatched from"
+              exit 1
+            fi
+          else
+            git check-ref-format --branch "$TARGET_BRANCH"
+            remote_sha=$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | cut -f1)
+            test "$source_sha" = "$remote_sha"
+          fi
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Keep custom-origin runs off the public render viewer
@@ -1157,7 +1169,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ inputs.private_corpus && needs.prepare.outputs.source-sha || inputs.branch }}
           persist-credentials: false
 
       - name: Require the measured branch head
