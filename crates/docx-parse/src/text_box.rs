@@ -212,6 +212,19 @@ pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     )
 }
 
+/// An `mc:AlternateContent` holding a bookmarked text box next to another drawing in one
+/// branch: no single shape can own its source, so each drawing keeps its own.
+pub(crate) fn shares_a_bookmarked_branch(element: &XmlElement) -> bool {
+    has_bookmarked_text_box(element)
+        && element.child_elements().any(|branch| {
+            branch
+                .child_elements()
+                .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+                .count()
+                > 1
+        })
+}
+
 pub(crate) fn contains_text_box(element: &XmlElement) -> bool {
     element.name == "w:txbxContent" || element.child_elements().any(contains_text_box)
 }
@@ -223,12 +236,19 @@ pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
 fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
     let in_text_box = in_text_box || element.name == "w:txbxContent";
     if in_text_box && element.name == "w:p" {
-        return false;
+        return contains_bookmark_boundary(element);
     }
     (in_text_box && crate::block::has_direct_block_bookmark(element))
         || element
             .child_elements()
             .any(|child| has_block_bookmarks(child, in_text_box))
+}
+
+fn contains_bookmark_boundary(element: &XmlElement) -> bool {
+    element.child_elements().any(|child| {
+        matches!(child.local_name(), "bookmarkStart" | "bookmarkEnd")
+            || contains_bookmark_boundary(child)
+    })
 }
 
 pub(crate) fn source_xml(source: &XmlElement) -> String {
