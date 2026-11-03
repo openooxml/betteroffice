@@ -10,16 +10,18 @@ import type {
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
+import { pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
+import { createWorkerFramePainter } from './workerFramePainter';
 import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
-import { installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
+import { createPptxPaintFontForwarder, installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
 import {
-  createPeerlessViewStore, installCoveringFrame,
+  createPeerlessViewStore, installCoveringFrame, peerlessEchoStores,
   type PeerlessConfirmedFrame, type PeerlessViewSnapshot, type PeerlessViewStore,
 } from './peerlessViewStore';
 
@@ -123,6 +125,7 @@ export function usePeerlessPresentation(
     let echoPainter: ReturnType<typeof createLocalEchoPainter> | undefined;
     const images = createCommandFrameImages();
     const thumbnailImages = createCommandFrameImages({ maxDimension: THUMBNAIL_IMAGE_DIMENSION, reuse: images });
+    const paintFonts = createPptxPaintFontForwarder();
     let activeImages: ReturnType<typeof images.pin> | undefined;
     let fatal: PptxWorkerEditorFailedError | undefined;
     let failedView: PeerlessViewSnapshot | undefined;
@@ -218,7 +221,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onError?.(fatal); } catch {}
       void session?.dispose().catch(() => {});
     };
-    const fontsReady = installFonts(fonts, installedFonts, current, warnFonts);
+    const fontsReady = installFonts(fonts, installedFonts, current, warnFonts, paintFonts.installed);
     void fontsReady.catch(report);
 
     async function whenPainted(): Promise<void> {
@@ -244,7 +247,10 @@ export function usePeerlessPresentation(
 
     function paintFrame(frame: PeerlessConfirmedFrame, view: PeerlessViewSnapshot): void {
       if (!current()) return;
-      const nextImages = images.pin(frame, [...pendingMedia].map(([assetId, bytes]) => ({ assetId, bytes })));
+      const suppliedImages = [...pendingMedia].map(([assetId, bytes]) => ({ assetId, bytes }));
+      const workerPaint = session && pptxWorkerRenderClients.get(session)?.supported && !peerlessEchoStores.has(base!);
+      images.ingest([...suppliedImages, ...frame.frame.media]);
+      const nextImages = workerPaint ? undefined : images.pin(frame, suppliedImages);
       activeImages?.release(); activeImages = nextImages;
       queuedFrame = frame;
       firstPainted = false;
@@ -394,6 +400,7 @@ export function usePeerlessPresentation(
           (family) => !suppliedFamilies.has(family.trim().toLowerCase()) && (allowed?.(family) ?? true)) }));
       disposers.push(session.subscribeFailure(report));
       const owner = session;
+      paintFonts.attach(owner);
       void owner.ready.then((client) => {
         if (!current()) return;
         recovery.open(client.takeRecoveryUpdate?.(), client.state.throughSeq, client.state.version,
@@ -447,6 +454,7 @@ export function usePeerlessPresentation(
           paintFrame,
           paintEcho: (view) => paintLocal(view),
           restoreLine: (view) => paintLocal(view, true),
+          resync: () => framePainter?.resync?.(),
         }, { onError: (error) => callbacks.current.onError?.(new PptxWorkerEditorFailedError(error)) });
         const original = base;
         const getSnapshot = original.getSnapshot.bind(original);
@@ -593,7 +601,7 @@ export function usePeerlessPresentation(
           async installFont(face) {
             require();
             suppliedFamilies.add(face.family.trim().toLowerCase());
-            await installFonts([face], installedFonts, current, warnFonts);
+            await installFonts([face], installedFonts, current, warnFonts, paintFonts.installed);
             require();
           },
           fit(token) {
@@ -607,7 +615,11 @@ export function usePeerlessPresentation(
             signal();
             if (!token.scale) return;
             let preparedEcho: ReturnType<typeof createLocalEchoPainter> | undefined;
-            framePainter = peerlessPainterFactories.frame(surface, {
+            const render = pptxWorkerRenderClients.get(owner);
+            const factory: typeof createCommandFramePainter = render?.supported && !peerlessEchoStores.has(original)
+              ? (target, options) => createWorkerFramePainter(target, render, { ...options, mainFirstFrame: true })
+              : peerlessPainterFactories.frame;
+            framePainter = factory(surface, {
               ...token, images, current: (frame) => current() && fit === token && (!frame || frame === queuedFrame),
               beforeCommit: (currentPaint) => waitForMode(token, currentPaint),
               compose(raster, frame) {
@@ -632,6 +644,13 @@ export function usePeerlessPresentation(
                   if (echo !== echoPainter) echo?.dispose();
                   pixels.width = pixels.height = 0;
                 } };
+              },
+              onAdopt(frame) {
+                if (!current() || fit !== token || !firstPainted || frame !== queuedFrame || getSnapshot().confirmed !== frame) return;
+                echoPainter?.dispose();
+                echoPainter = peerlessPainterFactories.echo(surface, { ...token,
+                  current: () => current() && firstPainted && fit === token });
+                echoPainter.paintEcho(getSnapshot());
               },
               onCommit(frame) {
                 if (!current() || fit !== token || frame !== queuedFrame || getSnapshot().confirmed !== frame) return;
@@ -681,6 +700,7 @@ export function usePeerlessPresentation(
       activeImages?.release();
       images.dispose();
       thumbnailImages.dispose();
+      paintFonts.dispose();
       pendingMedia.clear();
       for (const face of installedFonts) document.fonts.delete(face);
       cancelCheckpoint?.();

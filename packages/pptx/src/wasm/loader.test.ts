@@ -11,8 +11,7 @@ import type {
   TextBoxPrimitive,
 } from '../index';
 import { initWasm, openPresentation, paintSlide, StaleProposalError } from '../index';
-import { engineKind } from './engine';
-import { PptxDocument, PptxRenderer } from './generated/pptx_wasm.js';
+import { PptxDocument, PptxRenderer } from './engine';
 
 const root = resolve(import.meta.dir, '../../../..');
 let handle: PresentationHandle;
@@ -77,7 +76,7 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 
 afterAll(() => handle.dispose());
 
-for (const fallback of [false, true]) test.skipIf(engineKind === 'native')(`failed ${fallback ? 'fallback ' : ''}font registration frees the renderer and document`, () => {
+for (const fallback of [false, true]) test(`failed ${fallback ? 'fallback ' : ''}font registration frees the renderer and document`, () => {
   const original = Object.assign(new Error('render resource limit exceeded: more than 256 font faces'), {
     name: 'PptxResourceLimitError', code: 'font-face-limit',
   });
@@ -1019,4 +1018,27 @@ test('Selawik mixed scripts draw through coverage and CJK fallbacks without miss
   } finally {
     source.dispose();
   }
+});
+
+test('structural proposal reads include inserted and deleted slides by ID', () => {
+  const source = openPresentation(fixture, { clientId: 9202 });
+  try {
+    const before = source.snapshot();
+    const removed = before.slides[0]!.id;
+    const proposal = source.propose('agent', null, [
+      { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+      { type: 'setSlideNotes', slideId: '@draft', text: 'Draft notes' },
+      { type: 'deleteSlide', slideId: removed },
+    ]);
+    const entries = source.proposalSlideStrip(proposal.id);
+    expect(entries.find(entry => entry.slideId === removed)).toMatchObject({ status: 'deleted', previewIndex: null });
+    const inserted = entries.find(entry => entry.status === 'inserted')!;
+    expect(inserted).toMatchObject({ slideId: proposal.refs!.draft, liveIndex: null, previewIndex: 0 });
+    expect(source.layoutProposalDiffSlideById(proposal.id, inserted.slideId).snapshot.slides[0]!.notes).toBe('Draft notes');
+    expect(source.layoutProposalDiffSlideById(proposal.id, removed).frame).toBeDefined();
+    expect(source.snapshot()).toEqual(before);
+    source.acceptProposal(proposal.id);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+  } finally { source.dispose(); }
 });

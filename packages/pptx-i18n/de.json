@@ -168,7 +168,12 @@
     "canvasStale": "Ziele haben sich geändert. Öffnen Sie die Details zur Überprüfung, um die aktualisierte Vorschau vor dem Übernehmen zu prüfen.",
     "previousPosition": "Vorher",
     "proposedPosition": "Vorgeschlagen",
-    "loadingDiff": "Änderungen werden geladen…"
+    "loadingDiff": "Änderungen werden geladen…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Weitere Steuerelemente",

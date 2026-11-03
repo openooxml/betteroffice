@@ -46,7 +46,7 @@ import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost, type XlsxPluginHostBinding } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
-import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll } from '../viewer/sessionGeometry';
+import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll, positionAtPoint } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { XlsxAsyncExportBridge } from './createAsyncEditorApi';
 import { PeerlessWorkbookSession, type PeerlessSessionWorkbookProps } from './usePeerlessSessionWorkbook';
@@ -548,7 +548,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
     createClients: createPeerlessPluginClients, createGeometry: createPeerlessPluginGeometry,
     readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, proposals, staleFor,
-    proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t });
+    proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t,
+    positionAtPoint: (clientX, clientY) => {
+      const owner = ownerRef.current;
+      const frame = sourceRef.current?.painted;
+      if (!owner?.current || owner.retiring || owner.failure || !frame || frame.request.generation !== owner.generation) return null;
+      return positionAtPoint(frame.displayList, frame.request.sheet, canvasRef.current, clientX, clientY);
+    } });
   pluginBindingRef.current = pluginHost;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
   useLayoutEffect(() => {
@@ -993,7 +999,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         setPainted(frame);
         const sheetId = (run.session.editState.sheets ?? run.session.state.sheets).find((sheet) => sheet.index === frame.request.sheet)?.id;
         pluginHost.presentGrid(sheetId ? { frame: frame.displayList, version: frame.version,
-          sheetId, zoom: frame.request.zoom, viewport: frame.request.viewport } : null);
+          sheetId, sheet: frame.request.sheet, zoom: frame.request.zoom, viewport: frame.request.viewport } : null);
         if (frame.coversThroughSeq !== undefined) run.session.markPresented({
           ...run.session.commandIdentity, coversThroughSeq: frame.coversThroughSeq,
         });

@@ -546,6 +546,11 @@ impl Document {
         self.session.replay_json(envelope).map_err(peer_error)
     }
 
+    pub fn validate_proposal_json(&self, args: &str) -> Result<String, EngineError> {
+        let preview = self.session.stage().map_err(message_error)?;
+        json(preview.propose(parse_args(args)?).map_err(proposal_error)?)
+    }
+
     pub fn propose_json(&self, args: &str) -> Result<String, EngineError> {
         json(
             self.session
@@ -556,6 +561,14 @@ impl Document {
 
     pub fn list_proposals_json(&self) -> Result<String, EngineError> {
         json(self.session.proposals().map_err(proposal_error)?)
+    }
+
+    pub fn proposal_slide_strip_json(&self, id: &str) -> Result<String, EngineError> {
+        json(
+            self.session
+                .proposal_slide_strip(id)
+                .map_err(proposal_error)?,
+        )
     }
 
     pub fn preview_proposal_json(&self, args: &str) -> Result<String, EngineError> {

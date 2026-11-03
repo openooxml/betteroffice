@@ -337,10 +337,26 @@ impl PptxDocument {
     }
 
     #[napi(catch_unwind)]
+    pub fn validate_proposal_json(&self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .validate_proposal_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
     pub fn list_proposals_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
             .list_proposals_json()
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn proposal_slide_strip_json(&self, env: Env, id: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .proposal_slide_strip_json(&id)
             .map_err(|error| map_error(env, error))
     }
 
@@ -1211,6 +1227,23 @@ impl PptxRenderer {
         let document = document.document(env)?;
         renderer
             .layout_proposal_slide_json(document.session(), &id, slide_index)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn layout_proposal_diff_slide_by_id_json(
+        &self,
+        env: Env,
+        document: &PptxDocument,
+        id: String,
+        slide_id: String,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        let renderer = self.renderer(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        renderer
+            .layout_proposal_diff_slide_by_id_json(document.session(), &id, &slide_id)
             .map_err(|error| map_error(env, error))
     }
 

@@ -178,6 +178,7 @@
     "accept": "Chấp nhận",
     "reject": "Từ chối",
     "forceApply": "Buộc áp dụng",
+    "forceBlockedReason": "Không thể áp dụng đề xuất này sau khi cấu trúc thay đổi.",
     "staleWarning": "Các ô đã thay đổi kể từ khi đề xuất: {cells}"
   },
   "a11y": {

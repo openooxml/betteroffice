@@ -178,6 +178,7 @@
     "accept": "קבל",
     "reject": "דחה",
     "forceApply": "החל בכפייה",
+    "forceBlockedReason": "לא ניתן להחיל הצעה זו לאחר שינוי מבני.",
     "staleWarning": "תאים השתנו מאז ההצעה: {cells}"
   },
   "a11y": {

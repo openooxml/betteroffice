@@ -27,6 +27,169 @@ fn deploy(root: &std::path::Path, file: &str) {
     .unwrap();
 }
 
+fn deploy_flat(root: &std::path::Path) {
+    let face = resolve_metric_compat_face("Calibri", false, false).unwrap();
+    std::fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({ "version": face.version })).unwrap(),
+    )
+    .unwrap();
+    for face in &betteroffice_fonts::catalog::catalog().faces {
+        if face.pack == FontPack::Latin {
+            std::fs::write(
+                root.join(&face.file),
+                betteroffice_fonts_latin::face(&face.file).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn flat_pack_directories_load_faces_and_dictionaries() {
+    let root = tempfile::tempdir().unwrap();
+    deploy_flat(root.path());
+    let provider =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();
+    provider.preload().unwrap();
+    for bold in [false, true] {
+        let face = resolve_metric_compat_face("Calibri", bold, false).unwrap();
+        let bytes = provider
+            .resolve_family("Calibri", bold, false)
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(&bytes[..4], &[0, 1, 0, 0]);
+        assert_eq!(bytes.len(), face.byte_length);
+        assert_eq!(provider.load_face(face).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn flat_pack_directories_skip_missing_or_mismatched_manifests() {
+    let root = tempfile::tempdir().unwrap();
+    deploy_flat(root.path());
+    let manifest = root.path().join("manifest.json");
+    std::fs::write(&manifest, br#"{"version":"0.0.0-mismatch"}"#).unwrap();
+    for missing in [false, true] {
+        if missing {
+            std::fs::remove_file(&manifest).unwrap();
+        }
+        let provider =
+            BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())])
+                .unwrap();
+        assert!(provider.resolve_family("Calibri", false, false).is_none());
+        assert!(matches!(
+            provider.load_face(resolve_metric_compat_face("Calibri", false, false).unwrap()),
+            Err(FontError::MissingFontPack { .. })
+        ));
+    }
+}
+
+#[test]
+fn flat_pack_directories_skip_unreadable_manifests_and_incomplete_packs() {
+    let unreadable = tempfile::tempdir().unwrap();
+    deploy_flat(unreadable.path());
+    std::fs::remove_file(unreadable.path().join("manifest.json")).unwrap();
+    std::fs::create_dir(unreadable.path().join("manifest.json")).unwrap();
+    let incomplete = tempfile::tempdir().unwrap();
+    deploy_flat(incomplete.path());
+    let face = resolve_metric_compat_face("Calibri", true, false).unwrap();
+    std::fs::remove_file(incomplete.path().join(&face.file)).unwrap();
+    for root in [unreadable.path(), incomplete.path()] {
+        let provider =
+            BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.into())]).unwrap();
+        assert!(provider.resolve_family("Calibri", false, false).is_none());
+    }
+}
+
+#[test]
+fn provider_managers_offer_only_faces_of_found_packs() {
+    let none = BundledFonts::from_pack_directories(Vec::new()).unwrap();
+    let manager =
+        FontManager::new(&FontSource::Provider(Arc::new(none)), FontLoading::OnDemand).unwrap();
+    for (family, scripts) in [("Calibri", vec![]), ("MS Mincho", vec!["Hani".to_string()])] {
+        assert!(
+            manager
+                .resolve(family, false, false, &scripts, LastResortOffice::Word)
+                .is_empty()
+        );
+    }
+    let root = tempfile::tempdir().unwrap();
+    deploy_flat(root.path());
+    let latin =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();
+    let manager = FontManager::new(
+        &FontSource::Provider(Arc::new(latin)),
+        FontLoading::OnDemand,
+    )
+    .unwrap();
+    for family in ["Calibri", "MS Mincho", "Unknown Family"] {
+        let faces = manager.resolve(
+            family,
+            false,
+            false,
+            &["Hani".to_string(), "Deva".to_string()],
+            LastResortOffice::Word,
+        );
+        assert!(family != "Calibri" || !faces.is_empty());
+        for face in faces {
+            assert!(face.load().is_ok(), "{} failed to load", face.family);
+        }
+    }
+}
+
+#[test]
+fn flat_pack_directories_reject_duplicate_packs_and_empty_paths() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        BundledFonts::from_pack_directories(vec![
+            (FontPack::Latin, root.path().into()),
+            (FontPack::Latin, root.path().into()),
+        ]),
+        Err(FontError::InvalidFontOptions(_))
+    ));
+    assert!(matches!(
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, PathBuf::new())]),
+        Err(FontError::InvalidFontOptions(_))
+    ));
+}
+
+#[test]
+fn flat_pack_directories_resolve_relative_paths() {
+    let current = std::env::current_dir().unwrap();
+    let root = tempfile::tempdir_in(&current).unwrap();
+    deploy_flat(root.path());
+    let relative = root.path().strip_prefix(&current).unwrap().to_path_buf();
+    let provider = BundledFonts::from_pack_directories(vec![(FontPack::Latin, relative)]).unwrap();
+    assert!(
+        provider
+            .resolve_family("Calibri", false, false)
+            .unwrap()
+            .load()
+            .is_ok()
+    );
+}
+
+#[test]
+fn flat_pack_directories_do_not_share_cached_bytes() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    deploy_flat(first.path());
+    deploy_flat(second.path());
+    let face = resolve_metric_compat_face("Calibri", false, false).unwrap();
+    let provider =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, first.path().into())]).unwrap();
+    assert!(provider.load_face(face).is_ok());
+    std::fs::write(second.path().join(&face.file), [0]).unwrap();
+    let corrupt =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, second.path().into())]).unwrap();
+    assert!(matches!(
+        corrupt.load_face(face),
+        Err(FontError::InvalidFontData(_))
+    ));
+}
+
 #[test]
 fn loads_local_faces_and_dictionary_payloads_into_owned_buffers() {
     let root = tempfile::tempdir().unwrap();

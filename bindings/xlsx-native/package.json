@@ -99,6 +99,11 @@
     "**/xlsxSessionWorker.*",
     "**/session/worker.*"
   ],
+  "dependencies": {
+    "@betteroffice/fonts-cjk": "workspace:^",
+    "@betteroffice/fonts-intl": "workspace:^",
+    "@betteroffice/fonts-latin": "workspace:^"
+  },
   "devDependencies": {
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
