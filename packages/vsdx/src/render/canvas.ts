@@ -142,7 +142,10 @@ function utf8Slice(value: string, start: number, end: number): string { return n
 function quote(family: string): string { return family.includes(' ') ? JSON.stringify(family) : family; }
 const PLACEHOLDER_LABEL_IN = 10 / 72;
 function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void {
-  ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]);
+  const matrix = (ctx as CanvasRenderingContext2D & { getTransform?: () => DOMMatrix }).getTransform?.();
+  const devicePerInch = matrix ? Math.hypot(matrix.a, matrix.b) : 0;
+  const pixel = 1 / TEXT_UNITS_PER_INCH;
+  ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = devicePerInch > 0 ? Math.max(pixel, 1 / devicePerInch) : pixel; ctx.setLineDash([4 * pixel, 3 * pixel]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]);
   if (!value.reason) return;
   ctx.save();
   ctx.translate(value.x, value.y);
