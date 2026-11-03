@@ -147,6 +147,8 @@ real italic face.
 
 Measurement never consults fonts installed on the machine: embedded document fonts come first, then
 the bundled substitutes, then a last-resort face, so a document measures the same everywhere.
+DOCX loads `BASE_LATIN_FAMILY` from package assets only for text those sources do not cover.
+Native raster consumers embed these faces.
 
 ## API
 

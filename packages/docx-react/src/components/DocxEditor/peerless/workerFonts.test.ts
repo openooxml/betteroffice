@@ -1,10 +1,62 @@
-import { afterEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import * as fontManager from '@betteroffice/fonts';
 import { configureDefaultFonts } from '@betteroffice/docx/layout';
-import { customWorkerFontFaces, fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
+import { customWorkerFontFaces, fontEnvironmentForRegistrations, prepareWorkerFontEnvironment, uncoveredFontRequirements } from './workerFonts';
 
 afterEach(() => { mockFetch?.mockRestore(); configureDefaultFonts({}); });
 let mockFetch: ReturnType<typeof spyOn> | undefined;
+
+test('registered base-face descriptors survive worker font environments', () => {
+  const face = { family: 'BetterOffice Base Latin', bold: false, italic: false };
+  const environment = fontEnvironmentForRegistrations([Uint8Array.of(1), Uint8Array.of(2)],
+    { 'requested|1|1': [0, 1] }, [{ key: 'requested|1|1', family: 'Requested', bold: true, italic: true }],
+    ['Requested'], new Map([[1, face]]));
+  expect(environment.faces[0]).toMatchObject({ family: 'Requested', weight: 'bold', style: 'italic' });
+  expect(environment.faces[1]).toMatchObject({ family: face.family, weight: 'normal', style: 'normal' });
+  expect(environment.chains).toEqual({ 'requested|1|1': [0, 1] });
+});
+
+test('new characters refresh an existing family and retain earlier coverage requirements', () => {
+  const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false };
+  const prepared = [{ ...requirement, characters: ['A'] }];
+  expect(uncoveredFontRequirements(prepared, [{ ...requirement, characters: ['A'] }])).toBeNull();
+  expect(uncoveredFontRequirements(prepared, [{ ...requirement, characters: ['Ω'] }]))
+    .toEqual([{ ...requirement, characters: ['A', 'Ω'] }]);
+});
+
+test('new characters the registered fonts already cover do not rebuild the font environment', () => {
+  const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false };
+  const prepared = [{ ...requirement, characters: ['A'] }];
+  const typed = [{ ...requirement, characters: ['B', 'Ω'] }];
+  const asked: unknown[] = [];
+  expect(uncoveredFontRequirements(prepared, typed, (requirements) => { asked.push(requirements); return true; })).toBeNull();
+  expect(asked).toEqual([[{ ...requirement, characters: ['A', 'B', 'Ω'] }]]);
+  expect(uncoveredFontRequirements(prepared, typed, () => false)).toEqual([{ ...requirement, characters: ['A', 'B', 'Ω'] }]);
+  const scripted = [{ ...requirement, characters: ['A'], scripts: ['arabic' as const] }];
+  expect(uncoveredFontRequirements(prepared, scripted, () => true)).toEqual(scripted);
+  const added = [...typed, { key: 'other|0|0', family: 'Other', bold: false, italic: false }];
+  expect(uncoveredFontRequirements(prepared, added, () => true)?.map(item => item.key)).toEqual(['requested|0|0', 'other|0|0']);
+});
+
+test('the coverage check judges only the requirements that gained characters', () => {
+  const typed = { key: 'typed|0|0', family: 'Typed', bold: false, italic: false };
+  const other = { key: 'other|0|0', family: 'Other', bold: false, italic: false, characters: ['A'] };
+  const asked: unknown[] = [];
+  const covers = (requirements: unknown[]) => { asked.push(requirements); return requirements.length === 1; };
+  expect(uncoveredFontRequirements([{ ...typed, characters: ['A'] }, other], [{ ...typed, characters: ['j'] }, other], covers)).toBeNull();
+  expect(asked).toEqual([[{ ...typed, characters: ['A', 'j'] }]]);
+});
+
+test('compact requirement refreshes compare decoded candidates and settle', () => {
+  const requirement = { key: 'requested|0|0', family: 'Requested', bold: false, italic: false };
+  const prepared = [{ ...requirement, characterBits: '0000000000000002' }];
+  expect(uncoveredFontRequirements(prepared, [{ ...requirement, characters: ['A'] }])).toBeNull();
+  const next = [{ ...requirement, characters: ['B'] }];
+  const refreshed = uncoveredFontRequirements(prepared, next)!;
+  expect(refreshed[0]?.characters).toEqual(['A', 'B']);
+  expect(uncoveredFontRequirements(refreshed, next)).toBeNull();
+});
 
 test('custom WOFF and WOFF2 bytes pass unchanged to worker preparation', async () => {
   for (const signature of [0x774f4646, 0x774f4632]) {
@@ -25,7 +77,7 @@ test('captured registrations become face slots with style chains and substitute 
 });
 
 for (const embedded of [false, true]) {
-  test(`worker measurement puts URL faces before ${embedded ? 'embeds' : 'explicit manager defaults'}`, async () => {
+  test(`worker measurement keeps URL faces ${embedded ? 'after embeds' : 'before explicit manager defaults'}`, async () => {
     const data = new Uint8Array([1, 2]).buffer;
     const custom = new Uint8Array([3, 4]).buffer;
     const bundled = new Uint8Array([5, 6]).buffer;
@@ -42,16 +94,67 @@ for (const embedded of [false, true]) {
         requirements: [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }],
         families: ['Calibri'], provider: fontManager.createFontProvider(), compat: undefined, signal: new AbortController().signal,
       });
-      expect(environment.faces[0]).toMatchObject({ family: 'Calibri', data: new Uint8Array(custom) });
+      expect(environment.faces[0]).toMatchObject({ family: 'Calibri', data: new Uint8Array(embedded ? data : custom) });
       expect(environment.faces.filter(face => 'data' in face).map(face => face.data)).toEqual([
-        new Uint8Array(custom), new Uint8Array(bundled),
+        ...(embedded ? [new Uint8Array(data)] : []), new Uint8Array(custom), new Uint8Array(bundled),
       ]);
-      expect(environment.chains['calibri|0|0']).toEqual([0, 2, 3]);
+      expect(environment.chains['calibri|0|0']).toEqual(embedded ? [0, 1, 3, 4] : [0, 2, 3]);
       expect(create).toHaveBeenCalledTimes(1);
       expect(mockFetch).toHaveBeenCalledTimes(1);
     } finally { create.mockRestore(); }
   });
 }
+
+test('a hosted subset reaches base Latin after embedded and app faces with the implicit provider', async () => {
+  const subset = new Uint8Array(readFileSync(new URL('../../../../../fonts/assets/NotoSansHebrew-Regular.ttf', import.meta.url)));
+  const base = new Uint8Array(readFileSync(new URL('../../../../../../crates/base-latin/fonts/BetterOfficeBaseLatin-Regular.ttf', import.meta.url)));
+  const load = spyOn(fontManager, 'createFontProvider').mockReturnValue({
+    resolve: () => { throw new Error('hosted substitute requested'); },
+    resolveFamily: () => { throw new Error('hosted substitute requested'); },
+    resolveLastResort: () => { throw new Error('hosted substitute requested'); },
+    resolveScriptFallback: () => undefined,
+    resolveBaseLatin: () => async () => base.buffer,
+  });
+  mockFetch = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(subset));
+  try {
+    const environment = await prepareWorkerFontEnvironment({
+      fonts: [{ family: 'Requested', src: '/subset.ttf' }], embedded: [{ family: 'Requested', data: subset.slice().buffer,
+        weight: 'normal', style: 'normal', subsetted: true }],
+      requirements: [{ key: 'requested|0|0', family: 'Requested', bold: false, italic: false, characters: ['Ω'] }],
+      families: ['Requested'], provider: undefined, compat: undefined, signal: new AbortController().signal,
+    });
+    expect(environment.chains['requested|0|0']).toEqual([0, 1, 2]);
+    expect(environment.faces.filter(face => 'data' in face).map(face => face.data)).toEqual([subset, subset, base]);
+  } finally { load.mockRestore(); }
+});
+
+test('hosted WOFF and WOFF2 keep their compressed faces and chains for Greek text', async () => {
+  const load = mock(async () => { throw new Error('unexpected base Latin load'); });
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue({
+    resolve: () => { throw new Error('hosted substitute requested'); },
+    resolveFamily: () => { throw new Error('hosted substitute requested'); },
+    resolveLastResort: () => { throw new Error('hosted substitute requested'); },
+    resolveScriptFallback: () => undefined,
+    resolveBaseLatin: () => load,
+  });
+  try {
+    for (const signature of [0x774f4646, 0x774f4632]) {
+      const data = new Uint8Array(16);
+      new DataView(data.buffer).setUint32(0, signature);
+      mockFetch = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(data));
+      const environment = await prepareWorkerFontEnvironment({
+        fonts: [{ family: 'Requested', src: '/face' }], embedded: [],
+        requirements: [{ key: 'requested|0|0', family: 'Requested', bold: false, italic: false, characters: ['Ω'] }],
+        families: ['Requested'], provider: undefined, compat: undefined, signal: new AbortController().signal,
+      });
+      expect(environment.chains['requested|0|0']).toEqual([0]);
+      expect(environment.faces).toEqual([{ family: 'Requested', data, weight: 'normal', style: 'normal' }]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      mockFetch.mockRestore();
+    }
+    expect(load).not.toHaveBeenCalled();
+  } finally { create.mockRestore(); }
+});
 
 test('hosted Calibri excludes implicit worker substitutes while unhosted Cambria keeps them', async () => {
   const custom = Uint8Array.of(3, 4);
