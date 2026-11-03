@@ -21,6 +21,7 @@ import {
   type XlsxPluginRowDecoration,
   type XlsxPluginRowDecorations,
   type XlsxPluginSelection,
+  type XlsxPointPosition,
 } from '../index';
 import { MOUNTED } from '../__fixtures__/mounted';
 
@@ -148,6 +149,8 @@ interface Book {
   gutter(): HTMLElement | null;
   row(row: number): HTMLElement | null;
   geometry(record: Decorator): XlsxPluginGeometry | null;
+  /** The editor API's point query; the default worker editor's API has none. */
+  point: ((clientX: number, clientY: number) => XlsxPointPosition | null) | null;
 }
 
 const a1 = (row: number, col: number) => `${String.fromCharCode(65 + col)}${row + 1}`;
@@ -190,7 +193,7 @@ async function mount(editor: Editor, records: readonly Decorator[],
       },
     };
   };
-  const loaded = async (book: Omit<Book, 'zoom' | 'edit'>) => {
+  const loaded = async (book: Omit<Book, 'zoom' | 'edit' | 'point'>) => {
     await book.until(() => records.every((record) => record.contexts.length > 0));
     await book.until(() => records.length === 0 ||
       records.some((record) => record.contexts.some((context) => context.geometry !== null)));
@@ -204,6 +207,7 @@ async function mount(editor: Editor, records: readonly Decorator[],
     await loaded(base);
     return {
       ...base,
+      point: (clientX, clientY) => api!.getPositionAtPoint(clientX, clientY),
       zoom: async (scale) => {
         await act(async () => { await api!.commands.execute('zoom', { scale }); });
         await base.until(() => records.some((record) => base.geometry(record)?.layout.zoom === scale));
@@ -266,6 +270,7 @@ async function mount(editor: Editor, records: readonly Decorator[],
     await loaded(base);
     return {
       ...base,
+      point: (clientX, clientY) => worker!.getPositionAtPoint(clientX, clientY),
       zoom: async (scale) => {
         await act(async () => { await worker!.commands.execute('zoom', { scale }); });
         await base.until(() => records.some((record) => base.geometry(record)?.layout.zoom === scale));
@@ -286,6 +291,7 @@ async function mount(editor: Editor, records: readonly Decorator[],
   await loaded(base);
   return {
     ...base,
+    point: null,
     zoom: async (scale) => {
       await act(async () => { await api.commands.execute('zoom', { scale }); });
       await base.until(() => records.some((record) => base.geometry(record)?.layout.zoom === scale));
@@ -559,32 +565,48 @@ for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
       expect(book.errors).toEqual([]);
     }, SLOW);
 
-    it('keeps plugin geometry and the grid hit test on the right cells beside the gutter', async () => {
+    it('keeps plugin geometry, point queries and the grid hit test on the right cells beside the gutter', async () => {
       let shown = false;
       const record = decorator('shift', (context) => shown ? dots([4])(context) : null);
       const book = await mount(editor, [record]);
+      const canvas = book.surface.querySelector('canvas')!;
+      const layer = book.view.getByTestId('plugin-overlays');
+      let left = 0;
+      const placed = () => ({ x: left, y: 0, left, top: 0, right: left + VIEWPORT.width, bottom: VIEWPORT.height,
+        width: VIEWPORT.width, height: VIEWPORT.height, toJSON: () => ({}) }) as DOMRect;
+      spyOn(canvas, 'getBoundingClientRect').mockImplementation(placed);
+      spyOn(layer, 'getBoundingClientRect').mockImplementation(placed);
       const target = { sheetId: SHEET, row: 4, col: 2 };
       await book.until(() => book.geometry(record)?.getCellRect(target) != null);
       const before = book.geometry(record)!.getCellRect(target)!;
+      const at = (clientX: number, clientY: number) => book.geometry(record)?.getPositionAtPoint?.(clientX, clientY) ?? null;
+      const edge = before.x + 2;
+      const middle = before.y + before.height / 2;
+      await book.until(() => at(edge, middle) !== null);
+      expect(at(edge, middle)).toMatchObject({ sheet: 0, sheetId: SHEET, row: 4, col: 2 });
+      if (book.point) expect(book.point(edge, middle)).toEqual({ sheet: 0, row: 4, col: 2 });
+
       shown = true;
       await book.bump(record);
       await book.until(() => book.row(4) !== null);
-      const canvas = book.surface.querySelector('canvas')!;
-      const layer = book.view.getByTestId('plugin-overlays');
+      left = 24;
       expect(layer.parentElement).toBe(canvas.parentElement);
       expect(book.surface.contains(layer)).toBe(true);
       expect(book.gutter()!.contains(canvas)).toBe(false);
       expect(book.surface.style.marginLeft).toBe('24px');
       await book.until(() => book.geometry(record)?.getCellRect(target) != null);
       expect(book.geometry(record)!.getCellRect(target)).toEqual(before);
-      const shifted = (element: Element) => spyOn(element, 'getBoundingClientRect').mockReturnValue(
-        { x: 24, y: 0, left: 24, top: 0, right: 24 + VIEWPORT.width, bottom: VIEWPORT.height,
-          width: VIEWPORT.width, height: VIEWPORT.height, toJSON: () => ({}) } as DOMRect);
-      shifted(canvas);
-      shifted(layer);
-      const rect = book.geometry(record)!.getCellRect(target)!;
-      expect(rect).toEqual(before);
-      fireEvent.mouseDown(canvas, { clientX: 24 + rect.x + rect.width / 2, clientY: rect.y + rect.height / 2, button: 0 });
+      await book.until(() => at(left + edge, middle) !== null);
+      expect(at(edge, middle)).toMatchObject({ sheet: 0, sheetId: SHEET, row: 4, col: 1 });
+      expect(at(left + edge, middle)).toMatchObject({ sheet: 0, sheetId: SHEET, row: 4, col: 2 });
+      const centre = [left + before.x + before.width / 2, middle] as const;
+      const layout = book.geometry(record)!.layout;
+      expect(at(...centre)).toEqual({ sheet: 0, sheetId: SHEET, row: 4, col: 2, version: layout.version, layoutId: layout.id });
+      if (book.point) {
+        expect(at(...centre)).toEqual({ ...book.point(...centre)!, sheetId: SHEET, version: layout.version, layoutId: layout.id });
+        expect(book.point(edge, middle)).toEqual({ sheet: 0, row: 4, col: 1 });
+      }
+      fireEvent.mouseDown(canvas, { clientX: centre[0], clientY: centre[1], button: 0 });
       fireEvent.mouseUp(window, { button: 0 });
       await book.until(() => last(record.selections)?.cells?.anchor.row === 4);
       expect(last(record.selections)?.cells).toMatchObject({ anchor: { row: 4, col: 2 }, focus: { row: 4, col: 2 } });
