@@ -118,7 +118,7 @@ function readEngine(
 }
 
 /** Whether the sheet catalog lets users change `sheet`; protected sheets take no merges. */
-function sheetEditable(handle: WorkbookHandle, sheet: number): boolean {
+export function sheetEditable(handle: WorkbookHandle, sheet: number): boolean {
   const catalog = handle.readCells({ ranges: [] });
   return !catalog.ok || catalog.sheets[sheet]?.editable !== false;
 }

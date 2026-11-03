@@ -17,8 +17,9 @@ import {
 } from './evaluate';
 import { XLSX_COMMAND_DESCRIPTORS } from './descriptors';
 import { inputRefusal, WorkerInputRefusal, type WorkerInputCoordinator } from './workerInputCoordinator';
+import { isSheetProtectedError } from './workerInputErrors';
 
-import type { XlsxEditorBridge } from './useXlsxCommands';
+import { sheetEditable, type XlsxEditorBridge } from './useXlsxCommands';
 import type {
   XlsxCommandArgs,
   XlsxCommandFailureCode,
@@ -199,10 +200,16 @@ export function createWorkerXlsxCommandBinding(
       ok: true,
       status: changed ? 'executed' : 'noop',
     });
+    const protectedSheet = (): XlsxCommandResult => {
+      const result = fail('sheet-protected');
+      if (!result.ok) current.refuse?.({ message: result.failure.message });
+      return result;
+    };
     const attempt = (work: () => XlsxCommandResult): XlsxCommandResult => {
       try {
         return work();
       } catch (error) {
+        if (isSheetProtectedError(error)) return protectedSheet();
         if (inputRefusal(error)) current.refuse?.({ message: (error as Error).message });
         else current.fail(error);
         return fail('command-failed');
@@ -306,6 +313,7 @@ export function createWorkerXlsxCommandBinding(
         if (!selection) return fail('cell-selection-required');
         const ops = mergeOps(selection.sheet, selection, bound.value);
         if (ops.length === 0) return done(false);
+        if (!sheetEditable(peer, selection.sheet)) return protectedSheet();
         return edit(() => edits.applyOps(ops));
       }
       case 'undo':
@@ -357,6 +365,7 @@ export function createWorkerXlsxCommandBinding(
             current.refreshProposals();
             return fail('proposal-stale');
           }
+          if (isSheetProtectedError(error)) return protectedSheet();
           current.fail(error);
           return fail('command-failed');
         }

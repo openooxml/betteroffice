@@ -1,5 +1,7 @@
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
-import { WorkerInputNotReadyError, WorkerInputRefusal } from './workerInputErrors';
+import {
+  isSheetProtectedError, SHEET_PROTECTED_MESSAGE, WorkerInputNotReadyError, WorkerInputRefusal,
+} from './workerInputErrors';
 export { WorkerInputNotReadyError, WorkerInputRefusal } from './workerInputErrors';
 import type { InputCoordinatorHooks, InputDraft, InputSeal } from './inputCoordinator';
 
@@ -42,6 +44,7 @@ export interface WorkerInputLease {
 
 export function inputRefusal(error: unknown): WorkerInputRefusal | null {
   if (error instanceof WorkerInputRefusal) return error;
+  if (isSheetProtectedError(error)) return new WorkerInputRefusal(SHEET_PROTECTED_MESSAGE, false, 'sheet-protected');
   if (error instanceof Error && (error.name === 'NotAllowedError' || error.name === 'NotFoundError' ||
     error instanceof RangeError || /32,?767|out of range|invalid (sheet|cell|input|formula)|(text|formula).*limit/i.test(error.message))) {
     return new WorkerInputRefusal(error.message);

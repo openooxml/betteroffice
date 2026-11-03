@@ -1,5 +1,8 @@
 import { XlsxCommandAdmissionError, type XlsxCommandAdmissionCode } from './createXlsxCommandStore';
 
+/** The English notice for an edit sheet protection refuses. */
+export const SHEET_PROTECTED_MESSAGE = 'This cell is on a protected sheet.';
+
 /** Whether an engine refusal names a locked cell or a protected sheet. */
 export function isSheetProtectedMessage(message: string): boolean {
   return /^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(message);
