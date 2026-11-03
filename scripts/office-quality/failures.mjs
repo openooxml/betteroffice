@@ -1,4 +1,5 @@
 const MAX_REASON = 160;
+const MAX_MESSAGE = 4000;
 
 export function failureRecords(sample) {
   const records = [];
@@ -13,20 +14,20 @@ export function failureRecords(sample) {
     if (outcome?.parse?.status === 'failed') add('parse', channel, 'parse', outcome.parse.error);
     else if (outcome?.roundtrip?.status === 'failed') add('roundtrip', channel, outcome.roundtrip.stage, outcome.roundtrip.error);
   }
-  if (sample.roundtrip_probe?.status === 'failed') add('probe', null, 'probe', sample.roundtrip_probe.error);
+  if (sample.roundtrip_probe && sample.roundtrip_probe.status !== 'ok') add('probe', null, 'probe', sample.roundtrip_probe.error);
   return records;
 }
 
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export function normalizeReason(message, secrets = []) {
-  let text = String(message ?? '');
+  let text = String(message ?? '').slice(0, MAX_MESSAGE);
   const inner = text.match(/"error"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (inner) text = inner[1];
   for (const secret of [...secrets].filter(Boolean).sort((a, b) => b.length - a.length))
     text = text.replace(new RegExp(escape(secret), 'g'), '<sample>');
   text = text
-    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>')
+    .replace(/\b[a-z][a-z0-9+.-]{0,31}:\/\/\S+/gi, '<url>')
     .replace(/(^|[\s"'(=])(?:[A-Za-z]:)?(?:\/|\\)[^\s"')]+/g, '$1<path>')
     .replace(/\b[a-f0-9]{7,}\b/gi, '<hash>')
     .replace(/\d+(?:\.\d+)?/g, 'N')
@@ -39,9 +40,9 @@ export function normalizeReason(message, secrets = []) {
 const order = (a, b) => b.count - a.count || a.key.localeCompare(b.key);
 
 export function failureClusters(report) {
-  const secrets = report.samples.flatMap((sample) => [sample.id, sample.source_sha256, sample.metadata_url]);
   const clusters = new Map();
   for (const sample of report.samples) {
+    const secrets = [sample.id, sample.source_sha256, sample.metadata_url];
     for (const record of failureRecords(sample)) {
       const reason = normalizeReason(record.error, secrets);
       const key = JSON.stringify([sample.format, record.area, record.channel, record.stage, reason]);
