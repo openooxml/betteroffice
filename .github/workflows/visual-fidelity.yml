@@ -33,6 +33,11 @@ on:
         default: false
         required: false
         type: boolean
+      report_only:
+        description: Keep the results in this run's artifacts; never commit the README or publish renders
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
@@ -100,6 +105,12 @@ jobs:
         if: inputs.corpus_origin != '' && inputs.publish_renders
         run: |
           echo "::error::A custom corpus origin cannot publish renders: the public viewer reads references from the default corpus. Re-run with publish_renders off."
+          exit 1
+
+      - name: Keep report-only runs off the public render viewer
+        if: inputs.report_only && inputs.publish_renders
+        run: |
+          echo "::error::A report-only run cannot publish renders. Re-run with publish_renders off."
           exit 1
 
       - name: Keep private runs aggregate-only
@@ -1295,6 +1306,7 @@ jobs:
           path: |
             ${{ runner.temp }}/fidelity-report/report.json
             ${{ runner.temp }}/fidelity-report/section.md
+            ${{ runner.temp }}/fidelity-report/aggregate.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1302,7 +1314,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: visual-fidelity
-          path: ${{ runner.temp }}/fidelity-report/section.md
+          path: |
+            ${{ runner.temp }}/fidelity-report/section.md
+            ${{ runner.temp }}/fidelity-report/aggregate.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1311,7 +1325,7 @@ jobs:
         env: *private-write
         run: |
           cd "$RUNNER_TEMP/fidelity-report"
-          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity report.json section.md
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity report.json section.md aggregate.json
 
       - name: Keep the private logs
         if: always() && inputs.private_corpus
@@ -1333,7 +1347,7 @@ jobs:
         run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
-        if: ${{ !inputs.private_corpus }}
+        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
         run: |
           python3 - <<'PY'
           import os
@@ -1356,7 +1370,7 @@ jobs:
 
       - name: Detect a changed report
         id: changed
-        if: ${{ !inputs.private_corpus }}
+        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
         run: |
           if git diff --quiet -- README.md; then
             echo "value=false" >> "$GITHUB_OUTPUT"

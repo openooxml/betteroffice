@@ -182,7 +182,8 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
   expect(guard.run).toContain('exit 1');
   expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
   const gated = Object.values<any>(workflow.jobs).flatMap((job) => job.steps ?? [])
-    .filter((step: any) => step !== guard && String(step.if ?? '').includes('publish_renders'));
+    .filter((step: any) => step !== guard && step.name !== 'Keep report-only runs off the public render viewer' &&
+      String(step.if ?? '').includes('publish_renders'));
   expect(gated.length).toBe(6);
   for (const step of gated) expect(String(step.if).startsWith(RENDERS)).toBe(true);
   const publishing = publish.steps.find((step: any) => String(step.run ?? '').includes('publish-renders.mjs'));
