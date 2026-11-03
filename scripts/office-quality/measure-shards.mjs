@@ -33,8 +33,13 @@ export function measureShards(plan, budget = MEASURE_BUDGET_SECONDS) {
   return shards;
 }
 
+export const MAX_MATRIX_JOBS = 256;
+
 export function measureMatrix(plan) {
-  return measureShards(plan).map(({ format, shard }) => ({ format, shard }));
+  const shards = measureShards(plan);
+  if (shards.length > MAX_MATRIX_JOBS)
+    throw new Error(`Measurement needs ${shards.length} shards; one workflow matrix holds ${MAX_MATRIX_JOBS}`);
+  return shards.map(({ format, shard }) => ({ format, shard }));
 }
 
 export function measureShard(plan, format, shard) {
