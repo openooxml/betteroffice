@@ -598,9 +598,29 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
   const formatting = format(attributes);
   return {
     type: 'run',
+    ...runPropertyChanges(attributes, format),
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
     content: runContentForText(text, () => directFormatting(attributes)),
   };
+}
+
+function runPropertyChanges(attributes: Attrs, format: RunFormatter): Pick<Run, 'propertyChanges'> {
+  if (!Array.isArray(attributes.rPrChange) || attributes.rPrChange.length === 0) return {};
+  const changes = attributes.rPrChange.map((raw) => {
+    const change = asObject(raw);
+    if (!change) return raw;
+    const previous = asObject(change.previousAttributes);
+    const info = asObject(change.info);
+    const generated = typeof info?.id === 'string' && !Number.isFinite(Number(info.id));
+    return {
+      type: 'runPropertyChange',
+      ...change,
+      ...(previous && generated ? { previousFormatting: format({
+        ...previous, _sourceRunFormatting: attributes._sourceRunFormatting,
+      }) } : {}),
+    };
+  });
+  return { propertyChanges: propertyChanges(changes) as Run['propertyChanges'] };
 }
 
 function appendTextRun(target: Run, source: Run): void {
@@ -975,7 +995,7 @@ function replayedRunProperties(payload: Attrs, attributes: Attrs, format: RunFor
   }
   return {
     formatting: formatting as TextFormatting,
-    ...(Array.isArray(source.propertyChanges) ? { propertyChanges: source.propertyChanges as Run['propertyChanges'] } : {}),
+    ...runPropertyChanges(attributes, format),
   };
 }
 
@@ -1197,6 +1217,15 @@ function ordinaryContentForItem(
   recovery: ChartRecovery,
   format: RunFormatter
 ): ParagraphContent | null {
+  const content = inlineContentForItem(item, recovery, format);
+  return content?.type === 'run' ? { ...content, ...runPropertyChanges(item.attributes, format) } : content;
+}
+
+function inlineContentForItem(
+  item: InlineItem,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): ParagraphContent | null {
   if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
@@ -1243,6 +1272,7 @@ function tabRun(attributes: Attrs, format: RunFormatter): Run {
   const formatting = format(attributes);
   return {
     type: 'run',
+    ...runPropertyChanges(attributes, format),
     content: [{ type: 'tab' }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };
@@ -1268,9 +1298,13 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else child = { type: 'run', content: [] };
 
   if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
+  if (child.type === 'run') Object.assign(child, runPropertyChanges(item.attributes, format));
   const hyperlink = createHyperlink(item.attributes);
   if (hyperlink && (child.type === 'run' || child.type === 'mathEquation' || child.type === 'inlineSdt' || child.type === 'simpleField' || child.type === 'complexField')) {
-    if (child.type === 'run') hyperlink.children.push(child);
+    if (child.type === 'run') {
+    Object.assign(child, runPropertyChanges(item.attributes, format));
+    hyperlink.children.push(child);
+  }
     else hyperlink.structuredChildren = [child];
     child = hyperlink;
   }
@@ -1536,6 +1570,7 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
     if (BOOLEAN_MARKS.has(name)) attrs[name] = true;
     else if (name === 'boldCs' || name === 'italicCs') attrs[name] = value.value;
     else if (name === 'highlight') attrs.highlight = value.color;
+    else if (name === 'rPrChange') attrs.rPrChange = value.changes;
     else if (name === 'insertion' || name === 'deletion') {
       attrs[name === 'insertion' ? 'ins' : 'del'] = dropNulls({
         id: value.revisionId,

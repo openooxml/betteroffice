@@ -641,6 +641,13 @@ impl UnitRecorder {
                     record_decision(value);
                 }
             }
+            if let Some(Any::Array(changes)) =
+                attribute(diff.attributes.as_deref(), crate::format::RPR_CHANGE)
+            {
+                for change in changes.iter() {
+                    record_decision(change);
+                }
+            }
         }
         if !window.mutated && (pilcrow || standalone) {
             let has_reads = READS.with(|reads| {

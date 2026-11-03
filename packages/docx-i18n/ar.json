@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "تم إدراج فاصل فقرة",
     "paragraphMarkDeleted": "تم حذف فاصل فقرة",
     "paragraphPropertiesChanged": "تم تغيير خصائص الفقرة",
+    "runPropertiesChanged": "تم تغيير تنسيق النص",
     "rowInserted": "تم إدراج صف",
     "rowDeleted": "تم حذف صف",
     "rowPropertiesChanged": "تم تغيير خصائص الصف",
