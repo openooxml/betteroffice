@@ -12,7 +12,7 @@ use crate::inline::{
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
 use crate::paragraph::{
-    DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph,
+    DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph_with_story_context,
 };
 use crate::relationships::RelationshipMap;
 use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
@@ -119,6 +119,12 @@ pub struct StoryParser<'a, 'limits> {
     pub part: &'a str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct StoryContext {
+    pub in_header_footer: bool,
+    pub watermark_claimed_separately: bool,
+}
+
 pub const PREVIEW_MIN_BLOCKS: usize = 32;
 
 pub(crate) struct LegacyBodyCut {
@@ -161,6 +167,31 @@ impl LegacyBodyCut {
 }
 
 impl StoryParser<'_, '_> {
+    pub(crate) fn parse_header_footer_blocks(
+        &mut self,
+        parent: &XmlElement,
+        is_header: bool,
+    ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_with_context(
+            parent,
+            0,
+            StoryContext {
+                in_header_footer: true,
+                watermark_claimed_separately: is_header,
+            },
+        )
+    }
+
+    fn parse_blocks_with_context(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        context: StoryContext,
+    ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_until_with_context(parent, depth, context, None, None, None, None)
+            .map(|(content, _, _)| content)
+    }
+
     pub fn parse_blocks(
         &mut self,
         parent: &XmlElement,
@@ -199,6 +230,31 @@ impl StoryParser<'_, '_> {
         parent: &XmlElement,
         depth: usize,
         in_header_footer: bool,
+        limit: Option<usize>,
+        read_limit: Option<usize>,
+        paragraph_budget: Option<usize>,
+        legacy_partial: Option<bool>,
+    ) -> Result<(Vec<BlockContent>, usize, bool), ParseError> {
+        self.parse_blocks_until_with_context(
+            parent,
+            depth,
+            StoryContext {
+                in_header_footer,
+                watermark_claimed_separately: in_header_footer,
+            },
+            limit,
+            read_limit,
+            paragraph_budget,
+            legacy_partial,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_blocks_until_with_context(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        context: StoryContext,
         limit: Option<usize>,
         read_limit: Option<usize>,
         paragraph_budget: Option<usize>,
@@ -294,7 +350,7 @@ impl StoryParser<'_, '_> {
                         charts: self.charts,
                         smart_art: &mut *self.smart_art,
                     };
-                    let mut paragraph = parse_paragraph(
+                    let mut paragraph = parse_paragraph_with_story_context(
                         child,
                         self.relationships,
                         self.theme,
@@ -305,22 +361,16 @@ impl StoryParser<'_, '_> {
                         self.budget,
                         self.ids,
                         Some(&mut drawing),
-                        in_header_footer,
+                        context,
                         depth,
                     )?;
                     self.enrich_paragraph_text_boxes(&mut paragraph, child, depth)?;
                     BlockContent::Paragraph(Arc::new(paragraph))
                 }
-                "tbl" => BlockContent::Table(Arc::new(self.parse_table(
-                    child,
-                    depth,
-                    in_header_footer,
-                )?)),
-                "sdt" => BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(
-                    child,
-                    depth,
-                    in_header_footer,
-                )?)),
+                "tbl" => BlockContent::Table(Arc::new(self.parse_table(child, depth, context)?)),
+                "sdt" => {
+                    BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(child, depth, context)?))
+                }
                 "oMath" | "oMathPara" => {
                     self.budget.charge_paragraph(self.part)?;
                     BlockContent::Paragraph(Arc::new(math_paragraph(child)))
@@ -380,12 +430,12 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<BlockSdt, ParseError> {
         let next_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(next_depth, self.part)?;
         let nested = match element.child("w", "sdtContent") {
-            Some(container) => self.parse_blocks(container, next_depth, in_header_footer)?,
+            Some(container) => self.parse_blocks_with_context(container, next_depth, context)?,
             None => Vec::new(),
         };
         Ok(BlockSdt {
@@ -403,7 +453,7 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<Table, ParseError> {
         self.budget.charge_table(self.part)?;
         let properties = element.child("w", "tblPr");
@@ -422,7 +472,7 @@ impl StoryParser<'_, '_> {
                 pending.push(bookmark_source(child));
             } else if child.matches_name("w", "tr") {
                 self.budget.charge_table_row(self.part)?;
-                let mut row = self.parse_table_row(child, depth, in_header_footer)?;
+                let mut row = self.parse_table_row(child, depth, context)?;
                 row.leading_bookmarks = take_bookmarks(&mut pending);
                 table.rows.push(row);
             }
@@ -436,7 +486,7 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<TableRow, ParseError> {
         let properties = element.child("w", "trPr");
         let formatting = parse_document_table_row_properties(properties);
@@ -465,7 +515,7 @@ impl StoryParser<'_, '_> {
                 pending.push(bookmark_source(child));
             } else if child.matches_name("w", "tc") {
                 self.budget.charge_table_cell(self.part)?;
-                let mut cell = self.parse_table_cell(child, depth, in_header_footer)?;
+                let mut cell = self.parse_table_cell(child, depth, context)?;
                 cell.leading_bookmarks = take_bookmarks(&mut pending);
                 row.cells.push(cell);
             }
@@ -478,13 +528,13 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<TableCell, ParseError> {
         let properties = element.child("w", "tcPr");
         let formatting = parse_document_table_cell_properties(properties);
         let cell_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(cell_depth, self.part)?;
-        let mut content = self.parse_blocks(element, cell_depth, in_header_footer)?;
+        let mut content = self.parse_blocks_with_context(element, cell_depth, context)?;
         if content.iter().all(is_bookmark_block) {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
