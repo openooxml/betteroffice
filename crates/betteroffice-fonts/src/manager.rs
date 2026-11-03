@@ -145,10 +145,9 @@ impl FontManager {
                 packs: Some(options.packs.clone()),
             });
         }
-        Ok(Self {
-            provider: source.provider()?,
-            packs: None,
-        })
+        let provider = source.provider()?;
+        let packs = provider.as_ref().and_then(|provider| provider.bundled_packs());
+        Ok(Self { provider, packs })
     }
 
     pub fn resolve(
@@ -306,6 +305,10 @@ pub trait FontProvider: Send + Sync {
         italic: bool,
         office: LastResortOffice,
     ) -> FontFaceHandle;
+    #[doc(hidden)]
+    fn bundled_packs(&self) -> Option<Vec<FontPack>> {
+        None
+    }
 }
 
 impl FontSource {
@@ -397,22 +400,19 @@ impl BundledFonts {
                     })?
                     .join(directory);
             }
-            let path = directory.join("manifest.json");
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => return Err(FontError::Io { path, source }),
+            let Ok(bytes) = std::fs::read(directory.join("manifest.json")) else {
+                continue;
             };
             let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
                 continue;
             };
+            let version = manifest.get("version").and_then(serde_json::Value::as_str);
             if !catalog()
                 .faces
                 .iter()
                 .filter(|face| face.pack == pack)
                 .all(|face| {
-                    manifest.get("version").and_then(serde_json::Value::as_str)
-                        == Some(face.version.as_str())
+                    version == Some(face.version.as_str()) && directory.join(&face.file).is_file()
                 })
             {
                 continue;
@@ -500,6 +500,10 @@ impl FontProvider for BundledFonts {
         let mut handle = self.handle(choice.face);
         handle.only_if_primary_fails = choice.only_if_primary_fails;
         handle
+    }
+
+    fn bundled_packs(&self) -> Option<Vec<FontPack>> {
+        Some(self.options.packs.clone())
     }
 }
 

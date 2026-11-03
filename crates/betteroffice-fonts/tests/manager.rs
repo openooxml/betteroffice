@@ -87,6 +87,52 @@ fn flat_pack_directories_skip_missing_or_mismatched_manifests() {
 }
 
 #[test]
+fn flat_pack_directories_skip_unreadable_manifests_and_incomplete_packs() {
+    let unreadable = tempfile::tempdir().unwrap();
+    deploy_flat(unreadable.path());
+    std::fs::remove_file(unreadable.path().join("manifest.json")).unwrap();
+    std::fs::create_dir(unreadable.path().join("manifest.json")).unwrap();
+    let incomplete = tempfile::tempdir().unwrap();
+    deploy_flat(incomplete.path());
+    let face = resolve_metric_compat_face("Calibri", true, false).unwrap();
+    std::fs::remove_file(incomplete.path().join(&face.file)).unwrap();
+    for root in [unreadable.path(), incomplete.path()] {
+        let provider =
+            BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.into())]).unwrap();
+        assert!(provider.resolve_family("Calibri", false, false).is_none());
+    }
+}
+
+#[test]
+fn provider_managers_offer_only_faces_of_found_packs() {
+    let none = BundledFonts::from_pack_directories(Vec::new()).unwrap();
+    let manager =
+        FontManager::new(&FontSource::Provider(Arc::new(none)), FontLoading::OnDemand).unwrap();
+    for (family, scripts) in [("Calibri", vec![]), ("MS Mincho", vec!["Hani".to_string()])] {
+        assert!(manager.resolve(family, false, false, &scripts, LastResortOffice::Word).is_empty());
+    }
+    let root = tempfile::tempdir().unwrap();
+    deploy_flat(root.path());
+    let latin =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();
+    let manager =
+        FontManager::new(&FontSource::Provider(Arc::new(latin)), FontLoading::OnDemand).unwrap();
+    for family in ["Calibri", "MS Mincho", "Unknown Family"] {
+        let faces = manager.resolve(
+            family,
+            false,
+            false,
+            &["Hani".to_string(), "Deva".to_string()],
+            LastResortOffice::Word,
+        );
+        assert!(family != "Calibri" || !faces.is_empty());
+        for face in faces {
+            assert!(face.load().is_ok(), "{} failed to load", face.family);
+        }
+    }
+}
+
+#[test]
 fn flat_pack_directories_reject_duplicate_packs_and_empty_paths() {
     let root = tempfile::tempdir().unwrap();
     assert!(matches!(
