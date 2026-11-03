@@ -1,4 +1,7 @@
-import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE } from './roundtrip.mjs';
 
@@ -324,4 +327,50 @@ test('every per-document artifact has a private bundle of the same name and dire
   for (const job of ['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'publish'])
     expect(stores.some((store) => store.job === job && store.mode === 'put' && store.name.startsWith('logs-') &&
       store.step.if === 'always() && inputs.private_corpus')).toBe(true);
+});
+
+test('private runs check out only the main commit they were dispatched from', () => {
+  const checkout = prepare.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+  expect(checkout.with.ref).toBe('${{ inputs.private_corpus && github.sha || inputs.branch }}');
+  const pin = prepare.steps.find((step: any) => step.id === 'source');
+  expect(pin.env).toEqual({ TARGET_BRANCH: '${{ inputs.branch }}', PRIVATE_CORPUS: '${{ inputs.private_corpus }}' });
+  const publishCheckout = publish.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+  expect(publishCheckout.with.ref).toBe('${{ inputs.private_corpus && needs.prepare.outputs.source-sha || inputs.branch }}');
+  for (const [name, job] of Object.entries<any>(workflow.jobs)) {
+    if (job.environment === undefined || name === 'prepare' || name === 'publish') continue;
+    for (const step of job.steps ?? [])
+      if (step.uses?.startsWith('actions/checkout@'))
+        expect({ name, ref: step.with?.ref }).toEqual({ name, ref: '${{ needs.prepare.outputs.source-sha }}' });
+  }
+});
+
+test('the pin step refuses private runs on another branch or commit', async () => {
+  const pin = prepare.steps.find((step: any) => step.id === 'source');
+  const root = await mkdtemp(join(tmpdir(), 'pin-step-'));
+  const git = (...args: string[]) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: root, encoding: 'utf8' });
+  try {
+    git('init', '-q');
+    git('commit', '-q', '--allow-empty', '-m', 'one');
+    const first = git('rev-parse', 'HEAD').stdout.trim();
+    git('commit', '-q', '--allow-empty', '-m', 'two');
+    const head = git('rev-parse', 'HEAD').stdout.trim();
+    const run = (branch: string, sha: string) => {
+      const output = join(root, 'output');
+      const result = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', pin.run], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH, TARGET_BRANCH: branch, PRIVATE_CORPUS: 'true', GITHUB_SHA: sha, GITHUB_OUTPUT: output },
+      });
+      const written = spawnSync('cat', [output], { encoding: 'utf8' }).stdout;
+      spawnSync('rm', ['-f', output]);
+      return { status: result.status, refused: result.stdout.includes('::error::'), written };
+    };
+    expect(run('main', head)).toEqual({ status: 0, refused: false, written: `sha=${head}\n` });
+    expect(run('', head)).toEqual({ status: 0, refused: false, written: `sha=${head}\n` });
+    expect(run('feature', head)).toEqual({ status: 1, refused: true, written: '' });
+    expect(run('main-copy', head)).toEqual({ status: 1, refused: true, written: '' });
+    expect(run('main', first)).toEqual({ status: 1, refused: true, written: '' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

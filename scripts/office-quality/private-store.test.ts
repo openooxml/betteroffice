@@ -17,10 +17,11 @@ const ENV = {
   PRIVATE_R2_WRITE_SECRET: 'write-secret',
 };
 
-function bucket({ pageSize = 1000, transient = 0 } = {}) {
+function bucket({ pageSize = 1000, transient = 0, truncated = 0 } = {}) {
   const objects = new Map<string, { body: Buffer; meta: string }>();
   const calls: { method: string; url: string; credential: string }[] = [];
   let failures = transient;
+  let cuts = truncated;
   const request = async (url: string, init: any) => {
     const credential = init.headers.authorization.match(/Credential=([^/]+)\//)[1];
     calls.push({ method: init.method, url, credential });
@@ -36,6 +37,12 @@ function bucket({ pageSize = 1000, transient = 0 } = {}) {
       return new Response(null, { status: 200 });
     }
     expect(credential).toBe('read-id');
+    if (cuts-- > 0) return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('<?xml'));
+        controller.error(new Error('connection reset'));
+      },
+    }), { headers: { 'x-amz-meta-sha256': 'f'.repeat(64) } });
     if (target.searchParams.get('list-type') === '2') {
       const prefix = target.searchParams.get('prefix') ?? '';
       const keys = [...objects.keys()].filter((key) => key.startsWith(prefix)).sort();
@@ -158,5 +165,30 @@ test('archive failures name the bundle and nothing inside it', async () => {
     await createStore(ENV, { request, sleep: noSleep }).put('plan', ['plan.json'], { cwd: root });
     const unpack = await store.get('plan', join(root, 'leakprobe-sample-x/out')).catch((error) => error);
     expect(unpack.message).toBe('Unpacking private bundle plan failed');
+  });
+});
+
+test('a response that fails mid-body is requested again, up to the attempt limit', async () => {
+  await withTemp(async (root) => {
+    await writeFile(join(root, 'plan.json'), '{"plan":1}');
+    const object = bucket({ truncated: 2 });
+    const store = createStore(ENV, { request: object.request, sleep: noSleep });
+    await store.put('plan', ['plan.json'], { cwd: root });
+    expect(await store.get('plan', join(root, 'one'))).toEqual([{ name: 'plan', bytes: expect.any(Number) }]);
+    expect(await readFile(join(root, 'one/plan.json'), 'utf8')).toBe('{"plan":1}');
+    expect(object.calls.map((call) => call.method)).toEqual(['PUT', 'GET', 'GET', 'GET']);
+
+    const listing = bucket({ truncated: 1 });
+    const patterned = createStore(ENV, { request: listing.request, sleep: noSleep });
+    await patterned.put('docx-benchmark-report-0', ['plan.json'], { cwd: root });
+    expect((await patterned.get('docx-benchmark-report-*', join(root, 'parts'))).map((item) => item.name)).toEqual(['docx-benchmark-report-0']);
+    expect(listing.calls.filter((call) => call.url.includes('list-type=2')).length).toBe(2);
+
+    const exhausted = bucket({ truncated: 5 });
+    const failing = createStore(ENV, { request: exhausted.request, sleep: noSleep });
+    await failing.put('plan', ['plan.json'], { cwd: root });
+    const failure = await failing.get('plan', join(root, 'two')).catch((error) => error);
+    expect(failure.message).toStartWith('Private bucket GET failed');
+    expect(exhausted.calls.filter((call) => call.method === 'GET').length).toBe(5);
   });
 });
