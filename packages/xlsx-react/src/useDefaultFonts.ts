@@ -25,7 +25,12 @@ export function useDefaultFonts(
       current.painter = createDefaultFontPainter(decoder, () => repaintRef.current(),
         { onSettled: () => settledRef.current?.(), remoteFonts: JSON.parse(remote) as RemoteFontProvider });
       if (current.last) current.painter.adopt(current.last);
-    }, () => {});
+    }, () => {
+      if (state.current !== current) return;
+      state.current = undefined;
+      repaintRef.current();
+      settledRef.current?.();
+    });
     return () => {
       current.painter?.dispose();
       if (state.current === current) state.current = undefined;

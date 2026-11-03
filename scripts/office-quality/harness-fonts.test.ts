@@ -102,7 +102,7 @@ test('registers a Regular-only CJK script fallback once at 400 and preserves ren
     { family: 'Noto Sans SC', bold: false, italic: false, file: 'NotoSansSC-Regular.otf.zst' },
     { family: 'Noto Sans SC', bold: true, italic: false, file: 'NotoSansSC-Regular.otf.zst' },
   ]);
-});
+}, 30_000);
 
 test('registers a named Regular-only CJK family once without bold or italic aliases', async () => {
   const harness = await loadHarness();

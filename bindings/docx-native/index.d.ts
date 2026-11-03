@@ -153,6 +153,7 @@ export declare class EditSession {
   paragraph_id_count(story: string, paraId: string): number
   paragraph_identities(): string
   prime_save_seed_states(paragraphs: number, inflated: number): boolean
+  prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
   paragraph_save_plan(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number

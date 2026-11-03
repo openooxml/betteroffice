@@ -6,6 +6,7 @@ import {
   selectPlanSamples,
   validatePlan,
 } from './plan.mjs';
+import { MAX_SAMPLES } from './samples.mjs';
 
 const hash = 'a'.repeat(40);
 const assetHash = 'b'.repeat(64);
@@ -71,7 +72,7 @@ test('rejects bad revisions, metadata, duplicate samples, and format lists', () 
     { ...input(), samples: [input().samples[0], input().samples[0]] },
     {
       ...input(),
-      samples: Array.from({ length: 1001 }, (_, index) => ({
+      samples: Array.from({ length: MAX_SAMPLES + 1 }, (_, index) => ({
         id: `sample-${index}`,
         format: 'pptx',
         metadata: metadata(),

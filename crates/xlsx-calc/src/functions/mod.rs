@@ -24,6 +24,7 @@ pub mod math;
 pub mod math_extra;
 pub mod securities;
 pub(crate) mod special;
+pub mod statistics_extra;
 pub mod stats;
 pub mod text;
 pub mod text_extra;
@@ -359,6 +360,32 @@ pub enum Func {
     FTest,
     ConfidenceNorm,
     ConfidenceT,
+    BinomDist,
+    BinomDistRange,
+    BinomInv,
+    NegBinomDist,
+    NegBinomDistOld,
+    HypGeomDist,
+    HypGeomDistOld,
+    PoissonDist,
+    ExponDist,
+    WeibullDist,
+    Fisher,
+    FisherInv,
+    Standardize,
+    Permut,
+    Permutationa,
+    Steyx,
+    SkewP,
+    VarA,
+    VarPA,
+    StdevPA,
+    PercentileExc,
+    QuartileExc,
+    PercentRankInc,
+    PercentRankExc,
+    Prob,
+    ZTest,
     Bin2Dec,
     Bin2Hex,
     Bin2Oct,
@@ -434,6 +461,67 @@ pub(crate) fn bare_name(name: &str) -> &str {
         Some(rest) => strip_ascii_prefix(rest, "_xlws.").unwrap_or(rest),
         None => name,
     }
+}
+
+/// excel built-ins whose result needs a live service, data connection, add-in
+/// or host, so no offline engine can compute them.
+const UNCOMPUTABLE: [&str; 18] = [
+    "CALL",
+    "COPILOT",
+    "CUBEKPIMEMBER",
+    "CUBEMEMBER",
+    "CUBEMEMBERPROPERTY",
+    "CUBERANKEDMEMBER",
+    "CUBESET",
+    "CUBESETCOUNT",
+    "CUBEVALUE",
+    "DETECTLANGUAGE",
+    "FIELDVALUE",
+    "IMAGE",
+    "PY",
+    "REGISTER.ID",
+    "RTD",
+    "STOCKHISTORY",
+    "TRANSLATE",
+    "WEBSERVICE",
+];
+
+/// the name to report for a call no offline engine can compute: one of
+/// [`UNCOMPUTABLE`], or an add-in (`_xll.`) or user-defined (`_xludf.`)
+/// function as written. `None` for any other name.
+pub(crate) fn uncomputable(name: &str) -> Option<String> {
+    let mut bare = bare_name(name);
+    if ["_xll.", "_xludf."]
+        .iter()
+        .any(|prefix| strip_ascii_prefix(bare, prefix).is_some())
+    {
+        return Some(bare.to_owned());
+    }
+    while let Some((_, rest)) =
+        strip_ascii_prefix(bare, "_xl").and_then(|rest| rest.split_once('.'))
+    {
+        bare = rest;
+    }
+    UNCOMPUTABLE
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(bare))
+        .map(|known| (*known).to_owned())
+}
+
+/// whether a formula's text may call a function [`uncomputable`] names: a
+/// cheap filter that can say yes for text that does not. the parser lets
+/// whitespace stand between a name and its `(`, so this does too.
+pub fn may_call_uncomputable(formula: &str) -> bool {
+    let upper = formula.to_ascii_uppercase();
+    upper.contains("_XLL.")
+        || upper.contains("_XLUDF.")
+        || UNCOMPUTABLE.iter().any(|name| {
+            upper.match_indices(name).any(|(at, _)| {
+                upper[at + name.len()..]
+                    .trim_start_matches([' ', '\t', '\n', '\r'])
+                    .starts_with('(')
+            })
+        })
 }
 
 fn strip_ascii_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
@@ -526,7 +614,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "ATAN2" => Func::Atan2,
         "DEGREES" => Func::Degrees,
         "RADIANS" => Func::Radians,
-        "CORREL" => Func::Correl,
+        "CORREL" | "PEARSON" => Func::Correl,
         "RSQ" => Func::Rsq,
         "COVAR" | "COVARIANCE.P" => Func::CovarianceP,
         "COVARIANCE.S" => Func::CovarianceS,
@@ -726,6 +814,32 @@ pub fn resolve(name: &str) -> Option<Func> {
         "F.TEST" | "FTEST" => Func::FTest,
         "CONFIDENCE.NORM" | "CONFIDENCE" => Func::ConfidenceNorm,
         "CONFIDENCE.T" => Func::ConfidenceT,
+        "BINOM.DIST" | "BINOMDIST" => Func::BinomDist,
+        "BINOM.DIST.RANGE" => Func::BinomDistRange,
+        "BINOM.INV" | "CRITBINOM" => Func::BinomInv,
+        "NEGBINOM.DIST" => Func::NegBinomDist,
+        "NEGBINOMDIST" => Func::NegBinomDistOld,
+        "HYPGEOM.DIST" => Func::HypGeomDist,
+        "HYPGEOMDIST" => Func::HypGeomDistOld,
+        "POISSON.DIST" | "POISSON" => Func::PoissonDist,
+        "EXPON.DIST" | "EXPONDIST" => Func::ExponDist,
+        "WEIBULL.DIST" | "WEIBULL" => Func::WeibullDist,
+        "FISHER" => Func::Fisher,
+        "FISHERINV" => Func::FisherInv,
+        "STANDARDIZE" => Func::Standardize,
+        "PERMUT" => Func::Permut,
+        "PERMUTATIONA" => Func::Permutationa,
+        "STEYX" => Func::Steyx,
+        "SKEW.P" => Func::SkewP,
+        "VARA" => Func::VarA,
+        "VARPA" => Func::VarPA,
+        "STDEVPA" => Func::StdevPA,
+        "PERCENTILE.EXC" => Func::PercentileExc,
+        "QUARTILE.EXC" => Func::QuartileExc,
+        "PERCENTRANK.INC" | "PERCENTRANK" => Func::PercentRankInc,
+        "PERCENTRANK.EXC" => Func::PercentRankExc,
+        "PROB" => Func::Prob,
+        "Z.TEST" | "ZTEST" => Func::ZTest,
         "BIN2DEC" => Func::Bin2Dec,
         "BIN2HEX" => Func::Bin2Hex,
         "BIN2OCT" => Func::Bin2Oct,
@@ -1123,6 +1237,32 @@ impl Func {
             Func::FTest => distributions::f_test(args, ctx),
             Func::ConfidenceNorm => distributions::confidence_norm(args, ctx),
             Func::ConfidenceT => distributions::confidence_t(args, ctx),
+            Func::BinomDist => statistics_extra::binom_dist(args, ctx),
+            Func::BinomDistRange => statistics_extra::binom_dist_range(args, ctx),
+            Func::BinomInv => statistics_extra::binom_inv(args, ctx),
+            Func::NegBinomDist => statistics_extra::negbinom_dist(args, ctx),
+            Func::NegBinomDistOld => statistics_extra::negbinomdist(args, ctx),
+            Func::HypGeomDist => statistics_extra::hypgeom_dist(args, ctx),
+            Func::HypGeomDistOld => statistics_extra::hypgeomdist(args, ctx),
+            Func::PoissonDist => statistics_extra::poisson_dist(args, ctx),
+            Func::ExponDist => statistics_extra::expon_dist(args, ctx),
+            Func::WeibullDist => statistics_extra::weibull_dist(args, ctx),
+            Func::Fisher => statistics_extra::fisher(args, ctx),
+            Func::FisherInv => statistics_extra::fisherinv(args, ctx),
+            Func::Standardize => statistics_extra::standardize(args, ctx),
+            Func::Permut => statistics_extra::permut(args, ctx),
+            Func::Permutationa => statistics_extra::permutationa(args, ctx),
+            Func::Steyx => statistics_extra::steyx(args, ctx),
+            Func::SkewP => statistics_extra::skew_p(args, ctx),
+            Func::VarA => statistics_extra::vara(args, ctx),
+            Func::VarPA => statistics_extra::varpa(args, ctx),
+            Func::StdevPA => statistics_extra::stdevpa(args, ctx),
+            Func::PercentileExc => statistics_extra::percentile_exc_fn(args, ctx),
+            Func::QuartileExc => statistics_extra::quartile_exc(args, ctx),
+            Func::PercentRankInc => statistics_extra::percentrank_inc(args, ctx),
+            Func::PercentRankExc => statistics_extra::percentrank_exc(args, ctx),
+            Func::Prob => statistics_extra::prob(args, ctx),
+            Func::ZTest => statistics_extra::z_test(args, ctx),
             Func::Bin2Dec => engineering::bin2dec(args, ctx),
             Func::Bin2Hex => engineering::bin2hex(args, ctx),
             Func::Bin2Oct => engineering::bin2oct(args, ctx),
@@ -1463,7 +1603,45 @@ pub(crate) fn finite(x: f64) -> CellValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{Func, UNION_NAME, resolve};
+    use super::{Func, UNCOMPUTABLE, UNION_NAME, may_call_uncomputable, resolve, uncomputable};
+
+    #[test]
+    fn formula_text_filters_for_uncomputable_calls() {
+        for formula in [
+            "IFERROR(_xlfn.WEBSERVICE(A1),0)",
+            "cubevalue(\"c\",A1)",
+            "_xll.Quote(1)",
+            "_XLUDF.mine()",
+            "_xlfn.WEBSERVICE (\"x\")",
+            "RTD\t\r\n(\"x\",,\"y\")",
+        ] {
+            assert!(may_call_uncomputable(formula), "{formula}");
+        }
+        for formula in ["SUM(A1:A3)", "WEBSERVICES", "A1&\"RTD\""] {
+            assert!(!may_call_uncomputable(formula), "{formula}");
+        }
+    }
+
+    #[test]
+    fn uncomputable_names_resolve_through_their_stored_prefixes() {
+        for name in UNCOMPUTABLE {
+            assert!(resolve(name).is_none(), "{name}");
+            assert_eq!(uncomputable(name).as_deref(), Some(name));
+        }
+        for (stored, reported) in [
+            ("_xlfn.WEBSERVICE", "WEBSERVICE"),
+            ("_xlfn._xlws.PY", "PY"),
+            ("cubevalue", "CUBEVALUE"),
+            ("register.id", "REGISTER.ID"),
+            ("_xll.Quote", "_xll.Quote"),
+            ("_xludf.MyFn", "_xludf.MyFn"),
+        ] {
+            assert_eq!(uncomputable(stored).as_deref(), Some(reported), "{stored}");
+        }
+        for name in ["SUM", "REPRO_UNKNOWN_FUNCTION", "_xlfn.SUM", "REGISTER"] {
+            assert_eq!(uncomputable(name), None, "{name}");
+        }
+    }
 
     #[test]
     fn every_builtin_name_and_alias_resolves_to_its_variant() {
@@ -1713,6 +1891,32 @@ mod tests {
             (Func::FTest, "F.TEST"),
             (Func::ConfidenceNorm, "CONFIDENCE.NORM"),
             (Func::ConfidenceT, "CONFIDENCE.T"),
+            (Func::BinomDist, "BINOM.DIST"),
+            (Func::BinomDistRange, "BINOM.DIST.RANGE"),
+            (Func::BinomInv, "BINOM.INV"),
+            (Func::NegBinomDist, "NEGBINOM.DIST"),
+            (Func::NegBinomDistOld, "NEGBINOMDIST"),
+            (Func::HypGeomDist, "HYPGEOM.DIST"),
+            (Func::HypGeomDistOld, "HYPGEOMDIST"),
+            (Func::PoissonDist, "POISSON.DIST"),
+            (Func::ExponDist, "EXPON.DIST"),
+            (Func::WeibullDist, "WEIBULL.DIST"),
+            (Func::Fisher, "FISHER"),
+            (Func::FisherInv, "FISHERINV"),
+            (Func::Standardize, "STANDARDIZE"),
+            (Func::Permut, "PERMUT"),
+            (Func::Permutationa, "PERMUTATIONA"),
+            (Func::Steyx, "STEYX"),
+            (Func::SkewP, "SKEW.P"),
+            (Func::VarA, "VARA"),
+            (Func::VarPA, "VARPA"),
+            (Func::StdevPA, "STDEVPA"),
+            (Func::PercentileExc, "PERCENTILE.EXC"),
+            (Func::QuartileExc, "QUARTILE.EXC"),
+            (Func::PercentRankInc, "PERCENTRANK.INC"),
+            (Func::PercentRankExc, "PERCENTRANK.EXC"),
+            (Func::Prob, "PROB"),
+            (Func::ZTest, "Z.TEST"),
             (Func::Bin2Dec, "BIN2DEC"),
             (Func::Bin2Hex, "BIN2HEX"),
             (Func::Bin2Oct, "BIN2OCT"),
@@ -1872,6 +2076,14 @@ mod tests {
             ("CONFIDENCE", Func::ConfidenceNorm),
             ("LOGNORMDIST", Func::LogNormDistOld),
             ("LOGINV", Func::LogNormInv),
+            ("BINOMDIST", Func::BinomDist),
+            ("CRITBINOM", Func::BinomInv),
+            ("POISSON", Func::PoissonDist),
+            ("EXPONDIST", Func::ExponDist),
+            ("WEIBULL", Func::WeibullDist),
+            ("PERCENTRANK", Func::PercentRankInc),
+            ("ZTEST", Func::ZTest),
+            ("PEARSON", Func::Correl),
             ("ISO.CEILING", Func::CeilingPrecise),
         ];
         for &(name, func) in aliases {

@@ -97,6 +97,7 @@ pub struct ParseBudget<'a> {
     media_error: Option<String>,
     group_text_box_bytes: usize,
     group_text_box_depth: usize,
+    paragraph_runs: Vec<Option<usize>>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -120,6 +121,7 @@ impl<'a> ParseBudget<'a> {
             media_error: None,
             group_text_box_bytes: 0,
             group_text_box_depth: 0,
+            paragraph_runs: Vec::new(),
         }
     }
 
@@ -198,6 +200,16 @@ impl<'a> ParseBudget<'a> {
         let within = serde_json::to_writer(&mut meter, value).is_ok();
         self.group_text_box_bytes = if within { meter.used } else { limit };
         within
+    }
+
+    /// Records, for each `w:r` of the paragraph just parsed, the index of the run it became in
+    /// the paragraph content, or `None` when a field absorbed it.
+    pub(crate) fn record_paragraph_runs(&mut self, runs: Vec<Option<usize>>) {
+        self.paragraph_runs = runs;
+    }
+
+    pub(crate) fn take_paragraph_runs(&mut self) -> Vec<Option<usize>> {
+        std::mem::take(&mut self.paragraph_runs)
     }
 
     /// XML events charged so far.
@@ -1465,12 +1477,15 @@ fn retain_replayed_namespace_aliases(
         && element.child_elements().any(|child| {
             child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
         });
-    let bookmarked_drawing = matches!(element.local_name(), "drawing" | "AlternateContent")
-        && crate::text_box::has_bookmarked_text_box(element);
+    let drawing = matches!(element.local_name(), "drawing" | "AlternateContent");
+    let bookmarked_drawing = drawing && crate::text_box::has_bookmarked_text_box(element);
+    let text_box_drawing =
+        drawing && !bookmarked_drawing && crate::text_box::contains_text_box(element);
     if !row
         && !smart_art
         && !smart_art_run
         && !bookmarked_drawing
+        && !text_box_drawing
         && !matches!(element.local_name(), "pict" | "object")
     {
         return Ok(());
@@ -1488,7 +1503,7 @@ fn retain_replayed_namespace_aliases(
             }
         }
     }
-    if row
+    if (row || text_box_drawing)
         && let Some(root) = ancestors.first()
         && matches!(root.name.as_str(), "w:document" | "w:hdr" | "w:ftr")
     {

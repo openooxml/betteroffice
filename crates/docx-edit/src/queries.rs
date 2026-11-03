@@ -419,7 +419,7 @@ fn raw_changes<'a, T: ReadTxn>(
         start: change.start,
         end: change.start + 1,
     }));
-    raw.sort_by_key(|change| change.start);
+    crate::sort::sort_by_key(&mut raw, &|change| change.start);
     raw
 }
 
@@ -439,7 +439,7 @@ impl EditingDoc {
         let mut story_ids: Vec<String> = crate::live_stories(&stories, &txn)
             .map(|(id, _)| id.to_owned())
             .collect();
-        story_ids.sort();
+        crate::sort::sort(&mut story_ids);
         story_ids
             .into_iter()
             .filter_map(|story_id| {
@@ -650,7 +650,7 @@ impl EditingDoc {
             };
             use yrs::Map;
             let mut ids: Vec<String> = comments.keys(&txn).map(|key| key.to_string()).collect();
-            ids.sort();
+            crate::sort::sort(&mut ids);
             ids
         };
         let mut result = Vec::new();
@@ -880,7 +880,7 @@ impl EditingDoc {
         let mut story_ids: Vec<String> = crate::live_stories(&stories, &txn)
             .map(|(id, _)| id.to_owned())
             .collect();
-        story_ids.sort();
+        crate::sort::sort(&mut story_ids);
         for story_id in story_ids {
             use yrs::Map;
             let Some(Out::YText(story)) = stories.get(&txn, &story_id) else {

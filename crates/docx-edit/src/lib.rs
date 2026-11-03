@@ -96,6 +96,7 @@ mod paragraph_facts;
 mod resident_font;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod resident_geometry;
+mod sort;
 pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
@@ -677,6 +678,8 @@ pub struct EditingDoc {
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
+    /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
+    prime_progress: Mutex<Option<identity::PrimeProgress>>,
     #[cfg(test)]
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
@@ -784,6 +787,7 @@ impl EditingDoc {
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
             save_story_states,
+            prime_progress: Mutex::new(None),
             #[cfg(test)]
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
@@ -1172,6 +1176,7 @@ impl EditingDoc {
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
         self.save_story_states.lock().unwrap().clear();
+        *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
         *self.media.lock().unwrap() = None;
         *self.source.lock().unwrap() = Some(source);
@@ -1181,6 +1186,7 @@ impl EditingDoc {
     /// installed media writes, as a fresh seed of that package would.
     pub(crate) fn mark_seeded(&self) {
         self.save_story_states.lock().unwrap().clear();
+        *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }

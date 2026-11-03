@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { selectSamples } from './samples.mjs';
+import { MAX_SAMPLES, corpusOrigin, selectSamples } from './samples.mjs';
 
 const samples = Array.from({ length: 174 }, (_, index) => `sample-${index}`);
 
@@ -47,14 +47,44 @@ test('empty sample overrides use the canonical collection', async () => {
   }
 });
 
-test('rejects legacy custom collections with guidance before downloading', async () => {
-  await expect(
-    selectSamples({ QUALITY_COLLECTION: 'demos' }, async () => {
-      throw new Error('Unexpected download');
-    })
-  ).rejects.toThrow(
-    'QUALITY_COLLECTION is fixed to office-quality; use QUALITY_FORMAT or QUALITY_SAMPLES'
+test('loads a named collection from a configured origin', async () => {
+  const requests: unknown[] = [];
+  const selected = await selectSamples(
+    { QUALITY_COLLECTION: 'full-corpus-v1', QUALITY_CORPUS_ORIGIN: 'http://127.0.0.1:8099' },
+    async (url: string) => {
+      requests.push(url);
+      return collection(['govuk-1'], 'full-corpus-v1');
+    }
   );
+  expect(selected).toEqual(['govuk-1']);
+  expect(requests).toEqual(['http://127.0.0.1:8099/collections/full-corpus-v1.json']);
+});
+
+test('rejects collection names that are not folder names before downloading', async () => {
+  for (const name of ['../office-quality', 'Office', 'a/b', 'x?y']) {
+    await expect(
+      selectSamples({ QUALITY_COLLECTION: name }, async () => {
+        throw new Error('Unexpected download');
+      })
+    ).rejects.toThrow('QUALITY_COLLECTION must be a collection folder name');
+  }
+});
+
+test('accepts https and loopback http corpus origins only', () => {
+  expect(corpusOrigin({})).toBe('https://corpus.betteroffice.dev');
+  expect(corpusOrigin({ QUALITY_CORPUS_ORIGIN: ' ' })).toBe('https://corpus.betteroffice.dev');
+  expect(corpusOrigin({ QUALITY_CORPUS_ORIGIN: 'https://bench.example.org/' })).toBe('https://bench.example.org');
+  expect(corpusOrigin({ QUALITY_CORPUS_ORIGIN: 'http://localhost:8080' })).toBe('http://localhost:8080');
+  for (const value of [
+    'http://bench.example.org',
+    'https://bench.example.org/prefix',
+    'https://bench.example.org?x=1',
+    'file:///tmp/corpus',
+    'not a url',
+  ])
+    expect(() => corpusOrigin({ QUALITY_CORPUS_ORIGIN: value })).toThrow(
+      'QUALITY_CORPUS_ORIGIN must be an https origin or a loopback http origin'
+    );
 });
 
 test('requires the canonical collection identity and schema', async () => {
@@ -71,9 +101,9 @@ test('requires the canonical collection identity and schema', async () => {
   }
 });
 
-test('validates sample IDs, uniqueness, and the 1000-sample limit in both selection paths', async () => {
-  const thousand = Array.from({ length: 1000 }, (_, index) => `sample-${index}`);
-  for (const count of [174, 1000]) {
+test('validates sample IDs, uniqueness, and the sample limit in both selection paths', async () => {
+  const thousand = Array.from({ length: MAX_SAMPLES }, (_, index) => `sample-${index}`);
+  for (const count of [174, 1000, MAX_SAMPLES]) {
     const ids = thousand.slice(0, count);
     expect(
       await selectSamples({ QUALITY_SAMPLES: JSON.stringify(ids) }, async () => '')
@@ -97,12 +127,12 @@ test('validates sample IDs, uniqueness, and the 1000-sample limit in both select
   ]) {
     await expect(
       selectSamples({ QUALITY_SAMPLES: JSON.stringify(ids) }, async () => '')
-    ).rejects.toThrow('1–1000 unique sample folder names');
+    ).rejects.toThrow(`1–${MAX_SAMPLES} unique sample folder names`);
     await expect(
       selectSamples({}, async () =>
         JSON.stringify({ schema_version: 1, id: 'office-quality', samples: ids })
       )
-    ).rejects.toThrow('1–1000 unique sample folder names');
+    ).rejects.toThrow(`1–${MAX_SAMPLES} unique sample folder names`);
   }
 });
 

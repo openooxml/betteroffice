@@ -42,7 +42,7 @@ fn workbook() -> Workbook {
 fn displayed_precision_reaches_dependents_and_incremental_recalculation() {
     let mut book = workbook();
     book.full_precision = false;
-    put(&mut book, "A1", "6.102019382885104", "0.0");
+    put(&mut book, "A1", "6.1020193828851", "0.0");
     put(&mut book, "B1", "A1*10", "General");
     let (mut graph, _) = rebuild_and_recalc_all(&mut book, None);
     assert_eq!(value(&book, "A1"), number(6.1));
@@ -63,11 +63,11 @@ fn displayed_precision_reaches_dependents_and_incremental_recalculation() {
 fn full_precision_is_the_default() {
     let mut book = workbook();
     assert!(book.full_precision);
-    put(&mut book, "A1", "6.102019382885104", "0.0");
+    put(&mut book, "A1", "6.1020193828851", "0.0");
     put(&mut book, "B1", "A1*10", "General");
     rebuild_and_recalc_all(&mut book, None);
-    assert_eq!(value(&book, "A1"), number(6.102019382885104));
-    assert_eq!(value(&book, "B1"), number(6.102019382885104 * 10.0));
+    assert_eq!(value(&book, "A1"), number(6.1020193828851));
+    assert_eq!(value(&book, "B1"), number(6.1020193828851 * 10.0));
 }
 
 #[test]

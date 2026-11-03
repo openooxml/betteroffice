@@ -10,10 +10,10 @@ use pyo3::types::{PyBool, PyBytes, PyInt};
 use python_common::{generated_client_id, map_io_error};
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellAddress, CellInput, CellRange, CellRef, CellValue, Error as CoreError,
-    HorizontalAlignment, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MutationResult,
-    NumberFormatMutation, Proposal, ProposalEditInput, ProposalRequest, RenderOptions, SheetId,
-    StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
+    CalculationOptions, CalculationResult, CellAddress, CellInput, CellRange, CellRef, CellValue,
+    Error as CoreError, HorizontalAlignment, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MutationResult, NumberFormatMutation, Proposal, ProposalEditInput, ProposalRequest,
+    RenderOptions, SheetId, StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
 };
 use pyo3::types::PyDict;
 
@@ -219,6 +219,30 @@ pub struct PyCalculation {
     cycles: usize,
     #[pyo3(get)]
     limited: usize,
+    /// `(address, functions)` for each formula cell the engine could not
+    /// compute, which keeps Excel's saved value.
+    #[pyo3(get)]
+    unevaluated: Vec<(String, Vec<String>)>,
+}
+
+impl PyCalculation {
+    fn from_core(workbook: &CoreWorkbook, result: &CalculationResult) -> Self {
+        Self {
+            changed: result.changed.len(),
+            cycles: result.cycle_cells.len(),
+            limited: result.limited_cells.len(),
+            unevaluated: result
+                .unevaluated_cells
+                .iter()
+                .map(|cell| {
+                    (
+                        workbook.format_address(cell.address),
+                        cell.functions.clone(),
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 #[pymethods]
@@ -457,11 +481,7 @@ impl PyWorkbook {
             self.inner
                 .recalculate_all(CalculationOptions { now_serial })
         });
-        PyCalculation {
-            changed: result.changed.len(),
-            cycles: result.cycle_cells.len(),
-            limited: result.limited_cells.len(),
-        }
+        PyCalculation::from_core(&self.inner, &result)
     }
 
     #[getter]
@@ -950,12 +970,7 @@ impl PyWorkbook {
     }
 
     fn last_calculation(&self) -> PyCalculation {
-        let result = self.inner.last_calculation();
-        PyCalculation {
-            changed: result.changed.len(),
-            cycles: result.cycle_cells.len(),
-            limited: result.limited_cells.len(),
-        }
+        PyCalculation::from_core(&self.inner, self.inner.last_calculation())
     }
 
     /// Set a number format over a range. `format` is one of automatic, text,

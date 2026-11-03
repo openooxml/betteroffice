@@ -129,6 +129,8 @@ export interface ResidentScheduler {
   bump(changes: { version?: boolean; generation?: boolean }): void;
   /** Queued foreground units and background tasks. */
   pending(): { foreground: number; background: number };
+  /** Drops the queued background tasks `match` selects, each after its `cancel`. */
+  cancel(match: (task: SchedulerTask) => boolean): void;
 }
 
 /** @internal */
@@ -344,6 +346,19 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
     bump(changes) {
       if (changes.version) version += 1;
       if (changes.version || changes.generation) generation += 1;
+    },
+    cancel(match) {
+      const dropped = background.filter(match);
+      if (dropped.length === 0) return;
+      background = background.filter((task) => !dropped.includes(task));
+      for (const task of dropped) {
+        try {
+          task.cancel?.();
+        } catch (error) {
+          host.failed?.(error);
+        }
+      }
+      if (!running) armTimer();
     },
     pending() {
       return {
