@@ -11,6 +11,7 @@ import {
 } from './commandProtocol';
 import { resolveWorkbookToolbar } from './commandToolbar';
 import { applyWorkbookReplayOp, workbookReplayRefused, type WorkbookReplayMethod, type WorkbookReplayOp } from './replay';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 
 const STATUS_CACHE_SIZE = 256;
 const FORMAT_TOKEN_CACHE_SIZE = 64;
@@ -193,7 +194,7 @@ function inputSteps(handle: WorkbookHandle, edits: { sheet: number; row: number;
 function captureCommandFormat(handle: WorkbookHandle, sheet: number, range: string) {
   try { return handle.captureFormat(sheet, range); }
   catch (error) {
-    if (error instanceof Error && !(error instanceof WebAssembly.RuntimeError) &&
+    if (error instanceof Error && !(isEngineTrap(error)) &&
       /^sheet \d+ is not an editable worksheet$/.test(error.message)) {
       throw new WorkbookCommandRefusal('unsupported');
     }
@@ -388,7 +389,7 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   if (method === 'acceptProposal' && error instanceof StaleProposalError) {
     return new WorkbookCommandRefusal('stale-proposal', { cells: error.cells, targets: error.targets });
   }
-  if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError) return undefined;
+  if (!(error instanceof Error) || isEngineTrap(error)) return undefined;
   if (method === 'applyOps' && error.message === 'structural operations are unavailable in collaborative mode') {
     return new WorkbookCommandRefusal('unsupported');
   }
@@ -576,7 +577,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       const at = handle.version();
       try { handle.applyUpdate(update); }
       catch (error) {
-        if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || handle.version() !== at) throw error;
+        if (!(error instanceof Error) || isEngineTrap(error) || handle.version() !== at) throw error;
         if (at === before) throw new WorkbookCommandRefusal('invalid-update');
         refusedUpdate = true;
         break;
@@ -644,7 +645,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       if (op.calculation) handle.setCalculationContext(state.calculation);
       throw refusal;
     }
-    throw new SessionFailure(error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash',
+    throw new SessionFailure(isEngineTrap(error) ? 'trap' : 'crash',
       `Workbook command failed at sequence ${command.seq} (${command.kind})`,
       error instanceof Error ? error.message : String(error));
   }
@@ -767,7 +768,7 @@ export function applyWorkbookCommandIntent(
   } catch (error) {
     const refused = classifyRefusal(error);
     if (!refused) throw error instanceof SessionFailure ? error : new SessionFailure(
-      error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', 'Workbook command failed',
+      isEngineTrap(error) ? 'trap' : 'crash', 'Workbook command failed',
       error instanceof Error ? error.message : String(error));
     status = { seq: command.seq, status: 'refused', reason: refused.reason, committed: false,
       affectedSeqs: [command.seq], ...(refused.result === undefined ? {} : {
@@ -789,7 +790,7 @@ export function applyWorkbookCommandIntent(
   let editState: Partial<WorkbookEditState> | undefined;
   try { editState = projectEditState(handle, state); }
   catch (error) {
-    throw new SessionFailure(error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash',
+    throw new SessionFailure(isEngineTrap(error) ? 'trap' : 'crash',
       'Workbook command state projection failed', error instanceof Error ? error.message : String(error));
   }
   return { throughSeq: command.seq, version, statuses: [status],

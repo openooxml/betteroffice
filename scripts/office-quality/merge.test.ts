@@ -403,3 +403,21 @@ test('reports from several measure shards of one format merge into one, and a mi
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('writes failure clusters with their documents beside the report', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    await mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output });
+    const failures = JSON.parse(await readFile(join(paths.output, 'failures.json'), 'utf8'));
+    expect(failures.schema_version).toBe(1);
+    expect(failures.commit).toBe(commit);
+    expect(failures.clusters).toContainEqual({
+      format: 'pptx', area: 'render', channel: 'published', stage: 'capture', reason: 'capture stopped', count: 1, samples: ['pptx-c'],
+    });
+    const aggregate = JSON.parse(await readFile(join(paths.output, 'aggregate.json'), 'utf8'));
+    expect(aggregate.formats.pptx.failures).toContainEqual({ area: 'render', channel: 'published', stage: 'capture', count: 1 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

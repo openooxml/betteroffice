@@ -5,6 +5,7 @@ import { validateComparison } from './results.mjs';
 import { timingSummary } from './docx-benchmark.mjs';
 import { roundtripSummary } from './roundtrip.mjs';
 import { calculationSummary } from './xlsx-benchmark.mjs';
+import { failureCounts } from './failures.mjs';
 
 export const BEGIN = '<!-- BEGIN GENERATED VISUAL FIDELITY -->';
 export const END = '<!-- END GENERATED VISUAL FIDELITY -->';
@@ -276,6 +277,7 @@ export function aggregateReport(report) {
         return [channel, { parsed, preserved, total }];
       }));
     }
+    entry.failures = failureCounts(report, format);
     formats[format] = entry;
   }
   return { schema_version: 1, commit: report.commit, source_sha: report.source_sha ?? null, formats };

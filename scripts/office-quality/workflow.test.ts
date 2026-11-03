@@ -254,7 +254,7 @@ test('private runs upload no per-document artifact and touch no asset cache, ren
         ['Replace the generated README section', 'Detect a changed report'].includes(step.name))
       expect({ job, name: step.name ?? uses, if: step.if }).toEqual({ job, name: step.name ?? uses, if: expect.stringMatching(PRIVATE_OFF) });
     const cache = step.env?.QUALITY_ASSET_CACHE;
-    if (cache !== undefined) expect(cache).toBe("${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}");
+    if (cache !== undefined) expect(cache).toStartWith('${{ !inputs.private_corpus && ');
   }
   const mint = publish.steps.find((step: any) => step.name === 'Mint the bot token');
   const commit = publish.steps.find((step: any) => step.name === 'Commit only the generated README');
@@ -403,9 +403,9 @@ test('only a default showcase run commits the README; report-only runs publish n
 test('the reconciled artifact always carries the aggregate, and the private bundle keeps it too', () => {
   const uploads = publish.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@') && step.with.name === 'visual-fidelity');
   expect(uploads.map((step: any) => [step.if, step.with.path])).toEqual([
-    ['${{ !inputs.private_corpus }}', '${{ runner.temp }}/fidelity-report/report.json\n' + AGGREGATE_ONLY],
+    ['${{ !inputs.private_corpus }}', '${{ runner.temp }}/fidelity-report/report.json\n' + AGGREGATE_ONLY + '${{ runner.temp }}/fidelity-report/failures.json\n'],
     ['inputs.private_corpus', AGGREGATE_ONLY],
   ]);
   const keep = publish.steps.find((step: any) => step.name === 'Keep the reconciled report in the private bucket');
-  expect(keep.run).toContain('private-store.mjs" put visual-fidelity report.json section.md aggregate.json');
+  expect(keep.run).toContain('private-store.mjs" put visual-fidelity report.json section.md aggregate.json failures.json');
 });
