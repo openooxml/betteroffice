@@ -2,6 +2,7 @@
 
 The `@betteroffice/xlsx` API on the native Rust engine, for Node.js, Bun and Deno.
 Prebuilt binaries cover macOS arm64/x64, GNU and musl Linux arm64/x64, and Windows arm64/x64.
+PNG export renders with the installed Latin, international and CJK font packs; nothing is fetched.
 
 Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed.
 
@@ -35,14 +36,18 @@ use `@betteroffice/xlsx` there. Main-thread edit peers hydrated from a worker se
 ## Memory and untrusted input
 
 The native engine runs inside the calling process. In `@betteroffice/xlsx` each engine runs in a
-WebAssembly memory of at most 4 GiB: a document that needs more makes that engine fail (worker
-sessions report it as an error, in some APIs a typed out-of-memory error) while the process keeps
-running. The native engine has no such cap: a document that needs more memory than the machine has
-makes the whole process run out of memory.
+WebAssembly memory of at most 4 GiB; the native engine gives each thread the same 4 GiB budget. It
+counts the engine's live allocations on that thread, and a call that takes them past the budget
+fails: a worker session fails with a typed out-of-memory error, a workbook handle throws and then
+refuses every call except `dispose()`, and the process keeps running.
 
 Both engines bound their input the same way. A package is refused above 512 MiB uncompressed or
 5,000 parts, and XML nested deeper than 256 levels is refused. Worksheets are read up to 10,000,000 cells and the shared string table up to 10,000,000 entries.
 
-When you open documents from untrusted sources with this package on a server, run it under a
-memory limit (a container or cgroup limit, or a separate process) so an oversized document cannot
-take the server down.
+The budget counts live engine allocations, not process memory, and allocations are checked as the
+engine works, so process memory can exceed it: in a measurement with the budget lowered to 1 GiB,
+opening a 1,000,000-row workbook peaked about 40% above the budget, from allocator overhead and the
+JavaScript side. When you open
+documents from untrusted sources with this package on a server, set the container or cgroup memory
+limit above the budget of every thread that opens documents, with headroom for that overshoot, or
+open them in a separate process.

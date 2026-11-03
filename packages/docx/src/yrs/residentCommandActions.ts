@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
@@ -812,7 +813,7 @@ function writeCellSelection(engine: DocxWorkerCommandEngine, cells: PreparedDocx
     if (cells) engine.setCellSelection(cells);
     else engine.clearCellSelection();
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
   }
 }
 
@@ -965,7 +966,7 @@ function applyPreparedDocxCommand(
         }
       }
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
+      if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
       return { ...result('noop'), status: 'refused', reason: typeof error === 'string' ? error : error instanceof Error ? error.message : 'invalid-control-value' };
     } finally { engine.addUndoBoundary(); }
     return result(engine.proposalEngine.version() !== before ? 'applied' : 'noop');

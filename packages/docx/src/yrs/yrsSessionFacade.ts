@@ -1457,15 +1457,21 @@ export function wrapSession(
     },
     acceptChange: (target) => {
       markDirty('all');
-      return mutate(
-        () => JSON.parse(session.accept_change(wireChangeTarget(target))) as YrsResolveReceipt
-      );
+      return mutate(() => {
+        const receipt = JSON.parse(session.accept_change(wireChangeTarget(target))) as YrsResolveReceipt;
+        proposals.reconcile();
+        for (const registry of detachedProposals) registry.reconcile();
+        return receipt;
+      });
     },
     rejectChange: (target) => {
       markDirty('all');
-      return mutate(
-        () => JSON.parse(session.reject_change(wireChangeTarget(target))) as YrsResolveReceipt
-      );
+      return mutate(() => {
+        const receipt = JSON.parse(session.reject_change(wireChangeTarget(target))) as YrsResolveReceipt;
+        proposals.reconcile();
+        for (const registry of detachedProposals) registry.reconcile();
+        return receipt;
+      });
     },
 
     selectionContext: (range) => {

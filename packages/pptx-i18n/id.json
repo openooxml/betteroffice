@@ -168,7 +168,12 @@
     "canvasStale": "Target berubah. Buka detail peninjauan untuk memeriksa pratinjau terbaru sebelum menerapkannya.",
     "previousPosition": "Sebelumnya",
     "proposedPosition": "Diusulkan",
-    "loadingDiff": "Memuat perubahan…"
+    "loadingDiff": "Memuat perubahan…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Kontrol lainnya",

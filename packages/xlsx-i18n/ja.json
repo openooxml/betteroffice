@@ -178,6 +178,7 @@
     "accept": "承諾",
     "reject": "却下",
     "forceApply": "強制的に適用",
+    "forceBlockedReason": "構造の変更により、この提案は適用できません。",
     "staleWarning": "提案後に変更されたセル：{cells}"
   },
   "a11y": {

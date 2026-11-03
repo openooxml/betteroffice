@@ -25,7 +25,7 @@ import * as peerlessInput from '../commands/peerlessWorkerInputCoordinator';
 import type { PeerlessWorkerCommand } from '../commands/peerlessWorkerInputCoordinator';
 import type { XlsxCommandStore } from '../commands/types';
 import { defineXlsxPlugin } from '../plugins/defineXlsxPlugin';
-import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
+import type { XlsxPluginContext, XlsxPluginGeometry, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
 import { defaultFontPainterModule } from '../useDefaultFonts';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
@@ -585,9 +585,10 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
       } } : {}),
     });
   };
-  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4])) => view.rerender(
+  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4]),
+    hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => view.rerender(
     <Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} />
+      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} {...hostProps} />
     </Profiler>);
   const asyncEditor = (props: Partial<XlsxAsyncEditorProps> = {}) => (
     <XlsxEditor file={file} toolbar={<Chrome />} {...props} />
@@ -3241,6 +3242,70 @@ describe('peerless workbook worker editor', () => {
     });
   }
 
+  const neighborPrefetched = async (neighborDelay = 0) => {
+    const host = peerlessHarness();
+    const sample = await host.frame({ x: 0, y: 0, width: 800, height: 600 });
+    host.frame.mockClear();
+    host.frame.mockImplementation(async (viewport, options) => {
+      if (options?.sheet === 1 && neighborDelay) await new Promise((resolve) => setTimeout(resolve, neighborDelay));
+      return {
+        ...sample, viewport, sheet: options?.sheet ?? 0,
+        displayList: { ...sample.displayList, commands: options?.sheet === 1 ? [...sample.displayList.commands,
+          { op: 'text' as const, text: 'second-sheet', x: 200, y: 66, fontSize: 11, color: '#000000' }]
+          : sample.displayList.commands },
+      };
+    });
+    const view = await host.mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
+    expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
+    const settled = host.frame.mock.calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    expect(host.frame.mock.calls.length).toBe(settled);
+    const canvas = () => view.container.querySelector('canvas')!;
+    return { host, view, canvas };
+  };
+
+  it('a sheet tab switch paints the prefetched neighbor frame before the worker replies', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    const frames = host.frame.mock.calls.length;
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'true' });
+    const command = host.sent[host.sent.length - 1];
+    if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(canvas().dataset.commandCoverage).not.toBe(String(command.seq));
+    await act(async () => host.ack(command, { selection: command.payload.selection, paint: true }));
+    await advance();
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'false' });
+    expect(canvas().dataset.commandCoverage).toBe(String(command.seq));
+    expect(host.frame.mock.calls.length).toBeGreaterThanOrEqual(frames);
+  });
+
+  it('a neighbor too slow to prepare is neither painted provisionally nor prepared again', async () => {
+    const { host, view, canvas } = await neighborPrefetched(60);
+    const neighborCalls = () => host.frame.mock.calls.filter(([, options]) => options?.sheet === 1).length;
+    expect(neighborCalls()).toBe(1);
+    await act(async () => host.push({ throughSeq: 0, version: 'v1', statuses: [], editState: { canUndo: false } }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); });
+    expect(neighborCalls()).toBe(1);
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a proposal change drops the prefetched neighbor frame', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v1',
+      statuses: [{ seq: 0, status: 'applied', committed: false, result: { remoteUpdate: true, proposals: [] } }] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a neighbor frame prefetched before an edit is not painted after it', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v2', statuses: [] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
   it('cross-sheet hyperlinks reveal their target even when the initial sheet view arrives later', async () => {
     const host = peerlessHarness();
     const frame = await host.frame({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
@@ -3830,6 +3895,31 @@ describe('peerless workbook worker editor', () => {
     fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
     expect(host.sent[1]).toMatchObject({ kind: 'editCell', payload: { args: [0, 250, 0, 'z'] } });
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+  });
+
+  it('answers plugin point queries through the peerless hit test and refuses them after replacement', async () => {
+    const host = peerlessHarness();
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 192, y: 48, w: 96, h: 48 },
+      clip: { x: 192, y: 48, w: 96, h: 48 } });
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = await host.mount(undefined, false, { plugins });
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 800, 600);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(40 + 144, 60 + 36)).toEqual({ sheet: 0, sheetId: 'sheet:0',
+      row: 1, col: 1, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(40 + 240, 60 + 72)).toBeNull();
+    expect(retained.getPositionAtPoint!(39, 96)).toBeNull();
+    expect(retained.getPositionAtPoint!(40 + 100, 60 + 600)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.POSITIVE_INFINITY, 96)).toBeNull();
+    host.open.mockResolvedValueOnce({ ...host.session, commandIdentity: { session: 'replacement', incarnation: 'worker' } });
+    await act(async () => host.replace(view, new Uint8Array([4]), { plugins }));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
+    await opened();
+    await waitFor(() => expect(host.ready).toHaveBeenCalledTimes(2));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
   });
 
   it('replacement cancels retained chart nudges even with the same chart id', async () => {
@@ -4654,6 +4744,30 @@ describe('workbook worker editor', () => {
     await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen onReady={onReady} />); });
     expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toBeNull();
     await expect(apis[0].flushPendingInput()).rejects.toThrow('replaced');
+  });
+
+  it('answers plugin point queries through the worker hit test and refuses them after replacement', async () => {
+    harness();
+    const apis: XlsxWorkerEditorApi[] = [];
+    const onReady = (api: XlsxWorkerEditorApi) => { apis.push(api); };
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={plugins} onReady={onReady} />);
+    await opened();
+    await advance();
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 1200, 900);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    const point = [40 + 144 * 1.5, 60 + 36 * 1.5] as const;
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(...point)).toEqual({ ...apis[0].getPositionAtPoint(...point)!,
+      sheetId: geometry()!.layout.sheetId, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(...point)).toMatchObject({ sheet: 0, row: 1, col: 1 });
+    expect(retained.getPositionAtPoint!(39, 70)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.NaN, 70)).toBeNull();
+    await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen plugins={plugins} onReady={onReady} />); });
+    expect(apis[0].getPositionAtPoint(...point)).toBeNull();
+    expect(retained.getPositionAtPoint!(...point)).toBeNull();
   });
 
   it('clears a Ctrl+A sheet selection through its used cells', async () => {

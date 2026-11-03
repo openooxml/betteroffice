@@ -44,7 +44,7 @@ test('unsupported proposal edits are refused without closing the command connect
   try {
     let state: PresentationCommandAck = session.state;
     let seq = 0;
-    for (const edit of [{ type: 'insertSlide', index: 1 }, { type: 'deleteSlide', slideId: session.story.slideId }]) {
+    for (const edit of [{ type: 'insertSlide', index: 1 }, { type: 'deleteSlide', slideId: 'missing' }]) {
       state = await session.command(state, ++seq, { kind: 'invoke', payload: {
         ...input, method: 'propose', args: ['Writer', null, [edit]] } });
       expect(state.outcomes).toEqual([{ seq, status: 'refused', reason: 'invalid-payload', committed: false }]);
@@ -384,5 +384,25 @@ test('picture_conversion_stays_in_worker', async () => {
     const result = await session.rpc.call.prepareCommandPicture({ ...identity, seq: 0 }, bytes.slice().buffer);
     expect([...new Uint8Array(result).slice(0, 4)]).toEqual([137, 80, 78, 71]);
     expect(session.handle().version()).toBe(session.state.version);
+  } finally { await session.dispose(); }
+});
+
+test('worker proposal reads preserve slide refs and structural previews', async () => {
+  const session = await open();
+  try {
+    const ack = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [
+        { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+        { type: 'setSlideNotes', slideId: '@draft', text: 'Review me' },
+      ]],
+    } });
+    expect(ack.outcomes[0]!.status).toBe('applied');
+    const proposal = session.handle().listProposals()[0]!;
+    const fence = { ...identity, seq: 1 };
+    const strip = await session.rpc.call.accessCommandEditor(fence, 'proposalSlideStrip', [proposal.id]);
+    const entries = strip as import('../proposals').ProposalStripEntry[];
+    expect(entries[0]).toMatchObject({ slideId: proposal.refs!.draft, status: 'inserted', liveIndex: null });
+    const diff = await session.rpc.call.accessCommandEditor(fence, 'layoutProposalDiffSlideById', [proposal.id, entries[0]!.slideId]);
+    expect((diff as import('../proposals').ProposalDiffSlide).snapshot.slides[0]!.notes).toBe('Review me');
   } finally { await session.dispose(); }
 });

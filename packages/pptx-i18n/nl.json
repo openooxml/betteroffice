@@ -168,7 +168,12 @@
     "canvasStale": "Doelen zijn gewijzigd. Open Details controleren om het bijgewerkte voorbeeld te bekijken voordat u het toepast.",
     "previousPosition": "Vorige",
     "proposedPosition": "Voorgesteld",
-    "loadingDiff": "Wijzigingen worden geladen…"
+    "loadingDiff": "Wijzigingen worden geladen…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Meer besturingselementen",

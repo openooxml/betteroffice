@@ -1,5 +1,6 @@
 import { cellRect, rangeRect } from '@betteroffice/xlsx';
 import type { CellRange, DisplayList, GridMeta, Proposal, Viewport } from '@betteroffice/xlsx';
+import type { XlsxPointPosition } from '../XlsxEditor.types';
 import type { XlsxAnchorGeometryResult, XlsxPluginGeometry, XlsxPluginLayout, XlsxPluginRect } from './types';
 
 export interface ProposalGeometrySnapshot {
@@ -7,6 +8,9 @@ export interface ProposalGeometrySnapshot {
   sheetIndex: number;
   previewVersion: number;
 }
+
+/** The editor's own hit test over the frame it shows, in client coordinates. */
+export type EditorPointQuery = (clientX: number, clientY: number) => XlsxPointPosition | null;
 
 export function frozenGridExtent(
   grid: GridMeta | undefined,
@@ -52,6 +56,8 @@ export interface PaintedGrid {
   /** The workbook version the frame was built from. */
   version: string;
   sheetId: string;
+  /** The zero-based index of `sheetId`. */
+  sheet: number;
   /** The requested viewport, in unzoomed sheet pixels. */
   viewport: Viewport;
 }
@@ -121,14 +127,18 @@ export function canvasOrigin(canvas: Element, layer: HTMLElement): { x: number; 
   };
 }
 
-/** Geometry over one painted frame; every method returns null once `current` turns false. */
+/**
+ * Geometry over one painted frame; every method returns null once `current` turns false.
+ * Point queries go through `pointAt` and keep only answers on the frame's sheet.
+ */
 export function createPluginGeometry(
   layout: XlsxPluginLayout,
   painted: PaintedGrid,
   canvas: Element,
   layer: HTMLElement,
   current: () => boolean,
-  proposals: () => ProposalGeometrySnapshot | null = () => ({ proposals: [], sheetIndex: -1, previewVersion: 0 })
+  proposals: () => ProposalGeometrySnapshot | null = () => ({ proposals: [], sheetIndex: -1, previewVersion: 0 }),
+  pointAt?: EditorPointQuery
 ): XlsxPluginGeometry {
   const place = (rect: { x: number; y: number; w: number; h: number } | null) =>
     rect ? gridRectToOverlay(painted, rect, canvasOrigin(canvas, layer)) : null;
@@ -184,6 +194,21 @@ export function createPluginGeometry(
       }
       return place(rangeRect(painted.frame.grid, range));
     },
-    getPositionAtPoint: null,
+    getPositionAtPoint: pointAt
+      ? (clientX, clientY) => {
+          if (!current()) return null;
+          const position = pointAt(clientX, clientY);
+          if (!position || position.sheet !== painted.sheet) return null;
+          if (!isIndex(position.row) || !isIndex(position.col)) return null;
+          return {
+            sheet: position.sheet,
+            sheetId: layout.sheetId,
+            row: position.row,
+            col: position.col,
+            version: layout.version,
+            layoutId: layout.id,
+          };
+        }
+      : null,
   };
 }

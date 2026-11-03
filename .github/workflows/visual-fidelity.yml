@@ -233,13 +233,13 @@ jobs:
 
       - name: Restore fidelity asset cache
         id: fidelity-cache
-        if: ${{ !inputs.private_corpus }}
+        if: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/fidelity-assets
-          key: fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-
+          key: fidelity-assets-v3-${{ runner.os }}-${{ matrix.format }}-${{ matrix.shard }}-
           restore-keys: |
-            fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-
+            fidelity-assets-v3-${{ runner.os }}-${{ matrix.format }}-${{ matrix.shard }}-
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -304,7 +304,7 @@ jobs:
           QUALITY_FORMAT: ${{ matrix.format }}
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: .source/office-quality/ci
-          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && format('{0}/fidelity-assets', runner.temp) || '' }}
           PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
           PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
@@ -312,17 +312,17 @@ jobs:
 
       - name: Compute fidelity asset cache digest
         id: asset-cache
-        if: always() && !inputs.private_corpus
+        if: always() && !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality'
         run: |
           digest=$(node scripts/office-quality/asset-cache.mjs "${RUNNER_TEMP}/fidelity-assets")
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Save fidelity asset cache
-        if: always() && !inputs.private_corpus && steps.asset-cache.outputs.digest != '' && steps.fidelity-cache.outputs.cache-matched-key != format('fidelity-assets-v2-{0}-{1}-{2}', runner.os, matrix.format, steps.asset-cache.outputs.digest)
+        if: always() && !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && steps.asset-cache.outputs.digest != '' && steps.fidelity-cache.outputs.cache-matched-key != format('fidelity-assets-v3-{0}-{1}-{2}-{3}', runner.os, matrix.format, matrix.shard, steps.asset-cache.outputs.digest)
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/fidelity-assets
-          key: fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-${{ steps.asset-cache.outputs.digest }}
+          key: fidelity-assets-v3-${{ runner.os }}-${{ matrix.format }}-${{ matrix.shard }}-${{ steps.asset-cache.outputs.digest }}
 
       - name: Upload the format report
         if: ${{ !inputs.private_corpus }}
@@ -542,20 +542,20 @@ jobs:
           "$SOFFICE" --version
 
       - name: Restore DOCX source and reference assets
-        if: ${{ !inputs.private_corpus }}
+        if: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/fidelity-assets
-          key: fidelity-assets-v2-${{ runner.os }}-docx-
+          key: fidelity-assets-v3-${{ runner.os }}-docx-
           restore-keys: |
-            fidelity-assets-v2-${{ runner.os }}-docx-
+            fidelity-assets-v3-${{ runner.os }}-docx-
 
       - name: Download this shard's verified documents and references
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
-          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && format('{0}/fidelity-assets', runner.temp) || '' }}
           PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
           PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
@@ -708,7 +708,7 @@ jobs:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-benchmark
-          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && format('{0}/fidelity-assets', runner.temp) || '' }}
           PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
           PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
@@ -853,7 +853,7 @@ jobs:
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/pptx-benchmark
-          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && format('{0}/fidelity-assets', runner.temp) || '' }}
           PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
           PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
@@ -957,7 +957,7 @@ jobs:
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-fidelity
-          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && format('{0}/fidelity-assets', runner.temp) || '' }}
           PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
           PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
@@ -1102,7 +1102,7 @@ jobs:
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/roundtrip
-          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && format('{0}/fidelity-assets', runner.temp) || '' }}
           PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
           PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
@@ -1285,6 +1285,7 @@ jobs:
             ${{ runner.temp }}/fidelity-report/report.json
             ${{ runner.temp }}/fidelity-report/section.md
             ${{ runner.temp }}/fidelity-report/aggregate.json
+            ${{ runner.temp }}/fidelity-report/failures.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1303,7 +1304,7 @@ jobs:
         env: *private-write
         run: |
           cd "$RUNNER_TEMP/fidelity-report"
-          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity report.json section.md aggregate.json
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity report.json section.md aggregate.json failures.json
 
       - name: Keep the private logs
         if: always() && inputs.private_corpus

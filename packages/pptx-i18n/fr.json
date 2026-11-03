@@ -168,7 +168,12 @@
     "canvasStale": "Cibles modifiées. Ouvrez les détails de la révision pour inspecter l'aperçu mis à jour avant d'appliquer.",
     "previousPosition": "Avant",
     "proposedPosition": "Proposé",
-    "loadingDiff": "Chargement des modifications…"
+    "loadingDiff": "Chargement des modifications…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Autres commandes",

@@ -127,6 +127,42 @@ describe('workbook edit peers', () => {
     }
   });
 
+  test('rebases proposals through structural edits and history on both peer and worker', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    const peer = await hydratePeer(session);
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      const proposal = edits.propose('agent', null, [{ sheet: 0, row: 6, col: 4, input: '42' }]);
+      await matchingDigest(1, 'propose', edits, peer, session);
+      edits.applyOps([{ type: 'insertRows', sheet: 0, at: 5, count: 2 }]);
+      await matchingDigest(2, 'applyOps', edits, peer, session);
+      expect(peer.listProposals()[0]?.cells[0]?.a1).toBe('E9');
+      edits.applyOps([{ type: 'deleteRows', sheet: 0, at: 8, count: 1 }]);
+      await matchingDigest(3, 'applyOps', edits, peer, session);
+      expect(peer.listProposals()[0]?.cells[0]).toMatchObject({ a1: 'E9', stale: true });
+      expect(() => edits.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      expect(() => edits.acceptProposal(proposal.id, { force: true })).toThrow(StaleProposalError);
+      edits.undo();
+      await matchingDigest(4, 'undo', edits, peer, session);
+      expect(peer.listProposals()[0]).toMatchObject({
+        id: proposal.id, cells: [{ a1: 'E9', newText: '42' }],
+      });
+      expect(peer.listProposals()[0]?.cells[0]?.stale).not.toBe(true);
+      edits.acceptProposal(proposal.id);
+      await matchingDigest(5, 'acceptProposal', edits, peer, session);
+      expect(peer.cell(0, 8, 4).input).toBe('42');
+      expect((await session.call.cellInputs(0, 'E9')).cells[0][0].input).toBe('42');
+      expect(peer.listProposals()).toEqual([]);
+      expect(edits.state).toBe('ready');
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('serves an immediate frame after a peer sheet change without awaiting flush', async () => {
     for (const wrapHost of [undefined, batchRequests]) {
       const peer = openWorkbook(fixture, { calculation });

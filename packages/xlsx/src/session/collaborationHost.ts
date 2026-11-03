@@ -2,6 +2,7 @@ import { createCollaborationPipeHost } from '../../../../shared/collaboration-pi
 import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
 import { CollaborationError, type AwarenessCursor, type AwarenessPeer } from '../collaboration/types';
 import type { WorkbookHandle } from '../wasm/loader';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 
 type WorkerCollaborationProvider = CollaborationProvider & { onPeers: CollaborationProvider['onAwareness'] };
 
@@ -16,7 +17,7 @@ export function createWorkbookCollaborationHost(opened: WorkbookHandle, onOutput
         const before = opened.version();
         try { opened.applyUpdate(update); }
         catch (error) {
-          if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || opened.version() !== before) throw error;
+          if (!(error instanceof Error) || isEngineTrap(error) || opened.version() !== before) throw error;
           return { failed: error };
         }
       }

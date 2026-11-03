@@ -66,3 +66,11 @@ export const pptxEditSchema = z.discriminatedUnion('op', [
 export const pptxBatchSchema = z.object({ version: z.string().min(1).max(256), edits: z.array(pptxEditSchema).min(1).max(32) }).strict();
 export type PptxAgentEdit = z.infer<typeof pptxEditSchema>;
 export type PptxAgentBatch = z.infer<typeof pptxBatchSchema>;
+
+export const pptxProposalSlideEditSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('insertSlide'), ref: id.optional(), afterSlideId: id.nullable(), layoutPartPath: id.optional() }).strict(),
+  z.object({ type: z.literal('duplicateSlide'), ref: id.optional(), slideId: id, afterSlideId: id.nullable().optional() }).strict(),
+  z.object({ type: z.literal('deleteSlide'), slideId: id }).strict(),
+  z.object({ type: z.literal('moveSlide'), slideId: id, afterSlideId: id.nullable() }).strict(),
+]);
+export type PptxProposalSlideEdit = z.infer<typeof pptxProposalSlideEditSchema>;

@@ -218,3 +218,33 @@ fn proposal_list_alias_matches_original_and_the_ts_engine() {
         original.proposals().unwrap()
     );
 }
+
+#[test]
+fn structural_proposal_strip_and_by_id_layout_reach_the_facade() {
+    let presentation = Presentation::open(FIXTURE).unwrap();
+    let before = presentation.snapshot().unwrap();
+    let proposal = presentation
+        .propose(ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: serde_json::from_value(serde_json::json!([
+                {"type": "insertSlide", "ref": "draft", "afterSlideId": null},
+                {"type": "setSlideNotes", "slideId": "@draft", "text": "Review"}
+            ]))
+            .unwrap(),
+        })
+        .unwrap();
+    let strip = presentation.proposal_slide_strip(&proposal.id).unwrap();
+    assert_eq!(
+        strip[0].status,
+        betteroffice_pptx::ProposalStripStatus::Inserted
+    );
+    let diff = presentation
+        .layout_proposal_diff_slide_by_id(&proposal.id, &strip[0].slide_id)
+        .unwrap();
+    assert_eq!(diff.snapshot.slides[0].notes, "Review");
+    assert_eq!(presentation.snapshot().unwrap(), before);
+    presentation.accept_proposal(&proposal.id, false).unwrap();
+    assert!(presentation.undo());
+    assert_eq!(presentation.snapshot().unwrap(), before);
+}

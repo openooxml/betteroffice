@@ -20,6 +20,7 @@ import { mergeRoundtrips, roundtripShards } from './roundtrip.mjs';
 import { mergePptxBenchmark } from './pptx-benchmark.mjs';
 import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
 import { combineShardReports, measureShards } from './measure-shards.mjs';
+import { failureClusters } from './failures.mjs';
 
 function fail(message) {
   throw new Error(`Invalid fidelity merge: ${message}`);
@@ -262,6 +263,7 @@ export async function mergeFromPaths({
   }
   const section = renderSection(report);
   const aggregate = aggregateReport(report);
+  const failures = { schema_version: 1, commit: report.commit, clusters: failureClusters(report) };
   await emptyOutput(output);
   await mkdir(dirname(output), { recursive: true });
   const stage = await mkdtemp(join(dirname(output), `.${basename(output)}-`));
@@ -270,6 +272,7 @@ export async function mergeFromPaths({
     await writeFile(join(stage, 'report.json'), JSON.stringify(report, null, 2) + '\n');
     await writeFile(join(stage, 'section.md'), section);
     await writeFile(join(stage, 'aggregate.json'), JSON.stringify(aggregate, null, 2) + '\n');
+    await writeFile(join(stage, 'failures.json'), JSON.stringify(failures, null, 2) + '\n');
     await rename(stage, output);
   } catch (error) {
     await rm(stage, { recursive: true, force: true });

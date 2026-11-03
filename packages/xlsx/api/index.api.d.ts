@@ -3913,6 +3913,7 @@ export interface ProposalCell {
     a1: string;
     oldText: string;
     newText: string;
+    stale?: boolean;
 }
 /**
  * A pending, un-applied set of cell changes an agent has staged for human
@@ -3924,6 +3925,7 @@ export interface Proposal {
     agentId: string;
     note: string | null;
     cells: ProposalCell[];
+    forceBlocked?: boolean;
 }
 /** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */
 export interface StaleProposalTarget extends XlsxCellAddress {
@@ -4064,6 +4066,11 @@ export interface WorkbookHandle extends CollaborationReplica {
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal;
     /** every pending proposal, oldest first. empty when none or unsupported. */
     listProposals(): Proposal[];
+    /** The pending state or the last decision made through this handle. */
+    getProposalStatus(id: string): 'pending' | 'accepted' | 'rejected' | undefined;
+    isProposalStale(id: string): boolean;
+    /** Observe proposals created or decided through this handle. */
+    onProposalChange(listener: (proposals: Proposal[]) => void): () => void;
     /**
      * apply a pending proposal as one undo step and recalc dependents. throws
      * {@link StaleProposalError} when the base changed since it was staged and
