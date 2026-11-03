@@ -55,6 +55,25 @@ impl From<ResolveError> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[cfg(feature = "raster")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageTarget {
+    pub page: usize,
+}
+
+#[cfg(feature = "raster")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderOptions {
+    pub scale: f32,
+}
+
+#[cfg(feature = "raster")]
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self { scale: 1.0 }
+    }
+}
+
 pub struct Diagram {
     package: VsdxPackage,
     #[cfg(feature = "fonts")]
@@ -120,10 +139,13 @@ impl Diagram {
             .export_svg_page(&self.package, page_index)
             .map_err(|error| Error::Render(error.to_string()))
     }
-    /// Renders one diagram page to PNG at `scale` times the 96 dpi display list.
     #[cfg(feature = "raster")]
-    pub fn export_png(&self, page_index: usize, scale: f32) -> Result<vsdx_raster::RenderedPage> {
-        vsdx_raster::render_page(&self.renderer()?, &self.package, page_index, scale)
+    pub fn render_png(
+        &self,
+        target: PageTarget,
+        options: &RenderOptions,
+    ) -> Result<vsdx_raster::RenderedPage> {
+        vsdx_raster::render_page(&self.renderer()?, &self.package, target.page, options.scale)
             .map_err(Error::Render)
     }
     /// Applies formula edits sequentially, recomputing caches and enforcing current locks.

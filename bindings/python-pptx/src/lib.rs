@@ -95,6 +95,20 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
     }
 }
 
+fn png_target_index(target: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let invalid =
+        || RangeError::new_err("target must be a dict containing only a nonnegative slide index");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    let index = target.get_item("slide")?.ok_or_else(invalid)?;
+    if index.is_instance_of::<PyBool>() {
+        return Err(invalid());
+    }
+    index.extract::<usize>().map_err(|_| invalid())
+}
+
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
     match error {
@@ -2554,16 +2568,18 @@ impl PyPresentation {
     /// Rasterize one slide to deterministic PNG bytes. Media resolves from the
     /// package, so only fonts need registering; `background` is `"slide"`,
     /// `"transparent"`, or a `#rrggbb` color painted under the slide's own.
-    #[pyo3(signature = (slide, *, scale = 1.0, background = "slide", max_shadow_pixels = None))]
+    #[pyo3(signature = (target, *, scale = 1.0, background = "slide", max_shadow_pixels = None))]
     fn render_png(
         &self,
         py: Python<'_>,
-        slide: &Bound<'_, PyAny>,
+        target: &Bound<'_, PyAny>,
         scale: f32,
         background: &str,
         max_shadow_pixels: Option<u64>,
     ) -> PyResult<PyPng> {
-        let index = self.resolve_slide_index(slide)?;
+        let target = betteroffice_pptx::SlideTarget {
+            slide: png_target_index(target)?,
+        };
         let options = RenderOptions {
             scale,
             background: parse_background(background)?,
@@ -2573,7 +2589,7 @@ impl PyPresentation {
         let deck = DetachedDeck(&self.presentation);
         py.detach(move || {
             let deck = deck;
-            deck.0.render_png(index, &options)
+            deck.0.render_png(target, &options)
         })
         .map(|rendered| PyPng {
             data: rendered.bytes,

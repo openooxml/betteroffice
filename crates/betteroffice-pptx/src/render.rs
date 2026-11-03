@@ -11,6 +11,11 @@ pub use pptx_raster::{
     RenderedSlide as RenderedPng,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlideTarget {
+    pub slide: usize,
+}
+
 /// Glyph outlines and decoded assets shared across every slide one deck
 /// exports. Behind `Mutex`es so a [`Presentation`] holding one stays
 /// `Send + Sync`.
@@ -26,8 +31,8 @@ impl Presentation {
     /// [`Presentation::register_font`] took; a picture the backend cannot draw
     /// is skipped and counted rather than failing the render. Glyph outlines and
     /// decoded images are cached on the deck.
-    pub fn render_png(&self, slide_index: usize, options: &RenderOptions) -> Result<RenderedPng> {
-        let rendered = self.render_slide(slide_index)?;
+    pub fn render_png(&self, target: SlideTarget, options: &RenderOptions) -> Result<RenderedPng> {
+        let rendered = self.render_slide(target.slide)?;
         let mut images: AssetMap<'_> = self
             .media()
             .iter()

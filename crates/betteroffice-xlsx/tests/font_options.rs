@@ -175,7 +175,13 @@ mod shared_faces {
         assert_eq!(families.len(), 300);
         assert!(
             !workbook
-                .render_png_for(SheetId(0), &viewport)
+                .render_png(
+                    betteroffice_xlsx::PngTarget::Viewport {
+                        sheet: SheetId(0),
+                        viewport: viewport
+                    },
+                    &betteroffice_xlsx::RenderOptions::default()
+                )
                 .unwrap()
                 .bytes
                 .is_empty()

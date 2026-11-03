@@ -2779,14 +2779,38 @@ impl Workbook {
     }
 
     #[cfg(feature = "raster")]
-    pub fn render_png(&self, viewport: &Viewport) -> Result<RenderedPng> {
-        self.render_png_for(self.active_sheet, viewport)
-    }
-
-    #[cfg(feature = "raster")]
-    pub fn render_png_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<RenderedPng> {
-        let (display_list, width, height) = self.png_display_list_for(sheet, viewport)?;
-        self.rasterize_display_list(&display_list, width, height)
+    pub fn render_png(
+        &self,
+        target: crate::PngTarget,
+        options: &RenderOptions,
+    ) -> Result<RenderedPng> {
+        if !(options.scale.is_finite() && options.scale > 0.0) {
+            return Err(Error::InvalidScale(options.scale));
+        }
+        match target {
+            crate::PngTarget::Viewport { sheet, viewport } => {
+                validate_viewport(&viewport)?;
+                let width = (viewport.width * options.scale).ceil().max(1.0) as u32;
+                let height = (viewport.height * options.scale).ceil().max(1.0) as u32;
+                validate_render_size(width, height)?;
+                let geometry = self.sheet_geometry(sheet)?;
+                validate_display_region(self.sheet(sheet)?, &geometry, &viewport)?;
+                let display_list = self.display_list_for(sheet, &viewport)?;
+                let display_list = if options.scale == 1.0 {
+                    display_list
+                } else {
+                    scaled(display_list, options.scale)
+                };
+                self.rasterize_display_list(&display_list, width, height)
+            }
+            crate::PngTarget::Range { sheet, range } => self.render_sheet(
+                sheet,
+                &RenderOptions {
+                    range: Some(range),
+                    ..options.clone()
+                },
+            ),
+        }
     }
 
     #[cfg(feature = "raster")]

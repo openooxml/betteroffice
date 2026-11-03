@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import json
-from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Union, overload
+from typing import Any, TypedDict, Callable, Iterator, Literal, Mapping, Sequence, Union, overload
+
 from .edits import (
     PptxEditFailure,
     PptxEditFailureCode,
@@ -99,7 +100,12 @@ from ._betteroffice_pptx import (
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
 
+class SlideTarget(TypedDict):
+    slide: int
+
+
 __all__ = [
+    "SlideTarget",
     "decode_font_face",
     "AdjustEdit",
     "CaretAnchor",
@@ -890,17 +896,10 @@ class Presentation:
         """
         return json.loads(self._inner.apply_edits_json(_request_json(request)))
 
-    def render_png(
-        self,
-        slide: SlideKey,
-        *,
-        scale: float = 1.0,
-        background: str = "slide",
-        max_shadow_pixels: "int | None" = None,
-    ) -> Png:
-        """Rasterize a slide to PNG bytes. Register a font first."""
+    def render_png(self, target: SlideTarget, *, scale: float = 1.0,
+                   background: str = "slide", max_shadow_pixels: "int | None" = None) -> Png:
         return self._inner.render_png(
-            slide, scale=scale, background=background, max_shadow_pixels=max_shadow_pixels
+            target, scale=scale, background=background, max_shadow_pixels=max_shadow_pixels
         )
 
     def save(self) -> bytes:

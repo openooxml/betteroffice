@@ -568,26 +568,58 @@ impl PyWorkbook {
         Ok(PyMutation::from_core(&self.inner, &result))
     }
 
-    #[pyo3(signature = (sheet, *, scale = 1.0, range = None, max_width = None, max_height = None))]
-    fn render_png(
-        &self,
-        py: Python<'_>,
-        sheet: &Bound<'_, PyAny>,
-        scale: f32,
-        range: Option<&str>,
-        max_width: Option<u32>,
-        max_height: Option<u32>,
-    ) -> PyResult<PyPng> {
-        let sheet = self.resolve_sheet(sheet)?;
-        let range = range.map(parse_range).transpose()?;
+    #[pyo3(signature = (target, *, scale = 1.0))]
+    fn render_png(&self, py: Python<'_>, target: &Bound<'_, PyAny>, scale: f32) -> PyResult<PyPng> {
+        let invalid = || {
+            RangeError::new_err("target requires a sheet index and exactly one viewport or range")
+        };
+        let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+        if target.len() != 2 {
+            return Err(invalid());
+        }
+        let sheet = target.get_item("sheet")?.ok_or_else(invalid)?;
+        if sheet.is_instance_of::<PyBool>() {
+            return Err(invalid());
+        }
+        let sheet = SheetId(sheet.extract::<u32>().map_err(|_| invalid())?);
+        let target = match (target.get_item("viewport")?, target.get_item("range")?) {
+            (Some(viewport), None) => {
+                let viewport = viewport.cast::<PyDict>().map_err(|_| invalid())?;
+                if viewport.len() != 4 {
+                    return Err(invalid());
+                }
+                let number = |key: &str| -> PyResult<f32> {
+                    let value = viewport.get_item(key)?.ok_or_else(invalid)?;
+                    if value.is_instance_of::<PyBool>() {
+                        return Err(invalid());
+                    }
+                    value.extract::<f32>().map_err(|_| invalid())
+                };
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet,
+                    viewport: betteroffice_xlsx::Viewport {
+                        x: number("x")?,
+                        y: number("y")?,
+                        width: number("width")?,
+                        height: number("height")?,
+                    },
+                }
+            }
+            (None, Some(range)) => {
+                let range = range.extract::<String>().map_err(|_| invalid())?;
+                betteroffice_xlsx::PngTarget::Range {
+                    sheet,
+                    range: parse_range(&range)?,
+                }
+            }
+            _ => return Err(invalid()),
+        };
         let options = RenderOptions {
-            range,
             scale,
-            max_width,
-            max_height,
+            ..Default::default()
         };
         let rendered = py
-            .detach(|| self.inner.render_sheet(sheet, &options))
+            .detach(|| self.inner.render_png(target, &options))
             .map_err(map_error)?;
         Ok(PyPng {
             data: rendered.bytes,

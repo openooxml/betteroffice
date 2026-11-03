@@ -352,12 +352,12 @@ fn display_lists_end_at_the_last_track_with_extent() {
                 .is_empty()
         );
         let png = workbook
-            .render_sheet(
-                SheetId(0),
-                &RenderOptions {
-                    range: Some(CellRange::new(CellRef::new(0, 0), CellRef::new(59, 25))),
-                    ..RenderOptions::default()
+            .render_png(
+                betteroffice_xlsx::PngTarget::Range {
+                    sheet: SheetId(0),
+                    range: CellRange::new(CellRef::new(0, 0), CellRef::new(59, 25)),
                 },
+                &RenderOptions::default(),
             )
             .unwrap();
         assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']));

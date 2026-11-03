@@ -383,9 +383,9 @@ def test_proposal_receipt_is_opt_in(sample_bytes):
 def test_png_shadow_budget_and_typed_steps(sample_bytes, font_bytes):
     deck = bo.Presentation.open(sample_bytes)
     deck.register_font("Arial", font_bytes)
-    default = deck.render_png(0).bytes
-    assert deck.render_png(0, max_shadow_pixels=134_217_728).bytes == default
-    assert deck.render_png(0, max_shadow_pixels=0).bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    default = deck.render_png({"slide": 0}).bytes
+    assert deck.render_png({"slide": 0}, max_shadow_pixels=134_217_728).bytes == default
+    assert deck.render_png({"slide": 0}, max_shadow_pixels=0).bytes.startswith(b"\x89PNG\r\n\x1a\n")
     shape = deck.add_shape(0, "roundRect", x=0, y=0, width=400_000, height=400_000)
     background: PptxSlideBackgroundStep = {
         "op": "setSlideBackground", "target": {"slideId": deck[0].id},
@@ -426,7 +426,7 @@ def test_shadow_budget_controls_raster_output(sample_bytes, font_bytes):
                 target.writestr(part, data)
     deck = bo.Presentation.open(output.getvalue())
     deck.register_font("Arial", font_bytes)
-    assert deck.render_png(0).bytes != deck.render_png(0, max_shadow_pixels=0).bytes
+    assert deck.render_png({"slide": 0}).bytes != deck.render_png({"slide": 0}, max_shadow_pixels=0).bytes
 
 
 @pytest.mark.parametrize("method,args", [

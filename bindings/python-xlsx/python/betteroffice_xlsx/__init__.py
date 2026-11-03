@@ -7,7 +7,7 @@ import json
 import math
 import numbers
 import os
-from typing import Any, Iterable, Iterator, Mapping, Union
+from typing import Any, TypedDict, Iterable, Iterator, Mapping, Union
 
 from ._betteroffice_xlsx import (
     decode_font_face,
@@ -53,7 +53,25 @@ from .exports import (
     StructuredResult,
 )
 
+class Viewport(TypedDict):
+    x: float
+    y: float
+    width: float
+    height: float
+
+class ViewportTarget(TypedDict):
+    sheet: int
+    viewport: Viewport
+
+class PngRangeTarget(TypedDict):
+    sheet: int
+    range: str
+
+
 __all__ = [
+    "Viewport",
+    "ViewportTarget",
+    "PngRangeTarget",
     "decode_font_face",
     "Calculation",
     "CellError",
@@ -131,21 +149,8 @@ class Sheet:
     def formula(self, address: str) -> "str | None":
         return self._workbook.formula(self._index, address)
 
-    def render_png(
-        self,
-        *,
-        scale: float = 1.0,
-        range: "str | None" = None,
-        max_width: "int | None" = None,
-        max_height: "int | None" = None,
-    ) -> Png:
-        return self._workbook.render_png(
-            self._index,
-            scale=scale,
-            range=range,
-            max_width=max_width,
-            max_height=max_height,
-        )
+    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = 1.0) -> Png:
+        return self._workbook.render_png(target, scale=scale)
 
     def __repr__(self) -> str:
         return f"Sheet({self.name!r})"
@@ -218,23 +223,8 @@ class Workbook:
         """Set a cell from what a user would type."""
         return self._inner.set(sheet, address, _as_input(value), now_serial=now_serial)
 
-    def render_png(
-        self,
-        sheet: SheetKey,
-        *,
-        scale: float = 1.0,
-        range: "str | None" = None,
-        max_width: "int | None" = None,
-        max_height: "int | None" = None,
-    ) -> Png:
-        """Render a sheet to PNG."""
-        return self._inner.render_png(
-            sheet,
-            scale=scale,
-            range=range,
-            max_width=max_width,
-            max_height=max_height,
-        )
+    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = 1.0) -> Png:
+        return self._inner.render_png(target, scale=scale)
 
     def save(self) -> bytes:
         """Serialize back to XLSX bytes."""

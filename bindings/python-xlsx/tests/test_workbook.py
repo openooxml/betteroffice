@@ -271,7 +271,7 @@ def test_concurrent_renders_are_consistent(sample_bytes):
 
     wb = bo.Workbook.open(sample_bytes)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda _: wb.render_png("Budget", range="A1:D12"), range(8)))
+        results = list(pool.map(lambda _: wb.render_png({"sheet": 0, "range": "A1:D12"}), range(8)))
 
     reference = results[0]
     assert all(png.bytes == reference.bytes for png in results)
@@ -289,7 +289,7 @@ def test_concurrent_opens_are_consistent(sample_bytes):
 
 
 def test_render_png(sample_bytes):
-    png = bo.Workbook.open(sample_bytes).render_png("Budget", range="A1:D12")
+    png = bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": "A1:D12"})
     assert png.bytes[:8] == PNG_MAGIC
     assert png.width > 0 and png.height > 0
     assert len(png) == len(png.bytes)
@@ -297,15 +297,15 @@ def test_render_png(sample_bytes):
 
 def test_render_png_scale_changes_dimensions(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
-    small = wb.render_png("Budget", range="A1:D12", scale=1.0)
-    large = wb.render_png("Budget", range="A1:D12", scale=2.0)
+    small = wb.render_png({"sheet": 0, "range": "A1:D12"}, scale=1.0)
+    large = wb.render_png({"sheet": 0, "range": "A1:D12"}, scale=2.0)
     assert large.width > small.width
     assert large.height > small.height
 
 
 def test_render_png_write(sample_bytes, tmp_path):
     target = tmp_path / "sheet.png"
-    bo.Workbook.open(sample_bytes).render_png("Budget", range="A1:D12").write(target)
+    bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": "A1:D12"}).write(target)
     assert target.read_bytes()[:8] == PNG_MAGIC
 
 
@@ -348,7 +348,7 @@ def test_malformed_address_raises_range_error(sample_bytes):
 
 def test_malformed_range_raises_range_error(sample_bytes):
     with pytest.raises(bo.RangeError):
-        bo.Workbook.open(sample_bytes).render_png(0, range="ZZ")
+        bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": "ZZ"})
 
 
 def test_garbage_bytes_raise_parse_error():
@@ -599,3 +599,24 @@ def test_style_argument_errors_raise_value_error(sample_bytes, style):
     wb = bo.Workbook.open(sample_bytes)
     with pytest.raises(ValueError):
         wb.set_style("Budget", "A1:D1", **style)
+
+
+def test_viewport_png_target_scales_and_validates_sheet(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    target = {"sheet": 0, "viewport": {"x": 0, "y": 0, "width": 128, "height": 64}}
+    first = workbook.render_png(target)
+    second = workbook.render_png(target, scale=2.0)
+    assert (second.width, second.height) == (first.width * 2, first.height * 2)
+    invalid_targets = [
+        {"sheet": 99, "range": "A1:B2"},
+        {"sheet": 99, "viewport": target["viewport"]},
+    ]
+    for invalid_target in invalid_targets:
+        with pytest.raises(bo.RangeError):
+            workbook.render_png(invalid_target)
+
+
+@pytest.mark.parametrize("target", [None, 0, {}, {"sheet": 0}, {"sheet": True, "range": "A1"}, {"sheet": -1, "range": "A1"}, {"sheet": "Budget", "range": "A1"}, {"sheet": 0, "range": "A1", "viewport": {}}, {"sheet": 0, "viewport": {}}, {"sheet": 0, "range": 1}])
+def test_rejects_invalid_png_targets(sample_bytes, target):
+    with pytest.raises(bo.RangeError):
+        bo.Workbook.open(sample_bytes).render_png(target)
