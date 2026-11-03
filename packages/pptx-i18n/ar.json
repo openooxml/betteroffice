@@ -168,7 +168,12 @@
     "canvasStale": "تغيّرت الأهداف. افتح تفاصيل المراجعة لفحص المعاينة المحدّثة قبل التطبيق.",
     "previousPosition": "السابق",
     "proposedPosition": "المقترح",
-    "loadingDiff": "جارٍ تحميل التغييرات…"
+    "loadingDiff": "جارٍ تحميل التغييرات…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "المزيد من عناصر التحكم",

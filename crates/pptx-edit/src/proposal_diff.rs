@@ -11,7 +11,7 @@ use crate::deck::{
     slide_ref, slide_shape_order, snapshot_shape,
 };
 use crate::inherit::{SlideContext, record_inherited};
-use crate::proposals::{apply_edit, shape_text};
+use crate::proposals::shape_text;
 use crate::{
     DeckSession, DeckSnapshot, EditError, EditResult, Proposal, ProposalChange, ProposalEdit,
     ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot, TextRunSnapshot,
@@ -60,6 +60,25 @@ impl DeckSession {
         slide_index: usize,
     ) -> ProposalResult<ProposalSlideDiff> {
         let mut proposal = self.pending_proposal(id)?;
+        if proposal.edits.iter().any(|edit| {
+            matches!(
+                edit,
+                ProposalEdit::InsertSlide { .. }
+                    | ProposalEdit::DuplicateSlide { .. }
+                    | ProposalEdit::DeleteSlide { .. }
+                    | ProposalEdit::MoveSlide { .. }
+            )
+        }) {
+            let slide_id =
+                self.slide_ids()?
+                    .get(slide_index)
+                    .cloned()
+                    .ok_or(EditError::OutOfBounds {
+                        index: slide_index as u32,
+                        length: self.slide_ids()?.len() as u32,
+                    })?;
+            return self.preview_proposal_diff_slide_by_id(id, &slide_id);
+        }
         let (targets, before, stale_targets) = {
             let txn = self.doc.transact();
             let mut targets = BTreeSet::new();
@@ -95,6 +114,9 @@ impl DeckSession {
                     after,
                     old_text,
                     new_text,
+                    kind: None,
+                    before_index: None,
+                    after_index: None,
                 });
             }
             (changes, snapshot_flavor(&txn)?, snapshot_comments(&txn)?)
@@ -142,15 +164,48 @@ impl DeckSession {
         })
     }
 
-    /// Hydrates a scratch doc from the live state and applies `edits` — the
-    /// `preview_edits` tail, with target validation left to the caller.
-    fn preview_doc_with_edits(&self, edits: &[ProposalEdit]) -> ProposalResult<DeckSession> {
-        let preview = self.stage()?;
-        for edit in edits {
-            apply_edit(&preview, edit)?;
+    pub fn preview_proposal_diff_slide_by_id(
+        &self,
+        id: &str,
+        slide_id: &str,
+    ) -> ProposalResult<ProposalSlideDiff> {
+        let diff = self.preview_proposal_diff(id)?;
+        let preview = self.proposal_preview_session(id)?;
+        let ids = preview.slide_ids()?;
+        let mut scope = if let Some(index) = ids.iter().position(|id| id == slide_id) {
+            preview.slide_scope(index)?
+        } else {
+            let live_ids = self.slide_ids()?;
+            let index = live_ids
+                .iter()
+                .position(|id| id == slide_id)
+                .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+            self.slide_scope(index)?
+        };
+        if let Some(slide) = diff
+            .snapshot
+            .slides
+            .iter()
+            .find(|slide| slide.id == slide_id)
+        {
+            scope.slide = slide.clone();
         }
-        preview.validated_snapshot()?;
-        Ok(preview)
+        Ok(ProposalSlideDiff {
+            proposal: diff.proposal,
+            snapshot: DeckSnapshot {
+                width_emu: scope.width_emu,
+                height_emu: scope.height_emu,
+                slides: vec![scope.slide.clone()],
+                comment_flavor: diff.snapshot.comment_flavor,
+                comments: diff.snapshot.comments,
+            },
+            scope,
+            text_changes: diff.text_changes,
+        })
+    }
+
+    fn preview_doc_with_edits(&self, edits: &[ProposalEdit]) -> ProposalResult<DeckSession> {
+        Ok(self.preview_edits(edits, true)?.session)
     }
 
     /// Builds a render-only snapshot whose offsets are not editable.
@@ -220,6 +275,9 @@ fn scoped_target<T: ReadTxn>(txn: &T, edit: &ProposalEdit) -> EditResult<(String
             slide_id, shape_id, ..
         } => Ok((slide_id.clone(), Some(shape_id.clone()))),
         ProposalEdit::SetSlideNotes { slide_id, .. } => Ok((slide_id.clone(), None)),
+        _ => Err(EditError::InvalidState(
+            "structural edit requires proposal resolution".into(),
+        )),
     }
 }
 

@@ -305,6 +305,28 @@ impl Renderer {
         serde_json::to_string(&rendered.display_list).map_err(engine_error)
     }
 
+    pub fn layout_proposal_diff_slide_by_id_json(
+        &self,
+        session: &pptx_edit::DeckSession,
+        id: &str,
+        slide_id: &str,
+    ) -> Result<String, EngineError> {
+        let preview = session
+            .preview_proposal_diff_slide_by_id(id, slide_id)
+            .map_err(engine_error)?;
+        let rendered = self
+            .renderer
+            .layout_scoped_slide(session.package(), &preview.scope)
+            .map_err(engine_error)?;
+        serde_json::to_string(&pptx_render::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            frame: rendered.display_list,
+        })
+        .map_err(engine_error)
+    }
+
     pub fn layout_proposal_diff_slide_json(
         &self,
         session: &pptx_edit::DeckSession,

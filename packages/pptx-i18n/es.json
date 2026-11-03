@@ -168,7 +168,12 @@
     "canvasStale": "Los destinos han cambiado. Abra Detalles de la revisión para inspeccionar la vista previa actualizada antes de aplicar.",
     "previousPosition": "Anterior",
     "proposedPosition": "Propuesto",
-    "loadingDiff": "Cargando cambios…"
+    "loadingDiff": "Cargando cambios…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Más controles",

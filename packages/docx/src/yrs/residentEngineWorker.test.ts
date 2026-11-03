@@ -57,7 +57,37 @@ import {
 } from './residentEngineWorkerProtocol';
 import type { EchoGlyphProvider } from './residentCommandViewProjection';
 
-let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown) => void;
+let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown, schedule: unknown, unschedule: unknown) => void;
+const retireWorkerTimers: (() => void)[] = [];
+
+afterEach(() => {
+  for (const retire of retireWorkerTimers.splice(0)) retire();
+});
+
+function testScopedTimers() {
+  const armed = new Set<ReturnType<typeof setTimeout>>();
+  let retired = false;
+  retireWorkerTimers.push(() => {
+    retired = true;
+    for (const handle of armed) globalThis.clearTimeout(handle);
+    armed.clear();
+  });
+  return {
+    schedule(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) {
+      if (retired) return 0 as unknown as ReturnType<typeof setTimeout>;
+      const handle = globalThis.setTimeout(() => {
+        armed.delete(handle);
+        callback(...args);
+      }, ms);
+      armed.add(handle);
+      return handle;
+    },
+    unschedule(handle: ReturnType<typeof setTimeout>) {
+      armed.delete(handle);
+      globalThis.clearTimeout(handle);
+    },
+  };
+}
 
 beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
@@ -153,6 +183,8 @@ beforeAll(async () => {
     'performance',
     'fetch',
     'createImageBitmap',
+    'setTimeout',
+    'clearTimeout',
     await result.outputs[0].text()
   ) as typeof startWorker;
 }, 30_000);
@@ -411,8 +443,10 @@ function worker() {
       canvas.height = buffer.height;
     },
   };
+  const timers = testScopedTimers();
   startWorker(scope, Surface, harness, { now: () => harness.now() },
-    (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob));
+    (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob),
+    timers.schedule, timers.unschedule);
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
     return new Promise<DocxEngineWorkerResponse>((resolve) => {

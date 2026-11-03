@@ -248,9 +248,23 @@ impl PptxDocument {
     }
 
     #[napi]
+    pub fn validate_proposal_json(&self, env: Env, args: String) -> Result<String> {
+        self.document()?
+            .validate_proposal_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
     pub fn list_proposals_json(&self, env: Env) -> Result<String> {
         self.document()?
             .list_proposals_json()
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
+    pub fn proposal_slide_strip_json(&self, env: Env, id: String) -> Result<String> {
+        self.document()?
+            .proposal_slide_strip_json(&id)
             .map_err(|error| map_error(env, error))
     }
 
@@ -997,6 +1011,19 @@ impl PptxRenderer {
     ) -> Result<String> {
         self.renderer()?
             .layout_proposal_slide_json(document.document()?.session(), &id, slide_index)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi]
+    pub fn layout_proposal_diff_slide_by_id_json(
+        &self,
+        env: Env,
+        document: &PptxDocument,
+        id: String,
+        slide_id: String,
+    ) -> Result<String> {
+        self.renderer()?
+            .layout_proposal_diff_slide_by_id_json(document.document()?.session(), &id, &slide_id)
             .map_err(|error| map_error(env, error))
     }
 

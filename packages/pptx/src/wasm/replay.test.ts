@@ -266,6 +266,8 @@ test('layout_and_proposal_previews_do_not_change_replay_state', async () => {
     expect(peer.previewProposal(id)).toEqual(worker.previewProposal(id));
     expect(peer.layoutProposalSlide(id, 0)).toEqual(worker.layoutProposalSlide(id, 0));
     expect(peer.layoutProposalDiffSlide(id, 0)).toEqual(worker.layoutProposalDiffSlide(id, 0));
+    expect(peer.proposalSlideStrip(id)).toEqual(worker.proposalSlideStrip(id));
+    expect(peer.layoutProposalDiffSlideById(id, slide.id)).toEqual(worker.layoutProposalDiffSlideById(id, slide.id));
   }
   expect(peer.snapshot()).toEqual(before);
   expect(peer.version()).toBe(version);
