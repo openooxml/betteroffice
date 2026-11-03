@@ -434,6 +434,7 @@ export interface ProposalCell {
   a1: string;
   oldText: string;
   newText: string;
+  stale?: boolean;
 }
 
 /**
@@ -446,6 +447,7 @@ export interface Proposal {
   agentId: string;
   note: string | null;
   cells: ProposalCell[];
+  forceBlocked?: boolean;
 }
 
 /** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */
@@ -501,6 +503,7 @@ function displayErrorFrom(message: string): DisplayTooLargeError | null {
 
 // the wasm reports a stale accept as a JSON error naming each drifted cell.
 function staleErrorFrom(message: string): StaleProposalError | null {
+  if (message.startsWith('Stale proposal:')) return new StaleProposalError([]);
   if (!message.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(message) as {
@@ -634,6 +637,11 @@ export interface WorkbookHandle extends CollaborationReplica {
   propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal;
   /** every pending proposal, oldest first. empty when none or unsupported. */
   listProposals(): Proposal[];
+  /** The pending state or the last decision made through this handle. */
+  getProposalStatus(id: string): 'pending' | 'accepted' | 'rejected' | undefined;
+  isProposalStale(id: string): boolean;
+  /** Observe proposals created or decided through this handle. */
+  onProposalChange(listener: (proposals: Proposal[]) => void): () => void;
   /**
    * apply a pending proposal as one undo step and recalc dependents. throws
    * {@link StaleProposalError} when the base changed since it was staged and
@@ -937,6 +945,8 @@ function wrapWorkbookDocument(
 ): WorkbookHandle {
   const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
+  const proposalDecisions = new Map<string, 'accepted' | 'rejected'>();
+  const proposalListeners = new Set<(proposals: Proposal[]) => void>();
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin; fromPeer: boolean }> = [];
   let applyingPeerUpdate = 0;
   let nextListenerId = 0;
@@ -947,6 +957,15 @@ function wrapWorkbookDocument(
   let wasmCallDepth = 0;
   let flushingUpdates = false;
   let displayCapWarned = false;
+
+  function notifyProposals(): void {
+    if (!proposalListeners.size) return;
+    const proposals = handle.listProposals();
+    for (const listener of proposalListeners) {
+      try { listener(structuredClone(proposals)); }
+      catch (error) { console.error('xlsx proposal listener failed', error); }
+    }
+  }
 
   function reportDisplayLimit(frame: DisplayList): void {
     if (!frame.truncated || displayCapWarned) return;
@@ -1304,7 +1323,7 @@ function wrapWorkbookDocument(
       return wasmCall(() => doc.saveBytes());
     },
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal {
-      return mutatingWasmCall(() => {
+      const proposal = mutatingWasmCall(() => {
         const fn = (doc as { proposeJson?: (a: string) => string }).proposeJson;
         if (typeof fn !== 'function') throw new Error('proposals not in this build');
         const wireEdits = edits.map(({ numberFormat, ...edit }) => ({
@@ -1317,6 +1336,8 @@ function wrapWorkbookDocument(
           fn.call(doc, JSON.stringify({ agentId, note, edits: wireEdits }))
         ) as Proposal;
       });
+      notifyProposals();
+      return proposal;
     },
     listProposals(): Proposal[] {
       return wasmCall(() => {
@@ -1325,26 +1346,54 @@ function wrapWorkbookDocument(
         return (JSON.parse(fn.call(doc)) as { proposals: Proposal[] }).proposals;
       });
     },
+    onProposalChange(listener) {
+      assertAlive();
+      if (typeof listener !== 'function') throw new TypeError('proposal listener must be a function');
+      proposalListeners.add(listener);
+      return () => { proposalListeners.delete(listener); };
+    },
+    getProposalStatus(id: string) {
+      if (handle.listProposals().some(proposal => proposal.id === id)) return 'pending';
+      return proposalDecisions.get(id);
+    },
+    isProposalStale(id: string) {
+      const draft = openWorkbookRecoveryCheckpoint(workbookRecoveryCheckpoint(handle, 0), 0);
+      try {
+        draft.acceptProposal(id);
+        return false;
+      } catch (error) {
+        if (error instanceof StaleProposalError) return true;
+        throw error;
+      } finally { draft.dispose(); }
+    },
     acceptProposal(id: string, opts?: { force?: boolean }): EditResult & { proposalId: string } {
       try {
-        return mutatingWasmCall(() => {
+        const accepted = mutatingWasmCall(() => {
           const fn = (doc as { acceptProposalJson?: (a: string) => string }).acceptProposalJson;
           if (typeof fn !== 'function') throw new Error('proposals not in this build');
-          return JSON.parse(
+          const result = JSON.parse(
             fn.call(doc, JSON.stringify({ id, force: opts?.force ?? false }))
           ) as EditResult & { proposalId: string };
+          proposalDecisions.set(id, 'accepted');
+          return result;
         });
+        notifyProposals();
+        return accepted;
       } catch (e) {
         const message = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
         throw staleErrorFrom(message) ?? toError(e);
       }
     },
     rejectProposal(id: string): boolean {
-      return mutatingWasmCall(() => {
+      const rejected = mutatingWasmCall(() => {
         const fn = (doc as { rejectProposalJson?: (a: string) => string }).rejectProposalJson;
         if (typeof fn !== 'function') return false;
-        return (JSON.parse(fn.call(doc, JSON.stringify({ id }))) as { removed: boolean }).removed;
+        const removed = (JSON.parse(fn.call(doc, JSON.stringify({ id }))) as { removed: boolean }).removed;
+        if (removed) proposalDecisions.set(id, 'rejected');
+        return removed;
       });
+      if (rejected) notifyProposals();
+      return rejected;
     },
     isProposalsAvailable(): boolean {
       return wasmCall(() => typeof (doc as { proposeJson?: unknown }).proposeJson === 'function');
@@ -1387,6 +1436,8 @@ function wrapWorkbookDocument(
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      proposalDecisions.clear();
+      proposalListeners.clear();
       listeners.clear();
       pendingUpdates.length = 0;
       let disposalError: unknown;

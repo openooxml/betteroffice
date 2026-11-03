@@ -9,6 +9,7 @@ mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
 mod geometry;
+mod proposals;
 pub(crate) mod reads;
 pub(crate) mod recovery;
 mod rich_text;
@@ -21,6 +22,8 @@ mod staging;
 pub(crate) mod target;
 #[cfg(test)]
 mod update_tests;
+
+use self::proposals::proposal_edit_is_stale;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -282,6 +285,8 @@ impl PreservedSheetState {
 struct PreservedStateHistory {
     before: PreservedSheetState,
     after: PreservedSheetState,
+    proposals_before: Option<Vec<Proposal>>,
+    proposals_after: Option<Vec<Proposal>>,
 }
 
 struct SheetInfoCache {
@@ -2028,7 +2033,6 @@ impl Workbook {
         {
             return Err(Error::CollaborativeStructureOperation);
         }
-        let invalidates_proposals = ops.iter().any(invalidates_proposals);
         let mut preview = self.model.clone();
         let mut origins = self.preserved.origins.clone();
         let mut names = self.sheet_names();
@@ -2063,7 +2067,10 @@ impl Workbook {
         {
             xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)?;
         }
-        if preview == self.model {
+        let proposals_changed = self
+            .rebased_proposals(&ops)
+            .is_some_and(|proposals| proposals != self.proposals.list());
+        if preview == self.model && !proposals_changed {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
@@ -2092,9 +2099,6 @@ impl Workbook {
         let scope = scope.confirmed(&inputs, &prepared.model);
         let update = self.commit_prepared(prepared)?;
         self.restore_active_sheet(active_sheet);
-        if invalidates_proposals {
-            self.proposals.clear();
-        }
         mark(EditStage::Applied);
         let result = self.recalculate_scope(scope, &rewritten, options);
         mark(EditStage::Recalculated);
@@ -2195,21 +2199,28 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
+        let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.undo(model))?;
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
-        if let Some(history) = self.preserved_undo.pop() {
+        if let Some(mut history) = self.preserved_undo.pop() {
+            self.restore_rebased_proposals(
+                rebased,
+                &history.proposals_before,
+                &mut history.proposals_after,
+            );
+            if history.proposals_after.is_some() {
+                history.proposals_before = Some(self.proposals.list().to_vec());
+            }
             self.preserved = history.before.clone();
             self.preserved_redo.push(history);
         } else {
+            self.adopt_rebased_proposals(rebased);
             self.apply_preserved_state_ops(&names_before, &ops);
         }
         self.restore_active_sheet(active_sheet);
-        if ops.iter().any(invalidates_proposals) {
-            self.proposals.clear();
-        }
         let scope = match before {
             Some(before) => scope.confirmed(&before, &self.model),
             None => CalculationScope::Full,
@@ -2249,21 +2260,28 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
+        let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.redo(model))?;
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
-        if let Some(history) = self.preserved_redo.pop() {
+        if let Some(mut history) = self.preserved_redo.pop() {
+            self.restore_rebased_proposals(
+                rebased,
+                &history.proposals_after,
+                &mut history.proposals_before,
+            );
+            if history.proposals_before.is_some() {
+                history.proposals_after = Some(self.proposals.list().to_vec());
+            }
             self.preserved = history.after.clone();
             self.preserved_undo.push(history);
         } else {
+            self.adopt_rebased_proposals(rebased);
             self.apply_preserved_state_ops(&names_before, &ops);
         }
         self.restore_active_sheet(active_sheet);
-        if ops.iter().any(invalidates_proposals) {
-            self.proposals.clear();
-        }
         let scope = match before {
             Some(before) => scope.confirmed(&before, &self.model),
             None => CalculationScope::Full,
@@ -2343,7 +2361,6 @@ impl Workbook {
         self.restore_active_sheet(Some(active_sheet));
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
-        self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
         let changed = changed_cells_between(&before, &self.model);
         self.publish(Some(history.update));
@@ -2405,6 +2422,7 @@ impl Workbook {
                 a1: edit.cell.to_a1(),
                 old_text: display_text_at(&self.model, edit.sheet, edit.cell)?,
                 new_text: display_text_at(&preview, edit.sheet, edit.cell)?,
+                stale: None,
             });
         }
         let ghosts = proposal_ghosts(&self.model, &preview, &edits)?;
@@ -2445,20 +2463,19 @@ impl Workbook {
             });
         }
 
-        if !force {
-            let mut stale = Vec::new();
-            for edit in &proposal.edits {
-                let address = CellAddress {
-                    sheet: SheetId(edit.sheet),
-                    cell: CellRef::new(edit.row, edit.col),
-                };
-                if current_cell_state(&self.model, address.sheet, address.cell) != edit.old_state {
-                    stale.push(address);
-                }
-            }
-            if !stale.is_empty() {
-                return Err(Error::StaleProposal(stale));
-            }
+        let stale: Vec<_> = proposal
+            .edits
+            .iter()
+            .filter(|edit| {
+                edit.stale == Some(true) || (!force && proposal_edit_is_stale(&self.model, edit))
+            })
+            .map(|edit| CellAddress {
+                sheet: SheetId(edit.sheet),
+                cell: CellRef::new(edit.row, edit.col),
+            })
+            .collect();
+        if !stale.is_empty() {
+            return Err(Error::StaleProposal(stale));
         }
 
         let mut touched = Vec::with_capacity(proposal.edits.len());
@@ -2639,8 +2656,7 @@ impl Workbook {
                 .edits
                 .iter()
                 .filter_map(|edit| {
-                    let at = CellRef::new(edit.row, edit.col);
-                    (current_cell_state(&self.model, SheetId(edit.sheet), at) != edit.old_state)
+                    proposal_edit_is_stale(&self.model, edit)
                         .then_some((edit.sheet, edit.row, edit.col))
                 })
                 .collect();
@@ -3073,6 +3089,8 @@ impl Workbook {
             self.preserved_undo.push(PreservedStateHistory {
                 before,
                 after: self.preserved.clone(),
+                proposals_before: None,
+                proposals_after: None,
             });
             self.preserved_redo.clear();
         }
@@ -5058,6 +5076,7 @@ fn proposal_ghosts(
             ),
         });
     }
+    ghosts.sort_by_key(|ghost| (ghost.sheet, ghost.row, ghost.col));
     Ok(ghosts)
 }
 
@@ -5630,25 +5649,6 @@ fn reads_same(old: &xlsx_model::Cell, new: &xlsx_model::Cell, renamed: bool) -> 
         old.formula == new.formula
     };
     old.value == new.value && formulas
-}
-
-fn invalidates_proposals(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::InsertRows { .. }
-            | Op::DeleteRows { .. }
-            | Op::InsertCols { .. }
-            | Op::DeleteCols { .. }
-            | Op::SetHyperlinks { .. }
-            | Op::RestoreColStyles { .. }
-            | Op::RestoreRowStyles { .. }
-            | Op::SetCharts { .. }
-            | Op::AddSheet { .. }
-            | Op::RemoveSheet { .. }
-            | Op::MoveSheet { .. }
-            | Op::RenameSheet { .. }
-            | Op::RestoreSheet { .. }
-    )
 }
 
 #[cfg(test)]

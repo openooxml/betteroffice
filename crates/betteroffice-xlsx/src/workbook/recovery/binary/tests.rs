@@ -401,6 +401,7 @@ fn checkpoint_round_trips_every_op_and_calculation_and_proposal_fields() {
             a1: "A1".into(),
             old_text: "9".into(),
             new_text: "25%".into(),
+            stale: Some(true),
         }],
         ghosts: vec![ProposalGhost {
             sheet: 0,

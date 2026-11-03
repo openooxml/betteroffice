@@ -1,4 +1,9 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { inflateSync } from 'node:zlib';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
@@ -47,6 +52,42 @@ function expectPlainBytes(bytes: Uint8Array) {
   expect(bytes.buffer.byteLength).toBe(bytes.byteLength);
 }
 
+function pngPixels(bytes: Uint8Array): Uint8Array {
+  const png = Buffer.from(bytes);
+  expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  expect([png[24], png[25], png[28]]).toEqual([8, 6, 0]);
+  const stride = png.readUInt32BE(16) * 4;
+  const height = png.readUInt32BE(20);
+  const chunks: Buffer[] = [];
+  for (let offset = 8; offset < png.length;) {
+    const size = png.readUInt32BE(offset);
+    if (png.toString('ascii', offset + 4, offset + 8) === 'IDAT') {
+      chunks.push(png.subarray(offset + 8, offset + 8 + size));
+    }
+    offset += size + 12;
+  }
+  const filtered = inflateSync(Buffer.concat(chunks));
+  expect(filtered.length).toBe(height * (stride + 1));
+  const pixels = new Uint8Array(height * stride);
+  for (let row = 0; row < height; row++) {
+    const filter = filtered[row * (stride + 1)];
+    expect(filter).toBeLessThanOrEqual(4);
+    for (let col = 0; col < stride; col++) {
+      const index = row * stride + col;
+      const left = col >= 4 ? pixels[index - 4] : 0;
+      const up = row > 0 ? pixels[index - stride] : 0;
+      const corner = row > 0 && col >= 4 ? pixels[index - stride - 4] : 0;
+      const estimate = left + up - corner;
+      const distances = [Math.abs(estimate - left), Math.abs(estimate - up), Math.abs(estimate - corner)];
+      const paeth = distances[0] <= distances[1] && distances[0] <= distances[2]
+        ? left : distances[1] <= distances[2] ? up : corner;
+      const prediction = [0, left, up, Math.floor((left + up) / 2), paeth][filter];
+      pixels[index] = (filtered[row * (stride + 1) + col + 1] + prediction) & 255;
+    }
+  }
+  return pixels;
+}
+
 function caughtValue(call: () => unknown): unknown {
   try {
     call();
@@ -84,6 +125,70 @@ function runScript(doc: EngineDocument) {
 }
 
 describe('xlsx native engine parity', () => {
+  test('the package renders installed CJK and Devanagari faces without fetching', async () => {
+    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Fonts" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${rels}/styles" Target="styles.xml"/></Relationships>`);
+    zip.file('xl/styles.xml', `<styleSheet xmlns="${main}"><fonts count="1"><font><sz val="24"/><name val="Calibri"/><color rgb="FF000000"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/></cellXfs></styleSheet>`);
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><cols><col min="1" max="1" width="40" customWidth="1"/></cols><sheetData><row r="1" ht="48" customHeight="1"><c r="A1" t="inlineStr"><is><t>漢字テスト</t></is></c></row><row r="2" ht="48" customHeight="1"><c r="A2" t="inlineStr"><is><t>नमस्ते</t></is></c></row></sheetData></worksheet>`);
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const view = { x: 0, y: 0, width: 300, height: 150 };
+    const ranges = ['A1', 'A2'];
+    const fetch = spyOn(globalThis, 'fetch').mockImplementation(() => {
+      throw new Error('PNG font loading must not fetch');
+    });
+    try {
+      const script = join(mkdtempSync(join(tmpdir(), 'xlsx-native-fonts-')), 'baseline.mjs');
+      writeFileSync(script, `
+        import { createRequire } from 'node:module';
+        import { readFileSync } from 'node:fs';
+        globalThis.fetch = () => { throw new Error('PNG font loading must not fetch'); };
+        const { XlsxDocument } = createRequire(import.meta.url)(${JSON.stringify(fileURLToPath(new URL('./index.js', import.meta.url)))});
+        const doc = XlsxDocument.open(new Uint8Array(readFileSync(0)));
+        try {
+          process.stdout.write(JSON.stringify({
+            png: Buffer.from(doc.renderPng(${JSON.stringify(JSON.stringify(view))})).toString('base64'),
+            ranges: ${JSON.stringify(ranges)}.map(range => Buffer.from(doc.renderRangePng(JSON.stringify({ range, scale: 2 }))).toString('base64')),
+          }));
+        } finally { doc.free(); }
+      `);
+      const baseline = spawnSync(process.execPath, [script], { input: source, encoding: 'utf8' });
+      expect(baseline.status, baseline.stderr).toBe(0);
+      const withoutPacks = JSON.parse(baseline.stdout) as { png: string; ranges: string[] };
+      const entry = await import('./dist/index.js') as typeof import('../../packages/xlsx/src/index');
+      await entry.initWasm();
+      const workbook = entry.openWorkbook(source);
+      try {
+        expect(Buffer.from(workbook.renderPng(view))).not.toEqual(Buffer.from(withoutPacks.png, 'base64'));
+        for (const [row, range] of ranges.entries()) {
+          const rendered = workbook.renderRangePng({ range, scale: 2 });
+          const pixels = pngPixels(rendered);
+          expect(Buffer.from(rendered)).not.toEqual(Buffer.from(withoutPacks.ranges[row], 'base64'));
+          workbook.editCell(0, row, 0, '\u{10ffff}'.repeat(5));
+          const placeholder = pngPixels(workbook.renderRangePng({ range, scale: 2 }));
+          expect(pixels.length).toBe(placeholder.length);
+          let ink = 0;
+          let changed = 0;
+          for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] < 128 && pixels[i + 1] < 128 && pixels[i + 2] < 128 && pixels[i + 3] > 128) ink++;
+            if (Math.abs(pixels[i] - placeholder[i]) > 64) changed++;
+          }
+          expect(ink).toBeGreaterThan(100);
+          expect(changed).toBeGreaterThan(100);
+        }
+      } finally {
+        workbook.dispose();
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
+  }, 30_000);
+
   test('linked font decoder returns known answers and matching native and wasm errors', () => {
     expect(typeof wasmDecodeFontFace).toBe('function');
     expect(typeof native.decodeFontFace).toBe('function');

@@ -168,7 +168,12 @@
     "canvasStale": "Elementy docelowe uległy zmianie. Otwórz szczegóły sprawdzenia, aby przed zastosowaniem przejrzeć zaktualizowany podgląd.",
     "previousPosition": "Poprzedni",
     "proposedPosition": "Proponowany",
-    "loadingDiff": "Ładowanie zmian…"
+    "loadingDiff": "Ładowanie zmian…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Więcej elementów sterujących",

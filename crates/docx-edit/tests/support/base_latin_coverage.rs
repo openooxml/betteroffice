@@ -70,4 +70,33 @@ pub fn check(
     assert_eq!(take(), !has_backstop);
     assert!(measure(&input(primary, "Ω", false, false, "en-US")));
     assert!(!take());
+    let coverage_only = |id, runs: &[&str]| {
+        let runs: Vec<_> = runs
+            .iter()
+            .map(|text| json!({"kind": "text", "text": text, "fontFamily": "Requested"}))
+            .collect();
+        json!({
+            "block": {"kind": "paragraph", "id": "coverage", "runs": runs},
+            "maxWidth": 600,
+            "fontChains": {"requested|0|0": [id], "@betteroffice/fonts/coverage": [id]},
+            "defaults": {"fontSize": 11, "fontFamily": "Requested"}, "authoritativeShaping": true
+        })
+        .to_string()
+    };
+    let covered = "A".repeat(300);
+    assert!(!measure(&coverage_only(upper, &["\u{1F600}", &covered])));
+    assert!(!take());
+    assert!(!measure(&coverage_only(
+        upper,
+        &["\u{1F600}", &covered, "\u{3A9}"]
+    )));
+    assert_eq!(take(), !has_backstop);
+    let later_runs = register(&subset('B'));
+    let mut runs = vec!["\u{1F600}"];
+    runs.extend(std::iter::repeat_n("B", 300));
+    assert!(!measure(&coverage_only(later_runs, &runs)));
+    assert!(!take());
+    runs.push("\u{3A9}");
+    assert!(!measure(&coverage_only(later_runs, &runs)));
+    assert_eq!(take(), !has_backstop);
 }

@@ -198,6 +198,7 @@ export function createXlsxPluginHost(
       scopedCommandStore(controller(), scopeFor(invocation))
     );
     const geometry = access.geometry();
+    const point = geometry?.getPositionAtPoint ?? null;
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -209,15 +210,15 @@ export function createXlsxPluginHost(
       read: clients.read,
       commands: clients.commands,
       edits: clients.edits,
-      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? 'identity' in access ? {
+      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? {
         layout: geometry.layout,
         getCellRect: (target) => invocation.refusal() ? null : geometry.getCellRect(target),
         getRangeRect: (target) => invocation.refusal() ? null : geometry.getRangeRect(target),
         getAnchorGeometry: (target) => invocation.refusal()
           ? { ok: false, failure: { code: 'layout-unavailable', message: 'The plugin context is no longer current' } }
           : geometry.getAnchorGeometry(target),
-        getPositionAtPoint: null,
-      } : geometry : null,
+        getPositionAtPoint: point && ((clientX, clientY) => invocation.refusal() ? null : point(clientX, clientY)),
+      } : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),

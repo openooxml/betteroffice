@@ -689,6 +689,74 @@ describe('wasm loader — proposals', () => {
     }
   });
 
+  for (const mutation of ['dependent', 'style'] as const) {
+    it.skipIf(!available)(`checks ${mutation} proposal staleness without changing the workbook or proposal`, () => {
+      const handle = openWorkbook(sampleBytes());
+      const events: unknown[] = [];
+      const off = handle.onProposalChange(proposals => { events.push(proposals); });
+      try {
+        handle.editCells(0, [
+          { row: 1, col: 1, input: '120' },
+          { row: 1, col: 2, input: '135' },
+          { row: 1, col: 3, input: '150' },
+          { row: 1, col: 4, input: '=SUM(B2:D2)' },
+        ]);
+        const proposal = handle.propose('Agent', null, [{ sheet: 0, row: 1, col: 1, input: '200' }]);
+        const before = { version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() };
+        expect(handle.isProposalStale(proposal.id)).toBe(false);
+        expect({ version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() }).toEqual(before);
+        if (mutation === 'dependent') handle.editCell(0, 1, 2, '140');
+        else handle.patchRangeStyle(0, 'B2', { bold: true });
+        const stale = { version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(handle.isProposalStale(proposal.id)).toBe(true);
+          expect({ version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() }).toEqual(stale);
+        }
+        expect(events).toHaveLength(1);
+        expect(handle.cell(0, 1, 1).input).toBe('120');
+        expect(() => handle.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+        expect(handle.getProposalStatus(proposal.id)).toBe('pending');
+      } finally { off(); handle.dispose(); }
+    });
+  }
+
+  it.skipIf(!available)('lists rebased proposals after insertRows and stale proposals after deletion', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      handle.setNumberFormat(0, 'F7', 'plainText');
+      const proposal = handle.propose('agent', null, [
+        { sheet: 0, row: 6, col: 4, input: '42' },
+        { sheet: 0, row: 6, col: 5, input: '=A1' },
+        { sheet: 0, row: 6, col: 6, input: '=SUM(' },
+      ]);
+      const before = handle.listProposals()[0]!;
+      expect(before.cells.map((cell) => cell.newText)).toEqual(['42', '=A1', '=SUM(']);
+      for (const cell of before.cells) expect(cell).not.toHaveProperty('input');
+      handle.applyOps([{ type: 'insertRows', sheet: 0, at: 5, count: 2 }]);
+      expect(handle.listProposals()[0]).toMatchObject({
+        id: proposal.id, cells: [
+          { sheet: 0, row: 8, col: 4, a1: 'E9' },
+          { sheet: 0, row: 8, col: 5, a1: 'F9' },
+          { sheet: 0, row: 8, col: 6, a1: 'G9' },
+        ],
+      });
+      const after = handle.listProposals()[0]!;
+      expect(after.cells.map((cell) => cell.newText)).toEqual(before.cells.map((cell) => cell.newText));
+      for (const cell of after.cells) expect(cell).not.toHaveProperty('input');
+      handle.applyOps([{ type: 'deleteRows', sheet: 0, at: 8, count: 1 }]);
+      expect(handle.listProposals()[0]?.cells[0]).toMatchObject({ a1: 'E9', stale: true });
+      expect(() => handle.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      expect(() => handle.acceptProposal(proposal.id, { force: true })).toThrow(StaleProposalError);
+      handle.undo();
+      handle.acceptProposal(proposal.id);
+      expect(handle.cell(0, 8, 4).input).toBe('42');
+      expect(handle.cell(0, 8, 5)).toMatchObject({ input: "'=A1", isFormula: false });
+      expect(handle.cell(0, 8, 6)).toMatchObject({ input: "'=SUM(", isFormula: false });
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it.skipIf(!available)('rejects a proposal without applying it', () => {
     const handle = openWorkbook(sampleBytes());
     try {

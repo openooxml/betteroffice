@@ -20,6 +20,9 @@ function ProposalTextDiff({ change, t, testId }: Props) {
 export function ProposalChangeDetails({ change, t, lang, textOnly, testId }: Props) {
   return (
     <>
+      {change.kind === 'inserted' && <p>{t('proposals.insertedSlide')}</p>}
+      {change.kind === 'deleted' && <p>{t('proposals.deletedSlide')}</p>}
+      {change.kind === 'moved' && <p>{t('proposals.movedFrom', { number: (change.beforeIndex ?? 0) + 1 })}</p>}
       <ProposalTextDiff change={change} t={t} testId={testId} />
       {!textOnly && change.before && change.after && <ShapeChange change={change} t={t} lang={lang} />}
     </>

@@ -101,6 +101,8 @@ impl Workbook {
         let new_structure = collaborative.then(|| authority.structure.clone());
         let recorded = history == CommitHistory::Separate;
         let preserved_before = (!collaborative && recorded).then(|| self.preserved.clone());
+        let rebased = self.rebased_proposals(&ops);
+        let proposals_before = rebased.as_ref().map(|_| self.proposals.list().to_vec());
         let names_before = self.sheet_names();
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let local_history = match (recorded, collaborative) {
@@ -113,6 +115,7 @@ impl Workbook {
             .adopt_local_update(authority, local_history)
             .map_err(authority_error)?;
         self.install_model_with_ops(model, &ops)?;
+        self.adopt_rebased_proposals(rebased);
         if let Some(structure) = new_structure {
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(structure),
@@ -127,6 +130,8 @@ impl Workbook {
             self.preserved_undo.push(PreservedStateHistory {
                 before,
                 after: self.preserved.clone(),
+                proposals_before,
+                proposals_after: None,
             });
             self.preserved_redo.clear();
         }

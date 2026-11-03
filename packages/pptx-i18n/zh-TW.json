@@ -168,7 +168,12 @@
     "canvasStale": "目標已變更。請開啟檢閱詳細資料，以在套用前檢查更新後的預覽。",
     "previousPosition": "先前",
     "proposedPosition": "提議",
-    "loadingDiff": "正在載入變更…"
+    "loadingDiff": "正在載入變更…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "更多控制項",

@@ -19,6 +19,15 @@ import { proposalsPanelStyles as styles } from './proposalsPanelStyles';
 
 const ProposalChangeDetails = lazy(() => import('./ProposalDetails').then((module) => ({ default: module.ProposalChangeDetails })));
 
+function previewFrames(handle: PresentationHandle, id: string, slideId: string, live: DeckSnapshot, preview: DeckSnapshot, missingMessage: string) {
+  const liveIndex = live.slides.findIndex(slide => slide.id === slideId);
+  const previewIndex = preview.slides.findIndex(slide => slide.id === slideId);
+  const before = liveIndex >= 0 ? handle.layoutSlide(liveIndex) : null;
+  const after = previewIndex >= 0 ? handle.layoutProposalSlide(id, previewIndex) : null;
+  if (!before && !after) throw new Error(missingMessage);
+  return { before: before ?? { ...after!, primitives: [] }, after: after ?? { ...before!, primitives: [] } };
+}
+
 interface Props {
   handle: PresentationHandle;
   proposals: Proposal[];
@@ -105,12 +114,8 @@ export function ProposalsPanel({
     try {
       const data = handle.previewProposal(selected.id);
       const change = data.proposal.changes[selected.index];
-      const index = data.snapshot.slides.findIndex(
-        (slide) => slide.id === change?.slideId
-      );
-      if (index < 0) throw new Error(t('proposals.targetMissing'));
-      const before = handle.layoutSlide(index);
-      const after = handle.layoutProposalSlide(selected.id, index);
+      if (!change) throw new Error(t('proposals.targetMissing'));
+      const { before, after } = previewFrames(handle, selected.id, change.slideId, snapshot, data.snapshot, t('proposals.targetMissing'));
       setPreview({ data, before, after });
       setError(null);
     } catch (value) {
@@ -129,8 +134,10 @@ export function ProposalsPanel({
     const index = snapshot.slides.findIndex(
       (slide) => slide.id === change.slideId
     );
-    const label = change.before?.name || t('notes.panelLabel');
-    return index < 0
+    const label = change.kind === 'inserted' ? t('proposals.insertedSlide')
+      : change.kind === 'deleted' ? t('proposals.deletedSlide') : change.before?.name || t('notes.panelLabel');
+    return index < 0 && change.kind === 'inserted' ? t('proposals.target', { slide: (change.afterIndex ?? 0) + 1, name: label })
+      : index < 0
       ? t('proposals.targetMissing')
       : t('proposals.target', { slide: index + 1, name: label });
   };
@@ -169,14 +176,7 @@ export function ProposalsPanel({
       }
       if (!shown()) return false;
       const change = latest.proposal.changes[target.index];
-      const index = latest.snapshot.slides.findIndex(
-        (slide) => slide.id === change.slideId
-      );
-      setPreview({
-        data: latest,
-        before: handle.layoutSlide(index),
-        after: handle.layoutProposalSlide(target.id, index),
-      });
+      setPreview({ data: latest, ...previewFrames(handle, target.id, change.slideId, snapshot, latest.snapshot, t('proposals.targetMissing')) });
       setError(t('proposals.changedAgain'));
     } catch (value) {
       if (!shown()) return false;

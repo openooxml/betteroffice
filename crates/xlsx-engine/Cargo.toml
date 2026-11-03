@@ -12,6 +12,7 @@ name = "xlsx_engine"
 [features]
 default = ["raster"]
 raster = ["betteroffice-xlsx/raster"]
+fonts = ["betteroffice-xlsx/fonts"]
 
 [dependencies]
 betteroffice-xlsx = { workspace = true, default-features = false }

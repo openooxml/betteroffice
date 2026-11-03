@@ -476,7 +476,7 @@ export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
 export { StaleProposalError } from './proposals';
-export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { slideToPng } from './render/png';
 export type { SlideToPngOptions } from './render/png';
@@ -501,6 +501,23 @@ export { createPptxWorkerEditorSession } from './session/editorSession';
 // ---- proposals.d.ts ----
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextStyleSnapshot } from './types';
 export type ProposalEdit = {
+    type: 'insertSlide';
+    ref?: string;
+    afterSlideId: string | null;
+    layoutPartPath?: string;
+} | {
+    type: 'duplicateSlide';
+    ref?: string;
+    slideId: string;
+    afterSlideId?: string | null;
+} | {
+    type: 'deleteSlide';
+    slideId: string;
+} | {
+    type: 'moveSlide';
+    slideId: string;
+    afterSlideId: string | null;
+} | {
     type: 'replaceText';
     storyId: string;
     start: number;
@@ -546,7 +563,16 @@ export type ProposalEdit = {
     slideId: string;
     text: string;
 };
+export interface ProposalStripEntry {
+    slideId: string;
+    status: 'unchanged' | 'changed' | 'inserted' | 'deleted' | 'moved';
+    liveIndex: number | null;
+    previewIndex: number | null;
+}
 export interface ProposalChange {
+    kind?: 'content' | 'inserted' | 'deleted' | 'moved';
+    beforeIndex?: number | null;
+    afterIndex?: number | null;
     slideId: string;
     shapeId: string | null;
     before: ShapeSnapshot | null;
@@ -561,6 +587,7 @@ export interface Proposal {
     edits: ProposalEdit[];
     changes: ProposalChange[];
     staleTargets: string[];
+    refs?: Record<string, string>;
 }
 export interface ProposalPreview {
     proposal: Proposal;
@@ -575,6 +602,10 @@ export interface ProposalTextChange {
 export interface ProposalDiffSlide extends ProposalPreview {
     frame: SlideDisplayList;
     textChanges: ProposalTextChange[];
+    media?: {
+        assetId: string;
+        bytes: ArrayBuffer;
+    }[];
 }
 export interface ProposalAcceptance {
     proposalId: string;
@@ -719,7 +750,7 @@ import { type PresentationHandle, type PresentationPeerHandle } from '../wasm/lo
 import { PptxWorkerEditorFailedError } from './peerHydrationError';
 import { type PptxWorkerEditorOperation, type PptxWorkerEditorReply } from './replay';
 import type { PresentationSessionState } from './methods';
-declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "metafileSvg", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
+declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "proposalSlideStrip", "layoutProposalDiffSlideById", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "metafileSvg", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
 export interface PptxWorkerEditorInteractionAccess {
     snapshot(): {
         snapshot: DeckSnapshot;
@@ -2785,6 +2816,7 @@ export class PptxDocument {
     static openReplayBaseline(source: Uint8Array, client_id?: number | null, initial_update?: Uint8Array | null): PptxDocument;
     peerHydrationJson(fonts_json: string): string;
     previewProposalJson(args: string): string;
+    proposalSlideStripJson(id: string): string;
     proposeJson(args: string): string;
     readCommandContentJson(request: string): string;
     /**
@@ -2842,6 +2874,7 @@ export class PptxDocument {
      * `{"ok":true,"baseVersion","wouldApply","previews"}`.
      */
     validateEditsJson(request: string): string;
+    validateProposalJson(args: string): string;
     static version(): string;
     readonly clientId: number;
 }
@@ -2851,6 +2884,7 @@ export class PptxRenderer {
     [Symbol.dispose](): void;
     hitTestJson(x: number, y: number): string;
     hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string;
+    layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slide_id: string): string;
     layoutProposalDiffSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutSlideJson(document: PptxDocument, slide_index: number): string;
@@ -2984,6 +3018,7 @@ export interface InitOutput {
     readonly pptxdocument_openReplayBaseline: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly pptxdocument_peerHydrationJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_previewProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_proposalSlideStripJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_readCommandContentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_readContentJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3024,9 +3059,11 @@ export interface InitOutput {
     readonly pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_undoReceiptJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly pptxrenderer_layoutProposalDiffSlideByIdJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3071,7 +3108,7 @@ import type { InitInput } from './generated/pptx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 export declare const decodeFontFace: FontDecoder;
 import type { PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxMarkdownOptions, PptxStructuredContent } from '../structuredExport';
-import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
+import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry } from '../proposals';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxTextField, PptxValidationResult } from '../edits';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, HistoryProfile, HistoryResult, HitTestResult, ParagraphAlignment, PictureDraft, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideDisplayList, SlideReceipt, StorySnapshot, TextReceipt, TextParagraphDraft, TextStyle, TextStylePatch, TransformReceipt, TableReceipt } from '../types';
@@ -3132,6 +3169,8 @@ export interface PresentationHandle extends CollaborationReplica {
     previewProposal(id: string): ProposalPreview;
     layoutProposalSlide(id: string, slideIndex: number): SlideDisplayList;
     layoutProposalDiffSlide(id: string, slideIndex: number): ProposalDiffSlide;
+    layoutProposalDiffSlideById(id: string, slideId: string): ProposalDiffSlide;
+    proposalSlideStrip(id: string): ProposalStripEntry[];
     acceptProposal(id: string, options?: {
         force?: boolean;
     }): ProposalAcceptance;
@@ -3328,7 +3367,7 @@ export interface PresentationReplayReply {
     outcome: PresentationReplayOutcome;
 }
 /** @internal */
-export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
+export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
 /** @internal */
 export declare function openPresentationReplayBaseline(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationPeerHandle;
 /** @internal */

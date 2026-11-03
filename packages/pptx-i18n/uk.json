@@ -168,7 +168,12 @@
     "canvasStale": "Цілі змінилися. Відкрийте подробиці перегляду, щоб оглянути оновлений попередній перегляд перед застосуванням.",
     "previousPosition": "Попереднє",
     "proposedPosition": "Запропоноване",
-    "loadingDiff": "Завантаження змін…"
+    "loadingDiff": "Завантаження змін…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Інші елементи керування",

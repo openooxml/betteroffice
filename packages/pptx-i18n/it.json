@@ -168,7 +168,12 @@
     "canvasStale": "Destinazioni modificate. Apri Rivedi i dettagli per esaminare l'anteprima aggiornata prima di applicare.",
     "previousPosition": "Precedente",
     "proposedPosition": "Proposta",
-    "loadingDiff": "Caricamento delle modifiche…"
+    "loadingDiff": "Caricamento delle modifiche…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Altri controlli",
