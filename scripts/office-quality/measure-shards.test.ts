@@ -67,3 +67,10 @@ test('shard reports combine into one format report only when every planned sampl
   expect(() => combineShardReports(corpus, 'docx', [report(0, second.samples), report(1, first.samples)])).toThrow('does not hold its planned samples');
   expect(() => combineShardReports(corpus, 'docx', [report(0, first.samples), { ...report(1, second.samples), commit: 'other' }])).toThrow('disagree on commit');
 });
+
+test('a plan needing more measure shards than one workflow matrix holds fails in planning, with the count', () => {
+  const longest = plan({ docx: repeat(1235, () => 250) });
+  expect(measureShards(longest).length).toBe(257);
+  expect(() => measureMatrix(longest)).toThrow('Measurement needs 257 shards; one workflow matrix holds 256');
+  expect(measureMatrix(plan({ docx: repeat(1230, () => 250) })).length).toBeLessThanOrEqual(256);
+});
