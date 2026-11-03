@@ -837,7 +837,7 @@ for (const phase of ['propose', 'propose-after', 'set', 'set-after', 'withdraw',
       } else {
         const second = await doc.proposeAsync(input);
         armed = true;
-        await expect(doc.accept(second.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+        await expect(doc.accept(second.id)).rejects.toMatchObject({ code: 'STALE_TARGET', ...(phase === 'withdraw-after' && { details: { applied: true } }) });
         if (phase === 'withdraw-after') expect(owner.session.getProposals().proposals).toHaveLength(1);
         else expect(owner.session.getProposals().proposals[1].state).toBe('proposed');
       }
@@ -847,6 +847,231 @@ for (const phase of ['propose', 'propose-after', 'set', 'set-after', 'withdraw',
     } finally { doc.close(); owner.close(); }
   });
 }
+
+for (const peer of [false, true]) {
+  test(`attached DOCX preserves untouched refs after settlement interference, peer=${peer}`, async () => {
+    const owner = await proposalRaceFixture();
+    let armed = false;
+    let editorId = '';
+    const interfere = () => {
+      if (!armed) return;
+      armed = false;
+      const snapshot = owner.session.getProposals();
+      expect(owner.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+        changes: [{ id: editorId, state: 'rejected' }],
+      }).ok).toBe(true);
+    };
+    const session = new Proxy(owner.session, { get(target, key) {
+      if (!peer && key === 'withdrawProposals') return (request: Parameters<typeof target.withdrawProposals>[0]) => {
+        const result = target.withdrawProposals(request);
+        interfere();
+        return result;
+      };
+      return Reflect.get(target, key);
+    } });
+    const doc = attachDocx(session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { const result = owner.session.withdrawProposals(request); interfere(); return result; },
+    } } : {});
+    try {
+      const [alpha, beta, gamma, forecast, appendix] = ['alpha', 'beta', 'gamma', 'forecast', 'appendix'].map(query => doc.grep({ query }).matches[0]);
+      await doc.proposeAsync({ author: 'Agent', edits: [{ match: alpha.match, newText: 'ALPHA' }] });
+      editorId = owner.session.getProposals().proposals[0].id;
+      const second = await doc.proposeAsync({ author: 'Agent', edits: [{ match: beta.match, newText: 'BETA' }, { match: forecast.match, newText: 'FORECAST_LONG' }] });
+      armed = true;
+      await expect(doc.accept(second.id)).rejects.toMatchObject({ code: 'STALE_TARGET', details: { applied: true, id: second.id, status: 'accepted' } });
+      expect(doc.review(second.id).status).toBe('accepted');
+      expect(owner.session.getProposals().proposals.map(record => record.id)).toEqual([editorId]);
+      expect(doc.read(appendix.ref)).toMatchObject({ revision: appendix.revision, text: 'The FORECAST_LONG is draft; the appendix is draft.' });
+      await expect(doc.proposeAsync({ author: 'Agent', edits: [{ match: gamma.match, newText: 'GAMMA' }] })).rejects.toMatchObject({ code: 'STALE_TARGET' });
+      const reused = await doc.proposeAsync({ author: 'Agent', edits: [{ match: appendix.match, newText: 'APPENDIX' }] });
+      await doc.accept(reused.id);
+      expect(doc.read(appendix.ref).text).toContain('APPENDIX');
+    } finally { doc.close(); owner.close(); }
+  });
+
+  test(`attached DOCX decides from its retained snapshot, peer=${peer}`, async () => {
+    const owner = await proposalRaceFixture();
+    let lagging: ReturnType<typeof owner.session.getProposals> | undefined;
+    const session = new Proxy(owner.session, { get(target, key) {
+      if (key === 'getProposals') return () => lagging ?? target.getProposals();
+      return Reflect.get(target, key);
+    } });
+    const doc = attachDocx(session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    try {
+      const [alpha, beta, gamma] = ['alpha', 'beta', 'gamma'].map(query => doc.grep({ query }).matches[0]);
+      await doc.proposeAsync({ author: 'Agent', edits: [{ match: alpha.match, newText: 'ALPHA' }] });
+      lagging = owner.session.getProposals();
+      const second = await doc.proposeAsync({ author: 'Agent', edits: [{ match: beta.match, newText: 'BETA' }] });
+      await expect(doc.accept(second.id)).resolves.toMatchObject({ status: 'accepted' });
+      expect(doc.read(gamma.ref)).toMatchObject({ revision: gamma.revision, text: 'alpha BETA gamma gamma' });
+    } finally { doc.close(); owner.close(); }
+  });
+
+  test(`attached DOCX refuses a decision whose group is missing from the snapshot, peer=${peer}`, async () => {
+    const owner = await proposalRaceFixture();
+    const session = new Proxy(owner.session, { get(target, key) {
+      if (key === 'onProposalChange') return () => () => {};
+      if (key === 'getProposals') return () => ({ ...target.getProposals(), proposals: [] });
+      if (key === 'proposeChanges') return (request: Parameters<typeof target.proposeChanges>[0]) => {
+        const result = target.proposeChanges(request);
+        return result.ok ? { ...result, snapshot: { ...result.snapshot, proposals: [] } } : result;
+      };
+      return Reflect.get(target, key);
+    } });
+    const doc = attachDocx(session, peer ? { editPeer: {
+      async proposeChanges(request) { return session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    try {
+      const hit = doc.grep({ query: 'alpha' }).matches[0];
+      const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+      const before = owner.session.getProposals();
+      const version = owner.session.version();
+      const revisions = owner.session.listRevisions();
+      await expect(doc.rejectAsync(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET', details: { id: proposal.id } });
+      expect(owner.session.version()).toBe(version);
+      expect(owner.session.listRevisions()).toEqual(revisions);
+      expect(owner.session.getProposals()).toEqual(before);
+    } finally { doc.close(); owner.close(); }
+  });
+}
+
+for (const finish of ['withdraw', 'keep-one', 'reconcile'] as const) {
+  test(`attached DOCX does not claim editor ${finish} during staging rollback`, async () => {
+    const owner = await proposalRaceFixture();
+    let armed = false;
+    let staged: string[] = [];
+    const doc = attachDocx(owner.session, { editPeer: {
+      async proposeChanges(request) {
+        const result = owner.session.proposeChanges(request);
+        if (armed) {
+          staged = request.proposals.map(record => record.id);
+          const snapshot = owner.session.getProposals();
+          expect(owner.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+            changes: [{ id: snapshot.proposals[0].id, state: 'rejected' }],
+          }).ok).toBe(true);
+        }
+        return result;
+      },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) {
+        if (armed) {
+          armed = false;
+          if (finish === 'reconcile') {
+            const records = owner.session.getProposals().proposals.filter(record => staged.includes(record.id));
+            for (const record of records) for (const revisionId of record.revisionIds) owner.session.rejectChange({ revisionId });
+          } else expect(owner.session.withdrawProposals({ expectVersion: owner.session.version(), ids: finish === 'keep-one' ? [staged[1]] : staged, keepRevisions: finish === 'keep-one' }).ok).toBe(true);
+        }
+        return owner.session.withdrawProposals(request);
+      },
+    } });
+    try {
+      const [alpha, beta, forecast, appendix] = ['alpha', 'beta', 'forecast', 'appendix'].map(query => doc.grep({ query }).matches[0]);
+      await doc.proposeAsync({ author: 'Agent', edits: [{ match: alpha.match, newText: 'ALPHA' }] });
+      armed = true;
+      await expect(doc.proposeAsync({ author: 'Agent', edits: [{ match: beta.match, newText: 'BETA' }, { match: forecast.match, newText: 'FORECAST' }] })).rejects.toMatchObject({ code: 'PROPOSAL_DECIDED_IN_EDITOR' });
+      expect(doc.listProposals()).toHaveLength(2);
+      await expect(doc.rejectAsync('proposal2')).rejects.toMatchObject({ code: 'PROPOSAL_DECIDED_IN_EDITOR' });
+      await expect(doc.proposeAsync({ author: 'Agent', edits: [{ match: appendix.match, newText: 'APPENDIX' }] })).rejects.toMatchObject({ code: 'STALE_TARGET' });
+    } finally { doc.close(); owner.close(); }
+  });
+}
+
+for (const peer of [false, true]) for (const action of ['accept', 'reject', 'discard', 'rollback', 'evict'] as const) {
+  test(`attached DOCX releases ownership tracking after ${action}, peer=${peer}`, async () => {
+    const owner = await proposalRaceFixture();
+    let fail = action === 'rollback';
+    const session = new Proxy(owner.session, { get(target, key) {
+      if (key === 'withdrawProposals') return (request: Parameters<typeof target.withdrawProposals>[0]) => {
+        if (fail) { fail = false; throw new Error('withdraw refused'); }
+        return target.withdrawProposals(request);
+      };
+      return Reflect.get(target, key);
+    } });
+    const doc = attachDocx(session, peer ? { editPeer: {
+      async proposeChanges(request) { return session.proposeChanges(request); },
+      async setProposalStates(request) { return session.setProposalStates(request); },
+      async withdrawProposals(request) { return session.withdrawProposals(request); },
+    } } : {});
+    const tracking = doc as unknown as { ownStateVersions: Map<string, Set<number>>; ownWithdrawals: Set<string> };
+    try {
+      const hit = doc.grep({ query: 'alpha' }).matches[0];
+      const first = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+      const ids = owner.session.getProposals().proposals.map(record => record.id);
+      if (action === 'rollback') await expect(doc.accept(first.id)).rejects.toThrow('withdraw refused');
+      else if (action === 'accept') await doc.accept(first.id);
+      else if (action === 'discard') await doc.discardAsync(first.id);
+      else await doc.rejectAsync(first.id);
+      if (action === 'evict') {
+        tracking.ownStateVersions.set(ids[0], new Set([1]));
+        tracking.ownWithdrawals.add(ids[0]);
+        for (let index = 0; index < 64; index++) {
+          const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+          await doc.rejectAsync(proposal.id);
+        }
+        expect(doc.listProposals().some(proposal => proposal.id === first.id)).toBe(false);
+      }
+      expect(tracking.ownStateVersions.size).toBe(0);
+      expect(tracking.ownWithdrawals.size).toBe(0);
+      tracking.ownStateVersions.set('closed', new Set([1]));
+      tracking.ownWithdrawals.add('closed');
+      doc.close();
+      expect(tracking.ownStateVersions.size).toBe(0);
+      expect(tracking.ownWithdrawals.size).toBe(0);
+    } finally { doc.close(); owner.close(); }
+  });
+}
+
+for (const peer of [false, true]) {
+  test(`attached DOCX bounds ownership history, peer=${peer}`, async () => {
+    const owner = await proposalRaceFixture();
+    const doc = attachDocx(owner.session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    const tracking = doc as unknown as { ownStateVersions: Map<string, Set<number>>; ownWithdrawals: Set<string> };
+    try {
+      const hit = doc.grep({ query: 'alpha' }).matches[0];
+      const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+      for (let index = 0; index < 300; index++) {
+        tracking.ownStateVersions.set(`history${index}`, new Set(Array.from({ length: 300 }, (_, version) => version)));
+        tracking.ownWithdrawals.add(`history${index}`);
+      }
+      await doc.rejectAsync(proposal.id);
+      expect(tracking.ownStateVersions.size).toBe(256);
+      expect(tracking.ownWithdrawals.size).toBe(256);
+      expect([...tracking.ownStateVersions.values()].every(versions => versions.size <= 256)).toBe(true);
+    } finally { doc.close(); owner.close(); }
+  });
+}
+
+test('attached DOCX retains withdrawal provenance with a legacy peer result', async () => {
+  const owner = await proposalRaceFixture();
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) {
+      const result = owner.session.withdrawProposals(request);
+      return result.ok ? { ok: true, snapshot: result.snapshot } : result;
+    },
+  } });
+  try {
+    const [alpha, beta] = ['alpha', 'beta'].map(query => doc.grep({ query }).matches[0]);
+    const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: alpha.match, newText: 'ALPHA' }] });
+    await expect(doc.accept(proposal.id)).resolves.toMatchObject({ status: 'accepted' });
+    expect(doc.read(beta.ref).revision).toBe(beta.revision);
+    const reused = await doc.proposeAsync({ author: 'Agent', edits: [{ match: beta.match, newText: 'BETA' }] });
+    await doc.rejectAsync(reused.id);
+  } finally { doc.close(); owner.close(); }
+});
 
 for (const phase of ['set', 'set-after', 'withdraw', 'withdraw-one'] as const) for (const action of ['accept', 'tracked', 'reject', 'discard'] as const) {
   test(`attached DOCX rolls back only its own records after editor races ${action} during ${phase}`, async () => {

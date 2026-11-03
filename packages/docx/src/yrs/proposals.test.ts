@@ -1126,7 +1126,7 @@ describe('YrsSession host proposals', () => {
     const retried = session.getProposals();
     expect(
       session.withdrawProposals({ expectVersion: before, ids: ['rejected', 'accepted'] })
-    ).toEqual({ ok: true, snapshot: retried });
+    ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
     expect(
       session.withdrawProposals({ expectVersion: before, ids: ['again'] })
     ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
@@ -1468,4 +1468,41 @@ it('notifies adopted host updates as local and keeps earlier edits undoable', as
   expect(texts(main, 'accepted').at(-1)).toBe('Tail');
   expect(main.canUndo()).toBe(false);
   expect(main.undo()).toBe(false);
+});
+
+it('guards empty withdrawals before returning a no-op', async () => {
+  const session = await open();
+  const before = session.getProposals();
+  session.insertText({ story: 'body', paraId: '00000006', offset: 4 }, '!');
+  const current = session.getProposals();
+  expect(session.withdrawProposals({ expectVersion: before.version, ids: ['missing'] }))
+    .toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(session.withdrawProposals({ expectVersion: current.version, expectPreviewVersion: current.previewVersion + 1, ids: [] }))
+    .toMatchObject({ ok: false, failure: { code: 'stale-preview' } });
+  expect(session.getProposals()).toEqual(current);
+});
+
+for (const keepRevisions of [false, true]) {
+  it(`versions undecided withdrawals and reports only withdrawn ids, keepRevisions=${keepRevisions}`, async () => {
+    const session = await open();
+    const before = snapshotOf(propose(session,
+      replace('one', '00000003', 'this', 'that'), replace('two', '00000006', 'Tail', 'End')));
+    const first = session.withdrawProposals({ expectVersion: before.version, expectPreviewVersion: before.previewVersion, ids: ['two', 'missing', 'two'], keepRevisions });
+    expect(first).toMatchObject({ ok: true, withdrawnIds: ['two'], snapshot: { previewVersion: before.previewVersion + 1 } });
+    const after = session.getProposals();
+    expect(session.withdrawProposals({ expectVersion: after.version, expectPreviewVersion: before.previewVersion, ids: ['one', 'two'] }))
+      .toMatchObject({ ok: false, failure: { code: 'stale-preview' } });
+    expect(session.getProposals()).toEqual(after);
+    expect(session.withdrawProposals({ expectVersion: after.version, expectPreviewVersion: after.previewVersion, ids: ['two'] }))
+      .toMatchObject({ ok: true, withdrawnIds: [] });
+  });
+}
+
+it('versions reconciliation of undecided records', async () => {
+  const session = await open();
+  const before = snapshotOf(propose(session, replace('one', '00000003', 'this', 'that')));
+  for (const revisionId of before.proposals[0]!.revisionIds) session.rejectChange({ revisionId });
+  expect(session.getProposals().previewVersion).toBeGreaterThan(before.previewVersion);
+  expect(session.withdrawProposals({ expectVersion: session.version(), expectPreviewVersion: before.previewVersion, ids: ['one'] }))
+    .toMatchObject({ ok: false, failure: { code: 'stale-preview' } });
 });
