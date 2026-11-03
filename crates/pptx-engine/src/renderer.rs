@@ -67,12 +67,12 @@ impl Renderer {
         }
     }
 
-    pub fn register_font(
+    pub fn register_font<'a>(
         &mut self,
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
     ) -> Result<u32, EngineError> {
         let id = self
             .renderer
@@ -85,12 +85,12 @@ impl Renderer {
         Ok(id)
     }
 
-    pub fn register_fallback_font(
+    pub fn register_fallback_font<'a>(
         &mut self,
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
     ) -> Result<u32, EngineError> {
         let id = self
             .renderer

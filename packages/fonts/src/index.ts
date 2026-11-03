@@ -305,3 +305,17 @@ export function createFontProvider(
       : { baseUrl: resolvedAssetBase(options.baseUrl) };
   return fontProvider((face) => loadBundledFontBytes(face, resolvedOptions, runtime));
 }
+
+/**
+ * Decodes a pack file in the package's own decoder and releases it afterwards, so a large face costs an engine's
+ * memory nothing.
+ * @internal
+ */
+export const decodeFontFaceOutsideEngine: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  const decoder = await import('./decode');
+  try {
+    return await decoder.decodeFontFace(bytes, dict, { codec, maxOutput });
+  } finally {
+    decoder.releaseFontDecoder();
+  }
+};

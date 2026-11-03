@@ -19,7 +19,10 @@ impl EditSessionCore {
     /// Registers raw sfnt bytes in this session's resident measurement store
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
-    pub fn register_measure_font(&self, bytes: &[u8]) -> EngineResult<u32> {
+    pub fn register_measure_font<'a>(
+        &self,
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
+    ) -> EngineResult<u32> {
         let _fonts = self.fonts.enter();
         docx_layout::register_measure_font_bytes(bytes).map_err(EngineError::message)
     }

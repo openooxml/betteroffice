@@ -19,6 +19,8 @@ import { workbookPngDisplayListJson, workbookRangePngDisplayListJson } from '../
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
+import { decodeLargeFacesOutsideEngine, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { engineKind } from '../wasm/engine';
 import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './commandProtocol';
 import {
   WORKBOOK_SESSION_POLICIES,
@@ -28,6 +30,10 @@ import {
   type WorkbookSessionMethods,
   type WorkbookSheetSummary,
 } from './methods';
+
+const engineDecodeFontFace: FontDecoder = (bytes, options) => decodeFontFace(bytes, options);
+const sessionDecodeFontFace = engineKind === 'wasm' ? decodeLargeFacesOutsideEngine(engineDecodeFontFace,
+  () => import('@betteroffice/fonts').then((fonts) => fonts.decodeFontFaceOutsideEngine)) : engineDecodeFontFace;
 import {
   applyWorkbookReplayOp,
   validateWorkbookReplayEnvelope,
@@ -378,7 +384,7 @@ export function createWorkbookSessionHost(
       if (disposed) throw new Error('Workbook session is disposed');
       await (options.initWasm ?? initWasm)(wasm, enginePng === undefined ? undefined : { png: enginePng });
       if (disposed) throw new Error('Workbook session is disposed');
-      const face = await decodeFontFace(bytes, input);
+      const face = await sessionDecodeFontFace(bytes, input);
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
     },
     async openRecovery(_, checkpoint, input = {}) {

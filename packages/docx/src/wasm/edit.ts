@@ -127,4 +127,4 @@ export function renderDocxMarkdownWithPagesJson(content: string, options: string
 }
 
 export type { EditSession };
-export { decodePackedFontFace };
+export { decodePackedFontFace, engineKind };

@@ -1,4 +1,5 @@
 import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import { sessionFontDecoder } from './sessionFontDecoder';
 import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
@@ -53,6 +54,7 @@ const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
 export const commandDefaultFontModule = { load: () => import('./commandDefaultFonts') };
+const sessionDecodeFontFace = sessionFontDecoder((bytes, options) => decodeFontFace(bytes, options));
 
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
@@ -1590,7 +1592,7 @@ export function registerPresentationCommandHandlers(
       if (disposed) throw new Error('Presentation command session is disposed');
       await (options.initWasm ?? initWasm)(wasm);
       if (disposed) throw new Error('Presentation command session is disposed');
-      const face = await decodeFontFace(bytes, input);
+      const face = await sessionDecodeFontFace(bytes, input);
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
     },
     async openCommandEditor(_, bytes, input) {

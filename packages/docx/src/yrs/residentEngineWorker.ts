@@ -54,9 +54,9 @@ import {
   type ResidentEngineSession,
 } from './residentEngineSession';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
-import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
+import { decodePackedFontFace, engineKind, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
 import { shipsWasmAsset } from '../wasm/assetEdit';
-import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
+import { copyDecodedFace, decodeLargeFacesOutsideEngine, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import {
   createProposalRegistry,
   proposalRevisionPreview,
@@ -1357,6 +1357,14 @@ let offscreenZoom = 1;
 // pages keep their back-buffer raster (`intactBackBuffers`) so the line can be
 // dropped by re-presenting without raster or engine work; plain presents
 // detach their bitmap and stay zero-copy.
+const engineDecodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await preloadEditWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
+const workerDecodeFontFace = engineKind === 'wasm' ? decodeLargeFacesOutsideEngine(engineDecodeFontFace,
+  () => import('@betteroffice/fonts').then((fonts) => fonts.decodeFontFaceOutsideEngine)) : engineDecodeFontFace;
+
 let caretStyle: ResidentCaretPaintStyle = { color: '#000', width: 2 };
 let caretPaintRect: YrsResidentCaretRect | null = null;
 let paintedCaretPageId: string | null = null;
@@ -1644,9 +1652,8 @@ function trapped(id: number, error: Error): void {
 async function handle(request: ScheduledRequest): Promise<void> {
   if (request.type === 'decodeFontFace') {
     try {
-      await preloadEditWasm();
-      const face = copyDecodedFace(decodePackedFontFace(fontBytes(request.bytes), request.codec,
-        request.dict === undefined ? undefined : fontBytes(request.dict), request.maxOutput));
+      const face = await workerDecodeFontFace(request.bytes, { codec: request.codec, dict: request.dict,
+        maxOutput: request.maxOutput });
       reply({ id: request.id, ok: true, decodedFontFace: face },
         face.payload === undefined ? [face.font] : [face.font, face.payload]);
     } catch (error) {

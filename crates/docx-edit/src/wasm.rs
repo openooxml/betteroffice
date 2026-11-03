@@ -257,7 +257,8 @@ impl EditSession {
     /// Registers raw sfnt bytes in this session's resident measurement store
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
-    pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+    #[wasm_bindgen(js_name = register_measure_font)]
+    pub fn register_owned_measure_font(&self, bytes: Vec<u8>) -> Result<u32, JsValue> {
         self.core
             .register_measure_font(bytes)
             .map_err(JsValue::from)
@@ -2803,6 +2804,15 @@ pub fn render_docx_markdown_with_pages_json(
     options: &str,
 ) -> Result<String, JsValue> {
     crate::session::free::render_docx_markdown_with_pages_json(content, options).map_err(js_err)
+}
+
+#[cfg(test)]
+impl EditSession {
+    fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+        self.core
+            .register_measure_font(bytes)
+            .map_err(JsValue::from)
+    }
 }
 
 #[cfg(test)]

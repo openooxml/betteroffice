@@ -64,7 +64,7 @@ impl VsdxRenderer {
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<u32, JsValue> {
         let handle = self.font_count;
         let next_font_count = self
@@ -72,7 +72,7 @@ impl VsdxRenderer {
             .checked_add(1)
             .ok_or_else(|| JsValue::from_str("font handle limit exceeded"))?;
         self.renderer
-            .register_font(family, bold, italic, bytes.to_vec())
+            .register_font(family, bold, italic, bytes)
             .map_err(js_error)?;
         self.font_count = next_font_count;
         Ok(handle)

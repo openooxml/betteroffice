@@ -39,7 +39,7 @@ test('the manager decodes packed faces with the worker engine', async () => {
   expect((await decoder(packed, { codec: 'zstd' })).font.byteLength).toBe((await notoSansJP()).byteLength);
 });
 
-test('coverage prefetch loads each face once and decodes only after the session wasm is ready', async () => {
+test('coverage prefetch loads each face once; small faces decode only after the session wasm is ready, large ones need no wasm', async () => {
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { release = resolve; });
   const load = mock(async () => bytes);
@@ -53,9 +53,11 @@ test('coverage prefetch loads each face once and decodes only after the session 
   restorers.push(() => create.mockRestore());
   await commandFontProvider.load();
   const decoder = (create.mock.calls[0]![1] as { decoder: typeof decodeFontFace }).decoder;
-  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  const large = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  expect((await decoder(large, { codec: 'zstd' })).font.byteLength).toBeGreaterThan(0);
+  const small = await readFile(new URL('../../../fonts-latin/assets/LiberationSans-Regular.ttf.zst', import.meta.url));
   let decoded = false;
-  const decoding = decoder(packed, { codec: 'zstd' }).then((face) => { decoded = true; return face; });
+  const decoding = decoder(small, { codec: 'woff2t+zstd' }).then((face) => { decoded = true; return face; });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(decoded).toBe(false);
   release();
