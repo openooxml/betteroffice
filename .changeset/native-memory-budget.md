@@ -1,6 +1,6 @@
 ---
-"@betteroffice/xlsx-native": minor
+"@betteroffice/xlsx-native": patch
 "@betteroffice/xlsx": patch
 ---
 
-Gives the native xlsx engine the same 4 GiB memory budget per thread as the WebAssembly engine. A call that takes the engine's live allocations past the budget fails: worker sessions fail with the typed out-of-memory error, and a workbook handle refuses every later call except dispose().
+The native xlsx engine has the same 4 GiB memory budget per thread as the WebAssembly engine. A call past the budget fails the worker session with the typed out-of-memory error, and a failed workbook handle refuses later calls except dispose().
