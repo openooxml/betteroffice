@@ -14,7 +14,7 @@ type FrameTags = Omit<PresentationCommandFrame, 'displayList' | 'media'>;
 
 export function buildCommandFrame(
   handle: PresentationHandle, tags: FrameTags, sentMedia: ReadonlySet<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList,
-  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>
+  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
 ): TransferResult<PresentationCommandFrame> {
   const list = cached ?? JSON.parse(presentationDisplayListJson(handle, tags.slideIndex)) as SlideDisplayList;
   function visit(primitives: SlidePrimitive[]): void {
@@ -45,30 +45,37 @@ export function buildCommandFrame(
   if (!cached) visit(list.primitives);
   parsed?.(list);
   const displayList = new TextEncoder().encode(JSON.stringify(list)).buffer;
-  const media = commandFrameMedia(handle, list, sentMedia, metafiles, pendingMetafiles);
+  const media = commandFrameMedia(handle, list, sentMedia, metafiles, pendingMetafiles, extracted);
   return transferable({ ...tags, displayList, media },
     [displayList, ...media.map(({ bytes }) => bytes)]);
 }
 
 export function commandFrameMedia(
   handle: PresentationHandle, list: SlideDisplayList, sentMedia: ReadonlySet<string>,
-  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>,
+  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
 ): PresentationCommandFrame['media'] {
   const media: PresentationCommandFrame['media'] = [];
   for (const assetId of frameAssetIds(list)) {
     if (sentMedia.has(assetId)) continue;
     let bytes: Uint8Array;
-    try { bytes = handle.mediaBytes(assetId); } catch { continue; }
-    if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
-      try { bytes = decodeTiffImage(bytes); } catch {}
-    }
-    const source = bytes;
-    bytes = metafileImageBytes(source, () => {
-      if (metafiles?.ready()) return metafiles.convert(assetId, source);
-      pendingMetafiles?.add(assetId);
-      return undefined;
-    });
+    try { bytes = commandFrameMediaBytes(handle, assetId, metafiles, pendingMetafiles); } catch { continue; }
+    extracted?.set(assetId, bytes);
     media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
   }
   return media;
+}
+
+export function commandFrameMediaBytes(
+  handle: PresentationHandle, assetId: string, metafiles?: MetafileSvg, pendingMetafiles?: Set<string>,
+): Uint8Array {
+  let bytes = handle.mediaBytes(assetId);
+  if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
+    try { bytes = decodeTiffImage(bytes); } catch {}
+  }
+  const source = bytes;
+  return metafileImageBytes(source, () => {
+    if (metafiles?.ready()) return metafiles.convert(assetId, source);
+    pendingMetafiles?.add(assetId);
+    return undefined;
+  });
 }

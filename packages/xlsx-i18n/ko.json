@@ -178,6 +178,7 @@
     "accept": "수락",
     "reject": "거부",
     "forceApply": "강제로 적용",
+    "forceBlockedReason": "구조 변경으로 인해 이 제안을 적용할 수 없습니다.",
     "staleWarning": "제안 이후 변경된 셀: {cells}"
   },
   "a11y": {

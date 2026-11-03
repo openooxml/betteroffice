@@ -178,6 +178,7 @@
     "accept": "Accepter",
     "reject": "Refuser",
     "forceApply": "Appliquer de force",
+    "forceBlockedReason": "Cette proposition ne peut pas être appliquée après une modification de la structure.",
     "staleWarning": "Cellules modifiées depuis la proposition : {cells}"
   },
   "a11y": {

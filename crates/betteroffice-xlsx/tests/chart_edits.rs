@@ -1365,3 +1365,36 @@ fn quoted_sheet_names_may_hold_commas_parentheses_and_apostrophes() {
         assert_eq!(book.version(), version, "{reference}");
     }
 }
+
+#[test]
+fn chart_edits_and_history_keep_pending_proposals() {
+    let mut book = Workbook::open(&bytes(CHART)).unwrap();
+    let proposal = book
+        .propose(
+            betteroffice_xlsx::ProposalRequest {
+                agent_id: "agent".into(),
+                note: None,
+                edits: vec![betteroffice_xlsx::ProposalEditInput {
+                    sheet: SheetId(0),
+                    cell: betteroffice_xlsx::CellRef::new(6, 4),
+                    input: "42".into(),
+                    number_format: None,
+                }],
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    apply(
+        &mut book,
+        ChartEdit::SetChartTitle {
+            title: Some("Proposal review".into()),
+        },
+    );
+    assert_eq!(book.proposals(), std::slice::from_ref(&proposal));
+    book.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(book.proposals(), std::slice::from_ref(&proposal));
+    book.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(book.proposals(), std::slice::from_ref(&proposal));
+    book.accept_proposal(&proposal.id, false, CalculationOptions::default())
+        .unwrap();
+}

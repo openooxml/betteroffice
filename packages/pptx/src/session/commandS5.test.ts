@@ -263,11 +263,19 @@ test('worker frame media resolution requests an SVG display copy once', () => {
   const tags = { slideId: 'slide', slideIndex: 0, slideRevision: 1, coversThroughSeq: 1,
     documentEpoch: 1, incarnation: 'worker', epoch: 1, version: 'v1' };
   expect(replays).toBe(0);
-  const frame = buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles).value;
+  const extracted = new Map<string, Uint8Array>();
+  const result = buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles, undefined, extracted);
+  const frame = result.value;
   expect(frame.media).toEqual([{ assetId: 'picture', bytes: svg.buffer }]);
+  expect(extracted.get('picture')).toBe(svg);
+  expect(frame.media[0]!.bytes).not.toBe(svg.buffer);
+  expect(result.transfer).toContain(frame.media[0]!.bytes);
+  expect(result.transfer).not.toContain(svg.buffer);
   expect(replays).toBe(1);
+  extracted.clear();
   sent.add('picture');
-  expect(buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles).value.media).toEqual([]);
+  expect(buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles, undefined, extracted).value.media).toEqual([]);
+  expect(extracted.size).toBe(0);
   expect(replays).toBe(1);
 });
 

@@ -47,7 +47,49 @@ async function fixture(format: Format) {
   return { name: `robustness.${format}`, mimeType: 'application/octet-stream', buffer: await zip.generateAsync({ type: 'nodebuffer' }) };
 }
 
+function instrumentWorker() {
+  const scope = self as unknown as { __paintProbe?: { last: string | null } };
+  if (scope.__paintProbe || typeof OffscreenCanvasRenderingContext2D !== 'function') return;
+  const texts = new WeakMap<OffscreenCanvas, string[]>();
+  const probe = { last: null as string | null };
+  scope.__paintProbe = probe;
+  const context = OffscreenCanvasRenderingContext2D.prototype;
+  const fillText = context.fillText;
+  context.fillText = function (...args: Parameters<typeof fillText>) {
+    texts.set(this.canvas, [...(texts.get(this.canvas) ?? []), args[0]].slice(-256));
+    fillText.apply(this, args);
+  };
+  const clearRect = context.clearRect;
+  context.clearRect = function (...args: Parameters<typeof clearRect>) {
+    if (args[0] === 0 && args[1] === 0) texts.set(this.canvas, []);
+    clearRect.apply(this, args);
+  };
+  const drawImage = context.drawImage;
+  context.drawImage = function (source: CanvasImageSource, ...args: number[]) {
+    const copied = texts.get(source as OffscreenCanvas);
+    if (copied) texts.set(this.canvas, [...(texts.get(this.canvas) ?? []), ...copied].slice(-256));
+    Reflect.apply(drawImage, this, [source, ...args]);
+  };
+  const transfer = OffscreenCanvas.prototype.transferToImageBitmap;
+  OffscreenCanvas.prototype.transferToImageBitmap = function () {
+    probe.last = (texts.get(this) ?? []).join('');
+    return transfer.call(this);
+  };
+  const createBitmap = self.createImageBitmap;
+  self.createImageBitmap = function (source: ImageBitmapSource, ...args: unknown[]) {
+    if (source instanceof OffscreenCanvas) probe.last = (texts.get(source) ?? []).join('');
+    return Reflect.apply(createBitmap, self, [source, ...args]) as Promise<ImageBitmap>;
+  } as typeof self.createImageBitmap;
+}
+
+async function painted(page: Page): Promise<string> {
+  const workers = await Promise.all(page.workers().map((worker) => worker.evaluate(() =>
+    (self as unknown as { __paintProbe?: { last: string | null } }).__paintProbe?.last ?? null).catch(() => null)));
+  return workers.find((value) => value !== null) ?? await page.evaluate(() => window.__asyncRobustness.painted());
+}
+
 async function instrument(page: Page) {
+  page.on('worker', (worker) => { void worker.evaluate(instrumentWorker).catch(() => {}); });
   await page.addInitScript(() => {
     const texts = new WeakMap<HTMLCanvasElement, string[]>();
     const probe: BrowserProbe = {
@@ -115,7 +157,7 @@ async function ready(page: Page, format: Format) {
   if (format === 'xlsx') await expect(page.getByTestId('xlsx-formula-input')).toHaveValue(/.+/);
   if (format === 'pptx') {
     await expect(page.getByTestId('pptx-worker-status')).toHaveCount(0);
-    await expect.poll(() => page.evaluate(() => window.__asyncRobustness.painted())).toMatch(/\S/);
+    await expect.poll(() => painted(page)).toMatch(/\S/);
   }
 }
 
@@ -154,7 +196,7 @@ async function edit(page: Page, format: Format, value: string) {
 async function visible(page: Page, format: Format, value: string) {
   if (format === 'docx') await expect(page.locator('.canvas-page-mirror').first()).toContainText(value);
   else if (format === 'xlsx') await expect(page.getByRole('gridcell').filter({ hasText: value })).toHaveCount(1);
-  else await expect.poll(() => page.evaluate(() => window.__asyncRobustness.painted())).toContain(value);
+  else await expect.poll(() => painted(page)).toContain(value);
 }
 
 async function save(page: Page, format: Format, info: TestInfo, label: string) {
@@ -180,7 +222,7 @@ async function history(page: Page, format: Format, info: TestInfo, value: string
   else await page.getByTestId(`${format}-undo`).click();
   if (format === 'docx') await expect(page.locator('.canvas-page-mirror').first()).not.toContainText(value);
   else if (format === 'xlsx') await expect(page.getByRole('gridcell').filter({ hasText: value })).toHaveCount(0);
-  else await expect.poll(() => page.evaluate(() => window.__asyncRobustness.painted())).not.toContain(value);
+  else await expect.poll(() => painted(page)).not.toContain(value);
   const undone = await save(page, format, info, 'undone');
   expect(undone.text).toBe(original);
   if (format === 'docx') await docxInput(page).press('ControlOrMeta+Shift+z');
