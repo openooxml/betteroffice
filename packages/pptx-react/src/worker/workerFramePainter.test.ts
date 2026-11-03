@@ -332,6 +332,29 @@ test('a reply that arrives before its frame commits on paint without arming anot
   expect(h.client.views).toHaveLength(views); expect(closed(early)).toBe(1);
 });
 
+test('an older same-epoch patch arriving after a newer stashed raster never replaces it', async () => {
+  const h = host(); await commit(h);
+  const next = frame(2);
+  const newer = raster(next, { content: 5, bitmap: new Bitmap(160, 120, 'newer') as unknown as ImageBitmap });
+  const older = raster(next, { baseEpoch: 1, content: 4, baseContent: 1, rect: { x: 8, y: 10, width: 84, height: 14 },
+    bitmap: new Bitmap(84, 14, 'older') as unknown as ImageBitmap });
+  h.client.send(newer); h.client.send(older);
+  h.painter.paintFrame(next, view(next));
+  expect(await h.painter.whenPainted()).toBe(true);
+  expect(pixels.get(h.canvas)).toBe('newer');
+});
+
+test('an older same-epoch unchanged reply arriving after a newer stashed raster never replaces it', async () => {
+  const h = host(); await commit(h);
+  const next = frame(2);
+  const newer = raster(next, { content: 5, bitmap: new Bitmap(160, 120, 'newer') as unknown as ImageBitmap });
+  h.client.send(newer);
+  h.client.send({ kind: 'unchanged', slideId: 'slide', frameEpoch: 2, baseEpoch: 1, baseContent: 1 });
+  h.painter.paintFrame(next, view(next));
+  expect(await h.painter.whenPainted()).toBe(true);
+  expect(pixels.get(h.canvas)).toBe('newer');
+});
+
 test('a stashed reply for a superseded frame closes and the newer frame waits for the worker', async () => {
   const h = host(), first = await commit(h);
   const stale = raster(frame(2)); h.client.send(stale);

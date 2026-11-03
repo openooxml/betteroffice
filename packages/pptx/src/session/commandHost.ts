@@ -735,7 +735,11 @@ export function registerPresentationCommandHandlers(
       const opened = presentation();
       options.onActiveFrame!({ slideId: result.value.slideId, frameEpoch: result.value.epoch,
         displayList: layouts.get(result.value.slideId)!.list,
-        mediaBytes: (assetId) => extracted.get(assetId) ?? commandFrameMediaBytes(opened, assetId, metafiles) });
+        mediaBytes(assetId) {
+          const bytes = extracted.get(assetId);
+          extracted.delete(assetId);
+          return bytes ?? commandFrameMediaBytes(opened, assetId, metafiles);
+        } });
     }
     retainVersions();
     const updates = pendingUpdates.splice(0);

@@ -7,6 +7,16 @@ import { commandFrameCanvasVersion, hardReferences, invalidateCommandFrameCanvas
 import { slideRasterCache, type RasterEntry } from '../../../../shared/office-session/render/pptxSlideRaster';
 import type { PeerlessConfirmedFrame, PeerlessPaintCheckpoint, PeerlessViewSnapshot } from './peerlessViewStore';
 
+type ContentReply = Exclude<PptxRenderReply, { kind: 'unsupported' }>;
+const contentOf = (reply: ContentReply) =>
+  reply.kind === 'raster' ? reply.content : reply.kind === 'unchanged' ? reply.baseContent : undefined;
+/** Whether `reply` shows older pixels than `kept`; at equal content a raster outranks an `unchanged`. */
+function olderContent(reply: ContentReply, kept: ContentReply): boolean {
+  const incoming = contentOf(reply), held = contentOf(kept);
+  if (incoming === undefined || held === undefined) return false;
+  return incoming < held || incoming === held && kept.kind === 'raster' && reply.kind !== 'raster';
+}
+
 interface Paint {
   frame: PeerlessConfirmedFrame;
   view: PeerlessViewSnapshot;
@@ -158,7 +168,8 @@ export function createWorkerFramePainter(
     if (reply.kind === 'unsupported') { mainOnly = true; if (pending) main(pending); return; }
     const job = pending;
     if (!disposed && reply.frameEpoch > seenEpoch && (!job || reply.frameEpoch > job.frame.frame.epoch)) {
-      if (early && early.reply.frameEpoch > reply.frameEpoch) return;
+      if (early && (early.reply.frameEpoch > reply.frameEpoch ||
+        early.reply.frameEpoch === reply.frameEpoch && olderContent(reply, early.reply))) return;
       dropEarly();
       const holder = {};
       if (reply.kind === 'raster') pptxRasterOwnership.retain(reply.bitmap, holder);

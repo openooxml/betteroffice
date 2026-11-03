@@ -334,6 +334,27 @@ wasmTest('a late metafile repaint drops the worker raster media cached from the 
   expect(isSvg(frames[frames.length - 1]!.mediaBytes('ppt/media/picture.emf'))).toBe(true);
 }, 10_000);
 
+wasmTest('the worker raster takes each extracted picture buffer once and the frame keeps no copy', async () => {
+  loader(async () => svgModule());
+  const zip = await JSZip.loadAsync(await deck(1));
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
+  zip.file('ppt/media/picture.emf', png);
+  const frames: { mediaBytes(assetId: string): Uint8Array }[] = [];
+  const workerRender = {
+    transport: undefined as never, active: () => true, pending: () => false, afterReply() {},
+    paintNow: async () => undefined, defaultFonts() {}, dispose() {}, resetMedia() {},
+    frame(frame: { mediaBytes(assetId: string): Uint8Array }) { frames.push(frame); },
+  } as unknown as NonNullable<Parameters<typeof connection>[0]>;
+  const wire = connection(workerRender);
+  const client = await createPresentationCommandClient(await zip.generateAsync({ type: 'uint8array' }), options, wire.transport);
+  clients.push(client);
+  const first = frames[0]!.mediaBytes('ppt/media/picture.emf');
+  const again = frames[0]!.mediaBytes('ppt/media/picture.emf');
+  expect(first).toEqual(png);
+  expect(again).toEqual(png);
+  expect(again).not.toBe(first);
+});
+
 wasmTest('an opening load times out and later repaints without another client request', async () => {
   const pending = deferred<MetafileSvgModule>();
   const load = loader(() => pending.promise);
