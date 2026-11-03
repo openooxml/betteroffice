@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { DisplayList, GridMeta, Proposal } from '@betteroffice/xlsx';
+import { positionAtPoint } from '../viewer/sessionGeometry';
+import type { XlsxPointPosition } from '../XlsxEditor.types';
 import { createPeerlessPluginGeometry } from './createPeerlessPluginDocument';
 import {
   createPluginGeometry,
@@ -10,13 +12,20 @@ import {
   type PaintedGrid,
 } from './geometry';
 
-function element(left: number, top: number): HTMLElement {
+function element(left: number, top: number, width = 0, height = 0): HTMLElement {
   return {
     clientLeft: 0,
     clientTop: 0,
     scrollLeft: 0,
     scrollTop: 0,
-    getBoundingClientRect: () => ({ left, top }),
+    getBoundingClientRect: () => ({
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height,
+    }),
   } as unknown as HTMLElement;
 }
 
@@ -43,6 +52,7 @@ function painted(overrides: Partial<PaintedGrid> = {}): PaintedGrid {
     zoom: 2,
     version: 'v1',
     sheetId: 'sheet:0',
+    sheet: 0,
     viewport: { x: 192, y: 160, width: 300, height: 100 },
     ...overrides,
   };
@@ -195,6 +205,23 @@ describe('overlay coordinates', () => {
     expect(geometry.getRangeRect(range)).toBeNull();
   });
 
+  test('retained point queries refuse a new acknowledged version or painted frame', () => {
+    const frame = painted();
+    let projection = { version: 'v1', painted: frame };
+    const layout = pluginLayout(frame, 'v1')!;
+    const geometry = createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+      () => projection, undefined, () => ({ sheet: 0, row: 1, col: 4 }));
+    expect(geometry.getPositionAtPoint!(1, 1)).toEqual({
+      sheet: 0, sheetId: 'sheet:0', row: 1, col: 4, version: 'v1', layoutId: layout.id,
+    });
+    projection = { version: 'v2', painted: frame };
+    expect(geometry.getPositionAtPoint!(1, 1)).toBeNull();
+    projection = { version: 'v1', painted: painted() };
+    expect(geometry.getPositionAtPoint!(1, 1)).toBeNull();
+    expect(createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+      () => ({ version: 'v1', painted: frame })).getPositionAtPoint).toBeNull();
+  });
+
   test('zoom viewport-local grid rects, clip them to the frame and offset them by the canvas', () => {
     const grid = { frame: { width: 300, height: 100 } as DisplayList, zoom: 1.5 };
     expect(gridRectToOverlay(grid, { x: 64, y: 20, w: 64, h: 20 }, { x: 3, y: 4 })).toEqual({
@@ -216,12 +243,15 @@ describe('overlay coordinates', () => {
     const frame = painted();
     const layout = pluginLayout(frame, 'v1')!;
     let current = true;
+    const canvas = element(110, 60, 600, 200) as unknown as HTMLCanvasElement;
     const geometry = createPluginGeometry(
       layout,
       frame,
-      element(110, 60),
+      canvas,
       element(100, 50),
-      () => current
+      () => current,
+      undefined,
+      (clientX, clientY) => positionAtPoint(frame.frame, 0, canvas, clientX, clientY)
     );
     const cell = (row: number, col: number) =>
       geometry.getCellRect({ sheetId: 'sheet:0', row, col });
@@ -241,12 +271,60 @@ describe('overlay coordinates', () => {
     expect(geometry.getCellRect({ sheetId: 'sheet:1', row: 0, col: 0 })).toBeNull();
     expect(geometry.getCellRect({ sheetId: 'sheet:0', row: -1, col: 0 })).toBeNull();
     expect(geometry.getCellRect({ sheetId: 'sheet:0', row: 0.5, col: 0 })).toBeNull();
-    expect(geometry.getPositionAtPoint).toBeNull();
+    const at = (rect: { x: number; y: number; width: number; height: number }) =>
+      geometry.getPositionAtPoint!(100 + rect.x + rect.width / 2, 50 + rect.y + rect.height / 2);
+    const position = (row: number, col: number) => ({
+      sheet: 0,
+      sheetId: 'sheet:0',
+      row,
+      col,
+      version: 'v1',
+      layoutId: layout.id,
+    });
+    expect(at(cell(0, 0)!)).toEqual(position(0, 0));
+    expect(at(cell(10, 4)!)).toEqual(position(10, 4));
+    expect(at(cell(1, 6)!)).toEqual(position(1, 6));
+    expect(geometry.getPositionAtPoint!(109, 100)).toBeNull();
+    expect(geometry.getPositionAtPoint!(710, 100)).toBeNull();
+    expect(geometry.getPositionAtPoint!(Number.NaN, 100)).toBeNull();
 
     current = false;
     expect(cell(0, 0)).toBeNull();
     expect(
       geometry.getRangeRect({ sheetId: 'sheet:0', range: { top: 0, left: 0, bottom: 1, right: 1 } })
+    ).toBeNull();
+    expect(geometry.getPositionAtPoint!(110 + 2, 60 + 2)).toBeNull();
+  });
+
+  test('point queries keep only editor answers on the frame sheet', () => {
+    const frame = painted({ sheet: 1, sheetId: 'sheet:1' });
+    const layout = pluginLayout(frame, 'v1')!;
+    let answer: XlsxPointPosition | null = { sheet: 1, row: 2, col: 3 };
+    let current = true;
+    const calls: [number, number][] = [];
+    const geometry = createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current, undefined,
+      (clientX, clientY) => {
+        calls.push([clientX, clientY]);
+        return answer;
+      });
+    expect(geometry.getPositionAtPoint!(5, 6)).toEqual({
+      sheet: 1, sheetId: 'sheet:1', row: 2, col: 3, version: 'v1', layoutId: layout.id,
+    });
+    expect(calls).toEqual([[5, 6]]);
+    answer = { sheet: 0, row: 2, col: 3 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    answer = { sheet: 1, row: -1, col: 3 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    answer = { sheet: 1, row: 2, col: 0.5 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    answer = null;
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    current = false;
+    answer = { sheet: 1, row: 2, col: 3 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    expect(calls).toHaveLength(5);
+    expect(
+      createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => true).getPositionAtPoint
     ).toBeNull();
   });
 });

@@ -32,6 +32,7 @@ import type {
   XlsxPluginCommandResult,
   XlsxPluginCommandState,
 } from '../commands/types';
+import type { XlsxPointPosition } from '../XlsxEditor.types';
 
 export type {
   MaybePromise,
@@ -125,8 +126,11 @@ export interface XlsxPluginLayout {
   viewport: { x: number; y: number; width: number; height: number };
 }
 
-/** A cell under the pointer, with the layout it was resolved against. */
-export interface XlsxPluginCellPosition {
+/**
+ * A cell under the pointer, with the layout it was resolved against. `sheet`, `row` and `col`
+ * are what the editor's `getPositionAtPoint` answers for the same point; `sheetId` names that sheet.
+ */
+export interface XlsxPluginCellPosition extends XlsxPointPosition {
   sheetId: string;
   row: number;
   col: number;
@@ -166,7 +170,12 @@ export interface XlsxPluginGeometry {
   getCellRect(target: { sheetId: string; row: number; col: number }): XlsxPluginRect | null;
   /** The visible part of an inclusive range, such as a merged area. */
   getRangeRect(target: { sheetId: string; range: CellRange }): XlsxPluginRect | null;
-  /** Client-coordinate hit testing; null until the editor exposes it. */
+  /**
+   * The cell under client coordinates, through the editor's own hit test; selection and focus
+   * stay where they are. It answers null outside the painted grid, over a chart, for non-finite
+   * coordinates, once this layout is no longer painted or its workbook was replaced, and wherever
+   * that hit test answers null. The member itself is null on hosts without a grid hit test.
+   */
   getPositionAtPoint: ((clientX: number, clientY: number) => XlsxPluginCellPosition | null) | null;
 }
 
