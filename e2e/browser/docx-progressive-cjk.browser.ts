@@ -95,3 +95,28 @@ test('sliced CJK faces paint the first frame under a strict connect-src exactly 
   expect(whole.violations).toEqual([]);
   expect(sliced.pixels).toBe(whole.pixels);
 });
+
+test('typing a new CJK script refreshes the fonts with sliced faces', async ({ page }) => {
+  test.setTimeout(90_000);
+  const requests: string[] = [];
+  const rejected: string[] = [];
+  page.on('request', (request) => requests.push(new URL(request.url()).pathname));
+  page.on('console', (message) => {
+    if (/font environment was rejected/i.test(message.text())) rejected.push(message.text());
+  });
+  await page.goto('/?format=docx');
+  await page.locator('input[type=file]').last().setInputFiles({
+    name: 'progressive-cjk.docx', mimeType: 'application/octet-stream', buffer: await documentBytes(),
+  });
+  const canvas = page.locator('.paged-editor__page canvas').first();
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+  await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+  const opened = requests.filter((path) => /\/slices(-[\w-]+)?\.json$/.test(path)).length;
+  await canvas.click({ position: { x: 200, y: 200 } });
+  await page.keyboard.insertText('\ud55c\uae00');
+  await expect.poll(() => requests.filter((path) => /\/slices(-[\w-]+)?\.json$/.test(path)).length, { timeout: 30_000 })
+    .toBeGreaterThan(opened);
+  await expect(page.locator('.canvas-page-mirror').first()).toContainText('\ud55c\uae00');
+  await expect.poll(() => requests.filter((path) => /\/NotoSansKR-Regular\.otf(-[\w-]+)?\.zst$/.test(path)).length).toBe(0);
+  expect(rejected).toEqual([]);
+});

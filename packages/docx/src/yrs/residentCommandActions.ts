@@ -204,7 +204,7 @@ const DOCX_COMMAND_POLICIES = {
   collabPipe: { keys: ['provider', 'ops'], exact: true, session: 'collaboration', origin: 'remote',
     payload: (payload) => validPipePayload(payload, MAX_FRAME_BYTES, PIPE_SHAPE) },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
-  setFontEnvironment: { keys: ['faces', 'chains', 'families'], exact: true },
+  setFontEnvironment: { keys: ['faces', 'chains', 'families', 'progressive'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
   openPart: { keys: [] }, ensurePart: { keys: [] }, removePart: { keys: [] },
   setHyperlink: { keys: [] }, setObjectProperties: { keys: [] }, setSectionProperties: { keys: [] },
