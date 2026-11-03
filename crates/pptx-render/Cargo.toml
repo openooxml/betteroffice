@@ -34,6 +34,7 @@ unicode-segmentation = "1.12"
 betteroffice-fonts.workspace = true
 libm.workspace = true
 ooxml-opc.workspace = true
+pptx-edit = { workspace = true, features = ["metafile-svg"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

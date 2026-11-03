@@ -1,7 +1,7 @@
 import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import { initWasm, type WorkbookSession } from '@betteroffice/xlsx';
+import { initWasm, type Proposal, type WorkbookSession } from '@betteroffice/xlsx';
 import type { CommandStatus, WorkbookSharedCommand } from '@betteroffice/xlsx/worker';
 import { isClientMessage, isHostMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
@@ -84,6 +84,48 @@ async function recoveredInputs(bytes: Uint8Array, range: string) {
   try { return (await reopened.call.cellInputs(0, range)).cells.map((row) => row[0]?.input ?? ''); }
   finally { await reopened.dispose(); }
 }
+
+test.each([
+  ['acceptProposal', 'before'], ['acceptProposal', 'after'],
+  ['rejectProposal', 'before'], ['rejectProposal', 'after'],
+] as const)('public recovery replays %s for a host proposal staged %s the checkpoint', async (kind, staged) => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const session = await createTestWorkbookSession(await initialPaintBook(), host.wrap, { includeEditState: true, calculation });
+  const { run, api } = recoveryEditor(session);
+  let seq = 0;
+  const propose = async () => {
+    const status = await run.session.submit({ ...session.commandIdentity, seq: ++seq, basis: session.confirmedBasis,
+      kind: 'propose', payload: { args: ['host', null, [{ sheet: 0, row: 10, col: 0, input: '7' }]] } });
+    expect(status).toMatchObject({ status: 'applied', committed: false });
+    return (status.result as Proposal).id;
+  };
+  try {
+    await run.session.submit({ ...session.commandIdentity, seq: ++seq, basis: session.confirmedBasis,
+      kind: 'setReadOnly', payload: { readOnly: true, allowHostProposals: true } });
+    expect(run.readOnly).toBe(true);
+    let id = staged === 'before' ? await propose() : undefined;
+    const recovery = workbookSessionRecovery.get(session)!;
+    expect(await recovery.capture(() => true)).toBe(true);
+    const throughSeq = seq;
+    expect(recovery.throughSeq).toBe(throughSeq);
+    expect(recovery.retainedCommands).toBe(0);
+    id ??= await propose();
+    expect(await run.session.submit({ ...session.commandIdentity, seq: ++seq, basis: session.confirmedBasis,
+      kind, payload: { args: [id] } }))
+      .toMatchObject({ status: 'applied', committed: kind === 'acceptProposal' });
+    expect(await run.session.submit(recoveryCommand(session, ++seq, 10, 'blocked')))
+      .toMatchObject({ status: 'refused', reason: 'read-only' });
+    const expected = await session.save();
+    await crashAndWait(session, host);
+    const saved = await api.recoverySave();
+    expect(saved).toEqual({ bytes: expected, recovery: true });
+    expect(await recoveredInputs(saved.bytes, 'A11')).toEqual([kind === 'acceptProposal' ? '7' : '']);
+    expect(opener.mock.calls[0][2]?.throughSeq).toBe(throughSeq);
+    expect(run.readOnly).toBe(true);
+    expect(api.hydrated).toBe(false);
+  } finally { opener.mockRestore(); await run.dispose(); }
+});
 
 test('public recovery includes a completed held prefill before the read hold releases', async () => {
   const zip = await JSZip.loadAsync(await initialPaintBook());

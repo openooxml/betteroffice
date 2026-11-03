@@ -7,12 +7,14 @@ import {
   decodeTiffImage, presentationDisplayListJson, type PresentationHandle,
 } from '../wasm/loader';
 import type { PresentationCommandFrame } from './commandProtocol';
+import type { MetafileSvg } from './metafileSvg';
 import { frameAssetIds } from './frame';
 
 type FrameTags = Omit<PresentationCommandFrame, 'displayList' | 'media'>;
 
 export function buildCommandFrame(
-  handle: PresentationHandle, tags: FrameTags, sentMedia: ReadonlySet<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList
+  handle: PresentationHandle, tags: FrameTags, sentMedia: ReadonlySet<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList,
+  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>
 ): TransferResult<PresentationCommandFrame> {
   const list = cached ?? JSON.parse(presentationDisplayListJson(handle, tags.slideIndex)) as SlideDisplayList;
   function visit(primitives: SlidePrimitive[]): void {
@@ -59,7 +61,12 @@ export function commandFrameMedia(
     if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
       try { bytes = decodeTiffImage(bytes); } catch {}
     }
-    bytes = metafileImageBytes(bytes, () => handle.metafileSvg(assetId));
+    const source = bytes;
+    bytes = metafileImageBytes(source, () => {
+      if (metafiles?.ready()) return metafiles.convert(assetId, source);
+      pendingMetafiles?.add(assetId);
+      return undefined;
+    });
     media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
   }
   return media;

@@ -3,7 +3,8 @@ import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
-import { PptxDocument } from '../wasm/engine';
+import { createMetafileSvg } from './metafileSvg';
+import { PptxDocument, engineKind } from '../wasm/engine';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -169,6 +170,47 @@ export function registerPresentationCommandHandlers(
   const selections = new Map<number, AnchoredSelection | null>();
   const revisions = new Map<string, number>();
   const sentMedia = new Set<string>();
+  const pendingMetafiles = new Set<string>();
+  const metafiles = engineKind === 'native' ? {
+    start: async () => {}, ready: () => true,
+    convert: (assetId: string, _bytes: Uint8Array) => presentation().metafileSvg(assetId),
+  } : createMetafileSvg();
+  let metafileLoad: Promise<void> | undefined;
+  let metafileTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function applyMetafileRepaint(): boolean {
+    if (disposed || opening || !metafiles.ready() || !pendingMetafiles.size) return false;
+    for (const assetId of pendingMetafiles) sentMedia.delete(assetId);
+    pendingMetafiles.clear();
+    for (const [id, revision] of revisions) revisions.set(id, revision + 1);
+    layouts.clear();
+    return true;
+  }
+
+  function repaintMetafiles(): void {
+    if (gatingFonts || !applyMetafileRepaint()) return;
+    if (options.onDefaultFonts) {
+      const result = ack([], [...revisions.keys()]);
+      options.onDefaultFonts(transferable({ ...result.value, defaultFonts: [] }, result.transfer));
+    }
+  }
+
+  function loadMetafiles(): Promise<void> {
+    if (metafileLoad) return metafileLoad;
+    metafileLoad = metafiles.start().then(() => {
+      repaintMetafiles();
+    }).finally(() => { metafileLoad = undefined; });
+    return metafileLoad;
+  }
+
+  function idleMetafiles(): void {
+    if (disposed || metafileTimer !== undefined) return;
+    metafileTimer = setTimeout(() => {
+      metafileTimer = undefined;
+      if (!disposed) void loadMetafiles().catch(() => {});
+    }, 0);
+  }
+
   const frames = new Map<string, {
     tag: PresentationCommandFrameTag; geometry: CommandHitGeometryIndex; version: string;
   }>();
@@ -647,7 +689,8 @@ export function registerPresentationCommandHandlers(
     layout ? undefined : (list) => {
       geometry = indexHitGeometry(list);
       layouts.set(slideId, { slideIndex, revision, list, geometry });
-    }, layout?.list);
+    }, layout?.list, metafiles, pendingMetafiles);
+    if (pendingMetafiles.size && !metafiles.ready()) idleMetafiles();
     if (!geometry || !retain) return result;
     const { slideId: id, slideRevision, coversThroughSeq, documentEpoch: epoch, incarnation } = result.value;
     const key = frameKey(result.value);
@@ -1483,7 +1526,8 @@ export function registerPresentationCommandHandlers(
       const publish = () => {
         gatingFonts = false;
         const faces = gatedDefaultFonts.splice(0);
-        const result = ack([outcome], faces.length ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
+        const repainted = applyMetafileRepaint();
+        const result = ack([outcome], faces.length || repainted ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
           admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
           admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
         if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
@@ -1533,14 +1577,20 @@ export function registerPresentationCommandHandlers(
       opening = true;
       try {
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
-        if (input.defaultFonts !== false) {
-          void import('./coverageScan').then(async (scan) => {
-            const scripts = await scan.activeSlideCoverageScripts(bytes, input.activeSlideIndex ?? 0);
-            if (!scripts.length || disposed) return;
-            const fonts = await commandDefaultFontModule.load();
-            if (!disposed) fonts.prefetchCoverageFaces(scripts, wasmReady, sessionFontProvider(fonts));
-          }).catch(() => {});
-        }
+        let openingMetafiles: Promise<void> | undefined;
+        let scanned: { openingSlideMetafile: boolean; packageMetafile: boolean } | undefined;
+        const scanning = import('./coverageScan').then(async (scan) => {
+          const result = await scan.scanOpeningSlide(bytes, input.activeSlideIndex ?? 0);
+          if (disposed) return;
+          scanned = result;
+          if (result.openingSlideMetafile) openingMetafiles = loadMetafiles().catch(() => {});
+          else if (result.packageMetafile && !opening && !metafiles.ready()) idleMetafiles();
+          if (input.defaultFonts !== false && result.scripts.length) {
+            void commandDefaultFontModule.load().then((fonts) => {
+              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts));
+            }).catch(() => {});
+          }
+        }).catch(() => {});
         await wasmReady;
         if (disposed) throw new Error('Presentation command session is disposed');
         handle = openPresentation(new Uint8Array(bytes), { clientId: input.clientId,
@@ -1578,7 +1628,22 @@ export function registerPresentationCommandHandlers(
         const loading = !requestedFonts || activeSlideId === null ? [] : requestDefaultFonts(activeSlideId);
         const fonts = loading instanceof Promise ? await loading : undefined;
         if (disposed) throw new Error('Presentation command session is disposed');
+        if (!scanned) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 300);
+            void scanning.finally(() => { clearTimeout(timer); resolve(); });
+          });
+          if (disposed) throw new Error('Presentation command session is disposed');
+        }
+        if (openingMetafiles && !metafiles.ready()) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 3000);
+            void (openingMetafiles ?? Promise.resolve()).finally(() => { clearTimeout(timer); resolve(); });
+          });
+        }
+        if (disposed) throw new Error('Presentation command session is disposed');
         const result = ack();
+        if ((scanned?.packageMetafile && !metafiles.ready()) || pendingMetafiles.size) idleMetafiles();
         const sourceBaseline = input.initialUpdate === undefined && !input.collaboration && !result.value.updates?.length;
         const recoveryUpdate = sourceBaseline ? undefined : ownedBuffer(handle.encodeStateAsUpdate());
         if (requestedFonts) loadDefaultFonts();
@@ -1591,7 +1656,12 @@ export function registerPresentationCommandHandlers(
       } catch (error) {
         dispose();
         throw error;
-      } finally { opening = false; }
+      } finally {
+        opening = false;
+        if (!disposed && metafiles.ready() && pendingMetafiles.size) {
+          metafileTimer = setTimeout(() => { metafileTimer = undefined; repaintMetafiles(); }, 0);
+        }
+      }
     },
     command(_: null, command: PresentationCommandEnvelope):
       TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
@@ -1708,6 +1778,8 @@ export function registerPresentationCommandHandlers(
     if (disposed) return;
     disposed = true;
     if (fontTimer !== undefined) clearTimeout(fontTimer);
+    if (metafileTimer !== undefined) clearTimeout(metafileTimer);
+    pendingMetafiles.clear();
     cancelDefaultFontImport?.();
     defaultFonts?.dispose(); defaultFonts = undefined;
     requestedFonts = undefined;

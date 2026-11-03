@@ -815,6 +815,10 @@ fn with_measure_fonts<T>(read: impl FnOnce(&std::cell::RefCell<ooxml_text::FontS
     read(&store)
 }
 
+pub fn take_base_latin_miss() -> bool {
+    with_measure_fonts(|store| store.borrow().take_base_latin_miss())
+}
+
 /// A measurement font store of one session's own. Its ids start at zero and
 /// stay valid whatever other stores register or clear. Internal font access
 /// requires [`MeasureFonts::enter`] while any session store is alive.
@@ -950,6 +954,12 @@ pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64,
     let mut missing = Vec::new();
     let mut all_chains_empty = true;
     for &id in chains.values().flatten() {
+        if ooxml_text::FontId::from_u32(id)
+            .base_latin_style()
+            .is_some()
+        {
+            continue;
+        }
         all_chains_empty = false;
         if id as usize >= fonts {
             missing.push(id);
@@ -1152,6 +1162,31 @@ mod tests {
     // metric-compatible Arial stand-in) to exercise the outline wasm surface.
     const LIBERATION_SANS: &[u8] =
         include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    #[cfg(feature = "base-latin")]
+    fn clearing_host_fonts_keeps_backstop_descriptors_and_outlines_available() {
+        let fonts = MeasureFonts::default();
+        let _scope = fonts.enter();
+        for _ in 0..2 {
+            clear_measure_fonts();
+            let id = ooxml_text::FontId::base_latin(true, true);
+            assert!(
+                with_measure_face(id.to_u32(), |bytes, _| {
+                    bytes == ooxml_text::base_latin_face(true, true)
+                })
+                .unwrap()
+            );
+            let glyph =
+                with_measure_fonts(|store| store.borrow().glyph_id(id, 'A').unwrap().unwrap());
+            let outline: serde_json::Value =
+                serde_json::from_str(&outline_glyph_json(id.to_u32(), u32::from(glyph)).unwrap())
+                    .unwrap();
+            assert!(!outline["cmds"].as_array().unwrap().is_empty());
+            assert_eq!(measure_fonts_generation().1, 0);
+            assert_eq!(register_measure_font_bytes(LIBERATION_SANS).unwrap(), 0);
+        }
+    }
 
     #[test]
     fn plain_faces_and_segoe_substitute_views_keep_separate_widths() {

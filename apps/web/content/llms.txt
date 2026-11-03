@@ -72,6 +72,7 @@ Per-layer crates for single pipeline stages:
 - [betteroffice-fonts-latin](https://crates.io/crates/betteroffice-fonts-latin): bundled Latin and RTL font bytes.
 - [betteroffice-fonts-intl](https://crates.io/crates/betteroffice-fonts-intl): bundled international font bytes.
 - [betteroffice-fonts-cjk](https://crates.io/crates/betteroffice-fonts-cjk): bundled CJK font bytes, grouped from the [SC](https://crates.io/crates/betteroffice-fonts-cjk-sc), [TC](https://crates.io/crates/betteroffice-fonts-cjk-tc), [JP](https://crates.io/crates/betteroffice-fonts-cjk-jp), [KR](https://crates.io/crates/betteroffice-fonts-cjk-kr), and [Serif SC](https://crates.io/crates/betteroffice-fonts-cjk-serif-sc) face crates.
+- [betteroffice-base-latin](https://crates.io/crates/betteroffice-base-latin): embedded fallback faces for native text measurement and rendering.
 
 ## Python packages
 

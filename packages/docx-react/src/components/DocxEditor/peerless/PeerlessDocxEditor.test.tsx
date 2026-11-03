@@ -1302,10 +1302,10 @@ test('custom fonts fetch bytes for worker faces without global CSS and wait for 
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let embedded: { data: ArrayBuffer }[] = [];
     let slots: number[] = [];
-    return { setCompat() {}, setEmbeddedFaces(faces) { embedded = faces; },
+    return { setCompat() {}, setEmbeddedFaces(faces, appFaces = []) { embedded = [...faces, ...appFaces]; },
       async prepareFontRequirements() { slots = embedded.map(face => engine.registerFont(new Uint8Array(face.data))); return true; },
       measurementConfigForRequirements: () => ({ fontChains: { 'custom|0|0': slots }, defaults: { fontFamily: 'Custom', fontSize: 11 },
-        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }), clear() {} };
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }), coverageCheck: () => () => true, clear() {} };
   });
   restorers.push(() => fetchFont.mockRestore(), () => measure.mockRestore());
   const onFontsLoaded = mock(() => {});
@@ -1338,7 +1338,7 @@ test('a script typed after open loads its fallback face once and a covered scrip
   fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
           .map(name => engine.registerFont(new TextEncoder().encode(name.padEnd(12))))]));
@@ -1390,7 +1390,7 @@ test('a requirements hint during a toolbar font pick waits for the pick instead 
   let picking = false;
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         if (requirements.some(({ key }) => key === 'picked|0|0')) { picking = true; await held; }
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
@@ -1431,7 +1431,7 @@ test('an aborted toolbar font pick whose loader never settles no longer holds fo
   let picking = false;
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         if (requirements.some(({ key }) => key === 'picked|0|0')) { picking = true; await new Promise(() => {}); }
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
@@ -1464,7 +1464,7 @@ test('a toolbar font pick the worker refuses leaves its fonts uncovered for the 
   fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
           .map(name => engine.registerFont(new TextEncoder().encode(name.padEnd(12))))]));
