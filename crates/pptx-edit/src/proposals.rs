@@ -657,6 +657,10 @@ fn resolve_edit(
             after_slide_id: Some(id),
             ..
         } => resolve(id)?,
+        ProposalEdit::InsertSlide {
+            after_slide_id: None,
+            ..
+        } => {}
         ProposalEdit::DuplicateSlide {
             slide_id,
             after_slide_id,

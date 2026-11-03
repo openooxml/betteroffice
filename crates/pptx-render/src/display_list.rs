@@ -27,8 +27,8 @@ impl Serialize for ProposalDiffSlide {
             "frame": self.frame,
         });
         if !self.shape_changes.is_empty() {
-            value["shapeChanges"] = serde_json::to_value(&self.shape_changes)
-                .map_err(serde::ser::Error::custom)?;
+            value["shapeChanges"] =
+                serde_json::to_value(&self.shape_changes).map_err(serde::ser::Error::custom)?;
         }
         value.serialize(serializer)
     }
