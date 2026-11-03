@@ -22,6 +22,11 @@ export function reviewMatches(view: PeerlessViewSnapshot, review: DocxReviewSnap
   return reviewDescribes(view, review) && review.frameEpoch === view.geometry!.frameEpoch && review.layoutRevision === view.geometry!.layoutRevision;
 }
 
+/** Page-local review rects stay valid across frames that keep the document version and layout. */
+export function reviewPlacementMatches(view: PeerlessViewSnapshot, review: DocxReviewSnapshot): boolean {
+  return reviewDescribes(view, review) && review.layoutRevision === view.geometry!.layoutRevision;
+}
+
 export async function readPresentedReview(options: {
   binding: PeerlessEditSessionBinding;
   current(): PeerlessEditSessionBinding | null;
