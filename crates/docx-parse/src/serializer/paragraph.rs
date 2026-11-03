@@ -438,6 +438,75 @@ fn field_runs(node: &InlineNode) -> Vec<&Run> {
     }
 }
 
+fn field_run_text_length(run: &Run) -> usize {
+    run.content
+        .iter()
+        .map(|content| match content {
+            RunContent::Text { text, .. } => text.encode_utf16().count(),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
+    let Some(nodes) = field
+        .structured_result
+        .as_ref()
+        .and_then(|content| content.inline.as_ref())
+    else {
+        return Vec::new();
+    };
+    let in_place = nodes
+        .iter()
+        .flat_map(field_runs)
+        .eq(field.field_result.iter());
+    let mut bookmarks = Vec::new();
+    let mut offset = 0usize;
+    for node in nodes {
+        if matches!(
+            node,
+            InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
+        ) {
+            bookmarks.push((offset, node));
+        } else {
+            for run in field_runs(node) {
+                offset = offset.saturating_add(if in_place {
+                    1
+                } else {
+                    field_run_text_length(run)
+                });
+            }
+        }
+    }
+    if in_place || bookmarks.is_empty() {
+        return bookmarks;
+    }
+    let mut boundaries = Vec::with_capacity(field.field_result.len() + 1);
+    let mut total = 0usize;
+    boundaries.push(total);
+    for run in &field.field_result {
+        total = total.saturating_add(field_run_text_length(run));
+        boundaries.push(total);
+    }
+    for (offset, node) in &mut bookmarks {
+        if *offset == 0 {
+            continue;
+        }
+        if *offset >= total {
+            *offset = field.field_result.len();
+            continue;
+        }
+        let after = boundaries.partition_point(|boundary| *boundary < *offset);
+        *offset = if boundaries[after] == *offset || matches!(node, InlineNode::BookmarkEnd(_)) {
+            after
+        } else {
+            after - 1
+        };
+    }
+    bookmarks.sort_by_key(|(boundary, _)| *boundary);
+    bookmarks
+}
+
 fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
@@ -512,29 +581,19 @@ fn serialize_complex_field(
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else {
-        let mut runs = field.field_result.iter();
-        if let Some(nodes) = field
-            .structured_result
-            .as_ref()
-            .and_then(|content| content.inline.as_ref())
-        {
-            for node in nodes {
-                if matches!(
-                    node,
-                    InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
-                ) {
-                    output.push_str(&serialize_inline_node(node, context)?);
-                } else {
-                    for _ in field_runs(node) {
-                        if let Some(run) = runs.next() {
-                            output.push_str(&serialize_context_run(run, context)?);
-                        }
-                    }
-                }
+        let mut bookmarks = field_result_bookmarks(field).into_iter().peekable();
+        for (index, run) in field.field_result.iter().enumerate() {
+            while bookmarks
+                .peek()
+                .is_some_and(|(boundary, _)| *boundary == index)
+            {
+                let (_, node) = bookmarks.next().unwrap();
+                output.push_str(&serialize_inline_node(node, context)?);
             }
-        }
-        for run in runs {
             output.push_str(&serialize_context_run(run, context)?);
+        }
+        for (_, node) in bookmarks {
+            output.push_str(&serialize_inline_node(node, context)?);
         }
     }
     output.push_str("<w:r>");

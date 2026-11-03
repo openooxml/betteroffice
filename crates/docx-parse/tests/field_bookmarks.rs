@@ -20,6 +20,10 @@ fn saved_docx(source: &[u8]) -> Vec<u8> {
         .as_object_mut()
         .unwrap()
         .remove("sections");
+    save_package(source, &package)
+}
+
+fn save_package(source: &[u8], package: &Value) -> Vec<u8> {
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": package["document"],
@@ -76,6 +80,38 @@ fn repacked_field_document(body: &str, expected_texts: &[&str]) -> String {
         texts
     );
     document_xml(&saved)
+}
+
+fn rewritten_field_result(result: &str, runs: Value, expected_text: &str) -> String {
+    let source = fixture(&format!(
+        "<w:p>{BEGIN}{}{SEPARATE}{result}</w:p><w:p>{END}</w:p>",
+        instruction("QUOTE")
+    ));
+    let parsed = parse_docx_s9_wire(&source, S9ParseOptions::default()).unwrap();
+    let mut package = serde_json::to_value(parsed.document.package).unwrap();
+    package["document"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sections");
+    let field = package["document"]["content"][0]["content"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["type"] == "complexField")
+        .unwrap();
+    assert!(field["structuredResult"]["blocks"].is_array());
+    field["fieldResult"] = runs;
+    let saved = save_package(&source, &package);
+    let reopened = parse_docx_s9_wire(&saved, S9ParseOptions::default()).unwrap();
+    assert_eq!(
+        paragraph_texts(&reopened.document.package.document.content),
+        [expected_text, ""]
+    );
+    let xml = document_xml(&saved);
+    assert_field(&xml, "QUOTE");
+    assert_eq!(xml.matches("<w:bookmarkStart").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:bookmarkEnd").count(), 1, "{xml}");
+    xml
 }
 
 fn assert_field(xml: &str, instruction: &str) {
@@ -415,4 +451,64 @@ fn hyperlink_result_bookmarks_in_a_heading_survive_repack() {
             ],
         );
     }
+}
+
+#[test]
+fn split_result_runs_keep_the_entire_bookmark() {
+    let result = format!("{START}<w:r><w:t>Heading text</w:t></w:r>{STOP}");
+    let xml = rewritten_field_result(
+        &result,
+        json!([
+            {"type": "run", "content": [{"type": "text", "text": "Heading "}]},
+            {"type": "run", "formatting": {"bold": true}, "content": [{"type": "text", "text": "text"}]}
+        ]),
+        "Heading text",
+    );
+    assert_order(&xml, &[START, ">Heading <", "<w:b/>", ">text<", STOP]);
+}
+
+#[test]
+fn removed_result_runs_keep_bookmarks_around_remaining_text() {
+    let result = format!(
+        "<w:commentRangeEnd w:id=\"99\"/><w:r><w:commentReference w:id=\"99\"/></w:r><w:r><w:commentReference w:id=\"99\"/></w:r>{START}<w:r><w:t>Heading text</w:t></w:r>{STOP}"
+    );
+    for (runs, expected_text) in [
+        (
+            json!([{"type": "run", "content": [{"type": "text", "text": "Heading text"}]}]),
+            "Heading text",
+        ),
+        (
+            json!([{"type": "run", "content": [{"type": "text", "text": "Heading"}]}]),
+            "Heading",
+        ),
+        (
+            json!([
+                {"type": "run", "content": [{"type": "commentReference", "id": 99}]},
+                {"type": "run", "content": [{"type": "commentReference", "id": 99}]},
+                {"type": "run", "content": [{"type": "text", "text": "Heading text"}]}
+            ]),
+            "Heading text",
+        ),
+        (json!([]), ""),
+    ] {
+        let xml = rewritten_field_result(&result, runs, expected_text);
+        if expected_text.is_empty() {
+            assert_order(&xml, &[START, STOP]);
+        } else {
+            assert_order(&xml, &[START, &format!(">{expected_text}<"), STOP]);
+        }
+    }
+}
+
+#[test]
+fn mid_run_bookmark_offsets_widen_to_whole_result_runs() {
+    let result = format!(
+        "<w:r><w:t>Head</w:t></w:r>{START}<w:r><w:t>ing</w:t></w:r>{STOP}<w:r><w:t> text</w:t></w:r>"
+    );
+    let xml = rewritten_field_result(
+        &result,
+        json!([{"type": "run", "content": [{"type": "text", "text": "Heading text"}]}]),
+        "Heading text",
+    );
+    assert_order(&xml, &[START, "<w:r><w:t>Heading text</w:t></w:r>", STOP]);
 }
