@@ -101,8 +101,10 @@ including the CLI and MCP defaults, keep JS proposals. With a DOCX `editPeer`, u
 
 Agent refs, matches, cell handles and search cursors survive the agent's own
 proposal operations in attached mode. User edits can still expire them. XLSX
-attached proposals use target guards, so unrelated user edits need not stale a
-proposal. Headless XLSX retains whole-workbook proposal staleness.
+attached proposals use engine acceptance guards, including cell styles and
+dependent previews, so unrelated user edits need not stale a proposal. Stale
+acceptance throws `STALE_TARGET` and leaves the proposal pending without writing
+cells. Headless XLSX retains whole-workbook proposal staleness.
 
 XLSX accept receipt diagnostic counts come from engine acceptance: `changedCells`
 counts reported dependent addresses, `cycleCells` is 0, `limitedCells` counts

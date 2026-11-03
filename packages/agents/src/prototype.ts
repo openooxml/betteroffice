@@ -75,7 +75,7 @@ export abstract class PrototypeDocument<Change, Step> {
   protected createProposal(_value: AgentProposal<Change>, _steps: Step[]): string | undefined { return undefined; }
   protected proposalStatus(_engineId: string): AgentProposal<Change>['status'] | undefined { return undefined; }
   protected proposalStale(_engineId: string, _steps: Step[], version: string): boolean { return version !== this.currentVersion(); }
-  protected acceptProposal(_engineId: string, steps: Step[], version: string): unknown { return this.apply(steps, version); }
+  protected acceptProposal(_engineId: string, _steps: Step[], _version: string): unknown { throw new DocumentToolError('UNSUPPORTED', 'Engine proposal acceptance is unavailable.'); }
   protected rejectProposal(_engineId: string): void {}
 
   protected alive() {
@@ -117,9 +117,7 @@ export abstract class PrototypeDocument<Change, Step> {
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
     if (options.tracked || options.date) throw new DocumentToolError('UNSUPPORTED', 'Tracked acceptance is available for DOCX only. Omit tracked and date.');
-    const held = this.held(id);
-    if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
-    if (!held.engineId) this.pending(id);
+    const held = this.pending(id);
     const receipt = held.engineId ? this.acceptProposal(held.engineId, held.steps, held.value.version) : this.apply(held.steps, held.value.version);
     held.value.status = 'accepted';
     return { id, status: 'accepted' as const, receipt };

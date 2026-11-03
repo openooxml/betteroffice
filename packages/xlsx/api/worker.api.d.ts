@@ -3716,6 +3716,7 @@ export interface WorkbookHandle extends CollaborationReplica {
     listProposals(): Proposal[];
     /** The pending state or the last decision made through this handle. */
     getProposalStatus(id: string): 'pending' | 'accepted' | 'rejected' | undefined;
+    isProposalStale(id: string): boolean;
     /** Observe proposals created or decided through this handle. */
     onProposalChange(listener: (proposals: Proposal[]) => void): () => void;
     /**

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { attachDocx, attachXlsx, openDocx, openXlsx } from '../src';
-import { fixture } from './fixture';
+import { editFixture, fixture } from './fixture';
 import { xlsxFixture } from './format-fixtures';
 
 type Mode = 'headless' | 'attached' | 'peer';
@@ -29,6 +29,92 @@ const exceptions = {
   trackedConflict: 'Attached DOCX refuses adjoining tracked revisions with their identity; headless keeps ordinary insertion beside a tracked run.',
   undo: 'Attached DOCX settlement stays outside undo history; headless acceptance remains one undo step.',
 };
+
+for (const mode of ['headless', 'attached', 'peer'] as const) {
+  for (const sample of [
+    { text: 'aaab', start: 1, oldText: 'aab', newText: 'ccb', expected: 'accb' },
+    { text: 'ababa', start: 2, oldText: 'aba', newText: 'xyz', expected: 'abxyz' },
+    { text: 'zaaab', start: 0, oldText: 'zaaab', newText: 'zaccb', expected: 'zaccb' },
+    { text: '😀aaab', start: 3, oldText: 'aab', newText: 'ccb', expected: '😀accb' },
+  ]) {
+    test(`DOCX overlapping replacement at ${sample.start} in ${JSON.stringify(sample.text)} in ${mode} mode`, async () => {
+      const zip = await JSZip.loadAsync(await fixture());
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace('Executive summary', sample.text));
+      const owner = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+      const doc = mode === 'headless' ? owner : attachDocx(owner.session, mode === 'peer' ? { editPeer: {
+        async proposeChanges(request) { return owner.session.proposeChanges(request); },
+        async setProposalStates(request) { return owner.session.setProposalStates(request); },
+        async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+      } } : {});
+      try {
+        const hit = doc.grep({ query: sample.oldText }).matches[0];
+        const edit = hit.start === sample.start ? { match: hit.match, newText: sample.newText }
+          : { ref: hit.ref, revision: hit.revision, start: sample.start, oldText: sample.oldText, newText: sample.newText };
+        const proposal = await doc.proposeAsync({ author: 'Agent', edits: [edit] });
+        expect(doc.read(hit.ref).text).toBe(sample.text);
+        expect(doc.review(proposal.id).staleRefs).toEqual([]);
+        const preview = await openDocx(await doc.export(proposal.id));
+        try { expect(preview.read(preview.list({ story: 'body' }).items[0].ref).text).toBe(sample.expected); }
+        finally { preview.close(); }
+        await doc.accept(proposal.id);
+        expect(doc.read(hit.ref).text).toBe(sample.expected);
+        expect(owner.session.getProposals().proposals).toHaveLength(0);
+      } finally { doc.close(); owner.close(); }
+    });
+  }
+
+  for (const newText of ['Updated note.', 'Closing note!.', 'Closing note. More']) {
+    test(`DOCX replacement after a table for ${JSON.stringify(newText)} in ${mode} mode`, async () => {
+      const owner = await openDocx(await editFixture());
+      const doc = mode === 'headless' ? owner : attachDocx(owner.session, mode === 'peer' ? { editPeer: {
+        async proposeChanges(request) { return owner.session.proposeChanges(request); },
+        async setProposalStates(request) { return owner.session.setProposalStates(request); },
+        async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+      } } : {});
+      try {
+        const hit = doc.grep({ query: 'Closing note.' }).matches[0];
+        const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText }] });
+        expect(doc.read(hit.ref).text).toBe('\ufffcClosing note.');
+        await doc.accept(proposal.id);
+        expect(doc.read(hit.ref).text).toBe(`\ufffc${newText}`);
+        const reopened = await openDocx(await doc.export());
+        try { expect(reopened.grep({ query: newText }).matches).toHaveLength(1); }
+        finally { reopened.close(); }
+      } finally { doc.close(); owner.close(); }
+    });
+  }
+}
+
+for (const mode of ['headless', 'attached'] as const) {
+  for (const mutation of ['dependent', 'style'] as const) {
+    test(`XLSX ${mutation} changes stale review and accept in ${mode} mode`, async () => {
+      const owner = await openXlsx(await xlsxFixture());
+      for (const [col, input] of ['120', '135', '150', '=SUM(B2:D2)'].entries()) owner.handle.editCell(0, 1, col + 1, input);
+      const doc = mode === 'headless' ? owner : attachXlsx(owner.handle);
+      try {
+        const cell = doc.readCells({ sheet: 'sheet:0', range: 'B2' }).cells[0].cell;
+        const proposal = doc.proposeCells({ author: 'Agent', edits: [{ cell, input: '200' }] });
+        expect(doc.review(proposal.id).stale).toBe(false);
+        if (mutation === 'dependent') owner.handle.editCell(0, 1, 2, '140');
+        else owner.handle.patchRangeStyle(0, 'B2', { bold: true });
+        const version = owner.handle.version();
+        const pending = owner.handle.listProposals();
+        expect(doc.review(proposal.id)).toMatchObject({ status: 'pending', stale: true });
+        expect(doc.listProposals()[0].stale).toBe(true);
+        expect(owner.handle.listProposals()).toEqual(pending);
+        await expect(doc.export(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+        await expect(doc.accept(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+        expect(owner.handle.version()).toBe(version);
+        expect(owner.handle.cell(0, 1, 1).input).toBe('120');
+        expect(doc.readCells({ sheet: 'sheet:0', range: 'E2' }).cells[0].value).toEqual({ kind: 'number', value: mutation === 'dependent' ? 410 : 405 });
+        expect(doc.review(proposal.id).status).toBe('pending');
+        expect(owner.handle.listProposals()).toHaveLength(mode === 'attached' ? 1 : 0);
+        doc.reject(proposal.id);
+      } finally { doc.close(); owner.close(); }
+    });
+  }
+}
 
 async function runAgentScript(doc: ScriptDocument, format: Format, mode: Mode) {
   const attached = mode !== 'headless';

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { attachDocx, attachXlsx, openDocx, openXlsx } from '../src';
-import { fixture } from './fixture';
+import { editFixture, fixture } from './fixture';
 import { xlsxFixture } from './format-fixtures';
 
 test('attached XLSX proposals belong to the engine and reflect editor decisions', async () => {
@@ -46,6 +46,66 @@ test('XLSX proposal acceptance permits unrelated user edits', async () => {
   } finally { book.close(); owner.close(); }
 });
 
+test('attached XLSX string stale refusals never apply direct edits', async () => {
+  const owner = await openXlsx(await xlsxFixture());
+  let accepts = 0;
+  let writes = 0;
+  const handle = new Proxy(owner.handle, { get(target, key) {
+    if (key === 'acceptProposal') return () => { accepts++; throw new Error('Stale proposal: B3'); };
+    if (key === 'applyEdits' || key === 'editCell') return () => { writes++; throw new Error('Unexpected direct edit'); };
+    return Reflect.get(target, key);
+  } });
+  const doc = attachXlsx(handle);
+  try {
+    const cell = doc.readCells({ sheet: 'sheet:0', range: 'B3' }).cells[0].cell;
+    const proposal = doc.proposeCells({ author: 'Agent', edits: [{ cell, input: '200' }] });
+    const pending = owner.handle.listProposals();
+    const version = owner.handle.version();
+    await expect(doc.accept(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+    expect(accepts).toBe(1);
+    expect(writes).toBe(0);
+    expect(owner.handle.version()).toBe(version);
+    expect(owner.handle.cell(0, 2, 1).input).toBe('100');
+    expect(owner.handle.listProposals()).toEqual(pending);
+    expect(doc.review(proposal.id).status).toBe('pending');
+  } finally { doc.close(); owner.close(); }
+});
+
+for (const peer of [false, true]) {
+  for (const newText of ['Updated note.', 'Closing note!.', 'Closing note. More']) {
+    test(`attached DOCX maps leading block embeds for ${JSON.stringify(newText)} with peer=${peer}`, async () => {
+      const owner = await openDocx(await editFixture());
+      const paragraph = owner.session.paragraphs('body')[0];
+      const start = owner.session.locateParagraph('body', paragraph.paraId).start;
+      owner.session.createStory('body:offset-control', 'control');
+      owner.session.applyRawOps('body', [
+        { op: 'insertEmbed', index: start, kind: 'pageBreak' },
+        { op: 'insertEmbed', index: start + 1, kind: 'columnBreak' },
+        { op: 'insertEmbed', index: start + 2, kind: 'blockSdt', payload: { story: 'body:offset-control' } },
+      ]);
+      const doc = attachDocx(owner.session, peer ? { editPeer: {
+        async proposeChanges(request) { return owner.session.proposeChanges(request); },
+        async setProposalStates(request) { return owner.session.setProposalStates(request); },
+        async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+      } } : {});
+      try {
+        for (const query of ['Quarterly report', 'Closing note.']) {
+          const hit = doc.grep({ query }).matches[0];
+          expect(hit.start).toBe(query === 'Quarterly report' ? 3 : 1);
+          const replacement = query === 'Quarterly report' ? `Updated ${query}` : newText;
+          const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: replacement }] });
+          expect(doc.review(proposal.id).staleRefs).toEqual([]);
+          const read = owner.session.readParagraphs({ story: 'body', view: 'accepted' });
+          expect(read.ok && read.paragraphs.some(p => p.text === replacement)).toBe(true);
+          await doc.accept(proposal.id);
+          expect(doc.read(hit.ref).text).toBe(`${'\ufffc'.repeat(hit.start)}${replacement}`);
+        }
+        expect(owner.session.getProposals().proposals).toHaveLength(0);
+      } finally { doc.close(); owner.close(); }
+    });
+  }
+}
+
 test('attached DOCX proposals show engine revisions while pending reads and exports retain original text', async () => {
   const owner = await openDocx(await fixture());
   const agent = attachDocx(owner.session);
@@ -70,6 +130,54 @@ test('attached DOCX proposals show engine revisions while pending reads and expo
     expect(owner.session.getProposals().proposals).toHaveLength(0);
     expect(owner.session.listRevisions()).toHaveLength(0);
   } finally { agent.close(); owner.close(); }
+});
+
+test('attached DOCX keeps unidentified engine protection refusals out of revision conflict errors', async () => {
+  const owner = await openDocx(await fixture());
+  const session = new Proxy(owner.session, { get(target, key) {
+    if (key === 'proposeChanges') return () => ({ ok: false, version: target.version(), failure: { code: 'tracked-revision-conflict', message: 'Range is protected' } });
+    return Reflect.get(target, key);
+  } });
+  const doc = attachDocx(session);
+  try {
+    const hit = doc.grep({ query: 'Executive summary' }).matches[0];
+    expect(owner.session.listRevisions()).toHaveLength(0);
+    let refusal: unknown;
+    try { doc.propose({ author: 'Agent', edits: [{ match: hit.match, newText: 'Updated summary' }] }); }
+    catch (error) { refusal = error; }
+    expect(refusal).toMatchObject({ code: 'PROTECTED_CONTENT', message: 'Range is protected' });
+    expect(doc.listProposals()).toHaveLength(0);
+    expect(owner.session.getProposals().proposals).toHaveLength(0);
+    expect(doc.read(hit.ref).text).toBe('Executive summary');
+  } finally { doc.close(); owner.close(); }
+});
+
+test('attached DOCX sends the known trimmed offset for overlapping replacement text', async () => {
+  for (const sample of [
+    { text: 'aaab', oldText: 'aab', start: 1, newText: 'ccb', search: 'aa', replaceWith: 'cc', expected: 'accb' },
+    { text: 'ababa', oldText: 'aba', start: 2, newText: 'xyz', search: 'aba', replaceWith: 'xyz', expected: 'abxyz' },
+  ]) {
+    const zip = await JSZip.loadAsync(await fixture());
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('Executive summary', sample.text));
+    const owner = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+    const requests: Array<Parameters<typeof owner.session.proposeChanges>[0]> = [];
+    const doc = attachDocx(owner.session, { editPeer: {
+      async proposeChanges(request) { requests.push(request); return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } });
+    try {
+      const hit = doc.grep({ query: sample.oldText }).matches[0];
+      const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ ref: hit.ref, revision: hit.revision, start: sample.start, oldText: sample.oldText, newText: sample.newText }] });
+      expect(requests[0].proposals[0]).toMatchObject({ op: 'replaceText', at: { offset: sample.start }, search: sample.search, replaceWith: sample.replaceWith });
+      expect(doc.read(hit.ref).text).toBe(sample.text);
+      expect(owner.session.getProposals().proposals).toHaveLength(1);
+      await doc.accept(proposal.id);
+      expect(doc.read(hit.ref).text).toBe(sample.expected);
+      expect(owner.session.getProposals().proposals).toHaveLength(0);
+    } finally { doc.close(); owner.close(); }
+  }
 });
 
 for (const state of ['accepted', 'rejected'] as const) {
@@ -161,8 +269,63 @@ test('attached XLSX edit peer replays agent proposals and decisions to the edito
     await expect(agent.accept(stale.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
     await edits.flush();
     expect(edits.state).toBe('ready');
+    agent.reject(stale.id);
+    for (const mutation of ['dependent', 'style'] as const) {
+      for (const [col, input] of ['120', '135', '150', '=SUM(B2:D2)'].entries()) edits.editCell(0, 1, col + 1, input);
+      const cell = agent.readCells({ sheet: 'sheet:0', range: 'B2' }).cells[0].cell;
+      const proposal = agent.proposeCells({ author: 'Agent', edits: [{ cell, input: '200' }] });
+      if (mutation === 'dependent') edits.editCell(0, 1, 2, '140');
+      else edits.patchRangeStyle(0, 'B2', { bold: true });
+      await edits.flush();
+      const pending = peer.listProposals();
+      const version = peer.version();
+      expect(agent.review(proposal.id).stale).toBe(true);
+      expect(agent.listProposals().find(p => p.id === proposal.id)).toMatchObject({ status: 'pending', stale: true });
+      expect(peer.listProposals()).toEqual(pending);
+      await expect(agent.accept(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+      await edits.flush();
+      expect(edits.state).toBe('ready');
+      expect(peer.version()).toBe(version);
+      expect(peer.cell(0, 1, 1).input).toBe('120');
+      const remote = await session.call.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B2:E2' } }] });
+      expect(remote.ok && remote.ranges[0].cells[0][0].value).toEqual({ kind: 'number', value: 120 });
+      expect(remote.ok && remote.ranges[0].cells[0][3].value).toEqual({ kind: 'number', value: mutation === 'dependent' ? 410 : 405 });
+      expect(peer.listProposals()).toEqual(pending);
+      expect(agent.review(proposal.id).status).toBe('pending');
+      agent.reject(proposal.id);
+    }
+    await edits.flush();
+    let refusedAccepts = 0;
+    let directWrites = 0;
+    const guarded = new Proxy(peer, { get(target, key) {
+      if (key === 'applyEdits' || key === 'editCell') return () => { directWrites++; throw new Error('Unexpected direct edit'); };
+      return Reflect.get(target, key);
+    } });
+    const refusing = new Proxy(edits, { get(target, key) {
+      if (key === 'acceptProposal') return () => { refusedAccepts++; throw new Error('Stale proposal: B3'); };
+      return Reflect.get(target, key);
+    } });
+    const refusingAgent = attachXlsx(guarded, { editPeer: refusing });
+    try {
+      const cell = refusingAgent.readCells({ sheet: 'sheet:0', range: 'B3' }).cells[0].cell;
+      const proposal = refusingAgent.proposeCells({ author: 'Agent', edits: [{ cell, input: '333' }] });
+      await edits.flush();
+      const pending = peer.listProposals();
+      const sequence = edits.sentSequence;
+      await expect(refusingAgent.accept(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+      await edits.flush();
+      expect(refusedAccepts).toBe(1);
+      expect(directWrites).toBe(0);
+      expect(edits.sentSequence).toBe(sequence);
+      expect(peer.listProposals()).toEqual(pending);
+      expect(refusingAgent.review(proposal.id).status).toBe('pending');
+      const remote = await session.call.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B3' } }] });
+      expect(remote.ok && remote.ranges[0].cells[0][0].value).toEqual({ kind: 'number', value: 222 });
+      refusingAgent.reject(proposal.id);
+      await edits.flush();
+    } finally { refusingAgent.close(); }
   } finally { agent.close(); edits.dispose(); peer.dispose(); await session.dispose(); }
-}, 10000);
+}, 30000);
 
 test('DOCX proposals on separate ranges preserve original agent offsets', async () => {
   const owner = await openDocx(await fixture());

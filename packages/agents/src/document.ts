@@ -442,18 +442,7 @@ export class DocxAgentDocument {
       const suggest = { author: input.author, date };
       const offset = this.acceptedOffset(story, paraId, change.start);
       if (!change.oldText) return { id, paragraph, suggest, op: 'insertText', at: { offset }, text: change.newText };
-      const read = this.session.readParagraphs({ story, paraIds: [paraId], view: 'accepted' });
-      if (!read.ok) throw new DocumentToolError(read.failure.code, read.failure.message);
-      const text = read.paragraphs[0]?.text ?? '';
-      let occurrence = 0;
-      let at = 0;
-      while ((at = text.indexOf(change.oldText, at)) >= 0 && at <= offset) {
-        occurrence++;
-        if (at === offset) break;
-        at += change.oldText.length;
-      }
-      if (at !== offset) throw new TrackedRevisionConflictError(this.revisionConflicts([change]));
-      return { id, paragraph, suggest, op: 'replaceText', search: change.oldText, replaceWith: change.newText, occurrence };
+      return { id, paragraph, suggest, op: 'replaceText', at: { offset }, search: change.oldText, replaceWith: change.newText };
     });
     return { held, proposals, references, version: this.session.version() };
   }
@@ -839,7 +828,9 @@ export class DocxAgentDocument {
   private proposalResult(result: DocxProposalResult, changes?: ProposalChange[]): DocxProposalSnapshot {
     if (!result.ok && result.failure.code === 'tracked-revision-conflict') {
       const affected = changes ?? [...this.proposals.values()].filter(held => held.value.status === 'pending').flatMap(held => held.value.changes);
-      throw new TrackedRevisionConflictError(this.revisionConflicts(affected));
+      const conflicts = this.revisionConflicts(affected);
+      if (conflicts.length) throw new TrackedRevisionConflictError(conflicts);
+      throw new DocumentToolError('PROTECTED_CONTENT', result.failure.message, result.failure);
     }
     if (!result.ok) throw new DocumentToolError(result.failure.code === 'stale-version' ? 'STALE_TARGET' : result.failure.code, result.failure.message, result.failure);
     return result.snapshot;
@@ -939,12 +930,15 @@ export class DocxAgentDocument {
       if (segment.paraId !== paraId) { paragraph = []; continue; }
       let visible = 0;
       let accepted = 0;
+      let leading = true;
       for (const run of paragraph) {
         const length = run.kind === 'text' ? run.text.length : 1;
         const stamp = (run.attributes.ins ?? run.attributes.del) as { revisionId?: string; id?: string } | undefined;
         const decision = stamp && decisions.get(stamp.revisionId ?? stamp.id ?? '');
         const shown = decision === undefined || (run.attributes.ins ? decision === 'accepted' : decision === 'rejected');
-        const inAccepted = !run.attributes.del;
+        const block = leading && run.kind === 'embed' && BLOCK_EMBEDS.has(run.embedKind);
+        const inAccepted = !block && !run.attributes.del;
+        if (!block) leading = false;
         if (shown && visible + length >= offset) return accepted + (inAccepted ? offset - visible : 0);
         if (shown) visible += length;
         if (inAccepted) accepted += length;

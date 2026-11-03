@@ -174,6 +174,41 @@ afterEach(() => {
 });
 
 describe('proposal registry', () => {
+  it('replaces overlapping text at an accepted offset without selecting a search occurrence', async () => {
+    const session = await open(fixture(paragraph('00000001', run('aaab'))));
+    const input: DocxProposalInput = {
+      id: 'offset', paragraph: at('00000001'), suggest: SUGGEST,
+      op: 'replaceText', search: 'aa', replaceWith: 'cc', at: { offset: 1 },
+    };
+    snapshotOf(propose(session, input));
+    expect(texts(session, 'accepted')).toEqual(['accb']);
+    expect(texts(session, 'original')).toEqual(['aaab']);
+    const staged = state(session);
+    snapshotOf(propose(session, input));
+    expect(state(session)).toEqual(staged);
+    const changed = propose(session, { ...input, at: { offset: 0 } });
+    expect(changed).toMatchObject({ ok: false, failure: { code: 'proposal-id-conflict' } });
+    expect(state(session)).toEqual(staged);
+    snapshotOf(decide(session, [{ id: input.id, state: 'accepted' }]));
+    snapshotOf(session.withdrawProposals({ expectVersion: session.version(), ids: [input.id] }));
+    expect(texts(session, 'accepted')).toEqual(['accb']);
+    expect(texts(session, 'original')).toEqual(['accb']);
+    expect(session.listRevisions()).toHaveLength(0);
+  });
+
+  it('refuses invalid or mismatched replacement offsets without changing the session', async () => {
+    const session = await open(fixture(paragraph('00000001', run('aaab'))));
+    for (const offset of [-1, 0.5, 5, 3]) {
+      const before = state(session);
+      const result = propose(session, {
+        id: 'offset', paragraph: at('00000001'), suggest: SUGGEST,
+        op: 'replaceText', search: 'aa', replaceWith: 'cc', at: { offset },
+      });
+      expect(result).toMatchObject({ ok: false, failure: { code: offset < 0 || !Number.isInteger(offset) ? 'invalid-step' : 'missing-target' } });
+      expect(state(session)).toEqual(before);
+    }
+  });
+
   it('mirrors exported records and hands their dedupe keys and preview version back', async () => {
     const session = await open();
     const engine = roundEngine(session);

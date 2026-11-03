@@ -500,6 +500,7 @@ function displayErrorFrom(message: string): DisplayTooLargeError | null {
 
 // the wasm reports a stale accept as a JSON error naming each drifted cell.
 function staleErrorFrom(message: string): StaleProposalError | null {
+  if (message.startsWith('Stale proposal:')) return new StaleProposalError([]);
   if (!message.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(message) as {
@@ -635,6 +636,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   listProposals(): Proposal[];
   /** The pending state or the last decision made through this handle. */
   getProposalStatus(id: string): 'pending' | 'accepted' | 'rejected' | undefined;
+  isProposalStale(id: string): boolean;
   /** Observe proposals created or decided through this handle. */
   onProposalChange(listener: (proposals: Proposal[]) => void): () => void;
   /**
@@ -1350,6 +1352,16 @@ function wrapWorkbookDocument(
     getProposalStatus(id: string) {
       if (handle.listProposals().some(proposal => proposal.id === id)) return 'pending';
       return proposalDecisions.get(id);
+    },
+    isProposalStale(id: string) {
+      const draft = openWorkbookRecoveryCheckpoint(workbookRecoveryCheckpoint(handle, 0), 0);
+      try {
+        draft.acceptProposal(id);
+        return false;
+      } catch (error) {
+        if (error instanceof StaleProposalError) return true;
+        throw error;
+      } finally { draft.dispose(); }
     },
     acceptProposal(id: string, opts?: { force?: boolean }): EditResult & { proposalId: string } {
       try {

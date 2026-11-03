@@ -689,6 +689,37 @@ describe('wasm loader — proposals', () => {
     }
   });
 
+  for (const mutation of ['dependent', 'style'] as const) {
+    it.skipIf(!available)(`checks ${mutation} proposal staleness without changing the workbook or proposal`, () => {
+      const handle = openWorkbook(sampleBytes());
+      const events: unknown[] = [];
+      const off = handle.onProposalChange(proposals => { events.push(proposals); });
+      try {
+        handle.editCells(0, [
+          { row: 1, col: 1, input: '120' },
+          { row: 1, col: 2, input: '135' },
+          { row: 1, col: 3, input: '150' },
+          { row: 1, col: 4, input: '=SUM(B2:D2)' },
+        ]);
+        const proposal = handle.propose('Agent', null, [{ sheet: 0, row: 1, col: 1, input: '200' }]);
+        const before = { version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() };
+        expect(handle.isProposalStale(proposal.id)).toBe(false);
+        expect({ version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() }).toEqual(before);
+        if (mutation === 'dependent') handle.editCell(0, 1, 2, '140');
+        else handle.patchRangeStyle(0, 'B2', { bold: true });
+        const stale = { version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(handle.isProposalStale(proposal.id)).toBe(true);
+          expect({ version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() }).toEqual(stale);
+        }
+        expect(events).toHaveLength(1);
+        expect(handle.cell(0, 1, 1).input).toBe('120');
+        expect(() => handle.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+        expect(handle.getProposalStatus(proposal.id)).toBe('pending');
+      } finally { off(); handle.dispose(); }
+    });
+  }
+
   it.skipIf(!available)('rejects a proposal without applying it', () => {
     const handle = openWorkbook(sampleBytes());
     try {

@@ -47,6 +47,7 @@ export type DocxProposalInput = {
       search: string;
       replaceWith: string;
       occurrence?: DocxOccurrence;
+      at?: { offset: number };
     }
   | {
       op: 'insertText';
@@ -182,8 +183,10 @@ function proposalKey(input: DocxProposalInput): string {
           op: input.op,
           search: input.search,
           replaceWith: input.replaceWith,
-          occurrence:
-            input.occurrence === undefined || input.occurrence === 1 ? 'first' : input.occurrence,
+          at: input.at,
+          occurrence: input.at === undefined
+            ? input.occurrence === undefined || input.occurrence === 1 ? 'first' : input.occurrence
+            : undefined,
         }
       : { op: input.op, at: input.at, text: input.text };
   return JSON.stringify(canonical({ paragraph: input.paragraph, ...edit }));
@@ -370,6 +373,26 @@ export function executeProposalRound(
             suggest,
           },
         ],
+      };
+    }
+    if (input.at !== undefined) {
+      const offset = input.at?.offset;
+      if (!Number.isInteger(offset) || offset < 0 || offset > MAX_OFFSET) {
+        return failure('invalid-step', `proposal ${input.id} replaces at an invalid offset`);
+      }
+      const read = session.readParagraphs({ story, paraIds: [paraId], view: 'accepted' });
+      if (!read.ok) return { failure: { ...read.failure, proposalId: input.id } };
+      const text = read.paragraphs[0]?.text;
+      if (text === undefined || offset > text.length || text.slice(offset, offset + input.search.length) !== input.search) {
+        return failure('missing-target', `proposal ${input.id} search does not match at offset ${offset}`);
+      }
+      return {
+        steps: [{
+          op: 'replaceText',
+          target: { kind: 'range', story, start: { paraId, offset }, end: { paraId, offset: offset + input.search.length }, view: 'accepted' },
+          text: input.replaceWith,
+          suggest,
+        }],
       };
     }
     const occurrence = input.occurrence ?? 'first';

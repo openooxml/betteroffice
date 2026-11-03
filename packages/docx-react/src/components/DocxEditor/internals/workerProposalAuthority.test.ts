@@ -1357,6 +1357,30 @@ function editorRoundHarness(laidOut = async () => {}) {
   return { session, worker, authority, peerUpdated, events };
 }
 
+test('editor retries distinguish explicit replacement offsets after the document version advances', async () => {
+  const h = editorRoundHarness();
+  const paragraph = { kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'p1' };
+  const suggest = { author: 'Agent', date: '2026-01-01T00:00:00Z' };
+  const input = { id: 'offset', paragraph, suggest, op: 'replaceText' as const, search: 'aa', replaceWith: 'cc', at: { offset: 1 } };
+  const snapshot = reply();
+  const record = { id: input.id, state: 'proposed' as const, paragraph, revisionIds: ['revision'], changed: true };
+  snapshot.mirror.proposals.entries = [{
+    record, suggest,
+    key: JSON.stringify({ at: { offset: 1 }, op: input.op,
+      paragraph: { kind: paragraph.kind, paraId: paragraph.paraId, sessionId: paragraph.sessionId, story: paragraph.story },
+      replaceWith: input.replaceWith, search: input.search }),
+  }];
+  snapshot.result = { ok: true, snapshot: { version: 'worker-1', previewVersion: 0, proposals: [record] } };
+  h.worker.proposal.mockResolvedValue(snapshot);
+  await h.authority.initialize();
+  const request = { expectVersion: 'before-staging', proposals: [input] };
+  expect(await h.authority.propose(request, unusedMain)).toMatchObject({ ok: true });
+  expect(h.worker.proposal).toHaveBeenCalledTimes(2);
+  expect(await h.authority.propose({ ...request, proposals: [{ ...input, at: { offset: 0 } }] }, unusedMain))
+    .toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(h.worker.proposal).toHaveBeenCalledTimes(2);
+});
+
 test('unchanged editor reinitialization notifies readiness subscribers', async () => {
   const h = editorRoundHarness();
   const readiness: boolean[] = [];

@@ -209,8 +209,8 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     })).id;
   }
   protected override proposalStatus(id: string) { return this.handle.getProposalStatus(id); }
-  protected override proposalStale(_id: string, steps: XlsxEditStep[]) {
-    return !this.handle.validateEdits({ expectVersion: this.currentVersion(), steps, source: 'agent' }).ok;
+  protected override proposalStale(id: string, _steps: XlsxEditStep[]) {
+    return this.handle.isProposalStale(id);
   }
   protected override acceptProposal(id: string, steps: XlsxEditStep[]) {
     try {
@@ -227,6 +227,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
       return { applied: result.applied, version: this.currentVersion(), changedSheets: result.applied ? new Set(steps.map(step => step.target.sheetId)).size : 0, calculation: { changedCells: result.changed?.length ?? 0, cycleCells: 0, limitedCells: calculation.limitedCells.length, truncated: calculation.budgetExhausted ?? false } };
     } catch (error) {
       if (error instanceof StaleProposalError) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.', { cells: error.cells, targets: error.targets });
+      if ((error instanceof Error ? error.message : String(error)).startsWith('Stale proposal:')) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.');
       throw error;
     }
   }
