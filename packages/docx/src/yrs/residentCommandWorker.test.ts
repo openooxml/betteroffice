@@ -101,7 +101,7 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
+export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string; pipeline?: (client: ResidentEngineWorkerClient, point: { story: string; paraId: string; offset: number }, engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => Promise<unknown> } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = options.collaboration ? new DocxSourceWorkerClient(worker) : new ResidentEngineWorkerClient(worker);
   try {
@@ -151,12 +151,46 @@ export async function openWorker(options: { collaboration?: boolean; headersFoot
       fonts, layoutInput, layoutWithRegions: options.layoutWithRegions ?? true, layoutRevision: 1, extras,
       ...(options.displayWindow ? { displayWindow: options.displayWindow, retainBuiltPages: false } : {}),
     };
-    const initial = await client.commandInit(init);
-    return { worker, client, engine, init, initial, point };
+    const followUp = options.pipeline ? undefined : settledFrame(client);
+    const initializing = client.commandInit(init);
+    const pipelined = options.pipeline?.(client, point, engine);
+    const initial = await initializing;
+    const settled = (await followUp?.(initial.frame.revision)) as DocxCommandFrame;
+    return { worker, client, engine, init, initial, settled, point, pipelined };
   } catch (error) {
     client.destroy();
     throw error;
   }
+}
+
+function epochFree<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value ?? null)
+    .replace(/"backgroundId":"\d+:/g, '"backgroundId":"epoch:')
+    .replace(/"handle":"[^"]*"/g, '"handle":"session"'));
+}
+
+function openedFrame(initial: DocxCommandFrame, settled: DocxCommandFrame): RetainedFrame {
+  return applyFrameDeltaOwned(applyFrameDeltaOwned(null, decodeFrameDelta(initial.payload.frame)), decodeFrameDelta(settled.payload.frame));
+}
+
+function settledFrame(client: ResidentEngineWorkerClient): (after: number) => Promise<DocxCommandFrame> {
+  const frames: DocxCommandFrame[] = [];
+  let wake: (() => void) | undefined;
+  const unsubscribe = client.onFrame((frame) => { frames.push(frame); wake?.(); });
+  return async (after) => {
+    const deadline = Date.now() + 5_000;
+    try {
+      for (;;) {
+        const frame = frames.find(candidate => candidate.revision > after);
+        if (frame) return frame;
+        if (Date.now() > deadline) throw new Error('Missing first frame follow-up');
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          setTimeout(resolve, 50);
+        });
+      }
+    } finally { unsubscribe(); }
+  };
 }
 
 export function intent(seq: number, version: number, kind: string, payload: DocxCommandEnvelope['payload']): DocxCommandEnvelope {
@@ -270,7 +304,7 @@ test('worker selection reads project tracked deletions before slicing raw offset
 }, TIMEOUT);
 
 test('render environment commands change hidden text and theme colors without editing the document', async () => {
-  const { client, engine, initial } = await openWorker({ bodyXml:
+  const { client, engine, initial, settled } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r>' +
     '<w:r><w:rPr><w:vanish/><w:color w:themeColor="accent1"/></w:rPr><w:t>Hidden</w:t></w:r></w:p>',
   });
@@ -286,7 +320,7 @@ test('render environment commands change hidden text and theme colors without ed
     expect(engine.proposalEngine.version()).toBe(nativeVersion);
     expect(ack.selection ?? initial.selection).toEqual(initial.selection);
     expect(layouts).toHaveBeenCalledTimes(1);
-    const initialFrame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
+    const initialFrame = openedFrame(initial.frame, settled);
     expect(frameText(initialFrame)).toBe('Seed');
     const frame = applyFrameDeltaOwned(initialFrame, decodeFrameDelta(ack.frame!.payload.frame));
     expect(frameText(frame)).toBe('SeedHidden');
@@ -301,7 +335,7 @@ test('render environment commands change hidden text and theme colors without ed
 }, TIMEOUT);
 
 test('render environment reservations lay out at their document version and never reach the document', async () => {
-  const { client, engine, initial, point } = await openWorker({ bodyXml:
+  const { client, engine, initial, point, settled } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta</w:t></w:r></w:p>' +
     '<w:p w14:paraId="00000002"><w:r><w:t>Gamma</w:t></w:r></w:p>',
   });
@@ -314,7 +348,7 @@ test('render environment reservations lay out at their document version and neve
     const environment = (reservations: unknown) => ({ themeColors: {}, showHiddenText: false, reservations } as never);
     const nativeVersion = engine.proposalEngine.version();
     const before = new Uint8Array((await client.save({ comments: [] })).bytes);
-    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
+    let frame = openedFrame(initial.frame, settled);
     const boxes = () => frame.displayList.pages.flatMap((page) => page.reservations ?? []);
     expect(boxes()).toEqual([]);
 
@@ -363,7 +397,7 @@ test('render environment reservations lay out at their document version and neve
 }, TIMEOUT);
 
 test('stale render environment reservations retain listed owners and clear removed owners after an edit', async () => {
-  const { client, engine, initial, point } = await openWorker();
+  const { client, engine, initial, point, settled } = await openWorker();
   const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
   try {
     const version = initial.frame!.payload.documentVersion!;
@@ -378,7 +412,7 @@ test('stale render environment reservations retain listed owners and clear remov
       themeColors: {}, showHiddenText: false, reservations: { version, sets },
     } as never);
     const applied = () => JSON.parse(layouts.mock.calls.at(-1)![0]).renderEnv.reservations;
-    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
+    let frame = openedFrame(initial.frame, settled);
     const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment([
       { owner: 'A', items: [inline('a', 35, true)] },
       { owner: 'B', items: [inline('b', 20)] },
@@ -440,7 +474,7 @@ test('frames name the reservation set their layout includes, or none current for
 }, TIMEOUT);
 
 test('a render environment command without reservations keeps the set its frames name', async () => {
-  const { client, initial, point } = await openWorker();
+  const { client, initial, point, settled } = await openWorker();
   try {
     const version = initial.frame!.payload.documentVersion!;
     const set = await client.edit(intent(1, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: false, reservations: {
@@ -452,7 +486,7 @@ test('a render environment command without reservations keeps the set its frames
     expect(themed.outcomes[0]?.status).toBe('noop');
     expect(themed.frame!.payload.reservations).toEqual({ version, key: 'k1' });
     const frame = [set, themed].reduce((retained, ack) => applyFrameDeltaOwned(retained, decodeFrameDelta(ack.frame!.payload.frame)),
-      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame)));
+      openedFrame(initial.frame, settled));
     expect(frame.displayList.pages.flatMap((page) => page.reservations ?? [])).toEqual([expect.objectContaining({ owner: 'A', id: 'a', width: 30 })]);
   } finally {
     client.destroy();
@@ -460,9 +494,9 @@ test('a render environment command without reservations keeps the set its frames
 }, TIMEOUT);
 
 test.each([true, false])('render environment reservations survive a review preview relayout (regions=%s)', async (layoutWithRegions) => {
-  const { client, initial, point } = await openWorker({ layoutWithRegions });
+  const { client, initial, point, settled } = await openWorker({ layoutWithRegions });
   try {
-    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
+    let frame = openedFrame(initial.frame, settled);
     const boxes = () => frame.displayList.pages.flatMap((page) => page.reservations ?? []);
     const version = initial.frame!.payload.documentVersion!;
     const set = await client.edit(intent(1, 0, 'setRenderEnvironment', {
@@ -502,7 +536,7 @@ test.each([true, false])('render environment reservations survive a review previ
 test('the worker and a main-thread session lay out one reservation set identically', async () => {
   const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p>' +
     '<w:p w14:paraId="00000002"><w:r><w:t>Next</w:t></w:r></w:p>';
-  const { client, engine, init, initial, point } = await openWorker({ bodyXml });
+  const { client, engine, init, initial, point, settled } = await openWorker({ bodyXml });
   const host = await createYrsSession({ clientId: 8302 });
   try {
     host.seedFromDocx(syntheticDocument(false, false, false, bodyXml));
@@ -519,7 +553,7 @@ test('the worker and a main-thread session lay out one reservation set identical
       reservations: { version: initial.frame!.payload.documentVersion!, sets: [{ owner: 'plugin', items: items(engine.paragraphIdentities().sessionId) }] },
     } as never));
     const worker = applyFrameDeltaOwned(
-      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame)),
+      openedFrame(initial.frame, settled),
       decodeFrameDelta(set.frame!.payload.frame)
     );
 
@@ -569,11 +603,11 @@ function expectFrameRegions(frame: RetainedFrame, headerText: string, footerText
 }
 
 test('d2c_worker_fixture_clones_staged_page_and_background_bitmaps', async () => {
-  const { client, initial } = await openWorker();
+  const { client, settled } = await openWorker();
   try {
     const inserted = await client.edit(intent(1, 0, 'insertText', { text: '!' }));
     const full = await client.requestFullFrame();
-    for (const frame of [initial.frame, inserted.frame!, full.frame!]) {
+    for (const frame of [settled, inserted.frame!, full.frame!]) {
       const staged = frame.payload.stagedPresentation;
       const echo = frame.payload.echoContext;
       expect(staged?.frameEpoch).toBe(frame.revision);
@@ -601,12 +635,12 @@ test('d2c_worker_fixture_clones_staged_page_and_background_bitmaps', async () =>
 }, TIMEOUT);
 
 test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', async () => {
-  const { client, engine, initial, point } = await openWorker();
+  const { client, engine, initial, point, settled } = await openWorker();
   const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
   try {
     expect(initial.selection).toMatchObject({ anchor: point, focus: point });
     expect(initial.editState).toMatchObject({ readOnly: false, canUndo: false });
-    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    let frame = openedFrame(initial.frame, settled);
     expect(frameText(frame)).toBe('Seed');
     const inserted = await client.edit(intent(1, 0, 'insertText', { text: '!' }));
     expect(inserted).toMatchObject({
@@ -694,10 +728,10 @@ test('d1a_worker_keeps_sticky_provenance_until_document_epoch_replacement', asyn
 }, TIMEOUT);
 
 test.each([true, false])('d1a_header_footer_command_frames_use_current_story_content (regions=%s)', async (layoutWithRegions) => {
-  const { client, engine, initial, init } = await openWorker({ headersFooters: true, layoutWithRegions });
+  const { client, engine, initial, init, settled } = await openWorker({ headersFooters: true, layoutWithRegions });
   try {
     expect(init.extras).toContain('H');
-    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    let frame = openedFrame(initial.frame, settled);
     expectFrameRegions(frame, 'H', 'F');
     for (const [index, text] of ['H', 'F'].entries()) {
       const story = engine.geometryReader.storyIds().find((story) =>
@@ -723,10 +757,10 @@ test.each([true, false])('d1a_header_footer_command_frames_use_current_story_con
 }, TIMEOUT);
 
 test('d1a_non_region_command_frames_refresh_measured_content', async () => {
-  const { client, engine, initial } = await openWorker({ layoutWithRegions: false });
+  const { client, engine, initial, settled } = await openWorker({ layoutWithRegions: false });
   const layouts = spyOn(engine, 'layoutDocumentJson');
   try {
-    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    let frame = openedFrame(initial.frame, settled);
     expect(frameText(frame)).toBe('Seed');
     const inserted = await client.edit(intent(1, 0, 'insertText', { text: '!' }));
     expect(inserted.outcomes[0]?.status).toBe('applied');
@@ -812,7 +846,7 @@ test('history_commands_order_typing_undo_redo_and_readonly_without_duplicates', 
 }, TIMEOUT);
 
 test('replace_matches_and_range_highlights_share_native_version_and_layout_identity', async () => {
-  const { client, engine, point, initial } = await openWorker();
+  const { client, engine, point, initial, settled } = await openWorker();
   try {
     const range = { story: 'body', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 4 } };
     const version = engine.proposalEngine.version();
@@ -820,7 +854,7 @@ test('replace_matches_and_range_highlights_share_native_version_and_layout_ident
     expect(highlights.status).toBe('ok');
     if (highlights.status !== 'ok') throw new Error('Highlight read was superseded');
     const geometry = highlights.value!;
-    expect(geometry).toMatchObject({ version, layoutRevision: 1, frameEpoch: initial.frame!.revision });
+    expect(geometry).toMatchObject({ version, layoutRevision: 1, frameEpoch: settled.revision });
     expect(geometry.rects[0].length).toBeGreaterThan(0);
     expect(geometry.rects[0][0].pageId).toBeDefined();
     const find = await client.documentRead({ kind: 'findText', request: { text: 'Seed', within: { kind: 'story', story: 'body' }, view: 'accepted' } });
@@ -902,14 +936,14 @@ test('worker note parts edit and remove their references in the same history ste
 }, TIMEOUT);
 
 test('worker handles order control values and repeating item lifecycle with save and undo', async () => {
-  const { client, initial } = await openWorker({ controls: true });
+  const { client, initial, settled } = await openWorker({ controls: true });
   try {
     const read = await client.documentReadAt({ kind: 'contentControlHandles' }, initial.frame.payload.documentVersion!);
     if (read.status !== 'ok') throw new Error('Control snapshot superseded');
     const checkbox = read.value.controls.find(control => control.control.tag === 'check')!;
     const item = read.value.controls.find(control => control.control.tag === 'item')!;
     expect(checkbox.handle).not.toBe(item.handle);
-    expect(read.value.frameEpoch).toBe(initial.frame.payload.caret.frameEpoch);
+    expect(read.value.frameEpoch).toBe(settled.payload.caret.frameEpoch);
     expect(checkbox.rects.length).toBeGreaterThan(0);
     expect(item.rects.length).toBeGreaterThan(0);
     expect(checkbox.widget).toEqual({ kind: 'checkbox', checked: false });
@@ -1033,7 +1067,7 @@ test('worker part and property commands preserve each others metadata', async ()
 }, TIMEOUT);
 
 test('worker property queries and section mutations preserve versions undo layout and save', async () => {
-  const { client, initial, worker } = await openWorker();
+  const { client, initial, worker, settled } = await openWorker();
   try {
     const version = initial.frame.payload.documentVersion!;
     const read = await client.documentReadAt({ kind: 'properties', target: { kind: 'section', section: 'final' } }, version);
@@ -1045,7 +1079,7 @@ test('worker property queries and section mutations preserve versions undo layou
     }));
     expect(changed).toMatchObject({ version: 1, outcomes: [{ status: 'applied' }] });
     expect((await client.documentReadAt({ kind: 'properties', target: { kind: 'section', section: 'final' } }, version)).status).toBe('superseded');
-    const retained = applyFrameDeltaOwned(applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)), decodeFrameDelta(changed.frame!.payload.frame));
+    const retained = applyFrameDeltaOwned(openedFrame(initial.frame, settled), decodeFrameDelta(changed.frame!.payload.frame));
     expect(retained.displayList.pages[0]!.width).toBeCloseTo(10000 / 15);
     const current = changed.frame!.payload.documentVersion!;
     const refused = await new Promise<DocxEngineWorkerResponse>(resolve => {
@@ -1204,9 +1238,9 @@ test('worker image property reads normalize adjacent image ranges in either dire
 }, TIMEOUT);
 
 test('worker point reads use the native pointer mapping without selecting', async () => {
-  const { client, initial, engine } = await openWorker();
+  const { client, initial, engine, settled } = await openWorker();
   try {
-    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const frame = openedFrame(initial.frame, settled);
     const page = frame.displayList.pages[0]!;
     const glyph = page.primitives.find(primitive => primitive.kind === 'glyphRun' || primitive.kind === 'text');
     if (!glyph) throw new Error('Glyph unavailable');
@@ -1282,7 +1316,7 @@ test('worker margin and property commands preserve current metadata through undo
 }, TIMEOUT);
 
 test('worker section snapshots margins and tab stops use native versions and history', async () => {
-  const { client, initial, engine, point } = await openWorker();
+  const { client, initial, engine, point, settled } = await openWorker();
   try {
     const version = initial.frame.payload.documentVersion!;
     const read = await client.documentReadAt({ kind: 'sectionProperties' }, version);
@@ -1293,7 +1327,7 @@ test('worker section snapshots margins and tab stops use native versions and his
       section: 'final', margins: { marginLeft: 2880, marginRight: 720 }, expectVersion: version,
     }));
     expect(margins.outcomes[0]?.status).toBe('applied');
-    const retained = applyFrameDeltaOwned(applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)), decodeFrameDelta(margins.frame!.payload.frame));
+    const retained = applyFrameDeltaOwned(openedFrame(initial.frame, settled), decodeFrameDelta(margins.frame!.payload.frame));
     expect(retained.displayList.pages[0]!.contentBounds!.x).toBeCloseTo(2880 / 15);
     expect((await client.documentReadAt({ kind: 'sectionProperties' }, version)).status).toBe('superseded');
     expect((await client.documentRead({ kind: 'sectionProperties' })).value.sections.at(-1))
@@ -1662,11 +1696,119 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
   } finally { client.destroy(); }
 }, TIMEOUT);
 
-test('worker frames publish selection and distinct stable image handles', async () => {
-  const { client, initial, point } = await openWorker({ objects: true });
+test('the first frame carries the echo context and leaves object geometry to a follow-up frame that rebuilds no page', async () => {
+  const { client, initial, settled } = await openWorker();
   try {
-    const geometry = initial.frame.payload.geometry!;
-    expect(geometry).toMatchObject({ version: initial.frame.payload.documentVersion, frameEpoch: initial.frame.revision });
+    expect(initial.frame.payload.echoContext?.glyphs).toBeDefined();
+    expect(initial.frame.payload.echoGlyphSets?.length).toBeGreaterThan(0);
+    expect(initial.frame.payload.geometry).toBeUndefined();
+    expect(initial.frame.payload.stagedPresentation?.pages.length).toBeGreaterThan(0);
+    expect(settled.revision).toBeGreaterThan(initial.frame.revision);
+    expect(settled.coversThroughSeq).toBe(initial.frame.coversThroughSeq);
+    expect(decodeFrameDelta(settled.payload.frame).operations).toEqual([]);
+    expect(settled.payload.echoContext).toBeDefined();
+    expect(settled.payload.geometry).toMatchObject({ frameEpoch: settled.revision });
+    const full = (await client.requestFullFrame()).frame!;
+    expect(full.payload.echoContext).toBeDefined();
+    expect(settled.payload.geometry!.objects).toEqual(full.payload.geometry!.objects);
+    expect(epochFree({ ...settled.payload.echoContext!, frameEpoch: 0 })).toEqual(epochFree({ ...full.payload.echoContext!, frameEpoch: 0 }));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a replacement command session sends its own first frame follow-up', async () => {
+  const { client, init } = await openWorker();
+  try {
+    const checkpoint = await client.checkpoint();
+    const followUp = settledFrame(client);
+    const replacement = await client.bootstrap({
+      clientId: 8303, state: checkpoint.state, selection: null,
+      fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
+      layoutInput: LAYOUT, layoutWithRegions: true, layoutRevision: 2,
+    }, '{}');
+    const first = replacement.commandInitial!.frame;
+    expect(replacement.commandInitial).toMatchObject({ epoch: 2 });
+    expect(first.payload.geometry).toBeUndefined();
+    const settled = await followUp(first.revision);
+    expect(settled.payload.geometry).toMatchObject({ frameEpoch: settled.revision });
+    expect(decodeFrameDelta(settled.payload.frame).operations).toEqual([]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a key, click or selection that lands before the first frame follow-up acts as it does after it', async () => {
+  const late = await openWorker();
+  const caret = late.settled.payload.caret.caretRect!;
+  const clickAt = {
+    page: { pageId: caret.pageId, pageIndex: caret.pageIndex }, x: caret.x, y: caret.y + caret.height / 2,
+    layoutRevision: late.initial.frame.payload.layoutRevision, frameEpoch: late.initial.frame.revision,
+    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  };
+  late.client.destroy();
+  const inputs: Array<(point: { story: string; paraId: string; offset: number }) => DocxCommandEnvelope> = [
+    () => intent(1, 0, 'insertText', { text: 'Z' }),
+    () => intent(1, 0, 'selectPoint', clickAt),
+    (point) => intent(1, 0, 'select', { selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 2 } } }),
+  ];
+  const outcome = (ack: DocxCommandAck, engine: { paragraphs(story: string): Array<{ text: string }> }) => epochFree({
+    status: ack.outcomes[0]?.status, selection: ack.selection, text: engine.paragraphs('body').map(paragraph => paragraph.text),
+    caret: ack.frame!.payload.caret.caretRect, selectionRects: ack.frame!.payload.selectionRects,
+    objects: ack.frame!.payload.geometry?.objects, selected: ack.frame!.payload.geometry?.selection,
+    echo: ack.frame!.payload.echoContext && { ...ack.frame!.payload.echoContext, frameEpoch: 0 },
+  });
+  for (const input of inputs) {
+    const after = await openWorker();
+    let expected: ReturnType<typeof outcome>;
+    try {
+      expected = outcome(await editWithFrame(after.client, input(after.point)), after.engine);
+    } finally { after.client.destroy(); }
+    const frames: DocxCommandFrame[] = [];
+    const before = await openWorker({ pipeline: (client, point) => {
+      client.onFrame(frame => frames.push(frame));
+      return editWithFrame(client, input(point));
+    } });
+    try {
+      expect(before.initial.frame.revision).toBe(clickAt.frameEpoch);
+      expect(before.initial.frame.payload.geometry).toBeUndefined();
+      const ack = await before.pipelined as DocxCommandAck;
+      expect(outcome(ack, before.engine)).toEqual(expected);
+      expect(ack.frame!.payload.geometry).toBeDefined();
+      expect(frames.filter(frame => frame.revision < ack.frame!.revision && frame.payload.geometry)).toEqual([]);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(frames.filter(frame => frame.revision > ack.frame!.revision)).toEqual([]);
+    } finally { before.client.destroy(); }
+  }
+}, TIMEOUT);
+
+test('a remote update before the first frame follow-up keeps frames ordered and carries the deferred geometry', async () => {
+  const frames: DocxCommandFrame[] = [];
+  const remote = await createYrsSession({ clientId: 8312 });
+  const { client, engine, initial, pipelined } = await openWorker({ objects: true, pipeline: async (client, point, engine) => {
+    client.onFrame(frame => frames.push(frame));
+    remote.loadState(engine.encodeState());
+    remote.insertText({ story: 'body', paraId: point.paraId, offset: 0 }, 'Remote ');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+  } });
+  try {
+    await pipelined;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(initial.frame.payload.geometry).toBeUndefined();
+    expect(engine.paragraphs('body')[0]!.text.startsWith('Remote ')).toBe(true);
+    const revisions = frames.map(frame => frame.revision);
+    expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+    expect(new Set(revisions).size).toBe(revisions.length);
+    expect(revisions.every(revision => revision > initial.frame.revision)).toBe(true);
+    const last = frames.at(-1)!;
+    expect(last.payload.geometry).toMatchObject({ frameEpoch: last.revision });
+    expect(last.payload.geometry!.objects.filter(object => object.kind === 'image')).toHaveLength(2);
+    const full = (await client.requestFullFrame()).frame!;
+    expect(last.payload.geometry!.objects).toEqual(full.payload.geometry!.objects);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('worker frames publish selection and distinct stable image handles', async () => {
+  const { client, initial, point, settled } = await openWorker({ objects: true });
+  try {
+    const geometry = settled.payload.geometry!;
+    expect(geometry).toMatchObject({ version: initial.frame.payload.documentVersion, frameEpoch: settled.revision });
     const images = geometry.objects.filter(object => object.kind === 'image');
     expect(images).toHaveLength(2);
     expect(new Set(images.map(object => object.handle)).size).toBe(2);
@@ -1690,13 +1832,13 @@ test('the public session has no embed move, so collaborating replicas cannot dup
 
 for (const destination of ['forward', 'backward', 'self'] as const) {
   test(`worker moveEmbed same paragraph ${destination} preserves the picture`, async () => {
-    const { client, engine, initial } = await openWorker({ prepare(engine) {
+    const { client, engine, initial, settled } = await openWorker({ prepare(engine) {
       engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
       return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
     } });
     try {
-      const image = initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!;
-      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const image = settled.payload.geometry!.objects.find(o => o.kind === 'image')!;
+      const frame = openedFrame(initial.frame, settled);
       const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
       const box = destination === 'self' ? { x: image.rects[0]!.x, y: image.rects[0]!.y, w: image.rects[0]!.width, h: image.rects[0]!.height }
         : displayPrimitiveRect(glyphs[destination === 'backward' ? 0 : glyphs.length - 1]!);
@@ -1717,7 +1859,7 @@ for (const destination of ['forward', 'backward', 'self'] as const) {
 
 for (const refusal of ['unsupported-suggesting', 'read-only', 'stale-version', 'unsupported-object', 'stale-object', 'stale-epoch', 'locked-target'] as const) {
   test(`worker moveEmbed refuses ${refusal === 'locked-target' ? 'tracked deletion with locked-target' : refusal} without mutation`, async () => {
-    const { client, engine, initial } = await openWorker({ prepare(engine) {
+    const { client, engine, initial, settled } = await openWorker({ prepare(engine) {
       engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
         id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20,
         ...(refusal === 'unsupported-object' ? { displayMode: 'float', wrapType: 'square', position: { horizontal: { relativeTo: 'page', posOffset: 0 }, vertical: { relativeTo: 'page', posOffset: 0 } } } : {}),
@@ -1725,8 +1867,8 @@ for (const refusal of ['unsupported-suggesting', 'read-only', 'stale-version', '
       return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
     } });
     try {
-      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
-      const image = initial.frame.payload.geometry!.objects.find(o => o.kind === 'image');
+      const frame = openedFrame(initial.frame, settled);
+      const image = settled.payload.geometry!.objects.find(o => o.kind === 'image');
       const glyph = frame.displayList.pages[0]!.primitives.find(p => p.kind === 'glyphRun' || p.kind === 'text')!;
       const box = displayPrimitiveRect(glyph);
       const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x, y: box.y + box.h / 2,
@@ -1749,9 +1891,9 @@ for (const refusal of ['unsupported-suggesting', 'read-only', 'stale-version', '
 
 for (const stale of ['layoutRevision', 'frameEpoch', 'pageId', 'pageIndex', 'collaboration'] as const) {
   test(`worker moveEmbed ${stale === 'frameEpoch' ? 'accepts a drop from an earlier frame of the same layout' : `refuses stale drop ${stale}`}`, async () => {
-    const { client, engine, initial } = await openWorker({ collaboration: stale === 'collaboration', objects: true });
+    const { client, engine, initial, settled } = await openWorker({ collaboration: stale === 'collaboration', objects: true });
     try {
-      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const frame = openedFrame(initial.frame, settled);
       const glyph = frame.displayList.pages[0]!.primitives.find(p => p.kind === 'glyphRun' || p.kind === 'text')!;
       const box = displayPrimitiveRect(glyph);
       const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
@@ -1762,7 +1904,7 @@ for (const stale of ['layoutRevision', 'frameEpoch', 'pageId', 'pageIndex', 'col
       if (stale === 'pageId') drop.page.pageId = 'obsolete';
       if (stale === 'pageIndex') drop.page.pageIndex++;
       const before = engine.encodeStateVector();
-      const result = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle,
+      const result = await client.edit(intent(1, 0, 'moveEmbed', { handle: settled.payload.geometry!.objects.find(o => o.kind === 'image')!.handle,
         expectVersion: initial.frame.payload.documentVersion!, drop } as never));
       if (stale === 'frameEpoch') {
         // A selection-only frame does not move text, so a drop captured on the previous frame still applies.
@@ -1778,20 +1920,20 @@ for (const stale of ['layoutRevision', 'frameEpoch', 'pageId', 'pageIndex', 'col
 
 for (const tracked of ['source', 'destination'] as const) {
   test(`worker moveEmbed refuses a tracked row at the ${tracked}`, async () => {
-    const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>', prepare(engine) {
+    const { client, engine, initial, settled } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>', prepare(engine) {
       const story = tracked === 'source' ? 'body:t0:r0c0' : 'body';
       engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
       return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
     } });
     try {
-      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const frame = openedFrame(initial.frame, settled);
       const story = tracked === 'source' ? 'body' : 'body:t0:r0c0';
-      const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === story)!.rects[0]!;
+      const rect = settled.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === story)!.rects[0]!;
       const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2,
         frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
         modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
       const before = engine.encodeStateVector();
-      const result = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle,
+      const result = await client.edit(intent(1, 0, 'moveEmbed', { handle: settled.payload.geometry!.objects.find(o => o.kind === 'image')!.handle,
         expectVersion: initial.frame.payload.documentVersion!, drop } as never));
       expect(result.outcomes[0]).toMatchObject({ status: 'refused', reason: 'tracked-revision-conflict' });
       expect(result.version).toBe(0);
@@ -1802,19 +1944,19 @@ for (const tracked of ['source', 'destination'] as const) {
 
 for (const tracked of [false, true]) {
   test(`worker moveEmbed moves across paragraphs in one undo step with a tracked insertion: ${tracked}`, async () => {
-    const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>AB</w:t></w:r></w:p><w:p><w:r><w:t>CD</w:t></w:r></w:p>', prepare(engine) {
+    const { client, engine, initial, settled } = await openWorker({ bodyXml: '<w:p><w:r><w:t>AB</w:t></w:r></w:p><w:p><w:r><w:t>CD</w:t></w:r></w:p>', prepare(engine) {
       engine.applyRawOps('body', [{ op: 'insertEmbed', index: tracked ? 0 : 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20, nested: { locks: [true, false] } }, attrs: { bold: true, ...(tracked ? { ins: { id: 'pending-image', author: 'Ada', date: '2026-01-01' } } : {}) } }]);
       return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
     } });
     try {
       const before = engine.storySegments('body');
-      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const frame = openedFrame(initial.frame, settled);
       const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
       const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
       const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
         frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
         modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
-      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: settled.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
       expect(moved.outcomes[0]).toMatchObject({ status: 'applied' });
       expect(moved.selection!.focus.offset - moved.selection!.anchor.offset).toBe(1);
       expect(moved.selection!.anchor.paraId).toBe(engine.geometryReader.paragraphSpans('body')[1]!.paraId);
@@ -1831,19 +1973,19 @@ for (const tracked of [false, true]) {
 }
 
 test('worker moveEmbed moves from body text into a table cell in the body part', async () => {
-  const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>', prepare(engine) {
+  const { client, engine, initial, settled } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>', prepare(engine) {
     engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
     return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
   } });
   try {
-    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
-    const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === 'body:t0:r0c0')?.rects[0];
+    const frame = openedFrame(initial.frame, settled);
+    const rect = settled.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === 'body:t0:r0c0')?.rects[0];
     if (!rect) throw new Error('Cell text rectangle unavailable');
     const box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
     const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
       frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
       modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
-    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: settled.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
     expect(moved.outcomes[0]?.status).toBe('applied');
     expect(moved.selection!.anchor.story).toBe('body:t0:r0c0');
     expect(engine.storySegments('body').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(0);
@@ -1856,22 +1998,22 @@ test('worker moveEmbed moves from body text into a table cell in the body part',
 
 for (const locked of ['source', 'destination'] as const) {
   test(`worker moveEmbed refuses a locked content control at the ${locked}`, async () => {
-    const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sdt><w:sdtPr><w:id w:val="7"/><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Locked</w:t></w:r></w:p></w:sdtContent></w:sdt>', prepare(engine) {
+    const { client, engine, initial, settled } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sdt><w:sdtPr><w:id w:val="7"/><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Locked</w:t></w:r></w:p></w:sdtContent></w:sdt>', prepare(engine) {
       const story = locked === 'source' ? engine.geometryReader.storyIds().find(id => id.startsWith('body:'))! : 'body';
       engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
       return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
     } });
     try {
-      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const frame = openedFrame(initial.frame, settled);
       const story = locked === 'source' ? 'body' : engine.geometryReader.storyIds().find(id => id.startsWith('body:'));
-      const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === story)?.rects[0];
+      const rect = settled.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === story)?.rects[0];
       if (!rect) throw new Error('Control text rectangle unavailable');
       const box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
       const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
         frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
         modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
       const before = engine.encodeStateVector();
-      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: settled.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
       expect(moved.outcomes[0]).toMatchObject({ status: 'refused', reason: 'locked-target' });
       expect(engine.encodeStateVector()).toEqual(before);
     } finally { client.destroy(); }
@@ -1881,19 +2023,19 @@ for (const locked of ['source', 'destination'] as const) {
 test('worker moveEmbed save and reopen retain one drawing and its relationship', async () => {
   const drawing = '<w:r><w:rPr><w:b/></w:rPr><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:extent cx="381000" cy="190500"/><wp:docPr id="9" name="Picture"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
   const bodyXml = `<w:p><w:r><w:t>A</w:t></w:r>${drawing}</w:p><w:p><w:r><w:t>Destination</w:t></w:r></w:p>`;
-  const { client, engine, initial, init } = await openWorker({ imageMedia: true, bodyXml });
+  const { client, engine, initial, init, settled } = await openWorker({ imageMedia: true, bodyXml });
   const baseline = await openWorker({ imageMedia: true, bodyXml });
   const reopened = new ResidentEngineWorkerClient(startWorker(8302));
   try {
     const original = engine.storySegments('body').filter(s => s.kind === 'embed');
     expect(original.map(s => s.kind === 'embed' && s.payload.docPr)).toEqual([expect.objectContaining({ docPrId: '9', name: 'Picture' })]);
-    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const frame = openedFrame(initial.frame, settled);
     const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
     const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
     const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
       frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
       modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
-    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: settled.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
     expect(moved.outcomes[0]?.status).toBe('applied');
     expect(engine.storySegments('body').filter(s => s.kind === 'embed')).toEqual(original);
     const saved = await client.save({ comments: [] });
@@ -1913,15 +2055,16 @@ test('worker moveEmbed save and reopen retain one drawing and its relationship',
     expect(rels.match(/Id="rIdImage"/g)).toHaveLength(1);
     expect(Object.keys(parts).filter(key => key === 'word/media/picture.png')).toHaveLength(1);
     await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
+    const restoredFollowUp = settledFrame(reopened);
     const restored = await reopened.commandInit({ ...init, selection: null });
-    expect(restored.frame.payload.geometry!.objects.filter(o => o.kind === 'image')).toHaveLength(1);
+    expect((await restoredFollowUp(restored.frame.revision)).payload.geometry!.objects.filter(o => o.kind === 'image')).toHaveLength(1);
   } finally { baseline.client.destroy(); reopened.destroy(); client.destroy(); }
 }, TIMEOUT);
 
 test('worker orders versioned image resize and move with undo and stale-handle refusal', async () => {
-  const { client, engine, initial, point } = await openWorker({ objects: true });
+  const { client, engine, initial, point, settled } = await openWorker({ objects: true });
   try {
-    const handle = initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')!.handle;
+    const handle = settled.payload.geometry!.objects.find(object => object.kind === 'image')!.handle;
     const expectVersion = initial.frame.payload.documentVersion!;
     const request = intent(1, 0, 'resizeObject', { handle, widthEmu: 762000, heightEmu: 381000, expectVersion });
     const resized = await client.edit(request);
@@ -1953,7 +2096,7 @@ test('worker orders versioned image resize and move with undo and stale-handle r
 
 test('worker moves a floating image without changing its wrap and flags which images float', async () => {
   const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
-  const { client, engine, initial } = await openWorker({ prepare: engine => {
+  const { client, engine, initial, settled } = await openWorker({ prepare: engine => {
     engine.applyRawOps('body', [
       { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'floating-image', wrapType: 'behind', displayMode: 'float', cssFloat: 'none',
         position: { behindDoc: true, horizontal: { relativeTo: 'margin', posOffset: 0 }, vertical: { relativeTo: 'margin', posOffset: 0 } } } },
@@ -1963,12 +2106,12 @@ test('worker moves a floating image without changing its wrap and flags which im
   } });
   try {
     const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
-    expect(images(initial).map(object => object.floating)).toEqual([true, false]);
-    expect(images(initial).map(object => object.behindText)).toEqual([true, undefined]);
+    expect(images({ frame: settled }).map(object => object.floating)).toEqual([true, false]);
+    expect(images({ frame: settled }).map(object => object.behindText)).toEqual([true, undefined]);
     const payload = (id: string) => engine.storySegments('body').find(segment => segment.kind === 'embed' && segment.payload.id === id)!;
     const original = structuredClone(payload('floating-image'));
     const moved = await client.edit(intent(1, 0, 'moveObject', {
-      handle: images(initial)[0]!.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
+      handle: images({ frame: settled })[0]!.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
     }));
     expect(moved.outcomes[0]?.status).toBe('applied');
     expect(payload('floating-image')).toMatchObject({ payload: { wrapType: 'behind', displayMode: 'float', position: {
@@ -1996,7 +2139,7 @@ test('worker preserves picture aspect locks through resize, move, save and reope
     (lock === 'picture' ? '<a:picLocks noChangeAspect="1"/>' : '') +
     '</pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic>' +
     `</wp:${container}></w:drawing></w:r></w:p>`;
-  const { client, engine, initial, init } = await openWorker({ bodyXml:
+  const { client, engine, initial, init, settled } = await openWorker({ bodyXml:
     picture('inline', 1, 'frame') + picture('anchor', 2, 'picture') + picture('inline', 3, undefined) + picture('anchor', 4, undefined),
   });
   const reopened = new ResidentEngineWorkerClient(startWorker(8302));
@@ -2007,19 +2150,19 @@ test('worker preserves picture aspect locks through resize, move, save and reope
       expect(images(response).map(object => object.noChangeAspect)).toEqual([true, true, undefined, undefined]);
       for (const object of images(response).slice(2)) expect(object).not.toHaveProperty('noChangeAspect');
     };
-    expectLocks(initial);
+    expectLocks({ frame: settled });
     const { readResidentFrameGeometry: referenceGeometry } = await import('./residentObjectGeometry.reference');
     const reference = await referenceGeometry(engine,
-      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)), init.selection ?? null, init.layoutRevision);
+      openedFrame(initial.frame, settled), init.selection ?? null, init.layoutRevision);
     expect(reference.objects.filter(object => object.kind === 'image').map(object => object.noChangeAspect))
-      .toEqual(images(initial).map(object => object.noChangeAspect));
+      .toEqual(images({ frame: settled }).map(object => object.noChangeAspect));
     expect(engine.storySegments('body').flatMap(segment => segment.kind === 'embed' && segment.embedKind === 'image'
       ? [segment.payload.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
     expect((engine.yrsBlocksForStory('body') as LayoutBlock[])
       .flatMap(block => block.kind === 'paragraph' ? block.runs : [])
       .flatMap(run => run.kind === 'image' ? [run.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
     const resized = await client.edit(intent(1, 0, 'resizeObject', {
-      handle: images(initial)[0]!.handle, widthEmu: 762000, heightEmu: 381000, expectVersion: initial.frame.payload.documentVersion!,
+      handle: images({ frame: settled })[0]!.handle, widthEmu: 762000, heightEmu: 381000, expectVersion: initial.frame.payload.documentVersion!,
     }));
     expect(resized.outcomes[0]?.status).toBe('applied');
     expectLocks(resized);
@@ -2053,7 +2196,9 @@ test('worker preserves picture aspect locks through resize, move, save and reope
         .flatMap(content => content.type === 'drawing' ? [content.image.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
     } finally { projected.destroy(); }
     await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
-    const restored = await reopened.commandInit(init);
+    const restoredFollowUp = settledFrame(reopened);
+    const initialized = await reopened.commandInit(init);
+    const restored = { ...initialized, frame: await restoredFollowUp(initialized.frame.revision) };
     expectLocks(restored);
     expect(images(restored)[0]!.rects[0]).toMatchObject({ width: 80, height: 40 });
   } finally { reopened.destroy(); client.destroy(); }
@@ -2064,11 +2209,11 @@ test('worker selects a picture by its handle, refuses a stale version, and flags
     `<wp:extent cx="381000" cy="190500"/><wp:docPr id="${id}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr/></pic:nvPicPr>` +
     '<pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
   // The second picture is alone in its paragraph, whose selection rects also carry an empty-line marker.
-  const { client, engine, initial } = await openWorker({ bodyXml: `<w:p><w:r><w:t>ab</w:t></w:r>${drawing(1)}</w:p><w:p>${drawing(2)}</w:p>` });
+  const { client, engine, initial, settled } = await openWorker({ bodyXml: `<w:p><w:r><w:t>ab</w:t></w:r>${drawing(1)}</w:p><w:p>${drawing(2)}</w:p>` });
   try {
     const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
-    expect(images(initial).map(object => object.selected)).toEqual([undefined, undefined]);
-    const [first, second] = images(initial).map(object => object.handle);
+    expect(images({ frame: settled }).map(object => object.selected)).toEqual([undefined, undefined]);
+    const [first, second] = images({ frame: settled }).map(object => object.handle);
     const staleVersion = initial.frame.payload.documentVersion!;
     const paraId = engine.geometryReader.paragraphSpans('body')[0]!.paraId;
     const start = { story: 'body', paraId, offset: 0 };
@@ -2093,7 +2238,7 @@ test('worker selects a picture by its handle, refuses a stale version, and flags
 
 test('worker moves a Top and Bottom picture by floating it, since layout keeps that wrap in the text flow', async () => {
   const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
-  const { client, engine, initial } = await openWorker({ prepare: engine => {
+  const { client, engine, initial, settled } = await openWorker({ prepare: engine => {
     engine.applyRawOps('body', [
       { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'top-bottom-image', wrapType: 'topAndBottom', displayMode: 'block',
         position: { behindDoc: false, horizontal: { relativeTo: 'column', posOffset: 0 }, vertical: { relativeTo: 'paragraph', posOffset: 0 } } } },
@@ -2101,7 +2246,7 @@ test('worker moves a Top and Bottom picture by floating it, since layout keeps t
     return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
   } });
   try {
-    const image = initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')!;
+    const image = settled.payload.geometry!.objects.find(object => object.kind === 'image')!;
     const moved = await client.edit(intent(1, 0, 'moveObject', {
       handle: image.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
     }));
@@ -2114,13 +2259,13 @@ test('worker moves a Top and Bottom picture by floating it, since layout keeps t
 }, TIMEOUT);
 
 test('worker cell and text handles survive input and resize the issued cell column', async () => {
-  const { client, engine, initial, point } = await openWorker({ bodyXml:
+  const { client, engine, point, settled } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
     '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/></w:tblGrid>' +
     '<w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
   });
   try {
-    const objects = initial.frame.payload.geometry!.objects;
+    const objects = settled.payload.geometry!.objects;
     const cells = objects.filter(object => object.kind === 'cell');
     expect(cells).toHaveLength(2);
     expect(cells.every(cell => cell.rects.length > 0)).toBe(true);
@@ -2450,9 +2595,9 @@ test('round two repair helper works after an external story removal', async () =
 
 test('round two object geometry reads only paragraphs on resident pages', async () => {
   const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
-  const { client, engine, initial } = await openWorker({ bodyXml: syntheticParagraphs(1000), displayWindow: [0, 1] });
+  const { client, engine, initial, settled } = await openWorker({ bodyXml: syntheticParagraphs(1000), displayWindow: [0, 1] });
   try {
-    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const frame = openedFrame(initial.frame, settled);
     const read = spyOn(engine, 'paragraphSegments');
     try {
       await readResidentFrameGeometry(engine, frame, initial.selection ?? null, 1);
@@ -2464,9 +2609,9 @@ test('round two object geometry reads only paragraphs on resident pages', async 
 test('frame geometry reads the resident layout without a second display list or segment reads for text', async () => {
   const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
   const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
-  const { client, engine, initial } = await openWorker({ bodyXml: syntheticParagraphs(200), displayWindow: [0, 1] });
+  const { client, engine, initial, settled } = await openWorker({ bodyXml: syntheticParagraphs(200), displayWindow: [0, 1] });
   try {
-    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const frame = openedFrame(initial.frame, settled);
     const opened = spyOn(await loadRustDisplayListQueryEngine(), 'openDisplayList');
     const segments = spyOn(engine, 'paragraphSegments');
     try {
@@ -2853,13 +2998,13 @@ for (const scenario of SECTION_BREAK_CASES) {
           return savedDocumentXml((await client.save({ comments: [] })).bytes);
         } finally { client.destroy(); }
       });
-      const { client, engine, initial } = await open();
+      const { client, engine, initial, settled } = await open();
       try {
         const original = savedBody((await client.save({ comments: [] })).bytes);
         const inserted = await client.edit(intent(1, 0, 'insertSectionBreak', { type }));
         expect(inserted).toMatchObject({ version: 1, outcomes: [{ status: 'applied' }] });
         const acked = [...inserted.frame!.payload.pageFrames ?? [], inserted.frame!.payload.frame]
-          .reduce((frame, delta) => applyFrameDeltaOwned(frame, decodeFrameDelta(delta)), applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)));
+          .reduce((frame, delta) => applyFrameDeltaOwned(frame, decodeFrameDelta(delta)), openedFrame(initial.frame, settled));
         const frame = applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame));
         const pages = scenario.pages[type];
         expect(pageTexts(acked)).toEqual(pages);
@@ -3352,10 +3497,10 @@ test('round two resident geometry matches the reference walk on built pages', as
   const inner = OUTER_TABLE.slice(0, -6);
   const table = OUTER_TABLE.replace('<w:tc>', '<w:tc>' + inner);
   const bodyXml = syntheticParagraphs(100).replace('</w:p>', '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>' + table);
-  const { client, engine, initial } = await openWorker({ headersFooters: true, notes: true, objects: true,
+  const { client, engine, initial, settled } = await openWorker({ headersFooters: true, notes: true, objects: true,
     bodyXml, displayWindow: [0, 2] });
   try {
-    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const frame = openedFrame(initial.frame, settled);
     const before = await reference(engine, frame, initial.selection ?? null, 1);
     const after = await readResidentFrameGeometry(engine, frame, initial.selection ?? null, 1);
     const normalize = (value: typeof before) => ({ ...value,
@@ -3411,8 +3556,8 @@ test('resident geometry, object rects and selection after inline controls match 
     p('00000004', r('Text') + sdt('<w:id w:val="4"/><w:tag w:val="name"/><w:text/>', r('Name')) + r('End')) +
     `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>${p('00000005', checkbox(5) + r('C'))}</w:tc></w:tr></w:tbl>` +
     p('00000006', r('Tail'));
-  const { client, engine, initial } = await openWorker({ bodyXml, objects: true });
-  const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+  const { client, engine, initial, settled } = await openWorker({ bodyXml, objects: true });
+  const frame = openedFrame(initial.frame, settled);
   const queries = createDisplayListQueries(frame.displayList, await loadRustDisplayListQueryEngine());
   try {
     interface Block {
@@ -3445,7 +3590,7 @@ test('resident geometry, object rects and selection after inline controls match 
     expect(inline).toHaveLength(4);
     expect(inline).toEqual(expect.arrayContaining(widgets));
 
-    const objects = initial.frame.payload.geometry!.objects;
+    const objects = settled.payload.geometry!.objects;
     expect(sorted(objects.filter(object => object.kind === 'text').map(({ story, rects }) => ({ story, rects }))))
       .toEqual(sorted(layout.map(block => ({ story: storyOf(block.paraId), rects: located(queries.rangeRects(block.pmStart! + 1, block.pmEnd! - 1)) }))
         .filter(object => object.rects.length > 0)));
@@ -3483,9 +3628,9 @@ function cellObjects(response: { frame?: DocxCommandFrame | null }) {
 }
 
 test('worker orders table structure commands with single version steps duplicates and refusals', async () => {
-  const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });
+  const { client, engine, settled } = await openWorker({ bodyXml: TABLE_BODY });
   try {
-    expect(cellObjects(initial)).toHaveLength(4);
+    expect(cellObjects({ frame: settled })).toHaveLength(4);
     const cellA = cellPoint(engine, 'A');
     const selected = await client.edit(intent(1, 0, 'select', { selection: cellA.selection }));
     expect(selected.outcomes[0]?.status).toBe('noop');
@@ -3495,7 +3640,7 @@ test('worker orders table structure commands with single version steps duplicate
     expect(engine.selection()?.head.story).toBe(cellA.story);
     expect(cellObjects(inserted)).toHaveLength(6);
     expect(cellObjects(inserted).map((cell) => cell.rects[0]))
-      .not.toEqual(cellObjects(initial).map((cell) => cell.rects[0]));
+      .not.toEqual(cellObjects({ frame: settled }).map((cell) => cell.rects[0]));
     const duplicate = await client.edit(intent(2, 0, 'insertTableColumn', { side: 'right' }));
     expect(duplicate.outcomes).toEqual(inserted.outcomes);
     expect(duplicate.version).toBe(1);
@@ -3511,9 +3656,9 @@ test('worker orders table structure commands with single version steps duplicate
 }, TIMEOUT);
 
 test('worker refreshes deleted cell handles and resizes merged cells', async () => {
-  const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });
+  const { client, engine, settled } = await openWorker({ bodyXml: TABLE_BODY });
   try {
-    const before = cellObjects(initial);
+    const before = cellObjects({ frame: settled });
     expect(before).toHaveLength(4);
     const cellB = cellPoint(engine, 'B');
     const deleted = await client.edit(intent(1, 0, 'deleteTableColumn', { selection: cellB.selection }));
@@ -3781,7 +3926,7 @@ test('a comment selection range follows its issued sticky positions across later
 
 test('worker picture geometry carries renderer paint order across document order and relativeHeight', async () => {
   const image = { src: 'data:image/png;base64,', width: 40, height: 20, displayMode: 'float', cssFloat: 'none' };
-  const { client, initial } = await openWorker({ prepare: engine => {
+  const { client, settled } = await openWorker({ prepare: engine => {
     engine.applyRawOps('body', [
       { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'front', wrapType: 'inFront',
         position: { relativeHeight: 1, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } } } },
@@ -3793,7 +3938,7 @@ test('worker picture geometry carries renderer paint order across document order
     return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
   } });
   try {
-    const images = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'image');
+    const images = settled.payload.geometry!.objects.filter(object => object.kind === 'image');
     expect(images).toHaveLength(3);
     expect(images.map(object => object.paintOrder)).toEqual([2, 1, 0]);
     expect(images.map(object => object.rects[0])).toEqual(Array(3).fill(images[0]!.rects[0]));
@@ -3801,7 +3946,7 @@ test('worker picture geometry carries renderer paint order across document order
 }, TIMEOUT);
 
 test('worker picture geometry marks cell anchors as nested', async () => {
-  const { client, initial } = await openWorker({ bodyXml: OUTER_TABLE, prepare: engine => {
+  const { client, settled } = await openWorker({ bodyXml: OUTER_TABLE, prepare: engine => {
     const story = 'body:t0:r0c0';
     engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
       src: 'data:image/png;base64,', width: 40, height: 20, displayMode: 'float', wrapType: 'inFront',
@@ -3810,14 +3955,14 @@ test('worker picture geometry marks cell anchors as nested', async () => {
     return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 0 };
   } });
   try {
-    const images = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'image');
+    const images = settled.payload.geometry!.objects.filter(object => object.kind === 'image');
     expect(images).toHaveLength(1);
     expect(images[0]).toMatchObject({ floating: true, nested: true });
   } finally { client.destroy(); }
 }, TIMEOUT);
 
 test('worker commits floating resize position and dimensions in one undo step', async () => {
-  const { client, engine, initial, init } = await openWorker({ prepare: engine => {
+  const { client, engine, initial, init, settled } = await openWorker({ prepare: engine => {
     engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
       id: 'resize-position', src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', width: 40, height: 20, displayMode: 'float', wrapType: 'behind',
       position: { behindDoc: true, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } },
@@ -3827,12 +3972,12 @@ test('worker commits floating resize position and dimensions in one undo step', 
   const reopened = new ResidentEngineWorkerClient(startWorker(8399));
   try {
     const image = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.find(object => object.kind === 'image')!;
-    const original = image(initial).rects[0]!;
+    const original = image({ frame: settled }).rects[0]!;
     expect(original).toMatchObject({ x: 100, y: 50, width: 40, height: 20 });
     let seq = 0;
     for (const position of [{ hOffsetEmu: 0 }, { vOffsetEmu: 0 }, { hOffsetEmu: 0, vOffsetEmu: Infinity }]) {
       const refused = await client.edit(intent(++seq, 0, 'resizeObject', {
-        handle: image(initial).handle, expectVersion: initial.frame.payload.documentVersion!,
+        handle: image({ frame: settled }).handle, expectVersion: initial.frame.payload.documentVersion!,
         widthEmu: 285750, heightEmu: 142875, ...position,
       }));
       expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
@@ -3840,14 +3985,16 @@ test('worker commits floating resize position and dimensions in one undo step', 
         .toMatchObject({ payload: { width: 40, height: 20 } });
     }
     const resized = await client.edit(intent(++seq, 0, 'resizeObject', {
-      handle: image(initial).handle, expectVersion: initial.frame.payload.documentVersion!,
+      handle: image({ frame: settled }).handle, expectVersion: initial.frame.payload.documentVersion!,
       widthEmu: 285750, heightEmu: 142875, hOffsetEmu: 1047750, vOffsetEmu: 523875,
     }));
     expect(resized.outcomes[0]?.status).toBe('applied');
     expect(image(resized).rects[0]).toMatchObject({ x: 110, y: 55, width: 30, height: 15 });
     const saved = await client.save({ comments: [] });
     await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
-    const restored = await reopened.commandInit(init);
+    const restoredFollowUp = settledFrame(reopened);
+    const initialized = await reopened.commandInit(init);
+    const restored = { ...initialized, frame: await restoredFollowUp(initialized.frame.revision) };
     expect(image(restored).rects[0]).toMatchObject({ x: 110, y: 55, width: 30, height: 15 });
     const undone = await client.edit(intent(++seq, 1, 'undo', {}));
     expect(image(undone).rects[0]).toEqual(original);
@@ -3857,14 +4004,14 @@ test('worker commits floating resize position and dimensions in one undo step', 
 }, TIMEOUT);
 
 test('worker geometry exposes picture rotation for resize admission', async () => {
-  const { client, initial } = await openWorker({ prepare: engine => {
+  const { client, settled } = await openWorker({ prepare: engine => {
     engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
       id: 'rotated', src: 'data:image/png;base64,', width: 100, height: 50, transform: 'rotate(90deg)',
     } }]);
     return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
   } });
   try {
-    expect(initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')).toMatchObject({ rotation: 90 });
+    expect(settled.payload.geometry!.objects.find(object => object.kind === 'image')).toMatchObject({ rotation: 90 });
   } finally { client.destroy(); }
 }, TIMEOUT);
 

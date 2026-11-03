@@ -593,7 +593,11 @@ async function commandFixture(feature = 'plain', exportable = false, options: {
   const reply = await w.send({ type: 'commandInit', request: init });
   if (!reply.ok || !reply.commandInitial) throw new Error(JSON.stringify(reply));
   const initial = reply.commandInitial;
-  const frame = applyFrameDelta(null, decodeFrameDelta(initial.frame.payload.frame));
+  let frame = applyFrameDelta(null, decodeFrameDelta(initial.frame.payload.frame));
+  if (options.full) {
+    for (let turn = 0; turn < 200 && !w.frames.some(candidate => candidate.revision > initial.frame.revision); turn += 1) await w.turn();
+    for (const followUp of w.frames.splice(0)) frame = applyFrameDelta(frame, decodeFrameDelta(followUp.payload.frame));
+  }
   return { cold, engine, w, init, initial, frame, full, calls, editLayout, acks: [] as DocxCommandFrame[],
     destroy() { engine.destroy(); cold.destroy(); },
     async present() {

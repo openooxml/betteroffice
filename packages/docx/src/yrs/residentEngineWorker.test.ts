@@ -545,6 +545,20 @@ const COMMAND_INIT: DocxCommandInitRequest = {
   fonts: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1, extras: '{}',
 };
 
+async function settledCommandInit(client: ResidentEngineWorkerClient, init: DocxCommandInitRequest) {
+  const frames: DocxCommandFrame[] = [];
+  const unsubscribe = client.onFrame((frame) => frames.push(frame));
+  try {
+    const initial = await client.commandInit(init);
+    for (let turn = 0; turn < 100 && !frames.some(frame => frame.revision > initial.frame.revision); turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    const followUp = frames.find(frame => frame.revision > initial.frame.revision);
+    if (!followUp) throw new Error('Missing first frame follow-up');
+    return { initial, followUp };
+  } finally { unsubscribe(); }
+}
+
 async function commandWorker(options: { heapLimitBytes?: number } = {}) {
   const w = worker();
   let terminated = false;
@@ -573,6 +587,10 @@ async function commandWorker(options: { heapLimitBytes?: number } = {}) {
     encodeState: () => new TextEncoder().encode(w.harness.commandText!),
     buildDisplayListFrame: (_extras: string, expected: number) => {
       w.delta([1], expected === 0, 100, 1);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+    buildDisplayPagesFrame: (pages: number[]) => {
+      w.delta(pages.map((index) => index + 1), false, 100, 1);
       return new Uint8Array([w.harness.delta!.frameEpoch]);
     },
     applyInput: () => {
@@ -740,13 +758,17 @@ test('command raster scale repaints every window page in one viewport frame', as
       w.delta([1, 2, 3], expected === 0, 100.25, 3);
       return Uint8Array.of(w.harness.delta!.frameEpoch);
     },
+    buildDisplayPagesFrame(pages: number[]) {
+      w.delta(pages.map((index) => index + 1), false, 100.25, 3);
+      return Uint8Array.of(w.harness.delta!.frameEpoch);
+    },
   });
   try {
-    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 3], rasterScale: 1 } as DocxCommandInitRequest);
+    const { followUp } = await settledCommandInit(client, { ...COMMAND_INIT, displayWindow: [0, 3], rasterScale: 1 } as DocxCommandInitRequest);
     const frames: DocxCommandFrame[] = [];
     client.onFrame((candidate) => frames.push(candidate));
     w.resetCalls();
-    await client.requestViewport({ start: 0, end: 3, frameEpoch: initial.frame.revision, rasterScale: 2 } as Parameters<typeof client.requestViewport>[0]);
+    await client.requestViewport({ start: 0, end: 3, frameEpoch: followUp.revision, rasterScale: 2 } as Parameters<typeof client.requestViewport>[0]);
     expect(frames).toHaveLength(1);
     expect(frames[0]!.payload.stagedPresentation!.pages.map(({ page, bitmap }) => [page.pageIndex, bitmap.width, bitmap.height]))
       .toEqual([[0, 201, 200], [1, 201, 200], [2, 201, 200]]);
@@ -798,14 +820,15 @@ test('command echo refreshes its scale when rounded page dimensions stay equal',
       device: { x: 50, y: 500, width: 125, height: 25 }, pixelRatio: glyphs.pixelRatio },
   });
   try {
-    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.25 });
+    const { initial, followUp } = await settledCommandInit(client, { ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.25 });
     const original = initial.frame.payload.stagedPresentation!.pages[0]!;
     expect([original.bitmap.width, original.bitmap.height]).toEqual([1020, 1320]);
     expect(initial.frame.payload.echoContext!.glyphs!.pixelRatio).toBe(1.25);
+    expect(followUp.payload.echoContext!.glyphs!.pixelRatio).toBe(1.25);
     const frames: DocxCommandFrame[] = [];
     client.onFrame((candidate) => frames.push(candidate));
     w.resetCalls();
-    await client.requestViewport({ start: 0, end: 1, frameEpoch: initial.frame.revision, rasterScale: 1.2499 });
+    await client.requestViewport({ start: 0, end: 1, frameEpoch: followUp.revision, rasterScale: 1.2499 });
     expect(frames).toHaveLength(1);
     expect(frames[0]!.payload.echoContext?.glyphs?.pixelRatio).toBe(1.2499);
     const refreshed = frames[0]!.payload.stagedPresentation!.pages[0]!;

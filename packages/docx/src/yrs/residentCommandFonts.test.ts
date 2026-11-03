@@ -29,7 +29,7 @@ async function initializeFonts(
       const activeOffscreenPageIds = [], pendingOffscreenPageIds = new Set(), intactBackBuffers = new Map();
     const openedDocument = true, previewing = false, commandHost = null, commandHooksFactory = true, openedViaSource = false;
     let sourcePreviewing = false;
-      const setFrameDisplayWindow = () => {}, replyCommand = () => {}, adoptHostImages = () => {};
+      const setFrameDisplayWindow = () => {}, replyCommand = () => {}, adoptHostImages = () => {}, scheduleEchoFollowUp = () => {};
       let unsubscribe = null, pendingUpdates = [];
       ${hydrateSignature}): void {
         ${source.slice(start, end)}
