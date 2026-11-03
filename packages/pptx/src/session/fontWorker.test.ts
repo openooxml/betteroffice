@@ -1,10 +1,13 @@
-import { beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { resolve } from 'node:path';
 import { sessionWasmFactory } from '../../../../shared/office-session/testing/wasmWorker';
 
 type Client = typeof import('./fontWorker');
 let factory: Awaited<ReturnType<typeof sessionWasmFactory<Client>>>;
+
+const restorers: (() => void)[] = [];
+afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
 
 beforeAll(async () => {
   factory = await sessionWasmFactory<Client>(resolve(import.meta.dir, 'fontWorker.ts'),
@@ -191,4 +194,44 @@ test('a session adopts a shared worker only once the other editor has released i
     expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[0]);
     expect(h.workers[0]!.terminated).toBe(false);
   } finally { first.release(); second.release(); h.workers[0]?.terminate(); }
+});
+
+test('a collected handle with a decode in flight does not stop the worker for a handle prepared after it', async () => {
+  const cleanups: Array<{ held: unknown; token: object; cleanup: (held: unknown) => void }> = [];
+  class FakeRegistry {
+    constructor(private readonly cleanup: (held: unknown) => void) {}
+    register(_target: object, held: unknown, token: object) { cleanups.push({ held, token, cleanup: this.cleanup }); }
+    unregister(token: object) {
+      const index = cleanups.findIndex(entry => entry.token === token);
+      if (index >= 0) cleanups.splice(index, 1);
+      return index >= 0;
+    }
+  }
+  const scope = globalThis as unknown as { FinalizationRegistry: unknown };
+  const original = scope.FinalizationRegistry;
+  scope.FinalizationRegistry = FakeRegistry;
+  restorers.push(() => { scope.FinalizationRegistry = original; });
+  const collecting = await sessionWasmFactory<Client>(resolve(import.meta.dir, 'fontWorker.ts'),
+    resolve(import.meta.dir, 'commandSessionWasmTestWorker.ts'));
+  const h = collecting();
+  const releaseCompile = h.holdCompile();
+  const source = new Uint8Array([3, 1, 4]);
+  const first = h.client.preparePresentationFontDecoder(source);
+  const pending = first.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
+  const second = h.client.preparePresentationFontDecoder(source);
+  try {
+    expect(cleanups).toHaveLength(2);
+    const entry = cleanups[0]!;
+    entry.cleanup(entry.held);
+    const third = h.client.preparePresentationFontDecoder(source);
+    second.release();
+    releaseCompile();
+    expect(new Uint8Array((await pending).font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(h.workers[0]!.terminated).toBe(false);
+    expect(new Uint8Array((await third.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array([0, 1, 0, 0]));
+    third.release();
+    expect(h.workers[0]!.terminated).toBe(true);
+  } finally { second.release(); releaseCompile(); h.workers[0]?.terminate(); }
 });

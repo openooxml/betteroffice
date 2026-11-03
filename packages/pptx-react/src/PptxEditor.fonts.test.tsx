@@ -197,7 +197,7 @@ test('two editors on one file each release their own handle, so unmounting one k
   expect(secondRelease).not.toHaveBeenCalled();
   await act(async () => { pending.resolve(fontBytes.slice().buffer as ArrayBuffer); });
   await waitFor(() => expect(secondReady).toHaveBeenCalledTimes(1));
-  expect(opener.mock.calls.at(-1)![1]!.fonts).toEqual([{ family: face.family, bold: false, italic: false, bytes: fontBytes }]);
+  expect(opener.mock.calls[opener.mock.calls.length - 1]![1]!.fonts).toEqual([{ family: face.family, bold: false, italic: false, bytes: fontBytes }]);
   expect(firstReady).not.toHaveBeenCalled();
   second.unmount();
 });

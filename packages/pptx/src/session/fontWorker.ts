@@ -77,7 +77,7 @@ function createPreparedFontWorker() {
   async function track<T>(pending: Promise<T>): Promise<T> {
     active += 1;
     try { return await pending; }
-    finally { if (--active === 0 && abandoned) release(); }
+    finally { if (--active === 0 && abandoned && holders === 0) release(); }
   }
   const decode = rpcFontDecoder((bytes, options, transfer) => rpc.callWithTransfer('decodeFontFace', [bytes, options], transfer));
   const decoder: FontDecoder = (bytes, options) => retired
@@ -100,6 +100,7 @@ function createPreparedFontWorker() {
     /** A holder's own handle: the worker stops once every handle is released, or collected after its decodes. */
     handle(): PreparedFontWorker {
       holders += 1;
+      abandoned = false;
       let held = true;
       const token = {};
       const drop = (collected: boolean) => {
