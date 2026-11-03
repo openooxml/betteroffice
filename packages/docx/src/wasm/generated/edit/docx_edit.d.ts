@@ -868,6 +868,11 @@ export class EditSession {
      * inflated package budgets.
      */
     prime_save_seed_states(paragraphs: number, inflated: number): boolean;
+    /**
+     * One slice of [`Self::prime_save_seed_states`], digesting about `max_bytes` bytes of the
+     * stories: 0 once the states are known, 1 when more slices are needed, 2 when declined.
+     */
+    prime_save_seed_states_slice(paragraphs: number, inflated: number, max_bytes: number): number;
     proposal_revision_ranges_json(ids_json: string): string;
     /**
      * Versioned paragraph texts:
@@ -1895,6 +1900,7 @@ export interface InitOutput {
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
     readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
+    readonly editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];

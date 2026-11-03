@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
-import { LABEL, parseGroups } from './ci-route.mjs';
+import { LABEL, ROUTER, parseGroups } from './ci-route.mjs';
 
 const REPOSITORY = 'openooxml/betteroffice';
 const KYORA_CLASSES = ['kyora-4x8', 'kyora-8x8', 'kyora-8x16', 'kyora-16x32'];
@@ -190,8 +190,8 @@ describe('CI runner routing', () => {
       'ci.yml rust': ['kyora-8x16'],
       'ci.yml native-viewer': ['kyora-8x16'],
       'ci.yml python': ['kyora-4x8'],
-      'ci.yml route': ['kyora-4x8'],
-      'e2e.yml route': ['kyora-4x8'],
+      'ci.yml route': ['ubuntu-latest'],
+      'e2e.yml route': ['ubuntu-latest'],
       'e2e.yml corpus': ['kyora-8x8'],
       'e2e.yml browser-build': ['kyora-8x8'],
       'e2e.yml browser': ['kyora-8x8'],
@@ -227,6 +227,7 @@ describe('CI runner routing', () => {
     expect(routers.map(({ name }) => name).sort()).toEqual(['ci.yml route', 'e2e.yml route']);
     for (const router of routers) {
       const { name, file, job } = router;
+      expect(job.name, name).toBe(ROUTER);
       expect(router.runsOn(EVENTS['push to main'], {}, everyGroup), name).toEqual(router.runners['push to main'].unset);
       expect(job.permissions, name).toEqual({ actions: 'read', contents: 'read' });
       for (const step of job.steps) expect(step['continue-on-error'], `${name}: ${step.name ?? step.uses}`).toBe(true);

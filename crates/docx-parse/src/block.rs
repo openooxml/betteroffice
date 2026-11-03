@@ -506,6 +506,7 @@ impl StoryParser<'_, '_> {
         source: &XmlElement,
         depth: usize,
     ) -> Result<(), ParseError> {
+        let runs = self.budget.take_paragraph_runs();
         if paragraph.content.is_empty() {
             return Ok(());
         }
@@ -514,10 +515,11 @@ impl StoryParser<'_, '_> {
             .into_iter()
             .filter(|child| child.local_name() == "r")
         {
+            let target = runs.get(run_index).copied().flatten().unwrap_or(run_index);
             for child in run.child_elements() {
                 match child.local_name() {
                     "drawing" => {
-                        self.enrich_text_box_drawing(paragraph, child, child, run_index, depth)?
+                        self.enrich_text_box_drawing(paragraph, child, child, target, depth)?
                     }
                     "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
                     "AlternateContent" => {
@@ -545,7 +547,7 @@ impl StoryParser<'_, '_> {
                                         paragraph,
                                         item,
                                         if shared { item } else { child },
-                                        run_index,
+                                        target,
                                         depth,
                                     )?,
                                     "pict" => self.enrich_vml_text_box(paragraph, item, depth)?,

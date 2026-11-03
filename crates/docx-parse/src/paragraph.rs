@@ -548,6 +548,7 @@ fn parse_paragraph_contents(
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
     let mut beyond_nesting = 0;
+    let mut runs = Vec::new();
     for child in transparent_children(element, false) {
         let normalized;
         let child = if tracked_context == TrackedContext::Deletion
@@ -572,7 +573,16 @@ fn parse_paragraph_contents(
                     in_control || !element.matches_name("w", "p"),
                     in_header_footer,
                 )?;
+                let before = output.len();
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
+                runs.push(
+                    (output.len() == before + 1
+                        && matches!(
+                            output.last(),
+                            Some(ParagraphContent::Inline(InlineNode::Run(_)))
+                        ))
+                    .then_some(before),
+                );
             }
             "hyperlink" => {
                 let hyperlink = parse_hyperlink_composed(
@@ -778,6 +788,9 @@ fn parse_paragraph_contents(
         }
     }
     assign_marker_offsets(&mut output);
+    if element.name == "w:p" {
+        budget.record_paragraph_runs(runs);
+    }
     Ok(output)
 }
 

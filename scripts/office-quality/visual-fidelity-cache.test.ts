@@ -34,7 +34,7 @@ test('asset cache digest comes from cached blob names without extra manifest fet
   expect(workflow).toContain('echo "digest=${digest}"');
   expect(workflow).not.toContain('corpus.betteroffice.dev/collections');
   expect(workflow).not.toContain('steps.corpus.outputs.sha');
-  expect(workflow).toContain('QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets');
+  expect(workflow).toContain("QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}");
 });
 
 test('digest step and save run even on measurement failure', () => {

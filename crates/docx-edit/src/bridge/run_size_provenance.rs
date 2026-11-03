@@ -1,4 +1,5 @@
-use std::sync::{Arc, Weak};
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, Weak};
 
 use docx_parse::xml::XmlElement;
 use yrs::ReadTxn;
@@ -13,7 +14,11 @@ pub(crate) struct ParagraphSizes {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Sources(Weak<crate::identity::SourceIndex>);
+pub(super) struct Sources {
+    index: Weak<crate::identity::SourceIndex>,
+    seeded: bool,
+    keys: Arc<OnceLock<HashMap<String, usize>>>,
+}
 
 impl std::fmt::Debug for Sources {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -23,31 +28,48 @@ impl std::fmt::Debug for Sources {
 
 impl Sources {
     pub(super) fn new(doc: &EditingDoc) -> Self {
-        Self(
-            doc.source_index()
+        let index = doc.source_index();
+        Self {
+            seeded: index
                 .as_ref()
-                .map(Arc::downgrade)
-                .unwrap_or_default(),
-        )
+                .is_some_and(|index| index.reads_as_seeded(doc)),
+            index: index.as_ref().map(Arc::downgrade).unwrap_or_default(),
+            keys: Arc::default(),
+        }
     }
 
     pub(super) fn unchanged<'a, T: ReadTxn>(
         &self,
         key: &str,
         story: &str,
+        unit_start: bool,
         txn: &T,
         chunks: &[Diff<YChange>],
         markers: impl Iterator<Item = (u32, &'a str, bool)>,
     ) -> Option<Arc<ParagraphSizes>> {
-        let index = self.0.upgrade()?;
+        let index = self.index.upgrade()?;
+        let fingerprint = |markers| {
+            crate::identity::run_size_fingerprint(
+                chunks.iter().map(|diff| StorySegment {
+                    content: crate::segment_content(diff.insert.clone(), txn),
+                    attributes: crate::ordered_attrs(diff.attributes.as_deref()),
+                }),
+                markers,
+            )
+        };
+        if self.seeded && unit_start {
+            let fingerprint = fingerprint(markers)?;
+            let keys = self
+                .keys
+                .get_or_init(|| crate::identity::paragraph_key_counts(txn));
+            if keys.get(key) == Some(&1) {
+                index.note_seeded_run_size(key, story, fingerprint);
+            }
+            let proof = index.run_size_source(key, story)?;
+            return (fingerprint == proof.fingerprint).then_some(proof);
+        }
         let proof = index.run_size_source(key, story)?;
-        let fingerprint = crate::identity::run_size_fingerprint(
-            chunks.iter().map(|diff| StorySegment {
-                content: crate::segment_content(diff.insert.clone(), txn),
-                attributes: crate::ordered_attrs(diff.attributes.as_deref()),
-            }),
-            markers,
-        )?;
+        let fingerprint = fingerprint(markers)?;
         (fingerprint == proof.fingerprint).then_some(proof)
     }
 }
@@ -339,6 +361,15 @@ mod tests {
     use crate::{EditCtx, EngineSession, FormatPolicy, Position, seed_from_docx};
 
     fn word_toc(direct: Option<usize>, complex_page: bool, inside_sdt: bool) -> Vec<u8> {
+        word_toc_after("", direct, complex_page, inside_sdt)
+    }
+
+    fn word_toc_after(
+        before: &str,
+        direct: Option<usize>,
+        complex_page: bool,
+        inside_sdt: bool,
+    ) -> Vec<u8> {
         let styles = concat!(
             r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
             r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="20"/></w:rPr>"#,
@@ -419,6 +450,7 @@ mod tests {
         } else {
             body
         };
+        let body = format!("{before}{body}");
         let theme = concat!(
             r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
             r#"<a:themeElements><a:fontScheme name="Proof"><a:majorFont>"#,
@@ -487,6 +519,7 @@ mod tests {
                     let proof = sources.unchanged(
                         &key,
                         story_id,
+                        start == 0 || matches!(&chunks[start - 1].insert, Out::YMap(map) if crate::is_pilcrow(map, &txn)),
                         &txn,
                         &chunks[start..=index],
                         comments.markers(raw_start, raw_end),
@@ -526,6 +559,145 @@ mod tests {
                         assert_eq!(run["fontSize"], 10.0, "{label}: {run}");
                     }
                 }
+            }
+        }
+    }
+
+    type Proofs = Vec<Option<([u8; 32], bool)>>;
+
+    fn toc_proofs(bytes: &[u8], story_id: &str, reseed: bool) -> (Proofs, serde_json::Value) {
+        use yrs::{Out, Text, Transact};
+
+        let env = RenderEnv {
+            paragraph_style_font_sizes: BTreeMap::from([("TOC1".to_owned(), 10.0)]),
+            hyperlink_style_font_sizes: BTreeMap::from([("Hyperlink".to_owned(), 14.0)]),
+            doc_default_font_size: Some(10.0),
+            ..Default::default()
+        };
+        let engine = EngineSession::new(77114);
+        let doc = engine.doc();
+        seed_from_docx(doc, bytes).unwrap();
+        doc.mark_seeded();
+        if reseed {
+            doc.source_index().unwrap().reseed_for_tests();
+        }
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, story_id).unwrap();
+        let chunks = story.diff(&txn, YChange::identity);
+        let comments = crate::bridge::resolve_comment_intervals(&txn, story_id, &env).unwrap();
+        let sources = Sources::new(doc);
+        assert_eq!(sources.seeded, !reseed);
+        let (mut proofs, mut start, mut raw_start, mut raw_end) = (Vec::new(), 0, 0, 0);
+        for (index, chunk) in chunks.iter().enumerate() {
+            raw_end += crate::out_len(&chunk.insert);
+            if let Out::YMap(pilcrow) = &chunk.insert
+                && crate::is_pilcrow(pilcrow, &txn)
+            {
+                let key = crate::map_string(pilcrow, &txn, "paraId").unwrap();
+                let proof = sources.unchanged(
+                    &key,
+                    story_id,
+                    start == 0 || matches!(&chunks[start - 1].insert, Out::YMap(map) if crate::is_pilcrow(map, &txn)),
+                    &txn,
+                    &chunks[start..=index],
+                    comments.markers(raw_start, raw_end),
+                );
+                proofs.push(proof.map(|proof| (proof.fingerprint, proof.direct_cs)));
+                start = index + 1;
+                raw_start = raw_end;
+            }
+        }
+        drop(txn);
+        let blocks = engine
+            .with_lowered_story("body", &env, |blocks| serde_json::to_value(blocks).unwrap())
+            .unwrap();
+        (proofs, blocks)
+    }
+
+    #[test]
+    fn toc_proofs_read_while_seeded_match_proofs_from_seed_states() {
+        for direct in [None, Some(0), Some(2)] {
+            for complex_page in [false, true] {
+                for inside_sdt in [false, true] {
+                    let bytes = word_toc(direct, complex_page, inside_sdt);
+                    let story_id = if inside_sdt { "body:sdt0" } else { "body" };
+                    STORY_FINGERPRINTS.with(|counter| counter.set(0));
+                    RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| counter.set(0));
+                    let seeded = toc_proofs(&bytes, story_id, false);
+                    STORY_FINGERPRINTS.with(|counter| assert_eq!(counter.get(), 0));
+                    RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| assert_eq!(counter.get(), 0));
+                    let reseeded = toc_proofs(&bytes, story_id, true);
+                    assert_eq!(seeded, reseeded, "{direct:?} {complex_page} {inside_sdt}");
+                    assert_eq!(
+                        seeded.0.iter().filter(|proof| proof.is_some()).count(),
+                        3 - usize::from(direct.is_some())
+                    );
+                }
+            }
+        }
+    }
+
+    fn toc_save_plans(bytes: &[u8], reseed: bool) -> (String, String) {
+        let env = RenderEnv {
+            paragraph_style_font_sizes: BTreeMap::from([("TOC1".to_owned(), 10.0)]),
+            hyperlink_style_font_sizes: BTreeMap::from([("Hyperlink".to_owned(), 14.0)]),
+            doc_default_font_size: Some(10.0),
+            ..Default::default()
+        };
+        let session =
+            crate::session::EditSessionCore::new(91, crate::session::Host::deterministic());
+        session.open_docx(bytes, true, None, None).unwrap();
+        let doc = session.engine.doc();
+        if reseed {
+            doc.source_index().unwrap().reseed_for_tests();
+        }
+        session
+            .engine
+            .with_lowered_story("body", &env, |_| ())
+            .unwrap();
+        let unedited = session.paragraph_save_plan().unwrap();
+        doc.insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", 1),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        session
+            .engine
+            .with_lowered_story("body", &env, |_| ())
+            .unwrap();
+        (unedited, session.paragraph_save_plan().unwrap())
+    }
+
+    #[test]
+    fn toc_proofs_after_a_block_or_break_match_proofs_from_seed_states() {
+        let table = concat!(
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>"#,
+            r#"<w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let page_break =
+            r#"<w:p><w:r><w:t>Before</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p>"#;
+        for before in [table, page_break] {
+            for complex_page in [false, true] {
+                let bytes = word_toc_after(before, None, complex_page, false);
+                let seeded = toc_proofs(&bytes, "body", false);
+                let reseeded = toc_proofs(&bytes, "body", true);
+                assert_eq!(seeded, reseeded, "{before} {complex_page}");
+            }
+        }
+    }
+
+    #[test]
+    fn toc_proofs_read_while_seeded_keep_the_save_plans() {
+        for direct in [None, Some(1)] {
+            for inside_sdt in [false, true] {
+                let bytes = word_toc(direct, true, inside_sdt);
+                assert_eq!(
+                    toc_save_plans(&bytes, false),
+                    toc_save_plans(&bytes, true),
+                    "{direct:?} {inside_sdt}"
+                );
             }
         }
     }
@@ -911,7 +1083,7 @@ mod tests {
             doc_default_font_size: Some(10.0),
             ..Default::default()
         };
-        for count in [1, 128] {
+        for (count, seeded) in [(1, false), (128, false), (1, true), (128, true)] {
             let mut body = para(
                 "10000001",
                 concat!(
@@ -931,6 +1103,9 @@ mod tests {
                 .bytes();
             let engine = EngineSession::new(77112);
             seed_from_docx(engine.doc(), &bytes).unwrap();
+            if seeded {
+                engine.doc().mark_seeded();
+            }
             RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| counter.set(0));
             engine
                 .with_lowered_story("body", &env, |blocks| {
@@ -938,7 +1113,8 @@ mod tests {
                     assert_eq!(value[0]["runs"][0]["fontSize"], 10.0);
                 })
                 .unwrap();
-            RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| assert_eq!(counter.get(), 1));
+            RUN_SIZE_SEEDED_SNAPSHOTS
+                .with(|counter| assert_eq!(counter.get(), usize::from(!seeded)));
             RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| counter.set(0));
             RUN_SIZE_SOURCE_PARTS.with(|counter| counter.set(0));
             for text in ["x", "y"] {
