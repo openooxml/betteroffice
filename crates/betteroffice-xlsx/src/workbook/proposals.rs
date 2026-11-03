@@ -104,7 +104,11 @@ impl Workbook {
                         let style = self.model.sheet(SheetId(edit.sheet)).and_then(|sheet| {
                             sheet.effective_style(CellRef::new(edit.row, edit.col))
                         });
-                        let format = self.model.styles.resolved_format(style).number_format;
+                        let format = self
+                            .model
+                            .styles
+                            .resolved_format(Some(style.unwrap_or(0)))
+                            .number_format;
                         matches!(
                             xlsx_ops::parse_input_with_context(
                                 &edit.input,

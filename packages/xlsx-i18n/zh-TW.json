@@ -178,6 +178,7 @@
     "accept": "接受",
     "reject": "拒絕",
     "forceApply": "強制套用",
+    "forceBlockedReason": "結構變更後無法套用此提案。",
     "staleWarning": "儲存格在提案後已變更：{cells}"
   },
   "a11y": {

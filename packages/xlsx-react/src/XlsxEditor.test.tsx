@@ -2594,6 +2594,9 @@ describe('XlsxEditor commands', () => {
     );
     expect(await editor.execute('proposalsPanel', null)).toEqual({ ok: true, status: 'executed' });
     await waitFor(() => editor.view.getByTestId('xlsx-proposal-stale'));
+    expect(workbook.listProposals()[0]?.forceBlocked).not.toBe(true);
+    expect(editor.view.getByTestId('xlsx-proposal-force').getAttribute('aria-disabled')).toBeNull();
+    expect(editor.view.queryByTestId('xlsx-proposal-force-blocked')).toBeNull();
     expect(
       await editor.execute('proposalAccept', { proposalId: second, force: true })
     ).toEqual({ ok: true, status: 'executed' });
@@ -2612,13 +2615,47 @@ describe('XlsxEditor commands', () => {
     await editor.execute('proposalsPanel', null);
     await waitFor(() => expect(editor.view.getByTestId('xlsx-proposal-stale').textContent).toContain('E7'));
     expect(editor.view.getByTestId('xlsx-proposal').textContent).toContain('Audit agent');
+    expect(workbook.listProposals()[0]?.forceBlocked).toBe(true);
+    expect(editor.view.queryByTestId('xlsx-proposal-force')).toBeNull();
+    expect(editor.view.getByTestId('xlsx-proposal-force-blocked').textContent).toBe(
+      'This proposal cannot be applied after a structural edit.'
+    );
     await act(async () => {
       workbook.undo();
       editor.api().refreshProposals();
     });
     await waitFor(() => expect(editor.view.queryByTestId('xlsx-proposal-stale')).toBeNull());
+    expect(workbook.listProposals()[0]?.forceBlocked).not.toBe(true);
+    expect(editor.view.queryByTestId('xlsx-proposal-force-blocked')).toBeNull();
     expect(await editor.execute('proposalAccept', { proposalId: id })).toEqual({ ok: true, status: 'executed' });
     expect(workbook.cell(0, 6, 4).input).toBe('42');
+  });
+
+  it('hides force for an unrewritable formula even when another proposed cell only drifted', async () => {
+    const editor = await mountCommands();
+    const workbook = editor.api().handle;
+    let id = '';
+    await act(async () => {
+      id = workbook.propose('Audit agent', null, [
+        { sheet: 0, row: 6, col: 4, input: '=SUM(Table1[Amount])' },
+        { sheet: 0, row: 9, col: 4, input: '42' },
+      ]).id;
+      workbook.editCell(0, 9, 4, '99');
+      workbook.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }]);
+      editor.api().refreshProposals();
+    });
+    await editor.execute('proposalsPanel', null);
+    await waitFor(() => expect(editor.view.getByTestId('xlsx-proposal-stale').textContent).toContain('E8'));
+    expect(workbook.listProposals()[0]?.forceBlocked).toBe(true);
+    expect(editor.view.queryByTestId('xlsx-proposal-force')).toBeNull();
+    expect(editor.view.getByTestId('xlsx-proposal-force-blocked').textContent).toBe(
+      'This proposal cannot be applied after a structural edit.'
+    );
+    expect(failure(await editor.execute('proposalAccept', { proposalId: id, force: true }))).toBe(
+      'proposal-stale'
+    );
+    expect(workbook.listProposals().map((proposal) => proposal.id)).toContain(id);
+    expect(workbook.cell(0, 10, 4).input).toBe('99');
   });
 
   it('places host chrome by the toolbar and showToolbar props', async () => {

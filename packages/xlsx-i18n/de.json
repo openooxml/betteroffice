@@ -178,6 +178,7 @@
     "accept": "Annehmen",
     "reject": "Ablehnen",
     "forceApply": "Trotzdem übernehmen",
+    "forceBlockedReason": "Dieser Vorschlag kann nach einer Strukturänderung nicht übernommen werden.",
     "staleWarning": "Zellen haben sich seit dem Vorschlag geändert: {cells}"
   },
   "a11y": {

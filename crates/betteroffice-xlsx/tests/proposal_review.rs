@@ -532,6 +532,58 @@ fn structural_rebasing_preserves_an_existing_stale_before_state() {
 }
 
 #[test]
+fn plain_text_style_zero_preserves_literal_proposals_through_row_insertion() {
+    for style in [None, Some(0)] {
+        let mut source = model();
+        source.styles.cell_xfs.push(xlsx_model::Xf {
+            num_fmt_id: Some(49),
+            ..xlsx_model::Xf::default()
+        });
+        if let Some(style) = style {
+            source.sheets[0].set_cell(
+                cell("C1"),
+                xlsx_model::Cell {
+                    style: Some(style),
+                    ..xlsx_model::Cell::default()
+                },
+            );
+        }
+        assert_eq!(source.sheets[0].effective_style(cell("C1")), style);
+        let mut workbook = Workbook::from_model(source).unwrap();
+        let id = stage(&mut workbook, "=A1");
+        assert_eq!(workbook.proposals()[0].edits[0].input, "=A1");
+        assert_eq!(workbook.proposals()[0].edits[0].new_text, "=A1");
+        apply(
+            &mut workbook,
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        );
+        let edit = &workbook.proposals()[0].edits[0];
+        assert_eq!(edit.a1, "C2");
+        assert_eq!(edit.input, "=A1");
+        assert_eq!(edit.new_text, "=A1");
+        workbook
+            .accept_proposal(&id, false, CalculationOptions::default())
+            .unwrap();
+        let stored = workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("C2"))
+            .unwrap();
+        assert_eq!(
+            stored.value,
+            betteroffice_xlsx::CellValue::Text {
+                value: "=A1".into()
+            }
+        );
+        assert!(stored.formula.is_none());
+    }
+}
+
+#[test]
 fn formula_like_plain_text_inputs_are_not_rewritten() {
     let mut workbook = Workbook::from_model(model()).unwrap();
     apply(
