@@ -1,0 +1,53 @@
+import { expect, test } from 'bun:test';
+import type { PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
+import { pptxCaretColors } from './caretColor';
+
+const caret = { x: 120, y: 100, width: 1, height: 20 };
+
+function line(...runs: Array<{ start: number; end: number; color: string }>): PositionedTextLine {
+  return { runs: runs.map((run) => ({ ...run, text: 'x'.repeat(run.end - run.start) })) } as unknown as PositionedTextLine;
+}
+
+function slide(primitives: SlidePrimitive[], background?: SlideDisplayList['background']): SlideDisplayList {
+  return { contractVersion: 1, width: 960, height: 540, background, primitives };
+}
+
+const shape = (color: string, box = { x: 100, y: 80, w: 300, h: 80 }) =>
+  ({ kind: 'shape', objectId: 1, ...box, name: 'Box', geometry: 'rect', path: [], fill: { kind: 'solid', color } }) as SlidePrimitive;
+
+test('caret takes the run colour on a white slide', () => {
+  expect(pptxCaretColors(slide([]), line({ start: 0, end: 5, color: '#c00000' }), 3, caret))
+    .toEqual({ color: '#c00000', background: '#ffffff' });
+});
+
+test('caret at a run boundary follows the run before it', () => {
+  expect(pptxCaretColors(slide([]), line({ start: 0, end: 3, color: '#0000ff' }, { start: 3, end: 6, color: '#00aa00' }), 3, caret).color)
+    .toBe('#0000ff');
+  expect(pptxCaretColors(slide([]), line({ start: 0, end: 3, color: '#0000ff' }), 0, caret).color).toBe('#0000ff');
+});
+
+test('white text on a dark slide background keeps a white caret', () => {
+  expect(pptxCaretColors(slide([], { kind: 'solid', color: '#0b1f3a' }), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
+    .toEqual({ color: '#ffffff', background: '#0b1f3a' });
+});
+
+test('white text on a dark shape fill keeps a white caret', () => {
+  expect(pptxCaretColors(slide([shape('#202020')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
+    .toEqual({ color: '#ffffff', background: '#202020' });
+});
+
+test('fills that do not cover the caret are ignored', () => {
+  expect(pptxCaretColors(slide([shape('#000000', { x: 500, y: 300, w: 50, h: 50 })]), line(), 0, caret))
+    .toEqual({ color: '#000000', background: '#ffffff' });
+});
+
+test('dark slide with no run or unreadable text falls back to white', () => {
+  const dark = slide([], { kind: 'gradient', gradientType: 'linear', stops: [{ position: 0, color: '#000000' }, { position: 1, color: '#202020' }] });
+  expect(pptxCaretColors(dark, null, null, caret).color).toBe('#ffffff');
+  expect(pptxCaretColors(dark, line({ start: 0, end: 5, color: '#111111' }), 2, caret).color).toBe('#ffffff');
+});
+
+test('table cell shapes colour the caret background', () => {
+  const table = { kind: 'table', objectId: 2, x: 100, y: 80, w: 300, h: 80, name: 'Table', label: 'Table', primitives: [shape('#1f3864')] } as SlidePrimitive;
+  expect(pptxCaretColors(slide([table]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).background).toBe('#1f3864');
+});
