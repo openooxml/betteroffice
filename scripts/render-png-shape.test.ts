@@ -34,7 +34,7 @@ export function jsMatches(format: Format, text: string): boolean {
 }
 
 export function pythonMatches(text: string): boolean {
-  return /def render_png\(\s*self,\s*target(?::(?!\s*(?:int|str|float)\b)[^,)]+)?,\s*\*,[^)]*\bscale\b[^)]*\)\s*->\s*bytes\s*:/.test(text);
+  return /def render_png\(\s*self,\s*target(?::(?!\s*(?:int|str|float)\b)[^,)]+)?,\s*\*,[^)]*\bscale\b[^)]*\)\s*->\s*(?:bytes|Png)\s*:/.test(text);
 }
 
 export function rustMatches(text: string): boolean {
@@ -107,6 +107,8 @@ describe('the shape checks tell right from wrong', () => {
 
   test.each([
     ['def render_png(self, target: PageTarget, *, scale: float = 1.0) -> bytes: ...', true],
+    ['def render_png(self, target: PngTarget, *, scale: float = ...) -> Png: ...', true],
+    ['def render_png(self, target: PngTarget, *, scale: float = ...) -> Png | None: ...', false],
     ['def render_png(\n    self,\n    target,\n    *,\n    scale: float = 1.0,\n    background: str | None = None,\n) -> bytes: ...', true],
     ['def render_png(self, target: int, *, scale: float = 1.0) -> bytes: ...', false],
     ['def render_png(self, target: PageTarget) -> None: ...', false],

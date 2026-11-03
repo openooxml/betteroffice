@@ -6,6 +6,8 @@ pub use betteroffice_fonts as fonts;
 pub use fonts::OpenOptions;
 #[cfg(not(feature = "fonts"))]
 pub use open_options::OpenOptions;
+#[cfg(feature = "raster")]
+pub use vsdx_raster::RenderedPage;
 
 use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
@@ -140,11 +142,7 @@ impl Diagram {
             .map_err(|error| Error::Render(error.to_string()))
     }
     #[cfg(feature = "raster")]
-    pub fn render_png(
-        &self,
-        target: PngTarget,
-        options: &RenderOptions,
-    ) -> Result<vsdx_raster::RenderedPage> {
+    pub fn render_png(&self, target: PngTarget, options: &RenderOptions) -> Result<RenderedPage> {
         vsdx_raster::render_page(&self.renderer()?, &self.package, target.page, options.scale)
             .map_err(Error::Render)
     }
