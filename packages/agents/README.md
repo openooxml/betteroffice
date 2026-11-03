@@ -100,7 +100,8 @@ including the CLI and MCP defaults, keep JS proposals. With a DOCX `editPeer`, u
 `proposeAsync`, `rejectAsync` and `discardAsync`; acceptance is already async.
 
 Agent refs, matches, cell handles and search cursors survive the agent's own
-proposal operations in attached mode. User edits can still expire them. XLSX
+proposal operations in attached mode. DOCX editor proposal decisions also preserve
+refs, matches and cursors. User edits can still expire them. XLSX
 attached proposals use engine acceptance guards, including cell styles and
 dependent previews, so unrelated user edits need not stale a proposal. Stale
 acceptance throws `STALE_TARGET` and leaves the proposal pending without writing
@@ -115,7 +116,11 @@ DOCX pending proposals are live tracked changes in the shared editor session.
 Editor save includes them as tracked changes; agent read, grep and default export
 project the original text. Export with a proposal ID projects that proposal as
 accepted. Attached acceptance settles outside undo history; tracked acceptance
-retains the proposal's revision IDs, author and timestamp. Any attached accept
+retains revision IDs, author and timestamp only for edits accepted by the agent
+in that call. Editor-accepted edits settle to their previewed text in both sync
+and async peer mode. Agent decisions affect only undecided engine records; after
+settlement the group is rejected if every record was rejected, otherwise accepted.
+Partial editor acceptance is included in reads and target guards. Any attached accept
 `date` option throws `AcceptDateUnsupportedError` with code
 `ACCEPT_DATE_UNSUPPORTED`. Headless tracked acceptance still honors `date`.
 

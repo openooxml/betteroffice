@@ -182,6 +182,136 @@ test('attached DOCX sends the known trimmed offset for overlapping replacement t
 });
 
 for (const peer of [false, true]) {
+  for (const separateParagraphs of [false, true]) {
+    for (const action of ['review', 'export', 'render', 'verify', 'accept'] as const) {
+      test(`attached DOCX partial editor acceptance supports ${action}, separateParagraphs=${separateParagraphs}, peer=${peer}`, async () => {
+        const owner = await openDocx(await fixture());
+        const rendered: string[][] = [];
+        const doc = attachDocx(owner.session, { renderer: async session => {
+          rendered.push(session.paragraphs('body').map(paragraph => paragraph.text));
+          return { png: new Uint8Array(), page: 1, pageCount: 1, width: 1, height: 1, warnings: [] };
+        }, ...(peer ? { editPeer: {
+          async proposeChanges(request: Parameters<typeof owner.session.proposeChanges>[0]) { return owner.session.proposeChanges(request); },
+          async setProposalStates(request: Parameters<typeof owner.session.setProposalStates>[0]) { return owner.session.setProposalStates(request); },
+          async withdrawProposals(request: Parameters<typeof owner.session.withdrawProposals>[0]) { return owner.session.withdrawProposals(request); },
+        } } : {}) });
+        try {
+          const drafts = doc.grep({ query: 'draft' }).matches;
+          const hits = [separateParagraphs ? doc.grep({ query: 'Executive summary' }).matches[0] : drafts[0], drafts[1]];
+          const input = { author: 'Agent', edits: hits.map((hit, index) => ({ match: hit.match, newText: ['CONFIRMED', 'FINAL_LONG'][index] })) };
+          const proposal = peer ? await doc.proposeAsync(input) : doc.propose(input);
+          const snapshot = owner.session.getProposals();
+          const record = snapshot.proposals.find(record => record.id.endsWith(':1'))!;
+          expect(owner.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+            changes: [{ id: record.id, state: 'accepted' }],
+          }).ok).toBe(true);
+          if (action === 'review') expect(doc.review(proposal.id)).toMatchObject({ status: 'pending', staleRefs: [] });
+          if (action === 'export') {
+            const baseline = await openDocx(await doc.export());
+            try {
+              expect(baseline.grep({ query: 'CONFIRMED' }).matches).toHaveLength(0);
+              expect(baseline.grep({ query: 'FINAL_LONG' }).matches).toHaveLength(1);
+            } finally { baseline.close(); }
+            const preview = await openDocx(await doc.export(proposal.id));
+            try {
+              expect(preview.grep({ query: 'CONFIRMED' }).matches).toHaveLength(1);
+              expect(preview.grep({ query: 'FINAL_LONG' }).matches).toHaveLength(1);
+            } finally { preview.close(); }
+          }
+          if (action === 'render') {
+            await doc.render(1);
+            await doc.render(1, proposal.id);
+            expect(rendered[0].join('\n')).not.toContain('CONFIRMED');
+            expect(rendered[0].join('\n')).toContain('FINAL_LONG');
+            expect(rendered[1].join('\n')).toContain('CONFIRMED');
+            expect(rendered[1].join('\n')).toContain('FINAL_LONG');
+          }
+          if (action === 'verify') expect(await doc.verify(proposal.id)).toMatchObject({ reopened: true });
+          if (action === 'accept') {
+            expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted' });
+            expect(doc.grep({ query: 'CONFIRMED' }).matches).toHaveLength(1);
+            expect(owner.session.getProposals().proposals).toHaveLength(0);
+          } else expect(owner.session.getProposals().proposals.map(record => record.state)).toEqual(['proposed', 'accepted']);
+          expect(doc.read(hits[1].ref).text).toContain('FINAL_LONG');
+          expect(doc.read(hits[1].ref).revision).toBe(hits[1].revision);
+        } finally { doc.close(); owner.close(); }
+      });
+    }
+  }
+
+  for (const action of ['reject', 'discard', 'tracked'] as const) {
+    test(`attached DOCX editor acceptance preserves saved matches through ${action}, peer=${peer}`, async () => {
+      const zip = await JSZip.loadAsync(await fixture());
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace('Executive summary', 'alpha beta gamma'));
+      const owner = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+      const doc = attachDocx(owner.session, peer ? { editPeer: {
+        async proposeChanges(request) { await Promise.resolve(); return owner.session.proposeChanges(request); },
+        async setProposalStates(request) { await Promise.resolve(); return owner.session.setProposalStates(request); },
+        async withdrawProposals(request) { await Promise.resolve(); return owner.session.withdrawProposals(request); },
+      } } : {});
+      try {
+        const hitGamma = doc.grep({ query: 'gamma' }).matches[0];
+        const hits = ['alpha', 'beta'].map(query => doc.grep({ query }).matches[0]);
+        const cursor = doc.grep({ query: 'a', story: 'body', limit: 4 }).nextCursor!;
+        const input = { author: 'Agent', edits: hits.map((hit, index) => ({ match: hit.match, newText: ['ALPHA', 'BETA_LONG'][index] })) };
+        const proposal = peer ? await doc.proposeAsync(input) : doc.propose(input);
+        const snapshot = owner.session.getProposals();
+        const records = [0, 1].map(index => snapshot.proposals.find(record => record.id.endsWith(`:${index}`))!);
+        expect(owner.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+          changes: [{ id: records[1].id, state: 'accepted' }],
+        }).ok).toBe(true);
+        if (action === 'tracked') await doc.accept(proposal.id, { tracked: true });
+        else if (action === 'discard') {
+          if (peer) await doc.discardAsync(proposal.id);
+          else doc.discard(proposal.id);
+        } else {
+          const result = peer ? await doc.rejectAsync(proposal.id) : doc.reject(proposal.id);
+          expect(result).toEqual({ id: proposal.id, status: 'accepted' });
+          expect(doc.listProposals().find(value => value.id === proposal.id)?.status).toBe('accepted');
+          expect(doc.review(proposal.id).status).toBe('accepted');
+          expect(doc.listProposals().find(value => value.id === proposal.id)?.status).toBe('accepted');
+        }
+        expect(owner.session.getProposals().proposals).toHaveLength(0);
+        expect(doc.read(hitGamma.ref)).toMatchObject({ revision: hitGamma.revision,
+          text: action === 'tracked' ? 'alphaALPHA BETA_LONG gamma' : 'alpha BETA_LONG gamma',
+        });
+        expect(owner.session.listRevisions().map(revision => revision.revisionId).sort()).toEqual(action === 'tracked' ? [...records[0].revisionIds].sort() : []);
+        expect(doc.grep({ query: 'a', story: 'body', limit: 4, cursor }).matches[0]).toMatchObject({ start: action === 'tracked' ? 25 : 20, text: 'a' });
+        const reuse = { author: 'Agent', edits: [{ match: hitGamma.match, newText: 'GAMMA' }] };
+        const next = peer ? await doc.proposeAsync(reuse) : doc.propose(reuse);
+        expect(next.changes[0]).toMatchObject({ start: action === 'tracked' ? 21 : 16, oldText: 'gamma', revision: hitGamma.revision });
+        await doc.accept(next.id);
+        expect(doc.read(hitGamma.ref).text).toBe(action === 'tracked' ? 'alphaALPHA BETA_LONG GAMMA' : 'alpha BETA_LONG GAMMA');
+      } finally { doc.close(); owner.close(); }
+    });
+  }
+
+  test(`attached DOCX reuses a saved match immediately after an editor acceptance elsewhere, peer=${peer}`, async () => {
+    const owner = await openDocx(await fixture());
+    const doc = attachDocx(owner.session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    try {
+      const hits = doc.grep({ query: 'draft' }).matches;
+      const input = { author: 'Agent', edits: [{ match: hits[0].match, newText: 'confirmed' }] };
+      const first = peer ? await doc.proposeAsync(input) : doc.propose(input);
+      const snapshot = owner.session.getProposals();
+      expect(owner.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+        changes: [{ id: snapshot.proposals[0].id, state: 'accepted' }],
+      }).ok).toBe(true);
+      const reuse = { author: 'Agent', edits: [{ match: hits[1].match, newText: 'final' }] };
+      const second = peer ? await doc.proposeAsync(reuse) : doc.propose(reuse);
+      expect(second.changes[0]).toMatchObject({ revision: hits[1].revision, start: hits[1].start + 4, oldText: 'draft' });
+      expect(doc.review(first.id).status).toBe('accepted');
+      expect(doc.review(second.id).staleRefs).toEqual([]);
+      await doc.accept(second.id);
+      expect(doc.read(hits[1].ref)).toMatchObject({ revision: hits[1].revision, text: 'The forecast is confirmed; the appendix is final.' });
+    } finally { doc.close(); owner.close(); }
+  });
+
   test(`attached DOCX selected export preserves an editor rejection with peer=${peer}`, async () => {
     const owner = await openDocx(await fixture());
     const doc = attachDocx(owner.session, peer ? { editPeer: {
@@ -205,8 +335,8 @@ for (const peer of [false, true]) {
     } finally { doc.close(); owner.close(); }
   });
 
-  for (const action of ['accept', 'tracked', 'reject', 'discard'] as const) {
-    test(`attached DOCX preserves partial editor decisions on ${action} with peer=${peer}`, async () => {
+  for (const editorState of ['accepted', 'rejected'] as const) for (const action of ['accept', 'tracked', 'reject', 'discard'] as const) {
+    test(`attached DOCX preserves partial editor ${editorState} decisions on ${action} with peer=${peer}`, async () => {
       const zip = await JSZip.loadAsync(await fixture());
       const xml = await zip.file('word/document.xml')!.async('string');
       zip.file('word/document.xml', xml.replace('Executive summary', 'alpha beta gamma'));
@@ -237,7 +367,6 @@ for (const peer of [false, true]) {
         expect(snapshot.proposals).toHaveLength(3);
         const records = hits.map((_, index) => snapshot.proposals.find(record => record.id.endsWith(`:${index}`))!);
         const accepting = action === 'accept' || action === 'tracked';
-        const editorState = accepting ? 'rejected' : 'accepted';
         const agentState = accepting ? 'accepted' : 'rejected';
         expect(owner.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
           changes: [{ id: records[1].id, state: editorState }],
@@ -253,21 +382,26 @@ for (const peer of [false, true]) {
         expect(decisions[0].changes).toEqual([records[0], records[2]].map(record => ({ id: record.id, state: agentState })));
         expect(withdrawals[0].proposals).toEqual(records.map((record, index) => ({ ...record, state: index === 1 ? editorState : agentState })));
         expect(owner.session.getProposals().proposals).toHaveLength(0);
-        const expected = accepting ? 'ALPHA beta GAMMA' : 'alpha BETA gamma';
+        const expected = `${accepting ? 'ALPHA' : 'alpha'} ${editorState === 'accepted' ? 'BETA' : 'beta'} ${accepting ? 'GAMMA' : 'gamma'}`;
         if (action === 'tracked') {
           const read = owner.session.readParagraphs({ story: 'body', view: 'accepted' });
           expect(read.ok && read.paragraphs[0].text).toBe(expected);
-          expect(doc.read(hits[0].ref).text).not.toContain('BETA');
+          expect(doc.read(hits[0].ref).text).toContain(editorState === 'accepted' ? ' BETA ' : ' beta ');
           expect(owner.session.listRevisions().map(revision => revision.revisionId).sort()).toEqual([...records[0].revisionIds, ...records[2].revisionIds].sort());
         } else {
           expect(doc.read(hits[0].ref).text).toBe(expected);
           expect(owner.session.listRevisions()).toHaveLength(0);
           const reopened = await openDocx(await doc.export());
-          try { expect(reopened.read(reopened.grep({ query: accepting ? 'ALPHA' : 'BETA' }).matches[0].ref).text).toBe(expected); }
+          try { expect(reopened.read(reopened.grep({ query: accepting ? 'ALPHA' : 'alpha' }).matches[0].ref).text).toBe(expected); }
           finally { reopened.close(); }
         }
         if (action === 'discard') expect(() => doc.review(proposal.id)).toThrow('Proposal missing');
-        else expect(doc.review(proposal.id).status).toBe('accepted');
+        else {
+          const status = accepting || editorState === 'accepted' ? 'accepted' : 'rejected';
+          expect(doc.listProposals().find(value => value.id === proposal.id)?.status).toBe(status);
+          expect(doc.review(proposal.id).status).toBe(status);
+          expect(doc.listProposals().find(value => value.id === proposal.id)?.status).toBe(status);
+        }
       } finally { doc.close(); owner.close(); }
     });
   }

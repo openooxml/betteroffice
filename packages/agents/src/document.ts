@@ -82,6 +82,7 @@ interface HeldProposal {
   value: Proposal;
   targets: Map<string, { story: string; paraId: string; fingerprint: string }>;
   engine: DocxProposalRecord[];
+  registered: Set<string>;
 }
 
 const MAX_TEXT = 16_000;
@@ -142,6 +143,8 @@ export class DocxAgentDocument {
   private get proposalPeer() { return this.attached ? this.options.editPeer : undefined; }
   private epoch = 0;
   private indexedEpoch = -1;
+  private indexedVersion?: string;
+  private stagingProposals = 0;
   private paragraphs: Paragraph[] = [];
   private readonly identities = new Map<string, Paragraph>();
   private readonly proposals = new Map<string, HeldProposal>();
@@ -171,11 +174,13 @@ export class DocxAgentDocument {
     private readonly ownsSession = false,
   ) {
     this.name = options.name ?? 'document.docx';
-    this.unsubscribe = session.onUpdate(() => { this.epoch++; });
-    this.unsubscribeProposals = this.attached ? session.onProposalChange(snapshot => {
-      this.synchronizeProposals(snapshot);
+    this.unsubscribe = session.onUpdate(() => {
+      const indexed = this.attached && this.indexedEpoch === this.epoch && this.indexedVersion === session.version();
+      const before = indexed ? this.indexedReferences() : undefined;
       this.epoch++;
-    }) : () => {};
+      if (before) this.preserveReferences(before, session.version());
+    });
+    this.unsubscribeProposals = this.attached ? session.onProposalChange(snapshot => this.observeProposals(snapshot)) : () => {};
   }
 
   overview(options: { offset?: number; limit?: number } = {}) {
@@ -406,7 +411,7 @@ export class DocxAgentDocument {
       targets.set(p.ref, { story: p.story, paraId: p.paraId, fingerprint: p.fingerprint });
     }
     const value: Proposal = { id: `proposal${this.nextProposal++}`, author: input.author, note: input.note ?? '', status: 'pending', changes, staleRefs: [] };
-    return { value, targets, engine: [] };
+    return { value, targets, engine: [], registered: new Set() };
   }
 
   propose(input: { author: string; note?: string; edits: TextEdit[] }): Proposal {
@@ -417,15 +422,21 @@ export class DocxAgentDocument {
     }
     if (this.proposalPeer) throw new DocumentToolError('UNSUPPORTED', 'Use proposeAsync with a DOCX editor edit peer.');
     const plan = this.prepareProposal(input);
-    const snapshot = this.proposalResult(this.session.proposeChanges({ expectVersion: plan.version, proposals: plan.proposals }), plan.held.value.changes);
-    return this.recordProposal(plan, snapshot);
+    this.stagingProposals++;
+    try {
+      const snapshot = this.proposalResult(this.session.proposeChanges({ expectVersion: plan.version, proposals: plan.proposals }), plan.held.value.changes);
+      return this.recordProposal(plan, snapshot);
+    } finally { this.stagingProposals--; }
   }
 
   async proposeAsync(input: { author: string; note?: string; edits: TextEdit[] }): Promise<Proposal> {
     if (!this.proposalPeer) return this.propose(input);
     const plan = this.prepareProposal(input);
-    const snapshot = this.proposalResult(await this.proposalPeer.proposeChanges({ expectVersion: plan.version, proposals: plan.proposals }), plan.held.value.changes);
-    return this.recordProposal(plan, snapshot);
+    this.stagingProposals++;
+    try {
+      const snapshot = this.proposalResult(await this.proposalPeer.proposeChanges({ expectVersion: plan.version, proposals: plan.proposals }), plan.held.value.changes);
+      return this.recordProposal(plan, snapshot);
+    } finally { this.stagingProposals--; }
   }
 
   private prepareProposal(input: { author: string; note?: string; edits: TextEdit[] }) {
@@ -450,6 +461,7 @@ export class DocxAgentDocument {
   private recordProposal(plan: { held: HeldProposal; proposals: DocxProposalInput[]; references: ReturnType<DocxAgentDocument['captureReferences']> }, snapshot: DocxProposalSnapshot): Proposal {
     const ids = new Set(plan.proposals.map(proposal => proposal.id));
     plan.held.engine = snapshot.proposals.filter(proposal => ids.has(proposal.id));
+    plan.held.registered = new Set(plan.held.engine.map(record => record.id));
     this.proposals.set(plan.held.value.id, plan.held);
     this.epoch++;
     this.preserveReferences(plan.references, snapshot.version);
@@ -494,16 +506,15 @@ export class DocxAgentDocument {
     this.session.addUndoBoundary();
     try { await this.decideProposalAsync(held, 'accepted', options.tracked ?? false); }
     finally { this.session.addUndoBoundary(); }
-    held.value.status = 'accepted';
-    return { id, status: 'accepted' as const, tracked: options.tracked ?? false, changes: held.value.changes.length };
+    return { id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
   }
 
   reject(id: string) {
     const held = this.proposal(id);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
     if (this.attached) this.decideProposal(held, 'rejected');
-    held.value.status = 'rejected';
-    return { id, status: 'rejected' as const };
+    else held.value.status = 'rejected';
+    return { id, status: this.attached ? this.settledStatus(held) : 'rejected' as const };
   }
 
   async rejectAsync(id: string) {
@@ -511,8 +522,7 @@ export class DocxAgentDocument {
     const held = this.proposal(id);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
     await this.decideProposalAsync(held, 'rejected');
-    held.value.status = 'rejected';
-    return { id, status: 'rejected' as const };
+    return { id, status: this.settledStatus(held) };
   }
 
   async discardAsync(id: string) {
@@ -668,6 +678,7 @@ export class DocxAgentDocument {
     for (const p of paragraphs) p.table = cells.get(p.story);
     this.paragraphs = paragraphs;
     this.indexedEpoch = this.epoch;
+    this.indexedVersion = this.session.version();
   }
 
   private reference(p: Paragraph): ParagraphRef {
@@ -733,7 +744,11 @@ export class DocxAgentDocument {
 
   private captureReferences() {
     this.index();
-    return { epoch: this.epoch, paragraphs: this.paragraphs.map(p => ({ ...p })) };
+    return this.indexedReferences();
+  }
+
+  private indexedReferences() {
+    return { epoch: this.indexedEpoch, paragraphs: this.paragraphs.map(p => ({ ...p })) };
   }
 
   private preserveReferences(before: ReturnType<DocxAgentDocument['captureReferences']>, version: string, changes: ProposalChange[] = []) {
@@ -772,7 +787,7 @@ export class DocxAgentDocument {
         const target = held.targets.get(p.ref);
         if (target?.fingerprint !== previous.fingerprint) continue;
         target.fingerprint = p.fingerprint;
-        if (held.value.status === 'pending') for (const change of held.value.changes) {
+        if (held.value.status === 'pending' || held.registered.size) for (const change of held.value.changes) {
           if (change.ref === p.ref) change.start = shift(p.ref, change.start);
         }
       }
@@ -839,36 +854,79 @@ export class DocxAgentDocument {
   private synchronizeProposals(snapshot: DocxProposalSnapshot) {
     const records = new Map(snapshot.proposals.map(record => [record.id, record]));
     for (const held of this.proposals.values()) {
-      held.engine = held.engine.map(record => records.get(record.id) ?? { ...record, state: record.state === 'proposed' ? 'rejected' : record.state });
-      if (held.engine.length && held.engine.every(record => record.state !== 'proposed')) {
-        held.value.status = held.engine.some(record => record.state === 'accepted') ? 'accepted' : 'rejected';
-      } else if (held.engine.some(record => record.state === 'proposed')) held.value.status = 'pending';
+      if (!held.registered.size) continue;
+      held.engine = held.engine.map(record => !held.registered.has(record.id) ? record
+        : records.get(record.id) ?? { ...record, state: record.state === 'proposed' ? 'rejected' : record.state });
+      held.registered = new Set([...held.registered].filter(id => records.has(id)));
+      held.value.status = held.engine.some(record => record.state === 'proposed') ? 'pending' : this.settledStatus(held);
     }
+  }
+
+  private settledStatus(held: HeldProposal) {
+    return held.engine.some(record => record.state === 'accepted') ? 'accepted' as const : 'rejected' as const;
+  }
+
+  private observeProposals(snapshot: DocxProposalSnapshot) {
+    const before = this.indexedReferences();
+    const records = new Map(snapshot.proposals.map(record => [record.id, record]));
+    const revisions = new Set(this.session.listRevisions().map(revision => revision.revisionId));
+    const changes: ProposalChange[] = [];
+    let deciding = false;
+    for (const held of this.proposals.values()) {
+      for (const [index, edit] of held.value.changes.entries()) {
+        const record = held.engine.find(record => record.id === `${this.proposalPrefix}:${held.value.id}:${index}`);
+        if (!record || !held.registered.has(record.id)) continue;
+        const next = records.get(record.id);
+        deciding ||= !!next && next.state !== record.state;
+        const change = trimChange(edit);
+        const oldText = record.state === 'accepted' ? change.newText : change.oldText;
+        const newText = next ? next.state === 'accepted' ? change.newText : change.oldText
+          : record.revisionIds.some(id => revisions.has(id)) ? change.oldText + change.newText : oldText;
+        if (oldText !== newText) changes.push({ ...change, oldText, newText });
+      }
+    }
+    this.synchronizeProposals(snapshot);
+    this.epoch++;
+    if (!this.stagingProposals && (!deciding || this.indexedVersion === snapshot.version)) this.preserveReferences(before, snapshot.version, changes);
+  }
+
+  private proposalDecision(held: HeldProposal, state: 'accepted' | 'rejected') {
+    const snapshot = this.session.getProposals();
+    const ids = new Set(held.engine.map(record => record.id));
+    const changes = snapshot.proposals.filter(record => ids.has(record.id) && record.state === 'proposed').map(record => ({ id: record.id, state }));
+    return { snapshot, changes, request: { expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes } };
+  }
+
+  private proposalWithdrawals(held: HeldProposal, decision: ReturnType<DocxAgentDocument['proposalDecision']>, snapshot: DocxProposalSnapshot, keepRevisions: boolean) {
+    const kept = new Set(keepRevisions ? decision.changes.filter(change => change.state === 'accepted'
+      && snapshot.proposals.some(record => record.id === change.id && record.state === 'accepted')).map(change => change.id) : []);
+    const ids = held.engine.map(record => record.id);
+    return [
+      { ids: ids.filter(id => !kept.has(id)) },
+      { ids: ids.filter(id => kept.has(id)), keepRevisions: true },
+    ].filter(request => request.ids.length);
+  }
+
+  private proposalRollback(decision: ReturnType<DocxAgentDocument['proposalDecision']>) {
+    const current = this.session.getProposals();
+    return { expectVersion: current.version, expectPreviewVersion: current.previewVersion,
+      changes: decision.snapshot.proposals.filter(record => decision.changes.some(change => change.id === record.id
+        && current.proposals.some(existing => existing.id === record.id && existing.state === change.state))).map(({ id, state }) => ({ id, state })),
+    };
   }
 
   private decideProposal(held: HeldProposal, state: 'accepted' | 'rejected', keepRevisions = false) {
     if (this.proposalPeer) throw new DocumentToolError('UNSUPPORTED', 'Use rejectAsync or discardAsync with a DOCX editor edit peer.');
-    const references = this.captureReferences();
-    const appliedChanges = state === 'accepted' ? held.value.changes
-      .filter((_, index) => held.engine.find(record => record.id === `${this.proposalPrefix}:${held.value.id}:${index}`)?.state === 'proposed')
-      .map(trimChange).map(change => keepRevisions ? { ...change, newText: change.oldText + change.newText } : change) : [];
-    const snapshot = this.session.getProposals();
-    const ids = held.engine.map(record => record.id);
-    const changes = snapshot.proposals.filter(record => ids.includes(record.id) && record.state === 'proposed').map(record => ({ id: record.id, state }));
-    const decided = this.proposalResult(this.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes }), held.value.changes);
+    const decision = this.proposalDecision(held, state);
+    const decided = this.proposalResult(this.session.setProposalStates(decision.request), held.value.changes);
     try {
       let settled = decided;
-      if (keepRevisions) {
-        const rejected = decided.proposals.filter(record => ids.includes(record.id) && record.state === 'rejected').map(record => record.id);
-        if (rejected.length) settled = this.proposalResult(this.session.withdrawProposals({ expectVersion: settled.version, ids: rejected }), held.value.changes);
+      for (const request of this.proposalWithdrawals(held, decision, decided, keepRevisions)) {
+        settled = this.proposalResult(this.session.withdrawProposals({ ...request, expectVersion: settled.version }), held.value.changes);
       }
-      settled = this.proposalResult(this.session.withdrawProposals({ expectVersion: settled.version, ids, ...(keepRevisions ? { keepRevisions: true } : {}) }), held.value.changes);
-      this.preserveReferences(references, settled.version, appliedChanges);
+      this.synchronizeProposals(settled);
     } catch (error) {
-      const current = this.session.getProposals();
-      this.session.setProposalStates({ expectVersion: current.version, expectPreviewVersion: current.previewVersion,
-        changes: snapshot.proposals.filter(record => changes.some(change => change.id === record.id) && current.proposals.some(existing => existing.id === record.id)).map(({ id, state }) => ({ id, state })),
-      });
+      this.session.setProposalStates(this.proposalRollback(decision));
       throw error;
     }
   }
@@ -876,27 +934,16 @@ export class DocxAgentDocument {
   private async decideProposalAsync(held: HeldProposal, state: 'accepted' | 'rejected', keepRevisions = false) {
     const peer = this.proposalPeer;
     if (!peer) return this.decideProposal(held, state, keepRevisions);
-    const references = this.captureReferences();
-    const appliedChanges = state === 'accepted' ? held.value.changes
-      .filter((_, index) => held.engine.find(record => record.id === `${this.proposalPrefix}:${held.value.id}:${index}`)?.state === 'proposed')
-      .map(trimChange).map(change => keepRevisions ? { ...change, newText: change.oldText + change.newText } : change) : [];
-    const snapshot = this.session.getProposals();
-    const ids = held.engine.map(record => record.id);
-    const changes = snapshot.proposals.filter(record => ids.includes(record.id) && record.state === 'proposed').map(record => ({ id: record.id, state }));
-    const decided = this.proposalResult(await peer.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes }), held.value.changes);
+    const decision = this.proposalDecision(held, state);
+    const decided = this.proposalResult(await peer.setProposalStates(decision.request), held.value.changes);
     try {
       let settled = decided;
-      if (keepRevisions) {
-        const rejected = decided.proposals.filter(record => ids.includes(record.id) && record.state === 'rejected').map(record => record.id);
-        if (rejected.length) settled = this.proposalResult(await peer.withdrawProposals({ expectVersion: settled.version, ids: rejected }), held.value.changes);
+      for (const request of this.proposalWithdrawals(held, decision, decided, keepRevisions)) {
+        settled = this.proposalResult(await peer.withdrawProposals({ ...request, expectVersion: settled.version }), held.value.changes);
       }
-      settled = this.proposalResult(await peer.withdrawProposals({ expectVersion: settled.version, ids, ...(keepRevisions ? { keepRevisions: true } : {}) }), held.value.changes);
-      this.preserveReferences(references, settled.version, appliedChanges);
+      this.synchronizeProposals(settled);
     } catch (error) {
-      const current = this.session.getProposals();
-      await peer.setProposalStates({ expectVersion: current.version, expectPreviewVersion: current.previewVersion,
-        changes: snapshot.proposals.filter(record => changes.some(change => change.id === record.id) && current.proposals.some(existing => existing.id === record.id)).map(({ id, state }) => ({ id, state })),
-      });
+      await peer.setProposalStates(this.proposalRollback(decision));
       throw error;
     }
   }
