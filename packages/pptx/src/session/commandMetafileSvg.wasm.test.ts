@@ -334,3 +334,34 @@ test('a public session frame carries a metafile picture as SVG on every engine',
   clients.push(client);
   expect(isSvg((await client.call.frame(0)).media.get('ppt/media/picture.emf'))).toBe(true);
 });
+
+for (const byId of [false, true]) wasmTest(`proposal previews await lazy metafile media (${byId ? 'by ID' : 'by index'})`, async () => {
+  const pending = deferred<MetafileSvgModule>();
+  const requested = deferred<void>();
+  const load = loader(() => { requested.resolve(); return pending.promise; });
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(2, true), options, wire.transport);
+  clients.push(client);
+  const source = client.state.slides[1]!.id;
+  const ack = await client.dispatch({ kind: 'invoke', payload: {
+    inputTime: 1, undoGroup: 'proposal', method: 'propose', args: ['Reviewer', null, [
+      { type: 'duplicateSlide', ref: 'ghost', slideId: source, afterSlideId: null },
+    ]],
+  } });
+  expect(ack.outcomes[0]?.status).toBe('applied');
+  const proposal = (await client.access!('listProposals'))[0]!;
+  expect(load).not.toHaveBeenCalled();
+  const preview = () => byId
+    ? client.access!('layoutProposalDiffSlideById', proposal.id, proposal.refs!.ghost!)
+    : client.access!('layoutProposalDiffSlide', proposal.id, 1);
+  let settled = false;
+  const framing = preview().then((diff) => { settled = true; return diff; });
+  await requested.promise;
+  expect(settled).toBe(false);
+  pending.resolve(svgModule());
+  const diff = await framing;
+  expect(diff.media).toEqual([{ assetId: 'ppt/media/picture.bin', bytes: svg.buffer }]);
+  expect((await client.thumbnail(source)).status).toBe('frame');
+  expect((await preview()).media).toEqual(diff.media);
+  expect(load).toHaveBeenCalledTimes(1);
+});

@@ -10,6 +10,7 @@ import { isCommandEnvelope } from '../../../../shared/office-session/commands/ty
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
+import type { ProposalDiffSlide } from '../proposals';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
@@ -699,6 +700,17 @@ export function registerPresentationCommandHandlers(
       geometry, version });
     while (frames.size > 257) frames.delete(frames.keys().next().value!);
     return result;
+  }
+
+  async function proposalFrame(diff: ProposalDiffSlide): Promise<TransferResult<ProposalDiffSlide>> {
+    const pending = new Set<string>();
+    const sent = new Set<string>();
+    let media = commandFrameMedia(presentation(), diff.frame, sent, metafiles, pending);
+    if (pending.size) {
+      await loadMetafiles().catch(() => {});
+      media = commandFrameMedia(presentation(), diff.frame, sent, metafiles);
+    }
+    return transferable({ ...diff, media }, media.map(({ bytes }) => bytes));
   }
 
   function authoritativeGeometry(slideId: string): CommandHitGeometryIndex | undefined {
@@ -1747,8 +1759,7 @@ export function registerPresentationCommandHandlers(
           const diff = method === 'layoutProposalDiffSlideById'
             ? opened.layoutProposalDiffSlideById(args[0] as string, args[1] as string)
             : opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
-          const media = commandFrameMedia(opened, diff.frame, new Set());
-          return transferable({ ...diff, media }, media.map(({ bytes }) => bytes));
+          return proposalFrame(diff);
         }
         default: throw new TypeError('Unsupported access method');
       }

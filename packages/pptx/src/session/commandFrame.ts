@@ -45,13 +45,14 @@ export function buildCommandFrame(
   if (!cached) visit(list.primitives);
   parsed?.(list);
   const displayList = new TextEncoder().encode(JSON.stringify(list)).buffer;
-  const media = commandFrameMedia(handle, list, sentMedia);
+  const media = commandFrameMedia(handle, list, sentMedia, metafiles, pendingMetafiles);
   return transferable({ ...tags, displayList, media },
     [displayList, ...media.map(({ bytes }) => bytes)]);
 }
 
 export function commandFrameMedia(
   handle: PresentationHandle, list: SlideDisplayList, sentMedia: ReadonlySet<string>,
+  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>,
 ): PresentationCommandFrame['media'] {
   const media: PresentationCommandFrame['media'] = [];
   for (const assetId of frameAssetIds(list)) {

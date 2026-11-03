@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import type { PositionedTextLine, SlideDisplayList, TextBoxPrimitive } from '../types';
 import * as wasm from '../wasm/loader';
-import { buildCommandFrame } from './commandFrame';
+import { buildCommandFrame, commandFrameMedia } from './commandFrame';
 import { decodeCommandDisplayList, hitGeometry, indexGeometry, indexHitGeometry, navigateGeometry, selectionGeometry } from './commandGeometry';
 import type { PresentationCommandSelection } from './commandProtocol';
 
@@ -269,4 +269,41 @@ test('worker frame media resolution requests an SVG display copy once', () => {
   sent.add('picture');
   expect(buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles).value.media).toEqual([]);
   expect(replays).toBe(1);
+});
+
+test('shared frame media keeps lazy metafiles pending until the converter is ready', () => {
+  const displayList = list();
+  displayList.primitives = [{ kind: 'image', objectId: 1, name: 'picture', assetId: 'picture', x: 0, y: 0, w: 120, h: 80 }];
+  const bytes = new Uint8Array(44);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 1, true);
+  view.setUint32(40, 0x464d4520, true);
+  const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"/>');
+  const handle = { mediaBytes: () => bytes } as unknown as wasm.PresentationHandle;
+  const start = spyOn({ start: async () => {} }, 'start');
+  const convert = spyOn({ convert: (_assetId: string, _bytes: Uint8Array) => svg }, 'convert');
+  let ready = false;
+  const metafiles = { start, ready: () => ready, convert };
+  const pending = new Set<string>();
+  const sent = new Set<string>();
+  const tags = { slideId: 'slide', slideIndex: 0, slideRevision: 1, coversThroughSeq: 1,
+    documentEpoch: 1, incarnation: 'worker', epoch: 1, version: 'v1' };
+  expect(buildCommandFrame(handle, tags, sent, undefined, displayList, metafiles, pending).value.media)
+    .toEqual([{ assetId: 'picture', bytes: new ArrayBuffer(0) }]);
+  expect(pending).toEqual(new Set(['picture']));
+  expect(commandFrameMedia(handle, displayList, sent, metafiles, pending))
+    .toEqual([{ assetId: 'picture', bytes: new ArrayBuffer(0) }]);
+  expect(start).not.toHaveBeenCalled();
+  expect(convert).not.toHaveBeenCalled();
+  ready = true;
+  pending.clear();
+  const media = commandFrameMedia(handle, displayList, sent, metafiles, pending);
+  expect(media).toEqual([{ assetId: 'picture', bytes: svg.buffer }]);
+  expect(media[0]!.bytes).not.toBe(svg.buffer);
+  expect(pending.size).toBe(0);
+  expect(sent.size).toBe(0);
+  expect(convert).toHaveBeenCalledWith('picture', bytes);
+  sent.add('picture');
+  expect(commandFrameMedia(handle, displayList, sent, metafiles, pending)).toEqual([]);
+  expect(convert).toHaveBeenCalledTimes(1);
 });
