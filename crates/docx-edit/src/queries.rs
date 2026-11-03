@@ -347,7 +347,7 @@ fn visit_chunk_revisions<T: ReadTxn>(
             }
         }
         if let ChunkKind::Embed(Some(map)) = &chunk.kind
-            && map_string(map, txn, KIND_KEY).as_deref() == Some("sdt")
+            && matches!(map_string(map, txn, KIND_KEY).as_deref(), Some("sdt" | "field"))
             && let Some(Out::Any(content)) = map.get(txn, "content")
         {
             let mut seen: Vec<_> = [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)]

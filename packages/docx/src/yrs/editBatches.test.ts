@@ -13,7 +13,7 @@ import {
   type DocxEditStep,
   type YrsSession,
 } from './index';
-import { yrsToDocument } from './yrsToDocument';
+import { RunPropertyChangeProjectionError, yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const OFFICE = 'application/vnd.openxmlformats-officedocument';
@@ -506,6 +506,80 @@ describe('YrsSession edit batches', () => {
       reopened.destroy();
       inPlace.destroy();
       displaced.destroy();
+    }
+  });
+
+  it('saves suggested formatting on mixed text, fields and inline controls and reopens reviewable runs', async () => {
+    const simple = `<w:fldSimple w:instr="PAGE">${run('simple')}<w:r><w:rPr><w:i/></w:rPr><w:t>second</w:t></w:r></w:fldSimple>`;
+    const control = `<w:sdt><w:sdtPr><w:text/></w:sdtPr><w:sdtContent>${run('control')}</w:sdtContent></w:sdt>`;
+    const complex = `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${run('complex')}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const session = await open(fixture(paragraph('00000001', `${run('plain')}${simple}${control}${complex}`)));
+    const author = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+    const labels = ['plain', 'simple', 'second', 'control', 'complex'];
+    const savedRuns = (xml: string) => [...xml.matchAll(/<w:r(?: [^>]*)?>[\s\S]*?<\/w:r>/g)].map(match => match[0]);
+    try {
+      const base = session.materializeDocx();
+      if (!base) throw new Error('the opened package must materialize');
+      session.formatRange({ story: 'body', start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 8 } }, { bold: true }, author);
+      const before = session.encodeState();
+      const saved = await repackDocx(yrsToDocument(session, base));
+      expect(session.encodeState()).toEqual(before);
+      const xml = text(part(saved, 'word/document.xml'));
+      for (const label of labels) {
+        const savedRun = savedRuns(xml).find(value => value.includes(`>${label}</w:t>`));
+        expect(savedRun).toContain('<w:b/>');
+        expect(savedRun).toMatch(/<w:rPrChange[^>]*w:author="Writer"[^>]*w:date="2026-10-01T12:00:00Z"/);
+      }
+      for (const decision of ['accept', 'reject'] as const) {
+        const reopened = await open(new Uint8Array(saved));
+        try {
+          const revisions = reopened.listRevisions();
+          expect(revisions.length).toBeGreaterThan(0);
+          expect(revisions.every(revision => revision.kind === 'rPrChange' && revision.author === author.name && revision.date === author.date)).toBe(true);
+          const preview = revisions.map(revision => revision.preview).join('');
+          for (const label of labels) expect(preview).toContain(label);
+          for (const revisionId of new Set(revisions.map(revision => revision.revisionId))) {
+            if (decision === 'reject') reopened.rejectChange({ revisionId });
+            else reopened.acceptChange({ revisionId });
+          }
+          expect(reopened.listRevisions()).toEqual([]);
+          const reopenedBase = reopened.materializeDocx();
+          if (!reopenedBase) throw new Error('the reopened package must materialize');
+          const settled = text(part(await repackDocx(yrsToDocument(reopened, reopenedBase)), 'word/document.xml'));
+          expect(settled).not.toContain('w:rPrChange');
+          for (const label of labels) {
+            const savedRun = savedRuns(settled).find(value => value.includes(`>${label}</w:t>`));
+            expect(savedRun).toBeDefined();
+            expect(/<w:b\s*\/>|<w:b\s+w:val="(?:1|true|on)"\s*\/>/.test(savedRun!)).toBe(decision === 'accept');
+            if (label === 'second') expect(savedRun).toContain('<w:i/>');
+          }
+        } finally {
+          reopened.destroy();
+        }
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('refuses saving a formatting revision on a container without runs', async () => {
+    for (const [kind, payload] of [
+      ['sdt', { content: [] }],
+      ['field', { fieldData: JSON.stringify({ type: 'simpleField', instruction: 'PAGE', fieldType: 'PAGE', content: [] }) }],
+      ['field', { fieldData: JSON.stringify({ type: 'complexField', instruction: 'PAGE', fieldType: 'PAGE', fieldCode: [], fieldResult: [] }) }],
+    ] as const) {
+      const session = await open(fixture(paragraph('00000001', run('plain'))));
+      try {
+        const base = session.materializeDocx();
+        if (!base) throw new Error('the opened package must materialize');
+        session.applyRawOps('body', [{ op: 'insertEmbed', index: 5, kind, payload }]);
+        session.formatRange({ story: 'body', start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 6 } }, { bold: true }, { name: 'Writer' });
+        const before = session.encodeState();
+        expect(() => yrsToDocument(session, base)).toThrow(RunPropertyChangeProjectionError);
+        expect(session.encodeState()).toEqual(before);
+      } finally {
+        session.destroy();
+      }
     }
   });
 

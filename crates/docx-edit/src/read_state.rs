@@ -417,7 +417,10 @@ impl EditingDoc {
                 .iter()
                 .filter_map(|chunk| {
                     if let ChunkKind::Embed(Some(map)) = &chunk.kind
-                        && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
+                        && matches!(
+                            map_string(map, &txn, KIND_KEY).as_deref(),
+                            Some("sdt" | "field")
+                        )
                         && let Some(Out::Any(content)) = map.get(&txn, "content")
                     {
                         Some((chunk, content))

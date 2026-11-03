@@ -43,6 +43,66 @@ fn attrs(engine: &EngineSession) -> Vec<(String, Value)> {
 }
 
 #[test]
+fn imported_field_run_properties_are_reviewable_and_resolve_by_id_or_range() {
+    let changed = concat!(
+        r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="41" w:author="Ada">"#,
+        "<w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr><w:t>result</w:t></w:r>",
+    );
+    for accept in [true, false] {
+        for by_id in [true, false] {
+            for container in [
+                format!(r#"<w:fldSimple w:instr="PAGE">{changed}</w:fldSimple>"#),
+                format!(
+                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{changed}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                ),
+                format!(
+                    r#"<w:sdt><w:sdtPr><w:text/></w:sdtPr><w:sdtContent><w:fldSimple w:instr="PAGE">{changed}</w:fldSimple></w:sdtContent></w:sdt>"#,
+                ),
+            ] {
+                let engine = EngineSession::new(9310);
+                seed_from_docx(engine.doc(), &document(&format!("<w:p>{container}</w:p>")))
+                    .unwrap();
+                let revisions = engine.doc().list_revisions().unwrap();
+                assert_eq!(revisions.len(), 1);
+                assert_eq!(revisions[0].change.kind, ChangeKind::RunPropertiesChanged);
+                assert_eq!(revisions[0].change.revision_id, "41");
+                assert!(revisions[0].preview.contains("result"));
+                let target = if by_id {
+                    ChangeTarget::Revision("41".to_owned())
+                } else {
+                    ChangeTarget::Range(StoryRange::new("body", 0, 1))
+                };
+                if accept {
+                    engine.doc().accept_change(&suggesting(), &target).unwrap();
+                } else {
+                    engine.doc().reject_change(&suggesting(), &target).unwrap();
+                }
+                assert!(engine.doc().list_revisions().unwrap().is_empty());
+                let segments = engine.doc().story_segments("body").unwrap();
+                let crate::SegmentContent::OtherEmbed { payload, .. } = &segments[0].content else {
+                    panic!("expected a field or inline control");
+                };
+                let content = payload.get("content").unwrap();
+                let mut runs = 0;
+                crate::inline_content::visit(content, &mut |child| {
+                    let Some(Any::Array(_)) = child.get("runPath") else {
+                        return;
+                    };
+                    let Some(Any::Map(attrs)) = child.get("attrs") else {
+                        panic!("expected field run attributes");
+                    };
+                    runs += 1;
+                    assert!(!attrs.contains_key("rPrChange"));
+                    assert_eq!(attrs.get("bold") == Some(&Any::Bool(true)), accept);
+                    assert_eq!(attrs.get("italic") == Some(&Any::Bool(true)), !accept);
+                });
+                assert!(runs > 0);
+            }
+        }
+    }
+}
+
+#[test]
 fn suggested_format_captures_previous_run_properties() {
     let engine = engine();
     let receipt = engine

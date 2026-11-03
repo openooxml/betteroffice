@@ -2611,6 +2611,7 @@ pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
+    styles: &StyleResolver,
     source: &BTreeMap<String, String>,
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
@@ -2632,21 +2633,97 @@ fn field_payload(
     }
     let formatting = field_result_formatting(field_value);
     let merged = merge_text_formatting(style_formatting, formatting);
-    (
-        map_from_value(json!({
-            "fieldType": nullish(field(Some(field_value), "fieldType")),
-            "instruction": nullish(field(Some(field_value), "instruction")),
-            "displayText": display_text,
-            "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
-            "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
-            "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
-            "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
-            "hasCachedResult": !display_text.is_empty(),
-            "fieldData": source_json(field_value, source),
-            "modelKind": "field"
-        })),
-        formatting_to_marks(merged.as_ref()),
-    )
+    let mut content = Vec::new();
+    field_run_property_content(
+        field_value,
+        style_formatting,
+        styles,
+        &mut Vec::new(),
+        &mut content,
+    );
+    let mut payload = map_from_value(json!({
+        "fieldType": nullish(field(Some(field_value), "fieldType")),
+        "instruction": nullish(field(Some(field_value), "instruction")),
+        "displayText": display_text,
+        "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
+        "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
+        "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
+        "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
+        "hasCachedResult": !display_text.is_empty(),
+        "fieldData": source_json(field_value, source),
+        "modelKind": "field"
+    }));
+    if !content.is_empty() {
+        payload.insert("content".to_owned(), Value::Array(content));
+    }
+    let primary = runs.iter().find(|run| {
+        string(field(Some(run), "type")) == Some("run")
+            && field(Some(run), "formatting") == formatting
+    });
+    let marks = primary
+        .filter(|run| !array(field(Some(run), "propertyChanges")).is_empty())
+        .map_or_else(
+            || formatting_to_marks(merged.as_ref()),
+            |run| run_marks(run, style_formatting, styles),
+        );
+    if payload.contains_key("content") {
+        payload.insert(
+            "runPropertiesAttributes".to_owned(),
+            serde_json::to_value(marks_to_attrs(&marks)).unwrap(),
+        );
+    }
+    (payload, marks)
+}
+
+fn field_run_property_content(
+    value: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    path: &mut Vec<String>,
+    content: &mut Vec<Value>,
+) {
+    if string(field(Some(value), "type")) == Some("run") {
+        if !array(field(Some(value), "propertyChanges")).is_empty() {
+            let attrs = marks_to_attrs(&run_marks(value, style_formatting, styles));
+            let text: String = array(field(Some(value), "content"))
+                .iter()
+                .filter(|child| string(field(Some(child), "type")) == Some("text"))
+                .filter_map(|child| string(field(Some(child), "text")))
+                .collect();
+            content.push(json!({
+                "kind": "text", "text": text, "attrs": attrs,
+                "sourceAttributes": attrs, "runPath": path,
+            }));
+        }
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            let mut keys: Vec<_> = object.keys().collect();
+            keys.sort();
+            for key in keys {
+                path.push(key.clone());
+                field_run_property_content(&object[key], style_formatting, styles, path, content);
+                path.pop();
+            }
+        }
+        Value::Array(values) => {
+            let mut indices: Vec<_> = (0..values.len()).map(|index| index.to_string()).collect();
+            indices.sort();
+            for index in indices {
+                path.push(index.clone());
+                field_run_property_content(
+                    &values[index.parse::<usize>().unwrap()],
+                    style_formatting,
+                    styles,
+                    path,
+                    content,
+                );
+                path.pop();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The sequences of SEQ fields nested anywhere in a field's code or result.
@@ -3139,7 +3216,7 @@ fn hyperlink_to_units(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 let marks: Vec<Mark> = marks
                     .into_iter()
                     .chain(extra_marks.iter().cloned())
@@ -3210,7 +3287,7 @@ fn field_to_units(
         })
     {
         opaque_sequences.extend(nested_sequence_names(value));
-        let (payload, marks) = field_payload(value, style_formatting, source);
+        let (payload, marks) = field_payload(value, style_formatting, styles, source);
         return vec![embed_unit("field", payload, &marks, 1)];
     }
     let mut units = Vec::new();
@@ -3230,7 +3307,7 @@ fn field_to_units(
             }
             Some("simpleField") => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 vec![embed_unit("field", payload, &marks, 1)]
             }
             _ => continue,
@@ -3256,7 +3333,7 @@ fn field_to_units(
             .cloned()
             .collect(),
     );
-    let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    let (mut payload, marks) = field_payload(&visible, style_formatting, styles, source);
     let sequence_owner = string(field(Some(value), "instruction"))
         .and_then(docx_layout::sequence_fields::sequence_name)
         .is_some();
@@ -3269,6 +3346,21 @@ fn field_to_units(
         "fieldData".to_owned(),
         Value::String(source_json(value, source)),
     );
+    let mut content = Vec::new();
+    field_run_property_content(
+        value,
+        style_formatting,
+        styles,
+        &mut Vec::new(),
+        &mut content,
+    );
+    if !content.is_empty() {
+        payload.insert("content".to_owned(), Value::Array(content));
+        payload.insert(
+            "runPropertiesAttributes".to_owned(),
+            serde_json::to_value(marks_to_attrs(&marks)).unwrap(),
+        );
+    }
     payload.insert(
         "resultProjection".to_owned(),
         json!({"id":projection_id, "children":children}),
@@ -3395,7 +3487,7 @@ fn inline_container_units(
         }
         "simpleField" | "complexField" => {
             opaque_sequences.extend(nested_sequence_names(child));
-            let (payload, marks) = field_payload(child, style_formatting, source);
+            let (payload, marks) = field_payload(child, style_formatting, styles, source);
             vec![embed_unit("field", payload, &marks, 1)]
         }
         "inlineSdt" => vec![embed_unit(
@@ -3501,7 +3593,7 @@ fn sdt_payload(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 append(&mut content, embed_unit("field", payload, &marks, 1));
             }
             "inlineSdt" => append(

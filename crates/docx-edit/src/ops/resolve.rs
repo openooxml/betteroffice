@@ -454,7 +454,10 @@ fn resolve_story(
                         story.format(txn, overlap_start, overlap_end - overlap_start, patch);
                     }
                     if let ChunkKind::Embed(Some(map)) = &chunk.kind
-                        && crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
+                        && matches!(
+                            crate::map_string(map, txn, crate::KIND_KEY).as_deref(),
+                            Some("sdt" | "field")
+                        )
                         && let Some(Out::Any(content)) = map.get(txn, "content")
                     {
                         let mut tracked = false;

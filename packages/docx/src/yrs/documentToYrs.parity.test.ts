@@ -850,6 +850,33 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it('seeds and resolves imported field run property changes in both load projections', async () => {
+    const changed = '<w:r><w:rPr><w:b/><w:rPrChange w:id="41" w:author="Writer"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr><w:t>result</w:t></w:r>';
+    const bytes = sequencePackage(`<w:p><w:fldSimple w:instr="PAGE">${changed}</w:fldSimple><w:sdt><w:sdtPr><w:text/></w:sdtPr><w:sdtContent><w:fldSimple w:instr="PAGE">${changed}</w:fldSimple></w:sdtContent></w:sdt><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${changed}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`);
+    const parsed = await parseDocx(bytes.buffer);
+    for (const accept of [true, false]) {
+      const projected = await createYrsSession({ clientId: 47032 });
+      const engine = await createYrsSession({ clientId: 47032 });
+      try {
+        documentToYrs(projected, parsed, { generation: 'field-format-parity' });
+        engine.seedFromDocx(bytes, { generation: 'field-format-parity' });
+        expectEquivalentStories(engine, projected);
+        expect(engine.listRevisions()).toEqual(projected.listRevisions());
+        expect(engine.listRevisions().length).toBeGreaterThan(0);
+        expect(engine.listRevisions().every(revision => revision.kind === 'rPrChange' && revision.author === 'Writer')).toBe(true);
+        for (const session of [engine, projected]) {
+          if (accept) session.acceptChange({ revisionId: '41' });
+          else session.rejectChange({ revisionId: '41' });
+        }
+        expectEquivalentStories(engine, projected);
+        expect(engine.listRevisions()).toEqual([]);
+      } finally {
+        engine.destroy();
+        projected.destroy();
+      }
+    }
+  });
+
   it('seeds imported run property changes into the same reviewable attributes', async () => {
     const bytes = sequencePackage('<w:p><w:r><w:rPr><w:i/><w:rPrChange w:id="17" w:author="Writer"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>text</w:t></w:r></w:p>');
     const parsed = await parseDocx(bytes.buffer);
