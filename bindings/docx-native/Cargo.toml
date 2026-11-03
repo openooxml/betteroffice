@@ -11,6 +11,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+test-hooks = []
+
 [dependencies]
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../../crates/ooxml-font-preflight" }

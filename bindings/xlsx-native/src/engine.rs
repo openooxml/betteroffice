@@ -11,8 +11,9 @@ use napi_derive::napi;
 use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
 
 /// Internal, called by the package loader.
-#[napi(js_name = "configureFontPacks")]
+#[napi(catch_unwind, js_name = "configureFontPacks")]
 pub fn configure_font_packs(
+    env: Env,
     latin: Option<String>,
     intl: Option<String>,
     cjk: Option<String>,
@@ -31,7 +32,7 @@ pub fn configure_font_packs(
     .filter_map(|(pack, directory)| directory.map(|directory| (pack, directory.into())))
     .collect();
     let fonts = BundledFonts::from_pack_directories(directories)
-        .map_err(|error| Error::from_reason(error.to_string()))?;
+        .map_err(|error| throw_error(&env, &error.to_string()))?;
     let installed = set_default_font_source(FontSource::Provider(Arc::new(fonts))).is_ok();
     *configured = true;
     Ok(installed)
@@ -331,6 +332,17 @@ impl XlsxSnapshotBuilder {
         if self.failure.borrow().is_some() {
             crate::memory::release_to_os();
         }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[napi]
+impl XlsxDocument {
+    #[napi(catch_unwind, js_name = "panicForTest")]
+    pub fn panic_for_test(&self, env: Env) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let _document = self.document(env)?;
+        panic!("panicForTest");
     }
 }
 

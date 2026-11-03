@@ -11,6 +11,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+test-hooks = []
+
 [dependencies]
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 betteroffice-pptx-engine = { path = "../../crates/pptx-engine" }
