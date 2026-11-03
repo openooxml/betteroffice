@@ -471,6 +471,7 @@ export interface WorkbookCommandState {
   throughSeq: number;
   selection: WorkbookCommandSelection;
   readOnly: boolean;
+  allowHostProposals?: boolean;
   statuses: Map<number, CommandStatus>;
   pipeFrameBytes?: Map<number, number>;
   bases: Map<string, number>;
@@ -593,15 +594,19 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
     return { seq: command.seq, status: changed ? 'applied' : 'noop', committed: false };
   }
   if (command.kind === 'setReadOnly') {
-    const changed = state.readOnly !== command.payload.readOnly;
+    const changed = state.readOnly !== command.payload.readOnly ||
+      Boolean(state.allowHostProposals) !== Boolean(command.payload.allowHostProposals);
     state.readOnly = command.payload.readOnly;
+    state.allowHostProposals = command.payload.allowHostProposals === true;
     return { seq: command.seq, status: changed ? 'applied' : 'noop', committed: false };
   }
   const refreshProposals = command.kind === 'applyOps' && 'toolbar' in command.payload &&
     command.payload.toolbar.id === 'refreshProposals';
   if (command.kind === 'setActiveSheet' && command.payload.expectVersion !== undefined &&
     command.payload.expectVersion !== handle.version()) throw new WorkbookCommandRefusal('stale-version');
-  if (state.readOnly && command.kind !== 'setActiveSheet' && !refreshProposals) throw new WorkbookCommandRefusal('read-only');
+  const hostProposal = state.allowHostProposals &&
+    (command.kind === 'propose' || command.kind === 'acceptProposal' || command.kind === 'rejectProposal');
+  if (state.readOnly && !hostProposal && command.kind !== 'setActiveSheet' && !refreshProposals) throw new WorkbookCommandRefusal('read-only');
   if (command.payload.selection) validateSelection(handle, state, command.payload.selection);
   if (refreshProposals) {
     return { seq: command.seq, status: 'applied', committed: false, result: { proposals: handle.listProposals() } };

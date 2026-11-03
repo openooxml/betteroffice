@@ -1,5 +1,9 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, spyOn, test } from 'bun:test';
+import JSZip from 'jszip';
+import type { WorkbookCommand, WorkbookCommandKind, WorkbookCommandPayload } from '../../packages/xlsx/src/session/commandProtocol';
+import type { WorkbookSession } from '../../packages/xlsx/src/session/client';
+import type { Proposal } from '../../packages/xlsx/src/wasm/loader';
 
 const manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 const wasmManifest = JSON.parse(readFileSync(new URL('../../packages/xlsx/package.json', import.meta.url), 'utf8'));
@@ -81,5 +85,34 @@ describe('@betteroffice/xlsx-native', () => {
     } finally {
       await session.dispose();
     }
+  });
+
+  test('native sessions admit read-only host proposals through the shared command API', async () => {
+    const zip = new JSZip();
+    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Review" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>`);
+    const { openWorkbookSession } = await entry('./worker');
+    const session: WorkbookSession = await openWorkbookSession(await zip.generateAsync({ type: 'uint8array' }));
+    let seq = 0;
+    const send = <K extends WorkbookCommandKind>(kind: K, payload: WorkbookCommandPayload<K>) => session.submit({
+      ...session.commandIdentity, basis: session.confirmedBasis, seq: ++seq, kind, payload,
+    } as WorkbookCommand);
+    try {
+      await send('setReadOnly', { readOnly: true, allowHostProposals: true });
+      const staged = await send('propose', { args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '7' }]] });
+      expect(staged).toMatchObject({ status: 'applied', committed: false });
+      expect(await send('editCell', { args: [0, 0, 0, '99'] }))
+        .toMatchObject({ status: 'refused', reason: 'read-only' });
+      expect(await send('acceptProposal', { args: [(staged.result as Proposal).id] }))
+        .toMatchObject({ status: 'applied', committed: true });
+      const read = await session.call.cellInputs(0, 'A1');
+      expect(read.cells[0]![0]!.input).toBe('7');
+      expect(session.editState.readOnly).toBe(true);
+    } finally { await session.dispose(); }
   });
 });
