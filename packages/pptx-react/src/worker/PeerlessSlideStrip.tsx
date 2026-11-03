@@ -1,3 +1,5 @@
+import { peerlessProposalFrameSource } from './peerlessFrameSource';
+import { AsyncProposalSlideStrip } from '../components/ProposalSlideStrip';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
 import type { SlideFit } from '../fitSlideScale';
@@ -138,10 +140,13 @@ function SlideActions({ run, active, disabled }: { run: PeerlessPresentation; ac
   </div>;
 }
 
-export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previewFit, current, onNavigate }: {
+export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previewFit, current, onNavigate, proposalId, previewSlideId, onPreviewSlide }: {
   run: PeerlessPresentation; previewFit(frame: PeerlessConfirmedFrame, run: PeerlessPresentation): SlideFit | null;
   current(token: SlideFit, run: PeerlessPresentation): boolean;
   onNavigate(): void;
+  proposalId?: string | null;
+  previewSlideId?: string | null;
+  onPreviewSlide?(slideId: string): void;
 }) {
   const { store, client } = run;
   const { t } = useTranslation();
@@ -167,8 +172,12 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previe
     };
   }, [store, client, run]);
   const view = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const readStrip = useCallback((id: string) => client.access!('proposalSlideStrip', id), [client, view]);
+  const loadProposalSlide = useCallback((slideId: string) => peerlessProposalFrameSource(run, proposalId!, slideId), [run, proposalId, view]);
   return <div style={styles.strip}><aside style={{ overflowY: 'auto', flex: 1 }} aria-label={t('slides.panelLabel')}>
-    {view.slides.map((slide, index) => <Slide key={slide.id} {...slide} index={index} active={slide.id === view.active}
+    {proposalId && onPreviewSlide ? <AsyncProposalSlideStrip id={proposalId} read={readStrip}
+      load={loadProposalSlide} selectedSlideId={previewSlideId ?? view.active} onSelect={onPreviewSlide} />
+      : view.slides.map((slide, index) => <Slide key={slide.id} {...slide} index={index} active={slide.id === view.active}
       disabled={view.disabled} run={run} previewFit={previewFit} current={current} onNavigate={onNavigate} />)}
   </aside><SlideActions run={run} active={view.active} disabled={view.disabled} /></div>;
 });

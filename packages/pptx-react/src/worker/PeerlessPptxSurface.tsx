@@ -284,8 +284,9 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     </PresentationFailure>}
     <div ref={workspace} style={styles.workspace}>
       <PeerlessImagePicker input={picker} origin={pictureOrigin} onError={(error) => callbacks.current.onError?.(error)} />
-      {chrome && slides && slides.length > 0 && <PeerlessSlideStrip run={chrome} previewFit={previewFit} current={current}
-        onNavigate={navigate} />}
+      {chrome && slides && (slides.length > 0 || review.diff && review.selectedId) && <PeerlessSlideStrip run={chrome} previewFit={previewFit} current={current}
+        onNavigate={navigate} proposalId={review.diff ? review.selectedId : null} previewSlideId={review.slideVersion && review.slideVersion !== chrome.client.state.version ? null : review.slideId}
+        onPreviewSlide={(slideId) => setReview({ ...review, slideId, slideVersion: chrome.client.state.version })} />}
       {plugins.managed && <PluginDock host={plugins.host} placement="left" activations={plugins.activations.filter((entry) => entry.plugin.panel?.placement === 'left')} available={available} />}
       <div ref={stage} role="application" aria-label={t('editor.appLabel')} tabIndex={0}
         aria-readonly={Boolean(props.readOnly || failure)} style={styles.stage}

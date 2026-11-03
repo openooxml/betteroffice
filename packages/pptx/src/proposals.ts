@@ -9,6 +9,10 @@ import type {
 } from './types';
 
 export type ProposalEdit =
+  | { type: 'insertSlide'; ref?: string; afterSlideId: string | null; layoutPartPath?: string }
+  | { type: 'duplicateSlide'; ref?: string; slideId: string; afterSlideId?: string | null }
+  | { type: 'deleteSlide'; slideId: string }
+  | { type: 'moveSlide'; slideId: string; afterSlideId: string | null }
   | {
       type: 'replaceText';
       storyId: string;
@@ -52,7 +56,17 @@ export type ProposalEdit =
     }
   | { type: 'setSlideNotes'; slideId: string; text: string };
 
+export interface ProposalStripEntry {
+  slideId: string;
+  status: 'unchanged' | 'changed' | 'inserted' | 'deleted' | 'moved';
+  liveIndex: number | null;
+  previewIndex: number | null;
+}
+
 export interface ProposalChange {
+  kind?: 'content' | 'inserted' | 'deleted' | 'moved';
+  beforeIndex?: number | null;
+  afterIndex?: number | null;
   slideId: string;
   shapeId: string | null;
   before: ShapeSnapshot | null;
@@ -68,6 +82,7 @@ export interface Proposal {
   edits: ProposalEdit[];
   changes: ProposalChange[];
   staleTargets: string[];
+  refs?: Record<string, string>;
 }
 
 export interface ProposalPreview {

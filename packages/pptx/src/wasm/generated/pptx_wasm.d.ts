@@ -69,6 +69,8 @@ export class PptxDocument {
     insertTableRowJson(args: string): string;
     insertTextJson(args: string): string;
     insertTextProfiledJson(args: string): string;
+    proposalSlideStripJson(id: string): string;
+    validateProposalJson(args: string): string;
     listProposalsJson(): string;
     mediaBytes(part_path: string): Uint8Array;
     metafileSvg(part_path: string): Uint8Array | undefined;
@@ -158,6 +160,7 @@ export class PptxRenderer {
     [Symbol.dispose](): void;
     hitTestJson(x: number, y: number): string;
     hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string;
+    layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slideId: string): string;
     layoutProposalDiffSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutSlideJson(document: PptxDocument, slide_index: number): string;
@@ -279,6 +282,8 @@ export interface InitOutput {
     readonly pptxdocument_insertTableRowJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_proposalSlideStripJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
@@ -334,6 +339,7 @@ export interface InitOutput {
     readonly pptxdocument_version: () => [number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly pptxrenderer_layoutProposalDiffSlideByIdJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];

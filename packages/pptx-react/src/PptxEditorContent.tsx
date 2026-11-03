@@ -1,3 +1,4 @@
+import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
   initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
@@ -829,7 +830,14 @@ export function PptxEditorContent({
 
   const navigateProposalTarget = useCallback((slideId: string, shapeId: string | null, proposalId?: string) => {
     const index = modelRef.current?.snapshot.slides.findIndex((slide) => slide.id === slideId) ?? -1;
-    if (index < 0) return;
+    if (index < 0) {
+      if (!backend && proposalId) {
+        canvasReview.select(proposalId);
+        canvasReview.selectSlide(slideId, proposalId);
+        canvasReview.setEnabled(true);
+      }
+      return;
+    }
     const refreshed = refreshAt(index);
     const slide = refreshed?.snapshot.slides[refreshed.slideIndex];
     setSelection(null);
@@ -838,7 +846,7 @@ export function PptxEditorContent({
       if (proposalId) canvasReview.select(proposalId);
       canvasReview.setEnabled(true);
     }
-  }, [backend, refreshAt, canvasReview.select, canvasReview.setEnabled]);
+  }, [backend, refreshAt, canvasReview.select, canvasReview.selectSlide, canvasReview.setEnabled]);
 
   const refreshProposals = useCallback(() => {
     try {
@@ -2869,7 +2877,12 @@ export function PptxEditorContent({
       </div>}
       <div ref={dockAreaRef} style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
-          {model?.snapshot.slides.map((slide, index) => {
+          {canvasReview.reviewing && canvasReview.selected && handleRef.current && canvasReview.diff ? (
+            <ProposalSlideStrip entries={handleRef.current.proposalSlideStrip(canvasReview.selected.id)}
+              selectedSlideId={canvasReview.previewSlideId ?? currentSlideId}
+              load={(slideId) => handleRef.current!.layoutProposalDiffSlideById(canvasReview.selected!.id, slideId)}
+              resolveImage={resolveSlideImage} onSelect={canvasReview.selectSlide} />
+          ) : model?.snapshot.slides.map((slide, index) => {
             const slidePresence = remotePeersBySlide.get(slide.id);
             return (
               <button
@@ -3077,6 +3090,12 @@ export function PptxEditorContent({
                       navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id);
                       setProposalsOpen(true);
                     }} />}
+                </div>
+              ) : canvasReview.diff && model ? (
+                <div style={{ ...styles.canvasFrame, width: canvasReview.diff.frame.width * scale, height: canvasReview.diff.frame.height * scale }}>
+                  <ProposalCanvasOverlay diff={canvasReview.diff} current={model.snapshot} frame={canvasReview.diff.frame}
+                    slideIndex={0} scale={scale} resolveImage={resolveSlideImage} onPainted={setPaintedReview}
+                    onTarget={(slideId, shapeId) => navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id)} />
                 </div>
               ) : (
                 <div style={styles.empty}>

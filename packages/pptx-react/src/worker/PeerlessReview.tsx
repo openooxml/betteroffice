@@ -10,7 +10,7 @@ import { useTranslation } from '../i18n';
 import { proposalsPanelStyles as styles } from '../components/proposalsPanelStyles';
 import { PeerlessPresentationOverlay } from './PeerlessPresentationOverlay';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
-import { peerlessFrameSource } from './peerlessFrameSource';
+import { peerlessFrameSource, peerlessProposalFrameSource } from './peerlessFrameSource';
 import { commitComposition, PptxCommandRefusedError } from './peerlessViewStore';
 
 const location = { ...styles.link, cursor: 'default' };
@@ -23,9 +23,9 @@ function changesKey(proposal: Proposal): string {
       ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 }
 
-export interface PeerlessReviewState { open: boolean; selectedId: string | null; diff: boolean; presenting: boolean }
+export interface PeerlessReviewState { open: boolean; selectedId: string | null; diff: boolean; presenting: boolean; slideId?: string | null; slideVersion?: string }
 
-function Diff({ run, id, onPreview, onError }: { run: PeerlessPresentation; id: string; onPreview(proposal: Proposal | null): void; onError(error: Error): void }) {
+function Diff({ run, id, slideId, onPreview, onError }: { run: PeerlessPresentation; id: string; slideId?: string | null; onPreview(proposal: Proposal | null): void; onError(error: Error): void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const reportError = useRef(onError);
   reportError.current = onError;
@@ -33,11 +33,10 @@ function Diff({ run, id, onPreview, onError }: { run: PeerlessPresentation; id: 
   useEffect(() => {
     let cancelled = false;
     onPreview(null);
-    const index = run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId);
     void (async () => {
-      const source = await peerlessFrameSource(run, index);
+      const source = await peerlessProposalFrameSource(run, id, slideId);
       try {
-        const diff = await run.client.access!('layoutProposalDiffSlide', id, index);
+        const diff = source;
         run.require();
         const scale = visual?.fit.scale ?? 1;
         const buffer = document.createElement('canvas');
@@ -53,8 +52,8 @@ function Diff({ run, id, onPreview, onError }: { run: PeerlessPresentation; id: 
       } finally { source.release(); }
     })().catch((error: unknown) => { if (!cancelled && run.current) reportError.current(error instanceof Error ? error : new Error(String(error))); });
     return () => { cancelled = true; };
-  }, [run, id, visual, onPreview]);
-  return <canvas ref={canvas} data-testid="pptx-proposal-diff" style={{ position: 'absolute', left: 0, top: 0 }} />;
+  }, [run, id, slideId, visual, onPreview]);
+  return <canvas ref={canvas} data-testid="pptx-proposal-diff" data-slide-id={slideId ?? run.client.state.activeSlideId} style={{ position: 'absolute', left: 0, top: 0 }} />;
 }
 
 export function PeerlessReview({ run, diffHost, state, proposals, commands, onError, exit }: {
@@ -111,7 +110,8 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
   };
   const target = (change: Proposal['changes'][number]) => {
     const slide = run.client.state.slides.findIndex((slide) => slide.id === change.slideId);
-    return slide < 0 ? t('proposals.targetMissing')
+    return slide < 0 && change.kind === 'inserted' ? t('proposals.target', { slide: (change.afterIndex ?? 0) + 1, name: t('proposals.insertedSlide') })
+      : slide < 0 ? t('proposals.targetMissing')
       : t('proposals.target', { slide: slide + 1, name: change.before?.name || t('notes.panelLabel') });
   };
   const preview = async (proposal: Proposal) => {
@@ -128,7 +128,7 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
       }
       run.require();
       const slideId = proposal.changes[0]?.slideId;
-      if (slideId && slideId !== run.client.state.activeSlideId) {
+      if (slideId && run.client.state.slides.some(slide => slide.id === slideId) && slideId !== run.client.state.activeSlideId) {
         const ack = await run.store.dispatch({ kind: 'activateSlide', payload: { slideId } });
         const refused = ack.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
         if (refused) throw new PptxCommandRefusedError('activateSlide', refused);
@@ -179,7 +179,7 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
         </div>
       </section>)}
     </aside>}
-    {state.diff && state.selectedId && diffHost.current && createPortal(<Diff key={previewGeneration} run={run} id={state.selectedId} onPreview={onPreview} onError={onError} />, diffHost.current)}
+    {state.diff && state.selectedId && diffHost.current && createPortal(<Diff key={previewGeneration} run={run} id={state.selectedId} slideId={state.slideVersion && state.slideVersion !== run.client.state.version ? null : state.slideId} onPreview={onPreview} onError={onError} />, diffHost.current)}
     {state.presenting && <PeerlessPresentationOverlay frameSource={frameSource} subscribeRevision={subscribeRevision} revision={revision}
       slideCount={run.client.state.slides.length} startIndex={run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId)}
       label={t('presentation.label')} counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}

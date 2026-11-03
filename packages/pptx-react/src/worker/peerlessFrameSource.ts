@@ -20,6 +20,23 @@ export async function peerlessFrameSource(run: PeerlessPresentation, index?: num
   return { frame: frame.displayList, resolveImage: lease.resolve, release: lease.release, confirmed: frame, index: position };
 }
 
+export async function peerlessProposalFrameSource(run: PeerlessPresentation, id: string, slideId?: string | null) {
+  run.require();
+  const index = run.client.state.slides.findIndex(slide => slide.id === run.client.state.activeSlideId);
+  const targetId = slideId ?? (index < 0 ? (await run.client.access!('proposalSlideStrip', id))[0]?.slideId : null);
+  const diff = targetId
+    ? await run.client.access!('layoutProposalDiffSlideById', id, targetId)
+    : await run.client.access!('layoutProposalDiffSlide', id, index);
+  const live = await run.client.access!('snapshot');
+  const target = diff.snapshot.slides[0];
+  const original = live.slides.find(slide => slide.id === target?.id ||
+    Boolean(target?.sourcePartPath && slide.sourcePartPath === target.sourcePartPath));
+  const sourceIndex = run.client.state.slides.findIndex(slide => slide.id === original?.id);
+  if (!run.client.state.slides.length) return { ...diff, resolveImage: () => null, release() {} };
+  const source = await peerlessFrameSource(run, sourceIndex >= 0 ? sourceIndex : Math.max(0, index));
+  return { ...diff, resolveImage: source.resolveImage, release: source.release };
+}
+
 export async function peerlessExportPng(run: PeerlessPresentation): Promise<{ png: Blob; index: number }> {
   const source = await peerlessFrameSource(run);
   const canvas = document.createElement('canvas');

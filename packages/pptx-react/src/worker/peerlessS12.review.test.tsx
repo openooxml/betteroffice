@@ -224,3 +224,27 @@ test('force acceptance refreshes notes changed since preview without applying th
   await waitFor(() => expect(value.view.queryByTestId('pptx-proposal') === null).toBe(true));
   expect((await access.snapshot()).slides[0]!.notes).toBe('Proposed notes');
 });
+
+test('structural proposals show ghost strip entries and accept from the canvas review', async () => {
+  const value = await open();
+  const access = await value.api.handleAsync();
+  let id = '';
+  await act(async () => {
+    id = (await access.propose('reviewer', 'New slide', [
+      { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+      { type: 'setSlideNotes', slideId: '@draft', text: 'Draft' },
+      { type: 'deleteSlide', slideId: value.client.state.slides[1]!.id },
+    ])).id;
+    await value.api.commands.execute('proposalsPanel', { open: true });
+    await value.api.commands.execute('proposalSelect', { proposalId: id });
+    await value.api.commands.execute('proposalDiff', { enabled: true });
+  });
+  const ghost = await waitFor(() => value.view.getByTestId('pptx-proposal-slide-inserted'));
+  expect(ghost.style.borderStyle).toBe('dashed');
+  expect(value.view.getByTestId('pptx-proposal-slide-deleted').style.opacity).toBe('0.4');
+  await act(async () => { fireEvent.click(ghost); });
+  await waitFor(() => expect(value.view.getByTestId('pptx-proposal-diff').getAttribute('data-slide-id')).toBe(ghost.getAttribute('data-slide-id')));
+  await act(async () => { fireEvent.click(value.view.getByTestId('pptx-proposal-accept')); });
+  await waitFor(async () => expect(await access.listProposals()).toHaveLength(0));
+  expect((await access.snapshot()).slides[0]!.notes).toBe('Draft');
+});

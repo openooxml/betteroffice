@@ -1258,7 +1258,7 @@ export function registerPresentationCommandHandlers(
       opened.addUndoBoundary();
       if (before === opened.version()) return false;
       admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: false,
-        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide'].includes(admitted.method) };
+        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide', 'acceptProposal'].includes(admitted.method) };
       refreshHistory(command.seq, admitted.receipt);
       if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
@@ -1671,6 +1671,8 @@ export function registerPresentationCommandHandlers(
         case 'previewProposal': return opened.previewProposal(args[0] as string);
         case 'layoutSlide': return opened.layoutSlide(args[0] as number);
         case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
+        case 'proposalSlideStrip': return opened.proposalSlideStrip(args[0] as string);
+        case 'layoutProposalDiffSlideById': return opened.layoutProposalDiffSlideById(args[0] as string, args[1] as string);
         case 'layoutProposalDiffSlide': return opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
         default: throw new TypeError('Unsupported access method');
       }

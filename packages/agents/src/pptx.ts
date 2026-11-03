@@ -1,11 +1,11 @@
 import { imageSize } from 'image-size';
-import { pptxBatchSchema, type PptxAgentBatch, type PptxAgentEdit } from './pptx-schema';
+import { pptxBatchSchema, pptxProposalSlideEditSchema, type PptxAgentBatch, type PptxAgentEdit, type PptxProposalSlideEdit } from './pptx-schema';
 import { loadPptxFonts, pptxFontFaces, pptxThemeFonts, renderPptxSlide, type PptxThemeFonts } from './pptx-render';
-import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
+import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type ProposalEdit, type Proposal, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
 import { DocumentToolError, unknownMatchError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
-import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
+import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions, type AgentProposal } from './prototype';
 
-export interface SlideTextChange { ref: string; slide: number; story: string; start: number; oldText: string; newText: string }
+export interface SlideTextChange { ref: string; slide: number; story: string; start: number; oldText: string; newText: string; kind?: 'content' | 'inserted' | 'deleted' | 'moved'; slideId?: string; beforeIndex?: number | null; afterIndex?: number | null }
 interface Paragraph { ref: string; paragraphId: string; slide: number; story: PptxStoryText; start: number; end: number; editable: boolean }
 interface HeldMatch { ref: string; slide: number; target: PptxStoryTarget; start: number; paragraphStart: number; text: string; version: string }
 
@@ -15,6 +15,11 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   readonly format = 'pptx' as const;
   private readonly refs = new Map<string, string>();
   private readonly matches = new Map<string, HeldMatch>();
+  private readonly slideProposals = new Map<string, {
+    engineId: string;
+    value: AgentProposal<SlideTextChange>;
+    edits: ProposalEdit[];
+  }>();
   private nextMatch = 1;
   private nextRef = 1;
   private cachedLayouts?: ReturnType<PresentationHandle['layouts']>;
@@ -47,7 +52,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
 
   overview() {
     const read = this.content();
-    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, office_outline with story comments for discussion IDs and office_read for full comment text, pptx_edit with the current version for atomic edits including add_comment/reply_comment/resolve_comment, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
+    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements and slide structure', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, office_outline with story comments for discussion IDs and office_read for full comment text, pptx_edit with the current version for atomic edits including add_comment/reply_comment/resolve_comment, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
   }
 
   list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
@@ -106,23 +111,122 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     return { ...this.reference(p), version: read.version, ...textWindow(p.story.text.slice(p.start, p.end), options), editable: p.editable };
   }
 
-  propose(input: { author: string; note?: string; edits: TextEdit[] }) {
+  propose(input: { author: string; note?: string; edits: (TextEdit | PptxProposalSlideEdit)[] }) {
     this.alive();
-    if (!Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > 32) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply 1–32 replacements.');
+    if (!Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > 32) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply 1 to 32 proposal edits.');
     const version = this.currentVersion();
     const changes: SlideTextChange[] = [];
     const steps: PptxEditStep[] = [];
+    const structural = input.edits.some(edit => 'type' in edit);
+    const proposalEdits: ProposalEdit[] = [];
     for (const edit of input.edits) {
+      if ('type' in edit) {
+        const parsed = pptxProposalSlideEditSchema.safeParse(edit);
+        if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Invalid slide proposal edit.', parsed.error.issues);
+        proposalEdits.push(parsed.data);
+        continue;
+      }
       if (!('match' in edit)) throw new DocumentToolError('UNSUPPORTED', 'PPTX replacements require a match ID from grep.');
       const hit = this.matches.get(edit.match);
       if (!hit) throw unknownMatchError(edit.match, `${this.prefix}:match1`, /^[^:\s]+:match\d+$/u, 'Match expired or belongs to another deck. Grep again.');
       if (hit.version !== version) throw new DocumentToolError('STALE_TARGET', 'Presentation changed. Grep for fresh matches.');
       plainText(edit.newText);
       if (/[\r\n\ufffc]/u.test(edit.newText) || edit.newText.length > 16000) throw new DocumentToolError('INVALID_ARGUMENT', 'Replacement must be plain text in one paragraph, up to 16000 UTF-16 units.');
+      proposalEdits.push({ type: 'replaceText', storyId: hit.target.storyId, start: hit.start, end: hit.start + hit.text.length, text: edit.newText });
       changes.push({ ref: hit.ref, slide: hit.slide, story: hit.target.storyId, start: hit.start - hit.paragraphStart, oldText: hit.text, newText: edit.newText });
       steps.push({ op: 'replaceText', target: { kind: 'range', ...hit.target, start: hit.start, end: hit.start + hit.text.length }, text: edit.newText, expect: { text: hit.text } });
     }
+    if (structural) return this.stageSlideProposal(input, proposalEdits, version);
     return this.stage(input, changes, steps, version);
+  }
+
+  private slideChanges(proposal: Proposal): SlideTextChange[] {
+    return proposal.changes.map(change => ({
+      ref: change.shapeId ?? change.slideId, slide: (change.afterIndex ?? change.beforeIndex ?? 0) + 1,
+      story: '', start: 0, oldText: change.oldText, newText: change.newText,
+      kind: change.kind, slideId: change.slideId, beforeIndex: change.beforeIndex, afterIndex: change.afterIndex,
+    }));
+  }
+
+  private stageSlideProposal(input: { author: string; note?: string }, edits: ProposalEdit[], version: string): AgentProposal<SlideTextChange> {
+    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000) {
+      throw new DocumentToolError('INVALID_ARGUMENT', 'Supply an author (1 to 200 characters) and note up to 2000 characters.');
+    }
+    const listed = this.listProposals();
+    if (listed.length >= 64) {
+      const closed = listed.find(proposal => proposal.status !== 'pending');
+      if (!closed) throw new DocumentToolError('PROPOSAL_LIMIT', 'Reject or discard a proposal before staging more than 64.');
+      this.discard(closed.id);
+    }
+    const proposal = this.handle.propose(input.author, input.note ?? null, edits);
+    const value: AgentProposal<SlideTextChange> = {
+      id: `slide:${proposal.id}`, author: input.author, note: input.note ?? '', status: 'pending', version,
+      changes: this.slideChanges(proposal), stale: false,
+    };
+    this.slideProposals.set(value.id, { engineId: proposal.id, value, edits: structuredClone(edits) });
+    return structuredClone(value);
+  }
+
+  override review(id: string): AgentProposal<SlideTextChange> {
+    this.alive();
+    const held = this.slideProposals.get(id);
+    if (!held) return super.review(id);
+    const live = this.handle.listProposals().find(proposal => proposal.id === held.engineId);
+    if (held.value.status === 'pending' && !live) throw new DocumentToolError('PROPOSAL_CLOSED', 'Proposal was accepted or rejected in the editor.');
+    return structuredClone({ ...held.value, stale: Boolean(live?.staleTargets.length) });
+  }
+
+  override listProposals() {
+    const listed = super.listProposals();
+    const live = this.handle.listProposals();
+    return [...listed, ...[...this.slideProposals.values()].map(({ value, engineId }) => ({
+      id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status,
+      changes: value.changes.length, stale: Boolean(live.find(proposal => proposal.id === engineId)?.staleTargets.length),
+    }))];
+  }
+
+  override async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
+    this.alive();
+    const held = this.slideProposals.get(id);
+    if (!held) return super.accept(id, options);
+    if (options.tracked || options.date) throw new DocumentToolError('UNSUPPORTED', 'Tracked acceptance is available for DOCX only.');
+    if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
+    const result = this.handle.acceptProposal(held.engineId);
+    held.value.status = 'accepted';
+    return { id, status: 'accepted' as const, receipt: { applied: result.applied, version: this.handle.version(),
+      changedSlides: held.value.changes.length, changedStories: 0 } };
+  }
+
+  override reject(id: string) {
+    this.alive();
+    const held = this.slideProposals.get(id);
+    if (!held) return super.reject(id);
+    if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
+    this.handle.rejectProposal(held.engineId);
+    held.value.status = 'rejected';
+    return { id, status: 'rejected' as const };
+  }
+
+  override discard(id: string) {
+    this.alive();
+    const held = this.slideProposals.get(id);
+    if (!held) return super.discard(id);
+    if (held.value.status === 'pending') this.handle.rejectProposal(held.engineId);
+    this.slideProposals.delete(id);
+  }
+
+  override async export(id?: string): Promise<Uint8Array> {
+    this.alive();
+    const held = id ? this.slideProposals.get(id) : undefined;
+    if (!held) return super.export(id);
+    if (this.review(id!).status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
+    if (this.review(id!).stale) throw new DocumentToolError('STALE_TARGET', 'Proposal targets changed.');
+    const replica = this.handle.fork();
+    try {
+      const proposal = replica.propose(held.value.author, held.value.note, held.edits);
+      replica.acceptProposal(proposal.id);
+      return this.owned ? await this.saveFitted(replica) : replica.save();
+    } finally { replica.dispose(); }
   }
 
   outline(options: { offset?: number; limit?: number; shapeOffset?: number; shapeLimit?: number; layoutOffset?: number; layoutPlaceholderOffset?: number } = {}) {
@@ -600,7 +704,12 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     }
   }
   protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }
-  protected dispose() { this.refs.clear(); this.matches.clear(); if (this.owned) this.handle.dispose(); }
+  protected dispose() {
+    for (const held of this.slideProposals.values()) {
+      if (held.value.status === 'pending') this.handle.rejectProposal(held.engineId);
+    }
+    this.slideProposals.clear();
+    this.refs.clear(); this.matches.clear(); if (this.owned) this.handle.dispose(); }
 
   private content() { this.alive(); return unwrap(this.handle.readContent()); }
   private reference(p: Paragraph) { return { ref: p.ref, slide: p.slide, slideId: p.story.slideId, shapeId: p.story.shapeId, story: p.story.storyId }; }

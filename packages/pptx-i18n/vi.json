@@ -168,7 +168,12 @@
     "canvasStale": "Đối tượng đã thay đổi. Hãy mở Chi tiết xem xét để kiểm tra bản xem trước đã cập nhật trước khi áp dụng.",
     "previousPosition": "Trước",
     "proposedPosition": "Đã đề xuất",
-    "loadingDiff": "Đang tải thay đổi…"
+    "loadingDiff": "Đang tải thay đổi…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Điều khiển khác",

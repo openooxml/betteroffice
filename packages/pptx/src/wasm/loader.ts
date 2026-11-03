@@ -31,7 +31,7 @@ import type {
   PptxMarkdownOptions,
   PptxStructuredContent,
 } from '../structuredExport';
-import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
+import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry } from '../proposals';
 import type {
   PptxEditRequest,
   PptxEditResult,
@@ -136,6 +136,8 @@ export interface PresentationHandle extends CollaborationReplica {
   previewProposal(id: string): ProposalPreview;
   layoutProposalSlide(id: string, slideIndex: number): SlideDisplayList;
   layoutProposalDiffSlide(id: string, slideIndex: number): ProposalDiffSlide;
+  layoutProposalDiffSlideById(id: string, slideId: string): ProposalDiffSlide;
+  proposalSlideStrip(id: string): ProposalStripEntry[];
   acceptProposal(id: string, options?: { force?: boolean }): ProposalAcceptance;
   rejectProposal(id: string): boolean;
   readonly clientId: number;
@@ -363,7 +365,7 @@ export type PresentationPeerHandle = Pick<PresentationHandle,
   'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' |
   'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
   'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
-  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' |
+  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'hitTest' |
   'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
 >;
 
@@ -763,6 +765,12 @@ function openPresentationInternal(
     },
     previewProposal(id) {
       return jsonWasmCall(() => doc.previewProposalJson(JSON.stringify({ id })));
+    },
+    proposalSlideStrip(id) {
+      return jsonWasmCall(() => doc.proposalSlideStripJson(id));
+    },
+    layoutProposalDiffSlideById(id, slideId) {
+      return jsonWasmCall(() => renderer.layoutProposalDiffSlideByIdJson(doc, id, slideId));
     },
     layoutProposalDiffSlide(id, slideIndex) {
       return jsonWasmCall(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex));

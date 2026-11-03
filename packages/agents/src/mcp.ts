@@ -1,3 +1,5 @@
+import { pptxProposalSlideEditSchema } from './pptx-schema';
+import { PptxAgentPresentation } from './pptx';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -95,10 +97,15 @@ export async function createOfficeMcpServer(options: { root: string; renderer?: 
   tool('office_verify', 'Save and reopen the current document or a pending proposal in memory. Reports completed checks explicitly; does not assert semantic or visual correctness.', { document, proposal: proposal.optional() }, true, async args => result(await workspace.get(args.document).verify(args.proposal)));
   tool('office_close', 'Release an open document and its in-memory proposals. Export any work you want to keep first.', { document }, false, args => result(workspace.close(args.document)));
   if (!options.readOnly) {
-    tool('office_propose', 'DOCX/PPTX: stage 1–32 text replacements without changing the document. XLSX uses office_propose_cells. First grep for the exact text you want to replace, then copy the desired occurrence\'s match ID. Supply edits [{match: ID_FROM_GREP, newText: REPLACEMENT}]. To change part of a sentence, grep that part; do not reuse a match for the whole sentence. New text inherits formatting at its start. No paragraph/embedded-content/tracked-change crossings.', {
+    tool('office_propose', 'DOCX/PPTX: stage 1 to 32 text replacements without changing the document. XLSX uses office_propose_cells. First grep for the exact text you want to replace, then copy the desired occurrence\'s match ID. Supply edits [{match: ID_FROM_GREP, newText: REPLACEMENT}]. To change part of a sentence, grep that part; do not reuse a match for the whole sentence. New text inherits formatting at its start. No paragraph/embedded-content/tracked-change crossings. PPTX also accepts slide edits with type insertSlide {ref?, afterSlideId, layoutPartPath?}, duplicateSlide {ref?, slideId, afterSlideId?}, deleteSlide {slideId}, moveSlide {slideId, afterSlideId}. afterSlideId null means first; omitted on duplicateSlide means after its source. Later slide IDs and anchors may use @ref from a creating edit in this proposal.', {
       document, author: z.string().min(1).max(200), note: z.string().max(2000).optional(),
-      edits: z.array(z.object({ match: identifier.describe('Match ID from office_grep (not the text).'), newText: z.string().max(16000) }).strict()).min(1).max(32),
-    }, false, args => result(workspace.get(args.document).propose(args)));
+      edits: z.array(z.union([z.object({ match: identifier.describe('Match ID from office_grep (not the text).'), newText: z.string().max(16000) }).strict(), pptxProposalSlideEditSchema])).min(1).max(32),
+    }, false, args => {
+      const target = workspace.get(args.document);
+      if (target instanceof PptxAgentPresentation) return result(target.propose(args));
+      if (args.edits.some(edit => 'type' in edit)) throw new DocumentToolError('UNSUPPORTED_FORMAT', 'Slide proposals require PPTX.');
+      return result(target.propose({ ...args, edits: args.edits.filter((edit): edit is { match: string; newText: string } => 'match' in edit) }));
+    });
     tool('office_propose_cells', 'XLSX: stage 1–32 whole-cell edits using handles from office_cells or office_grep. input parses typed numbers, text and =formulas; empty clears. Review then office_accept, or office_export with proposal. For immediate matrix writes, use xlsx_write_range.', {
       document, author: z.string().min(1).max(200), note: z.string().max(2000).optional(),
       edits: z.array(z.object({ cell: identifier, input: z.string().max(16000) }).strict()).min(1).max(32),

@@ -581,3 +581,36 @@ test('PPTX layout placeholder inventories paginate within the outline budget', a
     expect(ids.size).toBe(81);
   } finally { deck.close(); }
 });
+
+test('slide proposals reach an attached canvas handle and keep refs through review and acceptance', async () => {
+  const opened = await openPptx(await presentationFixture());
+  opened.close();
+  const handle = openPresentation(await presentationFixture());
+  const deck = attachPptx(handle);
+  try {
+    const before = handle.snapshot();
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+      { type: 'duplicateSlide', ref: 'copy', slideId: '@draft' },
+      { type: 'moveSlide', slideId: '@copy', afterSlideId: before.slides[0]!.id },
+      { type: 'deleteSlide', slideId: '@draft' },
+    ] });
+    expect(handle.listProposals()).toHaveLength(1);
+    const pending = handle.listProposals()[0]!;
+    expect(handle.proposalSlideStrip(pending.id).some(entry => entry.status === 'inserted')).toBe(true);
+    expect(deck.review(proposal.id).stale).toBe(false);
+    expect(handle.snapshot()).toEqual(before);
+    const preview = await deck.export(proposal.id);
+    const reopened = openPresentation(preview);
+    expect(reopened.snapshot().slides).toHaveLength(before.slides.length + 1);
+    reopened.dispose();
+    await deck.accept(proposal.id);
+    expect(handle.listProposals()).toHaveLength(0);
+    expect(handle.snapshot().slides).toHaveLength(before.slides.length + 1);
+    handle.undo();
+    expect(handle.snapshot()).toEqual(before);
+    const rejected = deck.propose({ author: 'agent', edits: [{ type: 'insertSlide', afterSlideId: null }] });
+    deck.reject(rejected.id);
+    expect(handle.listProposals()).toHaveLength(0);
+  } finally { deck.close(); handle.dispose(); }
+});

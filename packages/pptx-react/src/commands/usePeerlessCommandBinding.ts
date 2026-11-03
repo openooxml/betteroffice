@@ -64,7 +64,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         canUndo: view?.editState.canUndo ?? false, canRedo: view?.editState.canRedo ?? false,
         slide: slide ? { id: slide.id, layoutPartPath: slide.layoutPartPath } : null, layouts: [...new Set(run?.client.state.slides.flatMap((slide) => slide.layoutPartPath ? [slide.layoutPartPath] : []))].map((layoutPartPath, index) => ({ value: layoutPartPath, label: t('toolbar.layoutOption', { number: index + 1 }), args: { layoutPartPath } })),
         text, shape: view?.editState.object ?? null, tool, zoom,
-        fontFamilies: DEFAULT_FONT_FAMILIES, fontSizes: DEFAULT_FONT_SIZES, proposals: { open: review.open, pending: proposals.map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), canvas: { available: proposals.filter((proposal) => proposal.changes.some((change) => change.slideId === slideId)).map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), selectedId: review.selectedId, diff: review.diff } },
+        fontFamilies: DEFAULT_FONT_FAMILIES, fontSizes: DEFAULT_FONT_SIZES, proposals: { open: review.open, pending: proposals.map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), canvas: { available: proposals.filter((proposal) => proposal.changes.some((change) => change.slideId === slideId || change.kind && change.kind !== 'content' || change.oldText !== change.newText || JSON.stringify(change.before) !== JSON.stringify(change.after))).map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), selectedId: review.selectedId, diff: review.diff } },
         hostDisabled: (id) => !supported.has(id), translate: t };
     };
     const value: PptxCommandBinding = {
@@ -92,7 +92,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         switch (id) {
           case 'zoom': setZoom((args as PptxCommandArgs['zoom']).scale); return { ok: true, status: 'executed' };
           case 'proposalsPanel': setReview({ ...review, open: args === null ? !review.open : (args as PptxCommandArgs['proposalsPanel'])!.open }); return { ok: true, status: 'opened' };
-          case 'proposalSelect': flushSync(() => setReview({ ...review, selectedId: (args as PptxCommandArgs['proposalSelect']).proposalId })); return { ok: true, status: 'executed' };
+          case 'proposalSelect': flushSync(() => setReview({ ...review, slideId: null, selectedId: (args as PptxCommandArgs['proposalSelect']).proposalId })); return { ok: true, status: 'executed' };
           case 'proposalDiff': {
             const enabled = (args as PptxCommandArgs['proposalDiff']).enabled;
             const composition = run.store.getSnapshot().composition;
