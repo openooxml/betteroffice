@@ -6,7 +6,7 @@ export type { ProgressiveFontFace, SliceLocation } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { loadPackedFontBytes, isBaseLatinFont, isLatinFont, sliceRefOf } from './packed';
+import { loadPackedFontBytes, isBaseLatinFont, isLatinFont, sliceDecoder, sliceRefOf } from './packed';
 import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
 import type { SliceLocation } from './progressive';
 
@@ -231,7 +231,7 @@ function sliceLocation(
     ref,
     base: baseUrl?.href ?? '',
     url: (file) => sliceAssetUrl(file, baseUrl),
-    wasmUrl: baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
+    decode: sliceDecoder(baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl), runtime?.decoder),
     decoder: runtime?.decoder,
   };
 }

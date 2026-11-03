@@ -4,7 +4,7 @@ import { version as fontsLatinVersion } from '../../fonts-latin/package.json';
 import { version as fontsIntlVersion } from '../../fonts-intl/package.json';
 import { loadFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
-import { loadPackedFontBytes, isBaseLatinFont, isLatinFont, isCjkFont, sliceRefOf } from './packed';
+import { loadPackedFontBytes, isBaseLatinFont, isLatinFont, isCjkFont, sliceDecoder, sliceRefOf } from './packed';
 import { fontProvider, type BundledFontSource } from './provider';
 
 export interface CdnFontOptions {
@@ -66,7 +66,7 @@ export function createFontProvider(
       base: cjkBase.href,
       url: async (file) => new URL(file, cjkBase),
       timeoutMs: 30_000,
-      wasmUrl: decoderUrl,
+      decode: sliceDecoder(decoderUrl, runtime?.decoder),
       decoder: runtime?.decoder,
     };
   });
