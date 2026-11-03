@@ -17,7 +17,7 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame } from './commandFrame';
+import { buildCommandFrame, commandFrameMedia } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
@@ -1672,8 +1672,14 @@ export function registerPresentationCommandHandlers(
         case 'layoutSlide': return opened.layoutSlide(args[0] as number);
         case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
         case 'proposalSlideStrip': return opened.proposalSlideStrip(args[0] as string);
-        case 'layoutProposalDiffSlideById': return opened.layoutProposalDiffSlideById(args[0] as string, args[1] as string);
-        case 'layoutProposalDiffSlide': return opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+        case 'layoutProposalDiffSlideById':
+        case 'layoutProposalDiffSlide': {
+          const diff = method === 'layoutProposalDiffSlideById'
+            ? opened.layoutProposalDiffSlideById(args[0] as string, args[1] as string)
+            : opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+          const media = commandFrameMedia(opened, diff.frame, new Set());
+          return transferable({ ...diff, media }, media.map(({ bytes }) => bytes));
+        }
         default: throw new TypeError('Unsupported access method');
       }
     },

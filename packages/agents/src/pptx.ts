@@ -136,7 +136,19 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       changes.push({ ref: hit.ref, slide: hit.slide, story: hit.target.storyId, start: hit.start - hit.paragraphStart, oldText: hit.text, newText: edit.newText });
       steps.push({ op: 'replaceText', target: { kind: 'range', ...hit.target, start: hit.start, end: hit.start + hit.text.length }, text: edit.newText, expect: { text: hit.text } });
     }
-    if (structural) return this.stageSlideProposal(input, proposalEdits, version);
+    if (structural) {
+      if (steps.length) this.validate(steps, version);
+      const replacements = new Map<string, Extract<ProposalEdit, { type: 'replaceText' }>[]>();
+      for (const edit of proposalEdits) {
+        if (edit.type !== 'replaceText') continue;
+        const story = replacements.get(edit.storyId) ?? [];
+        story.push(edit);
+        replacements.set(edit.storyId, story);
+      }
+      for (const story of replacements.values()) story.sort((left, right) => left.start - right.start);
+      const ordered = proposalEdits.map(edit => edit.type === 'replaceText' ? replacements.get(edit.storyId)!.pop()! : edit);
+      return this.stageSlideProposal(input, ordered, version);
+    }
     return this.stage(input, changes, steps, version);
   }
 
@@ -179,6 +191,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   override listProposals() {
     const listed = super.listProposals();
     const live = this.handle.listProposals();
+    const liveIds = new Set(live.map(proposal => proposal.id));
+    for (const [id, held] of this.slideProposals) {
+      if (!liveIds.has(held.engineId)) this.slideProposals.delete(id);
+    }
     return [...listed, ...[...this.slideProposals.values()].map(({ value, engineId }) => ({
       id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status,
       changes: value.changes.length, stale: Boolean(live.find(proposal => proposal.id === engineId)?.staleTargets.length),

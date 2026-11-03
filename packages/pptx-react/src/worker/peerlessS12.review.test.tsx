@@ -1,6 +1,8 @@
-import { open, replyControl, story, type } from './peerlessTestHarness';
+import { deck, open, replyControl, story, type } from './peerlessTestHarness';
 import { expect, mock, spyOn, test } from 'bun:test';
 import type { PresentationHandle } from '@betteroffice/pptx';
+import JSZip from 'jszip';
+import * as frameSources from './peerlessFrameSource';
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 type ReviewAccess = { [K in 'propose' | 'previewProposal' | 'layoutProposalDiffSlide' | 'acceptProposal' | 'rejectProposal']:
   (...args: Parameters<PresentationHandle[K]>) => Promise<ReturnType<PresentationHandle[K]>> };
@@ -247,4 +249,64 @@ test('structural proposals show ghost strip entries and accept from the canvas r
   await act(async () => { fireEvent.click(value.view.getByTestId('pptx-proposal-accept')); });
   await waitFor(async () => expect(await access.listProposals()).toHaveLength(0));
   expect((await access.snapshot()).slides[0]!.notes).toBe('Draft');
+});
+
+test('inserted layout background images paint in ghost thumbnails and canvas previews', async () => {
+  const zip = await JSZip.loadAsync(await deck());
+  const imageId = 'ppt/media/layout-background.png';
+  const layout = 'ppt/slideLayouts/slideLayout1.xml';
+  const p = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+  const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const rels = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  zip.file(layout, `<p:sldLayout xmlns:p="${p}" xmlns:a="${a}" xmlns:r="${r}" type="blank"><p:cSld name="Picture background"><p:bg><p:bgPr><a:blipFill><a:blip r:embed="picture"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:bgPr></p:bg><p:spTree/></p:cSld></p:sldLayout>`);
+  zip.file('ppt/slideLayouts/_rels/slideLayout1.xml.rels', `<Relationships xmlns="${rels}"><Relationship Id="picture" Type="${r}/image" Target="../media/layout-background.png"/></Relationships>`);
+  zip.file(imageId, Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), char => char.charCodeAt(0)));
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', `<Default Extension="png" ContentType="image/png"/><Override PartName="/${layout}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/></Types>`));
+  const bitmap = { width: 1, height: 1, close: mock(() => {}) } as unknown as ImageBitmap;
+  const originalBitmap = Object.getOwnPropertyDescriptor(globalThis, 'createImageBitmap');
+  Object.defineProperty(globalThis, 'createImageBitmap', { configurable: true, value: mock(async () => bitmap) });
+  const draws = new Map<HTMLCanvasElement, unknown[]>();
+  const context = HTMLCanvasElement.prototype.getContext;
+  const paint = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((function (this: HTMLCanvasElement, ...args: unknown[]) {
+    const result = Reflect.apply(context, this, args) as CanvasRenderingContext2D | null;
+    if (!result) return result;
+    const canvas = this;
+    return new Proxy(result, { get(target, key) {
+      if (key === 'drawImage') return (image: unknown) => { draws.set(canvas, [...(draws.get(canvas) ?? []), image]); };
+      return Reflect.get(target, key);
+    } });
+  }) as HTMLCanvasElement['getContext']);
+  const resolve = mock((id: string) => {});
+  const releases: ReturnType<typeof mock>[] = [];
+  const load = frameSources.peerlessProposalFrameSource;
+  const source = spyOn(frameSources, 'peerlessProposalFrameSource').mockImplementation(async (...args) => {
+    const result = await load(...args);
+    const release = mock(result.release);
+    releases.push(release);
+    return { ...result, resolveImage: (id: string) => { resolve(id); return result.resolveImage(id); }, release };
+  });
+  try {
+    const value = await open({ file: await zip.generateAsync({ type: 'uint8array' }) });
+    const access = await value.api.handleAsync();
+    await act(async () => {
+      const proposal = await access.propose('reviewer', 'Picture layout', [{ type: 'insertSlide', afterSlideId: null, layoutPartPath: layout }]);
+      await value.api.commands.execute('proposalSelect', { proposalId: proposal.id });
+      await value.api.commands.execute('proposalDiff', { enabled: true });
+    });
+    const ghost = await waitFor(() => value.view.getByTestId('pptx-proposal-slide-inserted'));
+    const paintedImage = (canvas: HTMLCanvasElement) => (draws.get(canvas) ?? []).some(buffer =>
+      buffer instanceof HTMLCanvasElement && draws.get(buffer)?.includes(bitmap));
+    await waitFor(() => expect(paintedImage(ghost.querySelector('canvas')!)).toBe(true));
+    expect(resolve).toHaveBeenCalledWith(imageId);
+    resolve.mockClear();
+    await act(async () => { fireEvent.click(ghost); });
+    await waitFor(() => expect(paintedImage(value.view.getByTestId('pptx-proposal-diff') as HTMLCanvasElement)).toBe(true));
+    expect(resolve).toHaveBeenCalledWith(imageId);
+    await waitFor(() => { for (const release of releases) expect(release).toHaveBeenCalledTimes(1); });
+  } finally {
+    source.mockRestore(); paint.mockRestore();
+    if (originalBitmap) Object.defineProperty(globalThis, 'createImageBitmap', originalBitmap);
+    else Reflect.deleteProperty(globalThis, 'createImageBitmap');
+  }
 });

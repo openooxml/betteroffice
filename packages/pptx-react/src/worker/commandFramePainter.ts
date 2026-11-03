@@ -80,6 +80,11 @@ interface PinnedAsset {
   references: number;
 }
 
+interface ImageFrame {
+  displayList: SlideDisplayList;
+  frame: Pick<PresentationCommandFrame, 'media'>;
+}
+
 interface SharedFrameImages {
   media: ReadonlyMap<string, { bytes: Uint8Array; version: number }>;
   assets: ReadonlyMap<string, PinnedAsset>;
@@ -95,7 +100,7 @@ export function createCommandFrameImages(options: { maxDimension?: number; reuse
   const pool: RasterPool = { canvases: [], disposed: false };
   const media = new Map<string, { bytes: Uint8Array; version: number }>();
   const assets = new Map<string, PinnedAsset>();
-  const frames = new Map<PeerlessConfirmedFrame, { resolve: CanvasImageResolver;
+  const frames = new Map<ImageFrame, { resolve: CanvasImageResolver;
     versions: Map<string, number>; retainAsset: MediaLease['retainAsset']; release(): void;
     ready: Promise<void>; references: number }>();
   let disposed = false;
@@ -115,7 +120,7 @@ export function createCommandFrameImages(options: { maxDimension?: number; reuse
     return { asset, release: () => reused.releaseAsset(key, asset) };
   };
   const result = {
-    pin(frame: PeerlessConfirmedFrame, supplied: PresentationCommandFrame['media'] = []): MediaLease {
+    pin(frame: ImageFrame, supplied: PresentationCommandFrame['media'] = []): MediaLease {
       if (disposed) throw new Error('Slide images are disposed');
       let entry = frames.get(frame);
       for (const asset of entry ? supplied : [...supplied, ...frame.frame.media]) {

@@ -27,14 +27,13 @@ export async function peerlessProposalFrameSource(run: PeerlessPresentation, id:
   const diff = targetId
     ? await run.client.access!('layoutProposalDiffSlideById', id, targetId)
     : await run.client.access!('layoutProposalDiffSlide', id, index);
-  const live = await run.client.access!('snapshot');
-  const target = diff.snapshot.slides[0];
-  const original = live.slides.find(slide => slide.id === target?.id ||
-    Boolean(target?.sourcePartPath && slide.sourcePartPath === target.sourcePartPath));
-  const sourceIndex = run.client.state.slides.findIndex(slide => slide.id === original?.id);
-  if (!run.client.state.slides.length) return { ...diff, resolveImage: () => null, release() {} };
-  const source = await peerlessFrameSource(run, sourceIndex >= 0 ? sourceIndex : Math.max(0, index));
-  return { ...diff, resolveImage: source.resolveImage, release: source.release };
+  run.require();
+  const lease = run.images.pin({ displayList: diff.frame, frame: { media: diff.media ?? [] } });
+  try {
+    await lease.ready;
+    run.require();
+    return { ...diff, resolveImage: lease.resolve, release: lease.release };
+  } catch (error) { lease.release(); throw error; }
 }
 
 export async function peerlessExportPng(run: PeerlessPresentation): Promise<{ png: Blob; index: number }> {

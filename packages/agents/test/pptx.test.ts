@@ -614,3 +614,62 @@ test('slide proposals reach an attached canvas handle and keep refs through revi
     expect(handle.listProposals()).toHaveLength(0);
   } finally { deck.close(); handle.dispose(); }
 });
+
+test('mixed slide proposals replace disjoint matches like the text batch path', async () => {
+  const bytes = await presentationFixture();
+  const batch = await openPptx(bytes);
+  const mixed = await openPptx(bytes);
+  try {
+    for (const deck of [batch, mixed]) {
+      const story = deck.list().items[0].story;
+      const first = deck.grep({ query: 'Keep', story }).matches[0];
+      const second = deck.grep({ query: 'paragraph', story }).matches[0];
+      const proposal = deck.propose({ author: 'agent', edits: [
+        { match: first.match, newText: 'Preserve all of' },
+        ...(deck === mixed ? [{ type: 'insertSlide' as const, afterSlideId: null }] : []),
+        { match: second.match, newText: 'text' },
+      ] });
+      await deck.accept(proposal.id);
+    }
+    const expected = batch.read(batch.grep({ query: 'Preserve' }).matches[0].ref).text;
+    expect(expected).toBe('Preserve all of this text.');
+    expect(mixed.read(mixed.grep({ query: 'Preserve' }).matches[0].ref).text).toBe(expected);
+  } finally { batch.close(); mixed.close(); }
+});
+
+test('mixed slide proposals refuse overlapping matches atomically', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const story = deck.list().items[0].story;
+    const first = deck.grep({ query: 'Keep this', story }).matches[0];
+    const second = deck.grep({ query: 'this paragraph', story }).matches[0];
+    const version = deck.overview().version;
+    expect(() => deck.propose({ author: 'agent', edits: [
+      { match: first.match, newText: 'Preserve' },
+      { type: 'insertSlide', afterSlideId: null },
+      { match: second.match, newText: 'text' },
+    ] })).toThrow('conflicts with step');
+    expect(deck.listProposals()).toEqual([]);
+    expect(deck.overview().version).toBe(version);
+    expect(deck.read(first.ref).text).toBe('Keep this paragraph.');
+  } finally { deck.close(); }
+});
+
+test('agent slide proposals drop editor decisions before listing and staging limits', async () => {
+  const bytes = await presentationFixture();
+  const initialized = await openPptx(bytes);
+  initialized.close();
+  const handle = openPresentation(bytes);
+  const deck = attachPptx(handle);
+  try {
+    for (let index = 0; index < 65; index++) {
+      deck.propose({ author: 'agent', edits: [{ type: 'insertSlide', afterSlideId: null }] });
+      const pending = handle.listProposals()[0]!;
+      if (index % 2 === 0) handle.acceptProposal(pending.id);
+      else handle.rejectProposal(pending.id);
+    }
+    expect(deck.listProposals()).toEqual([]);
+    const pending = deck.propose({ author: 'agent', edits: [{ type: 'insertSlide', afterSlideId: null }] });
+    expect(deck.listProposals()).toMatchObject([{ id: pending.id, status: 'pending' }]);
+  } finally { deck.close(); handle.dispose(); }
+});
