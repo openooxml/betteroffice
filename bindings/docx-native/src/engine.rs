@@ -422,6 +422,33 @@ impl EditSession {
     }
 }
 
+#[cfg(feature = "test-hooks")]
+#[napi]
+impl EditSession {
+    #[napi(catch_unwind, js_name = "panicForTest")]
+    pub fn panic_for_test(&self, env: Env) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let _document = self.document(env)?;
+        panic!("panicForTest");
+    }
+
+    #[napi(catch_unwind, js_name = "panicAfterInsertForTest")]
+    pub fn panic_after_insert_for_test(
+        &self,
+        env: Env,
+        story: String,
+        para_id: String,
+        text: String,
+    ) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let document = self.document(env)?;
+        document
+            .insert_text(&story, &para_id, 0, &text, None, None)
+            .map_err(|error| map_error(env, error))?;
+        panic!("panicAfterInsertForTest");
+    }
+}
+
 #[napi]
 impl EditSession {
     #[napi(catch_unwind, js_name = "free")]
@@ -431,14 +458,6 @@ impl EditSession {
         self.clear_observer(env)?;
         drop(core.take());
         Ok(())
-    }
-
-    /// @internal Test hook: panics inside a call on this object.
-    #[napi(catch_unwind, js_name = "panicForTest")]
-    pub fn panic_for_test(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        let _document = self.document(env)?;
-        panic!("panicForTest");
     }
 
     #[napi(catch_unwind, js_name = "register_measure_font")]

@@ -15,10 +15,10 @@ function thrown(call: () => unknown): unknown {
   throw new Error('Expected an error');
 }
 
-test('a panic fails the raw pptx object until it is freed', () => {
+test.skipIf(process.env.BETTEROFFICE_NATIVE_TEST_HOOKS !== '1')('a panic fails the raw pptx object until it is freed', () => {
   const document = PptxDocument.openCollaborative(fixture, 1);
   try {
-    const panic = thrown(() => document.panicForTest());
+    const panic = thrown(() => (document as unknown as { panicForTest(): void }).panicForTest());
     expect(panic).toBeInstanceOf(Error);
     expect(panic).toHaveProperty('code', 'GenericFailure');
 

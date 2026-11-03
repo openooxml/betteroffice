@@ -211,20 +211,23 @@ impl Default for PptxRenderer {
     }
 }
 
+#[cfg(feature = "test-hooks")]
+#[napi]
+impl PptxDocument {
+    #[napi(catch_unwind, js_name = "panicForTest")]
+    pub fn panic_for_test(&self, env: Env) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let _document = self.document(env)?;
+        panic!("panicForTest");
+    }
+}
+
 #[napi]
 impl PptxDocument {
     #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
         let _call = EngineCall::new(env);
         self.inner = None;
-    }
-
-    /// @internal Test hook: panics inside a call on this object.
-    #[napi(catch_unwind, js_name = "panicForTest")]
-    pub fn panic_for_test(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        let _document = self.document(env)?;
-        panic!("panicForTest");
     }
 
     #[napi(catch_unwind, factory, js_name = "openReplayBaseline")]

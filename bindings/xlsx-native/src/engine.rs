@@ -306,6 +306,17 @@ impl XlsxSnapshotBuilder {
     }
 }
 
+#[cfg(feature = "test-hooks")]
+#[napi]
+impl XlsxDocument {
+    #[napi(catch_unwind, js_name = "panicForTest")]
+    pub fn panic_for_test(&self, env: Env) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let _document = self.document(env)?;
+        panic!("panicForTest");
+    }
+}
+
 #[napi]
 impl XlsxDocument {
     #[napi(catch_unwind)]
@@ -315,14 +326,6 @@ impl XlsxDocument {
         if self.failure.borrow().is_some() {
             crate::memory::release_to_os();
         }
-    }
-
-    /// @internal Test hook: panics inside a call on this object.
-    #[napi(catch_unwind, js_name = "panicForTest")]
-    pub fn panic_for_test(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        let _document = self.document(env)?;
-        panic!("panicForTest");
     }
 
     #[napi(catch_unwind, getter, js_name = "clientId")]

@@ -730,6 +730,19 @@ describe('native package public names', () => {
     }
   });
 
+  test('panic test hooks stay out of shipped binaries and still run in CI', () => {
+    const job = read('.github/workflows/ci.yml');
+    expect(job).toContain('--features test-hooks -- --locked');
+    expect(job).toContain('BETTEROFFICE_NATIVE_TEST_HOOKS: "1"');
+    expect(job).toContain('bun test "$package/panic.test.ts"');
+    expect(distWorkflowText).not.toContain('test-hooks');
+    for (const path of NATIVE_PACKAGES) {
+      expect(read(`${path}/Cargo.toml`)).toContain('test-hooks = []');
+      expect(read(`${path}/Cargo.toml`)).not.toMatch(/default\s*=.*test-hooks/);
+      expect(read(`${path}/index.d.ts`)).not.toContain('ForTest');
+    }
+  });
+
   test('the dist workflow collects the renamed binaries', () => {
     expect(distWorkflowText).toContain('betteroffice-${{ inputs.binding }}-native.*.node');
   });
