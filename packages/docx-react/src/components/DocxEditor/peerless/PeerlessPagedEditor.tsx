@@ -25,6 +25,7 @@ import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
 import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 import { createPresentedPageQueries } from './presentedPageQueries';
+import { peerlessCaretColor } from './caretColor';
 import { useTranslation } from '../../../i18n';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
@@ -134,7 +135,7 @@ const PeerlessPages = memo(function PeerlessPages({ pages, visiblePages, canvasF
       noteAnchorRevision={page.displayPage ? displayPageNoteAnchorRevision(page.displayPage) : 0} />)}</>;
 });
 
-function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject<HTMLTextAreaElement | null> }): ReactElement {
+function PeerlessCaret({ caret, input, pages }: { caret: DocxEchoRect; input: RefObject<HTMLTextAreaElement | null>; pages: readonly PageGeometry[] }): ReactElement {
   const [focused, setFocused] = useState(false);
   const [lit, setLit] = useState(true);
   useLayoutEffect(() => {
@@ -156,7 +157,12 @@ function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject
     const blink = setInterval(() => setLit((shown) => !shown), DEFAULT_BLINK_INTERVAL);
     return () => clearInterval(blink);
   }, [focused, caret.x, caret.y]);
-  return <div aria-hidden style={{ position: 'absolute', left: 0, top: 0, transform: `translate(${caret.x}px, ${caret.y}px)`, willChange: 'transform', width: Math.max(1, caret.width), height: caret.height, background: 'currentColor', opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
+  const color = useMemo(() => {
+    const page = pages.find(({ bounds }) => caret.x >= bounds.x && caret.x <= bounds.x + bounds.width &&
+      caret.y >= bounds.y && caret.y <= bounds.y + bounds.height);
+    return peerlessCaretColor(page?.displayPage, page ? { ...caret, x: caret.x - page.bounds.x, y: caret.y - page.bounds.y } : caret);
+  }, [pages, caret]);
+  return <div aria-hidden style={{ position: 'absolute', left: 0, top: 0, transform: `translate(${caret.x}px, ${caret.y}px)`, willChange: 'transform', width: Math.max(1, caret.width), height: caret.height, background: color, opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
 }
 
 function useShownProvisionalCaret(viewStore: PeerlessViewStore): PeerlessProvisionalCaret | null {
@@ -175,8 +181,9 @@ function PeerlessSelectionLayer({ viewStore, rects, visible }: {
   return <>{rects.map((rect, index) => <div key={index} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: 'rgba(59, 130, 246, 0.25)', pointerEvents: 'none' }} />)}</>;
 }
 
-function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActive, multiCell, input }: {
+function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActive, multiCell, input, pages }: {
   viewStore: PeerlessViewStore;
+  pages: readonly PageGeometry[];
   geometryCaret: DocxEchoRect | null;
   matches: boolean;
   compositionActive: boolean;
@@ -187,7 +194,7 @@ function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActi
   if (compositionActive) return null;
   const caret = provisional?.rect ?? (matches ? geometryCaret : null);
   if (!caret || (!provisional && multiCell)) return null;
-  return <PeerlessCaret caret={caret} input={input} />;
+  return <PeerlessCaret caret={caret} input={input} pages={pages} />;
 }
 
 function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, queryEngineReady }: {
@@ -755,7 +762,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         {highlights?.map((rect, index) => <div key={`find-${index}`} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: rect.current ? 'rgba(255, 150, 0, 0.4)' : 'rgba(255, 220, 0, 0.3)', pointerEvents: 'none' }} />)}
         <PeerlessSelectionLayer viewStore={binding.viewStore} rects={geometry?.selectionRects}
           visible={composition?.phase !== 'active' && geometryMatchesDocument(snapshot)} />
-        <PeerlessCaretLayer viewStore={binding.viewStore} geometryCaret={geometry?.caret ?? null}
+        <PeerlessCaretLayer viewStore={binding.viewStore} geometryCaret={geometry?.caret ?? null} pages={pages}
           matches={geometryMatchesDocument(snapshot)} compositionActive={composition?.phase === 'active'}
           multiCell={snapshot.editState?.tableContext?.hasMultiCellSelection === true} input={input} />
         {picturePreview && <div className="paged-editor__picture-drag-preview" aria-hidden style={{ position: 'absolute', left: picturePreview.x, top: picturePreview.y,
