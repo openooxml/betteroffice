@@ -31,6 +31,69 @@ const exceptions = {
 };
 
 for (const mode of ['headless', 'attached', 'peer'] as const) {
+  if (mode !== 'headless') for (const action of ['accept', 'reject'] as const) {
+    test(`DOCX partial editor decision followed by agent ${action} in ${mode} mode`, async () => {
+      const zip = await JSZip.loadAsync(await fixture());
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace('Executive summary', 'alpha beta gamma'));
+      const owner = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+      const doc = attachDocx(owner.session, mode === 'peer' ? { editPeer: {
+        async proposeChanges(request) { return owner.session.proposeChanges(request); },
+        async setProposalStates(request) { return owner.session.setProposalStates(request); },
+        async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+      } } : {});
+      try {
+        const hits = ['alpha', 'beta', 'gamma'].map(query => doc.grep({ query }).matches[0]);
+        const input = { author: 'Agent', edits: hits.map((hit, index) => ({ match: hit.match, newText: ['ALPHA', 'BETA', 'GAMMA'][index] })) };
+        const proposal = mode === 'peer' ? await doc.proposeAsync(input) : doc.propose(input);
+        const snapshot = owner.session.getProposals();
+        const middle = snapshot.proposals.find(record => record.id.endsWith(':1'))!;
+        expect(owner.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+          changes: [{ id: middle.id, state: action === 'accept' ? 'rejected' : 'accepted' }],
+        }).ok).toBe(true);
+        expect(doc.review(proposal.id).status).toBe('pending');
+        if (action === 'accept') await doc.accept(proposal.id);
+        else if (mode === 'peer') await doc.rejectAsync(proposal.id);
+        else doc.reject(proposal.id);
+        expect(doc.read(hits[0].ref).text).toBe(action === 'accept' ? 'ALPHA beta GAMMA' : 'alpha BETA gamma');
+        expect(doc.review(proposal.id).status).toBe('accepted');
+        expect(owner.session.getProposals().proposals).toHaveLength(0);
+      } finally { doc.close(); owner.close(); }
+    });
+  }
+
+  for (const start of [0, 3]) {
+    test(`DOCX saved match after insertion at boundary ${start} in ${mode} mode`, async () => {
+      const zip = await JSZip.loadAsync(await fixture());
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace('Executive summary', 'abcdef'));
+      const owner = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+      const doc = mode === 'headless' ? owner : attachDocx(owner.session, mode === 'peer' ? { editPeer: {
+        async proposeChanges(request) { return owner.session.proposeChanges(request); },
+        async setProposalStates(request) { return owner.session.setProposalStates(request); },
+        async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+      } } : {});
+      try {
+        const hit = doc.grep({ query: 'abc' }).matches[0];
+        const input = { author: 'Agent', edits: [{ ref: hit.ref, revision: hit.revision, start, oldText: '', newText: 'XY' }] };
+        const proposal = mode === 'peer' ? await doc.proposeAsync(input) : doc.propose(input);
+        await doc.accept(proposal.id);
+        expect(doc.read(hit.ref).text).toBe(start === 0 ? 'XYabcdef' : 'abcXYdef');
+        const reuse = { author: 'Agent', edits: [{ match: hit.match, newText: 'Z' }] };
+        if (mode === 'headless') expect(() => doc.propose(reuse)).toThrow('Target text or formatting changed');
+        else {
+          const replacement = mode === 'peer' ? await doc.proposeAsync(reuse) : doc.propose(reuse);
+          expect(replacement.changes[0]).toMatchObject({ start: start === 0 ? 2 : 0, oldText: 'abc' });
+          await doc.accept(replacement.id);
+          expect(doc.read(hit.ref).text).toBe(start === 0 ? 'XYZdef' : 'ZXYdef');
+          const reopened = await openDocx(await doc.export());
+          try { expect(reopened.read(reopened.grep({ query: 'Z' }).matches[0].ref).text).toBe(start === 0 ? 'XYZdef' : 'ZXYdef'); }
+          finally { reopened.close(); }
+        }
+      } finally { doc.close(); owner.close(); }
+    });
+  }
+
   for (const sample of [
     { text: 'aaab', start: 1, oldText: 'aab', newText: 'ccb', expected: 'accb' },
     { text: 'ababa', start: 2, oldText: 'aba', newText: 'xyz', expected: 'abxyz' },

@@ -746,11 +746,11 @@ export class DocxAgentDocument {
       for (const edit of edits) expected = expected.slice(0, edit.start) + edit.newText + expected.slice(edit.start + edit.oldText.length);
       return !current || current.text !== expected || (!edits.length && current.fingerprint !== previous.fingerprint);
     })) return;
-    const shift = (ref: string, offset: number, right = false) => {
+    const shift = (ref: string, offset: number, right = false, afterInsertion = right) => {
       let delta = 0;
       for (const change of changes.filter(change => change.ref === ref).sort((a, b) => a.start - b.start)) {
         if (offset < change.start) break;
-        if (offset === change.start) return offset + delta + (!change.oldText && right ? change.newText.length : 0);
+        if (offset === change.start) return offset + delta + (!change.oldText && afterInsertion ? change.newText.length : 0);
         if (offset < change.start + change.oldText.length) return change.start + delta + (right ? change.newText.length : 0);
         delta += change.newText.length - change.oldText.length;
       }
@@ -764,7 +764,7 @@ export class DocxAgentDocument {
         if (match.ref !== p.ref || match.revision !== previous.revision || match.start === undefined) continue;
         if (previous.text.slice(match.start, match.start + match.oldText.length) !== match.oldText) continue;
         const start = shift(p.ref, match.start, true);
-        const end = shift(p.ref, match.start + match.oldText.length, true);
+        const end = shift(p.ref, match.start + match.oldText.length, true, false);
         match.start = start;
         match.oldText = p.text.slice(start, end);
       }
@@ -854,15 +854,20 @@ export class DocxAgentDocument {
       .map(trimChange).map(change => keepRevisions ? { ...change, newText: change.oldText + change.newText } : change) : [];
     const snapshot = this.session.getProposals();
     const ids = held.engine.map(record => record.id);
-    const changes = snapshot.proposals.filter(record => ids.includes(record.id)).map(record => ({ id: record.id, state }));
+    const changes = snapshot.proposals.filter(record => ids.includes(record.id) && record.state === 'proposed').map(record => ({ id: record.id, state }));
     const decided = this.proposalResult(this.session.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes }), held.value.changes);
     try {
-      const settled = this.proposalResult(this.session.withdrawProposals({ expectVersion: decided.version, ids, ...(keepRevisions ? { keepRevisions: true } : {}) }), held.value.changes);
+      let settled = decided;
+      if (keepRevisions) {
+        const rejected = decided.proposals.filter(record => ids.includes(record.id) && record.state === 'rejected').map(record => record.id);
+        if (rejected.length) settled = this.proposalResult(this.session.withdrawProposals({ expectVersion: settled.version, ids: rejected }), held.value.changes);
+      }
+      settled = this.proposalResult(this.session.withdrawProposals({ expectVersion: settled.version, ids, ...(keepRevisions ? { keepRevisions: true } : {}) }), held.value.changes);
       this.preserveReferences(references, settled.version, appliedChanges);
     } catch (error) {
       const current = this.session.getProposals();
       this.session.setProposalStates({ expectVersion: current.version, expectPreviewVersion: current.previewVersion,
-        changes: snapshot.proposals.filter(record => ids.includes(record.id)).map(({ id, state }) => ({ id, state })),
+        changes: snapshot.proposals.filter(record => changes.some(change => change.id === record.id) && current.proposals.some(existing => existing.id === record.id)).map(({ id, state }) => ({ id, state })),
       });
       throw error;
     }
@@ -877,15 +882,20 @@ export class DocxAgentDocument {
       .map(trimChange).map(change => keepRevisions ? { ...change, newText: change.oldText + change.newText } : change) : [];
     const snapshot = this.session.getProposals();
     const ids = held.engine.map(record => record.id);
-    const changes = snapshot.proposals.filter(record => ids.includes(record.id)).map(record => ({ id: record.id, state }));
+    const changes = snapshot.proposals.filter(record => ids.includes(record.id) && record.state === 'proposed').map(record => ({ id: record.id, state }));
     const decided = this.proposalResult(await peer.setProposalStates({ expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes }), held.value.changes);
     try {
-      const settled = this.proposalResult(await peer.withdrawProposals({ expectVersion: decided.version, ids, ...(keepRevisions ? { keepRevisions: true } : {}) }), held.value.changes);
+      let settled = decided;
+      if (keepRevisions) {
+        const rejected = decided.proposals.filter(record => ids.includes(record.id) && record.state === 'rejected').map(record => record.id);
+        if (rejected.length) settled = this.proposalResult(await peer.withdrawProposals({ expectVersion: settled.version, ids: rejected }), held.value.changes);
+      }
+      settled = this.proposalResult(await peer.withdrawProposals({ expectVersion: settled.version, ids, ...(keepRevisions ? { keepRevisions: true } : {}) }), held.value.changes);
       this.preserveReferences(references, settled.version, appliedChanges);
     } catch (error) {
       const current = this.session.getProposals();
       await peer.setProposalStates({ expectVersion: current.version, expectPreviewVersion: current.previewVersion,
-        changes: snapshot.proposals.filter(record => ids.includes(record.id)).map(({ id, state }) => ({ id, state })),
+        changes: snapshot.proposals.filter(record => changes.some(change => change.id === record.id) && current.proposals.some(existing => existing.id === record.id)).map(({ id, state }) => ({ id, state })),
       });
       throw error;
     }
@@ -951,7 +961,7 @@ export class DocxAgentDocument {
   private projectProposals(draft: YrsSession, selected?: HeldProposal) {
     const snapshot = this.session.getProposals();
     const decisions = this.previewDecisions(snapshot);
-    if (selected) for (const record of selected.engine) for (const id of record.revisionIds) decisions.set(id, 'accepted');
+    if (selected) for (const record of selected.engine.filter(record => record.state === 'proposed')) for (const id of record.revisionIds) decisions.set(id, 'accepted');
     for (const [revisionId, state] of decisions) {
       if (state === 'accepted') draft.acceptChange({ revisionId });
       else draft.rejectChange({ revisionId });
