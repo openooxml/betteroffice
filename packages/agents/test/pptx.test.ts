@@ -853,3 +853,40 @@ test('PPTX shape proposals expose refs, story targeting, previews, acceptance, a
     expect(handle.listProposals()).toHaveLength(0);
   } finally { deck.close(); handle.dispose(); }
 });
+
+test('PPTX paragraph proposals preserve rich paragraphs, created story refs and review lifecycle', async () => {
+  const handle = openPresentation(await presentationFixture(), { clientId: 733 });
+  const deck = attachPptx(handle);
+  try {
+    const before = handle.snapshot();
+    const slide = before.slides[0]!;
+    const shape = slide.shapes[0]!;
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id, paragraphs: [
+        { alignment: 'ctr', bullet: true, runs: [{ text: 'First ', style: { bold: true } }, { text: 'point', style: { italic: true } }] },
+        { alignment: 'r', bullet: false, runs: [{ text: 'Second point', style: {} }] },
+      ] },
+      { type: 'addTextBox', ref: 'box', slideId: slide.id, draft: { name: 'Proposed bullets', rect: { x: 0, y: 0, width: 2000000, height: 1000000 }, text: '', style: {} } },
+      { type: 'setStoryParagraphs', storyId: '@box', paragraphs: [{ bullet: true, runs: [{ text: 'From ref', style: {} }] }] },
+    ] });
+    expect(proposal.changes.some(change => change.newText === 'First point\nSecond point')).toBe(true);
+    expect(handle.snapshot()).toEqual(before);
+    const preview = openPresentation(await deck.export(proposal.id));
+    try {
+      const story = preview.snapshot().slides[0]!.shapes[0]!.textStories[0]!;
+      expect(story.paragraphs.map(p => p.runs.map(r => r.text).join(''))).toEqual(['First point', 'Second point']);
+      expect(story.paragraphs[0]!.alignment).toBe('ctr');
+      expect(JSON.parse(story.paragraphs[0]!.bulletJson!)).toEqual({ type: 'character', value: '•' });
+      expect(story.paragraphs[0]!.runs[0]!.style.bold).toBe(true);
+    } finally { preview.dispose(); }
+    await deck.accept(proposal.id);
+    expect(handle.snapshot().slides[0]!.shapes.find(s => s.name === 'Proposed bullets')!.textStories[0]!.paragraphs[0]!.runs[0]!.text).toBe('From ref');
+    expect(handle.undo().snapshot).toEqual(before);
+    const rejected = deck.propose({ author: 'agent', edits: [{ type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id, paragraphs: [{ runs: [] }] }] });
+    deck.reject(rejected.id);
+    expect(handle.snapshot()).toEqual(before);
+    expect(handle.listProposals()).toEqual([]);
+    expect(() => deck.propose({ author: 'agent', edits: [{ type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id, paragraphs: [] }] })).toThrow();
+    expect(handle.listProposals()).toEqual([]);
+  } finally { deck.close(); handle.dispose(); }
+});

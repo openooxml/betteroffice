@@ -55,6 +55,7 @@ fn proposal_shape_changes(proposal: &Proposal, slide_id: &str) -> Vec<ProposalSh
                 | ProposalEdit::SetShapeFill { .. }
                 | ProposalEdit::SetShapeStroke { .. }
                 | ProposalEdit::SetShapeAdjust { .. }
+                | ProposalEdit::SetStoryParagraphs { .. }
         )
     }) {
         return Vec::new();
@@ -348,6 +349,7 @@ fn scoped_target<T: ReadTxn>(txn: &T, edit: &ProposalEdit) -> EditResult<(String
     match edit {
         ProposalEdit::ReplaceText { story_id, .. }
         | ProposalEdit::FormatText { story_id, .. }
+        | ProposalEdit::SetStoryParagraphs { story_id, .. }
         | ProposalEdit::SetParagraphAlignment { story_id, .. } => story_owner(txn, story_id)?
             .map(|(slide_id, shape_id)| (slide_id, Some(shape_id)))
             .ok_or_else(|| EditError::StoryNotFound(story_id.clone())),
@@ -523,6 +525,15 @@ fn diff_story(
     after: &mut StorySnapshot,
     changes: &mut Vec<ProposalTextChange>,
 ) {
+    for (index, paragraph) in before.paragraphs.iter().enumerate() {
+        if !after.paragraphs.iter().any(|next| next.id == paragraph.id) {
+            let mut deleted = paragraph.clone();
+            deleted.runs.clear();
+            after
+                .paragraphs
+                .insert(index.min(after.paragraphs.len()), deleted);
+        }
+    }
     let mut offset = 0;
     for paragraph in &mut after.paragraphs {
         let old = before.paragraphs.iter().find(|old| old.id == paragraph.id);

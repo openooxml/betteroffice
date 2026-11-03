@@ -648,7 +648,7 @@ export interface UpdateEvent {
 
 export interface TextParagraphDraft {
   bullet?: boolean;
-  alignment?: ParagraphAlignment | null;
+  alignment?: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
   runs: Array<{ text: string; style?: TextStyle }>;
 }
 

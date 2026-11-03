@@ -8,6 +8,7 @@ import type {
   ShapeSnapshot,
   ShapeStroke,
   SlideDisplayList,
+  TextParagraphDraft,
   TextStyleSnapshot,
 } from './types';
 
@@ -42,6 +43,7 @@ export type ProposalEdit =
       end: number;
       alignment: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
     }
+  | { type: 'setStoryParagraphs'; storyId: string; paragraphs: TextParagraphDraft[] }
   | { type: 'setShapeRect'; slideId: string; shapeId: string; rect: ShapeRect }
   | {
       type: 'setShapeFill';

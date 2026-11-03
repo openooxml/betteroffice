@@ -320,3 +320,75 @@ fn reports_native_parse_errors() {
         Err(Error::Parse(_))
     ));
 }
+
+#[test]
+fn facade_paragraph_proposals_preview_save_and_undo() {
+    use betteroffice_pptx::{
+        ProposalEdit, ProposalRequest, ProposalShapeChangeKind, ProposalTextChangeKind,
+        TextParagraphDraft, TextRunDraft, TextStyle,
+    };
+    let fixture = include_bytes!("../../pptx-edit/tests/fixtures/proposal-shapes.pptx");
+    let presentation = Presentation::open(fixture).unwrap();
+    let before = presentation.snapshot().unwrap();
+    let shape = &before.slides[0].shapes[0];
+    let proposal = presentation
+        .propose(ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![ProposalEdit::SetStoryParagraphs {
+                story_id: shape.text_stories[0].id.clone(),
+                paragraphs: vec![
+                    TextParagraphDraft {
+                        alignment: Some("ctr".into()),
+                        bullet: Some(true),
+                        runs: vec![TextRunDraft {
+                            text: "First bullet".into(),
+                            style: TextStyle {
+                                bold: Some(true),
+                                ..Default::default()
+                            },
+                        }],
+                    },
+                    TextParagraphDraft {
+                        alignment: Some("r".into()),
+                        bullet: Some(false),
+                        runs: vec![TextRunDraft {
+                            text: "Second point".into(),
+                            style: TextStyle::default(),
+                        }],
+                    },
+                ],
+            }],
+        })
+        .unwrap();
+    let diff = presentation
+        .layout_proposal_diff_slide(&proposal.id, 0)
+        .unwrap();
+    assert!(
+        diff.text_changes
+            .iter()
+            .any(|change| change.kind == ProposalTextChangeKind::Insertion)
+    );
+    assert!(
+        diff.text_changes
+            .iter()
+            .any(|change| change.kind == ProposalTextChangeKind::Deletion)
+    );
+    assert_eq!(diff.shape_changes[0].kind, ProposalShapeChangeKind::Changed);
+    assert_eq!(presentation.snapshot().unwrap(), before);
+    let preview = presentation.preview_proposal(&proposal.id).unwrap();
+    assert_eq!(
+        presentation
+            .accept_proposal(&proposal.id, false)
+            .unwrap()
+            .snapshot,
+        preview.snapshot
+    );
+    let reopened = Presentation::open(&presentation.save().unwrap()).unwrap();
+    let story = &reopened.snapshot().unwrap().slides[0].shapes[0].text_stories[0];
+    assert_eq!(story.plain_text(), "First bullet\nSecond point");
+    assert_eq!(story.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(story.paragraphs[0].runs[0].style.bold, Some(true));
+    assert!(presentation.undo());
+    assert_eq!(presentation.snapshot().unwrap(), before);
+}
