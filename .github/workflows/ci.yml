@@ -162,10 +162,10 @@ jobs:
       - name: Check minimal Wasm features
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
-          cargo check -p betteroffice-docx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features --features fonts,fonts-latin,fonts-intl,fonts-cjk
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features
-          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --test fonts
-          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features --features fonts,fonts-latin,fonts-intl,fonts-cjk --test fonts
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features --features fonts,fonts-latin,fonts-intl,fonts-cjk
           cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown
           cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown --no-default-features --features raster
