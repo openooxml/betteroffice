@@ -962,11 +962,13 @@ pub fn allocation_failure() -> f64 {
     crate::memory::take_failed() as f64
 }
 
+/// @internal Test hook: the calling thread's live engine bytes.
 #[napi(catch_unwind, js_name = "engineHeapLiveBytes")]
 pub fn engine_heap_live_bytes() -> f64 {
     crate::memory::live() as f64
 }
 
+/// @internal Test hook: sets the calling thread's engine memory budget in bytes; 0 restores the default.
 #[napi(catch_unwind, js_name = "setHeapLimit")]
 pub fn set_heap_limit(bytes: f64) {
     crate::memory::set_budget(if bytes.is_finite() && bytes > 0.0 {

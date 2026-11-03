@@ -110,6 +110,7 @@ export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: 
 
 export declare function displayListCellLimit(): number
 
+/** @internal Test hook: the calling thread's live engine bytes. */
 export declare function engineHeapLiveBytes(): number
 
 export declare function engineVersion(): string
@@ -120,4 +121,5 @@ export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: str
 
 export declare function renderXlsxMarkdownJson(content: string, options: string): string
 
+/** @internal Test hook: sets the calling thread's engine memory budget in bytes; 0 restores the default. */
 export declare function setHeapLimit(bytes: number): void
