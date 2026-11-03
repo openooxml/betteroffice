@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
-import { createRef, startTransition, Suspense, useEffect, useLayoutEffect, useState } from 'react';
+import { createRef, Profiler, startTransition, Suspense, useEffect, useLayoutEffect, useState } from 'react';
 import * as measurement from '@betteroffice/docx/layout';
 import * as utils from '@betteroffice/docx/utils';
 import * as yrs from '@betteroffice/docx/yrs';
@@ -41,6 +41,7 @@ import { peerlessPreviewPaint } from './WorkerDocumentPreview';
 import * as clipboard from './clipboard';
 import * as reviewLayer from '../../sidebar/TrackedChangesReview';
 import * as sidebarView from '../../UnifiedSidebar';
+import type { ReactSidebarItem } from '../../../plugin-api/types';
 import { toast } from 'sonner';
 import { buildReportIssueUrl } from '../../reportIssue';
 import { ToolbarCommandButton } from '../../toolbar/ToolbarCommand';
@@ -609,6 +610,144 @@ test('scroll-only display window updates keep review rects, props and card rende
   }
   view.unmount();
   h.controller.dispose();
+});
+
+async function reviewCardRenderFixture() {
+  const h = proposalHost({ automatic: false });
+  const frame = h.binding.viewStore.getSnapshot().geometry!;
+  frame.pages = [{ page: { pageId: '0', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 },
+    transform: [1, 0, 0, 1, 0, 0], displayPage: { pageIndex: 0, width: 600, height: 800, primitives: [], sectionIndex: 0 } }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
+  let review: yrs.DocxReviewSnapshot = { ...base.value, uiComments: [noteComment(3, 'First note'), noteComment(4, 'Second note'),
+    noteComment(5, 'Comment reply', { parentId: 3 }), noteComment(6, 'Change reply', { parentId: 7 })],
+    commentIds: { first: 3, second: 4 }, commentGeometry: {
+      first: [{ pageIndex: 0, x: 30, y: 240, width: 50, height: 12 }],
+      second: [{ pageIndex: 0, x: 30, y: 340, width: 50, height: 12 }],
+    }, revisions: [7, 8].map(id => ({ revisionId: String(id), kind: 'insertion' as const, story: 'body', author: `Reviewer ${id}`,
+      date: '2026-10-01T00:00:00Z', preview: `Change ${id}`,
+      range: { story: 'body', start: { paraId: 'p0', offset: id }, end: { paraId: 'p0', offset: id + 1 } } })),
+    revisionGeometry: { 7: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }], 8: [{ pageIndex: 0, x: 30, y: 140, width: 50, height: 12 }] } };
+  let entries = [7, 8].map(id => ({ revisionId: id, type: 'insertion' as const, text: `Change ${id}`, author: `Reviewer ${id}`, from: id, to: id + 1 }));
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) => {
+    const geometry = h.binding.viewStore.getSnapshot().geometry!;
+    return { status: 'ok', version, value: request.kind === 'sidebar'
+      ? structuredClone({ comments: [], revisions: entries.map(entry => ({ key: `revision-${entry.revisionId}`, start: { story: 'body', position: entry.from } })),
+        trackedChanges: { entries, commentToRevision: [] } })
+      : request.kind === 'reviewSnapshot' ? structuredClone({ ...review, version: h.snapshot().version, frameEpoch: geometry.frameEpoch,
+        layoutRevision: geometry.layoutRevision, proposals: { ...review.proposals, version: h.snapshot().version },
+        proposalGeometry: { ...review.proposalGeometry, version: h.snapshot().version } })
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null };
+  }) as never);
+  const counts = new Map<string, number>();
+  const OriginalSidebar = sidebarView.UnifiedSidebar;
+  const wrappedRenders = new WeakMap<ReactSidebarItem['render'], ReactSidebarItem['render']>();
+  const wrappedItems = new WeakMap<ReactSidebarItem[], ReactSidebarItem[]>();
+  const column = spyOn(sidebarView, 'UnifiedSidebar').mockImplementation(props => {
+    let items = wrappedItems.get(props.items);
+    if (!items) {
+      items = props.items.map(item => {
+        let render = wrappedRenders.get(item.render);
+        if (!render) {
+          render = cardProps => <Profiler id={item.id} onRender={id => counts.set(id, (counts.get(id) ?? 0) + 1)}>{item.render(cardProps)}</Profiler>;
+          wrappedRenders.set(item.render, render);
+        }
+        return { ...item, render };
+      });
+      wrappedItems.set(props.items, items);
+    }
+    return <OriginalSidebar {...props} items={items} />;
+  });
+  restorers.push(() => readAt.mockRestore(), () => column.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} showHostProposalsInSidebar />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-card')).toHaveLength(4));
+  await act(async () => { await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); });
+  const paint = async () => {
+    const next = structuredClone(h.binding.viewStore.getSnapshot().geometry!);
+    next.frameEpoch++;
+    const displayPage = next.pages[0]!.displayPage!;
+    displayPage.sectionIndex = (displayPage.sectionIndex ?? 0) + 1;
+    await act(async () => {
+      h.binding.viewStore.installFrameGeometry(next);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    });
+  };
+  const edit = async (update: () => void) => {
+    await act(async () => {
+      update();
+      await h.submit('undo', {}, {}).ack;
+      const next = structuredClone(h.binding.viewStore.getSnapshot().geometry!);
+      next.frameEpoch++;
+      next.documentVersion = h.snapshot().version;
+      next.coversThroughSeq = h.binding.viewStore.getSnapshot().throughSeq;
+      h.binding.viewStore.installFrameGeometry(next);
+    });
+    await waitFor(() => expect(column.mock.calls.at(-1)![0].items).toHaveLength(4));
+    await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  };
+  return { h, view, counts, paint, edit, column, updateReview: (update: (value: yrs.DocxReviewSnapshot) => yrs.DocxReviewSnapshot) => { review = update(review); },
+    updateChange: () => { entries = entries.map(entry => entry.revisionId === 7 ? { ...entry, author: 'Edited reviewer', text: 'Edited change' } : entry); } };
+}
+
+test('forty paint-only scroll frames keep real tracked change and comment card renders flat', async () => {
+  const { h, view, counts, paint } = await reviewCardRenderFixture();
+  const before = new Map(counts);
+  expect([...before.keys()].sort()).toEqual(['comment-3', 'comment-4', 'tc-7-0', 'tc-8-1']);
+  for (let index = 0; index < 40; index++) {
+    await paint();
+    expect(counts).toEqual(before);
+  }
+  view.unmount(); h.controller.dispose();
+});
+
+test('real review cards update their data, replies, expansion and positions independently', async () => {
+  const { h, view, counts, edit, updateReview, updateChange } = await reviewCardRenderFixture();
+  const unchangedExcept = (before: Map<string, number>, id: string) => {
+    expect(counts.get(id)!).toBeGreaterThan(before.get(id)!);
+    for (const [other, count] of before) if (other !== id) expect(counts.get(other)).toBe(count);
+  };
+  let before = new Map(counts);
+  await edit(updateChange);
+  await waitFor(() => expect(view.container.querySelector('[data-revision-id="7"]')?.textContent).toContain('Edited reviewer'));
+  unchangedExcept(before, 'tc-7-0');
+  before = new Map(counts);
+  await edit(() => updateReview(value => ({ ...value, uiComments: value.uiComments!.map(comment => comment.id === 6 ? noteComment(6, 'Edited change reply', { parentId: 7 }) : comment) })));
+  await waitFor(() => expect(view.container.querySelector('[data-revision-id="7"]')?.textContent).toContain('Edited change reply'));
+  unchangedExcept(before, 'tc-7-0');
+  before = new Map(counts);
+  await edit(() => updateReview(value => ({ ...value, uiComments: value.uiComments!.map(comment => comment.id === 3 ? noteComment(3, 'Edited note') : comment) })));
+  await waitFor(() => expect(view.container.querySelector('[data-comment-id="3"]')?.textContent).toContain('Edited note'));
+  unchangedExcept(before, 'comment-3');
+  before = new Map(counts);
+  await edit(() => updateReview(value => ({ ...value, uiComments: value.uiComments!.map(comment => comment.id === 5 ? noteComment(5, 'Edited comment reply', { parentId: 3 }) : comment) })));
+  await waitFor(() => expect(view.container.querySelector('[data-comment-id="3"]')?.textContent).toContain('Edited comment reply'));
+  unchangedExcept(before, 'comment-3');
+  before = new Map(counts);
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"]')!);
+  expect(view.container.querySelector('[data-revision-id="7"]')?.getAttribute('data-active')).toBe('true');
+  unchangedExcept(before, 'tc-7-0');
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"]')!);
+  before = new Map(counts);
+  fireEvent.click(view.container.querySelector('[data-comment-id="3"]')!);
+  expect(view.container.querySelector('[data-comment-id="3"]')?.getAttribute('data-active')).toBe('true');
+  expect(view.container.querySelector('[data-comment-id="3"] .docx-review-input')).not.toBeNull();
+  unchangedExcept(before, 'comment-3');
+  fireEvent.click(view.container.querySelector('[data-comment-id="3"]')!);
+  before = new Map(counts);
+  const wrapper = () => view.container.querySelector<HTMLElement>('[data-comment-id="3"]')!.parentElement!;
+  const top = wrapper().style.top;
+  await edit(() => updateReview(value => ({ ...value, commentGeometry: { ...value.commentGeometry,
+    first: [{ pageIndex: 0, x: 30, y: 270, width: 50, height: 12 }] } })));
+  await waitFor(() => expect(wrapper().style.top).not.toBe(top));
+  expect(counts).toEqual(before);
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"] .docx-review-accept')!);
+  await waitFor(() => expect(h.submit.mock.calls.filter(call => call[0] === 'acceptRevision').at(-1)?.[1])
+    .toEqual({ revisionId: '7', expectVersion: h.snapshot().version }));
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"] .docx-review-reject')!);
+  await waitFor(() => expect(h.submit.mock.calls.filter(call => call[0] === 'rejectRevision').at(-1)?.[1])
+    .toEqual({ revisionId: '7', expectVersion: h.snapshot().version }));
+  view.unmount(); h.controller.dispose();
 });
 
 test('worker tracked change cards accept and reject through worker review commands', async () => {
