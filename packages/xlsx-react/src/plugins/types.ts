@@ -134,13 +134,34 @@ export interface XlsxPluginCellPosition {
   layoutId: string;
 }
 
+export type XlsxGeometryTarget = { kind: 'proposal'; id: string };
+
+export type XlsxAnchorGeometryResult =
+  | {
+      ok: true;
+      version: string;
+      previewVersion: number;
+      layoutId: string;
+      rects: readonly XlsxPluginRect[];
+      anchor: XlsxPluginRect;
+      pageRect: XlsxPluginRect;
+    }
+  | {
+      ok: false;
+      failure: {
+        code: XlsxPluginNavigationFailureCode | 'unknown-proposal' | 'pending' | 'read-failed';
+        message: string;
+      };
+    };
+
 /**
  * Geometry of the painted grid. Rectangles are in pixels of the overlay layer, already zoomed
- * and clipped to the visible grid; every method returns null once its layout is no longer
- * painted, and for cells scrolled out of view or on another sheet.
+ * and clipped to the visible grid. Cell and range queries return null for unpainted layouts
+ * and cells outside the visible sheet; anchor queries return a typed failure.
  */
 export interface XlsxPluginGeometry {
   layout: XlsxPluginLayout;
+  getAnchorGeometry(target: XlsxGeometryTarget): XlsxAnchorGeometryResult;
   /** One grid cell, without merge expansion; zero-based `row` and `col`. */
   getCellRect(target: { sheetId: string; row: number; col: number }): XlsxPluginRect | null;
   /** The visible part of an inclusive range, such as a merged area. */
@@ -217,6 +238,7 @@ export interface XlsxPluginNavigation {
 export type XlsxPluginEvent =
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
+  | { type: 'proposal-change'; generation: string; version: string; previewVersion: number }
   | {
       type: 'selection-change';
       generation: string;

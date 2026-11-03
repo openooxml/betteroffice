@@ -11,7 +11,7 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { FORMATS, renderSection } from './readme.mjs';
+import { FORMATS, aggregateReport, renderSection } from './readme.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
@@ -19,6 +19,7 @@ import { mergeXlsxFidelity, xlsxFidelityShards } from './xlsx-fidelity.mjs';
 import { mergeRoundtrips, roundtripShards } from './roundtrip.mjs';
 import { mergePptxBenchmark } from './pptx-benchmark.mjs';
 import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
+import { combineShardReports, measureShards } from './measure-shards.mjs';
 
 function fail(message) {
   throw new Error(`Invalid fidelity merge: ${message}`);
@@ -167,7 +168,10 @@ async function directory(path, label) {
 }
 
 async function copyRenders(plan, report, parts, stage) {
+  const artifacts = new Map(measureShards(plan).flatMap(({ format, shard, samples }) =>
+    samples.map((id) => [id, `visual-fidelity-renders-${format}-${shard}`])));
   for (const sample of report.samples) {
+    const artifact = artifacts.get(sample.id);
     const comparison = sample.comparisons.find(
       (result) =>
         result.channel === 'commit' && result.renderer_source_commit === plan.commit
@@ -175,21 +179,10 @@ async function copyRenders(plan, report, parts, stage) {
     if (comparison.status === 'failed') continue;
     if (!Number.isInteger(comparison.actual_pages) || comparison.actual_pages < 1)
       continue;
-    const root = resolve(
-      parts,
-      `visual-fidelity-renders-${sample.format}`,
-      sample.id,
-      'commit'
-    );
+    const root = resolve(parts, artifact, sample.id, 'commit');
     const destination = resolve(stage, sample.id, 'commit');
-    await directory(
-      resolve(parts, `visual-fidelity-renders-${sample.format}`),
-      `${sample.format} render artifact`
-    );
-    await directory(
-      resolve(parts, `visual-fidelity-renders-${sample.format}`, sample.id),
-      `${sample.id} render directory`
-    );
+    await directory(resolve(parts, artifact), `${artifact} render artifact`);
+    await directory(resolve(parts, artifact, sample.id), `${sample.id} render directory`);
     await directory(root, `${sample.id} commit render directory`);
     await mkdir(destination, { recursive: true });
     for (let page = 1; page <= comparison.actual_pages; page += 1) {
@@ -224,13 +217,21 @@ export async function mergeFromPaths({
   const planBytes = await readFile(planPath);
   const plan = normalizePlan(JSON.parse(planBytes));
   await directory(resolve(parts), 'QUALITY_PARTS');
+  const shards = measureShards(plan);
   const reports = await Promise.all(
     plan.formats.map(async (format) => {
-      const path = resolve(parts, `visual-fidelity-report-${format}`, 'report.json');
+      const shardReports = await Promise.all(shards.filter((entry) => entry.format === format).map(async ({ shard }) => {
+        const path = resolve(parts, `visual-fidelity-report-${format}-${shard}`, 'report.json');
+        try {
+          return JSON.parse(await readFile(path, 'utf8'));
+        } catch {
+          fail(`missing or invalid ${format} report for shard ${shard}`);
+        }
+      }));
       try {
-        return JSON.parse(await readFile(path, 'utf8'));
-      } catch {
-        fail(`missing or invalid ${format} report`);
+        return combineShardReports(plan, format, shardReports);
+      } catch (error) {
+        fail(error.message);
       }
     })
   );
@@ -260,6 +261,7 @@ export async function mergeFromPaths({
     report = mergeRoundtrips(plan, report, benchmarks, digest(planBytes));
   }
   const section = renderSection(report);
+  const aggregate = aggregateReport(report);
   await emptyOutput(output);
   await mkdir(dirname(output), { recursive: true });
   const stage = await mkdtemp(join(dirname(output), `.${basename(output)}-`));
@@ -267,6 +269,7 @@ export async function mergeFromPaths({
     if (requireRenders) await copyRenders(plan, report, resolve(parts), stage);
     await writeFile(join(stage, 'report.json'), JSON.stringify(report, null, 2) + '\n');
     await writeFile(join(stage, 'section.md'), section);
+    await writeFile(join(stage, 'aggregate.json'), JSON.stringify(aggregate, null, 2) + '\n');
     await rename(stage, output);
   } catch (error) {
     await rm(stage, { recursive: true, force: true });

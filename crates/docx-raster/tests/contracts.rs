@@ -14,6 +14,25 @@ use serde_json::{Value, json};
 const FONT: &[u8] = include_bytes!("assets/Carlito-Regular.ttf");
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
+#[path = "../../docx-layout/tests/fixtures/base_latin.rs"]
+mod base_latin;
+
+#[test]
+fn fontless_paragraph_rasterizes_with_ink() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for bold in [false, true] {
+        let scene = base_latin::measured_document(
+            &fonts,
+            &[ooxml_text::FontId::base_latin(bold, false).to_u32()],
+            "Latin Ελληνικά Кириллица ✓ ₹",
+            bold,
+        );
+        assert!(ink_bounds(&render_png(&scene, 0, &resources).unwrap()).is_some());
+    }
+    assert_eq!(fonts.font_count(), 0);
+}
+
 fn list(width: f64, height: f64, primitives: Vec<Value>) -> DisplayList {
     serde_json::from_value(json!({
         "pages": [{
@@ -1057,4 +1076,51 @@ fn undecodable_image_bytes_are_skipped_like_an_unresolvable_reference() {
             .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
         assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
     }
+}
+
+#[test]
+fn text_named_for_the_backstop_family_rasterizes_without_a_host_chain() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for font in [
+        format!("400 24px {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY),
+        format!("700 24px {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY),
+    ] {
+        let scene = list(
+            80.0,
+            40.0,
+            vec![json!({
+                "kind": "text",
+                "text": "1.",
+                "x": 4,
+                "baselineY": 30,
+                "width": 40,
+                "font": font,
+                "color": "#000000"
+            })],
+        );
+        assert!(ink_bounds(&render_png(&scene, 0, &resources).unwrap()).is_some());
+    }
+}
+
+#[test]
+fn a_leader_font_shorthand_resolves_its_family() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let font = format!("400 24px {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY);
+    let scene = list(
+        160.0,
+        48.0,
+        vec![json!({
+            "kind": "text",
+            "text": "Tab",
+            "x": 10,
+            "baselineY": 34,
+            "width": 130,
+            "font": font,
+            "color": "#000000",
+            "leaderGlyphs": {"glyph": ".", "count": 3, "advance": 10, "font": font}
+        })],
+    );
+    assert!(ink_bounds(&render_png(&scene, 0, &resources).unwrap()).is_some());
 }

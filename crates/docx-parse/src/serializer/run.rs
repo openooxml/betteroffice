@@ -763,6 +763,9 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    if let Some(xml) = super::text_box::replay_group(shape, context)? {
+        return Ok(xml);
+    }
     if let Some(xml) = super::smart_art::replay(shape, context, false)? {
         return Ok(xml);
     }

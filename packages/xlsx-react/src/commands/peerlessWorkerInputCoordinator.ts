@@ -136,6 +136,7 @@ export interface PeerlessWorkerInputCoordinatorHooks
   maxOutstanding?: number;
   maxQueued?: number;
   readOnly?(): boolean;
+  allowHostProposals?(): boolean;
 }
 
 export interface PeerlessWorkerInputCoordinator {
@@ -159,7 +160,7 @@ export interface PeerlessWorkerInputCoordinator {
     command: (input: T) => PeerlessWorkerCommandInput,
     options?: PeerlessWorkerCommandOptions
   ): PeerlessWorkerCommandTicket;
-  setReadOnly(readOnly: boolean): PeerlessWorkerCommandTicket;
+  setReadOnly(readOnly: boolean, allowHostProposals?: boolean): PeerlessWorkerCommandTicket;
   runAfterPendingInput<T>(operation: () => T | Promise<T>, fence?: boolean | 'posted' | 'settled' | 'read'): Promise<T>;
   flush(): Promise<void>;
   whenApplied(seq?: number): Promise<void>;
@@ -518,6 +519,7 @@ export function createPeerlessWorkerInputCoordinator(
       ticket.lease = cycle;
       if ((admittedReadOnly ?? localReadOnly) && (prepare || input &&
         input.kind !== 'select' && input.kind !== 'setActiveSheet' && input.kind !== 'setReadOnly' && input.kind !== 'applyUpdate' && input.kind !== 'collabPipe' &&
+        !(hooks.allowHostProposals?.() && (input.kind === 'propose' || input.kind === 'acceptProposal' || input.kind === 'rejectProposal')) &&
         !(input.kind === 'applyOps' && 'toolbar' in input.payload && input.payload.toolbar.id === 'refreshProposals'))) {
         throw new XlsxCommandAdmissionError('input-failed');
       }
@@ -833,12 +835,12 @@ export function createPeerlessWorkerInputCoordinator(
         return { seq: null, result: result.promise };
       }
     },
-    setReadOnly(value) {
+    setReadOnly(value, allowHostProposals) {
       current();
       const result = deferred<CommandStatus>();
       const ticket: PeerlessTicket = { seq: null, result: result.promise, lease: cycle };
       const admitted = runAfterPendingInput(() => {
-        const mode = accept({ kind: 'setReadOnly', payload: { readOnly: value } }, null, { after: null }, true);
+        const mode = accept({ kind: 'setReadOnly', payload: { readOnly: value, ...(allowHostProposals !== undefined ? { allowHostProposals } : {}) } }, null, { after: null }, true);
         Object.defineProperty(ticket, 'seq', { get: () => mode.seq });
         return mode.result;
       });

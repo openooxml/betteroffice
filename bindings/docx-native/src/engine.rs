@@ -391,6 +391,11 @@ impl EditSession {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
+    #[napi(js_name = "take_base_latin_miss")]
+    pub fn take_base_latin_miss(&self) -> Result<bool> {
+        Ok(self.document()?.take_base_latin_miss())
+    }
+
     #[napi(js_name = "register_substitute_measure_font")]
     pub fn register_substitute_measure_font(
         &self,

@@ -82,6 +82,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "betteroffice-base-latin"
+version = "0.5.1"
+
+[[package]]
 name = "betteroffice-docx"
 version = "0.5.1"
 dependencies = [
@@ -260,6 +264,7 @@ dependencies = [
 name = "betteroffice-ooxml-text"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-base-latin",
  "betteroffice-drawingml",
  "rustybuzz",
  "serde",
@@ -323,6 +328,7 @@ name = "betteroffice-pptx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-fonts",
+ "betteroffice-pptx-edit",
  "betteroffice-pptx-engine",
  "getrandom 0.3.4",
  "napi",

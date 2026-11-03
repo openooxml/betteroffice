@@ -3,6 +3,7 @@ import type { XlsxEditorApi } from './XlsxEditor.types';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import { guardAsyncEditorApi } from './worker/guardAsyncEditorApi';
 import { XlsxCommandAdmissionError, xlsxCommandController } from './commands/createXlsxCommandStore';
+import { commandReason } from './commands/evaluate';
 
 export function createInThreadAsyncEditorApi(
   api: XlsxEditorApi, collaborative: boolean, assertCurrent: () => void,
@@ -40,6 +41,12 @@ export function createInThreadAsyncEditorApi(
     applyEdits(request) {
       const captured = structuredClone(request);
       return host(() => api.applyEdits(captured));
+    },
+    proposeChanges(request) {
+      const captured = structuredClone(request);
+      return host(() => api.proposeChanges ? api.proposeChanges(captured) : Promise.resolve({
+        ok: false as const, failure: commandReason('unsupported-command', null),
+      }));
     },
     save: () => host(async () => {
       let bytes: Uint8Array;

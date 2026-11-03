@@ -1,5 +1,18 @@
 import intlSizes from './intl-sizes.json';
 import latinManifest from '../../fonts-latin/assets/manifest.json';
+import baseLatinManifest from '../assets/base-latin.json';
+
+/** @internal */
+export const BASE_LATIN_FAMILY = 'BetterOffice Base Latin';
+
+/** @internal */
+export const BASE_LATIN_FONTS: BundledFontFace[] = baseLatinManifest.faces.map((face) => ({
+  family: BASE_LATIN_FAMILY,
+  weight: face.source.includes('-Bold') ? 700 : 400,
+  style: face.source.includes('Italic') ? 'italic' : 'normal',
+  file: face.file,
+  byteLength: face.byteLength,
+}));
 
 /** Script bucket a bundled face provides glyph coverage for. */
 export type BundledFontScript =
@@ -569,6 +582,9 @@ export function resolveBundledFamilyFace(
   bold: boolean,
   italic: boolean,
 ): BundledFontFace | undefined {
+  if (family.trim().toLowerCase() === BASE_LATIN_FAMILY.toLowerCase()) {
+    return BASE_LATIN_FONTS.find((face) => face.weight === (bold ? 700 : 400) && face.style === (italic ? 'italic' : 'normal'));
+  }
   if (resolveMetricCompatFamily(family) === 'Selawik') {
     return italic ? undefined : resolveMetricCompatFace(family, bold, false);
   }

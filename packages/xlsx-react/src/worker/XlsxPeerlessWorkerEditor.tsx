@@ -205,7 +205,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const navigateFromNameBox = useCallback((cell: CellAddr) => nameNavigation.current(cell), []);
   const exportInput = useRef<ReturnType<typeof createPeerlessWorkerInputCoordinator> | null>(null);
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
-    coordinator: () => null, readOnly: () => propsRef.current.readOnly ?? false, focus,
+    coordinator: () => null, readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false, focus,
     exportSheet: () => activeRef.current, exportCoordinator: () => exportInput.current,
     editorDocument: () => pluginAccess, saved: (bytes) => propsRef.current.onSave?.(bytes),
     clearSelection: () => {}, refreshProposals: () => {}, recoverInput: async () => {},
@@ -469,6 +470,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const coordinator = useMemo(() => createPeerlessWorkerInputCoordinator({
     generation: () => run?.generation ?? 0, session: () => run?.session ?? null,
     isReady: () => run?.ready ?? false, readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false,
     seal: (): InputSeal => {
       if (chartDrag.current) return { refused: 'gesture-active' };
       flushNudgeRef.current();
@@ -493,7 +495,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     target: string | undefined; cells: Selection | null } | null>(null);
   const [pluginAccess] = useState(() => createPeerlessPluginDocument({
     owner: () => ownerRef.current, coordinator: () => coordinatorRef.current,
-    readOnly: () => propsRef.current.readOnly ?? false, commands: () => commands,
+    readOnly: () => propsRef.current.readOnly ?? false,
+    commands: () => commands,
     selection(owner) {
       const target = owner.session.selection;
       const sheets = owner.session.editState.sheets ?? owner.session.state.sheets;
@@ -518,7 +521,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const pluginSelection = pluginIdentity ? pluginAccess.selection!(pluginIdentity) : null;
   const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
     createClients: createPeerlessPluginClients, createGeometry: createPeerlessPluginGeometry,
-    readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, canvasRef, t });
+    readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, proposals, staleFor,
+    proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t });
   pluginBindingRef.current = pluginHost;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
   useLayoutEffect(() => {
@@ -1041,19 +1045,21 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       run.session.editState.sheets?.find((sheet) => sheet.index === active)?.id) return;
     refreshSheetGeometry(true);
   }, [run, active, refreshSheetGeometry]);
-  const mode = useRef<{ owner: PeerlessWorkbookSession | null; readOnly: boolean }>({ owner: null, readOnly: false });
+  const mode = useRef<{ owner: PeerlessWorkbookSession | null; readOnly: boolean; allowHostProposals: boolean }>(
+    { owner: null, readOnly: false, allowHostProposals: false });
   useLayoutEffect(() => {
-    if (!run?.ready || mode.current.owner === run && mode.current.readOnly === Boolean(props.readOnly)) return;
+    if (!run?.ready || mode.current.owner === run && mode.current.readOnly === Boolean(props.readOnly) &&
+      mode.current.allowHostProposals === Boolean(props.allowHostProposals)) return;
     const previous = mode.current;
-    mode.current = { owner: run, readOnly: Boolean(props.readOnly) };
-    if (previous.owner !== run && Boolean(run.session.editState.readOnly) === Boolean(props.readOnly)) return;
+    mode.current = { owner: run, readOnly: Boolean(props.readOnly), allowHostProposals: Boolean(props.allowHostProposals) };
+    if (previous.owner !== run && Boolean(run.session.editState.readOnly) === Boolean(props.readOnly) && !props.allowHostProposals) return;
     if (props.readOnly) {
       flushNudgeRef.current(true);
       draftController.finish(); setFormatToken(null); chartDrag.current = null; nudge.current = null;
       setChartOffset(null);
     }
-    void coordinator.setReadOnly(Boolean(props.readOnly)).result.catch(report);
-  }, [run, run?.ready, props.readOnly, coordinator, draftController]);
+    void coordinator.setReadOnly(Boolean(props.readOnly), props.allowHostProposals).result.catch(report);
+  }, [run, run?.ready, props.readOnly, props.allowHostProposals, coordinator, draftController]);
   useEffect(() => {
     if (!run?.failure) return;
     echoRef.current?.dispose(); sourceRef.current?.dispose(); coordinator.fail(run.failure); draftController.dispose();
@@ -1222,7 +1228,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     requestSave,
     session: () => run?.session ?? null, coordinator,
     status: () => run?.ready ? 'ready' : run && !run.failure || loading ? 'loading' : 'empty',
-    readOnly: () => propsRef.current.readOnly ?? false, collaborative: () => propsRef.current.collaboration !== undefined,
+    readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false, collaborative: () => propsRef.current.collaboration !== undefined,
     generation: () => run?.generation ?? 0, mutation: () => mutation.current,
     selection: () => selectedTarget() ?? null,
     frame: () => sourceRef.current?.captureCommandFrame() ?? undefined,
@@ -1453,7 +1460,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
 
   const sheets = catalog;
   const defaultToolbar = useMemo(() => <PeerlessDefaultToolbar />, []);
-  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? props.readOnly ? null : defaultToolbar : props.toolbar;
+  const reviewToolbar = props.allowHostProposals && isProposalsAvailable() ? <ToolbarCommandButton id="proposalsPanel" /> : null;
+  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? props.readOnly ? reviewToolbar : defaultToolbar : props.toolbar;
   const renderDock = (placement: DockPlacement) => pluginHost.managed ? <PluginDock host={pluginHost.host}
     placement={placement} activations={pluginHost.activations.filter((activation) => activation.plugin.panel?.placement === placement)}
     available={dockArea} /> : null;

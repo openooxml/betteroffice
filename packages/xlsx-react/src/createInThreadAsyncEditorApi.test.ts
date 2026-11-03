@@ -4,6 +4,20 @@ import { createXlsxCommandController, XlsxCommandAdmissionError } from './comman
 import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
 import { XlsxAsyncApiSyncAccessError } from './worker/asyncApiErrors';
 
+test('fallback host proposals capture requests and use the editor admission path', async () => {
+  const proposal = { id: 'p1', agentId: 'host', note: null, cells: [] };
+  const proposeChanges = mock(async () => ({ ok: true as const, proposal }));
+  const sync = { handle: {}, commands: createXlsxCommandController().store,
+    proposeChanges } as unknown as XlsxEditorApi;
+  const api = createInThreadAsyncEditorApi(sync, false, () => {});
+  const request = { agentId: 'host', edits: [{ sheet: 0, row: 0, col: 0, input: '7' }] };
+  const original = structuredClone(request);
+  const result = api.proposeChanges!(request);
+  request.edits[0]!.input = 'changed';
+  expect(await result).toEqual({ ok: true, proposal });
+  expect(proposeChanges).toHaveBeenCalledWith(original);
+});
+
 for (const method of ['readCells', 'findText', 'validateEdits', 'applyEdits'] as const) {
   test(`fallback host ${method} captures requests before delayed input`, async () => {
     let release!: () => void;
