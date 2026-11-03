@@ -2792,12 +2792,9 @@ impl Workbook {
                 sheet,
                 mut viewport,
             } => {
-                if let Some(width) = options.max_width {
-                    viewport.width = viewport.width.min(width as f32 / options.scale);
-                }
-                if let Some(height) = options.max_height {
-                    viewport.height = viewport.height.min(height as f32 / options.scale);
-                }
+                validate_viewport(&viewport)?;
+                viewport.width = capped_extent(viewport.width, options.max_width, options.scale);
+                viewport.height = capped_extent(viewport.height, options.max_height, options.scale);
                 validate_viewport(&viewport)?;
                 let width = (viewport.width * options.scale).ceil().max(1.0) as u32;
                 let height = (viewport.height * options.scale).ceil().max(1.0) as u32;
@@ -2886,12 +2883,8 @@ impl Workbook {
                 renderable(sheet_ref, &geometry, grown, options.scale)
             }),
         };
-        if let Some(width) = options.max_width {
-            viewport.width = viewport.width.min(width as f32 / options.scale);
-        }
-        if let Some(height) = options.max_height {
-            viewport.height = viewport.height.min(height as f32 / options.scale);
-        }
+        viewport.width = capped_extent(viewport.width, options.max_width, options.scale);
+        viewport.height = capped_extent(viewport.height, options.max_height, options.scale);
         validate_viewport(&viewport)?;
         let width = ((viewport.width * options.scale).ceil() as u32).max(1);
         let height = ((viewport.height * options.scale).ceil() as u32).max(1);
@@ -5172,6 +5165,18 @@ fn value_to_input(
         }
         CellValue::Error { value } => value.as_str().to_string(),
     }
+}
+
+/// The largest unscaled extent within `extent` whose scaled, rounded-up pixel size stays within `cap`.
+fn capped_extent(extent: f32, cap: Option<u32>, scale: f32) -> f32 {
+    let Some(cap) = cap else {
+        return extent;
+    };
+    let mut limit = cap as f32 / scale;
+    while limit > 0.0 && (limit * scale).ceil() > cap as f32 {
+        limit = limit.next_down();
+    }
+    extent.min(limit)
 }
 
 fn validate_viewport(viewport: &Viewport) -> Result<()> {

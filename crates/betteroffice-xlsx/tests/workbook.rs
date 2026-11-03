@@ -11319,6 +11319,91 @@ fn unrelated_currency_format_edits_refresh_formula_results() {
 
 #[cfg(feature = "raster")]
 #[test]
+fn png_dimension_caps_hold_at_fractional_scales() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    for (scale, cap) in [(1.2, 52), (3.0, 10), (1.7, 33)] {
+        let options = RenderOptions {
+            scale,
+            max_width: Some(cap),
+            max_height: Some(cap),
+            ..Default::default()
+        };
+        for target in [
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+            },
+            betteroffice_xlsx::PngTarget::Range {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:D12").unwrap(),
+            },
+        ] {
+            let rendered = workbook.render_png(target, &options).unwrap();
+            assert!(
+                rendered.width <= cap && rendered.height <= cap,
+                "{scale} {cap}: {}x{}",
+                rendered.width,
+                rendered.height
+            );
+            let decoded = image_size(&rendered.bytes);
+            assert!(
+                decoded.0 <= cap && decoded.1 <= cap,
+                "{scale} {cap}: decoded {decoded:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn png_caps_do_not_hide_an_invalid_viewport() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = RenderOptions {
+        max_width: Some(40),
+        max_height: Some(40),
+        ..Default::default()
+    };
+    for viewport in [
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: f32::NAN,
+            height: 64.0,
+        },
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: f32::INFINITY,
+            height: 64.0,
+        },
+        Viewport {
+            x: 3e38,
+            y: 0.0,
+            width: 3e38,
+            height: 64.0,
+        },
+    ] {
+        let error = workbook
+            .render_png(
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet: SheetId(0),
+                    viewport,
+                },
+                &options,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, betteroffice_xlsx::Error::InvalidViewport),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn png_dimension_caps_apply_to_both_target_forms() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
     let options = RenderOptions {
@@ -11404,4 +11489,12 @@ fn png_targets_validate_sheets_and_scale_both_forms() {
             Err(Error::SheetOutOfRange(_))
         ));
     }
+}
+
+fn image_size(png: &[u8]) -> (u32, u32) {
+    let header = &png[16..24];
+    (
+        u32::from_be_bytes(header[0..4].try_into().unwrap()),
+        u32::from_be_bytes(header[4..8].try_into().unwrap()),
+    )
 }

@@ -173,7 +173,14 @@ fn png_range(range: &Bound<'_, PyAny>) -> PyResult<CellRange> {
                 };
                 Ok(CellRef::new(index("row")?, index("col")?))
             };
-            Ok(CellRange::new(position("start")?, position("end")?))
+            let start = position("start")?;
+            let end = position("end")?;
+            if start.row > end.row || start.col > end.col {
+                return Err(RangeError::new_err(
+                    "range start must be above and left of its end",
+                ));
+            }
+            Ok(CellRange::new(start, end))
         }
         _ => Err(invalid()),
     }

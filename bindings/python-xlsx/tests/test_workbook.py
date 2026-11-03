@@ -633,7 +633,7 @@ def test_png_target_takes_a_sheet_name_or_index_and_any_range_form(sample_bytes)
     assert workbook.render_png({"sheet": 0, "range": row_col}).bytes == by_index.bytes
 
 
-@pytest.mark.parametrize("range_address", [{}, {"kind": "a1"}, {"kind": "rowCol", "start": {"row": 0, "col": 0}}, {"kind": "other"}, 1])
+@pytest.mark.parametrize("range_address", [{}, {"kind": "a1"}, {"kind": "rowCol", "start": {"row": 0, "col": 0}}, {"kind": "rowCol", "start": {"row": 5, "col": 5}, "end": {"row": 0, "col": 0}}, {"kind": "rowCol", "start": {"row": 0, "col": 5}, "end": {"row": 5, "col": 0}}, {"kind": "other"}, 1])
 def test_rejects_invalid_png_ranges(sample_bytes, range_address):
     with pytest.raises(bo.RangeError):
         bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": range_address})
@@ -664,3 +664,19 @@ def test_png_target_keeps_the_sheet_key_errors(sample_bytes):
         workbook.render_png({"sheet": True, "range": "A1"})
     with pytest.raises(KeyError):
         workbook.render_png({"sheet": "no-such-sheet", "range": "A1"})
+
+
+@pytest.mark.parametrize("scale,cap", [(1.2, 52), (3.0, 10), (1.7, 33)])
+def test_png_caps_hold_at_fractional_scales(sample_bytes, scale, cap):
+    workbook = bo.Workbook.open(sample_bytes)
+    viewport = {"sheet": 0, "viewport": {"x": 0, "y": 0, "width": 200, "height": 100}}
+    for target in (viewport, {"sheet": 0, "range": "A1:D12"}):
+        png = workbook.render_png(target, scale=scale, max_width=cap, max_height=cap)
+        assert png.width <= cap and png.height <= cap
+
+
+@pytest.mark.parametrize("width", [float("nan"), float("inf")])
+def test_png_caps_do_not_hide_an_invalid_viewport(sample_bytes, width):
+    target = {"sheet": 0, "viewport": {"x": 0, "y": 0, "width": width, "height": 64}}
+    with pytest.raises(bo.RangeError):
+        bo.Workbook.open(sample_bytes).render_png(target, max_width=40)
