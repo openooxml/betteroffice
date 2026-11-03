@@ -64,6 +64,7 @@ impl EngineCall {
         if crate::memory::over_budget() {
             panic!("{}", crate::memory::EXCEEDED);
         }
+        crate::memory::clear_failed();
         Self::enter(env, true)
     }
 

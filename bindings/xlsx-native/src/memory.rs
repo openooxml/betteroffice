@@ -66,6 +66,11 @@ pub(crate) fn live() -> usize {
     LIVE.try_with(Cell::get).unwrap_or(0)
 }
 
+/// Forgets a failure that no later call read, so it cannot describe an unrelated failure.
+pub(crate) fn clear_failed() {
+    let _ = FAILED.try_with(|failed| failed.set(0));
+}
+
 /// The size of the allocation that took the calling thread past its budget, once.
 pub(crate) fn take_failed() -> usize {
     FAILED.try_with(|failed| failed.replace(0)).unwrap_or(0)
