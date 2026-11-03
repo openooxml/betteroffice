@@ -197,7 +197,7 @@ describe('CI runner routing', () => {
       'e2e.yml browser': ['kyora-8x8'],
     });
     const hosted = jobs.filter((entry) => /^(ci|e2e)\.yml /.test(entry.name) && !kyoraJobs.includes(entry));
-    expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'e2e.yml publish']);
+    expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'ci.yml native-hooks', 'e2e.yml publish']);
     for (const { name, runners } of kyoraJobs) {
       for (const event of TRUSTED) {
         expect(runners[event].unset, `${name}: ${event}`).toEqual(runners['push to main'].unset);
