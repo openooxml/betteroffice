@@ -443,6 +443,9 @@ fn field_run_length(run: &Run) -> usize {
         .iter()
         .map(|content| match content {
             RunContent::Text { text, .. } => text.encode_utf16().count(),
+            RunContent::CommentReference { .. }
+            | RunContent::FieldChar { .. }
+            | RunContent::InstrText { .. } => 0,
             _ => 1,
         })
         .sum()

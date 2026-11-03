@@ -114,6 +114,19 @@ fn rewritten_field_result(result: &str, runs: Value, expected_text: &str) -> Str
     xml
 }
 
+fn normalized_field_result(result: &str, expected_text: &str) -> String {
+    let body = format!(
+        "<w:p>{BEGIN}{}{SEPARATE}{result}<w:commentRangeEnd w:id=\"99\"/></w:p><w:p>{END}</w:p>",
+        instruction("QUOTE")
+    );
+    let xml = repacked_field_document(&body, &[expected_text, ""]);
+    assert_field(&xml, "QUOTE");
+    assert_eq!(xml.matches("<w:bookmarkStart").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:bookmarkEnd").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:commentReference").count(), 1, "{xml}");
+    xml
+}
+
 fn assert_field(xml: &str, instruction: &str) {
     for kind in ["begin", "separate", "end"] {
         assert_eq!(
@@ -525,4 +538,24 @@ fn restyled_tab_result_keeps_its_enclosing_bookmark() {
         &xml,
         &[START, "<w:r><w:rPr><w:b/></w:rPr><w:tab/></w:r>", STOP],
     );
+}
+
+#[test]
+fn duplicate_result_references_keep_both_text_runs_bookmarked() {
+    let reference = r#"<w:r><w:commentReference w:id="99"/></w:r>"#;
+    let result = format!(
+        "{reference}{reference}{START}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{STOP}"
+    );
+    let xml = normalized_field_result(&result, "AB");
+    assert_order(&xml, &[START, ">A<", ">B<", STOP]);
+}
+
+#[test]
+fn removed_reference_between_result_runs_keeps_the_bookmark_end_in_place() {
+    let reference = r#"<w:r><w:commentReference w:id="99"/></w:r>"#;
+    let result = format!(
+        "{reference}{START}<w:r><w:t>A</w:t></w:r>{reference}<w:r><w:t>B</w:t></w:r>{STOP}<w:r><w:t>C</w:t></w:r>"
+    );
+    let xml = normalized_field_result(&result, "ABC");
+    assert_order(&xml, &[START, ">A<", ">B<", STOP, ">C<"]);
 }
