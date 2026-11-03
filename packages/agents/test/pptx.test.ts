@@ -706,6 +706,79 @@ test('mixed shape proposals preserve sequential typed story edits alongside batc
   } finally { deck.close(); handle.dispose(); }
 });
 
+for (const matchFirst of [false, true]) {
+  test(`mixed story proposals remap grep matches with typed inserts, match first: ${matchFirst}`, async () => {
+    const deck = await openPptx(await pptxFixture('abc def'));
+    try {
+      const hit = deck.grep({ query: 'def' }).matches[0]!;
+      const typed = { type: 'replaceText' as const, storyId: hit.story, start: 0, end: 0, text: 'X' };
+      const match = { match: hit.match, newText: 'replacement' };
+      const version = deck.overview().version;
+      const proposal = deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] });
+      expect(deck.overview().version).toBe(version);
+      expect(deck.read(hit.ref).text).toBe('abc def');
+      const preview = await openPptx(await deck.export(proposal.id));
+      try { expect(preview.read(preview.grep({ query: 'replacement' }).matches[0]!.ref).text).toBe('Xabc replacement'); }
+      finally { preview.close(); }
+      await deck.accept(proposal.id);
+      expect(deck.read(hit.ref).text).toBe('Xabc replacement');
+    } finally { deck.close(); }
+  });
+}
+
+for (const [matchFirst, end] of [[false, 5], [true, 5], [false, 6], [true, 6]] as const) {
+  test(`mixed story proposals refuse overlapping typed and match edits, match first: ${matchFirst}, typed end: ${end}`, async () => {
+    const deck = await openPptx(await pptxFixture('abc def'));
+    try {
+      const hit = deck.grep({ query: 'def' }).matches[0]!;
+      const typed = { type: 'replaceText' as const, storyId: hit.story, start: 5, end, text: 'X' };
+      const match = { match: hit.match, newText: 'replacement' };
+      const version = deck.overview().version;
+      let refusal: unknown;
+      try { deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] }); }
+      catch (error) { refusal = error; }
+      expect(refusal).toMatchObject({ name: 'DocumentToolError', code: 'OVERLAPPING_EDITS' });
+      expect(deck.listProposals()).toEqual([]);
+      expect(deck.overview().version).toBe(version);
+      expect(deck.read(hit.ref).text).toBe('abc def');
+    } finally { deck.close(); }
+  });
+}
+
+test('mixed story proposals keep typed offsets and local refs in staging order across length-changing matches', async () => {
+  const deck = await openPptx(await pptxFixture('abc def ghi'));
+  try {
+    const first = deck.grep({ query: 'abc' }).matches[0]!;
+    const last = deck.grep({ query: 'ghi' }).matches[0]!;
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { match: first.match, newText: 'alphabet' },
+      { type: 'addTextBox', ref: 'box', slideId: first.slideId, draft: { name: 'Local box', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Local' },
+      { type: 'replaceText', storyId: first.story, start: 9, end: 12, text: 'DEF' },
+      { match: last.match, newText: 'GHI' },
+      { type: 'replaceText', storyId: '@box', start: 5, end: 5, text: ' story' },
+    ] });
+    await deck.accept(proposal.id);
+    expect(deck.read(first.ref).text).toBe('alphabet DEF GHI');
+    expect(deck.read(deck.grep({ query: 'Local story' }).matches[0]!.ref).text).toBe('Local story');
+  } finally { deck.close(); }
+});
+
+test('mixed slide proposals preserve adjacent matches when an earlier match is deleted', async () => {
+  const deck = await openPptx(await pptxFixture('abc def'));
+  try {
+    const first = deck.grep({ query: 'abc ' }).matches[0]!;
+    const second = deck.grep({ query: 'def' }).matches[0]!;
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { match: first.match, newText: '' },
+      { type: 'insertSlide', afterSlideId: null },
+      { match: second.match, newText: 'replacement' },
+    ] });
+    await deck.accept(proposal.id);
+    expect(deck.read(first.ref).text).toBe('replacement');
+  } finally { deck.close(); }
+});
+
 test('PPTX shape proposals expose refs, story targeting, previews, acceptance, and rejection', async () => {
   const handle = openPresentation(await presentationFixture(), { clientId: 732 });
   const deck = attachPptx(handle);

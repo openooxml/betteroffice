@@ -2,6 +2,8 @@ import { deck, open, replyControl, story, type } from './peerlessTestHarness';
 import { expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import type { PresentationHandle } from '@betteroffice/pptx';
+import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
+import { renderedShapeBounds } from '../interactions';
 import JSZip from 'jszip';
 import * as frameSources from './peerlessFrameSource';
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
@@ -383,6 +385,45 @@ test('shape review shows insertion outlines, deletion strikes, and shape details
   expect(value.view.getAllByText('Inserted shape').length).toBeGreaterThan(0);
   expect(value.view.getAllByText('Deleted shape').length).toBeGreaterThan(0);
 });
+
+for (const geometry of ['rotated', 'group', 'grouped child'] as const) {
+  test(`shape review uses live rendered previous bounds for a ${geometry} shape`, async () => {
+    const zip = await JSZip.loadAsync(await deck());
+    const path = 'ppt/slides/slide1.xml';
+    const original = await zip.file(path)!.async('string');
+    const shape = original.match(/<p:sp>.*?<\/p:sp>/)![0];
+    const transformed = geometry === 'rotated' ? shape.replace('<a:xfrm>', '<a:xfrm rot="5400000">')
+      : `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="1200000" y="900000"/><a:ext cx="7200000" cy="3200000"/><a:chOff x="0" y="0"/><a:chExt cx="9000000" cy="4000000"/></a:xfrm></p:grpSpPr>${shape}</p:grpSp>`;
+    zip.file(path, original.replace(shape, transformed));
+    const value = await open({ file: await zip.generateAsync({ type: 'uint8array' }) });
+    const access = await value.api.handleAsync();
+    const snapshot = await access.snapshot();
+    const slide = snapshot.slides[0]!;
+    const target = geometry === 'grouped child' ? slide.shapes[0]!.children[0]! : slide.shapes[0]!;
+    const frame = decodeCommandDisplayList(value.client.state.frame!);
+    const before = renderedShapeBounds(frame, target)!;
+    expect(before).not.toBeNull();
+    expect(before).not.toEqual({ x: target.x * frame.width / snapshot.widthEmu, y: target.y * frame.height / snapshot.heightEmu,
+      width: target.width * frame.width / snapshot.widthEmu, height: target.height * frame.height / snapshot.heightEmu });
+    let proposalId = '';
+    await act(async () => {
+      const proposal = await access.propose('reviewer', 'Move transformed shape', [{ type: 'setShapeRect', slideId: slide.id, shapeId: target.id,
+        rect: { x: target.x + 500000, y: target.y + 300000, width: target.width, height: target.height } }]);
+      proposalId = proposal.id;
+      await value.api.commands.execute('proposalSelect', { proposalId });
+      await value.api.commands.execute('proposalDiff', { enabled: true });
+    });
+    const diff = await access.layoutProposalDiffSlide(proposalId, 0);
+    const after = renderedShapeBounds(diff.frame, diff.proposal.changes.find(change => change.shapeId === target.id)!.after!)!;
+    const old = await waitFor(() => value.view.getByTestId('pptx-proposal-old-bounds'));
+    const proposed = value.view.getByTestId('pptx-proposal-canvas-target');
+    const scale = parseFloat(proposed.style.width) / after.width;
+    expect(parseFloat(old.style.left)).toBeCloseTo(before.x * scale);
+    expect(parseFloat(old.style.top)).toBeCloseTo(before.y * scale);
+    expect(parseFloat(old.style.width)).toBeCloseTo(before.width * scale);
+    expect(parseFloat(old.style.height)).toBeCloseTo(before.height * scale);
+  });
+}
 
 test('worker async proposal API preserves the typed cumulative picture cap', async () => {
   const value = await open();

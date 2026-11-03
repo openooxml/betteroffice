@@ -140,16 +140,35 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     }
     if (structural) {
       if (steps.length) this.validate(steps, version);
-      const replacements = new Map<string, Extract<ProposalEdit, { type: 'replaceText' }>[]>();
+      const ranges = new Map<number, { storyId: string; start: number; end: number }>();
       for (const [index, edit] of proposalEdits.entries()) {
         if (!matchIndices.has(index) || edit.type !== 'replaceText') continue;
-        const story = replacements.get(edit.storyId) ?? [];
-        story.push(edit);
-        replacements.set(edit.storyId, story);
+        ranges.set(index, { storyId: edit.storyId, start: edit.start, end: edit.end });
       }
-      for (const story of replacements.values()) story.sort((left, right) => left.start - right.start);
-      const ordered = proposalEdits.map((edit, index) => matchIndices.has(index) && edit.type === 'replaceText'
-        ? replacements.get(edit.storyId)!.pop()! : edit);
+      const ordered = proposalEdits.map((edit, index) => {
+        if (edit.type !== 'replaceText') return edit;
+        const match = ranges.get(index);
+        const replacement = match ? { ...edit, start: match.start, end: match.end } : edit;
+        for (const [other, range] of ranges) {
+          if (other === index || range.storyId !== replacement.storyId) continue;
+          const overlaps = range.start === range.end
+            ? replacement.start <= range.start && replacement.end >= range.start
+            : replacement.start === replacement.end
+              ? replacement.start > range.start && replacement.start < range.end
+              : replacement.start < range.end && replacement.end > range.start;
+          if (!match && overlaps) throw new DocumentToolError('OVERLAPPING_EDITS', 'Typed text edits and grep replacements must have separate ranges.', { storyId: replacement.storyId });
+          if (replacement.end <= range.start) {
+            const delta = replacement.text.length - (replacement.end - replacement.start);
+            range.start += delta;
+            range.end += delta;
+          }
+        }
+        if (match) {
+          match.start = replacement.start;
+          match.end = replacement.start + replacement.text.length;
+        }
+        return replacement;
+      });
       return this.stageSlideProposal(input, ordered, version);
     }
     return this.stage(input, changes, steps, version);

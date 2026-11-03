@@ -2,7 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExtern
 import type { RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
-import type { Proposal, ProposalDiffSlide } from '@betteroffice/pptx';
+import type { Proposal, ProposalDiffSlide, SlideDisplayList } from '@betteroffice/pptx';
+import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 import type { PptxCommandStore } from '../commands/types';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { commandReason } from '../commands/evaluate';
@@ -31,7 +32,7 @@ function Diff({ run, id, slideId, onPreview, onError, onTarget }: { run: Peerles
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
-  const [painted, setPainted] = useState<{ diff: ProposalDiffSlide; scale: number } | null>(null);
+  const [painted, setPainted] = useState<{ diff: ProposalDiffSlide; frame: SlideDisplayList; scale: number } | null>(null);
   const reportError = useRef(onError);
   reportError.current = onError;
   const visual = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
@@ -44,6 +45,16 @@ function Diff({ run, id, slideId, onPreview, onError, onTarget }: { run: Peerles
       try {
         const diff = source;
         run.require();
+        const targetId = diff.snapshot.slides[0]?.id;
+        const view = run.store.getSnapshot();
+        let frame = view.confirmed?.frame.slideId === targetId ? view.confirmed?.displayList
+          : targetId ? view.thumbnails.get(targetId)?.displayList : undefined;
+        if (!frame && targetId && run.client.state.slides.some(slide => slide.id === targetId)) {
+          const live = await run.client.thumbnail(targetId);
+          run.require();
+          if (live.status !== 'frame') throw new Error('Slide frame is unavailable');
+          frame = decodeCommandDisplayList(live.frame);
+        }
         const scale = visual?.fit.scale ?? 1;
         const buffer = document.createElement('canvas');
         const context = buffer.getContext('2d');
@@ -56,7 +67,7 @@ function Diff({ run, id, slideId, onPreview, onError, onTarget }: { run: Peerles
         if (!cancelled && canvas.current && run.current) {
           sizeCanvasForSlide(canvas.current, diff.frame, 1, scale);
           canvas.current.getContext('2d')?.drawImage(buffer, 0, 0);
-          setPainted({ diff, scale });
+          setPainted({ diff, frame: frame ?? diff.frame, scale });
           onPreview(diff.proposal);
         }
       } finally { source.release(); }
@@ -65,7 +76,7 @@ function Diff({ run, id, slideId, onPreview, onError, onTarget }: { run: Peerles
   }, [run, id, slideId, visual, onPreview, decodeImageError]);
   return <>
     <canvas ref={canvas} data-testid="pptx-proposal-diff" data-slide-id={slideId ?? run.client.state.activeSlideId} style={{ position: 'absolute', left: 0, top: 0 }} />
-    {painted && <ProposalShapeOutlines diff={painted.diff} current={painted.diff.snapshot} frame={{ ...painted.diff.frame, primitives: [] }} scale={painted.scale} onTarget={onTarget} />}
+    {painted && <ProposalShapeOutlines diff={painted.diff} current={painted.diff.snapshot} frame={painted.frame} scale={painted.scale} onTarget={onTarget} />}
   </>;
 }
 
