@@ -1,5 +1,4 @@
 import { sectionPropertiesEqual } from './sections';
-import { visitFieldRuns } from './fieldRunProperties';
 /** yrs-to-OOXML save projection. */
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
@@ -624,83 +623,6 @@ function runPropertyChanges(attributes: Attrs, format: RunFormatter): Pick<Run, 
   return { propertyChanges: propertyChanges(changes) as Run['propertyChanges'] };
 }
 
-export class RunPropertyChangeProjectionError extends Error {
-  readonly code = 'unprojectable-run-property-change';
-
-  constructor(message: string) {
-    super(message);
-    this.name = 'RunPropertyChangeProjectionError';
-  }
-}
-
-function overlayRunFormatting(
-  run: Run,
-  before: Attrs,
-  attributes: Attrs,
-  format: RunFormatter
-): void {
-  const previous = directFormatting(before);
-  const current = directFormatting(attributes);
-  const projected = format(attributes);
-  const formatting: Attrs = { ...run.formatting };
-  for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
-    const property = key as keyof TextFormatting;
-    if (sameJson(previous[property], current[property])) continue;
-    if (projected[property] === undefined) delete formatting[key];
-    else formatting[key] = projected[property];
-  }
-  run.formatting = formatting as TextFormatting;
-}
-
-function projectContainerRunChanges(
-  content: ParagraphContent | null,
-  attributes: Attrs,
-  format: RunFormatter,
-  sourceAttributes?: Attrs
-): ParagraphContent | null {
-  const changes = runPropertyChanges(attributes, format).propertyChanges;
-  if (!changes?.length) return content;
-  if (content?.type === 'run') return { ...content, propertyChanges: changes };
-  if (sourceAttributes && sameJson(sourceAttributes.rPrChange, attributes.rPrChange) &&
-    sameJson(directFormatting(sourceAttributes), directFormatting(attributes))) return content;
-  let count = 0;
-  visitFieldRuns(content, run => {
-    count += 1;
-    const original = run.formatting;
-    for (const change of changes) {
-      const before = sourceAttributes ?? asObject((change as unknown as Attrs).previousAttributes);
-      if (before) overlayRunFormatting(run, before, attributes, format);
-    }
-    run.propertyChanges = run.propertyChanges?.length ? run.propertyChanges : changes.map(change => ({
-      ...change,
-      previousFormatting: original ?? {},
-    }));
-  });
-  if (count === 0) {
-    throw new RunPropertyChangeProjectionError(`Cannot save run property changes on ${content?.type ?? 'missing content'} without runs`);
-  }
-  return content;
-}
-
-function restoreFieldRunProperties(field: SimpleField | ComplexField, payload: Attrs, format: RunFormatter): void {
-  for (const raw of Array.isArray(payload.content) ? payload.content : []) {
-    const entry = asObject(raw);
-    if (!entry || !Array.isArray(entry.runPath)) continue;
-    let target: unknown = field;
-    for (const key of entry.runPath) {
-      target = typeof key === 'string' && target !== null && typeof target === 'object'
-        ? (target as Attrs)[key] : undefined;
-    }
-    if (asObject(target)?.type !== 'run') {
-      throw new RunPropertyChangeProjectionError('Cannot locate a field run carrying property changes');
-    }
-    const run = target as Run;
-    const attributes = asObject(entry.attrs) ?? {};
-    overlayRunFormatting(run, asObject(entry.sourceAttributes) ?? {}, attributes, format);
-    run.propertyChanges = runPropertyChanges(attributes, format).propertyChanges;
-  }
-}
-
 function appendTextRun(target: Run, source: Run): void {
   for (const item of source.content) {
     const previous = target.content[target.content.length - 1];
@@ -815,11 +737,9 @@ function fieldFromPayload(
       ) {
         const displayMode = asString(payload.displayMode) as 'result' | 'code' | undefined;
         if (stored.fieldTree && displayMode) stored.fieldTree.displayMode = displayMode;
-        restoreFieldRunProperties(stored, payload, format);
         return stored;
       }
-    } catch (error) {
-      if (error instanceof RunPropertyChangeProjectionError) throw error;
+    } catch {
       // Malformed editor cache: rebuild the same minimal inert field as the save path.
     }
   }
@@ -1298,10 +1218,7 @@ function ordinaryContentForItem(
   format: RunFormatter
 ): ParagraphContent | null {
   const content = inlineContentForItem(item, recovery, format);
-  return projectContainerRunChanges(
-    content, item.attributes, format,
-    item.kind === 'embed' ? asObject(item.payload.runPropertiesAttributes) : undefined
-  );
+  return content?.type === 'run' ? { ...content, ...runPropertyChanges(item.attributes, format) } : content;
 }
 
 function inlineContentForItem(
@@ -1367,9 +1284,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
     const ordinary = ordinaryContentForItem(item, recovery, format);
     child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run', content: [] };
   } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery, format);
-  else if (item.kind === 'embed' && item.embedKind === 'field') {
-    child = commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes, format);
-  } else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
@@ -1383,13 +1298,13 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else child = { type: 'run', content: [] };
 
   if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
-  child = projectContainerRunChanges(
-    child, item.attributes, format,
-    item.kind === 'embed' ? asObject(item.payload.runPropertiesAttributes) : undefined
-  ) as typeof child;
+  if (child.type === 'run') Object.assign(child, runPropertyChanges(item.attributes, format));
   const hyperlink = createHyperlink(item.attributes);
   if (hyperlink && (child.type === 'run' || child.type === 'mathEquation' || child.type === 'inlineSdt' || child.type === 'simpleField' || child.type === 'complexField')) {
-    if (child.type === 'run') hyperlink.children.push(child);
+    if (child.type === 'run') {
+    Object.assign(child, runPropertyChanges(item.attributes, format));
+    hyperlink.children.push(child);
+  }
     else hyperlink.structuredChildren = [child];
     child = hyperlink;
   }
@@ -1434,13 +1349,9 @@ function addToHyperlink(
   } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
   else if (item.embedKind === 'sdt') {
     const control = inlineSdtFromPayload(item.payload, recovery, format);
-    if (item.attributes.ins || item.attributes.del || item.attributes.rPrChange || hasTrackedControlContent(control)) child = control;
+    if (item.attributes.ins || item.attributes.del || hasTrackedControlContent(control)) child = control;
   }
   if (!child) return;
-  child = projectContainerRunChanges(
-    child, item.attributes, format,
-    item.kind === 'embed' ? asObject(item.payload.runPropertiesAttributes) : undefined
-  ) as HyperlinkContent;
   if (child.type === 'run') hyperlink.children.push(child);
   if (child.type !== 'run' || hyperlink.structuredChildren) {
     (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
