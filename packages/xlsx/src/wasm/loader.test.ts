@@ -692,13 +692,26 @@ describe('wasm loader — proposals', () => {
   it.skipIf(!available)('lists rebased proposals after insertRows and stale proposals after deletion', () => {
     const handle = openWorkbook(sampleBytes());
     try {
+      handle.setNumberFormat(0, 'F7', 'plainText');
       const proposal = handle.propose('agent', null, [
         { sheet: 0, row: 6, col: 4, input: '42' },
+        { sheet: 0, row: 6, col: 5, input: '=A1' },
+        { sheet: 0, row: 6, col: 6, input: '=SUM(' },
       ]);
+      const before = handle.listProposals()[0]!;
+      expect(before.cells.map((cell) => cell.newText)).toEqual(['42', '=A1', '=SUM(']);
+      for (const cell of before.cells) expect(cell).not.toHaveProperty('input');
       handle.applyOps([{ type: 'insertRows', sheet: 0, at: 5, count: 2 }]);
       expect(handle.listProposals()[0]).toMatchObject({
-        id: proposal.id, cells: [{ sheet: 0, row: 8, col: 4, a1: 'E9' }],
+        id: proposal.id, cells: [
+          { sheet: 0, row: 8, col: 4, a1: 'E9' },
+          { sheet: 0, row: 8, col: 5, a1: 'F9' },
+          { sheet: 0, row: 8, col: 6, a1: 'G9' },
+        ],
       });
+      const after = handle.listProposals()[0]!;
+      expect(after.cells.map((cell) => cell.newText)).toEqual(before.cells.map((cell) => cell.newText));
+      for (const cell of after.cells) expect(cell).not.toHaveProperty('input');
       handle.applyOps([{ type: 'deleteRows', sheet: 0, at: 8, count: 1 }]);
       expect(handle.listProposals()[0]?.cells[0]).toMatchObject({ a1: 'E9', stale: true });
       expect(() => handle.acceptProposal(proposal.id)).toThrow(StaleProposalError);
@@ -706,6 +719,8 @@ describe('wasm loader — proposals', () => {
       handle.undo();
       handle.acceptProposal(proposal.id);
       expect(handle.cell(0, 8, 4).input).toBe('42');
+      expect(handle.cell(0, 8, 5)).toMatchObject({ input: "'=A1", isFormula: false });
+      expect(handle.cell(0, 8, 6)).toMatchObject({ input: "'=SUM(", isFormula: false });
     } finally {
       handle.dispose();
     }

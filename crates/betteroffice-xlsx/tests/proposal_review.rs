@@ -543,6 +543,8 @@ fn formula_like_plain_text_inputs_are_not_rewritten() {
         },
     );
     let id = stage(&mut workbook, "=A1");
+    assert_eq!(workbook.proposals()[0].edits[0].input, "=A1");
+    assert_eq!(workbook.proposals()[0].edits[0].new_text, "=A1");
     apply(
         &mut workbook,
         Op::InsertCols {
@@ -552,10 +554,21 @@ fn formula_like_plain_text_inputs_are_not_rewritten() {
         },
     );
     assert_eq!(workbook.proposals()[0].edits[0].input, "=A1");
+    assert_eq!(workbook.proposals()[0].edits[0].new_text, "=A1");
     workbook
         .accept_proposal(&id, false, CalculationOptions::default())
         .unwrap();
-    assert_eq!(workbook.cell(SheetId(0), cell("D1")).unwrap().input, "=A1");
+    let accepted = workbook.cell(SheetId(0), cell("D1")).unwrap();
+    assert_eq!(accepted.input, "'=A1");
+    assert!(!accepted.is_formula);
+    let stored = workbook.sheet(SheetId(0)).unwrap().cell(cell("D1")).unwrap();
+    assert_eq!(
+        stored.value,
+        betteroffice_xlsx::CellValue::Text {
+            value: "=A1".into()
+        }
+    );
+    assert!(stored.formula.is_none());
 }
 
 #[test]
@@ -697,6 +710,8 @@ fn redo_restores_a_proposal_staged_inside_a_newly_inserted_column() {
 fn invalid_formula_text_remains_literal_through_structural_edits() {
     let mut workbook = Workbook::from_model(model()).unwrap();
     let id = stage(&mut workbook, "=SUM(");
+    assert_eq!(workbook.proposals()[0].edits[0].input, "=SUM(");
+    assert_eq!(workbook.proposals()[0].edits[0].new_text, "=SUM(");
     apply(
         &mut workbook,
         Op::InsertRows {
@@ -706,13 +721,21 @@ fn invalid_formula_text_remains_literal_through_structural_edits() {
         },
     );
     assert_eq!(workbook.proposals()[0].edits[0].input, "=SUM(");
+    assert_eq!(workbook.proposals()[0].edits[0].new_text, "=SUM(");
     workbook
         .accept_proposal(&id, false, CalculationOptions::default())
         .unwrap();
+    let accepted = workbook.cell(SheetId(0), cell("C2")).unwrap();
+    assert_eq!(accepted.input, "'=SUM(");
+    assert!(!accepted.is_formula);
+    let stored = workbook.sheet(SheetId(0)).unwrap().cell(cell("C2")).unwrap();
     assert_eq!(
-        workbook.cell(SheetId(0), cell("C2")).unwrap().input,
-        "=SUM("
+        stored.value,
+        betteroffice_xlsx::CellValue::Text {
+            value: "=SUM(".into()
+        }
     );
+    assert!(stored.formula.is_none());
 }
 
 #[test]

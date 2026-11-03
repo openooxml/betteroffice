@@ -128,7 +128,9 @@ describe('workbook edit peers', () => {
   });
 
   test('rebases proposals through structural edits and history on both peer and worker', async () => {
-    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const session = await createTestWorkbookSession(fixture, batchRequests, {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
     const peer = await hydratePeer(session);
     const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
     try {
@@ -144,6 +146,10 @@ describe('workbook edit peers', () => {
       expect(() => edits.acceptProposal(proposal.id, { force: true })).toThrow(StaleProposalError);
       edits.undo();
       await matchingDigest(4, 'undo', edits, peer, session);
+      expect(peer.listProposals()[0]).toMatchObject({
+        id: proposal.id, cells: [{ a1: 'E9', newText: '42' }],
+      });
+      expect(peer.listProposals()[0]?.cells[0]?.stale).not.toBe(true);
       edits.acceptProposal(proposal.id);
       await matchingDigest(5, 'acceptProposal', edits, peer, session);
       expect(peer.cell(0, 8, 4).input).toBe('42');
