@@ -130,7 +130,8 @@ export function createRustMeasureSource(options: {
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }), progressive: options.progressive
-      ? async (slices) => (await import('@betteroffice/fonts/progressive')).openSlicedFace(slices)
+      ? async (slices) => import('@betteroffice/fonts/progressive').then(({ openSlicedFace }) =>
+        openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]))
       : undefined },
   );
   let compat: CompatibilityFlags | undefined;
@@ -141,7 +142,7 @@ export function createRustMeasureSource(options: {
       if (registry.progressiveFaces().size === 0) return specs;
       const { sliceSourceOf } = await import('@betteroffice/fonts/progressive');
       for (const [slot, face] of registry.progressiveFaces()) {
-        const source = await sliceSourceOf(face);
+        const source = await sliceSourceOf(face as Parameters<typeof sliceSourceOf>[0]);
         if (source) specs.push({ slot, source });
       }
       return specs;

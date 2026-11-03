@@ -1,4 +1,11 @@
-import type { ProgressiveFontFace, SliceLocation } from '@betteroffice/fonts/progressive';
+/** Where a sliced face's files are, as `@betteroffice/fonts` loaders carry it; opaque to the registry. */
+export type SliceLocation = object;
+
+/** What the registry uses of a face `@betteroffice/fonts/progressive` opens. */
+export interface ProgressiveFontFace {
+  bytes(): ArrayBuffer;
+}
+
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
 
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {

@@ -1,14 +1,23 @@
-import {
-  openProgressiveFace,
-  readFontAsset,
-  type ProgressiveFontFace,
-  type SliceSource,
-} from '@betteroffice/fonts/progressive';
+/** A sliced face's pack files, as `sliceSourceOf` from `@betteroffice/fonts/progressive` describes them. */
+export interface ProgressiveFontSource {
+  ref: { format: number; index: string; indexSha256: string; byteLength: number; sha256: string };
+  /** Absolute URL of the index, skeleton, core and every chunk by manifest path. */
+  urls: Record<string, string>;
+  timeoutMs?: number;
+}
 
 /** A command font slot registered from a sliced face's skeleton and core. */
 export interface ProgressiveFontSpec {
   slot: number;
-  source: SliceSource;
+  source: ProgressiveFontSource;
+}
+
+/** What the worker uses of a face `@betteroffice/fonts/progressive` opens. */
+interface OutlineFace {
+  readonly revision: number;
+  bytes(): ArrayBuffer;
+  ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
+  complete(): boolean;
 }
 
 /** How long a frame waits for missing outlines before it paints without them and repaints later. */
@@ -20,8 +29,8 @@ const CHUNK_RETRY_DELAYS_MS = [250, 1_000, 4_000];
 interface Owner {
   /** The font id of every slot registered with these bytes; the engine may share one face among them. */
   ids: number[];
-  open: () => Promise<ProgressiveFontFace>;
-  face?: ProgressiveFontFace;
+  open: () => Promise<OutlineFace>;
+  face?: OutlineFace;
   installed: number;
   complete: boolean;
   refused: boolean;
@@ -103,15 +112,16 @@ export class ResidentProgressiveFonts {
         if (view !== null && view !== undefined && rootSlot(slot) === spec.slot) this.ownerOf.set(view, owner);
       }
       if (shared !== undefined) continue;
-      let opening: Promise<ProgressiveFontFace> | undefined;
-      const open = () => opening ??= openProgressiveFace(spec.source.ref, {
-        read: (file) => {
-          const url = spec.source.urls[file];
-          if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
-          return readFontAsset(file, new URL(url), spec.source.timeoutMs);
-        },
-        decode,
-      }).catch((error: unknown) => {
+      let opening: Promise<OutlineFace> | undefined;
+      const open = () => opening ??= import('@betteroffice/fonts/progressive').then(({ openProgressiveFace, readFontAsset }) =>
+        openProgressiveFace(spec.source.ref, {
+          read: (file) => {
+            const url = spec.source.urls[file];
+            if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
+            return readFontAsset(file, new URL(url), spec.source.timeoutMs);
+          },
+          decode,
+        })).catch((error: unknown) => {
         opening = undefined;
         throw error;
       });
