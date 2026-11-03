@@ -121,6 +121,7 @@ test('a placeholder is a thin dashed outline, not a filled block', async ({ page
     document.body.append(canvas);
     const dpr = vsdx.sizeCanvasForPage(canvas, list, 1, 1);
     const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('2d canvas context unavailable');
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await vsdx.paintPage(ctx, list, dpr, 1);

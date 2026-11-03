@@ -725,7 +725,9 @@ mod tests {
         let at = |x: u32, y: u32| gray[(y * width + x) as usize];
         let (left, right, top, bottom) = (96, 288, 96, 192);
         assert_eq!(at((left + right) / 2, (top + bottom) / 2), 255);
-        let inked: Vec<u32> = (top - 4..top + 5).filter(|&y| at(150, y) < 200 || at(153, y) < 200 || at(156, y) < 200).collect();
+        let inked: Vec<u32> = (top - 4..top + 5)
+            .filter(|&y| at(150, y) < 200 || at(153, y) < 200 || at(156, y) < 200)
+            .collect();
         assert!(!inked.is_empty() && inked.len() <= 2, "edge rows {inked:?}");
         let row = inked[0];
         let marks: Vec<bool> = (left + 2..right - 2).map(|x| at(x, row) < 200).collect();
