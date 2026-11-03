@@ -134,6 +134,7 @@ function harness(ready = true, attach = true) {
     mergedRanges: mock((_sheet: number, _range: string) => [{ start: { row: 0, col: 0 }, end: { row: 0, col: 1 } }]),
     historyState: mock(() => ({ canUndo: state.canUndo, canRedo: state.canRedo, undoDepth: 1, redoDepth: 1 })),
     captureFormat: mock((_sheet: number, _range: string) => ({ rows: 1, columns: 1, formats: [] })),
+    readCells: mock((_request: unknown) => ({ ok: true, sheets: [{ editable: true }] })),
     patchRangeStyle: rawMutation, setNumberFormat: rawMutation, applyOps: rawMutation,
     undo: rawMutation, redo: rawMutation, acceptProposal: rawMutation, rejectProposal: rawMutation,
     editCell: rawMutation, save: rawMutation,

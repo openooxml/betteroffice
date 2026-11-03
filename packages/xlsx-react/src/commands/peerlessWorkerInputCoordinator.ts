@@ -5,7 +5,7 @@ import type {
   CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest, WorkbookCommandSelection,
 } from '@betteroffice/xlsx/worker';
 
-import { WorkerInputRefusal } from './workerInputErrors';
+import { isSheetProtectedMessage, SHEET_PROTECTED_MESSAGE, WorkerInputRefusal } from './workerInputErrors';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -880,9 +880,8 @@ export class PeerlessWorkerCommandRefusal extends WorkerInputRefusal {
     readonly draft: InputDraft | null
   ) {
     const result = status.result as { failure?: { message?: string } } | undefined;
-    const protectedCell = status.reason === 'locked-target' &&
-      /^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(result?.failure?.message ?? '');
-    super(protectedCell ? 'This cell is on a protected sheet.' : status.reason ?? 'Worker command refused',
+    const protectedCell = status.reason === 'locked-target' && isSheetProtectedMessage(result?.failure?.message ?? '');
+    super(protectedCell ? SHEET_PROTECTED_MESSAGE : status.reason ?? 'Worker command refused',
       false, protectedCell ? 'sheet-protected' : 'input-failed');
     this.name = 'XlsxWorkerCommandRefusal';
   }

@@ -1581,6 +1581,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet)?;
         self.apply_ops(
             vec![Op::PatchRangeStyle {
                 sheet,
@@ -1599,6 +1600,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet)?;
         self.apply_ops(
             vec![Op::SetRangeNumberFormat {
                 sheet,
@@ -1730,6 +1732,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet)?;
         self.apply_ops(
             vec![Op::ApplyRangeFormat {
                 sheet,
@@ -1819,6 +1822,7 @@ impl Workbook {
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
+        self.ensure_cells_writable(sheet, [cell])?;
         let names = DefinedFunctionNames::new(&self.model.defined_names);
         let (state, format) =
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
@@ -1868,13 +1872,16 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         self.ensure_worksheet_sheet(sheet)?;
+        for edit in edits {
+            self.validate_cell(edit.cell)?;
+        }
+        self.ensure_cells_writable(sheet, edits.iter().map(|edit| edit.cell))?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
         let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
         for edit in edits {
-            self.validate_cell(edit.cell)?;
             let (state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -1962,6 +1969,7 @@ impl Workbook {
             .ok_or(Error::CellOutOfRange(destination))?;
         let target = CellRange::new(destination, CellRef::new(end_row, end_col));
         self.validate_bounded_range(sheet, target)?;
+        self.ensure_cells_writable(sheet, cells_in(source).chain(cells_in(target)))?;
         if source.start.row == destination.row && source.start.col == destination.col {
             return Ok(MutationResult::default());
         }
@@ -2364,6 +2372,7 @@ impl Workbook {
         let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
+            self.ensure_cells_writable(edit.sheet, [edit.cell])?;
             let (state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -2470,6 +2479,7 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
+            self.ensure_cells_writable(sheet, [cell])?;
             let (state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -2728,6 +2738,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         let sheet_ref = self.sheet(sheet)?;
+        self.ensure_objects_movable(sheet)?;
         let chart = sheet_ref
             .charts
             .iter()
@@ -4444,6 +4455,13 @@ fn validate_range(range: CellRange) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Row-major cells of a validated range.
+fn cells_in(range: CellRange) -> impl Iterator<Item = CellRef> {
+    (range.start.row..=range.end.row).flat_map(move |row| {
+        (range.start.col..=range.end.col).map(move |col| CellRef::new(row, col))
+    })
 }
 
 /// A chart part is only ever preserved from the package it was read with;

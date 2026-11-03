@@ -11,7 +11,7 @@ use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
     MAX_DIAGNOSTIC_CELLS, failure, refusal,
 };
-use crate::{CellAddress, Result, XlsxSheetVisibility};
+use crate::{CellAddress, Error, Result, XlsxSheetVisibility};
 
 /// Most cells one read may return.
 const MAX_READ_CELLS: u64 = 100_000;
@@ -390,25 +390,9 @@ impl Workbook {
         match operation {
             EditOperation::SetCellInputs { .. }
             | EditOperation::SetCellValues { .. }
-            | EditOperation::SetFormulas { .. } => {
-                let sheet = self.model.sheet(target.sheet)?;
-                let mut defaults = ColumnDefaults::new(sheet);
-                let locked = target.iter().find(|&at| {
-                    self.model
-                        .styles
-                        .xf(defaults.effective_style(at).unwrap_or(0))
-                        .and_then(|xf| xf.protection)
-                        .is_none_or(|protection| protection.locked)
-                })?;
-                Some((
-                    EditFailureCode::LockedTarget,
-                    format!(
-                        "{} is locked on protected sheet {:?}",
-                        locked.to_a1(),
-                        sheet.name
-                    ),
-                ))
-            }
+            | EditOperation::SetFormulas { .. } => self
+                .locked_cell(target.sheet, target.iter())
+                .map(|message| (EditFailureCode::LockedTarget, message)),
             EditOperation::SetNumberFormat { .. } | EditOperation::PatchStyle { .. } => {
                 if format_cells {
                     None
@@ -417,6 +401,69 @@ impl Workbook {
                 }
             }
         }
+    }
+
+    /// The first of `cells` that is locked on `sheet`, named as a refusal.
+    fn locked_cell(
+        &self,
+        sheet: SheetId,
+        cells: impl IntoIterator<Item = CellRef>,
+    ) -> Option<String> {
+        let sheet = self.model.sheet(sheet)?;
+        let mut defaults = ColumnDefaults::new(sheet);
+        let locked = cells.into_iter().find(|&at| {
+            self.model
+                .styles
+                .xf(defaults.effective_style(at).unwrap_or(0))
+                .and_then(|xf| xf.protection)
+                .is_none_or(|protection| protection.locked)
+        })?;
+        Some(format!(
+            "{} is locked on protected sheet {:?}",
+            locked.to_a1(),
+            sheet.name
+        ))
+    }
+
+    /// Refuses user input into `cells` of `sheet` when one of them is locked on a protected
+    /// sheet, the check edit batches make without the protected-sheet opt-in.
+    pub(super) fn ensure_cells_writable(
+        &self,
+        sheet: SheetId,
+        cells: impl IntoIterator<Item = CellRef>,
+    ) -> Result<()> {
+        if matches!(self.sheet_lock(sheet), Some(SheetLock::Protected { .. }))
+            && let Some(message) = self.locked_cell(sheet, cells)
+        {
+            return Err(Error::LockedTarget(message));
+        }
+        Ok(())
+    }
+
+    /// Refuses formatting cells of a protected sheet that does not allow it.
+    pub(super) fn ensure_cells_formattable(&self, sheet: SheetId) -> Result<()> {
+        match self.sheet_lock(sheet) {
+            Some(SheetLock::Protected {
+                format_cells: false,
+            }) => Err(self.protected_sheet(sheet)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuses moving objects on a protected sheet.
+    pub(super) fn ensure_objects_movable(&self, sheet: SheetId) -> Result<()> {
+        match self.sheet_lock(sheet) {
+            Some(SheetLock::Protected { .. }) => Err(self.protected_sheet(sheet)),
+            _ => Ok(()),
+        }
+    }
+
+    fn protected_sheet(&self, sheet: SheetId) -> Error {
+        let name = self
+            .model
+            .sheet(sheet)
+            .map_or("", |sheet| sheet.name.as_str());
+        Error::LockedTarget(format!("sheet {name:?} is protected"))
     }
 
     /// Reads cells with the version they were read at. `Err` is an internal failure.

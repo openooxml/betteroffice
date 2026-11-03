@@ -10,6 +10,7 @@
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
+import JSZip from 'jszip';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useEffect } from 'react';
@@ -3220,6 +3221,168 @@ describe('clipboard access failure recovery', () => {
       await act(async () => { await api!.flushPendingInput(); });
       expect(api!.handle.cell(0, 0, 0).input).toBe(before);
     } finally { navigator.clipboard.writeText = write; }
+  });
+});
+
+describe('XlsxEditor protected sheets', () => {
+  const PROTECTED = 'This cell is on a protected sheet.';
+
+  async function protectedBook(protectedSheet: boolean, formatCells: boolean) {
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+    zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+    zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>');
+    zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+    zip.file('xl/styles.xml', '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf/><xf applyProtection="1"><protection locked="0"/></xf></cellXfs></styleSheet>');
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" s="1"><v>2</v></c></row></sheetData>${protectedSheet ? `<sheetProtection sheet="1"${formatCells ? ' formatCells="0"' : ''}/>` : ''}</worksheet>`);
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  async function mountProtected({ protectedSheet = true, formatCells = false } = {}) {
+    let api: XlsxEditorApi | undefined;
+    const saves: Uint8Array[] = [];
+    const file = await protectedBook(protectedSheet, formatCells);
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
+      onSave={(bytes) => { saves.push(bytes); }} onReady={(ready) => { api = ready; }} />);
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
+    const surface = view.getByTestId('xlsx-scroll');
+    const select = (col: number, to = col) => act(async () => {
+      api!.selectCells(0, { anchor: { row: 0, col }, focus: { row: 0, col: to } });
+    });
+    const type = async (value: string) => {
+      fireEvent.keyDown(surface, { key: 'F2' });
+      const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor') as HTMLInputElement);
+      fireEvent.change(editor, { target: { value } });
+      fireEvent.keyDown(editor, { key: 'Enter' });
+    };
+    const execute = async <K extends XlsxCommandId>(id: K, args: XlsxCommandArgs[K]) => {
+      let result!: XlsxCommandResult;
+      await act(async () => { result = await api!.commands.execute(id, args); });
+      return result;
+    };
+    const flush = () => act(async () => { await api!.flushPendingInput().catch(() => {}); });
+    return {
+      view, surface, saves, select, type, execute, flush,
+      api: () => api!,
+      input: (col: number) => api!.handle.cell(0, 0, col).input,
+      refusal: () => view.queryByTestId('xlsx-input-refusal')?.textContent ?? null,
+    };
+  }
+
+  for (const formatCells of [false, true]) {
+    it(`refuses typing into a locked cell and keeps the draft open at its cell when formatCells=${formatCells}`, async () => {
+      const book = await mountProtected({ formatCells });
+      await book.select(0);
+      const version = book.api().handle.version();
+      await book.type('changed');
+      await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+      expect((book.view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('changed');
+      expect((book.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+      expect(book.input(0)).toBe('1');
+      expect(book.api().handle.version()).toBe(version);
+      expect(book.view.queryByTestId('xlsx-error')).toBeNull();
+      expect(await book.execute('save', null)).toMatchObject({ ok: false, failure: { code: 'sheet-protected', message: PROTECTED } });
+      expect(book.saves).toHaveLength(0);
+      fireEvent.keyDown(book.view.getByTestId('xlsx-cell-editor'), { key: 'Escape' });
+      expect(await book.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+      const saved = openWorkbook(book.saves[0]);
+      try { expect(saved.cell(0, 0, 0).input).toBe('1'); } finally { saved.dispose(); }
+    });
+  }
+
+  it('writes an unlocked cell of a protected sheet', async () => {
+    const book = await mountProtected();
+    await book.select(1);
+    await book.type('unlocked');
+    await waitFor(() => expect(book.input(1)).toBe('unlocked'));
+    expect(book.input(0)).toBe('1');
+    expect(book.refusal()).toBeNull();
+    expect(book.view.queryByTestId('xlsx-cell-editor')).toBeNull();
+  });
+
+  it('writes any cell of an unprotected sheet', async () => {
+    const book = await mountProtected({ protectedSheet: false });
+    await book.select(0);
+    await book.type('unprotected');
+    await waitFor(() => expect(book.input(0)).toBe('unprotected'));
+    expect(book.refusal()).toBeNull();
+  });
+
+  it('refuses a formula bar commit into a locked cell', async () => {
+    const book = await mountProtected();
+    await book.select(0);
+    const formula = book.view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    fireEvent.change(formula, { target: { value: '=B1*2' } });
+    fireEvent.keyDown(formula, { key: 'Enter' });
+    await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+    expect(book.input(0)).toBe('1');
+    expect(await book.execute('bold', null)).toMatchObject({ ok: false, failure: { code: 'sheet-protected' } });
+  });
+
+  it('refuses Delete on a locked cell and clears an unlocked one', async () => {
+    const book = await mountProtected();
+    await book.select(0, 1);
+    fireEvent.keyDown(book.surface, { key: 'Delete' });
+    await book.flush();
+    await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+    expect([book.input(0), book.input(1)]).toEqual(['1', '2']);
+    await book.select(1);
+    fireEvent.keyDown(book.surface, { key: 'Delete' });
+    await book.flush();
+    expect([book.input(0), book.input(1)]).toEqual(['1', '']);
+    expect(book.refusal()).toBeNull();
+  });
+
+  it('refuses a paste that reaches a locked cell and a cut of one', async () => {
+    const clipboard = navigator.clipboard;
+    const { read, readText, writeText } = clipboard;
+    let text = 'p\tq';
+    const written: string[] = [];
+    clipboard.read = undefined as unknown as typeof read;
+    clipboard.readText = () => Promise.resolve(text);
+    clipboard.writeText = (value: string) => { written.push(value); return Promise.resolve(); };
+    try {
+      const book = await mountProtected();
+      await book.select(1);
+      fireEvent.keyDown(book.surface, { key: 'v', ctrlKey: true });
+      await book.flush();
+      await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+      expect([book.input(1), book.api().handle.cell(0, 0, 2).input]).toEqual(['2', '']);
+      text = 'p';
+      fireEvent.keyDown(book.surface, { key: 'v', ctrlKey: true });
+      await book.flush();
+      await waitFor(() => expect(book.input(1)).toBe('p'));
+      await book.select(0);
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.flush();
+      await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+      expect(written).toEqual(['1']);
+      expect(book.input(0)).toBe('1');
+    } finally {
+      clipboard.read = read;
+      clipboard.readText = readText;
+      clipboard.writeText = writeText;
+    }
+  });
+
+  it('refuses formatting a protected sheet that does not allow formatting cells', async () => {
+    const book = await mountProtected();
+    await book.select(1);
+    expect(await book.execute('bold', null)).toMatchObject({ ok: false, failure: { code: 'sheet-protected', message: PROTECTED } });
+    expect(book.api().handle.selectionFormatting(0, 'B1:B1').bold).toBe(false);
+    await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+    expect(book.view.queryByTestId('xlsx-error')).toBeNull();
+  });
+
+  it('formats cells of a protected sheet that allows it and refuses merging them', async () => {
+    const book = await mountProtected({ formatCells: true });
+    await book.select(1);
+    expect(await book.execute('bold', null)).toEqual({ ok: true, status: 'executed' });
+    expect(book.api().handle.selectionFormatting(0, 'B1:B1').bold).toBe(true);
+    await book.select(0, 1);
+    expect(await book.execute('merge', { value: 'all' })).toMatchObject({ ok: false, failure: { code: 'sheet-protected', message: PROTECTED } });
+    expect(book.api().handle.mergedRanges(0, 'A1:B1')).toHaveLength(0);
+    expect(book.input(1)).toBe('2');
   });
 });
 
