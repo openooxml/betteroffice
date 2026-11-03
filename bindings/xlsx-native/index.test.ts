@@ -96,7 +96,7 @@ describe('@betteroffice/xlsx-native', () => {
     zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Review" sheetId="1" r:id="rId1"/></sheets></workbook>`);
     zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
     zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>`);
-    const { openWorkbookSession } = await entry('./worker');
+    const { openWorkbookSession, workbookSessionRecovery } = await entry('./worker');
     const session: WorkbookSession = await openWorkbookSession(await zip.generateAsync({ type: 'uint8array' }));
     let seq = 0;
     const send = <K extends WorkbookCommandKind>(kind: K, payload: WorkbookCommandPayload<K>) => session.submit({
@@ -106,6 +106,10 @@ describe('@betteroffice/xlsx-native', () => {
       await send('setReadOnly', { readOnly: true, allowHostProposals: true });
       const staged = await send('propose', { args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '7' }]] });
       expect(staged).toMatchObject({ status: 'applied', committed: false });
+      const recovery = workbookSessionRecovery.get(session)!;
+      expect(await recovery.capture(() => true)).toBe(true);
+      expect(recovery.throughSeq).toBe(2);
+      expect(recovery.retainedCommands).toBe(0);
       expect(await send('editCell', { args: [0, 0, 0, '99'] }))
         .toMatchObject({ status: 'refused', reason: 'read-only' });
       expect(await send('acceptProposal', { args: [(staged.result as Proposal).id] }))
@@ -113,6 +117,16 @@ describe('@betteroffice/xlsx-native', () => {
       const read = await session.call.cellInputs(0, 'A1');
       expect(read.cells[0]![0]!.input).toBe('7');
       expect(session.editState.readOnly).toBe(true);
+      const rejected = await send('propose', { args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '9' }]] });
+      expect(rejected).toMatchObject({ status: 'applied', committed: false });
+      expect(await send('rejectProposal', { args: [(rejected.result as Proposal).id] }))
+        .toMatchObject({ status: 'applied', committed: false });
+      const bytes = await recovery.save(() => {});
+      expect(bytes).toEqual(await session.save());
+      const { openWorkbook } = await entry('.');
+      const restored = openWorkbook(bytes);
+      try { expect(restored.cell(0, 0, 0).input).toBe('7'); }
+      finally { restored.dispose(); }
     } finally { await session.dispose(); }
   });
 });
