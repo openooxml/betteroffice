@@ -3499,6 +3499,41 @@ describe('peerless workbook worker editor', () => {
     } });
   });
 
+  it('read-only host proposals use ordered worker commands and leave other writes disabled', async () => {
+    const host = peerlessHarness();
+    const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
+    restorers.push(() => available.mockRestore());
+    let api!: XlsxAsyncEditorApi;
+    const view = await host.mount(undefined, true, { allowHostProposals: true,
+      onReady(ready) { api = ready; host.ready(); } });
+    expect(await host.commandAt(0)).toMatchObject({ kind: 'setReadOnly',
+      payload: { readOnly: true, allowHostProposals: true } });
+    await act(async () => host.ack(host.sent[0]));
+    const proposal = { id: 'host-review', agentId: 'Host agent', note: 'Review this cell',
+      cells: [{ sheet: 0, row: 0, col: 0, a1: 'A1', oldText: 'initial', newText: '7' }] };
+    const proposed = api.proposeChanges!({ agentId: 'Host agent', note: proposal.note,
+      edits: [{ sheet: 0, row: 0, col: 0, input: '7' }] });
+    expect(await host.commandAt(1)).toMatchObject({ kind: 'propose' });
+    await act(async () => host.ack(host.sent[1], { result: proposal }));
+    await expect(proposed).resolves.toEqual({ ok: true, proposal });
+    expect(await host.commandAt(2)).toMatchObject({ kind: 'applyOps',
+      payload: { toolbar: { id: 'refreshProposals' } } });
+    await act(async () => host.ack(host.sent[2], { result: { proposals: [proposal] } }));
+    await act(async () => { await host.commands().execute('proposalsPanel', { open: true }); });
+    await host.commandAt(3);
+    await act(async () => host.ack(host.sent[3], { result: { proposals: [proposal] } }));
+    expect(view.getByText('Review this cell')).toBeDefined();
+    expect(await host.commands().execute('bold', null)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    const accepted = host.commands().execute('proposalAccept', { proposalId: proposal.id });
+    expect(await host.commandAt(4)).toMatchObject({ kind: 'acceptProposal', payload: { args: [proposal.id, {}] } });
+    await act(async () => host.ack(host.sent[4], { result: { applied: true }, paint: true }));
+    await expect(accepted).resolves.toMatchObject({ ok: true });
+    await host.commandAt(5);
+    await act(async () => host.ack(host.sent[5], { result: { proposals: [] } }));
+    expect(view.queryByText('Review this cell')).toBeNull();
+    expect(host.session.editState.readOnly).toBe(true);
+  });
+
   it('read-only proposal panel loads proposals through a worker read command', async () => {
     const host = peerlessHarness();
     const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
