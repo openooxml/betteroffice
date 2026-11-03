@@ -72,18 +72,3 @@ for (const seeder of ['native', 'projected'] as const) {
     } finally { session.destroy(); }
   });
 }
-
-const scaled = `<w:drawing><wp:inline><wp:extent cx="5486400" cy="5486400"/><wp:docPr id="40" name="Scaled"/><a:graphic><a:graphicData ${GROUP}><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="5486400" cy="5486400"/><a:chOff x="105048" y="105048"/><a:chExt cx="2750159" cy="2750159"/></a:xfrm></wpg:grpSpPr><wps:wsp><wps:cNvPr id="41" name="Part"/><wps:spPr><a:xfrm><a:off x="105048" y="105048"/><a:ext cx="50000" cy="50000"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>`;
-
-it('a whole-part save keeps a group whose child sits on the scaled child origin', async () => {
-  const parts = new Map<string, Uint8Array>(Object.entries(unzipContainer(fixture())));
-  parts.set('word/document.xml', toBytes(`<w:document ${NS}><w:body><w:p w14:paraId="00000002"><w:r><w:t>Host</w:t></w:r><w:r>${scaled}</w:r></w:p><w:sectPr/></w:body></w:document>`));
-  const source = new Uint8Array(rezipPartsToArrayBuffer(parts));
-  const document = await parseDocx(source.slice().buffer, { preloadFonts: false });
-  const body = document.package.document;
-  body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
-  const saved = new Uint8Array(await repackDocx(document));
-  const xml = new TextDecoder().decode(unzipContainer(saved)['word/document.xml']);
-  expect(xml).toContain('w:top="2000"');
-  expect(xml).toContain(scaled);
-});

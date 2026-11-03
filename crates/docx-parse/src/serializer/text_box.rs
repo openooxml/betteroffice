@@ -57,6 +57,18 @@ fn content_paths(element: &XmlElement, path: &mut Vec<u32>, paths: &mut Vec<Vec<
 
 /// Replays a group or canvas from the part's source drawing with the same `wp:docPr` id,
 /// while the model matches that source apart from its frame and text-box text.
+/// Whether the model still says what its retained source says, apart from text and media. A
+/// stored hash can differ without an edit when it was computed with other number parsing.
+fn matches_source(drawing: &XmlElement, shape: &Shape) -> bool {
+    let Some(mut baseline) = crate::shape::parse_shape_from_drawing(drawing) else {
+        return false;
+    };
+    crate::paragraph::apply_shape_metadata(&mut baseline, drawing);
+    crate::smart_art::frame_model(&baseline) == crate::smart_art::frame_model(shape)
+        && crate::text_box::group_model_sha256(&baseline)
+            == crate::text_box::group_model_sha256(shape)
+}
+
 pub(super) fn replay_group(
     shape: &Shape,
     context: &mut SerializerContext,
@@ -286,7 +298,8 @@ pub(super) fn replay(
             || model
                 .get("otherSha256")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|before| before != crate::smart_art::other_model_sha256(shape)));
+                .is_some_and(|before| before != crate::smart_art::other_model_sha256(shape)))
+        && !matches_source(at_path(root, &drawing).unwrap(), shape);
     if redraw {
         let mut authored = shape.clone();
         authored.drawing_xml = None;

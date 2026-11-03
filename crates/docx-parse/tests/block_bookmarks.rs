@@ -1248,3 +1248,34 @@ fn paragraph_bookmarks_in_text_boxes_survive_a_save() {
         }
     }
 }
+
+#[test]
+fn a_stale_stored_hash_does_not_redraw_an_unedited_text_box() {
+    let source = fixture(
+        "textbox",
+        &format!("{START}{}{END}", p("00000002", "Anchor")),
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap();
+    *bytes = String::from_utf8(bytes.clone())
+        .unwrap()
+        .replacen("<a:xfrm>", r#"<a:xfrm rot="58432">"#, 1)
+        .replacen(
+            r#"<a:prstGeom prst="rect"/>"#,
+            r#"<a:prstGeom prst="rect"/><a:effectLst><a:glow rad="63500"><a:srgbClr val="112233"/></a:glow></a:effectLst>"#,
+            1,
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut model = package(&source);
+    let shape = model
+        .pointer_mut("/document/content/1/content/0/content/0/shape")
+        .unwrap();
+    shape["drawingModel"]["otherSha256"] = json!("computed with other number parsing");
+    let xml = part(&save(&source, &model), "textbox");
+    assert!(xml.contains("<a:glow"), "{xml}");
+    assert!(xml.contains(r#"rot="58432""#), "{xml}");
+}
