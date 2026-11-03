@@ -270,7 +270,6 @@ impl Workbook {
             None,
         )?;
         let update = self.commit_prepared(prepared)?;
-        self.proposals.clear();
         self.recalculate_scope(CalculationScope::Kept, &[], options);
         self.publish(update);
         Ok(MutationResult {

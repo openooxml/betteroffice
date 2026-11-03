@@ -4269,7 +4269,7 @@ fn proposal_acceptance_applies_duplicate_targets_sequentially() {
 }
 
 #[test]
-fn rename_invalidates_pending_proposals() {
+fn rename_keeps_pending_proposals() {
     let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
     workbook
         .propose(
@@ -4295,7 +4295,14 @@ fn rename_invalidates_pending_proposals() {
             CalculationOptions::default(),
         )
         .unwrap();
-    assert!(workbook.proposals().is_empty());
+    let proposals = workbook.proposals();
+    assert_eq!(proposals.len(), 1);
+    let edit = &proposals[0].edits[0];
+    assert_eq!(
+        (edit.sheet, edit.a1.as_str(), edit.input.as_str()),
+        (0, "A1", "=Renamed!A2")
+    );
+    assert_ne!(edit.stale, Some(true));
 }
 
 #[test]
@@ -4409,7 +4416,7 @@ fn a_refused_array_formula_saves_its_rectangle() {
 }
 
 #[test]
-fn structural_ops_invalidate_coordinate_proposals() {
+fn structural_ops_rebase_coordinate_proposals() {
     let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
     workbook
         .propose(
@@ -4436,7 +4443,11 @@ fn structural_ops_invalidate_coordinate_proposals() {
             CalculationOptions::default(),
         )
         .unwrap();
-    assert!(workbook.proposals().is_empty());
+    let proposals = workbook.proposals();
+    assert_eq!(proposals.len(), 1);
+    let edit = &proposals[0].edits[0];
+    assert_eq!((edit.row, edit.col, edit.a1.as_str()), (1, 0, "A2"));
+    assert_ne!(edit.stale, Some(true));
 }
 
 #[test]

@@ -178,6 +178,7 @@
     "accept": "Accept",
     "reject": "Reject",
     "forceApply": "Force apply",
+    "forceBlockedReason": "This proposal cannot be applied after a structural edit.",
     "staleWarning": "Cells changed since proposed: {cells}"
   },
   "a11y": {
