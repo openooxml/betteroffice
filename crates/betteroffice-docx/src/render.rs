@@ -95,33 +95,22 @@ impl Document {
             return Err(Error::Render("scale must be finite and positive".into()));
         }
         let bytes = self.save()?;
-        let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())?
-            .document
-            .package;
+        let package = docx_parse::parse_docx_s9_wire(
+            &bytes,
+            docx_parse::S9ParseOptions {
+                detect_variables: false,
+                ..Default::default()
+            },
+        )?
+        .document
+        .package;
         let engine = docx_edit::EngineSession::new(1);
         docx_edit::seed_from_docx(engine.doc(), &bytes).map_err(Error::Render)?;
-        let mut sections: Vec<_> = package.document.sections.unwrap_or_default().into_iter()
-            .map(|section| serde_json::json!({"sectionId": section.id, "properties": section.properties}))
-            .collect();
-        sections.push(serde_json::json!({"properties": package.document.final_section_properties}));
-        let mut contents = Vec::new();
-        for (notes, kind) in [
-            (&package.footnotes, "footnote"),
-            (&package.endnotes, "endnote"),
-        ] {
-            for note in notes.iter().flatten() {
-                if note.note_type.is_empty() || note.note_type == "normal" {
-                    contents.push(
-                        serde_json::json!({"id": note.id as i64, "noteKind": kind, "height": 0}),
-                    );
-                }
-            }
-        }
-        let mut request = serde_json::json!({
-            "bodyStory": "body", "renderEnv": {}, "options": {"pageGap": 24},
-            "regions": {"sections": sections, "settings": package.settings},
-            "notes": {"contents": contents},
-            "measurement": {"defaults": {"fontFamily": "Calibri", "fontSize": 11}}
+        let package =
+            serde_json::to_value(package).map_err(|error| Error::Render(error.to_string()))?;
+        let mut request = docx_edit::layout_request::region_layout_request(&package, 24.0);
+        request["measurement"] = serde_json::json!({
+            "defaults": {"fontFamily": "Calibri", "fontSize": 11}
         });
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         #[cfg(feature = "fonts")]

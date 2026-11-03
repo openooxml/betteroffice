@@ -1,5 +1,7 @@
 import json
 import math
+import struct
+import zlib
 from collections import UserDict
 from pathlib import Path
 from types import MappingProxyType
@@ -275,3 +277,56 @@ def test_page_targets_scale_and_validate_indexes(minimal_bytes, font_bytes):
 def test_rejects_invalid_page_targets(minimal_bytes, target):
     with pytest.raises(ValueError):
         Document.open(minimal_bytes).render_png(target)
+
+
+def _png_rgb_pixels(png: bytes) -> list[tuple[int, int, int]]:
+    width, height, depth, color, compression, filtering, interlace = struct.unpack(
+        ">IIBBBBB", png[16:29]
+    )
+    assert depth == 8 and color in (2, 6)
+    assert (compression, filtering, interlace) == (0, 0, 0)
+    channels = 4 if color == 6 else 3
+    compressed = bytearray()
+    offset = 8
+    while offset < len(png):
+        length = struct.unpack(">I", png[offset:offset + 4])[0]
+        if png[offset + 4:offset + 8] == b"IDAT":
+            compressed.extend(png[offset + 8:offset + 8 + length])
+        offset += length + 12
+    data = zlib.decompress(compressed)
+    stride = width * channels
+    assert len(data) == (stride + 1) * height
+    previous = bytearray(stride)
+    pixels = []
+    for y in range(height):
+        start = y * (stride + 1)
+        filter_type = data[start]
+        assert 0 <= filter_type <= 4
+        row = bytearray(data[start + 1:start + 1 + stride])
+        for x in range(stride):
+            left = row[x - channels] if x >= channels else 0
+            above = previous[x]
+            upper_left = previous[x - channels] if x >= channels else 0
+            prediction = left + above - upper_left
+            paeth = min((left, above, upper_left), key=lambda value: abs(prediction - value))
+            predictor = (0, left, above, (left + above) // 2, paeth)[filter_type]
+            row[x] = (row[x] + predictor) & 255
+        pixels.extend(tuple(row[x:x + 3]) for x in range(0, stride, channels))
+        previous = row
+    return pixels
+
+
+def test_png_uses_the_document_theme_accent(font_bytes: bytes) -> None:
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "crates/docx-edit/tests/fixtures/layout-request/theme-accent.docx"
+    )
+    document = Document.open(fixture.read_bytes())
+    document.register_font("Calibri", font_bytes)
+    document.register_font("Calibri", font_bytes, bold=True)
+    pixels = _png_rgb_pixels(document.render_png({"page": 0}).bytes)
+    assert any(r >= 243 and g <= 12 and b <= 12 for r, g, b in pixels)
+    assert not any(
+        abs(r - 0x44) <= 12 and abs(g - 0x72) <= 12 and abs(b - 0xC4) <= 12
+        for r, g, b in pixels
+    )

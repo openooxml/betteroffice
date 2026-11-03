@@ -625,3 +625,40 @@ fn page_targets_validate_indexes_and_scale_dimensions() {
         );
     }
 }
+
+#[test]
+fn png_uses_the_document_theme_accent() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../docx-edit/tests/fixtures/layout-request/theme-accent.docx");
+    let bytes = std::fs::read(path).unwrap();
+    let mut document = Document::open(&bytes).unwrap();
+    document
+        .register_font("Calibri", false, false, CARLITO)
+        .unwrap();
+    document
+        .register_font("Calibri", true, false, CARLITO)
+        .unwrap();
+    let rendered = document
+        .render_png(
+            betteroffice_docx::PngTarget { page: 0 },
+            &betteroffice_docx::RenderOptions::default(),
+        )
+        .unwrap();
+    let (_, _, pixels) = decode(&rendered.bytes);
+    let close = |pixel: &[u8], color: [u8; 3]| {
+        pixel[..3]
+            .iter()
+            .zip(color)
+            .all(|(&value, target)| value.abs_diff(target) <= 12)
+    };
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .any(|pixel| close(pixel, [255, 0, 0]))
+    );
+    assert!(
+        !pixels
+            .chunks_exact(4)
+            .any(|pixel| close(pixel, [0x44, 0x72, 0xc4]))
+    );
+}

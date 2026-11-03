@@ -11359,6 +11359,7 @@ fn png_dimension_caps_hold_at_fractional_scales() {
     }
 }
 
+#[cfg(feature = "raster")]
 #[test]
 fn png_caps_do_not_hide_an_invalid_viewport() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
@@ -11403,6 +11404,7 @@ fn png_caps_do_not_hide_an_invalid_viewport() {
     }
 }
 
+#[cfg(feature = "raster")]
 #[test]
 fn png_dimension_caps_apply_to_both_target_forms() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
@@ -11431,6 +11433,7 @@ fn png_dimension_caps_apply_to_both_target_forms() {
     }
 }
 
+#[cfg(feature = "raster")]
 #[test]
 fn png_targets_validate_sheets_and_scale_both_forms() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
@@ -11491,6 +11494,7 @@ fn png_targets_validate_sheets_and_scale_both_forms() {
     }
 }
 
+#[cfg(feature = "raster")]
 fn image_size(png: &[u8]) -> (u32, u32) {
     let header = &png[16..24];
     (

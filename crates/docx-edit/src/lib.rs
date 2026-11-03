@@ -90,6 +90,7 @@ mod header_footer;
 mod heading;
 mod identity;
 mod inline_content;
+pub mod layout_request;
 mod list_marker;
 pub mod media;
 mod paragraph_facts;
