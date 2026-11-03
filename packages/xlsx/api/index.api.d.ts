@@ -1521,6 +1521,7 @@ export type WorkbookCommandPayload<K extends WorkbookCommandKind> = K extends Wo
     updates?: Uint8Array[];
 } : {
     readOnly: boolean;
+    allowHostProposals?: boolean;
 };
 export interface WorkbookCommandFrameRequest {
     sheet: number;

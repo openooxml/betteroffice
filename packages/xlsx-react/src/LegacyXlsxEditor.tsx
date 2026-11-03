@@ -12,14 +12,15 @@ import type { EditableSessionWorkbookProps } from './worker/useEditableSessionWo
 export function LegacyXlsxEditor(props: GeneralEditorSessionProps | XlsxLegacyEditorProps | XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps): React.JSX.Element {
   useEffect(() => { warnXlsxEngine('legacy-sync-api'); }, []);
   const workerOpen = props.experimentalWorkerOpen;
+  const editable = !props.readOnly || ('allowHostProposals' in props && props.allowHostProposals === true);
   const collaboration = props.collaboration;
   const identity = useMemo(() => ({}), [props.file, collaboration, workerOpen]);
   const start = () => ({ identity, reason: workerOpen === false ? 'deprecated' as XlsxEngineWarning
     : workerOpen !== true ? 'in-thread' as const
-    : typeof Worker !== 'function' ? 'no-worker' as XlsxEngineWarning : undefined, editor: !props.readOnly });
+    : typeof Worker !== 'function' ? 'no-worker' as XlsxEngineWarning : undefined, editor: editable });
   const [choice, setChoice] = useState(start);
   const session = choice.identity === identity ? choice : start();
-  const editor = session.editor || !props.readOnly;
+  const editor = session.editor || editable;
   if (choice !== session || choice.editor !== editor) setChoice({ ...session, editor });
   useEffect(() => { if (session.reason && session.reason !== 'in-thread') warnXlsxEngine(session.reason); }, [session.reason]);
   return session.reason ? <XlsxEditorContent {...props as Omit<XlsxInThreadEditorProps, 'file'> & { file?: Uint8Array }} />

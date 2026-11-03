@@ -21,7 +21,7 @@ raster = ["dep:pptx-raster"]
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
-pptx-edit = { workspace = true, features = ["engine"] }
+pptx-edit = { workspace = true, features = ["engine", "metafile-svg"] }
 pptx-parse.workspace = true
 pptx-raster = { workspace = true, optional = true }
 pptx-render.workspace = true

@@ -8,6 +8,7 @@
  * dom down under whichever suite bun happens to run second.
  */
 
+import { hostProposalWorkbook } from './__fixtures__/hostProposalWorkbook';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -2533,6 +2534,32 @@ describe('XlsxEditor commands', () => {
     });
     const merge = api!.commands.getState('merge', { value: 'all' });
     expect(merge.enabled ? null : merge.disabledReason.code).toBe('collaboration-unsupported');
+  });
+
+  it('allows host proposal review in a read-only editor only when opted in', async () => {
+    const editor = await mountCommands({ file: await hostProposalWorkbook(), readOnly: true, allowHostProposals: true });
+    expect(editor.view.getByTestId('xlsx-proposals-button')).toBeDefined();
+    const api = editor.api();
+    let result!: Awaited<ReturnType<NonNullable<XlsxEditorApi['proposeChanges']>>>;
+    await act(async () => {
+      result = await api.proposeChanges!({ agentId: 'Host agent',
+        edits: [{ sheet: 0, row: 6, col: 4, input: '12' }] });
+    });
+    if (!result.ok) throw new Error(result.failure.message);
+    const id = result.proposal.id;
+    await editor.execute('proposalsPanel', { open: true });
+    expect(editor.view.getByTestId('xlsx-proposals-panel').textContent).toContain('Host agent');
+    expect(failure(await editor.execute('bold', null))).toBe('read-only');
+    expect(failure(await editor.execute('undo', null))).toBe('read-only');
+    const batch = { expectVersion: api.handle.version(), steps: [{ op: 'setCellInputs' as const,
+      target: { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'E7' } }, inputs: [['99']] }] };
+    await expect(api.applyEdits(batch)).resolves.toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    await expect(api.validateEdits(batch)).resolves.toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    expect(await editor.execute('proposalAccept', { proposalId: id })).toEqual({ ok: true, status: 'executed' });
+    expect(api.handle.cell(0, 6, 4).input).toBe('12');
+    await act(async () => editor.rerender({ readOnly: true, allowHostProposals: false }));
+    await expect(api.proposeChanges!({ agentId: 'Host agent', edits: [] }))
+      .resolves.toMatchObject({ ok: false, failure: { code: 'read-only' } });
   });
 
   it('accepts, refuses stale and force-applies proposals through commands', async () => {

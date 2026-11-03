@@ -9,6 +9,10 @@ description = "Target-neutral PPTX engine boundary shared by the wasm and native
 [lib]
 name = "pptx_engine"
 
+[features]
+default = ["metafile-svg"]
+metafile-svg = ["pptx-edit/metafile-svg"]
+
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["tiff"] }
 pptx-edit = { workspace = true, features = ["engine"] }

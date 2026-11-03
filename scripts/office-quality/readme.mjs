@@ -53,6 +53,9 @@ function score(samples, channel, revision) {
   return {
     count: scores.length,
     total: samples.length,
+    mean: scores.length
+      ? scores.reduce((sum, result) => sum + result.penalized_ssim, 0) / scores.length
+      : null,
     value: scores.length
       ? (
           scores.reduce((sum, result) => sum + result.penalized_ssim, 0) / scores.length
@@ -226,6 +229,56 @@ ${xlsxTable}
 For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).
 
 ${END}`;
+}
+
+export function aggregateReport(report) {
+  renderSection(report);
+  const side = (result) => ({
+    ssim: result.mean === null ? null : Number(result.mean.toFixed(4)),
+    scored: result.count,
+    total: result.total,
+    exact_pages: result.exact,
+    paged: result.paged,
+    page_error: result.pageError,
+  });
+  const meanMs = (value) => (value === null ? null : Math.round(value));
+  const formats = {};
+  for (const format of FORMATS) {
+    const samples = report.samples.filter((sample) => sample.format === format);
+    const fidelity = format === 'xlsx' ? report.xlsx_fidelity_benchmark : report[`${format}_benchmark`];
+    const office = fidelity ?? report[`${format}_benchmark`] ?? report.roundtrip_benchmark?.[format];
+    const entry = {
+      samples: samples.length,
+      published_version: report.versions[format],
+      libreoffice_version: office?.libreoffice_version ?? null,
+      fidelity: {
+        published: side(score(samples, 'published', report.versions[format])),
+        commit: side(score(samples, 'commit', report.commit)),
+        libreoffice: fidelity ? side(score(samples, 'libreoffice', fidelity.libreoffice_version)) : null,
+      },
+    };
+    if (format !== 'xlsx' && report[`${format}_benchmark`]) {
+      const timing = timingSummary(report.samples, format);
+      entry.render_ms = Object.fromEntries(['published', 'commit', 'libreoffice'].map((channel) =>
+        [channel, meanMs(timing.channels[channel].mean_ms)]));
+    }
+    if (format === 'xlsx' && report.xlsx_benchmark) {
+      const calculation = calculationSummary(report.samples);
+      entry.recalc = Object.fromEntries(['published', 'commit', 'libreoffice'].map((channel) => {
+        const { correct, total, mean_ms } = calculation.channels[channel];
+        return [channel, { correct, total, mean_ms: meanMs(mean_ms) }];
+      }));
+    }
+    if (report.roundtrip_benchmark?.[format]) {
+      const summary = roundtripSummary(report.samples, format);
+      entry.roundtrip = Object.fromEntries(['published', 'commit', 'libreoffice'].map((channel) => {
+        const { parsed, preserved, total } = summary[channel];
+        return [channel, { parsed, preserved, total }];
+      }));
+    }
+    formats[format] = entry;
+  }
+  return { schema_version: 1, commit: report.commit, source_sha: report.source_sha ?? null, formats };
 }
 
 export function updateReadme(readme, section) {

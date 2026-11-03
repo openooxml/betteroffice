@@ -31,6 +31,7 @@ export default defineConfig((options) => ({
     const out = options.outDir ?? 'dist';
     await rename(join(out, 'pptxSessionWorker.js'), join(out, 'pptxSessionWorker.mjs'));
     await mkdir('dist/generated', { recursive: true });
+    await copyFile('src/wasm/generated/metafile_svg_wasm_bg.wasm', 'dist/generated/metafile_svg_wasm_bg.wasm');
     await copyFile('src/wasm/generated/pptx_wasm_bg.wasm', 'dist/generated/pptx_wasm_bg.wasm');
     await copyFile('src/wasm/generated/pptx_wasm_lean_bg.wasm', 'dist/generated/pptx_wasm_lean_bg.wasm');
   },
