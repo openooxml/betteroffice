@@ -174,6 +174,34 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     }));
 }
 
+/// The group model without its frame, text-box text and media sources, which a replay
+/// updates in place or which differ only by how the media was resolved.
+pub(crate) fn group_model_sha256(shape: &Shape) -> String {
+    fn clear(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(body) = map
+                    .get_mut("textBody")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    body.insert("content".to_owned(), serde_json::Value::Array(Vec::new()));
+                }
+                map.retain(|_, value| {
+                    !value
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("media:") || text.starts_with("data:"))
+                });
+                map.values_mut().for_each(clear);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(clear),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(shape).expect("shape model");
+    clear(&mut value);
+    crate::smart_art::other_value_sha256(value)
+}
+
 pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     use sha2::{Digest, Sha256};
 
