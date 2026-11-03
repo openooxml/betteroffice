@@ -10,6 +10,7 @@ import type { XlsxCommandStore } from '../commands/types';
 import {
   WorkerInputNotReadyError, WorkerInputRefusal, inputRefusal, type WorkerInputCoordinator, type WorkerInputLease,
 } from '../commands/workerInputCoordinator';
+import { previewRefusal } from '../commands/workerInputErrors';
 
 import { XlsxPeerNotReadyError } from './workerEditorErrors';
 export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './workerEditorErrors';
@@ -265,7 +266,10 @@ export function createWorkerEditorApi(
         if (result.ok) markApplied();
         if (!session.retiring) bridge().apply(result, op);
         return result;
-      }, true, () => editable ? previewRequest(input, op) : undefined);
+      }, true, () => editable ? previewRequest(input, op).catch((error: unknown) => {
+        if (previewRefusal(error)) return undefined;
+        throw error;
+      }) : undefined);
     },
     cell: (sheet, row, col) => readable() ? session.peer!.cell(sheet, row, col) : null,
     cellAsync: (sheet, row, col) => ordered('cell', () => requirePeer().peer.cell(sheet, row, col)),

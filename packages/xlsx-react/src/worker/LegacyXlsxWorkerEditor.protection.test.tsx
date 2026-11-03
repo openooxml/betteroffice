@@ -91,12 +91,20 @@ async function pump() {
   });
 }
 
-async function mount(formatCells = false) {
+async function mount(formatCells = false, held?: Promise<void>) {
   const bytes = await workbook(formatCells);
   const session = await createTestWorkbookSession(bytes, undefined, { wasm: wasm.slice().buffer, retainPeerHydration: true });
   sessionToDispose = session;
   const open = spyOn(editableWorkbookSessionBackend, 'open').mockResolvedValue(session);
   restorers.push(() => open.mockRestore());
+  if (held) {
+    const hydratePeer = editableWorkbookSessionBackend.hydrate;
+    const hydrate = spyOn(editableWorkbookSessionBackend, 'hydrate').mockImplementation(async (opened) => {
+      await held;
+      return hydratePeer(opened);
+    });
+    restorers.push(() => hydrate.mockRestore());
+  }
   const saves: Uint8Array[] = [];
   let api: XlsxWorkerEditorApi | undefined;
   const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={bytes}
@@ -104,7 +112,7 @@ async function mount(formatCells = false) {
   await waitFor(async () => {
     await pump();
     expect(api).toBeDefined();
-    expect(api!.hydrated).toBe(true);
+    expect(api!.hydrated).toBe(!held);
   }, MOUNTED);
   const surface = view.getByTestId('xlsx-scroll');
   const select = async (col: number, to = col) => {
@@ -152,6 +160,30 @@ describe('legacy worker editor on a protected sheet', () => {
       expect(reopened.cell(0, 0, 0).input).toBe('1');
       expect(reopened.cell(0, 0, 1).input).toBe('unlocked');
     } finally { reopened.dispose(); }
+  });
+
+  it('returns the engine refusal of an API batch into a locked cell sent before hydration', async () => {
+    let release!: () => void;
+    const book = await mount(false, new Promise<void>((resolve) => { release = resolve; }));
+    const { version } = await book.session.call.cellInputs(0, 'A1');
+    let applied!: Promise<unknown>;
+    await act(async () => {
+      applied = book.api().applyEdits({ expectVersion: version, steps: [{ op: 'setCellInputs',
+        target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }, inputs: [['locked']] }] });
+      void applied.catch(() => {});
+    });
+    await pump();
+    expect(book.api().hydrated).toBe(false);
+    release();
+    let result: unknown;
+    await act(async () => { result = await applied; });
+    expect(result).toMatchObject({ ok: false, failure: { code: 'locked-target', message: 'A1 is locked on protected sheet "Data"' } });
+    expect(book.api().failure).toBeNull();
+    expect(book.session.failure).toBeUndefined();
+    expect(await book.input(0)).toBe('1');
+    expect(await book.execute('save', null)).toMatchObject({ ok: false });
+    const reopened = await book.saved();
+    try { expect(reopened.cell(0, 0, 0).input).toBe('1'); } finally { reopened.dispose(); }
   });
 
   it('refuses Delete on a locked cell and keeps saving available', async () => {
