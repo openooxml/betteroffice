@@ -1,4 +1,4 @@
-import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
+import { XlsxCommandAdmissionError, XlsxHostRefusalError } from './createXlsxCommandStore';
 import type { InputCoordinatorHooks, InputDraft, InputSeal } from './inputCoordinator';
 import type { WorkbookSession, XlsxRangeTarget } from '@betteroffice/xlsx';
 import type {
@@ -100,6 +100,8 @@ export type PeerlessWorkerInputEvent = {
   command?: PeerlessWorkerCommand;
   status?: CommandStatus;
   selectionRevision?: number;
+  /** Why a draft was refused before it reached the worker. */
+  error?: unknown;
 } | {
   type: 'coverage';
   throughSeq: number;
@@ -129,6 +131,12 @@ export interface PeerlessWorkerInputCoordinatorHooks
   dependency?(draft: InputDraft): PeerlessWorkerCommandOptions['after'];
   target(sheet: number, row: number, col: number): XlsxRangeTarget;
   draftTarget?(draft: InputDraft): XlsxRangeTarget | undefined;
+  /**
+   * Null when no plugin gates edits; otherwise the gate pass for a typed draft. The coordinator
+   * starts it once every earlier command was answered, so plugins decide on the version the draft
+   * lands on. It resolves to the input to write or rejects with `XlsxHostRefusalError`.
+   */
+  gateCommit?(draft: InputDraft, target: XlsxRangeTarget): (() => Promise<string>) | null;
   frame?(): WorkbookCommandFrameRequest | undefined;
   selectionRevision?(): number;
   onEvent?(event: PeerlessWorkerInputEvent, publish?: () => void): void;
@@ -192,6 +200,7 @@ interface PeerlessEntry {
   selectionRevision?: number;
   fence: boolean;
   prepare?: Promise<PeerlessWorkerCommandInput>;
+  gate?: () => Promise<PeerlessWorkerCommandInput>;
 }
 
 interface PeerlessGate {
@@ -239,7 +248,7 @@ export function createPeerlessWorkerInputCoordinator(
   const acknowledgements = new Map<number, PeerlessTicket>();
   let draft: InputDraft | null = null;
   let rejected: readonly InputDraft[] = [];
-  const refusals = new WeakMap<InputDraft, PeerlessWorkerCommandRefusal>();
+  const refusals = new WeakMap<InputDraft, XlsxCommandAdmissionError>();
   let failure: { error: unknown } | null = null;
   let retired = false;
   let suspended = false;
@@ -280,6 +289,21 @@ export function createPeerlessWorkerInputCoordinator(
     if (last === entry.ticket) last = undefined;
     entry.result.reject(error);
     emit({ type: 'cancelled', seq: entry.ticket.seq, target: entry.target, draft: entry.draft });
+  };
+  /** Rejects a draft its gate refused before dispatch; it stays rejected like a worker refusal. */
+  const refuse = (entry: PeerlessEntry, value: InputDraft, error: XlsxHostRefusalError) => {
+    if (entry.ticket.outcome || entry.ticket.failure) return;
+    entry.ticket.failure = { error };
+    if (boundary === entry.ticket) boundary = undefined;
+    if (last === entry.ticket) last = undefined;
+    refusals.set(value, error);
+    rejected = [...rejected.filter((candidate) => !sameCell(candidate, value)), value].slice(-maxQueued);
+    if (!draft) draft = value;
+    entry.result.reject(error);
+    emit({ type: 'refused', seq: null, target: entry.target, draft: value, error });
+    for (const queued of queue) {
+      if ('ticket' in queued && queued !== entry && dependencyFailed(queued)) cancel(queued, error);
+    }
   };
   const invalidate = (error: unknown) => {
     offAck(); offFailure();
@@ -420,6 +444,15 @@ export function createPeerlessWorkerInputCoordinator(
           if (entry.ticket.failure) { queue.shift(); continue; }
           const failed = dependencyFailed(entry);
           if (failed) { queue.shift(); cancel(entry, failed.error); continue; }
+          if (entry.gate) {
+            if (outstanding.size > 0) break;
+            const gate = entry.gate;
+            entry.gate = undefined;
+            try {
+              entry.prepare = gate();
+              void entry.prepare.catch(() => {});
+            } catch (error) { queue.shift(); cancel(entry, error); continue; }
+          }
           if (entry.prepare) {
             const lease = cycle;
             blocked = entry;
@@ -429,12 +462,16 @@ export function createPeerlessWorkerInputCoordinator(
                 entry.input = structuredClone(commandSelection(input, entry.selection));
                 entry.target = commandTarget(entry.input);
                 entry.prepare = undefined;
+                if (entry.draft && entry.input.kind === 'editCell') {
+                  entry.draft = Object.freeze({ ...entry.draft, value: entry.input.payload.args[3] });
+                }
               } catch (error) { cancel(entry, error); }
               blocked = null;
               pump();
             }, (error) => {
               if (lease !== cycle || blocked !== entry) return;
-              cancel(entry, error);
+              if (error instanceof XlsxHostRefusalError && entry.draft) refuse(entry, entry.draft, error);
+              else cancel(entry, error);
               blocked = null;
               pump();
             });
@@ -508,7 +545,7 @@ export function createPeerlessWorkerInputCoordinator(
   const accept = (
     input: PeerlessWorkerCommandInput | null, value: InputDraft | null,
     options: PeerlessWorkerCommandOptions = {}, fence = false,
-    prepare?: Promise<PeerlessWorkerCommandInput>
+    prepare?: Promise<PeerlessWorkerCommandInput>, gate?: () => Promise<PeerlessWorkerCommandInput>
   ): PeerlessWorkerCommandTicket => {
     const result = deferred<CommandStatus>();
     const ticket: PeerlessTicket = { seq: null, result: result.promise, lease: cycle, acknowledge: options.acknowledge };
@@ -517,7 +554,7 @@ export function createPeerlessWorkerInputCoordinator(
       target = input ? commandTarget(input) : null;
       check();
       ticket.lease = cycle;
-      if ((admittedReadOnly ?? localReadOnly) && (prepare || input &&
+      if ((admittedReadOnly ?? localReadOnly) && (prepare || gate || input &&
         input.kind !== 'select' && input.kind !== 'setActiveSheet' && input.kind !== 'setReadOnly' && input.kind !== 'applyUpdate' && input.kind !== 'collabPipe' &&
         !(hooks.allowHostProposals?.() && (input.kind === 'propose' || input.kind === 'acceptProposal' || input.kind === 'rejectProposal')) &&
         !(input.kind === 'applyOps' && 'toolbar' in input.payload && input.payload.toolbar.id === 'refreshProposals'))) {
@@ -529,14 +566,14 @@ export function createPeerlessWorkerInputCoordinator(
         target,
         after: options.after === null ? undefined : options.after ??
           (admittedAfter !== undefined ? (fence ? admittedAfter.last : admittedAfter.boundary) ?? undefined : fence ? last : boundary),
-        ticket, result, fence, prepare, dispatch: options.dispatch,
+        ticket, result, fence, prepare, gate, dispatch: options.dispatch,
         frame: structuredClone('frame' in options ? options.frame : hooks.frame?.()),
         selection: structuredClone(options.selection),
         selectionRevision: 'selectionRevision' in options ? options.selectionRevision : hooks.selectionRevision?.(),
       };
       const previous = queue[queue.length - 1];
-      if (!fence && value && previous && 'ticket' in previous && !previous.fence &&
-        !previous.ticket.failure && !previous.prepare && previous.draft &&
+      if (!fence && !prepare && !gate && value && previous && 'ticket' in previous && !previous.fence &&
+        !previous.ticket.failure && !previous.prepare && !previous.gate && previous.draft &&
         sameCell(previous.draft, value) && previous.after === entry.after &&
         JSON.stringify(previous.target) === JSON.stringify(entry.target)) {
         previous.input = entry.input;
@@ -578,10 +615,13 @@ export function createPeerlessWorkerInputCoordinator(
     } else {
       try {
         const target = options.target ?? hooks.draftTarget?.(value) ?? hooks.target(value.sheet, value.row, value.col);
-        ticket = accept({ kind: 'editCell', payload: {
-          args: [value.sheet, value.row, value.col, value.value], target,
-      } }, value, { ...options, after: options.after === undefined ? hooks.dependency?.(value) ?? null : options.after },
-      Boolean(options.compositionId || options.selection));
+        const edit = (input: string): PeerlessWorkerCommandInput => ({ kind: 'editCell', payload: {
+          args: [value.sheet, value.row, value.col, input], target,
+        } });
+        const gated = hooks.gateCommit?.(value, target) ?? null;
+        ticket = accept(gated ? null : edit(value.value), value,
+          { ...options, after: options.after === undefined ? hooks.dependency?.(value) ?? null : options.after },
+          Boolean(options.compositionId || options.selection), undefined, gated ? () => gated().then(edit) : undefined);
       } catch (error) {
         const result = deferred<CommandStatus>();
         result.reject(error);

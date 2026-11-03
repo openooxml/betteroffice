@@ -55,6 +55,9 @@ export function definitionProblem(definition: XlsxPluginDefinition<unknown>): Er
   if (!optionalFunction(definition.initialize) || !optionalFunction(definition.onEvent)) {
     return new TypeError('initialize and onEvent must be functions');
   }
+  if (!optionalFunction(definition.cellEditable) || !optionalFunction(definition.beforeCellCommit)) {
+    return new TypeError('cellEditable and beforeCellCommit must be functions');
+  }
   if (definition.overlay !== undefined && !isComponent(definition.overlay)) {
     return new TypeError('overlay must be a component');
   }

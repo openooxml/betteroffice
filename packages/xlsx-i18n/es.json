@@ -136,6 +136,7 @@
       "invalidArguments": "Este valor no es válido.",
       "inputFailed": "La entrada de celda anterior no se pudo guardar.",
       "sheetProtected": "Esta celda está en una hoja protegida.",
+      "hostRefused": "Esta edición no está permitida.",
       "documentReplaced": "Se abrió otro libro.",
       "targetChanged": "La selección ha cambiado.",
       "gestureActive": "Termine primero de mover el gráfico.",

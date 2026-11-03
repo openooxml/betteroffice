@@ -30,9 +30,13 @@ import { definitionProblem, pluginDefinition } from './defineXlsxPlugin';
 import type { XlsxPluginDocumentAccess } from './createPluginDocumentAccess';
 import type {
   XlsxPlugin,
+  XlsxPluginCellCommit,
+  XlsxPluginCellRef,
   XlsxPluginCommand,
+  XlsxPluginCommitDecision,
   XlsxPluginContext,
   XlsxPluginDefinition,
+  XlsxPluginEditGateContext,
   XlsxPluginError,
   XlsxPluginErrorPhase,
   XlsxPluginEvent,
@@ -47,6 +51,17 @@ type Definition = XlsxPluginDefinition<unknown>;
 type Context = XlsxPluginContext<unknown>;
 
 export type XlsxPluginActivation = RuntimeActivation<Definition, Context>;
+
+/** A typed commit after every plugin saw it: the input to write, or the first refusal. */
+export type XlsxPluginCommitOutcome = { ok: true; input: string } | { ok: false; message: string | null };
+
+/** One gate pass over a typed edit, which may cover the cells of a clear. */
+export interface XlsxPluginEditGate {
+  /** False when a plugin makes `cell` read-only for typed edits. */
+  cellEditable(cell: XlsxPluginCellRef): boolean;
+  /** Runs a typed commit through the plugins in installation order; each sees the kind of its input. */
+  beforeCellCommit(commit: Omit<XlsxPluginCellCommit, 'kind'>): XlsxPluginCommitOutcome;
+}
 
 /** The editor as the plugin host reaches it; members are read at call time. */
 export type XlsxPluginHostAccess = (XlsxPluginEditorAccess | XlsxPluginDocumentAccess) & {
@@ -89,7 +104,19 @@ export interface XlsxPluginHost {
     fallback: T
   ): T;
   fail(pluginId: string, phase: XlsxPluginErrorPhase, error: unknown): void;
+  /** Whether a ready plugin gates typed edits. */
+  gatesEdits(): boolean;
+  /** Starts a gate pass for one typed edit, which may cover the cells of a clear. */
+  openGate(): XlsxPluginEditGate;
 }
+
+export interface XlsxPluginHostOptions {
+  /** False when the editor cannot gate typed edits; plugins that define gate hooks are then ended. */
+  editGate?: boolean;
+}
+
+/** Why a plugin that gates edits is ended in an editor that cannot gate them. */
+export const EDIT_GATE_UNSUPPORTED = 'edit gating is not supported in the legacy worker editor';
 
 const ENABLED = Object.freeze({ enabled: true as const });
 
@@ -118,6 +145,30 @@ function checkedResult(value: unknown): XlsxPluginCommandResult {
     : { ok: true, status: 'executed' };
 }
 
+/** The decision as a plain object, each field read once. */
+function checkedDecision(value: unknown): XlsxPluginCommitDecision {
+  if (value !== null && typeof value === 'object') {
+    const decision = value as { action?: unknown; input?: unknown; message?: unknown };
+    const action = decision.action;
+    if (action === 'accept') return { action };
+    if (action === 'replace') {
+      const input = decision.input;
+      if (typeof input === 'string') return { action, input };
+    }
+    if (action === 'refuse') {
+      const message = decision.message;
+      if (message === undefined) return { action };
+      if (typeof message === 'string') return { action, message };
+    }
+  }
+  throw new TypeError('beforeCellCommit must return an accept, replace or refuse decision');
+}
+
+function commitKind(input: string): XlsxPluginCellCommit['kind'] {
+  if (input === '') return 'clear';
+  return input.startsWith('=') ? 'formula' : 'value';
+}
+
 function sameLayout(a: XlsxPluginLayout | null, b: XlsxPluginLayout | null): boolean {
   return a === b || (!!a && !!b && a.id === b.id && a.version === b.version);
 }
@@ -131,7 +182,9 @@ function readVersion(handle: WorkbookHandle): string | null {
 }
 
 export function createXlsxPluginHost(
-  access: XlsxPluginHostAccess, clientFactory: typeof createPluginClients = createPluginClients
+  access: XlsxPluginHostAccess,
+  clientFactory: typeof createPluginClients = createPluginClients,
+  { editGate = true }: XlsxPluginHostOptions = {}
 ): XlsxPluginHost {
   let reporter: ((error: XlsxPluginError) => void) | undefined;
   let handle: object | null = null;
@@ -161,6 +214,8 @@ export function createXlsxPluginHost(
   };
   const unknownPlugins = new WeakSet<object>();
   const reportedConflicts = new Set<string>();
+
+  let gatingPlugins: readonly string[] = [];
 
   const report = (error: XlsxPluginError): void => {
     if (!reporter) {
@@ -225,6 +280,15 @@ export function createXlsxPluginHost(
     };
   };
 
+  const snapshotOf = (pluginId: string, generation: string): XlsxPluginSnapshot => ({
+    generation,
+    version: state.version,
+    readOnly: state.readOnly,
+    grant: runtime.grant(pluginId) as XlsxPluginGrant,
+    selection: state.selection,
+    layout: state.layout,
+  });
+
   const runtime: PluginRuntime<
     Definition,
     Context,
@@ -238,14 +302,7 @@ export function createXlsxPluginHost(
     XlsxPluginErrorPhase
   >({
     context: (invocation) => createContext(invocation),
-    snapshot: (pluginId, generation) => ({
-      generation,
-      version: state.version,
-      readOnly: state.readOnly,
-      grant: runtime.grant(pluginId) as XlsxPluginGrant,
-      selection: state.selection,
-      layout: state.layout,
-    }),
+    snapshot: (pluginId, generation) => snapshotOf(pluginId, generation),
     currentVersion: () => (handle && runtime.generation() !== null
       ? 'identity' in access ? access.currentVersion(handle) : readVersion(handle as WorkbookHandle) : null),
     loadEvent: (snapshot, reason) => ({
@@ -348,6 +405,59 @@ export function createXlsxPluginHost(
     return { ok: false, failure: commandReason(code, { translate: access.translate }) };
   };
 
+  const failing = new WeakSet<object>();
+
+  /** Ends the activations of plugins that gate edits when the editor cannot gate them. */
+  const refuseEditGate = (): void => {
+    if (editGate || runtime.generation() === null) return;
+    for (const pluginId of gatingPlugins) runtime.fail(pluginId, 'edit-gate', new Error(EDIT_GATE_UNSUPPORTED));
+  };
+
+  /** Gate hooks of ready plugins in installation order, without ones already failing. */
+  const gates = () =>
+    runtime.activations().filter((entry) =>
+      !failing.has(entry.activation) &&
+      (entry.plugin.cellEditable !== undefined || entry.plugin.beforeCellCommit !== undefined)
+    );
+
+  const gateContext = (context: Context): XlsxPluginEditGateContext<unknown> => Object.freeze({
+    pluginId: context.pluginId,
+    get snapshot() {
+      return snapshotOf(context.pluginId, context.snapshot.generation);
+    },
+    get state() {
+      return context.state;
+    },
+    read: context.read,
+  });
+
+  /**
+   * Runs one gate hook with the pass's context of its plugin; a throw or a malformed result
+   * quarantines the plugin and yields null.
+   */
+  const runGate = <T>(
+    entry: XlsxPluginActivation,
+    contexts: Map<object, XlsxPluginEditGateContext<unknown>>,
+    call: (context: XlsxPluginEditGateContext<unknown>) => T
+  ): T | null => {
+    try {
+      let context = contexts.get(entry.activation);
+      if (!context) {
+        context = gateContext(entry.context);
+        contexts.set(entry.activation, context);
+      }
+      return call(context);
+    } catch (error) {
+      failing.add(entry.activation);
+      queueMicrotask(() => {
+        if (runtime.activations().some((current) => current.activation === entry.activation)) {
+          runtime.fail(entry.pluginId, 'edit-gate', error);
+        }
+      });
+      return null;
+    }
+  };
+
   const binding: XlsxPluginHost = {
     setPlugins(plugins) {
       const definitions: Definition[] = [];
@@ -369,8 +479,12 @@ export function createXlsxPluginHost(
         });
       }
       installed = definitions.length > 0;
+      gatingPlugins = definitions
+        .filter((definition) => definition.cellEditable !== undefined || definition.beforeCellCommit !== undefined)
+        .map((definition) => definition.id);
       observe();
       runtime.setPlugins(definitions);
+      refuseEditGate();
     },
 
     setGrants: (grants) => runtime.setGrants(grants),
@@ -391,6 +505,7 @@ export function createXlsxPluginHost(
       observe();
       generations += 1;
       runtime.open(`workbook-${generations}`);
+      refuseEditGate();
     },
 
     close(reason) {
@@ -510,6 +625,40 @@ export function createXlsxPluginHost(
 
     guard: (pluginId, phase, call, fallback) => runtime.guard(pluginId, phase, call, fallback),
     fail: (pluginId, phase, error) => runtime.fail(pluginId, phase, error),
+
+    gatesEdits: () => runtime.generation() !== null && gates().length > 0,
+
+    openGate() {
+      documentChanged();
+      const contexts = new Map<object, XlsxPluginEditGateContext<unknown>>();
+      return {
+        cellEditable(cell) {
+          for (const entry of gates()) {
+            const hook = entry.plugin.cellEditable;
+            if (!hook) continue;
+            const editable = runGate(entry, contexts, (context) => {
+              const value: unknown = hook(context, { ...cell });
+              if (typeof value !== 'boolean') throw new TypeError('cellEditable must return a boolean');
+              return value;
+            });
+            if (editable === false) return false;
+          }
+          return true;
+        },
+        beforeCellCommit(commit) {
+          let input = commit.input;
+          for (const entry of gates()) {
+            const hook = entry.plugin.beforeCellCommit;
+            if (!hook) continue;
+            const next = { ...commit, input, kind: commitKind(input) };
+            const decision = runGate(entry, contexts, (context) => checkedDecision(hook(context, next)));
+            if (decision?.action === 'refuse') return { ok: false, message: decision.message ?? null };
+            if (decision?.action === 'replace') input = decision.input;
+          }
+          return { ok: true, input };
+        },
+      };
+    },
   };
   return binding;
 }

@@ -1,6 +1,6 @@
 import type { NavigationContext } from '../selectionData';
 import {
-  copiedSelection, createSelectionDataNavigation, mergeAnchorCell, sameSelection, selectionDataRequest, selectionFrameContains, selectionHidden, selectionMerges,
+  copiedSelection, createSelectionDataNavigation, MAX_CLEAR_CELLS, mergeAnchorCell, sameSelection, selectionDataRequest, selectionFrameContains, selectionHidden, selectionMerges,
 } from '../selectionData';
 import {
   cellAtPoint, cellRect, chartRegionAtPoint, extendTo, hyperlinkAtCell, isProposalsAvailable,
@@ -8,18 +8,18 @@ import {
   selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
 import type {
-  CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary,
+  CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary, XlsxRangeTarget,
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import { useDefaultFonts } from '../useDefaultFonts';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
-import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
+import { createXlsxCommandController, XlsxCommandAdmissionError, XlsxHostRefusalError } from '../commands/createXlsxCommandStore';
 import { commandForEvent } from '../commands/descriptors';
 import { commandReason, initialZoomScale } from '../commands/evaluate';
 import type { XlsxCommandFailureCode } from '../commands/types';
-import type { InputSeal } from '../commands/inputCoordinator';
+import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
 import { useSaveRequest } from '../commands/useSaveRequest';
@@ -41,7 +41,7 @@ import type { XlsxRevealAlignment } from '../plugins/createPluginClients';
 import { createPeerlessPluginClients } from '../plugins/createPeerlessPluginClients';
 import { createPeerlessPluginDocument, createPeerlessPluginGeometry } from '../plugins/createPeerlessPluginDocument';
 import type { XlsxPluginDocumentAccess } from '../plugins/createPluginDocumentAccess';
-import type { XlsxPluginNavigationFailureCode } from '../plugins/types';
+import type { XlsxPluginCellCommit, XlsxPluginCellRef, XlsxPluginNavigationFailureCode } from '../plugins/types';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost, type XlsxPluginHostBinding } from '../plugins/useXlsxPluginHost';
@@ -107,6 +107,8 @@ function commandSelection(target: WorkbookCommandSelection, previous?: Selection
     col: anchor.col === start.col ? end.col : start.col,
   } };
 }
+
+const MAX_CLEAR_SCAN_CELLS = 10 * MAX_CLEAR_CELLS;
 
 function rangeA1(range: CellRange): string {
   return `${address({ row: range.top, col: range.left })}:${address({ row: range.bottom, col: range.right })}`;
@@ -177,6 +179,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pluginBindingRef = useRef<XlsxPluginHostBinding | null>(null);
+  const gateCommitRef = useRef<(draft: InputDraft, target: XlsxRangeTarget) => (() => Promise<string>) | null>(() => null);
   useLayoutEffect(() => () => pluginBindingRef.current?.host.close('unmounted'), []);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -187,7 +190,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const { setSelection, selectionRef, setView, viewRef, setPainted } = presentation;
   const [catalog, setCatalog, catalogRef] = useSyncedState<WorkbookSheetSummary[]>([]);
   const [zoom, setZoom, zoomRef] = useSyncedState(initialZoomScale(props.initialZoom));
-  const [refusal, setRefusal] = useState<{ code: XlsxCommandFailureCode; detail?: string } | null>(null);
+  const [refusal, setRefusal] = useState<{ code: XlsxCommandFailureCode; detail?: string; message?: string } | null>(null);
   const [selectedChart, setSelectedChart, chartRef] = useSyncedState<{ id: string; movable: boolean } | null>(null);
   const [chartOffset, setChartOffset] = useState<{ x: number; y: number } | null>(null);
   const [formatToken, setFormatTokenState, formatTokenRef] = useSyncedState<string | null>(null);
@@ -278,7 +281,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const editable = () => Boolean(ownerRef.current?.ready && !ownerRef.current.retiring &&
     !ownerRef.current.failure && !ownerRef.current.readOnly && !propsRef.current.readOnly && !coordinatorRef.current?.readOnly);
   const report = useCallback((error: unknown) => {
-    if (error instanceof PeerlessWorkerCommandRefusal && error.status.reason === 'read-only') {
+    if (error instanceof XlsxHostRefusalError) {
+      setRefusal({ code: error.code, message: error.message });
+    } else if (error instanceof PeerlessWorkerCommandRefusal && error.status.reason === 'read-only') {
       setRefusal({ code: 'read-only' });
     } else if (error instanceof WorkerInputRefusal) {
       setRefusal({ code: error.code, detail: error.code === 'sheet-protected' ? undefined : error.message });
@@ -507,6 +512,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     dependency: (draft) => (draft as WorkerNativeDraft).after,
     target: (sheet, row, col) => rangeTarget(sheet, selectionAt({ row, col })),
     draftTarget: (draft) => (draft as WorkerNativeDraft).target,
+    gateCommit: (draft, target) => gateCommitRef.current(draft, target),
     frame: () => sourceRef.current?.captureCommandFrame() ?? undefined,
     selectionRevision: () => navigation.current,
     onEvent: (event, publish) => inputEvents.current(event, publish), onError: (error) => run?.fail(error),
@@ -550,6 +556,71 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, proposals, staleFor,
     proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t });
   pluginBindingRef.current = pluginHost;
+  const editGate = pluginHost.host;
+
+  /** Whether plugins let the user type into a cell of the active sheet; a protected sheet leaves it to protection. */
+  const typingAllowed = useCallback((cell: CellAddr): boolean => {
+    const owner = ownerRef.current;
+    if (!owner?.ready || !editGate.gatesEdits() || owner.session.editState.selectionEditable === false) return true;
+    const sheetId = owner.session.editState.sheets?.find((entry) => entry.index === activeRef.current)?.id ??
+      owner.session.state.sheets.find((entry) => entry.index === activeRef.current)?.id;
+    return !sheetId || editGate.openGate().cellEditable({ sheetId, row: cell.row, col: cell.col });
+  }, [editGate]);
+
+  /** Runs typed writes through the plugins once the worker confirmed protection does not refuse them first. */
+  const gateWrites = async (
+    owner: PeerlessWorkbookSession, sheetId: string, edits: readonly CellInputEdit[],
+    source: XlsxPluginCellCommit['source']
+  ): Promise<CellInputEdit[]> => {
+    if (edits.length === 0) return [...edits];
+    const cells: XlsxPluginCellRef[] = edits.map(({ row, col }) => ({ sheetId, row, col }));
+    const catalog = await owner.session.call.readCells({ ranges: [] });
+    const entry = catalog.ok ? catalog.sheets.find((sheet) => sheet.sheetId === sheetId) : undefined;
+    if (catalog.ok && entry && !entry.editable) {
+      const check = await owner.session.call.validateEdits({ expectVersion: catalog.version,
+        steps: cells.map(({ row, col }) => ({ op: 'setCellInputs' as const, inputs: [['']],
+          target: { sheetId, range: { kind: 'rowCol' as const, start: { row, col }, end: { row, col } } } })) });
+      if (!check.ok && check.failure.code === 'locked-target') return [...edits];
+    }
+    const refusal = (message: string | null) => new XlsxHostRefusalError(message ?? t('commands.reasons.hostRefused'));
+    const pass = editGate.openGate();
+    if (!cells.every((cell) => pass.cellEditable(cell))) throw refusal(null);
+    return edits.map((edit, index) => {
+      const outcome = pass.beforeCellCommit({ ...cells[index], input: edit.input, source });
+      if (!outcome.ok) throw refusal(outcome.message);
+      return { ...edit, input: outcome.input };
+    });
+  };
+  /**
+   * The cells of `range` that hold content, read inside the used range in bounded chunks; null when
+   * more than a clear may change hold content or the area to read is too large.
+   */
+  const contentCells = async (owner: PeerlessWorkbookSession, sheet: number, range: CellRange): Promise<CellInputEdit[] | null> => {
+    const { usedRange: used } = await owner.session.call.selectionData(sheet, 0, 0, 'usedRange');
+    if (!used) return [];
+    const top = Math.max(range.top, used.top), bottom = Math.min(range.bottom, used.bottom);
+    const left = Math.max(range.left, used.left), right = Math.min(range.right, used.right);
+    if (top > bottom || left > right) return [];
+    const width = right - left + 1;
+    if ((bottom - top + 1) * width > MAX_CLEAR_SCAN_CELLS) return null;
+    const rows = Math.max(1, Math.floor(MAX_CLEAR_CELLS / width));
+    const content: CellInputEdit[] = [];
+    for (let start = top; start <= bottom; start += rows) {
+      const end = Math.min(bottom, start + rows - 1);
+      const { cells } = await owner.session.call.cellInputs(sheet, rangeA1({ top: start, left, bottom: end, right }));
+      cells.forEach((row, dr) => row.forEach((cell, dc) => {
+        if (cell.input !== '') content.push({ row: start + dr, col: left + dc, input: '' });
+      }));
+      if (content.length > MAX_CLEAR_CELLS) return null;
+    }
+    return content;
+  };
+  gateCommitRef.current = (draft, target) => {
+    const owner = ownerRef.current;
+    if (!owner || !editGate.gatesEdits()) return null;
+    return () => gateWrites(owner, target.sheetId, [{ row: draft.row, col: draft.col, input: draft.value }],
+      draft.source === 'cell' ? 'cell-editor' : 'formula-bar').then(([edit]) => edit.input);
+  };
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
   useLayoutEffect(() => {
     const apply = async ([update, ...updates]: Uint8Array[]) => {
@@ -717,7 +788,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (event.seq !== null) echoRef.current?.refuse(event.seq);
       if (event.type === 'refused' && event.draft) {
         draftController.refused(event.seq, event.draft);
-        report(new PeerlessWorkerCommandRefusal(event.status ?? { seq: event.seq ?? 0, status: 'refused' }, event.target, event.draft));
+        report(event.error ?? new PeerlessWorkerCommandRefusal(event.status ?? { seq: event.seq ?? 0, status: 'refused' }, event.target, event.draft));
       }
       return;
     }
@@ -1125,8 +1196,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const clear = () => {
     const target = selectedTarget();
-    if (!editable() || !target) return;
-    command({ kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } });
+    const owner = ownerRef.current;
+    const selected = selectionRef.current;
+    if (!editable() || !target || !owner || !selected) return;
+    const cleared: PeerlessWorkerCommandInput = { kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } };
+    if (!editGate.gatesEdits()) { command(cleared); return; }
+    const sheet = activeRef.current;
+    const range = normalizeRange(selected);
+    const gated = coordinator.runAfterPendingInput(async () => {
+      const content = await contentCells(owner, sheet, range);
+      if (!content) throw new WorkerInputRefusal(t('editor.clearExceedsLimit'));
+      const edits = await gateWrites(owner, target.sheetId, content, 'clear-key');
+      return edits.length > 0 ? edits : null;
+    }, 'posted');
+    const ticket = coordinator.clipboard(() => gated, (edits): PeerlessWorkerCommandInput => edits
+      ? { kind: 'editCells', payload: { args: [sheet, edits], target, selection: target } } : cleared,
+    { frame: sourceRef.current?.captureCommandFrame() ?? undefined, selectionRevision: navigation.current });
+    void ticket.result.catch(report);
   };
   const clipboardAllowed = (kind: 'copy' | 'cut' | 'paste') => {
     const owner = ownerRef.current;
@@ -1420,7 +1506,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const openCell = (seed?: string) => {
     const selected = selectionRef.current;
-    if (!run?.ready || !editable() || !selected) return;
+    if (!run?.ready || !editable() || !selected || !typingAllowed(selected.anchor)) return;
     reveal(activeRef.current, selected.anchor);
     draftController.open(seed);
   };
@@ -1590,7 +1676,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   return <XlsxCommandContext.Provider value={commands.store}><EditorChromeContext.Provider value={true}>
     <PeerlessChromeContext.Provider value={true}>
     <PeerlessWorkerInputs onNavigate={navigateFromNameBox} controller={draftController} presentation={presentation} run={run} active={active}
-      selectedChart={selectedChart !== null} error={Boolean(error)} readOnly={Boolean(props.readOnly)} navigation={navigation}>
+      selectedChart={selectedChart !== null} error={Boolean(error)} readOnly={Boolean(props.readOnly)} navigation={navigation}
+      cellEditable={typingAllowed} gateRevision={pluginHost.activations}>
       <div dir="ltr" ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
         onKeyDownCapture={(event) => {
           if (!fromPlugin(event) && event.key === 'Escape') { cellClipboard.cancelCut(); setFormatToken(null); commands.refresh(); }
@@ -1637,7 +1724,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         </div>
         <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} />
         {refusal && <div data-testid="xlsx-input-refusal" role="alert">
-          {commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}
+          {refusal.message ?? <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>}
         </div>}
         {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
         {sheets.length > 0 && <div data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}

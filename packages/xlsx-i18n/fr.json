@@ -136,6 +136,7 @@
       "invalidArguments": "Cette valeur n’est pas valide.",
       "inputFailed": "La saisie de cellule précédente n’a pas pu être enregistrée.",
       "sheetProtected": "Cette cellule se trouve sur une feuille protégée.",
+      "hostRefused": "Cette modification n’est pas autorisée.",
       "documentReplaced": "Un autre classeur a été ouvert.",
       "targetChanged": "La sélection a changé.",
       "gestureActive": "Terminez d’abord de déplacer le graphique.",

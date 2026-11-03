@@ -136,6 +136,7 @@
       "invalidArguments": "Valore non valido.",
       "inputFailed": "Impossibile salvare l'immissione di cella precedente.",
       "sheetProtected": "Questa cella si trova in un foglio protetto.",
+      "hostRefused": "Questa modifica non è consentita.",
       "documentReplaced": "È stata aperta un'altra cartella di lavoro.",
       "targetChanged": "La selezione è cambiata.",
       "gestureActive": "Termina prima lo spostamento del grafico.",

@@ -136,6 +136,7 @@
       "invalidArguments": "Deze waarde is niet geldig.",
       "inputFailed": "De voorgaande celinvoer kon niet worden opgeslagen.",
       "sheetProtected": "Deze cel staat op een beveiligd werkblad.",
+      "hostRefused": "Deze bewerking is niet toegestaan.",
       "documentReplaced": "Er is een andere werkmap geopend.",
       "targetChanged": "De selectie is gewijzigd.",
       "gestureActive": "Voltooi eerst het verplaatsen van de grafiek.",

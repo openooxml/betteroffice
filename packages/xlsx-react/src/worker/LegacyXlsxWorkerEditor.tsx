@@ -708,7 +708,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return sheetId === undefined ? null : { sheetId, sheetIndex: active,
       cells: selection, chartId: selectedChart?.id ?? null };
   }, [run, active, selection, selectedChart]);
-  const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
+  const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands, editGate: false,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
     selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t });
   const presentGridRef = useRef(pluginHost.presentGrid);

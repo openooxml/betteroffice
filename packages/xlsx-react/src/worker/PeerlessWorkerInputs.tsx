@@ -7,7 +7,7 @@ import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerPresentationStore } from './WorkerPresentationStore';
 
 export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ controller, presentation, run, active,
-  selectedChart, error, readOnly, navigation, onNavigate, children }: {
+  selectedChart, error, readOnly, navigation, onNavigate, cellEditable, children }: {
   controller: WorkerDraftController;
   presentation: WorkerPresentationStore;
   run: PeerlessWorkbookSession | null;
@@ -17,6 +17,10 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   readOnly: boolean;
   navigation: { current: number };
   onNavigate(cell: { row: number; col: number }): void;
+  /** Whether plugins let the user type into a cell of the active sheet. */
+  cellEditable(cell: { row: number; col: number }): boolean;
+  /** Changes whenever plugin state may change `cellEditable`. */
+  gateRevision: unknown;
   children: ReactNode;
 }) {
   const { selection, view, painted } = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
@@ -66,8 +70,9 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
     if (input && !controller.isComposing('formula') && input.value !== value) presentInputValue(input, value);
   }, [controller, state, value]);
   const disabled = !view || !selection || error;
-  const formula = useMemo<FormulaBarBinding>(() => ({ ...handlers, a1, value, disabled, readOnly: unavailable || selectedChart }),
-    [handlers, a1, value, disabled, unavailable, selectedChart]);
+  const gated = selection !== null && !cellEditable(selection.anchor);
+  const formula = useMemo<FormulaBarBinding>(() => ({ ...handlers, a1, value, disabled, readOnly: unavailable || selectedChart || gated,
+    ...gated && { onChange: () => {} } }), [handlers, a1, value, disabled, unavailable, selectedChart, gated]);
   return <FormulaBarContext.Provider value={formula}>{children}
     {state.refused.map((record) => <button key={record.seq ?? record.draft.revision}
       data-testid="xlsx-refused-draft" data-sheet={record.draft.sheet} data-row={record.draft.row}
