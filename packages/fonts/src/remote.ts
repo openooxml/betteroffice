@@ -300,17 +300,24 @@ export async function loadRemoteFontFaces(
   family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet,
   options: RemoteFontLoadOptions = {},
 ): Promise<FontFace[]> {
+  if (options.text !== undefined) return loadCoveringSlices(family, alias, face, fontSet, options);
   const slices = await remoteFontSlices(family, face, options);
   if (slices.length === 0) return [];
-  if (options.text === undefined) {
-    const bytes = await fetchRemoteFontSlices(slices, options);
-    const fonts = await Promise.all(slices.map((rule, index) => remoteFace(alias, rule, bytes[index]!)));
-    options.signal?.throwIfAborted();
-    for (const font of fonts) fontSet.add(font);
-    return fonts;
-  }
+  const bytes = await fetchRemoteFontSlices(slices, options);
+  const fonts = await Promise.all(slices.map((rule, index) => remoteFace(alias, rule, bytes[index]!)));
+  options.signal?.throwIfAborted();
+  for (const font of fonts) fontSet.add(font);
+  return fonts;
+}
+
+async function loadCoveringSlices(
+  family: string, alias: string, face: RemoteFaceRequest, fontSet: FontFaceSet, options: RemoteFontLoadOptions,
+): Promise<FontFace[]> {
   let registered = registeredSlices.get(fontSet);
   if (!registered) registeredSlices.set(fontSet, registered = new Map());
+  const before = new Set([...registered.values()].flatMap((entry) => entry.loaded ? [entry.loaded] : []));
+  const slices = await remoteFontSlices(family, face, options);
+  if (slices.length === 0) return [];
   const keyOf = (rule: RemoteFontFaceRule) => JSON.stringify([alias, rule.weight, rule.style, rule.unicodeRange, preferredSource(rule).url]);
   const present = (entry: RegisteredSlice) => !entry.loaded || typeof fontSet.has !== 'function' || fontSet.has(entry.loaded);
   for (const rule of slices) {
@@ -339,12 +346,11 @@ export async function loadRemoteFontFaces(
     void entry.font.then((font) => { entry.loaded = font; }, () => { if (registered.get(key) === entry) registered.delete(key); });
   }
   const entries = slices.flatMap((rule) => registered.get(keyOf(rule)) ?? []);
-  const pending = new Set(entries.filter((entry) => !entry.loaded));
   for (const entry of entries) if (!entry.loaded) entry.waiting.add(options.signal ?? null);
   const fonts = Promise.allSettled(entries.map((entry) => entry.font)).then((results) => {
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failed) {
-      const added = results.flatMap((result, index) => result.status === 'fulfilled' && pending.has(entries[index]!) ? [result.value] : []);
+      const added = results.flatMap((result) => result.status === 'fulfilled' && !before.has(result.value) ? [result.value] : []);
       throw new RemoteFontLoadError('Some remote font slices failed to load', added, { cause: failed.reason });
     }
     return results.map((result) => (result as PromiseFulfilledResult<FontFace>).value);

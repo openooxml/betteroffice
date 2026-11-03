@@ -349,8 +349,16 @@ test('characters the General format generates when it shortens a number are requ
   await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [{
     op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
     numberFormat: { left: 0, width: 80, parts: [], general: 7 },
-  } as TextCmd] });
+  } as unknown as TextCmd] });
   expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['7#012345689.-E+']);
+});
+
+test('whitespace the canvas paints as a space requests the space character', async () => {
+  browser();
+  const { remoteLoads } = provider();
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: 'A\tA' } as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A\t ']);
 });
 
 test('a face the host registered under the family keeps the remote provider away', async () => {
