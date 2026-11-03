@@ -144,7 +144,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     }
     if (structural) {
       const context = presentationContexts.get(handle);
-      if (!context) return null;
+      if (!context || typeof context.doc.validateProposalJson !== 'function') return null;
       try { context.jsonWasmCall(() => context.doc.validateProposalJson(JSON.stringify({ agentId: agent, note, edits: canonicalEdits }))); }
       catch { return null; }
       return () => handle.propose(agent, note, canonicalEdits);

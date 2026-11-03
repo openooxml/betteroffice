@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo } from 'react';
+import { useLayoutEffect, useMemo, type Dispatch, type SetStateAction } from 'react';
 import { flushSync } from 'react-dom';
 import type { Translations } from '@betteroffice/pptx-i18n';
 import type { Proposal } from '@betteroffice/pptx';
@@ -42,7 +42,7 @@ function receipt(ack: PresentationCommandAck | null, env: PptxCommandEnvironment
 export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
   tool, setTool, openPicture, save, focus, i18n, zoom, setZoom, review, proposals, setReview, exportPng,
 }: { tool: PptxEditorTool; setTool(tool: PptxEditorTool): void; openPicture(): void; save(): Promise<void>;
-  focus(): void; i18n?: Translations; zoom: number | 'fit'; setZoom(value: number | 'fit'): void; review: PeerlessReviewState; proposals: Proposal[]; setReview(next: PeerlessReviewState): void; exportPng(): Promise<void> }) {
+  focus(): void; i18n?: Translations; zoom: number | 'fit'; setZoom(value: number | 'fit'): void; review: PeerlessReviewState; proposals: Proposal[]; setReview: Dispatch<SetStateAction<PeerlessReviewState>>; exportPng(): Promise<void> }) {
   const { t } = useTranslation();
   const controller = useMemo(() => createPptxCommandController(), [run]);
   const binding = useMemo(() => {
@@ -91,8 +91,8 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         let operation: Promise<PresentationCommandAck | null> | null = null;
         switch (id) {
           case 'zoom': setZoom((args as PptxCommandArgs['zoom']).scale); return { ok: true, status: 'executed' };
-          case 'proposalsPanel': setReview({ ...review, open: args === null ? !review.open : (args as PptxCommandArgs['proposalsPanel'])!.open }); return { ok: true, status: 'opened' };
-          case 'proposalSelect': flushSync(() => setReview({ ...review, slideId: null, selectedId: (args as PptxCommandArgs['proposalSelect']).proposalId })); return { ok: true, status: 'executed' };
+          case 'proposalsPanel': setReview((state) => ({ ...state, open: args === null ? !state.open : (args as PptxCommandArgs['proposalsPanel'])!.open })); return { ok: true, status: 'opened' };
+          case 'proposalSelect': flushSync(() => setReview((state) => ({ ...state, slideId: null, selectedId: (args as PptxCommandArgs['proposalSelect']).proposalId }))); return { ok: true, status: 'executed' };
           case 'proposalDiff': {
             const enabled = (args as PptxCommandArgs['proposalDiff']).enabled;
             const composition = run.store.getSnapshot().composition;
@@ -103,13 +103,13 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
               await run.store.fence();
               run.require();
             }
-            flushSync(() => setReview({ ...review, diff: enabled }));
+            flushSync(() => setReview((state) => ({ ...state, diff: enabled })));
             return { ok: true, status: 'executed' };
           }
-          case 'slideshow': await run.store.fence(); setReview({ ...review, presenting: true }); return { ok: true, status: 'opened' };
+          case 'slideshow': await run.store.fence(); setReview((state) => ({ ...state, presenting: true })); return { ok: true, status: 'opened' };
           case 'exportPng': await exportPng(); return { ok: true, status: 'executed' };
-          case 'proposalAccept': operation = invokePeerless(run, { method: 'acceptProposal', args: [(args as PptxCommandArgs['proposalAccept']).proposalId, { force: (args as PptxCommandArgs['proposalAccept']).force }] }); setReview({ ...review, diff: false }); break;
-          case 'proposalReject': operation = invokePeerless(run, { method: 'rejectProposal', args: [(args as PptxCommandArgs['proposalReject']).proposalId] }); setReview({ ...review, diff: false }); break;
+          case 'proposalAccept': operation = invokePeerless(run, { method: 'acceptProposal', args: [(args as PptxCommandArgs['proposalAccept']).proposalId, { force: (args as PptxCommandArgs['proposalAccept']).force }] }); setReview((state) => ({ ...state, diff: false })); break;
+          case 'proposalReject': operation = invokePeerless(run, { method: 'rejectProposal', args: [(args as PptxCommandArgs['proposalReject']).proposalId] }); setReview((state) => ({ ...state, diff: false })); break;
           case 'insertSlide': operation = peerlessInsertSlide(run, (args as PptxCommandArgs['insertSlide']).layoutPartPath); break;
           case 'shapeFill': operation = peerlessObjectCommand(run, { kind: 'fill', color: (args as PptxCommandArgs['shapeFill']).color }); break;
           case 'shapeStrokeColor': operation = peerlessObjectCommand(run, { kind: 'strokeColor', color: (args as PptxCommandArgs['shapeStrokeColor']).color }); break;

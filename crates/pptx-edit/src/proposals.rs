@@ -599,11 +599,10 @@ fn resolve_edit(
     };
     let mut edit = edit.clone();
     match &mut edit {
-        ProposalEdit::InsertSlide { after_slide_id, .. } => {
-            if let Some(id) = after_slide_id {
-                resolve(id)?;
-            }
-        }
+        ProposalEdit::InsertSlide {
+            after_slide_id: Some(id),
+            ..
+        } => resolve(id)?,
         ProposalEdit::DuplicateSlide {
             slide_id,
             after_slide_id,

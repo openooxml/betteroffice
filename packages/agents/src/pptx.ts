@@ -122,7 +122,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     for (const edit of input.edits) {
       if ('type' in edit) {
         const parsed = pptxProposalSlideEditSchema.safeParse(edit);
-        if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Invalid slide proposal edit.', parsed.error.issues);
+        if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Invalid slide proposal edit.', { issues: parsed.error.issues });
         proposalEdits.push(parsed.data);
         continue;
       }

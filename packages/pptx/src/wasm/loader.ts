@@ -767,9 +767,13 @@ function openPresentationInternal(
       return jsonWasmCall(() => doc.previewProposalJson(JSON.stringify({ id })));
     },
     proposalSlideStrip(id) {
+      if (!isProposalsAvailable() || typeof doc.proposalSlideStripJson !== 'function') return [];
       return jsonWasmCall(() => doc.proposalSlideStripJson(id));
     },
     layoutProposalDiffSlideById(id, slideId) {
+      if (!isProposalsAvailable() || typeof renderer.layoutProposalDiffSlideByIdJson !== 'function') {
+        throw new Error('Proposal slide previews are unavailable');
+      }
       return jsonWasmCall(() => renderer.layoutProposalDiffSlideByIdJson(doc, id, slideId));
     },
     layoutProposalDiffSlide(id, slideIndex) {
