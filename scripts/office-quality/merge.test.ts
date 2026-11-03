@@ -344,3 +344,21 @@ test('rejects missing and symlinked render pages without publishing a partial re
     ]);
   }
 });
+
+test('writes a public aggregate beside the section that names no sample', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    await mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output });
+    const text = await readFile(join(paths.output, 'aggregate.json'), 'utf8');
+    const aggregate = JSON.parse(text);
+    expect(aggregate.commit).toBe(commit);
+    expect(aggregate.source_sha).toBe(sourceSha);
+    expect(Object.keys(aggregate.formats)).toEqual(['docx', 'pptx', 'xlsx']);
+    expect([aggregate.formats.docx.samples, aggregate.formats.pptx.samples, aggregate.formats.xlsx.samples]).toEqual([2, 1, 0]);
+    for (const leak of ['docx-a', 'docx-b', 'pptx-c', 'a'.repeat(64), 'corpus.example'])
+      expect(text.includes(leak) && leak).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -196,7 +196,7 @@ const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
   'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
-const PRIVATE_OFF = /(^|&& )!inputs\.private_corpus( &&|$)|^\$\{\{ !inputs\.private_corpus \}\}$/;
+const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
 
 test('private corpus runs are an explicit input that refuses sample lists and render publishing', () => {
   expect(workflow.on.workflow_dispatch.inputs.private_corpus).toEqual({
@@ -237,7 +237,7 @@ test('private runs upload no per-document artifact and touch no asset cache, ren
     if (uses.startsWith('actions/upload-artifact@')) {
       if (BINARY_ARTIFACTS.test(step.with.name)) continue;
       if (step.if === 'inputs.private_corpus') {
-        expect({ job, name: step.with.name, path: step.with.path }).toEqual({ job, name: 'visual-fidelity', path: '${{ runner.temp }}/fidelity-report/section.md' });
+        expect({ job, name: step.with.name, path: step.with.path }).toEqual({ job, name: 'visual-fidelity', path: AGGREGATE_ONLY });
         continue;
       }
       expect({ job, name: step.with.name, if: step.if }).toEqual({ job, name: step.with.name, if: expect.stringMatching(PRIVATE_OFF) });
@@ -373,4 +373,32 @@ test('the pin step refuses private runs on another branch or commit', async () =
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+const AGGREGATE_ONLY = '${{ runner.temp }}/fidelity-report/section.md\n${{ runner.temp }}/fidelity-report/aggregate.json\n';
+const README = "${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}";
+
+test('only a default showcase run commits the README; report-only runs publish nothing', () => {
+  expect(workflow.on.workflow_dispatch.inputs.report_only).toEqual({
+    description: "Keep the results in this run's artifacts; never commit the README or publish renders",
+    default: false, required: false, type: 'boolean',
+  });
+  const guard = prepare.steps.find((step: any) => step.name === 'Keep report-only runs off the public render viewer');
+  expect(guard.if).toBe('inputs.report_only && inputs.publish_renders');
+  expect(guard.run).toContain('exit 1');
+  expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
+  const readme = publish.steps.filter((step: any) => ['Replace the generated README section', 'Detect a changed report'].includes(step.name));
+  expect(readme.map((step: any) => step.if)).toEqual([README, README]);
+  for (const step of publish.steps.filter((step: any) => /README|bot token/.test(step.name ?? '') && !readme.includes(step)))
+    expect(step.if).toBe("steps.changed.outputs.value == 'true'");
+});
+
+test('the reconciled artifact always carries the aggregate, and the private bundle keeps it too', () => {
+  const uploads = publish.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@') && step.with.name === 'visual-fidelity');
+  expect(uploads.map((step: any) => [step.if, step.with.path])).toEqual([
+    ['${{ !inputs.private_corpus }}', '${{ runner.temp }}/fidelity-report/report.json\n' + AGGREGATE_ONLY],
+    ['inputs.private_corpus', AGGREGATE_ONLY],
+  ]);
+  const keep = publish.steps.find((step: any) => step.name === 'Keep the reconciled report in the private bucket');
+  expect(keep.run).toContain('private-store.mjs" put visual-fidelity report.json section.md aggregate.json');
 });
