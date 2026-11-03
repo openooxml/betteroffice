@@ -422,8 +422,7 @@ fn serialize_simple_field(
     Ok(output)
 }
 
-/// The runs a field-code node contributes to `field_code`, as the parser flattens them.
-fn code_runs(node: &InlineNode) -> Vec<&Run> {
+fn field_runs(node: &InlineNode) -> Vec<&Run> {
     match node {
         InlineNode::Run(run) => vec![run],
         InlineNode::Hyperlink(hyperlink) => hyperlink
@@ -464,7 +463,11 @@ fn serialize_complex_field(
         .and_then(|content| content.inline.as_deref())
         .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
     let in_place = code_nodes.filter(|nodes| {
-        !field.field_code.is_empty() && nodes.iter().flat_map(code_runs).eq(field.field_code.iter())
+        !field.field_code.is_empty()
+            && nodes
+                .iter()
+                .flat_map(field_runs)
+                .eq(field.field_code.iter())
     });
     if let Some(nodes) = in_place {
         for node in nodes {
@@ -509,7 +512,28 @@ fn serialize_complex_field(
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else {
-        for run in &field.field_result {
+        let mut runs = field.field_result.iter();
+        if let Some(nodes) = field
+            .structured_result
+            .as_ref()
+            .and_then(|content| content.inline.as_ref())
+        {
+            for node in nodes {
+                if matches!(
+                    node,
+                    InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
+                ) {
+                    output.push_str(&serialize_inline_node(node, context)?);
+                } else {
+                    for _ in field_runs(node) {
+                        if let Some(run) = runs.next() {
+                            output.push_str(&serialize_context_run(run, context)?);
+                        }
+                    }
+                }
+            }
+        }
+        for run in runs {
             output.push_str(&serialize_context_run(run, context)?);
         }
     }
