@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { ReactElement } from 'react';
 import * as xlsx from '@betteroffice/xlsx';
 import { initWasm, openWorkbook, type WorkbookSession } from '@betteroffice/xlsx';
 import { createTestWorkbookSession } from '../../../xlsx/src/session/testHelpers';
@@ -104,11 +105,12 @@ interface Decorator {
   rendered: Context | null;
 }
 
-function decorator(id: string, compute: ((context: Context) => unknown) | null): Decorator {
+function decorator(id: string, compute: ((context: Context) => unknown) | null, revision?: number): Decorator {
   const record: Decorator = { id, plugin: null as unknown as XlsxPlugin, activations: [], selections: [], contexts: [],
     rendered: null };
   record.plugin = defineXlsxPlugin<number>({
     id,
+    ...(revision !== undefined && { revision }),
     createState: () => 0,
     onEvent(context, event) {
       record.contexts.push(context);
@@ -149,6 +151,8 @@ interface Book {
   gutter(): HTMLElement | null;
   row(row: number): HTMLElement | null;
   geometry(record: Decorator): XlsxPluginGeometry | null;
+  /** Rerenders the editor with these plugins in place of the mounted ones. */
+  replace(records: readonly Decorator[]): Promise<void>;
   /** The editor API's point query; the default worker editor's API has none. */
   point: ((clientX: number, clientY: number) => XlsxPointPosition | null) | null;
 }
@@ -167,7 +171,7 @@ async function mount(editor: Editor, records: readonly Decorator[],
   const plugins = records.map((record) => record.plugin);
   const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
   let pump = () => act(async () => {});
-  const shared = (view: ReturnType<typeof render>) => {
+  const shared = (view: ReturnType<typeof render>, element: (next: readonly XlsxPlugin[]) => ReactElement) => {
     const surface = view.getByTestId('xlsx-scroll');
     const gutter = () => view.queryByTestId('xlsx-row-gutter');
     const until = (check: () => boolean) => waitFor(async () => {
@@ -178,6 +182,10 @@ async function mount(editor: Editor, records: readonly Decorator[],
       view, surface, errors, until, sync: () => pump(), gutter,
       row: (row: number) => gutter()?.querySelector<HTMLElement>(`[data-row="${row}"]`) ?? null,
       geometry: (record: Decorator) => last(record.contexts)?.geometry ?? null,
+      replace: async (next: readonly Decorator[]) => {
+        await act(async () => { view.rerender(element(next.map((record) => record.plugin))); });
+        await pump();
+      },
       bump: async (record: Decorator) => {
         await act(async () => {
           const context = record.rendered!;
@@ -200,10 +208,11 @@ async function mount(editor: Editor, records: readonly Decorator[],
   };
   if (editor === 'in-thread') {
     let api: XlsxEditorApi | undefined;
-    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} plugins={plugins}
-      readOnly={readOnly} onPluginError={onPluginError} onReady={(ready) => { api = ready; }} />);
+    const element = (next: readonly XlsxPlugin[]) => <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
+      plugins={next} readOnly={readOnly} onPluginError={onPluginError} onReady={(ready) => { api = ready; }} />;
+    const view = render(element(plugins));
     await waitFor(() => expect(api).toBeDefined(), MOUNTED);
-    const base = shared(view);
+    const base = shared(view, element);
     await loaded(base);
     return {
       ...base,
@@ -260,13 +269,15 @@ async function mount(editor: Editor, records: readonly Decorator[],
   });
   if (editor === 'legacy-worker') {
     let worker: XlsxWorkerEditorApi | undefined;
-    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} plugins={plugins}
-      readOnly={readOnly} allowHostProposals={readOnly} onPluginError={onPluginError} onReady={(ready) => { worker = ready as unknown as XlsxWorkerEditorApi; }} />);
+    const element = (next: readonly XlsxPlugin[]) => <XlsxEditor legacySyncApi experimentalWorkerOpen file={file}
+      plugins={next} readOnly={readOnly} allowHostProposals={readOnly} onPluginError={onPluginError}
+      onReady={(ready) => { worker = ready as unknown as XlsxWorkerEditorApi; }} />;
+    const view = render(element(plugins));
     await waitFor(async () => {
       await pump();
       expect(worker?.hydrated).toBe(true);
     }, MOUNTED);
-    const base = shared(view);
+    const base = shared(view, element);
     await loaded(base);
     return {
       ...base,
@@ -283,11 +294,12 @@ async function mount(editor: Editor, records: readonly Decorator[],
     };
   }
   const ready = mock((_api: XlsxAsyncEditorApi) => {});
-  const view = render(<XlsxWorkerEditor backend="peerless" file={file} plugins={plugins} readOnly={readOnly}
-    onPluginError={onPluginError} onReady={ready} />);
+  const element = (next: readonly XlsxPlugin[]) => <XlsxWorkerEditor backend="peerless" file={file} plugins={next}
+    readOnly={readOnly} onPluginError={onPluginError} onReady={ready} />;
+  const view = render(element(plugins));
   await waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED);
   const api = ready.mock.calls[0][0];
-  const base = shared(view);
+  const base = shared(view, element);
   await loaded(base);
   return {
     ...base,
@@ -501,6 +513,22 @@ for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
       await book.sync();
       expect(first.activations).toHaveLength(1);
       expect(second.activations.map((event) => event.id)).toEqual(['two', 'two']);
+      expect(book.errors).toEqual([]);
+    }, SLOW);
+
+    it('evaluates and routes a replaced definition with the same id and revision', async () => {
+      const original = decorator('x', dots([2], { id: 'old' }), 1);
+      const book = await mount(editor, [original]);
+      await book.until(() => book.row(2) !== null);
+      const replacement = decorator('x', dots([5], { id: 'new' }), 1);
+      await book.replace([replacement]);
+      await book.until(() => book.row(5) !== null && book.row(2) === null);
+      expect(buttons(book.row(5)).map((button) => button.dataset.decorationId)).toEqual(['new']);
+      fireEvent.click(buttons(book.row(5))[0]);
+      await book.until(() => replacement.activations.length === 1);
+      expect(replacement.activations[0]).toMatchObject({ id: 'new', row: 5 });
+      await book.sync();
+      expect(original.activations).toEqual([]);
       expect(book.errors).toEqual([]);
     }, SLOW);
 

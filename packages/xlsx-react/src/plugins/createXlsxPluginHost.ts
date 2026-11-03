@@ -178,10 +178,15 @@ export function createXlsxPluginHost(
   };
   const unknownPlugins = new WeakSet<object>();
   const decorationCache = new WeakMap<object, {
+    definition: Definition;
+    hook: Definition['rowDecorations'];
     state: unknown;
     version: string;
     value: XlsxPluginRowDecorations | null;
   }>();
+  let definitionsById = new Map<string, Definition>();
+  const definitionOf = (entry: XlsxPluginActivation): Definition =>
+    definitionsById.get(entry.pluginId) ?? entry.plugin;
   let decorationSets: readonly RowDecorationSet[] = Object.freeze([]);
   const reportedConflicts = new Set<string>();
 
@@ -393,6 +398,7 @@ export function createXlsxPluginHost(
         });
       }
       installed = definitions.length > 0;
+      definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
       observe();
       runtime.setPlugins(definitions);
     },
@@ -538,14 +544,16 @@ export function createXlsxPluginHost(
     rowDecorations() {
       const next: RowDecorationSet[] = [];
       for (const entry of runtime.activations()) {
-        const plugin = entry.plugin;
-        if (!plugin.rowDecorations) continue;
+        const plugin = definitionOf(entry);
+        const hook = plugin.rowDecorations;
+        if (!hook) continue;
         const current = entry.context.state;
         let cached = decorationCache.get(entry.activation);
-        if (!cached || cached.state !== current || cached.version !== state.version) {
+        if (!cached || cached.definition !== plugin || cached.hook !== hook || cached.state !== current ||
+            cached.version !== state.version) {
           const value = runtime.guard(entry.pluginId, 'row-decorations',
             (context) => checkedRowDecorations(plugin.rowDecorations!(context)), null);
-          cached = { state: current, version: state.version, value };
+          cached = { definition: plugin, hook, state: current, version: state.version, value };
           decorationCache.set(entry.activation, cached);
         }
         const value = cached.value;
@@ -565,8 +573,8 @@ export function createXlsxPluginHost(
         .find((candidate) => candidate.id === item.id);
       if (!current || current.sheetId !== item.sheetId || current.row !== item.row) return;
       const entry = runtime.activations().find((candidate) => candidate.key === key);
-      if (!entry?.plugin.onEvent) return;
-      const plugin = entry.plugin;
+      const plugin = entry && definitionOf(entry);
+      if (!entry || !plugin?.onEvent) return;
       void runtime.invoke(pluginId, 'event', (context) => plugin.onEvent!(context, {
         type: 'row-decoration-activate',
         generation: entry.generation,
