@@ -38,7 +38,7 @@ import {
 } from './replay';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 import { decodeWorkbookRecovery, isCollaborativeWorkbookRecovery, restoreWorkbookCommandState, type WorkbookRecovery } from './recovery';
-import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { isEngineTrap, nativeBudgetFailure } from '../../../../shared/office-session/trap';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -680,9 +680,14 @@ export function createWorkbookSessionHost(
   return host;
 }
 
-/** The engine traps when an allocation fails; past the wasm32 memory limit that means the workbook is too large. */
-function engineOutOfMemory(trap: SessionFailure): SessionFailure | undefined {
-  const failed = engineAllocationFailure();
+/**
+ * @internal A WebAssembly engine traps when an allocation fails past the wasm32 memory limit; a native
+ * engine call fails with an error naming the allocation that crossed its budget. Either way the
+ * workbook is too large.
+ */
+export function engineOutOfMemory(trap: SessionFailure): SessionFailure | undefined {
+  const native = nativeBudgetFailure(trap.message) ?? nativeBudgetFailure(trap.diagnostics);
+  const failed = native ? { bytes: native.bytes, memoryBytes: native.budgetBytes } : engineAllocationFailure();
   return failed ? new SessionFailure('out-of-memory', 'The workbook is too large: the spreadsheet engine ran out of memory',
     `An allocation of ${failed.bytes} bytes failed with ${Math.round(failed.memoryBytes / 2 ** 20)} MiB of engine memory; ` +
     `${trap.message}${trap.diagnostics ? `: ${trap.diagnostics}` : ''}`) : undefined;

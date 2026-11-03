@@ -11,5 +11,13 @@ export const NATIVE_ENGINE_OBJECT_FAILED = 'This engine object failed in an earl
 export function isEngineTrap(error: unknown): boolean {
   return (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError) ||
     (error instanceof Error &&
-      (error.message === NATIVE_MEMORY_BUDGET_EXCEEDED || error.message === NATIVE_ENGINE_OBJECT_FAILED));
+      (error.message.startsWith(NATIVE_MEMORY_BUDGET_EXCEEDED) || error.message === NATIVE_ENGINE_OBJECT_FAILED));
+}
+
+const NATIVE_BUDGET_DETAIL = /BetterOffice engine memory budget exceeded \((\d+) bytes over a (\d+)-byte budget\)/;
+
+/** @internal The allocation and budget a native engine error reports, found anywhere in `text`. */
+export function nativeBudgetFailure(text: string | undefined): { bytes: number; budgetBytes: number } | null {
+  const match = text === undefined ? null : NATIVE_BUDGET_DETAIL.exec(text);
+  return match ? { bytes: Number(match[1]), budgetBytes: Number(match[2]) } : null;
 }
