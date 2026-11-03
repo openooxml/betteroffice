@@ -58,7 +58,7 @@ export async function initialize(format: 'xlsx' | 'pptx', init: (input?: Uint8Ar
 }
 
 export abstract class PrototypeDocument<Change, Step> {
-  private readonly proposals = new Map<string, { value: AgentProposal<Change>; steps: Step[] }>();
+  private readonly proposals = new Map<string, { value: AgentProposal<Change>; steps: Step[]; engineId?: string }>();
   private readonly cursors = new Map<string, { signature: string; version: string; offset: number }>();
   private nextId = 1;
   protected readonly prefix = crypto.randomUUID();
@@ -72,6 +72,12 @@ export abstract class PrototypeDocument<Change, Step> {
   protected abstract reopen(bytes: Uint8Array): void;
   protected abstract dispose(): void;
 
+  protected createProposal(_value: AgentProposal<Change>, _steps: Step[]): string | undefined { return undefined; }
+  protected proposalStatus(_engineId: string): AgentProposal<Change>['status'] | undefined { return undefined; }
+  protected proposalStale(_engineId: string, _steps: Step[], version: string): boolean { return version !== this.currentVersion(); }
+  protected acceptProposal(_engineId: string, steps: Step[], version: string): unknown { return this.apply(steps, version); }
+  protected rejectProposal(_engineId: string): void {}
+
   protected alive() {
     if (this.closed) throw new DocumentToolError('CLOSED', 'This document is closed. Open it again.');
   }
@@ -83,30 +89,38 @@ export abstract class PrototypeDocument<Change, Step> {
     }
     if (JSON.stringify(changes).length > 32000) throw new DocumentToolError('EDIT_LIMIT', 'Combined proposal changes must fit in 32000 UTF-16 units.');
     this.validate(steps, version);
+    this.synchronizeProposals();
     if (this.proposals.size >= 64) {
       const old = [...this.proposals].find(([, held]) => held.value.status !== 'pending');
       if (old) this.proposals.delete(old[0]);
       else throw new DocumentToolError('PROPOSAL_LIMIT', 'Reject or discard a proposal before staging more than 64.');
     }
     const value: AgentProposal<Change> = { id: `proposal${this.nextId++}`, author: input.author, note: input.note ?? '', status: 'pending', version, changes, stale: false };
-    this.proposals.set(value.id, { value: structuredClone(value), steps: structuredClone(steps) });
+    const engineId = this.createProposal(value, steps);
+    this.proposals.set(value.id, { value: structuredClone(value), steps: structuredClone(steps), engineId });
     return value;
   }
 
   review(id: string) {
-    const { value } = this.held(id);
-    return structuredClone({ ...value, stale: value.status === 'pending' && value.version !== this.currentVersion() });
+    const held = this.held(id);
+    return structuredClone({ ...held.value, stale: this.isStale(held) });
   }
 
   listProposals() {
     this.alive();
-    return [...this.proposals.values()].map(({ value }) => ({ id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status, changes: value.changes.length, stale: value.status === 'pending' && value.version !== this.currentVersion() }));
+    this.synchronizeProposals();
+    return [...this.proposals.values()].map(held => {
+      const { value } = held;
+      return { id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status, changes: value.changes.length, stale: this.isStale(held) };
+    });
   }
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
     if (options.tracked || options.date) throw new DocumentToolError('UNSUPPORTED', 'Tracked acceptance is available for DOCX only. Omit tracked and date.');
-    const held = this.pending(id);
-    const receipt = this.apply(held.steps, held.value.version);
+    const held = this.held(id);
+    if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
+    if (!held.engineId) this.pending(id);
+    const receipt = held.engineId ? this.acceptProposal(held.engineId, held.steps, held.value.version) : this.apply(held.steps, held.value.version);
     held.value.status = 'accepted';
     return { id, status: 'accepted' as const, receipt };
   }
@@ -114,11 +128,16 @@ export abstract class PrototypeDocument<Change, Step> {
   reject(id: string) {
     const held = this.held(id);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
+    if (held.engineId) this.rejectProposal(held.engineId);
     held.value.status = 'rejected';
     return { id, status: 'rejected' as const };
   }
 
-  discard(id: string) { this.held(id); this.proposals.delete(id); }
+  discard(id: string) {
+    const held = this.held(id);
+    if (held.engineId && held.value.status === 'pending') this.rejectProposal(held.engineId);
+    this.proposals.delete(id);
+  }
 
   async export(id?: string) {
     this.alive();
@@ -174,8 +193,21 @@ export abstract class PrototypeDocument<Change, Step> {
     if (!options.query || options.query.length > 1000 || /[\r\n]/.test(options.query)) throw new DocumentToolError('INVALID_ARGUMENT', 'query must be 1–1000 characters within one paragraph or cell.');
   }
 
+  private synchronizeProposals() {
+    for (const held of this.proposals.values()) {
+      if (held.engineId) held.value.status = this.proposalStatus(held.engineId) ?? held.value.status;
+    }
+  }
+
+  private isStale(held: { value: AgentProposal<Change>; steps: Step[]; engineId?: string }) {
+    return held.value.status === 'pending' && (held.engineId
+      ? this.proposalStale(held.engineId, held.steps, held.value.version)
+      : held.value.version !== this.currentVersion());
+  }
+
   private held(id: string) {
     this.alive();
+    this.synchronizeProposals();
     const held = this.proposals.get(id);
     if (!held) throw new DocumentToolError('UNKNOWN_PROPOSAL', 'Stage a proposal first.');
     return held;
@@ -184,7 +216,7 @@ export abstract class PrototypeDocument<Change, Step> {
   private pending(id: string) {
     const held = this.held(id);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
-    if (held.value.version !== this.currentVersion()) throw new DocumentToolError('STALE_TARGET', 'The document changed. Read fresh targets and create a new proposal.');
+    if (this.isStale(held)) throw new DocumentToolError('STALE_TARGET', 'The document changed. Read fresh targets and create a new proposal.');
     return held;
   }
 }

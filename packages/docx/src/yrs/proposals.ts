@@ -98,6 +98,8 @@ export type DocxProposalResult =
 export interface DocxProposalWithdrawRequest {
   expectVersion: string;
   ids: readonly string[];
+  /** Release ownership while keeping ordinary tracked revisions. Off by default. */
+  keepRevisions?: boolean;
 }
 
 export interface DocxProposalStateRequest {
@@ -804,7 +806,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     const settling = [...owners.keys()];
     const accept = settling.filter((revisionId) => shown[revisionId] === 'accepted');
     const reject = settling.filter((revisionId) => shown[revisionId] !== 'accepted');
-    const result = executeProposalWithdrawal(session, {
+    const result = request.keepRevisions ? { ok: true as const } : executeProposalWithdrawal(session, {
       owned: settling,
       accept,
       reject,

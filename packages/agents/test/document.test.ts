@@ -129,7 +129,7 @@ describe('grep, read, propose, export', () => {
     expect(doc.reject(proposal.id).status).toBe('rejected');
   });
 
-  test('accepts a batch as one undo step, isolated from prior and subsequent user edits', async () => {
+  test('engine proposal settlement preserves independent user undo history', async () => {
     const doc = await open();
     const heading = doc.session.paragraphs('body')[0];
     const loc = { story: 'body', paraId: heading.paraId, offset: 0 };
@@ -142,10 +142,10 @@ describe('grep, read, propose, export', () => {
     expect(doc.grep({ query: 'Later' }).matches).toHaveLength(0);
     expect(doc.grep({ query: 'approved' }).matches).toHaveLength(3);
     expect(doc.session.undo()).toBe(true);
-    expect(doc.grep({ query: 'draft' }).matches).toHaveLength(2);
-    expect(doc.grep({ query: 'Prior' }).matches).toHaveLength(1);
+    expect(doc.grep({ query: 'approved' }).matches).toHaveLength(3);
+    expect(doc.grep({ query: 'Prior' }).matches).toHaveLength(0);
     expect(doc.session.redo()).toBe(true);
-    expect(doc.grep({ query: 'draft' }).matches).toHaveLength(0);
+    expect(doc.grep({ query: 'Prior' }).matches).toHaveLength(1);
   });
 
   test('inserts immediately after protected content without changing it', async () => {
@@ -160,7 +160,8 @@ describe('grep, read, propose, export', () => {
     doc.session.insertText({ story: 'body', paraId: target.paraId, offset: 0 }, 'Tracked', { name: 'Peer', date: '2026-09-27T12:00:00Z' });
     const heading = doc.list({ story: 'body' }).items[0];
     const revisions = doc.session.listRevisions();
-    const next = doc.propose({ author: 'test', edits: [{ ...heading, start: 7, oldText: '', newText: ' Ordinary ' }] });
+    expect(() => doc.propose({ author: 'test', edits: [{ ...heading, start: 7, oldText: '', newText: ' Ordinary ' }] })).toThrow('tracked change');
+    const next = doc.propose({ author: 'test', edits: [{ ...heading, start: 8, oldText: '', newText: ' Ordinary ' }] });
     await doc.accept(next.id);
     expect(doc.session.listRevisions()).toEqual(revisions);
     expect(doc.grep({ query: ' Ordinary ' }).matches).toHaveLength(1);

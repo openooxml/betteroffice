@@ -3714,6 +3714,10 @@ export interface WorkbookHandle extends CollaborationReplica {
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal;
     /** every pending proposal, oldest first. empty when none or unsupported. */
     listProposals(): Proposal[];
+    /** The pending state or the last decision made through this handle. */
+    getProposalStatus(id: string): 'pending' | 'accepted' | 'rejected' | undefined;
+    /** Observe proposals created or decided through this handle. */
+    onProposalChange(listener: (proposals: Proposal[]) => void): () => void;
     /**
      * apply a pending proposal as one undo step and recalc dependents. throws
      * {@link StaleProposalError} when the base changed since it was staged and

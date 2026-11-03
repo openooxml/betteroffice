@@ -1,4 +1,4 @@
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxProposalRequest, DocxProposalResult, DocxProposalStateRequest, DocxProposalWithdrawRequest, YrsSession } from '@betteroffice/docx/yrs';
 
 export interface ParagraphRef {
   ref: string;
@@ -90,9 +90,16 @@ export interface RenderedPage {
 
 export type DocumentRenderer = (session: YrsSession, page: number) => Promise<RenderedPage>;
 
+export interface DocxProposalPeer {
+  proposeChanges(request: DocxProposalRequest): Promise<DocxProposalResult>;
+  setProposalStates(request: DocxProposalStateRequest): Promise<DocxProposalResult>;
+  withdrawProposals(request: DocxProposalWithdrawRequest): Promise<DocxProposalResult>;
+}
+
 export interface DocumentOptions {
   name?: string;
   renderer?: DocumentRenderer;
+  editPeer?: DocxProposalPeer;
 }
 
 export function unknownMatchError(value: string, example: string, shape: RegExp, expiredMessage: string): DocumentToolError {

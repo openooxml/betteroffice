@@ -11,7 +11,7 @@ export const reviewCommandKeys = {
   rejectRevision: ['revisionId', 'expectVersion'],
   propose: ['proposals', 'expectVersion', 'hostProposal'],
   setProposalStates: ['changes', 'expectVersion', 'expectPreviewVersion', 'hostProposal'],
-  withdrawProposals: ['ids', 'expectVersion', 'hostProposal'],
+  withdrawProposals: ['ids', 'expectVersion', 'keepRevisions', 'hostProposal'],
 };
 
 export type ReviewCommand = Extract<DocxCommandIntent, { kind: keyof typeof reviewCommandKeys }>;

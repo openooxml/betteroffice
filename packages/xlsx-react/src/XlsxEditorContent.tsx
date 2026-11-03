@@ -935,7 +935,7 @@ export function XlsxEditorContent({
           }
           handleRef.current = handle;
           lastDocumentVersionRef.current = handle.version();
-          unsubscribeUpdates = handle.onUpdate((_update, _origin, { fromPeer }) => {
+          const offUpdates = handle.onUpdate((_update, _origin, { fromPeer }) => {
             if (disposed || !handle) return;
             cellClipboard.changed();
             mutationRef.current += 1;
@@ -950,6 +950,8 @@ export function XlsxEditorContent({
               setError(e instanceof Error ? e.message : String(e));
             }
           });
+          const offProposals = handle.onProposalChange(refreshProposals);
+          unsubscribeUpdates = () => { offUpdates(); offProposals(); };
           pendingSheetViewRef.current = true;
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));
