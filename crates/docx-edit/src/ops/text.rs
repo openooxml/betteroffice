@@ -63,7 +63,7 @@ fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String
         FormatPolicy::Plain => Vec::new(),
         FormatPolicy::Explicit(map) => map
             .iter()
-            .filter(|(key, _)| !matches!(key.as_str(), INS | DEL))
+            .filter(|(key, _)| !matches!(key.as_str(), INS | DEL | crate::format::RPR_CHANGE))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
         FormatPolicy::Inherit => {
@@ -77,7 +77,8 @@ fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String
                     .attrs
                     .iter()
                     .filter(|(key, value)| {
-                        !matches!(key.as_str(), INS | DEL) && **value != Any::Null
+                        !matches!(key.as_str(), INS | DEL | crate::format::RPR_CHANGE)
+                            && **value != Any::Null
                     })
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
@@ -586,7 +587,8 @@ impl EditingDoc {
                     .attrs
                     .iter()
                     .filter(|(key, value)| {
-                        !matches!(key.as_str(), INS | DEL) && **value != Any::Null
+                        !matches!(key.as_str(), INS | DEL | crate::format::RPR_CHANGE)
+                            && **value != Any::Null
                     })
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
@@ -654,6 +656,17 @@ impl EditingDoc {
     pub(crate) fn replace_range_rich_placed(
         &self,
         ctx: &EditCtx,
+        range: StoryRange,
+        runs: &[RichRun],
+    ) -> OpResult<(Receipt, u32)> {
+        let mut txn = self.transact_for(ctx);
+        self.replace_range_rich_placed_in(&mut txn, ctx, range, runs)
+    }
+
+    pub(crate) fn replace_range_rich_placed_in(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
         mut range: StoryRange,
         runs: &[RichRun],
     ) -> OpResult<(Receipt, u32)> {
@@ -665,19 +678,18 @@ impl EditingDoc {
         if len == 0 && total == 0 {
             return Err(OpError::EmptyRange);
         }
-        let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, &range.story)?;
-        check_range(&story, &txn, range.start, len)?;
+        let story = story_ref(txn, &range.story)?;
+        check_range(&story, txn, range.start, len)?;
         if len == 0 {
-            range.start = past_leading_blocks(&story, &txn, range.start);
+            range.start = past_leading_blocks(&story, txn, range.start);
             range.end = range.start;
         }
-        let chunks = range_chunks(&story, &txn, &mut range);
+        let chunks = range_chunks(&story, txn, &mut range);
         let len = range.end - range.start;
-        let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
+        let after = after_struck_text(&story, txn, ctx, &range, len, &chunks);
         let mut at = after.unwrap_or(range.start);
         if total > 0 {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
+            crate::identity::promote_at(self, txn, &range.story, &story, at);
         }
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
@@ -689,26 +701,19 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
-        let carry = Carry::capture(&story, &txn, range.start, range.end, None);
+        let carry = Carry::capture(&story, txn, range.start, range.end, None);
         let mut changes = Vec::new();
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
-                let outcome = suggest_delete(
-                    &mut txn,
-                    &story,
-                    ctx,
-                    revision,
-                    range.start,
-                    range.end,
-                    &chunks,
-                );
+                let outcome =
+                    suggest_delete(txn, &story, ctx, revision, range.start, range.end, &chunks);
                 if after.is_some() {
                     at -= outcome.removed;
                 }
                 changes = outcome.changes;
             } else {
                 changes = plain_delete(
-                    &mut txn,
+                    txn,
                     &story,
                     range.start,
                     range.end,
@@ -730,7 +735,7 @@ impl EditingDoc {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
             story.insert_with_attributes(
-                &mut txn,
+                txn,
                 cursor,
                 &run.text,
                 stamped_attrs(formatting, revision.clone()),
@@ -742,9 +747,9 @@ impl EditingDoc {
                 at,
                 len: cursor - at,
             });
-            carry.apply(&mut txn, &changes, &[]);
+            carry.apply(txn, &changes, &[]);
         }
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, at, cursor)?;
+        let loc_range = loc_range_in_txn(&range.story, &story, txn, at, cursor)?;
         Ok((
             Receipt {
                 new_para_ids: Vec::new(),

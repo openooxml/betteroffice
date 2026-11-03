@@ -1790,6 +1790,7 @@ fn paint_image_revision(
     let color = match revision.kind {
         RevisionKind::Ins => "rgb(46, 125, 50)",
         RevisionKind::Del => "rgb(198, 40, 40)",
+        RevisionKind::Format => "rgb(106, 27, 154)",
     };
     let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
         .ok_or_else(|| "invalid image revision rectangle".to_string())?;

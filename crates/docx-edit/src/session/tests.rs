@@ -116,7 +116,16 @@ fn text_edits_marks_and_raw_ops_run_without_wasm() {
     assert_eq!(paragraph_texts(&session), ["First", "Second"]);
 
     session
-        .toggle_mark("body", para_id, 0, para_id, 5, r#"{"type":"bold"}"#)
+        .toggle_mark(
+            "body",
+            para_id,
+            0,
+            para_id,
+            5,
+            r#"{"type":"bold"}"#,
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(
         session

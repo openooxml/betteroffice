@@ -12,10 +12,15 @@ export function useDefaultFonts(
   repaintRef.current = repaint;
   const settledRef = useRef(settled);
   settledRef.current = settled;
-  const state = useRef<{ painter?: ReturnType<typeof createDefaultFontPainter>; last?: DisplayList }>(undefined);
+  const state = useRef<{ owner: unknown; painter?: ReturnType<typeof createDefaultFontPainter>; last?: DisplayList }>(undefined);
+  const openingFrame = useRef<DisplayList>(undefined);
   useLayoutEffect(() => {
     if (defaultFonts === false || decoder === undefined) return;
-    const current: NonNullable<typeof state.current> = {};
+    const current: NonNullable<typeof state.current> = { owner };
+    if (owner != null) {
+      current.last = openingFrame.current;
+      openingFrame.current = undefined;
+    }
     state.current = current;
     void defaultFontPainterModule.load().then(({ createDefaultFontPainter }) => {
       if (state.current !== current) return;
@@ -35,6 +40,7 @@ export function useDefaultFonts(
   }, [owner, decoder, defaultFonts]);
   const paintWithFonts = useCallback((displayList: DisplayList, paint: () => void): boolean => {
     const current = state.current;
+    if (current && current.owner == null) openingFrame.current = displayList;
     if (current?.painter) return current.painter.paint(displayList, paint);
     paint();
     if (!current) return true;

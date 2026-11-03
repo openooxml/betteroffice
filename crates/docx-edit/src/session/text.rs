@@ -6,9 +6,7 @@ use super::args::{
     parse_para_attr_delta, text_receipt_json,
 };
 use super::{EditSessionCore, EngineError, EngineResult};
-use crate::{
-    EditCtx, FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange,
-};
+use crate::{FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange};
 
 impl EditSessionCore {
     pub fn insert_text(
@@ -243,11 +241,15 @@ impl EditSessionCore {
         end_para: &str,
         end_offset: u32,
         mark_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> EngineResult<()> {
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         apply_mark(
             self.engine.doc(),
+            &ctx,
             StoryRange::new(story, start, end),
             mark_json,
         )
@@ -261,16 +263,18 @@ impl EditSessionCore {
         end_para: &str,
         end_offset: u32,
         delta_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> EngineResult<()> {
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let delta = parse_inline_format_delta(delta_json)?;
-        let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .format_range(&ctx, StoryRange::new(story, start, end), &delta)
             .map(|_| ())
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 
     pub fn set_hyperlink(
@@ -281,7 +285,10 @@ impl EditSessionCore {
         end_para: &str,
         end_offset: u32,
         hyperlink_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> EngineResult<()> {
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let value: Value = serde_json::from_str(hyperlink_json).map_err(EngineError::message)?;
@@ -294,7 +301,6 @@ impl EditSessionCore {
                 "set_hyperlink expects an object or null",
             ));
         };
-        let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .set_hyperlink(&ctx, StoryRange::new(story, start, end), hyperlink)
@@ -309,15 +315,17 @@ impl EditSessionCore {
         start_offset: u32,
         end_para: &str,
         end_offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> EngineResult<()> {
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .clear_formatting(&ctx, StoryRange::new(story, start, end))
             .map(|_| ())
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 
     pub fn next_paragraph_style(

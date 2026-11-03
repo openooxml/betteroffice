@@ -55,7 +55,11 @@ test('replays positioned text runs at their line caret positions', async () => {
   expect(log).toContain('translate:0,84');
   expect(log).toContain('scale:1,-1');
   expect(log).toContain('textBaseline=top');
-  expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
+  expect(log).toContain(`scale:${1 / 96},${1 / 96}`);
+  expect(log).toContain('font=1152px Arial');
+  expect(log).toContain('font=bold 1152px Arial');
+  expect(log).toContain('textRendering=geometricPrecision');
+  expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual([`fillText:left,${30 * 96},${20 * 96}`, `fillText:right,${60 * 96},${45 * 96}`]);
   expect(log.some(entry => entry.startsWith('clip'))).toBe(false);
 });
 
