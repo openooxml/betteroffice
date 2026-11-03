@@ -48,12 +48,16 @@ pub(crate) fn over_budget() -> bool {
     OVER.try_with(Cell::get).unwrap_or(false)
 }
 
-/// Sets the calling thread's budget in bytes; 0 restores the default.
+/// Sets the calling thread's budget in bytes; 0 restores the default. A budget below the live
+/// bytes puts the thread over budget at once.
 pub(crate) fn set_budget(bytes: usize) {
     let budget = if bytes == 0 { DEFAULT_BUDGET } else { bytes };
     let _ = BUDGET.try_with(|slot| slot.set(budget));
-    if LIVE.try_with(Cell::get).unwrap_or(0) <= budget {
-        let _ = OVER.try_with(|over| over.set(false));
+    let live = LIVE.try_with(Cell::get).unwrap_or(0);
+    let over = live > budget;
+    let _ = OVER.try_with(|slot| slot.set(over));
+    if over {
+        let _ = FAILED.try_with(|failed| failed.set(live - budget));
     }
 }
 
