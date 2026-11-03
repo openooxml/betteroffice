@@ -109,7 +109,7 @@ jobs:
           bun scripts/check-embedded-fonts.mjs
           bun test scripts/check-embedded-fonts.test.ts
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
 
@@ -434,7 +434,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
 
