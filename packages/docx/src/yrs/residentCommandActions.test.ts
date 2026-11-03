@@ -1074,7 +1074,68 @@ test('suggested formatting survives save and reopen and rejection restores the o
   expect(new TextDecoder().decode(unzipContainer(new Uint8Array(rejected))['word/document.xml'])).not.toContain('w:rPrChange');
 }, TIMEOUT);
 
-test('hyperlink commands forward suggesting for the link and display text', async () => {
+test('formatting preflight refuses every reserved run attribute before mutation', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  for (const key of ['ins', 'del', 'hyperlink', 'rPrChange']) {
+    for (const value of [null, [{ info: { author: 'Forged' } }]]) {
+      for (const kind of ['formatSelection', 'formatRange'] as const) {
+        for (const end of [0, 5]) {
+          const intent = command(arm, kind, { selection: selection(id, 0, end), delta: { other: { [key]: value } } });
+          const before = snapshot(arm);
+          expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent)))
+            .toMatchObject({ status: 'refused', reason: 'invalid-formatting' });
+          expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'invalid-formatting' });
+          expect(snapshot(arm)).toEqual(before);
+        }
+      }
+    }
+  }
+  expect(execute(arm, command(arm, 'insertText', { text: 'safe' })).status).toBe('applied');
+  expect(texts(arm)[0]).toBe('safeAlpha beta');
+}, TIMEOUT);
+
+test('stored run property changes refuse typing and breaks before insertion', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  arm.state.storedMarks = { story: 'body', paraId: id, clear: false, delta: { other: { rPrChange: null } } };
+  for (const [kind, payload] of [
+    ['insertText', { text: 'unsafe' }],
+    ['replaceSelection', { text: 'unsafe', selection: selection(id, 0, 5) }],
+    ['lineBreak', {}],
+  ] as const) {
+    const before = snapshot(arm);
+    expect(execute(arm, command(arm, kind, payload))).toMatchObject({ status: 'refused', reason: 'invalid-stored-marks' });
+    expect(snapshot(arm)).toEqual(before);
+  }
+}, TIMEOUT);
+
+test('suggested hyperlinks refuse existing revisions before changing links or display text', async () => {
+  const changes = [
+    '<w:del w:id="7" w:author="Bob"><w:r><w:delText>old </w:delText></w:r></w:del>',
+    '<w:ins w:id="7" w:author="Ada"><w:r><w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>old </w:t></w:r></w:ins>',
+    '<w:r><w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>old </w:t></w:r>',
+  ];
+  for (const change of changes) {
+    const arm = await openCommandEngine([], { bodyXml:
+      '<w:p w14:paraId="00000001"><w:r><w:t>Click </w:t></w:r>' + change + '<w:r><w:t>here</w:t></w:r></w:p>',
+    });
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    for (const displayText of [undefined, 'label']) {
+      const intent = command(arm, 'setHyperlink', {
+        selection: selection(id, 0, 14), hyperlink: { href: '#target' }, displayText,
+        expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Ada', date: '2026-10-01T12:00:00Z' },
+      });
+      const before = snapshot(arm);
+      const segments = arm.engine.storySegments('body');
+      expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+      expect(snapshot(arm)).toEqual(before);
+      expect(arm.engine.storySegments('body')).toEqual(segments);
+    }
+  }
+}, TIMEOUT);
+
+test('suggested hyperlink display text keeps its insertion revision and rejection restores the original', async () => {
   const arm = await openCommandEngine();
   const id = arm.engine.paragraphs('body')[0]!.paraId;
   const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
@@ -1085,13 +1146,37 @@ test('hyperlink commands forward suggesting for the link and display text', asyn
       selection: selection(id, 0, 5), hyperlink: { href: '#target' }, displayText: 'label',
       expectVersion: arm.engine.proposalEngine.version(), suggesting,
     })).status).toBe('applied');
-    expect(link.mock.calls[0]?.[2]).toEqual(suggesting);
+    expect(link.mock.calls[0]?.[2]).toBeUndefined();
     expect(replace.mock.calls[0]?.[2]).toEqual(suggesting);
-    expect(arm.engine.geometryReader.listRevisions().length).toBeGreaterThan(0);
+    const runs = arm.engine.storySegments('body').filter(segment => segment.kind === 'text');
+    expect(runs.filter(run => run.attributes.ins != null).map(run => run.text).join('')).toBe('label');
+    expect(runs.filter(run => run.attributes.del != null).map(run => run.text).join('')).toBe('Alpha');
+    expect(runs.find(run => run.attributes.ins != null)?.attributes.hyperlink).toMatchObject({ href: '#target' });
+    for (const revisionId of new Set(arm.engine.geometryReader.listRevisions().map(revision => revision.revisionId))) {
+      arm.engine.rejectChange({ revisionId });
+    }
+    expect(texts(arm)).toEqual(['Alpha beta', 'Second']);
+    expect(arm.engine.storySegments('body').every(segment => segment.attributes.hyperlink == null)).toBe(true);
   } finally {
     link.mockRestore();
     replace.mockRestore();
   }
+}, TIMEOUT);
+
+test('suggested hyperlink display text at a caret remains a reviewable insertion', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'setHyperlink', {
+    selection: selection(id, 0), hyperlink: { href: '#target' }, displayText: 'label',
+    expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Ada', date: '2026-10-01T12:00:00Z' },
+  })).status).toBe('applied');
+  const inserted = arm.engine.storySegments('body').find(segment => segment.attributes.ins != null);
+  expect(inserted).toMatchObject({ kind: 'text', text: 'label', attributes: { hyperlink: { href: '#target' } } });
+  expect(arm.engine.storySegments('body').every(segment => segment.attributes.del == null)).toBe(true);
+  for (const revisionId of new Set(arm.engine.geometryReader.listRevisions().map(revision => revision.revisionId))) {
+    arm.engine.rejectChange({ revisionId });
+  }
+  expect(texts(arm)).toEqual(['Alpha beta', 'Second']);
 }, TIMEOUT);
 
 test('suggested hyperlink replacement saves both targets and rejection restores the old target', async () => {

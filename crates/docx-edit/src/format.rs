@@ -555,6 +555,12 @@ impl EditingDoc {
                 if start >= end {
                     continue;
                 }
+                if [INS, DEL, RPR_CHANGE]
+                    .iter()
+                    .any(|key| chunk.attrs.contains_key(*key))
+                {
+                    return Err(OpError::OverlapsTrackedChange);
+                }
                 let crate::ops::ChunkKind::Text(text) = &chunk.kind else {
                     return Err(OpError::InvalidFormatValue(
                         "suggested hyperlinks require a text range".to_owned(),

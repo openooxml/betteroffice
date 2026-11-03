@@ -130,6 +130,23 @@ test('insert_table_row copies the anchor row, its cell properties and first-run 
   expect(doc.read(header.ref).table).toMatchObject({ row: 2 });
 });
 
+test('insert_table_row copies formatting without inheriting run property revisions', async () => {
+  const cell = tableCell('Template').replace('<w:r>',
+    '<w:r><w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr>');
+  const doc = await open(await tableFixture([
+    tableCell('Header') + tableCell('Value'),
+    cell + tableCell('Amount'),
+  ]));
+  const { receipt, xml } = await edited(doc, [
+    { op: 'insert_table_row', row: hit(doc, 'Template').ref, position: 'after', cells: ['Copied', 'Cell'] },
+  ]);
+  const [ref] = receipt.results[0].refs as string[];
+  expect(doc.read(ref).runs[0].formatting.italic).toBe(true);
+  const tableRows = rows(xml);
+  expect(tableRows[1]).toContain('<w:rPrChange ');
+  expect(tableRows[2]).not.toContain('<w:rPrChange ');
+});
+
 test('insert_table_row copies each template paragraph style, indentation and spacing', async () => {
   const first = '<w:pPr><w:pStyle w:val="Quote"/><w:spacing w:before="120" w:after="240" w:line="360" w:lineRule="auto"/><w:ind w:left="720" w:right="180" w:firstLine="240"/><w:jc w:val="center"/></w:pPr>';
   const second = '<w:pPr><w:pStyle w:val="Heading2"/><w:spacing w:before="60" w:after="180"/><w:ind w:left="360" w:hanging="120"/><w:jc w:val="right"/></w:pPr>';

@@ -130,6 +130,90 @@ fn accept_and_reject_run_properties_by_id_and_range() {
 }
 
 #[test]
+fn suggested_hyperlink_refuses_pending_deletions_without_mutation() {
+    let engine = EngineSession::new(9305);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>Click </w:t></w:r>",
+            r#"<w:del w:id="7" w:author="Bob"><w:r><w:delText>old </w:delText></w:r></w:del>"#,
+            "<w:r><w:t>here</w:t></w:r></w:p>",
+        )),
+    )
+    .unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let runs = attrs(&engine);
+    assert_eq!(runs[1].0, "old ");
+    assert!(!runs[1].1["del"].is_null());
+    let result = engine.doc().set_hyperlink(
+        &suggesting(),
+        StoryRange::new("body", 0, 14),
+        Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+    );
+    assert_eq!(result, Err(OpError::OverlapsTrackedChange));
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+    assert_eq!(attrs(&engine), runs);
+}
+
+#[test]
+fn suggested_hyperlink_refuses_insertions_and_preserves_run_property_changes() {
+    for author in ["Ada", "Bob"] {
+        for property_change in [false, true] {
+            let engine = EngineSession::new(9306);
+            let properties = if property_change {
+                r#"<w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr>"#
+            } else {
+                "<w:rPr><w:i/></w:rPr>"
+            };
+            seed_from_docx(
+                engine.doc(),
+                &document(&format!(
+                    r#"<w:p><w:r><w:t>before</w:t></w:r><w:ins w:id="7" w:author="{author}"><w:r>{properties}<w:t>link</w:t></w:r></w:ins></w:p>"#,
+                )),
+            )
+            .unwrap();
+            let before = engine.doc().encode_state_as_update_v1();
+            let runs = attrs(&engine);
+            assert!(!runs[1].1["ins"].is_null());
+            assert_eq!(!runs[1].1["rPrChange"].is_null(), property_change);
+            let result = engine.doc().set_hyperlink(
+                &suggesting(),
+                StoryRange::new("body", 0, 10),
+                Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+            );
+            assert_eq!(result, Err(OpError::OverlapsTrackedChange));
+            assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+            assert_eq!(attrs(&engine), runs);
+        }
+    }
+}
+
+#[test]
+fn suggested_hyperlink_refuses_existing_run_property_changes_without_mutation() {
+    let engine = engine();
+    engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 2, 4),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    for hyperlink in [None, Some(Any::from_json(r##"{"href":"#target"}"##).unwrap())] {
+        let before = engine.doc().encode_state_as_update_v1();
+        let runs = attrs(&engine);
+        let result = engine.doc().set_hyperlink(
+            &suggesting(),
+            StoryRange::new("body", 1, 5),
+            hyperlink,
+        );
+        assert_eq!(result, Err(OpError::OverlapsTrackedChange));
+        assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+        assert_eq!(attrs(&engine), runs);
+    }
+}
+
+#[test]
 fn suggested_hyperlink_can_be_rejected() {
     let engine = engine();
     let receipt = engine
@@ -141,6 +225,21 @@ fn suggested_hyperlink_can_be_rejected() {
         )
         .unwrap();
     assert!(!receipt.revision_ids.is_empty());
+    let runs = attrs(&engine);
+    assert_eq!(
+        runs.iter()
+            .filter(|run| !run.1["ins"].is_null())
+            .map(|run| run.0.as_str())
+            .collect::<String>(),
+        "bcde"
+    );
+    assert_eq!(
+        runs.iter()
+            .filter(|run| !run.1["del"].is_null())
+            .map(|run| run.0.as_str())
+            .collect::<String>(),
+        "bcde"
+    );
     engine
         .doc()
         .reject_change(
@@ -152,6 +251,13 @@ fn suggested_hyperlink_can_be_rejected() {
         attrs(&engine)
             .iter()
             .all(|run| run.1["hyperlink"].is_null())
+    );
+    assert_eq!(
+        attrs(&engine)
+            .iter()
+            .map(|run| run.0.as_str())
+            .collect::<String>(),
+        "abcdef"
     );
 }
 

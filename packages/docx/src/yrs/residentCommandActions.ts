@@ -43,7 +43,7 @@ import type {
 } from './residentCommandProtocol';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
-const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink']);
+const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const IDENTITY_KEYS = new Set(['paraId', '_kind', 'ooxmlParaId', 'sourceParaId', 'paraOrigin']);
 
 function object(value: unknown): value is Record<string, unknown> {
