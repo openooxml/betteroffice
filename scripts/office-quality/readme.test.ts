@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { renderSection, updateReadme } from './readme.mjs';
+import { aggregateReport, renderSection, updateReadme } from './readme.mjs';
 
 const row = (label: string, published: string, current: string) =>
   `<tr><td>${label}</td><td align="right">${published}</td><td align="right">${current}</td></tr>`;
@@ -207,4 +207,38 @@ test('the section embeds the benchmark chart flush left, over collapsed data, wi
   expect(section).not.toContain('perf.svg');
   expect(section.lastIndexOf('</details>')).toBeLessThan(section.indexOf('For how scores'));
   expect(section.startsWith('<!-- BEGIN GENERATED VISUAL FIDELITY -->')).toBe(true);
+});
+
+test('the aggregate carries per-format counts and means and nothing that names a document', () => {
+  const input = report();
+  input.samples.push({
+    ...input.samples[0],
+    id: 'second',
+    metadata_url: 'https://corpus.betteroffice.dev/second/metadata.json',
+    comparisons: input.samples[0].comparisons.map((entry) => ({ ...entry, penalized_ssim: 0.6, reference_pages: 2, actual_pages: 3 })),
+  });
+  const aggregate = aggregateReport(input);
+  expect(aggregate.schema_version).toBe(1);
+  expect(aggregate.commit).toBe(commit);
+  expect(aggregate.formats.docx).toEqual({
+    samples: 2,
+    published_version: '0.1.0',
+    libreoffice_version: null,
+    fidelity: {
+      published: { ssim: 0.7, scored: 2, total: 2, exact_pages: 0, paged: 1, page_error: 1 },
+      commit: { ssim: 0.7, scored: 2, total: 2, exact_pages: 0, paged: 1, page_error: 1 },
+      libreoffice: null,
+    },
+  });
+  expect(aggregate.formats.pptx.samples).toBe(0);
+  expect(aggregate.formats.pptx.fidelity.commit).toEqual({ ssim: null, scored: 0, total: 0, exact_pages: 0, paged: 0, page_error: 0 });
+  const text = JSON.stringify(aggregate);
+  for (const leak of ['demo', 'second', 'metadata', 'corpus.betteroffice.dev', 'sha256'])
+    expect(text.includes(leak) && leak).toBe(false);
+});
+
+test('the aggregate refuses the same invalid reports the README refuses', () => {
+  const input = report();
+  input.commit = 'short';
+  expect(() => aggregateReport(input)).toThrow('Expected a full commit SHA');
 });

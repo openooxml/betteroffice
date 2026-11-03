@@ -11,7 +11,7 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { FORMATS, renderSection } from './readme.mjs';
+import { FORMATS, aggregateReport, renderSection } from './readme.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
@@ -260,6 +260,7 @@ export async function mergeFromPaths({
     report = mergeRoundtrips(plan, report, benchmarks, digest(planBytes));
   }
   const section = renderSection(report);
+  const aggregate = aggregateReport(report);
   await emptyOutput(output);
   await mkdir(dirname(output), { recursive: true });
   const stage = await mkdtemp(join(dirname(output), `.${basename(output)}-`));
@@ -267,6 +268,7 @@ export async function mergeFromPaths({
     if (requireRenders) await copyRenders(plan, report, resolve(parts), stage);
     await writeFile(join(stage, 'report.json'), JSON.stringify(report, null, 2) + '\n');
     await writeFile(join(stage, 'section.md'), section);
+    await writeFile(join(stage, 'aggregate.json'), JSON.stringify(aggregate, null, 2) + '\n');
     await rename(stage, output);
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
