@@ -298,7 +298,14 @@ describe('proposal registry', () => {
     expect(events).toHaveLength(4);
     expect(registry.propose({
       expectVersion: session.version(),
-      proposals: [{ ...inputs[0]!, op: 'replaceText', search: 'world', replaceWith: 'other' }],
+      proposals: [{
+        id: inputs[0]!.id,
+        paragraph: inputs[0]!.paragraph,
+        suggest: inputs[0]!.suggest,
+        op: 'replaceText',
+        search: 'world',
+        replaceWith: 'other',
+      }],
     })).toMatchObject({ ok: false, failure: { code: 'proposal-id-conflict' } });
     expect(events).toHaveLength(4);
     expect(snapshotOf(registry.setStates({
