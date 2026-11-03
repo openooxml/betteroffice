@@ -55,7 +55,7 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
     const color = paintColor(primitive.fill);
     if (!color) continue;
     const box = transformedRect(transforms, { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h });
-    if (x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) fill = color;
+    if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) fill = color;
   }
   return fill;
 }
