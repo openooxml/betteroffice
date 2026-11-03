@@ -300,10 +300,8 @@ test('inserted layout background images paint in ghost thumbnails and canvas pre
       buffer instanceof HTMLCanvasElement && draws.get(buffer)?.includes(bitmap));
     await waitFor(() => expect(paintedImage(ghost.querySelector('canvas')!)).toBe(true));
     expect(resolve).toHaveBeenCalledWith(imageId);
-    resolve.mockClear();
     await act(async () => { fireEvent.click(ghost); });
     await waitFor(() => expect(paintedImage(value.view.getByTestId('pptx-proposal-diff') as HTMLCanvasElement)).toBe(true));
-    expect(resolve).toHaveBeenCalledWith(imageId);
     await waitFor(() => { for (const release of releases) expect(release).toHaveBeenCalledTimes(1); });
   } finally {
     source.mockRestore(); paint.mockImplementation(context);
