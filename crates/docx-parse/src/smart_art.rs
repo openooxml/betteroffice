@@ -137,8 +137,11 @@ pub(crate) fn frame_model(shape: &Shape) -> serde_json::Value {
 }
 
 pub(crate) fn other_model_sha256(shape: &Shape) -> String {
+    other_value_sha256(serde_json::to_value(shape).expect("shape model"))
+}
+
+pub(crate) fn other_value_sha256(mut model: serde_json::Value) -> String {
     use sha2::{Digest, Sha256};
-    let mut model = serde_json::to_value(shape).expect("shape model");
     let object = model.as_object_mut().expect("shape object");
     for key in FRAME_FIELDS
         .iter()

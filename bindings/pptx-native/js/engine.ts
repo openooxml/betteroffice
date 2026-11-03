@@ -34,6 +34,10 @@ export const rendererVersion = binding.rendererVersion;
 
 export const engineKind: 'wasm' | 'native' = 'native';
 
+export function metafileSvgBindings(): Promise<never> {
+  return Promise.reject(new Error('The native engine converts metafiles itself'));
+}
+
 async function initNativeEngine(): Promise<{ memory: undefined }> {
   return { memory: undefined };
 }

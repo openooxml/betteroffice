@@ -548,6 +548,7 @@ fn parse_paragraph_contents(
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
     let mut beyond_nesting = 0;
+    let mut runs = Vec::new();
     for child in transparent_children(element, false) {
         let normalized;
         let child = if tracked_context == TrackedContext::Deletion
@@ -572,7 +573,16 @@ fn parse_paragraph_contents(
                     in_control || !element.matches_name("w", "p"),
                     in_header_footer,
                 )?;
+                let before = output.len();
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
+                runs.push(
+                    (output.len() == before + 1
+                        && matches!(
+                            output.last(),
+                            Some(ParagraphContent::Inline(InlineNode::Run(_)))
+                        ))
+                    .then_some(before),
+                );
             }
             "hyperlink" => {
                 let hyperlink = parse_hyperlink_composed(
@@ -778,6 +788,9 @@ fn parse_paragraph_contents(
         }
     }
     assign_marker_offsets(&mut output);
+    if element.name == "w:p" {
+        budget.record_paragraph_runs(runs);
+    }
     Ok(output)
 }
 
@@ -1270,7 +1283,9 @@ fn parse_run_with_context(
                         drawing_properties: fallback_properties,
                     }]);
                 } else {
-                    if let [RunContent::Shape { shape, .. }] = parsed.as_mut_slice() {
+                    if let [RunContent::Shape { shape, .. }] = parsed.as_mut_slice()
+                        && !crate::text_box::shares_a_bookmarked_branch(child)
+                    {
                         crate::text_box::capture_bookmark_source(shape, child);
                     }
                     replacements.push(parsed);
@@ -1527,19 +1542,6 @@ fn parse_alternate_content_branch_with_context<'a>(
     in_header_footer: bool,
     preserve_text_box: bool,
 ) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
-    if crate::text_box::has_bookmarked_text_box(element)
-        && element.child_elements().any(|branch| {
-            branch
-                .child_elements()
-                .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
-                .count()
-                > 1
-        })
-    {
-        return Err(ParseError::Canonical(
-            "bookmarked alternate content has multiple drawings".to_owned(),
-        ));
-    }
     let has_media = drawing.is_some();
     let is_resolved_image = |image: &crate::image::Image| {
         image.src.is_some() || (!has_media && !image.relationship_id.is_empty())

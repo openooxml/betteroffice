@@ -693,6 +693,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         }
       },
       async apply(command, context) {
+        engine.takeBaseLatinMiss?.();
         if (command.command.kind === 'setFontEnvironment') {
           const prepared = preparedFonts.get(command);
           if (!prepared) throw new Error('Worker font environment was not prepared');
@@ -729,6 +730,11 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             if (error instanceof WebAssembly.RuntimeError) throw error;
             throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
           }
+        }
+        const coverageMiss = engine.takeBaseLatinMiss?.();
+        if (result.status === 'applied' && coverageMiss && !fontRequirementsHinted) {
+          fontRequirementsHinted = true;
+          reply({ id: 0, ok: true, fontRequirementsHint: { session: init.session, incarnation: init.incarnation, epoch: init.epoch } });
         }
         return result;
       },
@@ -1293,6 +1299,10 @@ const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
 const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 const SAVE_SEED_MAX_PARAGRAPHS = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
+const SAVE_SEED_SLICE_BYTES = 16 * 1024;
+const SAVE_SEED_MIN_SLICE_BYTES = 2 * 1024;
+const SAVE_SEED_MAX_SLICE_BYTES = 1024 * 1024;
+const SAVE_SEED_SLICE_TARGET_MS = 10;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -2136,6 +2146,12 @@ async function handle(request: ScheduledRequest): Promise<void> {
           (request.operation.kind === 'snapshot' && fontRequirements.version === snapshot.version))
           ? { ...fontRequirements, version: snapshot.version }
           : null;
+      if (unchangedFonts && fontRequirements) {
+        const requirements = JSON.parse(fontRequirements.requirementsJson) as { characterBits?: string; characters?: string[] }[];
+        if (requirements.some(requirement => requirement.characterBits || requirement.characters?.length)) {
+          fontRequirements = previewFontRequirements(session, fontRequirements.layoutInput, undefined, snapshot.version);
+        }
+      }
       // A decision changes only the preview: the host's next input is its last one previewing it.
       const preview = proposalRevisionPreview(snapshot);
       if (
@@ -3410,6 +3426,7 @@ function asciiProposalFontsUnchanged(
 function destroySession(keepSurfaces = false): void {
   cancelSaveWasmPreload();
   cancelSaveWarmup();
+  scheduler.cancel((task) => task.kind === 'saveSeedPrime');
   saveWarmupOwner = null;
   collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
@@ -3927,20 +3944,36 @@ function canPreloadSaveWasm(): boolean {
 }
 
 /**
- * Records save seed states once per editable command document, as soon as its
- * layout is complete: one bounded wasm call after a request or completion
- * step, so the first save after an edit need not reseed.
+ * Records save seed states once per editable command document once its layout
+ * is complete, so the first save after an edit need not reseed: idle slices of
+ * the background scheduler, each sized to its budget, that yield to every
+ * request and wait out input.
  */
 function primeSaveSeedStatesOnce(): void {
   if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
     incompleteLayout || commandLayout?.certifiedPages() != null) return;
   saveSeedStatesPrimed = true;
   if (!saveWarmupHasHeadroom()) return;
-  try {
-    session.primeSaveSeedStates(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
-  } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
-  }
+  const owner = session;
+  let maxBytes = SAVE_SEED_SLICE_BYTES;
+  scheduler.schedule({
+    kind: 'saveSeedPrime', version: scheduler.version, generation: scheduler.generation,
+    idleAfterInputMs: COMPLETION_IDLE_MS,
+    onStale: () => 'continue',
+    fail: (error) => {
+      if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+    },
+    run: (budgetMs) => {
+      if (session !== owner || trap) return 'done';
+      const started = performance.now();
+      const state = owner.primeSaveSeedStatesSlice(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES, maxBytes);
+      const elapsed = performance.now() - started;
+      const target = Math.min(budgetMs, SAVE_SEED_SLICE_TARGET_MS);
+      maxBytes = Math.min(SAVE_SEED_MAX_SLICE_BYTES, Math.max(SAVE_SEED_MIN_SLICE_BYTES,
+        Math.round((maxBytes * target) / Math.max(1, elapsed))));
+      return state === 1 ? 'yield' : 'done';
+    },
+  });
 }
 
 function scheduleSaveWasmPreload(): void {

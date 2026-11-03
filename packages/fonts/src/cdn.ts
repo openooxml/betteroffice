@@ -4,7 +4,7 @@ import { version as fontsLatinVersion } from '../../fonts-latin/package.json';
 import { version as fontsIntlVersion } from '../../fonts-intl/package.json';
 import { loadFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
-import { loadPackedFontBytes, isLatinFont, isCjkFont } from './packed';
+import { loadPackedFontBytes, isBaseLatinFont, isLatinFont, isCjkFont } from './packed';
 import { fontProvider, type BundledFontSource } from './provider';
 
 export interface CdnFontOptions {
@@ -16,6 +16,7 @@ const BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-latin@${fonts
 const CJK_BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/`;
 const INTL_BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-intl@${fontsIntlVersion}/assets/`;
 const DECODER_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`;
+const BASE_LATIN_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/assets/`;
 
 function assetBase(value: string | URL): URL {
   const href = String(value);
@@ -45,7 +46,7 @@ export function createFontProvider(
         face,
         async (dependency) => new URL(
           dependency.file,
-          isLatinFont(face.file) ? base : isCjkFont(face.file) ? cjkBase : intlBase,
+          isBaseLatinFont(face.file) ? assetBase(options.baseUrl ?? BASE_LATIN_URL) : isLatinFont(face.file) ? base : isCjkFont(face.file) ? cjkBase : intlBase,
         ),
         30_000,
         decoderUrl,

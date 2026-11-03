@@ -1,7 +1,6 @@
 //! Shared-store text shaping and glyph rasterization.
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::rc::Rc;
 
 use docx_layout::display_list::{
@@ -32,37 +31,10 @@ pub fn measure_text(
     Ok(glyphs.iter().map(|glyph| glyph.x_advance).sum())
 }
 
-/// Most glyph outlines one cache retains; the oldest insertion evicts first.
-const MAX_CACHED_GLYPH_OUTLINES: usize = 8_192;
-
-/// Extracted glyph outlines keyed by font and glyph id, reusable across pages.
-/// Ids are store-local, so the cache binds to the store that fills it and
-/// refuses any other; entries past the cap evict oldest-first.
+/// Store-bound glyph outlines reusable across pages.
 #[derive(Default)]
 pub struct GlyphCache {
-    entries: HashMap<(u32, u32), CachedGlyph>,
-    order: VecDeque<(u32, u32)>,
-    store: Option<u64>,
-}
-
-impl GlyphCache {
-    fn remember(&mut self, key: (u32, u32), glyph: CachedGlyph) {
-        if self.entries.insert(key, glyph).is_none() {
-            self.order.push_back(key);
-        }
-        while self.order.len() > MAX_CACHED_GLYPH_OUTLINES {
-            let oldest = self
-                .order
-                .pop_front()
-                .expect("the queue tracks every cached entry");
-            self.entries.remove(&oldest);
-        }
-    }
-}
-
-struct CachedGlyph {
-    path: Option<Path>,
-    upem: f32,
+    inner: ooxml_raster::GlyphCache,
 }
 
 #[derive(Clone)]
@@ -117,6 +89,19 @@ impl FontSpecCache {
         }
         self.key_bytes += font.len();
         self.entries.insert(font.into(), parsed.clone());
+    }
+}
+
+/// The built-in faces the layout names when only they cover a run, for hosts
+/// that registered no chain under their family.
+fn backstop_chain(spec: &FontSpec, key: &str) -> Result<[FontId; 1], String> {
+    if spec
+        .family
+        .eq_ignore_ascii_case(ooxml_text::BASE_LATIN_FAMILY)
+    {
+        Ok([FontId::base_latin(spec.bold, spec.italic)])
+    } else {
+        Err(format!("missing font chain for `{key}`"))
     }
 }
 
@@ -429,8 +414,15 @@ fn paint_leader(
         .transpose()?
         .unwrap_or(number_f32(&run.baseline_y)?);
     let mut spec = run_font.spec.clone();
-    if let Some(family) = leader.font.as_deref() {
-        spec.family = family.to_string();
+    if let Some(font) = leader.font.as_deref() {
+        match parse_font(font) {
+            Ok(parsed) => {
+                spec.family = parsed.family;
+                spec.bold = parsed.bold;
+                spec.italic = parsed.italic;
+            }
+            Err(_) => spec.family = font.to_string(),
+        }
     }
     if let Some(size) = &leader.size {
         spec.size = number_f32(size)?;
@@ -506,15 +498,25 @@ fn shape_stamp(
         excess = (glyphs.len() as u64).saturating_sub(glyph.chars().count() as u64);
         segments.push(ShapedSegment { font, glyphs });
     } else {
-        let chain = context
-            .resources
-            .font_chains
-            .get(key)
-            .ok_or_else(|| format!("missing font chain for `{key}`"))?;
+        let backstop;
+        let chain: &[FontId] = match context.resources.font_chains.get(key) {
+            Some(chain) => chain.as_slice(),
+            None => {
+                backstop = backstop_chain(spec, key)?;
+                &backstop
+            }
+        };
         if chain.is_empty() {
             return Err(format!("font chain `{key}` is empty"));
         }
-        for segment in font_segments(context.resources.fonts, chain, glyph)? {
+        for segment in font_segments(
+            context.resources.fonts,
+            chain,
+            glyph,
+            spec.bold,
+            spec.italic,
+            &spec.family,
+        )? {
             let text = &glyph[segment.start..segment.end];
             let glyphs = shape_segment(context, text, segment.font, spec.size, direction)?;
             excess = excess
@@ -601,15 +603,25 @@ fn paint_resolved_text(
     color: tiny_skia::Color,
     transform: Transform,
 ) -> Result<(), String> {
-    let chain = context
-        .resources
-        .font_chains
-        .get(key)
-        .ok_or_else(|| format!("missing font chain for `{key}`"))?;
+    let backstop;
+    let chain: &[FontId] = match context.resources.font_chains.get(key) {
+        Some(chain) => chain.as_slice(),
+        None => {
+            backstop = backstop_chain(spec, key)?;
+            &backstop
+        }
+    };
     if chain.is_empty() {
         return Err(format!("font chain `{key}` is empty"));
     }
-    let segments = font_segments(context.resources.fonts, chain, text)?;
+    let segments = font_segments(
+        context.resources.fonts,
+        chain,
+        text,
+        spec.bold,
+        spec.italic,
+        &spec.family,
+    )?;
     let mut paint = Paint::default();
     paint.set_color(color);
     paint.anti_alias = true;
@@ -701,19 +713,14 @@ fn paint_placed_glyph(
         return Ok(());
     };
     let scale = size / cached.upem;
-    let glyph_transform = Transform::from_row(
+    ooxml_raster::fill_glyph(
+        context.pixmap,
+        path,
         scale,
-        0.0,
-        0.0,
-        -scale,
         f64_to_f32(glyph.x, "glyph x")?,
         f64_to_f32(glyph.y, "glyph y")?,
-    );
-    context.pixmap.fill_path(
-        path,
+        transform,
         paint,
-        FillRule::Winding,
-        transform.pre_concat(glyph_transform),
         context.mask,
     );
     Ok(())
@@ -724,56 +731,24 @@ fn cached_glyph<'a>(
     fonts: &FontStore,
     font: FontId,
     glyph_id: u32,
-) -> Result<&'a CachedGlyph, String> {
-    if cache.store.is_some_and(|bound| bound != fonts.id()) {
-        return Err("glyph cache is bound to another font store".to_string());
-    }
-    let key = (font.to_u32(), glyph_id);
-    if !cache.entries.contains_key(&key) {
-        let id = u16::try_from(glyph_id)
-            .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))?;
-        let outline = fonts
-            .outline_glyph(font, id)
-            .map_err(|error| error.to_string())?;
-        let path = outline_path(&outline.cmds)?;
-        cache.store = Some(fonts.id());
-        cache.remember(
-            key,
-            CachedGlyph {
-                path,
-                upem: f32::from(outline.upem),
-            },
-        );
-    }
-    Ok(cache
-        .entries
-        .get(&key)
-        .expect("a just-inserted or occupied key is present"))
+) -> Result<&'a ooxml_raster::CachedGlyph, String> {
+    cache.inner.lookup(
+        fonts,
+        font,
+        glyph_id,
+        || {
+            u16::try_from(glyph_id)
+                .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))
+        },
+        outline_path,
+    )
 }
 
 fn outline_path(commands: &[PathCmd]) -> Result<Option<Path>, String> {
     if commands.is_empty() {
         return Ok(None);
     }
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => builder.move_to(x, y),
-            PathCmd::LineTo { x, y } => builder.line_to(x, y),
-            PathCmd::QuadTo { cx, cy, x, y } => builder.quad_to(cx, cy, x, y),
-            PathCmd::CubicTo {
-                c1x,
-                c1y,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => builder.cubic_to(c1x, c1y, c2x, c2y, x, y),
-            PathCmd::Close => builder.close(),
-        }
-    }
-    builder
-        .finish()
+    ooxml_raster::outline_path(commands)
         .map(Some)
         .ok_or_else(|| "glyph outline has no drawable commands".to_string())
 }
@@ -782,13 +757,15 @@ fn font_segments(
     fonts: &FontStore,
     chain: &[FontId],
     text: &str,
+    bold: bool,
+    italic: bool,
+    family: &str,
 ) -> Result<Vec<FontSegment>, String> {
     let mut segments: Vec<FontSegment> = Vec::new();
     for (start, character) in text.char_indices() {
         let end = start + character.len_utf8();
         let font = fonts
-            .resolve(chain, character)
-            .or_else(|| chain.last().copied())
+            .resolve_with_family(chain, character, bold, italic, family)
             .ok_or_else(|| "font chain is empty".to_string())?;
         if let Some(last) = segments.last_mut()
             && last.font == font
@@ -917,8 +894,6 @@ fn f64_to_f32(value: f64, field: &str) -> Result<f32, String> {
 mod tests {
     use super::*;
 
-    const CARLITO: &[u8] = include_bytes!("../tests/assets/Carlito-Regular.ttf");
-
     #[test]
     fn parses_layout_font_shorthands() {
         let regular = parse_font("400 16px Liberation Sans, sans-serif").unwrap();
@@ -990,57 +965,18 @@ mod tests {
         assert!(oversized.entries.is_empty());
         assert_eq!(oversized.key_bytes, 0);
     }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
 
     #[test]
-    fn the_glyph_cache_evicts_its_oldest_entries_past_the_cap() {
-        let mut cache = GlyphCache::default();
-        for index in 0..MAX_CACHED_GLYPH_OUTLINES as u32 + 2 {
-            cache.remember(
-                (index, 0),
-                CachedGlyph {
-                    path: None,
-                    upem: 1000.0,
-                },
-            );
-        }
-        assert_eq!(cache.entries.len(), MAX_CACHED_GLYPH_OUTLINES);
-        assert_eq!(cache.order.len(), MAX_CACHED_GLYPH_OUTLINES);
-        assert!(!cache.entries.contains_key(&(0, 0)));
-        assert!(cache.entries.contains_key(&(2, 0)));
-        assert!(
-            cache
-                .entries
-                .contains_key(&(MAX_CACHED_GLYPH_OUTLINES as u32 + 1, 0))
+    fn outline_keeps_empty_and_undrawable_results() {
+        assert!(outline_path(&[]).unwrap().is_none());
+        assert_eq!(
+            outline_path(&[PathCmd::MoveTo { x: 0.0, y: 0.0 }]).unwrap_err(),
+            "glyph outline has no drawable commands"
         );
-    }
-
-    /// Distinct outlines past the cap evict earlier ones; a render that asks
-    /// for an evicted outline gets a fresh extraction, not a stale or missing
-    /// path.
-    #[test]
-    fn an_evicted_glyph_outline_is_extracted_again_on_demand() {
-        let mut fonts = FontStore::new();
-        let mut ids = Vec::new();
-        for _ in 0..4 {
-            ids.push(fonts.register(CARLITO.to_vec()).expect("font"));
-        }
-        let mut cache = GlyphCache::default();
-        let mut inserted = 0usize;
-        for id in &ids {
-            for gid in 0..u16::MAX {
-                if cached_glyph(&mut cache, &fonts, *id, u32::from(gid)).is_err() {
-                    break;
-                }
-                inserted += 1;
-            }
-        }
-        assert!(inserted > MAX_CACHED_GLYPH_OUTLINES);
-        assert_eq!(cache.entries.len(), MAX_CACHED_GLYPH_OUTLINES);
-        assert!(!cache.entries.contains_key(&(ids[0].to_u32(), 0)));
-        let refilled =
-            cached_glyph(&mut cache, &fonts, ids[0], 0).expect("re-extract after eviction");
-        let upem = fonts.metrics(ids[0]).expect("metrics").units_per_em;
-        assert_eq!(refilled.upem, f32::from(upem));
-        assert!(cache.entries.contains_key(&(ids[0].to_u32(), 0)));
     }
 }

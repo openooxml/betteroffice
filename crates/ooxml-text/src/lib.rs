@@ -63,7 +63,13 @@ pub mod shape;
 pub mod word_fonts;
 pub mod word_metrics;
 
+#[cfg(all(target_arch = "wasm32", feature = "base-latin"))]
+compile_error!("Web consumers must load base Latin faces from font assets");
+
 pub use auto_space::{AUTO_SPACE_EM, AutoSpace};
+#[cfg(feature = "base-latin")]
+pub use base_latin::face as base_latin_face;
+pub const BASE_LATIN_FAMILY: &str = "BetterOffice Base Latin";
 pub use bidi::{
     BaseDirection, BidiParagraph, BidiRun, bidi_paragraphs, level_is_rtl, visual_order_for_levels,
 };
@@ -79,7 +85,7 @@ pub use line_break::{
 };
 pub use measure::{
     FontChains, FontSlotUse, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut,
-    TypesetRowOut, font_slot_use, measure_paragraph, measure_paragraph_json,
+    TypesetRowOut, font_slot_characters, font_slot_use, measure_paragraph, measure_paragraph_json,
     measure_paragraph_typed, min_content_width_typed,
 };
 pub use ooxml_drawingml::symbol_font;

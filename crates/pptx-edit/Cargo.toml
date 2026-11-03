@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 engine = []
+metafile-svg = ["ooxml-metafile/svg"]
 wasm = ["engine", "dep:js-sys", "dep:wasm-bindgen"]
 
 [dependencies]
@@ -24,7 +25,7 @@ base64 = "0.22"
 js-sys = { version = "0.3", optional = true }
 ooxml-drawingml.workspace = true
 ooxml-diff.workspace = true
-ooxml-metafile = { workspace = true, features = ["svg"] }
+ooxml-metafile.workspace = true
 pptx-parse.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

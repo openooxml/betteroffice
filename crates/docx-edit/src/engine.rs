@@ -2367,8 +2367,6 @@ impl Drop for RelayoutTriggerReset<'_> {
     }
 }
 
-/// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
-/// they were measured with synthetic metrics.
 fn missing_font_chains<'a>(
     measurement: &serde_json::Value,
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
@@ -2391,6 +2389,15 @@ fn missing_font_chains<'a>(
                             .and_then(|id| u32::try_from(id).ok())
                             .and_then(|id| docx_layout::with_measure_face(id, |_, _| ()))
                             .is_some()
+                    })
+                    && ids.iter().any(|id| {
+                        id.as_u64()
+                            .and_then(|id| u32::try_from(id).ok())
+                            .is_some_and(|id| {
+                                ooxml_text::FontId::from_u32(id)
+                                    .base_latin_style()
+                                    .is_none()
+                            })
                     })
             })
     })
@@ -6584,8 +6591,9 @@ impl EngineSession {
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
         let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
+        let mut stable_markers = true;
         if cache_key.is_some() {
-            collector.collect_preview(
+            stable_markers &= collector.collect_preview(
                 input.measured.iter().map(|measured| &measured.block),
                 default_family,
             );
@@ -6633,11 +6641,12 @@ impl EngineSession {
                     && let Some(blocks) = self.lower_note_separator(name, &render_env)?
                 {
                     if cache_key.is_some() {
-                        collector.collect_preview(blocks.iter(), default_family);
+                        stable_markers &= collector.collect_preview(blocks.iter(), default_family);
                         if let Some(revealable) =
                             self.note_separator_revealable(name, &render_env)?
                         {
-                            collector.collect_preview(revealable.iter(), default_family);
+                            stable_markers &=
+                                collector.collect_preview(revealable.iter(), default_family);
                         }
                     } else {
                         collector.collect(blocks.iter(), default_family);
@@ -6667,12 +6676,14 @@ impl EngineSession {
                             content.display_label.as_deref().unwrap_or("1"),
                         );
                         if cache_key.is_some() {
-                            collector.collect_preview(blocks.iter(), default_family);
+                            stable_markers &=
+                                collector.collect_preview(blocks.iter(), default_family);
                         } else {
                             collector.collect(blocks.iter(), default_family);
                         }
                     } else if cache_key.is_some() {
-                        collector.collect_preview(blocks.iter().map(Rc::as_ref), default_family);
+                        stable_markers &= collector
+                            .collect_preview(blocks.iter().map(Rc::as_ref), default_family);
                     } else {
                         collector.collect(blocks.iter().map(Rc::as_ref), default_family);
                     }
@@ -6688,14 +6699,15 @@ impl EngineSession {
                             .expect("resident story exists after lowering")
                             .revealable_blocks,
                     );
-                    collector.collect_preview(revealable.iter(), default_family);
+                    stable_markers &= collector.collect_preview(revealable.iter(), default_family);
                 }
             }
         }
         let requirements = collector.finish();
-        let preview_superset_safe = requirements
-            .values()
-            .all(|requirement| requirement.scripts.is_empty());
+        let preview_superset_safe = stable_markers
+            && requirements
+                .values()
+                .all(|requirement| requirement.scripts.is_empty());
         if let Some((doc_epoch, request_fingerprint)) = cache_key
             && !preview_superset_safe
         {
@@ -25464,7 +25476,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             .unwrap();
         let requirements: Vec<serde_json::Value> = serde_json::from_str(&superset).unwrap();
         for requirement in exact {
-            assert!(requirements.contains(&serde_json::to_value(requirement).unwrap()));
+            assert_font_requirement_covered(&requirements, &requirement);
         }
     }
 
@@ -25492,24 +25504,128 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         )
         .unwrap();
         for requirement in &exact {
-            let candidate = superset
-                .iter()
-                .find(|candidate| candidate["key"] == requirement.key)
-                .unwrap_or_else(|| panic!("missing font requirement: {requirement:?}"));
-            assert_eq!(candidate["family"], requirement.family);
-            assert_eq!(candidate["bold"], requirement.bold);
-            assert_eq!(candidate["italic"], requirement.italic);
-            for script in &requirement.scripts {
-                assert!(
-                    candidate["scripts"]
-                        .as_array()
-                        .is_some_and(|scripts| scripts.iter().any(|value| value == script)),
-                    "missing script {script} for {}: {candidate}",
-                    requirement.key
-                );
-            }
+            assert_font_requirement_covered(&superset, requirement);
         }
         exact
+    }
+
+    fn assert_font_requirement_covered(
+        requirements: &[serde_json::Value],
+        requirement: &docx_layout::measure_blocks::FontRequirement,
+    ) {
+        let candidate = requirements
+            .iter()
+            .find(|candidate| candidate["key"] == requirement.key)
+            .unwrap_or_else(|| panic!("missing font requirement: {requirement:?}"));
+        assert_eq!(candidate["family"], requirement.family);
+        assert_eq!(candidate["bold"], requirement.bold);
+        assert_eq!(candidate["italic"], requirement.italic);
+        for script in &requirement.scripts {
+            assert!(
+                candidate["scripts"]
+                    .as_array()
+                    .is_some_and(|scripts| scripts.iter().any(|value| value == script)),
+                "missing script {script} for {}: {candidate}",
+                requirement.key
+            );
+        }
+        let bits = candidate["characterBits"].as_str().unwrap_or_default();
+        for ch in requirement.characters.iter() {
+            let index = ooxml_text::font_store::base_latin_character_index(ch).unwrap();
+            let start = index / 32 * 8;
+            let word = bits
+                .get(start..start + 8)
+                .map(|word| u32::from_str_radix(word, 16).unwrap())
+                .unwrap_or_default();
+            assert_ne!(
+                word & (1 << (index % 32)),
+                0,
+                "missing character {ch:?} for {}: {candidate}",
+                requirement.key
+            );
+        }
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_renumbered_marker_characters() {
+        let engine = EngineSession::new(1373);
+        let item = |family| {
+            serde_json::json!({
+                "type": "paragraph",
+                "formatting": {"numPr": {"numId": 1, "ilvl": 0}},
+                "listRendering": {"marker": "%1.", "markerBold": true},
+                "content": [font_preflight_run("Item", family)]
+            })
+        };
+        let blocks = [
+            serde_json::json!({
+                "type": "table",
+                "rows": [{"type": "tableRow", "cells": [{
+                    "type": "tableCell", "content": [item("First")]
+                }]}]
+            }),
+            item("Second"),
+        ];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 0, 1),
+            )
+            .unwrap();
+        for (decision, marker) in [
+            (crate::bridge::RevisionPreview::Accepted, ".1"),
+            (crate::bridge::RevisionPreview::Rejected, ".2"),
+        ] {
+            let exact =
+                assert_preview_font_preflight_covers(&engine, &deletion.revision_ids[0], decision);
+            let requirement = exact
+                .iter()
+                .find(|requirement| requirement.key == "second|1|0")
+                .unwrap();
+            assert_eq!(requirement.characters.iter().collect::<String>(), marker);
+        }
+    }
+
+    #[test]
+    fn preview_font_preflight_keeps_characters_from_all_text_previews() {
+        let engine = EngineSession::new(1374);
+        let blocks = [serde_json::json!({
+            "type": "paragraph", "content": [font_preflight_run("AΩ", "Preview")]
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 0, 1),
+            )
+            .unwrap();
+        for (decision, characters) in [
+            (crate::bridge::RevisionPreview::Accepted, "Ω"),
+            (crate::bridge::RevisionPreview::Rejected, "AΩ"),
+        ] {
+            let exact =
+                assert_preview_font_preflight_covers(&engine, &deletion.revision_ids[0], decision);
+            let requirement = exact
+                .iter()
+                .find(|requirement| requirement.key == "preview|0|0")
+                .unwrap();
+            assert_eq!(
+                requirement.characters.iter().collect::<String>(),
+                characters
+            );
+            assert!(
+                engine
+                    .preview_font_requirements
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .json
+                    .is_some()
+            );
+        }
     }
 
     #[test]

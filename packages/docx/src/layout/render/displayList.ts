@@ -385,6 +385,7 @@ export interface TextRunPrimitive extends DocAttrs {
   width: number; // measured advance of the whole run
   paintClip?: DisplayPaintClip;
   font: string;
+  scripts?: string[];
   color: string;
   letterSpacing?: number;
   // extra advance (px) added after each U+0020 space cluster — the canvas

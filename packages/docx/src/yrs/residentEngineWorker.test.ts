@@ -268,6 +268,7 @@ function worker() {
     session: {
       initializeComments() {},
       primeSaveSeedStates: mock(() => true),
+      primeSaveSeedStatesSlice: mock((_paragraphs: number, _inflated: number, _bytes: number) => 0),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -2530,13 +2531,36 @@ describe('document worker warmup', () => {
     try {
       await client.commandInit(COMMAND_INIT);
       const before = replies.length;
-      await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
-      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
+      await settleWarmup(() => w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === 1);
+      expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledWith(4096, 16 * 1024 * 1024, 16 * 1024);
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
       expect(replies).toHaveLength(before);
       await client.edit(commandEnvelope(1));
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
+      expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('save seed priming runs in slices until the states are known', async () => {
+    const { w, client } = await commandWorker();
+    w.harness.now = () => now;
+    const answers = [1, 1, 0];
+    w.harness.session.primeSaveSeedStatesSlice.mockImplementation(() => answers.shift() ?? 0);
+    try {
+      await client.commandInit(COMMAND_INIT);
+      await settleWarmup(() => w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === 3);
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      const calls = w.harness.session.primeSaveSeedStatesSlice.mock.calls;
+      expect(calls).toHaveLength(3);
+      for (const [paragraphs, inflated, bytes] of calls) {
+        expect([paragraphs, inflated]).toEqual([4096, 16 * 1024 * 1024]);
+        expect(bytes).toBeGreaterThanOrEqual(2 * 1024);
+        expect(bytes).toBeLessThanOrEqual(1024 * 1024);
+      }
     } finally {
       client.destroy();
     }
@@ -2549,7 +2573,7 @@ describe('document worker warmup', () => {
       await client.commandInit({ ...COMMAND_INIT, readOnly: true });
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+      expect(w.harness.session.primeSaveSeedStatesSlice).not.toHaveBeenCalled();
     } finally {
       client.destroy();
     }
@@ -2563,7 +2587,7 @@ describe('document worker warmup', () => {
       await client.commandInit(COMMAND_INIT);
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+      expect(w.harness.session.primeSaveSeedStatesSlice).not.toHaveBeenCalled();
     } finally {
       client.destroy();
     }
