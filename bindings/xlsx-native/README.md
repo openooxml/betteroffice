@@ -37,30 +37,30 @@ use `@betteroffice/xlsx` there. Main-thread edit peers hydrated from a worker se
 
 Choose native for servers and CLIs in Node, Bun or Deno where a prebuilt binary exists; use WebAssembly in browsers or where an addon can't load.
 
-Native is faster for every operation, with edits about three times as fast. Its peak memory is 15 to 16% higher on the 50,000-row and 4.1 MB workbooks and 9% lower on the 0.8 MB workbook. Engine start-up takes about 10 ms instead of 55 ms.
+Native is faster for every operation, with edits about three times as fast. Its peak memory is 16 to 18% higher on the 50,000-row and 4.1 MB workbooks and 5% lower on the 0.8 MB workbook. Engine start-up takes about 12 ms instead of 50 ms.
 
 | Document | Operation | WebAssembly | Native | Native / WebAssembly (95% CI) |
 |---|---|---:|---:|---:|
-| 50,000-row workbook with 50,000 formulas | Open | 2,180 ms | 1,647 ms | 0.68 (0.66 to 0.85) |
-| 50,000-row workbook with 50,000 formulas | Edits | 313 ms | 105 ms | 0.34 (0.32 to 0.38) |
-| 50,000-row workbook with 50,000 formulas | Save | 611 ms | 433 ms | 0.68 (0.66 to 0.73) |
-| 50,000-row workbook with 50,000 formulas | Layout | 19.4 ms | 13.2 ms | 0.71 (0.67 to 0.84) |
-| 50,000-row workbook with 50,000 formulas | Export | 2,148 ms | 1,753 ms | 0.78 (0.70 to 0.99) |
-| 50,000-row workbook with 50,000 formulas | Peak memory | 611 MiB | 704 MiB | 1.15 (1.14 to 1.16) |
-| 0.8 MB government workbook | Open | 789 ms | 529 ms | 0.69 (0.60 to 0.77) |
-| 0.8 MB government workbook | Edits | 4,683 ms | 1,411 ms | 0.31 (0.28 to 0.34) |
-| 0.8 MB government workbook | Save | 67.8 ms | 49.9 ms | 0.66 (0.48 to 0.81) |
-| 0.8 MB government workbook | Layout | 15.3 ms | 9.1 ms | 0.59 (0.46 to 0.66) |
-| 0.8 MB government workbook | Export | 852 ms | 618 ms | 0.72 (0.61 to 0.74) |
-| 0.8 MB government workbook | Peak memory | 460 MiB | 418 MiB | 0.91 (0.90 to 0.94) |
-| 4.1 MB government statistics workbook | Open | 5,473 ms | 2,040 ms | 0.37 (0.35 to 0.55) |
-| 4.1 MB government statistics workbook | Edits | 1,373 ms | 374 ms | 0.28 (0.27 to 0.32) |
-| 4.1 MB government statistics workbook | Save | 200 ms | 119 ms | 0.65 (0.54 to 0.84) |
-| 4.1 MB government statistics workbook | Layout | 13.2 ms | 7.4 ms | 0.61 (0.55 to 0.70) |
-| 4.1 MB government statistics workbook | Export | 5,736 ms | 2,243 ms | 0.39 (0.38 to 0.58) |
-| 4.1 MB government statistics workbook | Peak memory | 1,000 MiB | 1,164 MiB | 1.16 (1.16 to 1.19) |
+| 50,000-row workbook with 50,000 formulas | Open | 1,937 ms | 1,405 ms | 0.72 (0.67 to 0.79) |
+| 50,000-row workbook with 50,000 formulas | Edits | 293 ms | 98.1 ms | 0.33 (0.32 to 0.34) |
+| 50,000-row workbook with 50,000 formulas | Save | 579 ms | 392 ms | 0.67 (0.65 to 0.70) |
+| 50,000-row workbook with 50,000 formulas | Layout | 19.0 ms | 12.8 ms | 0.67 (0.64 to 0.71) |
+| 50,000-row workbook with 50,000 formulas | Export | 1,977 ms | 1,515 ms | 0.74 (0.71 to 0.82) |
+| 50,000-row workbook with 50,000 formulas | Peak memory | 607 MiB | 700 MiB | 1.16 (1.14 to 1.16) |
+| 0.8 MB government workbook | Open | 717 ms | 513 ms | 0.67 (0.64 to 0.73) |
+| 0.8 MB government workbook | Edits | 4,331 ms | 1,325 ms | 0.30 (0.28 to 0.34) |
+| 0.8 MB government workbook | Save | 66.4 ms | 44.5 ms | 0.64 (0.61 to 0.75) |
+| 0.8 MB government workbook | Layout | 14.3 ms | 8.5 ms | 0.60 (0.57 to 0.63) |
+| 0.8 MB government workbook | Export | 784 ms | 563 ms | 0.70 (0.63 to 0.72) |
+| 0.8 MB government workbook | Peak memory | 439 MiB | 418 MiB | 0.95 (0.91 to 0.96) |
+| 4.1 MB government statistics workbook | Open | 5,250 ms | 1,889 ms | 0.36 (0.35 to 0.40) |
+| 4.1 MB government statistics workbook | Edits | 1,316 ms | 361 ms | 0.28 (0.27 to 0.29) |
+| 4.1 MB government statistics workbook | Save | 172 ms | 106 ms | 0.63 (0.60 to 0.68) |
+| 4.1 MB government statistics workbook | Layout | 12.0 ms | 7.0 ms | 0.59 (0.58 to 0.62) |
+| 4.1 MB government statistics workbook | Export | 5,460 ms | 2,029 ms | 0.38 (0.37 to 0.42) |
+| 4.1 MB government statistics workbook | Peak memory | 983 MiB | 1,165 MiB | 1.18 (1.16 to 1.22) |
 
-Medians of 9 interleaved rounds on one 6-vCPU Linux machine with Node.js 24. A ratio below 1 favours native. Edits are 200 cell edits, layout is 20 viewports of display list, and export is Markdown. Timings varied by 15 to 30% between rounds, so the ratios are steadier than the absolute values.
+Medians of 9 interleaved rounds on one 6-vCPU Linux machine with Node.js 24. A ratio below 1 favours native. Edits are 200 cell edits, layout is 20 viewports of display list, and export is Markdown. Timings varied by up to about 25% between rounds, so the ratios are steadier than the absolute values.
 
 ## Memory and untrusted input
 
