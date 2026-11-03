@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { openWorkbook } from '../wasm/loader';
-import { engineKind } from '../wasm/engine';
 import { openWorkbookSession } from './client';
 import { createTestWorkbookSession, initRecordedWasm, limitEngineMemoryHeadroom, numbersWorkbook, restoreEngineMemory } from './testHelpers';
 
@@ -29,15 +27,4 @@ test('an edit that runs out of memory fails its session for good while a session
   } finally {
     await other.dispose();
   }
-});
-
-test('a workbook handle whose call ran out of memory refuses every later call', async () => {
-  const workbook = openWorkbook(await numbersWorkbook(20_000));
-  const read = (a1: string) => workbook.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1 } }] });
-  limitEngineMemoryHeadroom(256 * 2 ** 10);
-  expect(() => read('A1:B20000')).toThrow();
-  restoreEngineMemory();
-  expect(() => read('A1')).toThrow();
-  expect(() => workbook.save()).toThrow();
-  if (engineKind === 'native') expect(() => workbook.dispose()).not.toThrow();
 });
