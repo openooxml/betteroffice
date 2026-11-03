@@ -715,27 +715,19 @@ fn group_drawings_in_part(xml: &str) -> HashMap<String, String> {
                         tag.attributes
                             .iter()
                             .find(|(name, _)| *name == "id")
-                            .map(|(_, range)| xml[range.clone()].to_owned())
+                            .and_then(|(_, range)| {
+                                crate::paragraph_identity::unescaped(xml, range.clone())
+                            })
                     });
                 if group && let Some(id) = id {
                     let mut span = xml[start..tag.range.end].to_owned();
-                    let mut used = HashSet::new();
-                    let mut declared = HashSet::new();
-                    for tag in &tags[first - 1..=index] {
-                        if let Some((prefix, _)) = tag.name.split_once(':') {
-                            used.insert(prefix.to_owned());
-                        }
-                        for (name, _) in &tag.attributes {
-                            if let Some(prefix) = name.strip_prefix("xmlns:") {
-                                declared.insert(prefix.to_owned());
-                            } else if let Some((prefix, _)) = name.split_once(':') {
-                                used.insert(prefix.to_owned());
-                            }
-                        }
-                    }
+                    let Some(required) = super::splice::required_prefixes(&span) else {
+                        continue;
+                    };
+                    let required: Vec<String> = required.into_iter().map(str::to_owned).collect();
                     let mut bindings = String::new();
-                    for prefix in used {
-                        if prefix == "xml" || prefix == "xmlns" || declared.contains(&prefix) {
+                    for prefix in required {
+                        if prefix == "xml" || prefix == "xmlns" {
                             continue;
                         }
                         if let Some((_, uri)) = scopes

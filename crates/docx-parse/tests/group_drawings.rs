@@ -310,3 +310,37 @@ fn an_edit_in_a_table_only_text_box_is_never_reverted() {
     let xml = save(&source, &model);
     assert!(!xml.contains(">Inner<"), "{xml}");
 }
+
+#[test]
+fn a_descendant_declaration_does_not_hide_an_inherited_binding() {
+    let a = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#;
+    let drawing = group("group").replacen("<a:xfrm>", &format!("<a:xfrm {a}>"), 1);
+    let source = fixture(&format!(
+        r#"<w:p><w:r><w:t>Host</w:t></w:r><w:r><mc:AlternateContent><mc:Choice Requires="wpg" {a}>{drawing}</mc:Choice><mc:Fallback/></mc:AlternateContent></w:r></w:p>"#
+    ));
+    let source = {
+        let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+        let (_, bytes) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/document.xml")
+            .unwrap();
+        *bytes = String::from_utf8(bytes.clone())
+            .unwrap()
+            .replacen(&format!(" {a}"), "", 1)
+            .into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let xml = rewrite_host(&source);
+    assert!(xml.contains(">Inner<"), "{xml}");
+    assert_eq!(unbound_prefixes(&xml), Vec::<String>::new(), "{xml}");
+}
+
+#[test]
+fn a_group_with_an_escaped_drawing_id_is_kept() {
+    let drawing = group("group").replacen(r#"<wp:docPr id="30""#, r#"<wp:docPr id="&#51;0""#, 1);
+    let source = fixture(&format!(
+        r#"<w:p><w:r><w:t>Host</w:t></w:r><w:r>{drawing}</w:r></w:p>"#
+    ));
+    let xml = rewrite_host(&source);
+    assert!(xml.contains(&drawing), "{xml}");
+}
