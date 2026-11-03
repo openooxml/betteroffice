@@ -25,25 +25,22 @@ fn grew(bytes: usize) {
     let _ = LIVE.try_with(|live| {
         let next = live.get().saturating_add(bytes);
         live.set(next);
-        if next > BUDGET.try_with(Cell::get).unwrap_or(DEFAULT_BUDGET)
-            && !OVER.try_with(|over| over.replace(true)).unwrap_or(true)
-        {
+        if next > budget() && !OVER.try_with(|over| over.replace(true)).unwrap_or(true) {
             let _ = FAILED.try_with(|failed| failed.set(bytes.max(1)));
         }
     });
 }
 
 fn shrank(bytes: usize) {
-    let _ = LIVE.try_with(|live| {
-        let next = live.get().saturating_sub(bytes);
-        live.set(next);
-        if next <= BUDGET.try_with(Cell::get).unwrap_or(DEFAULT_BUDGET) {
-            let _ = OVER.try_with(|over| over.set(false));
-        }
-    });
+    let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(bytes)));
 }
 
-/// Whether the calling thread's engine memory is past its budget.
+fn budget() -> usize {
+    BUDGET.try_with(Cell::get).unwrap_or(DEFAULT_BUDGET)
+}
+
+/// Whether an allocation took the calling thread past its budget since its current engine call
+/// began; later frees do not lower it.
 pub(crate) fn over_budget() -> bool {
     OVER.try_with(Cell::get).unwrap_or(false)
 }
@@ -66,9 +63,18 @@ pub(crate) fn live() -> usize {
     LIVE.try_with(Cell::get).unwrap_or(0)
 }
 
-/// Forgets a failure that no later call read, so it cannot describe an unrelated failure.
-pub(crate) fn clear_failed() {
-    let _ = FAILED.try_with(|failed| failed.set(0));
+/// Starts a budget-checked engine call; false when it must fail at once. An outermost call that
+/// starts within the budget forgets the crossing and failure an earlier call left, so they cannot
+/// describe it; a nested call inherits them.
+pub(crate) fn begin_call(outermost: bool) -> bool {
+    if over_budget() && (!outermost || live() > budget()) {
+        return false;
+    }
+    if outermost {
+        let _ = OVER.try_with(|over| over.set(false));
+        let _ = FAILED.try_with(|failed| failed.set(0));
+    }
+    true
 }
 
 /// The size of the allocation that took the calling thread past its budget, once.

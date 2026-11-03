@@ -61,10 +61,9 @@ struct EngineCall {
 
 impl EngineCall {
     fn new(env: Env) -> Self {
-        if crate::memory::over_budget() {
+        if !crate::memory::begin_call(CURRENT_ENV.get().is_none()) {
             panic!("{}", crate::memory::EXCEEDED);
         }
-        crate::memory::clear_failed();
         Self::enter(env, true)
     }
 
