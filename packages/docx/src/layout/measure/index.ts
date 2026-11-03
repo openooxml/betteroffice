@@ -10,6 +10,7 @@ export {
   type RustMeasureSource,
   type RustTextEngine,
   type ResidentFontRequirement,
+  fontRequirementCharacters,
   type ResidentMeasurementConfig,
 } from './rustMeasureSource';
 export type {

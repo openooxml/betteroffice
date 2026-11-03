@@ -48,7 +48,7 @@ export interface XlsxAsyncEditorApi {
   save(): Promise<Uint8Array>;
   readonly commands: XlsxCommandStore;
   readonly collaboration: AsyncCollaborationReplica | null;
-  /** Stages tracked cell edits after pending input drains; available on worker editors. */
+  /** Stages tracked cell edits after pending input drains. */
   proposeChanges?(request: XlsxProposalRequest): Promise<XlsxProposalResult>;
   focus(): void;
   renderPng(...args: Parameters<WorkbookHandle['renderPng']>): Promise<ReturnType<WorkbookHandle['renderPng']>>;
@@ -217,7 +217,7 @@ export function createAsyncEditorApi(
         if (!input) throw new XlsxCommandAdmissionError('editor-unavailable');
         return await input.runAfterPendingInput(async () => {
           assertProposalReady();
-          if (input.readOnly) return proposalRefusal('read-only');
+          if (input.readOnly && !bridge().allowHostProposals?.()) return proposalRefusal('read-only');
           const ticket = input.command({ kind: 'propose', payload: {
             args: [captured.agentId, captured.note ?? null, captured.edits],
           } });

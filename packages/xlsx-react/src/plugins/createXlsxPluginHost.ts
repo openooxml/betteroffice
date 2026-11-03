@@ -66,6 +66,8 @@ export interface XlsxPluginHost {
   version(): string;
   selectionChanged(selection: XlsxPluginSelection): void;
   modeChanged(readOnly: boolean): void;
+  proposalsChanged(signature: string): void;
+  previewVersion(): number;
   layoutChanged(layout: XlsxPluginLayout | null): void;
   /**
    * The id of the layout plugins may use now. It clears in the same step as a committed change,
@@ -142,6 +144,8 @@ export function createXlsxPluginHost(
     readOnly: false,
     selection: null as XlsxPluginSelection,
     layout: null as XlsxPluginLayout | null,
+    proposals: JSON.stringify({ proposals: [], staleFor: {}, version: null }),
+    previewVersion: 0,
   };
   const activationScopes = new WeakMap<object, XlsxCommandScope>();
   const identities = new WeakMap<object, number>();
@@ -210,6 +214,9 @@ export function createXlsxPluginHost(
         layout: geometry.layout,
         getCellRect: (target) => invocation.refusal() ? null : geometry.getCellRect(target),
         getRangeRect: (target) => invocation.refusal() ? null : geometry.getRangeRect(target),
+        getAnchorGeometry: (target) => invocation.refusal()
+          ? { ok: false, failure: { code: 'layout-unavailable', message: 'The plugin context is no longer current' } }
+          : geometry.getAnchorGeometry(target),
         getPositionAtPoint: point && ((clientX, clientY) => invocation.refusal() ? null : point(clientX, clientY)),
       } : null,
       navigation: clients.navigation,
@@ -378,6 +385,8 @@ export function createXlsxPluginHost(
       handle = next;
       state.version = ('identity' in access ? access.version(next) : readVersion(next as WorkbookHandle)) ?? '';
       state.layout = null;
+      state.proposals = JSON.stringify({ proposals: [], staleFor: {}, version: null });
+      state.previewVersion = 0;
       state.selection = 'identity' in access && access.selection ? access.selection(next) : null;
       if ('identity' in access && access.readOnly) state.readOnly = access.readOnly(next);
       observe();
@@ -393,6 +402,16 @@ export function createXlsxPluginHost(
 
     generation: () => runtime.generation(),
     version: () => state.version,
+    previewVersion: () => state.previewVersion,
+
+    proposalsChanged(signature) {
+      if (state.proposals === signature) return;
+      state.proposals = signature;
+      state.previewVersion += 1;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'proposal-change', generation, version: state.version,
+        previewVersion: state.previewVersion });
+    },
 
     selectionChanged(selection) {
       if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;

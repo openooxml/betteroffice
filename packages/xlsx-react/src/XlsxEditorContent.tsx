@@ -1,3 +1,4 @@
+import { commandReason } from './commands/evaluate';
 import {
   anchorSelection, clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges,
   workbookSelectionMerges,
@@ -412,6 +413,7 @@ export function XlsxEditorContent({
   onReady,
   className,
   readOnly = false,
+  allowHostProposals = false,
   defaultFonts,
   toolbar,
   showToolbar = true,
@@ -500,6 +502,8 @@ export function XlsxEditorContent({
   }, []);
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  const allowHostProposalsRef = useRef(allowHostProposals);
+  allowHostProposalsRef.current = allowHostProposals;
 
   const [sheetInfo, setSheetInfo, sheetInfoRef] = useSyncedState<SheetInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -852,6 +856,9 @@ export function XlsxEditorContent({
     readOnly,
     handle: openedHandle,
     selection: pluginSelection,
+    proposals,
+    staleFor,
+    proposalsPending: () => coordinator.pending,
     canvasRef,
     positionAtPoint: (clientX, clientY) => hostPointRef.current(clientX, clientY),
     t,
@@ -963,6 +970,22 @@ export function XlsxEditorContent({
             commands: commandController.store,
             handle,
             refreshProposals,
+            proposeChanges: async (request) => {
+              try {
+                const captured = structuredClone(request);
+                return await afterInput(opened, () => {
+                  if (readOnlyRef.current && !allowHostProposalsRef.current) {
+                    return { ok: false as const, failure: commandReason('read-only', null) };
+                  }
+                  const proposal = opened.propose(captured.agentId, captured.note ?? null, captured.edits);
+                  refreshProposals();
+                  return { ok: true as const, proposal };
+                });
+              } catch (error) {
+                const code = error instanceof XlsxCommandAdmissionError ? error.code : 'command-failed';
+                return { ok: false as const, failure: commandReason(code, null) };
+              }
+            },
             focus: () => scrollRef.current?.focus(),
             flushPendingInput: async () => {
               if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
@@ -2192,6 +2215,7 @@ export function XlsxEditorContent({
     handle: () => handleRef.current,
     status: () => (handleRef.current ? 'ready' : file && !error ? 'loading' : 'empty'),
     readOnly: () => readOnlyRef.current,
+    allowHostProposals: () => allowHostProposalsRef.current,
     collaborative: () => collaborationEnabled,
     mutation: () => mutationRef.current,
     generation: () => generationRef.current,
@@ -2331,7 +2355,7 @@ export function XlsxEditorContent({
     ? null
     : toolbar === undefined
       ? readOnly
-        ? null
+        ? allowHostProposals && proposalsAvailable ? <ProposalsButton /> : null
         : defaultToolbar
       : toolbar;
 

@@ -132,6 +132,8 @@ export type {
   XlsxPluginEvent,
   XlsxPluginFailureCode,
   XlsxPluginGeometry,
+  XlsxGeometryTarget,
+  XlsxAnchorGeometryResult,
   XlsxPluginGrant,
   XlsxPluginLayout,
   XlsxPluginNavigation,

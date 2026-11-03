@@ -1,45 +1,15 @@
 //! Glyph rasterization for the pre-shaped runs the display list carries.
 
-use std::collections::{HashMap, VecDeque};
-
 use ooxml_text::{FontId, FontStore, PathCmd, shape};
 use pptx_render::{PositionedTextLine, PositionedTextRun};
-use tiny_skia::{Color, FillRule, Mask, Paint, Path, Pixmap, Rect, Transform};
+use tiny_skia::{Color, Mask, Paint, Path, Pixmap, Rect, Transform};
 
 use crate::{RenderResources, parse_color};
 
-/// Most glyph outlines one cache retains; the oldest insertion evicts first.
-const MAX_CACHED_GLYPH_OUTLINES: usize = 8_192;
-
-/// Extracted glyph outlines keyed by font and glyph id, reusable across slides.
-/// Ids are store-local, so the cache binds to the store that fills it and
-/// refuses any other; entries past the cap evict oldest-first.
+/// Store-bound glyph outlines reusable across slides.
 #[derive(Default)]
 pub struct GlyphCache {
-    entries: HashMap<(u32, u32), CachedGlyph>,
-    order: VecDeque<(u32, u32)>,
-    store: Option<u64>,
-}
-
-impl GlyphCache {
-    fn remember(&mut self, key: (u32, u32), glyph: CachedGlyph) {
-        if self.entries.insert(key, glyph).is_none() {
-            self.order.push_back(key);
-        }
-        while self.order.len() > MAX_CACHED_GLYPH_OUTLINES {
-            let oldest = self
-                .order
-                .pop_front()
-                .expect("the queue tracks every cached entry");
-            self.entries.remove(&oldest);
-        }
-    }
-}
-
-#[derive(Debug)]
-struct CachedGlyph {
-    path: Option<Path>,
-    upem: f32,
+    inner: ooxml_raster::GlyphCache,
 }
 
 /// Paint one text box's positioned lines. Nothing is shaped here: the layout
@@ -209,14 +179,7 @@ fn paint_glyph(
         return Ok(());
     };
     let scale = size_px / cached.upem;
-    let glyph_transform = Transform::from_row(scale, 0.0, 0.0, -scale, x, y);
-    pixmap.fill_path(
-        path,
-        paint,
-        FillRule::Winding,
-        transform.pre_concat(glyph_transform),
-        clip,
-    );
+    ooxml_raster::fill_glyph(pixmap, path, scale, x, y, transform, paint, clip);
     Ok(())
 }
 
@@ -225,31 +188,17 @@ fn cached_glyph<'a>(
     fonts: &FontStore,
     font: FontId,
     glyph_id: u32,
-) -> Result<&'a CachedGlyph, String> {
-    if cache.store.is_some_and(|bound| bound != fonts.id()) {
-        return Err("glyph cache is bound to another font store".to_string());
-    }
-    let key = (font.to_u32(), glyph_id);
-    if !cache.entries.contains_key(&key) {
-        let id = u16::try_from(glyph_id)
-            .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))?;
-        let outline = fonts
-            .outline_glyph(font, id)
-            .map_err(|error| error.to_string())?;
-        let path = outline_path(&outline.cmds)?;
-        cache.store = Some(fonts.id());
-        cache.remember(
-            key,
-            CachedGlyph {
-                path,
-                upem: f32::from(outline.upem),
-            },
-        );
-    }
-    Ok(cache
-        .entries
-        .get(&key)
-        .expect("a just-inserted or occupied key is present"))
+) -> Result<&'a ooxml_raster::CachedGlyph, String> {
+    cache.inner.lookup(
+        fonts,
+        font,
+        glyph_id,
+        || {
+            u16::try_from(glyph_id)
+                .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))
+        },
+        outline_path,
+    )
 }
 
 fn outline_path(commands: &[PathCmd]) -> Result<Option<Path>, String> {
@@ -261,27 +210,6 @@ mod tests {
     use super::*;
 
     const CARLITO: &[u8] = include_bytes!("../tests/assets/Carlito-Regular.ttf");
-
-    #[test]
-    fn the_cache_evicts_oldest_first_past_its_cap() {
-        let mut cache = GlyphCache::default();
-        for index in 0..MAX_CACHED_GLYPH_OUTLINES as u32 + 2 {
-            cache.remember(
-                (index, 0),
-                CachedGlyph {
-                    path: None,
-                    upem: 1_000.0,
-                },
-            );
-        }
-        assert_eq!(cache.entries.len(), MAX_CACHED_GLYPH_OUTLINES);
-        assert!(!cache.entries.contains_key(&(0, 0)));
-        assert!(
-            cache
-                .entries
-                .contains_key(&(MAX_CACHED_GLYPH_OUTLINES as u32 + 1, 0))
-        );
-    }
 
     #[test]
     fn a_glyph_cache_is_bound_to_the_store_that_filled_it() {

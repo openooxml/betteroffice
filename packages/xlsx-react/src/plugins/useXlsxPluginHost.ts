@@ -8,6 +8,7 @@ import {
 } from 'react';
 import type { RefObject } from 'react';
 import type { TFunction } from '@betteroffice/xlsx-i18n';
+import type { Proposal } from '@betteroffice/xlsx';
 import type { XlsxCommandController } from '../commands/createXlsxCommandStore';
 import type { XlsxPluginEditorAccess } from './createPluginClients';
 import type { XlsxPluginDocumentAccess } from './createPluginDocumentAccess';
@@ -35,6 +36,9 @@ export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
   access: XlsxPluginEditorAccess | XlsxPluginDocumentAccess;
   commands: XlsxCommandController;
   readOnly: boolean;
+  proposals?: readonly Proposal[];
+  staleFor?: Readonly<Record<string, readonly string[]>>;
+  proposalsPending?(): boolean;
   /** The workbook once it is open, else null. Plugins open it while the editor still holds it. */
   handle: object | null;
   selection: XlsxPluginSelection;
@@ -58,6 +62,11 @@ export interface XlsxPluginHostBinding {
    * in the same step, so retained geometry of an earlier frame refuses at once.
    */
   presentGrid(painted: PaintedGrid | null): void;
+}
+
+function proposalSignature(options: UseXlsxPluginHostOptions, version: string): string {
+  const proposals = options.proposals ?? [];
+  return JSON.stringify({ proposals, staleFor: options.staleFor ?? {}, version: proposals.length ? version : null });
 }
 
 /** Owns the plugin host of one `XlsxEditor` and binds it to the editor's authority. */
@@ -89,6 +98,12 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     const pointAt: EditorPointQuery | undefined = latest.current.positionAtPoint
       ? (clientX, clientY) => latest.current.positionAtPoint?.(clientX, clientY) ?? null
       : undefined;
+    const proposals = () => {
+      const options = latest.current;
+      if (options.proposalsPending?.() || !options.selection || options.selection.sheetId !== layout?.sheetId) return null;
+      return { proposals: options.proposals ?? [], sheetIndex: options.selection.sheetIndex,
+        previewVersion: host.previewVersion() };
+    };
     geometryRef.current =
       layout && painted && canvas && layer
         ? 'identity' in latest.current.access ? latest.current.createGeometry?.(
@@ -104,12 +119,13 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
               return { version: identity ? access.version(identity) : null,
                 painted: live ? paintedRef.current : null };
             },
+            proposals,
             pointAt
           ) ?? null : createPluginGeometry(layout, painted, canvas, layer, () =>
               host.layoutId() === layout.id &&
               paintedRef.current === painted &&
               canvas.isConnected &&
-              layer.isConnected, pointAt)
+              layer.isConnected, proposals, pointAt)
         : null;
     host.layoutChanged(layout);
     host.geometryChanged();
@@ -139,6 +155,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     const identity = 'identity' in access ? access.identity() : access.handle();
     if (identity !== options.handle) return;
     host.open(options.handle);
+    host.proposalsChanged(proposalSignature(latest.current, host.version()));
     publish();
     return () => host.close('document-replaced');
   }, [host, options.access, options.handle, publish]);
@@ -147,6 +164,11 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     host.syncCommands();
     return host.subscribe(() => host.syncCommands());
   }, [host]);
+
+  const proposalState = proposalSignature(options, host.version());
+  useLayoutEffect(() => {
+    if (options.handle && host.generation()) host.proposalsChanged(proposalState);
+  }, [host, options.handle, proposalState]);
 
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
 

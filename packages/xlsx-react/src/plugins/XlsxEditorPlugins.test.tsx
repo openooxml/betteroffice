@@ -1,4 +1,5 @@
 import { testScope } from './__fixtures__/testScope';
+import { hostProposalWorkbook } from '../__fixtures__/hostProposalWorkbook';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -1978,6 +1979,76 @@ describe('XlsxEditor plugin boundaries and races', () => {
     });
     await settle();
     expect(marks).toEqual(['acme.review', 'acme.review']);
+  });
+
+  editorTest('proposal events and anchors follow host review in a read-only editor', async () => {
+    const events: XlsxPluginEvent[] = [];
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugin = defineXlsxPlugin<null>({ id: 'acme.proposals', createState: () => null,
+      onEvent(context, event) { contexts.push(context); events.push(event); },
+      overlay: ({ context }) => { contexts.push(context); return null; } });
+    const { api, view } = await mount({ file: await hostProposalWorkbook(), plugins: [plugin],
+      readOnly: true, allowHostProposals: true });
+    const stage = async (value: string) => {
+      const result = await act(() => api().proposeChanges!({ agentId: 'Host agent',
+        edits: [{ sheet: 0, row: 2, col: 1, input: value }] }));
+      if (!result.ok) throw new Error(result.failure.message);
+      return result.proposal.id;
+    };
+    const first = await stage('123');
+    await until(() => last(contexts)?.geometry?.getAnchorGeometry({ kind: 'proposal', id: first }).ok === true);
+    const geometry = last(contexts).geometry!;
+    const cell = geometry.getCellRect({ sheetId: 'sheet:0', row: 2, col: 1 });
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: true, rects: [cell], anchor: cell });
+    const scroll = view.getByTestId('xlsx-scroll');
+    scroll.scrollTop = 40;
+    fireEvent.scroll(scroll);
+    await until(() => last(contexts).geometry?.layout.viewport.y === 40);
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    const scrolled = last(contexts).geometry!;
+    expect(scrolled.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: true, anchor: scrolled.getCellRect({ sheetId: 'sheet:0', row: 2, col: 1 }) });
+    await act(async () => { api().selectCells(1, selectionAt({ row: 2, col: 1 })); });
+    await until(() => last(contexts).geometry?.layout.sheetId === 'sheet:1');
+    expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    await act(async () => { api().selectCells(0, selectionAt({ row: 2, col: 1 })); });
+    await until(() => last(contexts).geometry?.layout.sheetId === 'sheet:0');
+    expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'proposal', id: first })).toMatchObject({ ok: true });
+    expect(events.filter((event) => event.type === 'proposal-change')).toHaveLength(1);
+    await act(() => api().commands.execute('proposalAccept', { proposalId: first }));
+    expect(input(api(), 2, 1)).toBe('123');
+    await until(() => events.filter((event) => event.type === 'proposal-change').length === 2);
+    const second = await stage('456');
+    await act(() => api().commands.execute('proposalReject', { proposalId: second }));
+    await until(() => events.filter((event) => event.type === 'proposal-change').length === 4);
+    expect(input(api(), 2, 1)).toBe('123');
+    expect(last(contexts).geometry?.getAnchorGeometry({ kind: 'proposal', id: second }))
+      .toMatchObject({ ok: false, failure: { code: 'unknown-proposal' } });
+  });
+
+  editorTest('proposal events report stale decisions and structural changes', async () => {
+    const events: XlsxPluginEvent[] = [];
+    const plugin = defineXlsxPlugin<null>({ id: 'acme.proposal-state', createState: () => null,
+      onEvent(_context, event) { events.push(event); } });
+    const { api } = await mount({ file: await hostProposalWorkbook(), plugins: [plugin],
+      readOnly: true, allowHostProposals: true });
+    const result = await act(() => api().proposeChanges!({ agentId: 'agent',
+      edits: [{ sheet: 0, row: 2, col: 1, input: '123' }] }));
+    if (!result.ok) throw new Error(result.failure.message);
+    await act(async () => { api().handle.editCell(0, 2, 1, 'changed'); api().refreshProposals(); });
+    const beforeStale = events.filter((event) => event.type === 'proposal-change').length;
+    const stale = await act(() => api().commands.execute('proposalAccept', { proposalId: result.proposal.id }));
+    expect(stale).toMatchObject({ ok: false, failure: { code: 'proposal-stale' } });
+    await until(() => events.filter((event) => event.type === 'proposal-change').length > beforeStale);
+    const beforeStructure = events.filter((event) => event.type === 'proposal-change').length;
+    await act(async () => {
+      api().handle.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }]);
+      api().refreshProposals();
+    });
+    await until(() => events.filter((event) => event.type === 'proposal-change').length > beforeStructure);
   });
 
   editorTest('retained geometry refuses in the same step as a committed change or a new frame', async () => {

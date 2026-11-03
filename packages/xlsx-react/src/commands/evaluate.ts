@@ -44,6 +44,7 @@ export interface XlsxProposalEnvironment {
 export interface XlsxCommandEnvironment {
   status: 'ready' | 'loading' | 'empty';
   readOnly: boolean;
+  allowHostProposals?: boolean;
   collaborative: boolean;
   /** `'chart'` while a chart object is selected instead of cells. */
   selection: XlsxSelectionEnvironment | 'chart' | null;
@@ -432,7 +433,8 @@ function evaluate<K extends XlsxCommandId>(
   const stage = lifecycle(env);
   if (stage) return { gate: stage };
   const readOnly: Gate =
-    env.readOnly && (XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument || WRITE_COMMANDS.has(id))
+    env.readOnly && !(env.allowHostProposals && (id === 'proposalAccept' || id === 'proposalReject')) &&
+    (XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument || WRITE_COMMANDS.has(id))
       ? 'read-only'
       : null;
   let evaluation: Evaluation<K>;

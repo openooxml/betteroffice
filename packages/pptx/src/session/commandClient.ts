@@ -293,7 +293,7 @@ async function createCommandClient(
   const identity = { session: state.session, incarnation: state.incarnation };
   const unack = rpc.on('ack', install);
   const unfonts = rpc.on('defaultFonts', (ack) => {
-    if (ack.defaultFonts?.length) install(ack, true);
+    install(ack, true);
   });
   const unpipe = rpc.on('collaborationPipe', receivePipe);
   const unfailure = rpc.onFailure(fail);

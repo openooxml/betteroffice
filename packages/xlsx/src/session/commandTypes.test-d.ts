@@ -31,5 +31,5 @@ export type CommandSwapCompatibility = [
   Assert<Equal<WorkbookSession['editState'], Readonly<Partial<WorkbookEditState>>>>,
   Assert<Equal<WorkbookSession['selection'], WorkbookCommandSelection | undefined>>,
   Assert<Equal<Extract<WorkbookCommand, { kind: 'select' }>['payload'], { selection: WorkbookCommandSelection }>>,
-  Assert<Equal<Extract<WorkbookCommand, { kind: 'setReadOnly' }>['payload'], { readOnly: boolean }>>,
+  Assert<Equal<Extract<WorkbookCommand, { kind: 'setReadOnly' }>['payload'], { readOnly: boolean; allowHostProposals?: boolean }>>,
 ];

@@ -127,6 +127,7 @@ export interface DefaultFontOptions {
 let options: DefaultFontOptions = {};
 const engineRuntime = { decoder: decodeFontFace };
 let resolved = new WeakMap<object, Promise<BundledFontProvider | undefined>>();
+let baseLatinResolved = new WeakMap<object, Promise<BundledFontProvider>>();
 
 function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
   if (baseUrl === undefined) return undefined;
@@ -155,6 +156,7 @@ export function hasConfiguredFontSource(): boolean {
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };
   resolved = new WeakMap();
+  baseLatinResolved = new WeakMap();
 }
 
 async function load(runtime: { decoder?: FontDecoder }): Promise<BundledFontProvider | undefined> {
@@ -187,4 +189,13 @@ export function resolveDefaultFontProvider(
     pending = promise;
   }
   return pending;
+}
+
+/** @internal State the lazily loaded backstop provider resolves against. */
+export function baseLatinFontState(): {
+  baseUrl: string | URL | undefined;
+  cache: WeakMap<object, Promise<BundledFontProvider>>;
+  runtime: { decoder?: FontDecoder };
+} {
+  return { baseUrl: options.baseUrl, cache: baseLatinResolved, runtime: engineRuntime };
 }

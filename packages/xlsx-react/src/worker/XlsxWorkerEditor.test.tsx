@@ -3242,6 +3242,70 @@ describe('peerless workbook worker editor', () => {
     });
   }
 
+  const neighborPrefetched = async (neighborDelay = 0) => {
+    const host = peerlessHarness();
+    const sample = await host.frame({ x: 0, y: 0, width: 800, height: 600 });
+    host.frame.mockClear();
+    host.frame.mockImplementation(async (viewport, options) => {
+      if (options?.sheet === 1 && neighborDelay) await new Promise((resolve) => setTimeout(resolve, neighborDelay));
+      return {
+        ...sample, viewport, sheet: options?.sheet ?? 0,
+        displayList: { ...sample.displayList, commands: options?.sheet === 1 ? [...sample.displayList.commands,
+          { op: 'text' as const, text: 'second-sheet', x: 200, y: 66, fontSize: 11, color: '#000000' }]
+          : sample.displayList.commands },
+      };
+    });
+    const view = await host.mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
+    expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
+    const settled = host.frame.mock.calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    expect(host.frame.mock.calls.length).toBe(settled);
+    const canvas = () => view.container.querySelector('canvas')!;
+    return { host, view, canvas };
+  };
+
+  it('a sheet tab switch paints the prefetched neighbor frame before the worker replies', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    const frames = host.frame.mock.calls.length;
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'true' });
+    const command = host.sent[host.sent.length - 1];
+    if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(canvas().dataset.commandCoverage).not.toBe(String(command.seq));
+    await act(async () => host.ack(command, { selection: command.payload.selection, paint: true }));
+    await advance();
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'false' });
+    expect(canvas().dataset.commandCoverage).toBe(String(command.seq));
+    expect(host.frame.mock.calls.length).toBeGreaterThanOrEqual(frames);
+  });
+
+  it('a neighbor too slow to prepare is neither painted provisionally nor prepared again', async () => {
+    const { host, view, canvas } = await neighborPrefetched(60);
+    const neighborCalls = () => host.frame.mock.calls.filter(([, options]) => options?.sheet === 1).length;
+    expect(neighborCalls()).toBe(1);
+    await act(async () => host.push({ throughSeq: 0, version: 'v1', statuses: [], editState: { canUndo: false } }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); });
+    expect(neighborCalls()).toBe(1);
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a proposal change drops the prefetched neighbor frame', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v1',
+      statuses: [{ seq: 0, status: 'applied', committed: false, result: { remoteUpdate: true, proposals: [] } }] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a neighbor frame prefetched before an edit is not painted after it', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v2', statuses: [] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
   it('cross-sheet hyperlinks reveal their target even when the initial sheet view arrives later', async () => {
     const host = peerlessHarness();
     const frame = await host.frame({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
@@ -3498,6 +3562,41 @@ describe('peerless workbook worker editor', () => {
     expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'editCells', payload: {
       args: [0, [{ row: 1, col: 0, input: 'initial' }]],
     } });
+  });
+
+  it('read-only host proposals use ordered worker commands and leave other writes disabled', async () => {
+    const host = peerlessHarness();
+    const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
+    restorers.push(() => available.mockRestore());
+    let api!: XlsxAsyncEditorApi;
+    const view = await host.mount(undefined, true, { allowHostProposals: true,
+      onReady(ready) { api = ready; host.ready(); } });
+    expect(await host.commandAt(0)).toMatchObject({ kind: 'setReadOnly',
+      payload: { readOnly: true, allowHostProposals: true } });
+    await act(async () => host.ack(host.sent[0]));
+    const proposal = { id: 'host-review', agentId: 'Host agent', note: 'Review this cell',
+      cells: [{ sheet: 0, row: 0, col: 0, a1: 'A1', oldText: 'initial', newText: '7' }] };
+    const proposed = api.proposeChanges!({ agentId: 'Host agent', note: proposal.note,
+      edits: [{ sheet: 0, row: 0, col: 0, input: '7' }] });
+    expect(await host.commandAt(1)).toMatchObject({ kind: 'propose' });
+    await act(async () => host.ack(host.sent[1], { result: proposal }));
+    await expect(proposed).resolves.toEqual({ ok: true, proposal });
+    expect(await host.commandAt(2)).toMatchObject({ kind: 'applyOps',
+      payload: { toolbar: { id: 'refreshProposals' } } });
+    await act(async () => host.ack(host.sent[2], { result: { proposals: [proposal] } }));
+    await act(async () => { await host.commands().execute('proposalsPanel', { open: true }); });
+    await host.commandAt(3);
+    await act(async () => host.ack(host.sent[3], { result: { proposals: [proposal] } }));
+    expect(view.getByText('Review this cell')).toBeDefined();
+    expect(await host.commands().execute('bold', null)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    const accepted = host.commands().execute('proposalAccept', { proposalId: proposal.id });
+    expect(await host.commandAt(4)).toMatchObject({ kind: 'acceptProposal', payload: { args: [proposal.id, {}] } });
+    await act(async () => host.ack(host.sent[4], { result: { applied: true }, paint: true }));
+    await expect(accepted).resolves.toMatchObject({ ok: true });
+    await host.commandAt(5);
+    await act(async () => host.ack(host.sent[5], { result: { proposals: [] } }));
+    expect(view.queryByText('Review this cell')).toBeNull();
+    expect(host.session.editState.readOnly).toBe(true);
   });
 
   it('read-only proposal panel loads proposals through a worker read command', async () => {

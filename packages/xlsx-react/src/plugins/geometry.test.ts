@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { DisplayList, GridMeta } from '@betteroffice/xlsx';
+import type { DisplayList, GridMeta, Proposal } from '@betteroffice/xlsx';
 import { positionAtPoint } from '../viewer/sessionGeometry';
 import type { XlsxPointPosition } from '../XlsxEditor.types';
 import { createPeerlessPluginGeometry } from './createPeerlessPluginDocument';
@@ -59,6 +59,55 @@ function painted(overrides: Partial<PaintedGrid> = {}): PaintedGrid {
 }
 
 describe('grid track geometry', () => {
+  test('peerless proposal anchors use the same snapshot and refuse replaced frames', () => {
+    const frame = painted();
+    let live: PaintedGrid | null = frame;
+    const geometry = createPeerlessPluginGeometry(pluginLayout(frame, 'v1')!, frame,
+      element(0, 0), element(0, 0), () => ({ version: 'v1', painted: live }),
+      () => ({ proposals: [{ id: 'p1', agentId: 'host', note: null,
+        cells: [{ sheet: 0, row: 0, col: 0, a1: 'A1', oldText: '', newText: '7' }] }],
+        sheetIndex: 0, previewVersion: 1 }));
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: true, anchor: { x: 0, y: 0, width: 128, height: 40 } });
+    live = null;
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  });
+
+  test('proposal anchors follow visible cells, zoom, scroll and sheet changes', () => {
+    const proposal: Proposal = { id: 'p1', agentId: 'agent', note: null, cells: [
+      { sheet: 0, row: 10, col: 4, a1: 'E11', oldText: '', newText: '7' },
+      { sheet: 0, row: 11, col: 5, a1: 'F12', oldText: '', newText: '8' },
+    ] };
+    let current = true;
+    let pending = false;
+    const create = (frame: PaintedGrid) => createPluginGeometry(pluginLayout(frame, 'v1')!, frame,
+      element(110, 60), element(100, 50), () => current,
+      () => pending ? null : { proposals: [proposal], sheetIndex: frame.sheetId === 'sheet:0' ? 0 : 1,
+        previewVersion: 2 });
+    const geometry = create(painted());
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' })).toMatchObject({ ok: true,
+      version: 'v1', previewVersion: 2, layoutId: geometry.layout.id,
+      rects: [{ x: 138, y: 90, width: 128, height: 40 }, { x: 266, y: 130, width: 128, height: 40 }],
+      anchor: { x: 138, y: 90, width: 256, height: 80 } });
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'missing' }))
+      .toMatchObject({ ok: false, failure: { code: 'unknown-proposal' } });
+    expect(create(painted({ zoom: 1 })).getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: true, anchor: { x: 74, y: 50, width: 128, height: 40 } });
+    expect(create(painted({ sheetId: 'sheet:1' })).getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    const scrolled = frozenFrame();
+    scrolled.grid!.rowIndices = [0, 1, 20, 21, 22];
+    expect(create(painted({ frame: scrolled })).getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    pending = true;
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'pending' } });
+    current = false;
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  });
+
   test('frozen extents count visible frozen tracks after hidden tracks are compacted', () => {
     const grid: GridMeta = {
       ...frozenFrame().grid!,
@@ -161,7 +210,7 @@ describe('overlay coordinates', () => {
     let projection = { version: 'v1', painted: frame };
     const layout = pluginLayout(frame, 'v1')!;
     const geometry = createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
-      () => projection, () => ({ sheet: 0, row: 1, col: 4 }));
+      () => projection, undefined, () => ({ sheet: 0, row: 1, col: 4 }));
     expect(geometry.getPositionAtPoint!(1, 1)).toEqual({
       sheet: 0, sheetId: 'sheet:0', row: 1, col: 4, version: 'v1', layoutId: layout.id,
     });
@@ -201,6 +250,7 @@ describe('overlay coordinates', () => {
       canvas,
       element(100, 50),
       () => current,
+      undefined,
       (clientX, clientY) => positionAtPoint(frame.frame, 0, canvas, clientX, clientY)
     );
     const cell = (row: number, col: number) =>
@@ -252,7 +302,7 @@ describe('overlay coordinates', () => {
     let answer: XlsxPointPosition | null = { sheet: 1, row: 2, col: 3 };
     let current = true;
     const calls: [number, number][] = [];
-    const geometry = createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current,
+    const geometry = createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current, undefined,
       (clientX, clientY) => {
         calls.push([clientX, clientY]);
         return answer;
