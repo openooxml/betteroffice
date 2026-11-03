@@ -11,8 +11,7 @@ import type {
   TextBoxPrimitive,
 } from '../index';
 import { initWasm, openPresentation, paintSlide, StaleProposalError } from '../index';
-import { engineKind } from './engine';
-import { PptxDocument, PptxRenderer } from './generated/pptx_wasm.js';
+import { PptxDocument, PptxRenderer } from './engine';
 
 const root = resolve(import.meta.dir, '../../../..');
 let handle: PresentationHandle;
@@ -77,7 +76,7 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 
 afterAll(() => handle.dispose());
 
-for (const fallback of [false, true]) test.skipIf(engineKind === 'native')(`failed ${fallback ? 'fallback ' : ''}font registration frees the renderer and document`, () => {
+for (const fallback of [false, true]) test(`failed ${fallback ? 'fallback ' : ''}font registration frees the renderer and document`, () => {
   const original = Object.assign(new Error('render resource limit exceeded: more than 256 font faces'), {
     name: 'PptxResourceLimitError', code: 'font-face-limit',
   });
