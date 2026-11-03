@@ -220,10 +220,12 @@ export function createDefaultFontPainter(
       let face = faces.get(key);
       if (!face) faces.set(key, face = { fontFamily, bold, italic, characters: new Set() });
       for (const character of command.text ?? '') face.characters.add(character);
-      if (/[\t\n\f\r]/.test(command.text ?? '')) face.characters.add(' ');
       if (command.numberFormat) face.characters.add('#');
       if (command.numberFormat?.general !== undefined) for (const character of '0123456789.-E+') face.characters.add(character);
       for (const part of command.numberFormat?.parts ?? []) for (const character of part.character) face.characters.add(character);
+    }
+    for (const face of faces.values()) {
+      if (['\t', '\n', '\f', '\r'].some((character) => face.characters.has(character))) face.characters.add(' ');
     }
     return faces;
   }

@@ -359,6 +359,11 @@ test('whitespace the canvas paints as a space requests the space character', asy
   await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [
     { op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: 'A\tA' } as TextCmd] });
   expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A\t ']);
+  await createDefaultFontPainter(decoder(), mock(() => {})).load({ width: 200, height: 100, commands: [{
+    op: 'text', fontFamily: 'Tahoma', bold: false, italic: false, text: '7',
+    numberFormat: { left: 0, width: 80, parts: [{ offset: 1, kind: 'fill', character: '\t' }] },
+  } as TextCmd] });
+  expect(remoteLoads.mock.calls.map((call) => (call[4] as { text?: string }).text)).toEqual(['A\t ', '7#\t ']);
 });
 
 test('a face the host registered under the family keeps the remote provider away', async () => {
