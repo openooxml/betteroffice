@@ -21,6 +21,7 @@ betteroffice-fonts-cjk-kr = { path = "crates/betteroffice-fonts-cjk-kr", version
 betteroffice-fonts-cjk-serif-sc = { path = "crates/betteroffice-fonts-cjk-serif-sc", version = "0.5.1" }
 betteroffice-fonts-cjk = { path = "crates/betteroffice-fonts-cjk", version = "0.5.1" }
 
+base-latin = { package = "betteroffice-base-latin", path = "crates/base-latin", version = "0.5.1" }
 betteroffice-fonts = { path = "crates/betteroffice-fonts", version = "0.5.1", default-features = false }
 quick-xml = "0.41"
 wasm-bindgen = "0.2"

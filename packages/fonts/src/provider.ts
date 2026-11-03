@@ -1,4 +1,5 @@
 import {
+  BASE_LATIN_FONTS,
   resolveBundledFamilyFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
@@ -9,15 +10,20 @@ import {
   type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
+import { knownCoverage } from './coverage';
 
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   /** Word measurement family; defaults to the requested family. */
   measureAs?: string;
   onlyIfPrimaryFails?: boolean;
+  /** @internal Base Latin characters the face is known to cover, as coverage bits. */
+  coverage?: string;
 };
 
 /** Structural provider contract keeps this package independent of the engine. */
 export interface BundledFontSource {
+  /** @internal */
+  resolveBaseLatin?(bold: boolean, italic: boolean): BundledFontLoader | undefined;
   resolve(
     family: string,
     bold: boolean,
@@ -66,12 +72,17 @@ export function fontProvider(
     const key = `${face.file}|${options?.measureAs ?? ''}|${options?.onlyIfPrimaryFails ?? false}`;
     let loader = loaders.get(key);
     if (loader === undefined) {
-      loader = Object.assign(() => loadBytes(face), options);
+      const coverage = knownCoverage(face.file);
+      loader = Object.assign(() => loadBytes(face), options, coverage === undefined ? undefined : { coverage });
       loaders.set(key, loader);
     }
     return loader;
   };
   return {
+    resolveBaseLatin(bold, italic) {
+      const face = BASE_LATIN_FONTS.find((face) => face.weight === (bold ? 700 : 400) && face.style === (italic ? 'italic' : 'normal'));
+      return face ? load(face) : undefined;
+    },
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
       return face ? load(face, { measureAs: face.family === 'Selawik' ? face.metricCompatWith : undefined }) : undefined;

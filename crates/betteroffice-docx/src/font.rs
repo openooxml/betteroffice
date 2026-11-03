@@ -258,6 +258,7 @@ fn text_requirement(run: &docx_layout::display_list::TextRunPrimitive) -> Option
         bold,
         italic,
         scripts: text_scripts(run),
+        characters: Default::default(),
     })
 }
 

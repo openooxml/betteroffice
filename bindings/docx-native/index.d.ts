@@ -13,6 +13,7 @@ export declare class EditSession {
   free(): void
   register_measure_font(bytes: Uint8Array): number
   decode_font(bytes: Uint8Array): Uint8Array
+  take_base_latin_miss(): boolean
   register_substitute_measure_font(base: number, requestedFamily: string): number
   clear_measure_fonts(): void
   measure_paragraph_json(input: string): string

@@ -267,6 +267,10 @@ impl EditSession {
         self.core.decode_font(bytes).map_err(JsValue::from)
     }
 
+    pub fn take_base_latin_miss(&self) -> bool {
+        self.core.take_base_latin_miss()
+    }
+
     /// Registers a measurement view of `base` carrying the vertical metrics
     /// and advance pitch Word measures `requested_family` with — for a face
     /// this host had to substitute. Returns `base` for a family whose metrics

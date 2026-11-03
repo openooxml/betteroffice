@@ -16,6 +16,7 @@ pub struct SerializerContext {
     now: String,
     rendered_page_breaks: Vec<bool>,
     chart_drawings: HashMap<String, String>,
+    group_drawings: HashMap<String, String>,
     warnings: Vec<String>,
     paragraph_replace_counts: BTreeMap<String, u32>,
     paragraph_ids: BTreeSet<u32>,
@@ -61,6 +62,7 @@ impl SerializerContext {
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
             chart_drawings: HashMap::new(),
+            group_drawings: HashMap::new(),
             warnings: Vec::new(),
             paragraph_replace_counts: BTreeMap::new(),
             paragraph_ids: BTreeSet::new(),
@@ -104,6 +106,16 @@ impl SerializerContext {
 
     pub(crate) fn chart_drawing(&self, relationship_id: &str) -> Option<&str> {
         self.chart_drawings.get(relationship_id).map(String::as_str)
+    }
+
+    /// Source `w:drawing` elements holding a group or canvas in one story part, keyed by
+    /// `wp:docPr` id; an id used by more than one drawing is left out.
+    pub fn set_group_drawings(&mut self, drawings: HashMap<String, String>) {
+        self.group_drawings = drawings;
+    }
+
+    pub(crate) fn group_drawing(&self, id: &str) -> Option<&str> {
+        self.group_drawings.get(id).map(String::as_str)
     }
 
     /// Records a non-fatal save diagnostic for the caller to report.

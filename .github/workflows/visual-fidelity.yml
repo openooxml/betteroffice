@@ -33,6 +33,11 @@ on:
         default: false
         required: false
         type: boolean
+      report_only:
+        description: Keep the results in this run's artifacts; never commit the README or publish renders
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
@@ -49,11 +54,15 @@ jobs:
   prepare:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    environment: &private-environment
+      name: "${{ inputs.private_corpus && 'private-corpus' || '' }}"
+      deployment: false
     timeout-minutes: 10
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
       runner-image: ${{ steps.runner.outputs.image }}
       formats: ${{ steps.plan.outputs.formats }}
+      measure-shards: ${{ steps.plan.outputs.measure-shards }}
       roundtrip-builds: ${{ steps.plan.outputs.roundtrip-builds }}
       roundtrip-shards-a: ${{ steps.plan.outputs.roundtrip-shards-a }}
       roundtrip-shards-b: ${{ steps.plan.outputs.roundtrip-shards-b }}
@@ -66,7 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ inputs.private_corpus && github.sha || inputs.branch }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -74,11 +83,23 @@ jobs:
         id: source
         env:
           TARGET_BRANCH: ${{ inputs.branch }}
+          PRIVATE_CORPUS: ${{ inputs.private_corpus }}
         run: |
-          git check-ref-format --branch "$TARGET_BRANCH"
           source_sha=$(git rev-parse HEAD)
-          remote_sha=$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | cut -f1)
-          test "$source_sha" = "$remote_sha"
+          if [ "$PRIVATE_CORPUS" = true ]; then
+            case "$TARGET_BRANCH" in
+              '' | main) ;;
+              *) echo "::error::Private corpus runs measure only main: the bucket keys never reach code from another branch"; exit 1 ;;
+            esac
+            if [ "$source_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::Private corpus runs measure only the main commit the workflow was dispatched from"
+              exit 1
+            fi
+          else
+            git check-ref-format --branch "$TARGET_BRANCH"
+            remote_sha=$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | cut -f1)
+            test "$source_sha" = "$remote_sha"
+          fi
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Keep custom-origin runs off the public render viewer
@@ -87,14 +108,21 @@ jobs:
           echo "::error::A custom corpus origin cannot publish renders: the public viewer reads references from the default corpus. Re-run with publish_renders off."
           exit 1
 
+      - name: Keep report-only runs off the public render viewer
+        if: inputs.report_only && inputs.publish_renders
+        run: |
+          echo "::error::A report-only run cannot publish renders. Re-run with publish_renders off."
+          exit 1
+
       - name: Keep private runs aggregate-only
         if: inputs.private_corpus
         env:
           SAMPLES_GIVEN: ${{ inputs.samples != '' }}
           PUBLISH_RENDERS: ${{ inputs.publish_renders }}
+          ORIGIN_GIVEN: ${{ inputs.corpus_origin != '' }}
         run: |
-          if [ "$SAMPLES_GIVEN" != false ] || [ "$PUBLISH_RENDERS" != false ]; then
-            echo "::error::Private corpus runs take a collection, not a samples list, and never publish renders"
+          if [ "$SAMPLES_GIVEN" != false ] || [ "$PUBLISH_RENDERS" != false ] || [ "$ORIGIN_GIVEN" != false ]; then
+            echo "::error::Private corpus runs take a collection from the private bucket, not a samples list or a corpus origin, and never publish renders"
             exit 1
           fi
 
@@ -112,11 +140,15 @@ jobs:
           QUALITY_SAMPLES: ${{ inputs.samples }}
           QUALITY_COLLECTION: ${{ inputs.collection }}
           QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-plan
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: |
           node scripts/office-quality/private-step.mjs plan -- node scripts/office-quality/plan.mjs
           node --input-type=module - <<'JS'
           import { appendFile, readFile } from 'node:fs/promises';
           import { docxShards } from './scripts/office-quality/docx-benchmark.mjs';
+          import { measureMatrix } from './scripts/office-quality/measure-shards.mjs';
           import { roundtripMatrices } from './scripts/office-quality/roundtrip.mjs';
           import { xlsxFidelityShards } from './scripts/office-quality/xlsx-fidelity.mjs';
           import { xlsxShards } from './scripts/office-quality/xlsx-benchmark.mjs';
@@ -128,6 +160,7 @@ jobs:
           await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-shards-b=${JSON.stringify(roundtripB)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-builds=${JSON.stringify(builds)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `formats=${JSON.stringify(plan.formats)}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `measure-shards=${JSON.stringify(measureMatrix(plan))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-shards=${JSON.stringify(docxShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-published-source=${plan.docx_published_source_sha ?? ''}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `xlsx-fidelity-shards=${JSON.stringify(xlsxFidelityShards(plan).map((_, index) => index))}\n`);
@@ -144,14 +177,30 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Keep the plan in the private bucket
+        if: inputs.private_corpus
+        env: &private-write
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_WRITE_KEY_ID: ${{ secrets.PRIVATE_R2_WRITE_KEY_ID }}
+          PRIVATE_R2_WRITE_SECRET: ${{ secrets.PRIVATE_R2_WRITE_SECRET }}
+        run: |
+          cd "$RUNNER_TEMP/fidelity-plan"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity-plan plan.json
+
+      - name: Keep the private logs
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-prepare private-logs
+
   measure:
     needs: prepare
     runs-on: ubuntu-24.04
+    environment: *private-environment
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        format: ${{ fromJSON(needs.prepare.outputs.formats) }}
+        include: ${{ fromJSON(needs.prepare.outputs.measure-shards) }}
     steps:
       - name: Require the planned runner image
         env:
@@ -169,9 +218,18 @@ jobs:
           persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: &private-read
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
 
       - name: Restore fidelity asset cache
         id: fidelity-cache
@@ -234,6 +292,8 @@ jobs:
           python -m pip install -r scripts/office-quality/requirements.txt
 
       - name: Check benchmark scripts
+        env:
+          QUALITY_PRIVATE: 'false'
         run: |
           bun test scripts/office-quality
           python -m unittest discover -s scripts/office-quality -p 'test_*.py'
@@ -242,8 +302,12 @@ jobs:
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_FORMAT: ${{ matrix.format }}
+          QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: .source/office-quality/ci
           QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs measure -- node scripts/office-quality/run.mjs
 
       - name: Compute fidelity asset cache digest
@@ -264,7 +328,7 @@ jobs:
         if: ${{ !inputs.private_corpus }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: visual-fidelity-report-${{ matrix.format }}
+          name: visual-fidelity-report-${{ matrix.format }}-${{ matrix.shard }}
           path: .source/office-quality/ci/report.json
           include-hidden-files: true
           if-no-files-found: error
@@ -274,7 +338,7 @@ jobs:
         if: inputs.publish_renders && inputs.corpus_origin == '' && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: visual-fidelity-renders-${{ matrix.format }}
+          name: visual-fidelity-renders-${{ matrix.format }}-${{ matrix.shard }}
           path: |
             .source/office-quality/ci/report.json
             .source/office-quality/ci/*/commit/page_*.png
@@ -282,6 +346,18 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$GITHUB_WORKSPACE/.source/office-quality/ci"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity-report-${{ matrix.format }}-${{ matrix.shard }} report.json
+
+      - name: Keep the private logs
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-measure-${{ matrix.format }}-${{ matrix.shard }} private-logs
 
   native-build:
     needs: prepare
@@ -400,6 +476,7 @@ jobs:
     needs: [prepare, native-build]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
     runs-on: ubuntu-24.04
+    environment: *private-environment
     timeout-minutes: 90
     env:
       SOFFICE: /opt/libreoffice26.2/program/soffice
@@ -423,9 +500,15 @@ jobs:
           persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -473,6 +556,9 @@ jobs:
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
           QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs docx-benchmark-stage -- node scripts/office-quality/docx-benchmark.mjs
 
       - name: Measure native CLI times and LibreOffice fidelity
@@ -502,6 +588,23 @@ jobs:
             ${{ runner.temp }}/docx-benchmark/*/lo-comparison/score.json
           compression-level: 0
           retention-days: 7
+
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/docx-benchmark"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put docx-benchmark-report-${{ matrix.shard }} report.json
+
+      - name: Keep the diagnostics and logs in the private bucket
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: |
+          shopt -s nullglob
+          if cd "$RUNNER_TEMP/docx-benchmark" 2>/dev/null; then
+            node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional docx-benchmark-diagnostics-${{ matrix.shard }} report.json ./*/timing/* ./*/libreoffice/* ./*/lo-comparison/score.json
+          fi
+          cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-docx-benchmark-${{ matrix.shard }} private-logs
 
   xlsx-native-build:
     needs: prepare
@@ -548,6 +651,7 @@ jobs:
     needs: [prepare, xlsx-native-build]
     if: needs.prepare.outputs.xlsx-shards != '[]'
     runs-on: ubuntu-24.04
+    environment: *private-environment
     timeout-minutes: 90
     env:
       SOFFICE: /opt/libreoffice26.2/program/soffice
@@ -570,9 +674,15 @@ jobs:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: xlsx-native-published
@@ -599,6 +709,9 @@ jobs:
           QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-benchmark
           QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs xlsx-benchmark-stage -- node scripts/office-quality/xlsx-benchmark.mjs
       - name: Measure calculation accuracy and native CLI times
         env:
@@ -621,6 +734,23 @@ jobs:
             ${{ runner.temp }}/xlsx-benchmark/report.json
             ${{ runner.temp }}/xlsx-benchmark/*/timing/**
           retention-days: 7
+
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/xlsx-benchmark"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put xlsx-benchmark-report-${{ matrix.shard }} report.json
+
+      - name: Keep the diagnostics and logs in the private bucket
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: |
+          shopt -s nullglob
+          if cd "$RUNNER_TEMP/xlsx-benchmark" 2>/dev/null; then
+            node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional xlsx-benchmark-diagnostics-${{ matrix.shard }} report.json ./*/timing
+          fi
+          cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-xlsx-benchmark-${{ matrix.shard }} private-logs
 
   pptx-native-build:
     needs: prepare
@@ -667,6 +797,7 @@ jobs:
     needs: [prepare, pptx-native-build]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
     runs-on: ubuntu-24.04
+    environment: *private-environment
     timeout-minutes: 90
     env:
       SOFFICE: /opt/libreoffice26.2/program/soffice
@@ -685,9 +816,15 @@ jobs:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: pptx-native-published
@@ -717,6 +854,9 @@ jobs:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/pptx-benchmark
           QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs pptx-benchmark-stage -- node scripts/office-quality/pptx-benchmark.mjs
       - name: Measure native slide render times and LibreOffice fidelity
         env:
@@ -744,10 +884,28 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/pptx-benchmark"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put pptx-benchmark-report report.json
+
+      - name: Keep the diagnostics and logs in the private bucket
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: |
+          shopt -s nullglob
+          if cd "$RUNNER_TEMP/pptx-benchmark" 2>/dev/null; then
+            node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional pptx-benchmark-diagnostics report.json ./*/timing/* ./*/libreoffice/* ./*/lo-comparison/score.json
+          fi
+          cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-pptx-benchmark private-logs
+
   xlsx-fidelity:
     needs: prepare
     if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
     runs-on: ubuntu-24.04
+    environment: *private-environment
     timeout-minutes: 90
     env:
       SOFFICE: /opt/libreoffice26.2/program/soffice
@@ -770,9 +928,15 @@ jobs:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24"
@@ -794,6 +958,9 @@ jobs:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-fidelity
           QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs xlsx-fidelity-stage -- node scripts/office-quality/xlsx-fidelity.mjs
       - name: Measure LibreOffice XLSX range fidelity
         env:
@@ -818,6 +985,23 @@ jobs:
             ${{ runner.temp }}/xlsx-fidelity/*/lo-comparison/score.json
           compression-level: 0
           retention-days: 7
+
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/xlsx-fidelity"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put xlsx-fidelity-report-${{ matrix.shard }} report.json
+
+      - name: Keep the diagnostics and logs in the private bucket
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: |
+          shopt -s nullglob
+          if cd "$RUNNER_TEMP/xlsx-fidelity" 2>/dev/null; then
+            node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional xlsx-fidelity-diagnostics-${{ matrix.shard }} report.json ./*/libreoffice ./*/lo-comparison/score.json
+          fi
+          cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-xlsx-fidelity-${{ matrix.shard }} private-logs
 
   roundtrip-build:
     needs: prepare
@@ -862,6 +1046,7 @@ jobs:
   roundtrip-a:
     needs: [prepare, roundtrip-build]
     runs-on: ubuntu-24.04
+    environment: *private-environment
     timeout-minutes: 90
     env: &roundtrip-env
       SOFFICE: /opt/libreoffice26.2/program/soffice
@@ -885,9 +1070,15 @@ jobs:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: roundtrip-native-${{ matrix.format }}-published
@@ -912,6 +1103,9 @@ jobs:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/roundtrip
           QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && format('{0}/fidelity-assets', runner.temp) || '' }}
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs roundtrip-stage -- node scripts/office-quality/roundtrip.mjs
       - name: Measure parsing and preservation after an edit
         env:
@@ -944,10 +1138,28 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/roundtrip"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put roundtrip-report-${{ matrix.format }}-${{ matrix.shard }} report.json
+
+      - name: Keep the diagnostics and logs in the private bucket
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: |
+          shopt -s nullglob
+          if cd "$RUNNER_TEMP/roundtrip" 2>/dev/null; then
+            node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional roundtrip-diagnostics-${{ matrix.format }}-${{ matrix.shard }} report.json ./*/probe.json ./*/published/* ./*/commit/* ./*/libreoffice/source.* ./*/libreoffice/*.json ./*/libreoffice/*.log
+          fi
+          cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-roundtrip-${{ matrix.format }}-${{ matrix.shard }} private-logs
+
   roundtrip-b:
     needs: [prepare, roundtrip-build]
     if: needs.prepare.outputs.roundtrip-shards-b != '[]'
     runs-on: ubuntu-24.04
+    environment: *private-environment
     timeout-minutes: 90
     env: *roundtrip-env
     strategy:
@@ -967,11 +1179,12 @@ jobs:
       (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success') &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') || needs.xlsx-fidelity.result == 'success')
     runs-on: ubuntu-latest
+    environment: *private-environment
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ inputs.private_corpus && needs.prepare.outputs.source-sha || inputs.branch }}
           persist-credentials: false
 
       - name: Require the measured branch head
@@ -984,74 +1197,70 @@ jobs:
           node-version: "24"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
-        with:
-          name: visual-fidelity-report-docx
-          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-docx
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
+        if: ${{ !inputs.private_corpus }}
         with:
-          name: visual-fidelity-report-pptx
-          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-pptx
+          pattern: visual-fidelity-report-*
+          path: ${{ runner.temp }}/fidelity-parts
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
+        if: inputs.publish_renders && inputs.corpus_origin == ''
         with:
-          name: visual-fidelity-report-xlsx
-          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-xlsx
+          pattern: visual-fidelity-renders-*
+          path: ${{ runner.temp }}/fidelity-parts
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: inputs.publish_renders && inputs.corpus_origin == '' && contains(fromJSON(needs.prepare.outputs.formats), 'docx')
-        with:
-          name: visual-fidelity-renders-docx
-          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-docx
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: inputs.publish_renders && inputs.corpus_origin == '' && contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
-        with:
-          name: visual-fidelity-renders-pptx
-          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-pptx
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: inputs.publish_renders && inputs.corpus_origin == '' && contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
-        with:
-          name: visual-fidelity-renders-xlsx
-          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-xlsx
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
+        if: ${{ !inputs.private_corpus && contains(fromJSON(needs.prepare.outputs.formats), 'docx') }}
         with:
           pattern: docx-benchmark-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: needs.prepare.outputs.xlsx-shards != '[]'
+        if: ${{ !inputs.private_corpus && needs.prepare.outputs.xlsx-shards != '[]' }}
         with:
           pattern: xlsx-benchmark-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
+        if: ${{ !inputs.private_corpus && contains(fromJSON(needs.prepare.outputs.formats), 'pptx') }}
         with:
           name: pptx-benchmark-report
           path: ${{ runner.temp }}/fidelity-parts/pptx-benchmark-report
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
+        if: ${{ !inputs.private_corpus && contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') }}
         with:
           pattern: xlsx-fidelity-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ !inputs.private_corpus }}
         with:
           pattern: roundtrip-report-*
           path: ${{ runner.temp }}/fidelity-parts
+
+      - name: Fetch the format reports from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: |
+          store=scripts/office-quality/private-store.mjs
+          parts="$RUNNER_TEMP/fidelity-parts"
+          node "$store" get 'visual-fidelity-report-*' "$parts"
+          if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'docx') }}; then node "$store" get 'docx-benchmark-report-*' "$parts"; fi
+          if ${{ needs.prepare.outputs.xlsx-shards != '[]' }}; then node "$store" get 'xlsx-benchmark-report-*' "$parts"; fi
+          if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'pptx') }}; then node "$store" get pptx-benchmark-report "$parts/pptx-benchmark-report"; fi
+          if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') }}; then node "$store" get 'xlsx-fidelity-report-*' "$parts"; fi
+          node "$store" get 'roundtrip-report-*' "$parts"
 
       - name: Reconcile the format reports
         env:
@@ -1075,6 +1284,7 @@ jobs:
           path: |
             ${{ runner.temp }}/fidelity-report/report.json
             ${{ runner.temp }}/fidelity-report/section.md
+            ${{ runner.temp }}/fidelity-report/aggregate.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1082,9 +1292,23 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: visual-fidelity
-          path: ${{ runner.temp }}/fidelity-report/section.md
+          path: |
+            ${{ runner.temp }}/fidelity-report/section.md
+            ${{ runner.temp }}/fidelity-report/aggregate.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Keep the reconciled report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/fidelity-report"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put visual-fidelity report.json section.md aggregate.json
+
+      - name: Keep the private logs
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-publish private-logs
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: inputs.publish_renders && inputs.corpus_origin == '' && !inputs.private_corpus && github.repository == 'openooxml/betteroffice'
@@ -1101,7 +1325,7 @@ jobs:
         run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
-        if: ${{ !inputs.private_corpus }}
+        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
         run: |
           python3 - <<'PY'
           import os
@@ -1124,7 +1348,7 @@ jobs:
 
       - name: Detect a changed report
         id: changed
-        if: ${{ !inputs.private_corpus }}
+        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
         run: |
           if git diff --quiet -- README.md; then
             echo "value=false" >> "$GITHUB_OUTPUT"
