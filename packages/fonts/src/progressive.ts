@@ -85,7 +85,6 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
   const listeners = new Set<(revision: number) => void>();
   let revision = 1;
   let dirty = false;
-  let current: ArrayBuffer | undefined;
   const install = (bytes: Uint8Array) => {
     for (const [glyph, outline] of chunkEntries(bytes)) outlines.set(glyph, outline);
   };
@@ -115,7 +114,6 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     if (!dirty) return revision;
     dirty = false;
     revision += 1;
-    current = undefined;
     for (const listener of [...listeners]) listener(revision);
     return revision;
   };
@@ -135,8 +133,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       return revision;
     },
     bytes() {
-      current ??= skeleton.reassemble(outlines);
-      return current.slice(0);
+      return skeleton.reassemble(outlines);
     },
     ensureGlyphs(glyphIds) {
       const chunks: number[] = [];
