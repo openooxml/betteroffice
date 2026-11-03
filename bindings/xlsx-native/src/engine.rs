@@ -57,6 +57,7 @@ fn enter_object(failure: &Failure, env: Env) -> Result<()> {
 }
 
 struct EngineCall {
+    env: Env,
     previous: Option<Env>,
     previous_object: *const Failure,
     budget: bool,
@@ -76,6 +77,7 @@ impl EngineCall {
 
     fn enter(env: Env, budget: bool) -> Self {
         Self {
+            env,
             previous: CURRENT_ENV.replace(Some(env)),
             previous_object: CURRENT_OBJECT.replace(std::ptr::null()),
             budget,
@@ -102,6 +104,9 @@ impl Drop for EngineCall {
             }
         }
         if failing {
+            let mut exception = std::ptr::null_mut();
+            // SAFETY: the env belongs to the call that is ending on this thread.
+            unsafe { napi::sys::napi_get_and_clear_last_exception(self.env.raw(), &mut exception) };
             crate::memory::release_to_os();
         }
         if failing && !unwinding {
