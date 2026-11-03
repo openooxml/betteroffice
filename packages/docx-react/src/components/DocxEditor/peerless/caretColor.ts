@@ -36,6 +36,15 @@ function covers(box: { x: number; y: number; w: number; h: number }, x: number, 
   return x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h;
 }
 
+function clipped(primitive: DisplayPrimitive, x: number, y: number): boolean {
+  const group = primitive.clipGroup;
+  if (group?.opacity !== undefined && group.opacity < 0.5) return true;
+  const clip = group?.clip;
+  if (!clip) return false;
+  if (clip.x !== undefined && (x < clip.x || (clip.w !== undefined && x >= clip.x + clip.w))) return true;
+  return clip.y !== undefined && (y < clip.y || (clip.h !== undefined && y >= clip.y + clip.h));
+}
+
 function* paintOrder(page: DisplayPage): Generator<DisplayPrimitive> {
   const watermarks = Math.min(page.watermarkPrimitiveCount ?? 0, page.primitives.length);
   yield* page.primitives.slice(0, watermarks);
@@ -54,8 +63,9 @@ function runExtent(run: GlyphRunPrimitive): { left: number; right: number; basel
 
 /**
  * Caret paint colour for a page-local caret rect: the colour of the text the
- * caret sits in, as long as it reads against the fill under the caret; else
- * black or white by that fill (the page is white when nothing is painted).
+ * caret sits in, unless a known solid fill under the caret would hide it; then
+ * black or white by that fill. Shapes and images make the fill unknown, and the
+ * text colour is trusted there.
  */
 export function peerlessCaretColor(page: DisplayPage | undefined, caret: DocxEchoRect): string {
   if (!page) return '#000';
@@ -63,13 +73,23 @@ export function peerlessCaretColor(page: DisplayPage | undefined, caret: DocxEch
   const y = caret.y + caret.height / 2;
   const paintX = caret.x + Math.max(1, caret.width) / 2;
   let fill: Rgb = parseColor(page.background) ?? WHITE;
+  let known = true;
   let before: GlyphRunPrimitive | undefined;
   let after: GlyphRunPrimitive | undefined;
+  const paint = (value: string | undefined) => {
+    const color = parseColor(value);
+    if (color) {
+      fill = color;
+      known = true;
+    } else if (value && !/^(transparent|none|#|rgba?\()/i.test(value.trim())) known = false;
+  };
   for (const primitive of paintOrder(page)) {
     if (primitive.kind === 'rect') {
-      if ((primitive.opacity ?? 1) >= 0.5 && covers(primitive, paintX, y)) fill = parseColor(primitive.fill) ?? fill;
+      if ((primitive.opacity ?? 1) >= 0.5 && covers(primitive, paintX, y) && !clipped(primitive, paintX, y)) paint(primitive.fill);
     } else if (primitive.kind === 'decoration') {
-      if (primitive.deco === 'highlight' && covers(primitive, paintX, y)) fill = parseColor(primitive.color) ?? fill;
+      if (primitive.deco === 'highlight' && covers(primitive, paintX, y) && !clipped(primitive, paintX, y)) paint(primitive.color);
+    } else if (primitive.kind === 'shape' || primitive.kind === 'image') {
+      if (covers(primitive, paintX, y) && !clipped(primitive, paintX, y)) known = false;
     } else if (primitive.kind === 'glyphRun' && !primitive.listMarker && !primitive.hidden) {
       const extent = runExtent(primitive);
       if (!extent || extent.baseline < caret.y || extent.baseline > caret.y + caret.height) continue;
@@ -80,6 +100,6 @@ export function peerlessCaretColor(page: DisplayPage | undefined, caret: DocxEch
   }
   const run = before ?? after;
   const text = parseColor(run?.color);
-  if (run && text && contrast(text, fill) >= 2) return run.color;
+  if (run && text && (!known || contrast(text, fill) >= 2)) return run.color;
   return luminance(fill) < 0.18 ? '#fff' : '#000';
 }

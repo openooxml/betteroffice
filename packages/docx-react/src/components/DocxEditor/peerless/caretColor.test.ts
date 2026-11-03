@@ -71,3 +71,24 @@ test('a dark page background gives a light caret', () => {
   expect(peerlessCaretColor({ ...page(), background: '#101010' } as DisplayPage, caret)).toBe('#fff');
   expect(peerlessCaretColor({ ...page(run('#e0e0e0', 100, 160)), background: '#101010' } as DisplayPage, caret)).toBe('#e0e0e0');
 });
+
+test('a highlight clipped away from the caret does not colour it', () => {
+  const highlight = { kind: 'decoration', deco: 'highlight', x: 60, y: 98, w: 100, h: 22, color: '#000080',
+    clipGroup: { clip: { x: 140, y: 0, w: 200, h: 400 } } } as DisplayPrimitive;
+  expect(peerlessCaretColor(page(highlight, run('#ffffff', 100, 160)), caret)).toBe('#000');
+});
+
+test('text over a shape or image keeps its own colour', () => {
+  const shape = { kind: 'shape', x: 90, y: 90, w: 200, h: 40 } as DisplayPrimitive;
+  expect(peerlessCaretColor(page(shape, run('#ffffff', 100, 160)), caret)).toBe('#ffffff');
+  const image = { kind: 'image', x: 90, y: 90, w: 200, h: 40 } as DisplayPrimitive;
+  expect(peerlessCaretColor(page(image, run('#ffffff', 100, 160)), caret)).toBe('#ffffff');
+  const cover = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: '#ffffff' } as DisplayPrimitive;
+  expect(peerlessCaretColor(page(shape, cover, run('#ffffff', 100, 160)), caret)).toBe('#000');
+});
+
+test('transparent and translucent fills are ignored', () => {
+  const clear = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: 'transparent' } as DisplayPrimitive;
+  const faint = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: 'rgba(0, 0, 0, 0.1)' } as DisplayPrimitive;
+  expect(peerlessCaretColor(page(clear, faint, run('#ffffff', 100, 160)), caret)).toBe('#000');
+});
