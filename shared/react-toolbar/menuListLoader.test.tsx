@@ -1,12 +1,13 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
+import { useLayoutEffect } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { ContextMenu } from './ContextMenu';
 import { OverflowMenu } from './OverflowMenu';
-import { loadedMenuList, menuListLoader, preloadMenuList, resetMenuList } from './menuListLoader';
+import { loadedMenuList, loadMenuList, menuListLoader, preloadMenuList, resetMenuList } from './menuListLoader';
 
 const { act, cleanup, fireEvent, render, screen } = await import('@testing-library/react');
 
@@ -122,6 +123,49 @@ test('dismissal keys reach a pending menu even when the focused editor stops the
   finish();
   await settle();
   expect(screen.queryByRole('menu')).toBeNull();
+});
+
+test('a list that loads after a menu renders but before its effect still shows the menu', async () => {
+  const component = await original();
+  menuListLoader.load = () => ({
+    then: (loaded: (value: typeof component) => unknown) => Promise.resolve(loaded(component)),
+  }) as unknown as Promise<typeof component>;
+  function LoadDuringCommit() {
+    useLayoutEffect(() => { void loadMenuList(); }, []);
+    return null;
+  }
+  render(<div>
+    <ContextMenu label="Actions" entries={entries} point={{ x: 1, y: 1 }} onClose={() => {}} />
+    <LoadDuringCommit />
+  </div>);
+  await settle();
+  expect(screen.getByRole('menu', { name: 'Actions' })).toBeDefined();
+});
+
+test('while a menu waits for its list, other keys never reach the page, and they do again once it has loaded', async () => {
+  for (const kind of ['overflow', 'context'] as const) {
+    resetMenuList();
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    menuListLoader.load = () => held.then(original);
+    const reached: string[] = [];
+    const view = render(<div>
+      <input aria-label="Stage" onKeyDown={(event) => { reached.push(event.key); }} />
+      {kind === 'overflow' ? <OverflowMenu label="More" trigger="More" entries={entries} testId="more" />
+        : <ContextMenu label="Actions" entries={entries} point={{ x: 1, y: 1 }} onClose={() => {}} />}
+    </div>);
+    if (kind === 'overflow') fireEvent.click(screen.getByTestId('more'));
+    await settle();
+    const stage = screen.getByLabelText('Stage');
+    const blocked = fireEvent.keyDown(stage, { key: 'Delete', cancelable: true });
+    expect([kind, blocked, reached]).toEqual([kind, false, []]);
+    finish();
+    await settle();
+    expect(screen.getByRole('menu')).toBeDefined();
+    fireEvent.keyDown(stage, { key: 'Delete' });
+    expect([kind, reached]).toEqual([kind, ['Delete']]);
+    view.unmount();
+  }
 });
 
 test('a cancelled idle preload loads nothing', async () => {
