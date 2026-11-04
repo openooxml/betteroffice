@@ -55,8 +55,8 @@ test('table cell shapes colour the caret background', () => {
 test('a gradient fill trusts the run colour, wherever the caret sits on it', () => {
   const gradient = { kind: 'gradient', gradientType: 'linear', angleDeg: 0, stops: [{ position: 0, color: '#000000' }, { position: 0.6, color: '#eeeeee' }, { position: 0.8, color: '#f8f8f8' }, { position: 1, color: '#ffffff' }] } satisfies Paint;
   const box = { kind: 'shape', objectId: 1, x: 100, y: 80, w: 300, h: 80, name: 'Box', geometry: 'rect', path: [], fill: gradient } as SlidePrimitive;
-  expect(pptxCaretColors(slide([box]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret)).toEqual({ color: '#ffffff', background: '#000000' });
-  expect(pptxCaretColors(slide([], gradient), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff' });
+  expect(pptxCaretColors(slide([box]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret)).toEqual({ color: '#ffffff', background: '#000000', halo: '#000000' });
+  expect(pptxCaretColors(slide([], gradient), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff', halo: '#ffffff' });
 });
 
 test('rotated or non-rectangular shapes and images make the fill unknown, so the run colour is trusted', () => {
@@ -76,4 +76,16 @@ test('an empty line over a shape of unknown extent reads against the last known 
   expect(pptxCaretColors(slide([rotated], dark), line(), 0, caret).color).toBe('#ffffff');
   const ellipse = { ...shape('#000000'), geometry: 'ellipse' } as SlidePrimitive;
   expect(pptxCaretColors(slide([ellipse]), line(), 0, caret).color).toBe('#000000');
+});
+
+test('an empty line over an unknown fill gets a haloed caret, in the insertion colour when known', () => {
+  const ellipse = { ...shape('#000000'), geometry: 'ellipse' } as SlidePrimitive;
+  expect(pptxCaretColors(slide([ellipse]), line(), 0, caret)).toEqual({ color: '#000000', background: '#ffffff', halo: '#ffffff' });
+  expect(pptxCaretColors(slide([ellipse]), line(), 0, caret, '#ffffff')).toEqual({ color: '#ffffff', background: '#000000', halo: '#000000' });
+  expect(pptxCaretColors(slide([]), line(), 0, caret, '#c00000')).toEqual({ color: '#c00000', background: '#ffffff' });
+  expect(pptxCaretColors(slide([], { kind: 'solid', color: '#000000' }), line(), 0, caret, '#000000').color).toBe('#ffffff');
+});
+
+test('a known solid fill never gets a halo', () => {
+  expect(pptxCaretColors(slide([shape('#202020')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).halo).toBeUndefined();
 });

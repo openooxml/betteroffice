@@ -243,7 +243,8 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
   const height = Math.max(1, (view.caret?.height ?? 1) * scale);
   const preedit = view.composition?.text && !view.echo && view.caret ? pptxCaretColors(view.confirmed?.displayList,
     (view.activeLine ?? (view.confirmed ? findLine(indexGeometry(view.confirmed.displayList), view.selection) : null))?.line,
-    view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret) : null;
+    view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret,
+    view.editState?.toolbar?.formatting?.color) : null;
   return <>
     {preedit && <span data-testid="pptx-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', color: preedit.color, borderBottom: '1px solid currentColor', background: preedit.background, pointerEvents: 'none' }}>{view.composition?.text}</span>}
     <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{view.selection && view.selection.anchor !== view.selection.focus ? selectionAnnouncement : ''}</span>

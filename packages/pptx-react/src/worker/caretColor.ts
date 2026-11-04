@@ -71,13 +71,16 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
 }
 
 /**
- * Caret colours at a slide-space caret rect: the fill under the caret, and the
- * colour of the run the caret sits in as long as it reads against a known
- * solid fill; else black or white by the fill. Over a gradient, an image or a
- * shape whose painted area is not its box, the run colour is trusted.
+ * Caret colours at a slide-space caret rect: the colour of the text at the
+ * caret (its run, or the insertion colour on an empty line), as long as it
+ * reads against a known solid fill; else black or white by that fill. Over a
+ * gradient, an image or a shape whose painted area is not its box, the fill is
+ * unknown: the text colour is used as is and `halo` gives the caret a
+ * contrasting outline, so it shows on whatever is painted there.
  */
 export function pptxCaretColors(list: SlideDisplayList | null | undefined, line: PositionedTextLine | null | undefined,
-  position: number | null | undefined, caret: CommandRect | null | undefined): { color: string; background: string } {
+  position: number | null | undefined, caret: CommandRect | null | undefined,
+  insertion?: string | null): { color: string; background: string; halo?: string } {
   let under: Fill = fillOf(list?.background) ?? { color: parseColor(WHITE)!, solid: true };
   if (list && caret) under = fillAt(list.primitives, [], caret.x + caret.width / 2, caret.y + caret.height / 2, under);
   const fill = under.color;
@@ -85,9 +88,15 @@ export function pptxCaretColors(list: SlideDisplayList | null | undefined, line:
   const run = position === null || position === undefined ? undefined
     : runs.find((candidate) => candidate.start < position && position <= candidate.end)
       ?? runs.find((candidate) => candidate.start <= position && position <= candidate.end);
-  const text = parseColor(run?.color);
-  if (run && text && !under.solid) return { color: run.color, background: luminance(text) < 0.18 ? WHITE : '#000000' };
+  const textColor = run?.color ?? insertion ?? undefined;
+  const text = parseColor(textColor);
+  const fallback = luminance(fill) < 0.18 ? WHITE : '#000000';
+  if (!under.solid) {
+    const color = text ? textColor! : fallback;
+    const opposite = luminance(text ?? parseColor(color)!) < 0.18 ? WHITE : '#000000';
+    return { color, background: opposite, halo: opposite };
+  }
   const background = hex(fill);
-  if (run && text && contrast(text, fill) >= 2) return { color: run.color, background };
-  return { color: luminance(fill) < 0.18 ? WHITE : '#000000', background };
+  if (text && contrast(text, fill) >= 2) return { color: textColor!, background };
+  return { color: fallback, background };
 }

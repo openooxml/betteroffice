@@ -175,7 +175,8 @@ export function createLocalEchoPainter(
         const left = measure(start);
         const right = measure(start + view.composition.text.length);
         ctx.fillStyle = pptxCaretColors(view.confirmed?.displayList, active.line,
-          view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret).color;
+          view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret,
+          view.editState?.toolbar?.formatting?.color).color;
         ctx.fillRect(active.line.x + Math.min(left, right), active.line.baseline + 2,
           Math.abs(right - left), 1);
       }
