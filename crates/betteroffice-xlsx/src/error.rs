@@ -26,6 +26,12 @@ pub enum Error {
     },
     NotCollaborative,
     CollaborativeStructureOperation,
+    /// A collaborative `AddSheet` anywhere but the end of the workbook.
+    CollaborativeSheetPosition,
+    /// An undo that would remove an added sheet still holding anything the add
+    /// did not write, such as another collaborator's edit. The workbook is
+    /// unchanged and the next undo reaches the step before it.
+    CollaborativeUndoRefused,
     CollaborativeStructureChanged,
     Spreadsheet(xlsx_parse::ParseError),
     Operation(xlsx_ops::OpError),
@@ -107,6 +113,12 @@ impl fmt::Display for Error {
             }
             Self::CollaborativeStructureOperation => {
                 f.write_str("structural operations are unavailable in collaborative mode")
+            }
+            Self::CollaborativeSheetPosition => {
+                f.write_str("collaborative sheets can only be added at the end of the workbook")
+            }
+            Self::CollaborativeUndoRefused => {
+                f.write_str("undo would remove a sheet that holds collaborators' edits")
             }
             Self::CollaborativeStructureChanged => {
                 f.write_str("remote update changes the frozen workbook structure")

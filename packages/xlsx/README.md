@@ -139,10 +139,15 @@ to a binary transport. See the [collaboration guide](https://docs.betteroffice.d
 for provider lifecycle, transport setup, and shared starting state.
 
 Open the workbook with `openWorkbook(bytes, { collaborative: true })`. Collaborative workbooks
-synchronize cell content, formulas, styles, column widths and row heights, with local undo and
-redo whose effects synchronize.
-Structural edits throw: inserting or deleting rows and columns, adding, removing, moving or renaming
-sheets, and changing charts or defined names.
+synchronize cell content, formulas, styles, column widths and row heights, row and column
+visibility, freeze panes, merged cells, single hyperlinks, chart positions and sheets added at the
+end, with local undo and redo whose effects synchronize.
+
+Other structural edits are refused without changing the workbook: `applyOps` throws and editor
+sessions report the command as refused with reason `unsupported`. That covers inserting or deleting
+rows and columns, adding a sheet anywhere but the end, removing, moving or renaming sheets,
+conditional formats, auto filters, defined names and chart edits beyond moving a chart. See the
+[collaboration guide](https://docs.betteroffice.dev/docs/collaboration#xlsx-limits) for the reasons.
 
 ## Operation profiles
 

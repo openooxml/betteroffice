@@ -838,7 +838,7 @@ impl SnapshotValidation {
             let fingerprint = string(&fingerprint)?;
             let candidate = base
                 .fingerprints
-                .get(&self.version)
+                .get(&self.version.min(FINGERPRINT_SCHEMA_VERSION))
                 .and_then(|values| values.get(self.metadata_child))
                 .ok_or_else(invalid)?;
             allowance(128, budget, &mut self.unit_bytes)?;
@@ -1251,7 +1251,7 @@ impl SnapshotValidation {
                 }
                 if (required.len() + 4..=required.len() + 5).contains(&self.field) {
                     let columns = self.field == required.len() + 4;
-                    if let Some(hidden) = (self.version < SCHEMA_VERSION)
+                    if let Some(hidden) = (self.version < CHARTS_SCHEMA_VERSION)
                         .then(|| {
                             base.hidden_dimensions
                                 .get(base_sheet_index(&key).unwrap_or(usize::MAX))
@@ -1481,7 +1481,7 @@ impl SnapshotValidation {
                                             )
                                             .map_err(SnapshotError::new)?;
                                         } else if key.starts_with(HYPERLINK_PREFIX) {
-                                            if self.version < SCHEMA_VERSION {
+                                            if self.version < CHARTS_SCHEMA_VERSION {
                                                 return Err(invalid());
                                             }
                                             if !self.collect_hyperlink_edit(
@@ -1792,7 +1792,7 @@ impl SnapshotValidation {
                         let actual = child
                             .get(&txn, &index.to_string())
                             .and_then(|value| value.cast::<f64>().ok());
-                        let fallback = if self.version < SCHEMA_VERSION {
+                        let fallback = if self.version < CHARTS_SCHEMA_VERSION {
                             base.hidden_dimensions
                                 .get(
                                     base_sheet_index(

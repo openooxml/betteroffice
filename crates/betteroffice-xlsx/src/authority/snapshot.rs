@@ -4359,7 +4359,8 @@ mod tests {
             let budget = SnapshotBudget::new(100, usize::MAX).unwrap();
             let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
             let mut header = header(&a, &encoder, budget);
-            assert_eq!(header.chunk_count(ChunkKind::Yrs), 1);
+            assert!(header.chunk_count(ChunkKind::Yrs) >= 1);
+            header.chunk_counts[ChunkKind::Yrs as usize - 1] = 1;
             header.state_vector = StateVector::default().encode_v1();
             let mut hydrator = AuthorityHydrator::new(&header).unwrap();
             while let Some(chunk) = encoder.next(budget).unwrap() {

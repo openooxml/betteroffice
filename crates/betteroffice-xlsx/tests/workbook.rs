@@ -4518,10 +4518,20 @@ fn collaboration_vectors_diffs_and_deterministic_baseline_handshake() {
         left.encode_state_as_update_v1(),
         right.encode_state_as_update_v1()
     );
-    assert_eq!(
-        left.encode_diff_v1(&right.encode_state_vector_v1())
-            .unwrap(),
-        &[0, 0]
+    let unchanged = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    assert!(
+        YrsUpdate::decode_v1(&unchanged)
+            .unwrap()
+            .state_vector()
+            .is_empty()
+    );
+    assert!(
+        !right
+            .apply_update_v1(&unchanged, CalculationOptions::default())
+            .unwrap()
+            .applied
     );
 
     left.edit_cell(SheetId(0), cell("A1"), "21", CalculationOptions::default())
@@ -5883,10 +5893,6 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             at: 0,
             count: 1,
         },
-        Op::AddSheet {
-            index: 1,
-            name: "Added".into(),
-        },
         Op::RemoveSheet { index: 1 },
         Op::RenameSheet {
             sheet: SheetId(0),
@@ -5900,6 +5906,18 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
     ];
     let model = workbook.model().clone();
     let state = workbook.encode_state_as_update_v1();
+    assert!(matches!(
+        workbook.apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Added".into(),
+            }],
+            CalculationOptions::default(),
+        ),
+        Err(Error::CollaborativeSheetPosition)
+    ));
+    assert_eq!(workbook.model(), &model);
+    assert_eq!(workbook.encode_state_as_update_v1(), state);
     for op in structural_ops {
         assert!(matches!(
             workbook.apply_ops(vec![op], CalculationOptions::default()),

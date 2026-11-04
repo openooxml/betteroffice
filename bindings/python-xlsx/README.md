@@ -246,10 +246,12 @@ whole-table replacements `setCharts`, `setConditionalFormats` and
 `capture_format` and `apply_format` mirror the TypeScript handle's methods of
 the same names, with the same arguments. Formulas that depend on moved cells
 are rewritten and recalculated. A collaborative workbook accepts freeze panes,
-merges and single-range hyperlinks, and refuses the other structural ops (row and
-column inserts and deletes, sheet changes, conditional formats, filters, charts
-and defined names) with `CollaborativeStructureError`. An op the engine refuses
-raises `OperationError`; both carry the message TypeScript throws.
+merges, single-range hyperlinks and sheets added at the end, and refuses the other
+structural ops (row and column inserts and deletes, other sheet changes,
+conditional formats, filters, charts and defined names) with
+`CollaborativeStructureError`. `undo` raises it too when undoing an added sheet
+would remove another collaborator's edits. An op the engine refuses raises
+`OperationError`; both carry the message TypeScript throws.
 
 ## Reading without recalculating
 

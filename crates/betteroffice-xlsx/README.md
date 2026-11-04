@@ -98,9 +98,11 @@ right.apply_update_v1(&update, CalculationOptions::default())?;
 Incoming updates cap at 64 MiB, state vectors at 65,536 client entries, and
 4,096 unresolved updates. Updates stage on a separate Yrs document before they
 can touch the live workbook. Sheet and nested shared maps are frozen by logical
-identity, so replacing one is rejected even when its visible contents match.
+identity, so replacing one is rejected even when its visible contents match. The
+one structural change accepted is a sheet joining or leaving the end of the
+workbook; undoing and redoing an added sheet replaces its map.
 
-Only the nonstructural schema this library emits is accepted. Use authenticated,
+Only the schema this library emits is accepted. Use authenticated,
 authorized transports: the byte and collection limits reduce resource exposure,
 they do not make hostile Yrs `Any` payloads safe.
 
@@ -153,8 +155,9 @@ writes back.
 
 Standalone and collaborative workbooks support cell content, formatting, row
 heights, column widths, edit batches, structured export and proposals.
-Collaborative replicas exchange Yrs updates and track local user edits for undo.
-Standalone workbooks additionally support structural edits and remap chart
-references and anchors.
+Collaborative replicas exchange Yrs updates and track local user edits for undo,
+and can merge cells, freeze panes and add sheets at the end of the workbook.
+Standalone workbooks additionally support the other structural edits and remap
+chart references and anchors.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
