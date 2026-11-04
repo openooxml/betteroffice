@@ -890,6 +890,7 @@ fn paragraph_writes(
                         };
                         if !unchanged {
                             write.properties.strike = None;
+                            write.clear_strike = true;
                         }
                     }
                     write
@@ -903,6 +904,7 @@ fn paragraph_writes(
 fn run_write(run: &TextRunSnapshot) -> RunWrite {
     RunWrite {
         text: run.text.clone(),
+        clear_strike: false,
         properties: RunProperties {
             font_size_pt: run.style.font_size_pt,
             spacing_pt: run.style.spacing_pt,

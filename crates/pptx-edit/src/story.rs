@@ -139,7 +139,7 @@ pub(crate) fn seed_story(
             if !run.text.is_empty() {
                 let style = style_from_run_properties(&run.properties, theme);
                 let index = story.len(txn);
-                insert_styled_text(&story, txn, index, &run.text, &style);
+                insert_styled_text(&story, txn, index, &run.text, &style, false);
             }
         }
         let bullet_json = paragraph
@@ -171,7 +171,7 @@ pub(crate) fn seed_plain_story(
 ) -> TextRef {
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     if !text.is_empty() {
-        insert_styled_text(&story, txn, 0, text, style);
+        insert_styled_text(&story, txn, 0, text, style, false);
     }
     append_pilcrow(&story, txn, paragraph_id, None, 0, None);
     story
@@ -719,7 +719,7 @@ impl DeckSession {
             });
         }
         if !text.is_empty() {
-            insert_styled_text(&story, &mut txn, index, text, style);
+            insert_styled_text(&story, &mut txn, index, text, style, true);
         }
         let length = text.encode_utf16().count() as u32;
         Ok(TextReceipt {
@@ -1555,10 +1555,14 @@ pub(crate) fn insert_styled_text(
     index: u32,
     text: &str,
     style: &TextStyle,
+    inherit_strike: bool,
 ) {
     story.insert(txn, index, text);
     let length = text.encode_utf16().count() as u32;
     for (key, value) in style_values(style) {
+        if key == "strike" && inherit_strike && style.strike.is_none() {
+            continue;
+        }
         story.format(txn, index, length, Attrs::from([(Arc::from(key), value)]));
     }
 }

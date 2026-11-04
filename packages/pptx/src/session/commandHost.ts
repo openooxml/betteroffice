@@ -648,7 +648,8 @@ export function registerPresentationCommandHandlers(
     let echoRun: 'before' | 'after' | null = null;
     if (selection && selection.kind !== 'shape') {
       const cached = stories.get(storyKey(selection))!;
-      const neighbour = insertionEchoRun(cached.snapshot, selection.anchor, selection.focus, storedMarks);
+      const neighbour = insertionEchoRun(cached.formatting ??= presentationStoryFormatting(opened, selection),
+        selection.anchor, selection.focus, storedMarks);
       if (!readOnly && neighbour && cached.echoRanges.some((range) => range.start <= neighbour.start && range.end >= neighbour.end)
         && cached.text.paragraphs.some((paragraph) => paragraph.paragraphId === neighbour.paragraphId
           && paragraph.editable && paragraph.fields.length === 0)) echoRun = neighbour.neighbour;

@@ -179,6 +179,7 @@ pub struct ParagraphWrite {
 pub struct RunWrite {
     pub text: String,
     pub properties: RunProperties,
+    pub clear_strike: bool,
 }
 
 pub struct ShapeAdd {
@@ -2676,6 +2677,9 @@ fn empty_table_runs(
                         XmlNode::Element(XmlElement::new(prefixes.drawing("rPr"))),
                     );
                 }
+                if style.clear_strike {
+                    run.child_mut("rPr").unwrap().attributes.remove("strike");
+                }
                 apply_run_properties(
                     run.child_mut("rPr").unwrap(),
                     &style.properties,
@@ -2979,6 +2983,7 @@ struct RunSegment<'a> {
     line_break: bool,
     text: &'a str,
     properties: &'a RunProperties,
+    clear_strike: bool,
 }
 
 fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
@@ -2990,6 +2995,7 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
                     line_break: true,
                     text: "",
                     properties: &run.properties,
+                    clear_strike: run.clear_strike,
                 });
             }
             if !piece.is_empty() {
@@ -2997,6 +3003,7 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
                     line_break: false,
                     text: piece,
                     properties: &run.properties,
+                    clear_strike: run.clear_strike,
                 });
             }
         }
@@ -3028,7 +3035,7 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.spacing_pt == target.spacing_pt
         && source.kern_pt == target.kern_pt
         && source.underline == target.underline
-        && source.strike == target.strike
+        && (target.strike.is_none() && !segment.clear_strike || source.strike == target.strike)
         && source.caps == target.caps
         && source.font_family == target.font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
@@ -3151,6 +3158,7 @@ fn span_elements(
     }
     let ranges = align_span(segments, source_runs, span);
     let mut output = Vec::new();
+    let mut last_source = None;
     let mut offset = 0;
     let mut range_index = 0;
     let mut range_start = 0;
@@ -3176,6 +3184,7 @@ fn span_elements(
                 output.push(XmlNode::Element(segment_element(
                     segment, template, theme, prefixes,
                 )));
+                last_source = None;
                 offset += 1;
                 break;
             }
@@ -3189,7 +3198,23 @@ fn span_elements(
             } else {
                 segment_element(&piece, source.child("rPr"), theme, prefixes)
             };
-            output.push(XmlNode::Element(element));
+            let previous = output.last_mut().and_then(|node| match node {
+                XmlNode::Element(previous)
+                    if last_source == Some(range.source)
+                        && previous.local_name() == "r"
+                        && element.local_name() == "r"
+                        && previous.child("rPr") == element.child("rPr") =>
+                {
+                    previous.child_mut("t")
+                }
+                _ => None,
+            });
+            if let Some(previous) = previous {
+                previous.children.push(XmlNode::Text(piece.text.to_owned()));
+            } else {
+                output.push(XmlNode::Element(element));
+            }
+            last_source = Some(range.source);
             offset += length;
             remaining = &remaining[length..];
             if remaining.is_empty() {
@@ -3474,6 +3499,9 @@ fn segment_properties(
     match template {
         Some(template) => {
             let mut base = template.clone();
+            if segment.clear_strike {
+                base.attributes.remove("strike");
+            }
             apply_run_properties(&mut base, segment.properties, theme, prefixes);
             Some(base)
         }
@@ -3616,11 +3644,8 @@ fn apply_run_properties(
             base.attributes.remove("u");
         }
     }
-    match &properties.strike {
-        Some(strike) => base.set_attribute("strike", strike.clone()),
-        None => {
-            base.attributes.remove("strike");
-        }
+    if let Some(strike) = &properties.strike {
+        base.set_attribute("strike", strike.clone());
     }
     let authored = parse_run_properties(Some(base)).color;
     let keeps_fill = authored == properties.color
@@ -4233,6 +4258,7 @@ mod tests {
                 runs: vec![RunWrite {
                     text: "Ellipse label".to_owned(),
                     properties: RunProperties::default(),
+                    clear_strike: false,
                 }],
             }]),
             picture: None,
@@ -4800,6 +4826,7 @@ mod tests {
                 .map(|(text, properties)| RunWrite {
                     text: (*text).to_owned(),
                     properties: properties.clone(),
+                    clear_strike: false,
                 })
                 .collect(),
         };

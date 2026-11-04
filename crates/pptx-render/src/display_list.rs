@@ -503,7 +503,7 @@ pub struct PositionedTextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_unstruck")]
     pub strike: Option<String>,
     pub color: String,
     /// Tracking between clusters in pixels.
@@ -538,6 +538,10 @@ fn is_false(value: &bool) -> bool {
 
 fn is_zero(value: &f32) -> bool {
     *value == 0.0
+}
+
+fn is_unstruck(value: &Option<String>) -> bool {
+    !matches!(value.as_deref(), Some("sngStrike" | "dblStrike"))
 }
 
 #[cfg(test)]

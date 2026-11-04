@@ -448,9 +448,11 @@ def test_strike_round_trip_and_clear(sample_bytes):
     assert story.paragraphs[0].runs[0].strike == "dblStrike"
     deck.insert_text(story.id, 6, "!", strike="sngStrike")
     reopened = bo.Presentation.open(deck.save())
-    assert reopened.story(story.id).paragraphs[0].runs[-1].strike == "sngStrike"
+    story = next(shape for shape in reopened[0].shapes if shape.name == "Parity text").stories[0]
+    assert story.paragraphs[0].runs[-1].strike == "sngStrike"
     reopened.format_text(story.id, 0, 7, strike="noStrike")
     cleared = bo.Presentation.open(reopened.save())
-    assert all(run.strike is None for run in cleared.story(story.id).paragraphs[0].runs)
+    story = next(shape for shape in cleared[0].shapes if shape.name == "Parity text").stories[0]
+    assert all(run.strike is None for run in story.paragraphs[0].runs)
     with pytest.raises(bo.PptxError, match="strike"):
         cleared.format_text(story.id, 0, 1, strike="invalid")
