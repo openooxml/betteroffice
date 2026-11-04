@@ -31,6 +31,25 @@ describe('selection announcement', () => {
     expect(paintedCellText(frame, 9, 1)).toBeNull();
   });
 
+  it('gives text spilling over blank neighbours to the cell it belongs to', () => {
+    const spill = { ...frame, commands: [
+      { op: 'text', x: 126, y: 14, text: 'Total', fontSize: 11, color: '#000000', align: 'right', clip: { x: 0, y: 0, w: 128, h: 20 } },
+      { op: 'text', x: 2, y: 34, text: 'Long heading', fontSize: 11, color: '#000000', clip: { x: 0, y: 20, w: 128, h: 20 } },
+    ] } as DisplayList;
+    expect(paintedCellText(spill, 4, 1)).toBe('');
+    expect(paintedCellText(spill, 4, 2)).toBe('Total');
+    expect(paintedCellText(spill, 5, 1)).toBe('Long heading');
+    expect(paintedCellText(spill, 5, 2)).toBe('');
+  });
+
+  it('reads right-aligned text of a merged area from its first cell', () => {
+    const merged = [{ start: { row: 4, col: 1 }, end: { row: 4, col: 2 } }];
+    const area = { ...frame, commands: [
+      { op: 'text', x: 126, y: 14, text: 'Sum', fontSize: 11, color: '#000000', align: 'right', clip: { x: 0, y: 0, w: 128, h: 20 } },
+    ] } as DisplayList;
+    expect(paintedCellText(area, 4, 1, merged)).toBe('Sum');
+  });
+
   it('announces the active cell with its value and a formula hint', () => {
     expect(selectionAnnouncement(at(4, 1), { text: '42', formula: false }, strings)).toBe('B5, 42');
     expect(selectionAnnouncement(at(4, 1), { text: '42', formula: true }, strings)).toBe('B5, 42, has formula');

@@ -219,4 +219,19 @@ describe('peerless grid screen reader support', () => {
     fireEvent.keyDown(grid, { key: 'F6', shiftKey: true });
     expect(toolbar.contains(document.activeElement)).toBe(true);
   });
+
+  it('leaves F6 to an open modal dialog', async () => {
+    const { view } = await mount();
+    const toolbar = view.getByTestId('xlsx-toolbar');
+    const dialog = document.createElement('form');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const field = document.createElement('input');
+    dialog.append(field);
+    toolbar.append(dialog);
+    await act(async () => { field.focus(); });
+    fireEvent.keyDown(field, { key: 'F6' });
+    expect(document.activeElement).toBe(field);
+    dialog.remove();
+  });
 });

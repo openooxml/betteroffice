@@ -41,6 +41,7 @@ export const PeerlessWorkerAnnouncer = memo(function PeerlessWorkerAnnouncer({ s
   const [announcement, setAnnouncement] = useState('');
   const [focusRevision, setFocusRevision] = useState(0);
   const tick = useRef(false);
+  /** The key last spoken, suffixed `?` when it was spoken before its cell data arrived. */
   const spoken = useRef<string | null>(null);
   const lastSheet = useRef<number | null>(null);
   useLayoutEffect(() => {
@@ -58,19 +59,19 @@ export const PeerlessWorkerAnnouncer = memo(function PeerlessWorkerAnnouncer({ s
   const key = selection ? selectionKey(active, selection) : null;
   const merged = frame?.mergedRanges;
   const single = selection ? isSingleCell(selection, merged) : false;
-  const text = selection && frame ? paintedCellText(frame.displayList, selection.anchor.row, selection.anchor.col) : null;
+  const text = selection && frame ? paintedCellText(frame.displayList, selection.anchor.row, selection.anchor.col, merged) : null;
   const at = selection ? `${active}:${cellAddress(selection.anchor.row, selection.anchor.col)}` : '';
   const formula = input && input.at === at ? input.value.startsWith('=') : null;
   const ready = !single || (text !== null && formula !== null);
   const position = sheets.findIndex((entry) => entry.index === active);
   const sheet = position >= 0 ? sheets[position] : undefined;
   useEffect(() => {
-    if (!selection || key === null || spoken.current === key) return;
+    if (!selection || key === null || spoken.current === key || (spoken.current === `${key}?` && !ready)) return;
     const timer = setTimeout(() => {
       const target = focusTarget.current;
       const focused = Boolean(target && target.contains(target.ownerDocument.activeElement));
       const switched = lastSheet.current !== null && lastSheet.current !== active;
-      spoken.current = key;
+      spoken.current = ready ? key : `${key}?`;
       lastSheet.current = active;
       if (!focused) return;
       const message = selectionAnnouncement(selection, { text, formula }, strings,

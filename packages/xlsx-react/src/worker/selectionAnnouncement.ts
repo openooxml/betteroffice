@@ -31,20 +31,39 @@ function localIndex(start: number, indices: number[] | undefined, count: number,
   return local >= 0 && local < count ? local : -1;
 }
 
-const originKey = (x: number, y: number) => `${Math.round(x * 1000)},${Math.round(y * 1000)}`;
+function lastLocalAtOrBefore(start: number, indices: number[] | undefined, count: number, address: number): number {
+  if (!indices) return Math.min(address - start, count - 1);
+  let out = -1;
+  for (let index = 0; index < count && index < indices.length; index++) if (indices[index] <= address) out = index;
+  return out;
+}
 
-/** The text painted in a cell, or null when the frame does not cover it. */
-export function paintedCellText(displayList: DisplayList, row: number, col: number): string | null {
+/**
+ * The text painted in a cell, or null when the frame does not cover it. Text
+ * spilling over blank neighbours clips wider than its cell, so a run belongs to
+ * the cell its anchor point lies in, not to the cell its clip starts in.
+ */
+export function paintedCellText(displayList: DisplayList, row: number, col: number,
+  merged: readonly MergedRange[] = []): string | null {
   const grid = displayList.grid;
   if (!grid) return null;
+  const columns = grid.colOffsets.length - 1;
   const lr = localIndex(grid.startRow, grid.rowIndices, grid.rowOffsets.length - 1, row);
-  const lc = localIndex(grid.startCol, grid.colIndices, grid.colOffsets.length - 1, col);
+  const lc = localIndex(grid.startCol, grid.colIndices, columns, col);
   if (lr < 0 || lc < 0) return null;
-  const origin = originKey(grid.colOffsets[lc], grid.rowOffsets[lr]);
+  const merge = merged.find(({ start, end }) =>
+    Math.min(start.row, end.row) === row && Math.min(start.col, end.col) === col);
+  const lastCol = merge ? Math.max(merge.start.col, merge.end.col) : col;
+  const le = Math.max(lc, lastCol === col ? lc : lastLocalAtOrBefore(grid.startCol, grid.colIndices, columns, lastCol));
+  const left = grid.colOffsets[lc];
+  const right = grid.colOffsets[le + 1];
+  const top = Math.round(grid.rowOffsets[lr] * 1000);
   const parts: string[] = [];
   for (const command of displayList.commands) {
-    if (command.op === 'text' && command.clip && !command.ghost && !command.chart &&
-      originKey(command.clip.x, command.clip.y) === origin) parts.push(command.text);
+    if (command.op !== 'text' || !command.clip || command.ghost || command.chart) continue;
+    if (Math.round(command.clip.y * 1000) !== top) continue;
+    const anchor = Math.min(Math.max(command.x, command.clip.x), command.clip.x + command.clip.w - 1e-3);
+    if (anchor >= left - 1e-3 && anchor < right - 1e-3) parts.push(command.text);
   }
   return parts.join(' ').trim();
 }
