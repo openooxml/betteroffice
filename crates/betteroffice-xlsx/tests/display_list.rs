@@ -2,8 +2,7 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     Cell, CellRange, CellRef, CellValue, DrawCmd, FreezePane, GridGeometry, MAX_COLS,
-    MAX_DISPLAY_CELLS, MAX_ROWS, RowId, Sheet, SheetId, Viewport, Workbook,
-    WorkbookModel,
+    MAX_DISPLAY_CELLS, MAX_ROWS, RowId, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
 
 fn workbook() -> Workbook {

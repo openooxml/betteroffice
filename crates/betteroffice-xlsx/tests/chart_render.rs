@@ -1,8 +1,8 @@
-#[cfg(feature = "raster")]
-use betteroffice_xlsx::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, RenderOptions};
 use betteroffice_xlsx::{
     CalculationOptions, CellRef, CellValue, ChartAnchor, DrawCmd, Op, SheetId, Viewport, Workbook,
 };
+#[cfg(feature = "raster")]
+use betteroffice_xlsx::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, RenderOptions};
 
 const FIXTURE: &[u8] = include_bytes!("../../../packages/xlsx/test-fixtures/charts.xlsx");
 const UNSUPPORTED: &[u8] =

@@ -653,12 +653,16 @@ fn png_uses_the_document_theme_accent() {
     };
     assert!(
         pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| close(pixel, [255, 0, 0]))
     );
     assert!(
         !pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| close(pixel, [0x44, 0x72, 0xc4]))
     );
 }
