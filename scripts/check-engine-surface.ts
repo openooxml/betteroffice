@@ -67,7 +67,7 @@ export const FORMATS: Record<string, FormatConfig> = {
     wasm: "packages/pptx/src/wasm/generated/pptx_wasm.d.ts",
     native: "bindings/pptx-native/index.d.ts",
     classes: ["PptxDocument", "PptxRenderer"],
-    pending: [],
+    pending: ["PptxRenderer.exportSlideJson"],
   },
 };
 

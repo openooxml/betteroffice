@@ -117,6 +117,18 @@ impl Renderer {
             .0)
     }
 
+    /// `layout_slide_json` for an export: hit testing keeps the slide it had.
+    pub fn export_slide_json(
+        &mut self,
+        session: &pptx_edit::DeckSession,
+        slide_index: u32,
+    ) -> Result<String, EngineError> {
+        let last_slide = self.last_slide.clone();
+        let result = self.layout_slide_json(session, slide_index);
+        self.last_slide = last_slide;
+        result
+    }
+
     /// Enables browser metrics for uncovered characters. Off by default.
     pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
         if self.renderer.set_browser_coverage_fallback(enabled) {
@@ -608,6 +620,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn export_layout_keeps_the_hit_test_slide() {
+        let document = pptx_edit::DeckSession::open(DECK, 914).unwrap();
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        assert!(document.slide_ids().unwrap().len() > 1);
+        renderer.layout_slide_json(&document, 0).unwrap();
+        let shown = renderer.last_slide.clone();
+        let exported = renderer.export_slide_json(&document, 1).unwrap();
+        assert_eq!(renderer.last_slide, shown);
+        assert_eq!(exported, renderer.layout_slide_json(&document, 1).unwrap());
+        assert_ne!(renderer.last_slide, shown);
     }
 
     #[test]

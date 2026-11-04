@@ -3,7 +3,7 @@ import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
   decodePresentationImage, initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
-  slideToPng, StaleProposalError, PptxPeerNotReadyError,
+  StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver, DeckSnapshot, HitTestResult, ParagraphAlignment, PptxCaretAnchor,
@@ -2642,30 +2642,20 @@ export function PptxEditorContent({
   // with, so the png matches what is on screen. Only capturing the slide waits
   // for accepted input; painting runs outside the input queue.
   const exportPng = async (): Promise<PptxExportOutcome> => {
-    let captured: { frame: SlideDisplayList; slideIndex: number; handle: PresentationHandle };
+    let captured: { slideIndex: number; handle: PresentationHandle };
     try {
       captured = await coordinator.run(() => {
         const current = modelRef.current;
         const handle = handleRef.current;
         if (!current?.frame || !handle) throw new PptxInputStale();
-        return { frame: current.frame, slideIndex: current.slideIndex, handle };
+        return { slideIndex: current.slideIndex, handle };
       });
     } catch (value) {
       return value instanceof PptxInputFailure ? 'input-failed' : 'replaced';
     }
-    const { frame, slideIndex, handle } = captured;
-    // Painting is async, so the deck can be replaced or disposed mid-export.
-    // Pin the handle the frame came from, behind its own decode cache, rather
-    // than reading whichever deck `handleRef` holds by the time an asset
-    // resolves.
-    const pinned = { current: handle };
-    const cache = { current: frameImages() };
+    const { slideIndex, handle } = captured;
     try {
-      const blob = await slideToPng(frame, {
-        scale: window.devicePixelRatio || 1,
-        resolveImage: resolveImages(pinned, cache, decodeImageError),
-      });
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const bytes = await handle.renderPng({ slide: slideIndex }, { scale: window.devicePixelRatio || 1 });
       if (handleRef.current !== handle) return 'replaced';
       downloadBytes(bytes, pngName(fileName, slideIndex), 'image/png');
       return 'exported';
@@ -2673,8 +2663,6 @@ export function PptxEditorContent({
       if (handleRef.current !== handle) return 'replaced';
       reportError(value);
       return 'failed';
-    } finally {
-      cache.current.dispose();
     }
   };
   const shapeDragDelta =
