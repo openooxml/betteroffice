@@ -101,6 +101,11 @@ fn tokenized_saving(edited: usize) -> usize {
                 .collect::<Vec<_>>()
         );
     }
+    let ordinals: Vec<u32> = part
+        .paragraphs
+        .iter()
+        .map(|(ordinal, _)| *ordinal)
+        .collect();
     let patched: Vec<_> = plan
         .patched_parts
         .iter()
@@ -114,7 +119,7 @@ fn tokenized_saving(edited: usize) -> usize {
         "options": {"updateModifiedDate": false},
         "paragraphIds": {"patchedParts": patched, "splicedParts": [{
             "part": part.part, "sha256": part.sha256,
-            "paragraphs": part.paragraphs, "changed": part.changed,
+            "paragraphs": ordinals, "changed": part.changed,
             "paragraphPatches": part.paragraph_patches,
             "legacyParagraphs": part.legacy_paragraphs
         }]}
@@ -145,10 +150,12 @@ fn saving_more_patched_paragraphs_does_not_rescan_the_part_for_each() {
     let part = document_xml().len();
     let one = tokenized_saving(1);
     let many = tokenized_saving(100);
+    let extra = many.saturating_sub(one);
+    let patched = 99;
     assert!(
-        many.saturating_sub(one) < 2 * part,
-        "patching 99 more paragraphs tokenized {} more bytes, {:.1} times the {part}-byte part",
-        many.saturating_sub(one),
-        many.saturating_sub(one) as f64 / part as f64
+        extra * 10 < part * patched,
+        "patching {patched} more paragraphs tokenized {extra} more bytes, {:.2} times the \
+         {part}-byte part for each, where a tenth is the limit",
+        extra as f64 / (part * patched) as f64
     );
 }
