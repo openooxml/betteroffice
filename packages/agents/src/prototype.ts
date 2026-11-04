@@ -142,7 +142,7 @@ export abstract class PrototypeDocument<Change, Step> {
     return this.save(id ? this.pending(id).steps : undefined);
   }
 
-  async verify(id?: string) {
+  async verify(id?: string, _options?: { structure?: boolean }) {
     const bytes = await this.export(id);
     this.reopen(bytes);
     return { reopened: true, bytes: bytes.length, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', ...(this.format === 'xlsx' ? ['formula correctness'] : [])] };
