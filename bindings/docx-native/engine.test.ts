@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { inflateSync } from 'node:zlib';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import type { DecorationPrimitive, DisplayList, GlyphRunPrimitive } from '../../packages/docx/src/layout/render/displayList';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
+import { expectPngRule, expectPngTracking, pngPixels } from '../raster-pixels';
 
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
@@ -1029,45 +1030,15 @@ test('native and wasm track and resolve character formatting with the same optio
   }
 });
 
-function pngPixels(bytes: Uint8Array): Uint8Array {
-  const png = Buffer.from(bytes);
-  expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
-  expect([png[24], png[25], png[28]]).toEqual([8, 6, 0]);
-  const stride = png.readUInt32BE(16) * 4;
-  const height = png.readUInt32BE(20);
-  const chunks: Buffer[] = [];
-  for (let offset = 8; offset < png.length;) {
-    const size = png.readUInt32BE(offset);
-    if (png.toString('ascii', offset + 4, offset + 8) === 'IDAT') {
-      chunks.push(png.subarray(offset + 8, offset + 8 + size));
-    }
-    offset += size + 12;
-  }
-  const filtered = inflateSync(Buffer.concat(chunks));
-  expect(filtered.length).toBe(height * (stride + 1));
-  const pixels = new Uint8Array(height * stride);
-  for (let row = 0; row < height; row++) {
-    const filter = filtered[row * (stride + 1)];
-    expect(filter).toBeLessThanOrEqual(4);
-    for (let col = 0; col < stride; col++) {
-      const index = row * stride + col;
-      const left = col >= 4 ? pixels[index - 4] : 0;
-      const up = row > 0 ? pixels[index - stride] : 0;
-      const corner = row > 0 && col >= 4 ? pixels[index - stride - 4] : 0;
-      const estimate = left + up - corner;
-      const distances = [Math.abs(estimate - left), Math.abs(estimate - up), Math.abs(estimate - corner)];
-      const paeth = distances[0] <= distances[1] && distances[0] <= distances[2]
-        ? left : distances[1] <= distances[2] ? up : corner;
-      const prediction = [0, left, up, Math.floor((left + up) / 2), paeth][filter];
-      pixels[index] = (filtered[row * (stride + 1) + col + 1] + prediction) & 255;
-    }
-  }
-  return pixels;
-}
-
-function pngDisplayList(session: import('./index.js').EditSession): string {
-  const font = session.register_measure_font(fontBytes);
-  const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+function pngDisplayList(
+  session: import('./index.js').EditSession,
+  families = ['Calibri'],
+  font = session.register_measure_font(fontBytes),
+): string {
+  const fontChains = Object.fromEntries(families.flatMap((family) => [
+    [`${family.toLowerCase()}|0|0`, [font]],
+    [`${family.toLowerCase()}|1|0`, [font]],
+  ]));
   const materialized = JSON.parse(session.materialize_docx()!) as {
     document: { package: { theme: { colorScheme: Record<string, string> } } };
   };
@@ -1234,3 +1205,93 @@ test('native docx PNG resolves media tokens in every page region and skips missi
     session.free();
   }
 });
+
+function docxTextRaster(family: string, properties = '') {
+  const raw = require('./index.js') as typeof import('./index.js');
+  const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
+  parts['word/document.xml'] = new TextEncoder().encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}"/><w:sz w:val="24"/>${properties}</w:rPr><w:t>TTTT</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`);
+  const session = new raw.EditSession(410);
+  try {
+    session.open_docx(wasm.rezip_docx(parts), true);
+    const face = session.register_measure_font(fontBytes);
+    const json = pngDisplayList(session, ['Calibri', 'Liberation Sans', 'Unregistered Raster Face'], face);
+    const list = JSON.parse(json) as DisplayList;
+    const runs = list.pages[0].primitives.filter((primitive): primitive is GlyphRunPrimitive => primitive.kind === 'glyphRun');
+    expect(runs.length).toBe(1);
+    const run = runs[0];
+    expect(run.text).toBe('TTTT');
+    expect(run.fontId).toBe(face);
+    expect(run.size).toBe(16);
+    expect(run.glyphs.length).toBe(4);
+    return { session, json, list, run };
+  } catch (error) {
+    session.free();
+    throw error;
+  }
+}
+
+test.each([1, 2])('native docx PNG preserves the layout fallback face at scale %s', (scale) => {
+  const fallback = docxTextRaster('Unregistered Raster Face');
+  const direct = docxTextRaster('Liberation Sans');
+  try {
+    expect(fallback.run.fontId).toBe(direct.run.fontId);
+    expect(fallback.run.glyphs).toEqual(direct.run.glyphs);
+    expect(fallback.run.size).toBe(direct.run.size);
+    const actual = fallback.session.render_page_png(fallback.json, 0, scale);
+    const expected = direct.session.render_page_png(direct.json, 0, scale);
+    expect(pngPixels(actual)).toEqual(pngPixels(expected));
+    expect(pngPixels(actual).some((value, index) => index % 4 < 3 && value < 200)).toBe(true);
+  } finally {
+    fallback.session.free();
+    direct.session.free();
+  }
+});
+
+test.each([1, 2])('native docx PNG preserves positioned letter spacing at scale %s', (scale) => {
+  const spaced = docxTextRaster('Liberation Sans', '<w:spacing w:val="200"/>');
+  const plain = docxTextRaster('Liberation Sans');
+  try {
+    const glyphs = (run: GlyphRunPrimitive) => run.glyphs.map((glyph) => {
+      expect(glyph.advance).toBeDefined();
+      return { x: glyph.x, advance: glyph.advance! };
+    });
+    expectPngTracking(
+      spaced.session.render_page_png(spaced.json, 0, scale),
+      plain.session.render_page_png(plain.json, 0, scale),
+      glyphs(spaced.run), glyphs(plain.run), 200 / 15, scale,
+    );
+  } finally {
+    spaced.session.free();
+    plain.session.free();
+  }
+});
+
+for (const [decoration, properties] of [
+  ['underline', '<w:u w:val="single"/>'],
+  ['strike', '<w:strike/>'],
+] as const) {
+  test.each([1, 2])(`native docx PNG paints display list ${decoration} at scale %s`, (scale) => {
+    const decorated = docxTextRaster('Liberation Sans', properties);
+    const plain = docxTextRaster('Liberation Sans');
+    try {
+      expect(decorated.run.glyphs).toEqual(plain.run.glyphs);
+      const rules = decorated.list.pages[0].primitives.filter((primitive): primitive is DecorationPrimitive =>
+        primitive.kind === 'decoration' && primitive.deco === decoration);
+      expect(rules.length).toBe(1);
+      expect(plain.list.pages[0].primitives.some((primitive) => primitive.kind === 'decoration')).toBe(false);
+      const rule = rules[0];
+      const first = decorated.run.glyphs[0];
+      const last = decorated.run.glyphs[decorated.run.glyphs.length - 1];
+      expect(Math.abs(rule.x - first.x)).toBeLessThan(0.02);
+      expect(Math.abs(rule.w - (last.x + last.advance! - first.x))).toBeLessThan(0.02);
+      expectPngRule(
+        decorated.session.render_page_png(decorated.json, 0, scale),
+        plain.session.render_page_png(plain.json, 0, scale),
+        rule, scale,
+      );
+    } finally {
+      decorated.session.free();
+      plain.session.free();
+    }
+  });
+}
