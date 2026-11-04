@@ -238,7 +238,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   }, [presentation]);
   const commands = usePeerlessCommandBinding(presentation, { tool: insertion.tool, setTool: insertion.setTool,
     openPicture, save, focus, i18n: props.i18n, zoom, setZoom, review, proposals, setReview, exportPng });
-  const contextMenu = usePeerlessContextMenu(presentation, commands, stage, canvas, review.diff);
+  const contextMenu = usePeerlessContextMenu(presentation, commands, stage, canvas, review.diff, focus);
   const [workspace, available] = useDockArea(Boolean(props.plugins?.length));
   useCommandShortcuts({ commands: pptxCommandController(commands)!, containerRef: editor, editorInput: inputRef,
     suspended: () => review.presenting || Boolean(presentation?.store.getSnapshot().composition) });

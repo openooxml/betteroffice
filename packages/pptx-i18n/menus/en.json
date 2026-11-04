@@ -1,0 +1,28 @@
+{
+  "commands": {
+    "reasons": {
+      "clipboardUnavailable": "Clipboard access is unavailable or was denied.",
+      "tableRequired": "Place the cursor in a table cell first.",
+      "lastSlide": "The last slide cannot be deleted."
+    },
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "insert": "Insert",
+    "delete": "Delete",
+    "deleteTable": "Delete table",
+    "duplicateSlide": "Duplicate slide",
+    "insertRowsAbove": "Insert rows above",
+    "insertRowsBelow": "Insert rows below",
+    "insertColumnsLeft": "Insert columns to the left",
+    "insertColumnsRight": "Insert columns to the right",
+    "deleteRows": "Delete rows",
+    "deleteColumns": "Delete columns"
+  },
+  "contextMenu": {
+    "text": "Text menu",
+    "shape": "Shape menu",
+    "table": "Table menu",
+    "slide": "Slide menu"
+  }
+}

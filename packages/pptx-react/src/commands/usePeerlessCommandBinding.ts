@@ -5,7 +5,7 @@ import type { Proposal } from '@betteroffice/pptx';
 import type { PresentationCommandAck } from '@betteroffice/pptx/worker';
 import type { PeerlessReviewState } from '../worker/PeerlessReview';
 import { invokePeerless } from '../worker/peerlessObjectCommands';
-import { useTranslation } from '../i18n';
+import { useMenuTranslation } from '../i18n/useMenuTranslation';
 import type { PptxEditorTool } from '../components/toolbarTypes';
 import type { PeerlessPresentation } from '../worker/usePeerlessPresentation';
 import { formatPeerlessText, peerlessTextContext } from '../worker/peerlessTextCommands';
@@ -16,6 +16,7 @@ import { peerlessObjectCommand } from '../worker/peerlessObjectCommands';
 import { peerlessDeleteSlide, peerlessInsertSlide } from '../worker/peerlessSlideCommands';
 import { createPptxCommandController, PptxCommandAdmissionError, type PptxCommandBinding, type PptxCommandOrigin } from './createPptxCommandStore';
 import { commandReason, DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES, type PptxCommandEnvironment } from './evaluate';
+import { clipboardRefusal, pptxMenuGates } from './menuGates';
 import type { PptxCommandArgs, PptxCommandFailureCode, PptxCommandId, PptxCommandResult } from './types';
 
 interface Origin extends PptxCommandOrigin { run: PeerlessPresentation; slideId: string | null; target: string | null; id: PptxCommandId }
@@ -47,7 +48,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
   tool, setTool, openPicture, save, focus, i18n, zoom, setZoom, review, proposals, setReview, exportPng,
 }: { tool: PptxEditorTool; setTool(tool: PptxEditorTool): void; openPicture(): void; save(): Promise<void>;
   focus(): void; i18n?: Translations; zoom: number | 'fit'; setZoom(value: number | 'fit'): void; review: PeerlessReviewState; proposals: Proposal[]; setReview: Dispatch<SetStateAction<PeerlessReviewState>>; exportPng(): Promise<void> }) {
-  const { t } = useTranslation();
+  const { t } = useMenuTranslation();
   const controller = useMemo(() => createPptxCommandController(), [run]);
   const binding = useMemo(() => {
     const environment = (executing: boolean): PptxCommandEnvironment => {
@@ -72,7 +73,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         clipboardRead: typeof navigator !== 'undefined' && typeof navigator.clipboard?.readText === 'function',
         clipboardWrite: typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function',
         fontFamilies: DEFAULT_FONT_FAMILIES, fontSizes: DEFAULT_FONT_SIZES, proposals: { open: review.open, pending: proposals.map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), canvas: { available: proposals.filter((proposal) => proposal.changes.some((change) => change.slideId === slideId || change.kind && change.kind !== 'content' || change.oldText !== change.newText || JSON.stringify(change.before) !== JSON.stringify(change.after))).map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), selectedId: review.selectedId, diff: review.diff } },
-        hostDisabled: (id) => !supported.has(id), translate: t };
+        hostDisabled: (id) => !supported.has(id), gates: pptxMenuGates, translate: t };
     };
     const value: PptxCommandBinding = {
       environment,
@@ -98,18 +99,24 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         let operation: Promise<PresentationCommandAck | null> | null = null;
         switch (id) {
           case 'cut': case 'copy': case 'paste': {
-            if (id === 'paste') {
-              const ack = await peerlessPaste(run);
+            try {
+              if (id === 'paste') {
+                const ack = await peerlessPaste(run);
+                run.require();
+                const result: PptxCommandResult = ack ? receipt(ack, env) : { ok: true, status: 'noop' };
+                if (result.ok) focus();
+                return result;
+              }
+              const ack = await peerlessClipboard(run, id === 'cut', true);
               run.require();
-              const result: PptxCommandResult = ack ? receipt(ack, env) : { ok: true, status: 'noop' };
+              const result: PptxCommandResult = id === 'cut' ? receipt(ack, env) : { ok: true, status: 'executed' };
               if (result.ok) focus();
               return result;
+            } catch (error) {
+              const refused = clipboardRefusal(error, env);
+              if (refused) return refused;
+              throw error;
             }
-            const ack = await peerlessClipboard(run, id === 'cut', true);
-            run.require();
-            const result: PptxCommandResult = id === 'cut' ? receipt(ack, env) : { ok: true, status: 'executed' };
-            if (result.ok) focus();
-            return result;
           }
           case 'deleteObject': operation = peerlessObjectCommand(run, { kind: 'remove' }); break;
           case 'deleteSlide': operation = peerlessDeleteSlide(run, env.slide!.id); break;

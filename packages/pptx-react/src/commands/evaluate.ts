@@ -99,13 +99,15 @@ export interface PptxCommandEnvironment {
   } | null;
   /** A host-owned binding without a handler for `id`. */
   hostDisabled?(id: PptxCommandId): boolean;
+  /** Gates for commands the binding brings along; `undefined` leaves `id` to the built-in gate. */
+  gates?(id: PptxCommandId, args: unknown, env: PptxCommandEnvironment): PptxCommandEvaluation | undefined;
   translate: TFunction;
 }
 
-const REASON_KEYS: Record<PptxCommandFailureCode, TranslationKey> = {
-  'clipboard-unavailable': 'commands.reasons.clipboardUnavailable',
-  'table-required': 'commands.reasons.tableRequired',
-  'last-slide': 'commands.reasons.lastSlide',
+/** @internal Failure codes whose messages load with the binding that raises them. */
+export type PptxMenuReasonCode = 'clipboard-unavailable' | 'table-required' | 'last-slide';
+
+const REASON_KEYS: Record<Exclude<PptxCommandFailureCode, PptxMenuReasonCode>, TranslationKey> = {
   'editor-unavailable': 'commands.reasons.editorUnavailable',
   'document-loading': 'commands.reasons.documentLoading',
   'no-document': 'commands.reasons.noDocument',
@@ -143,7 +145,7 @@ const REASON_KEYS: Record<PptxCommandFailureCode, TranslationKey> = {
 export function commandReason<Code extends PptxCommandFailureCode>(
   code: Code,
   env: Pick<PptxCommandEnvironment, 'translate'> | null,
-  key: TranslationKey = REASON_KEYS[code]
+  key: TranslationKey = REASON_KEYS[code as Exclude<Code, PptxMenuReasonCode>]
 ): CommandReason<Code> {
   return {
     code,
@@ -157,13 +159,16 @@ export function commandReason<Code extends PptxCommandFailureCode>(
 
 type Gate = PptxCommandDisabledCode | null;
 
-interface Evaluation<K extends PptxCommandId> {
+/** @internal */
+export interface PptxCommandEvaluation<K extends PptxCommandId = PptxCommandId> {
   gate: Gate;
   reasonKey?: TranslationKey;
   active?: boolean | 'mixed';
   value?: PptxCommandValues[K];
   options?: readonly PptxCommandChoice<K>[];
 }
+
+type Evaluation<K extends PptxCommandId> = PptxCommandEvaluation<K>;
 
 export const MIN_FONT_POINTS = 1;
 export const MAX_FONT_POINTS = 400;
@@ -231,11 +236,6 @@ function validArgs<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K] | un
   if (args === undefined) return true;
   const value = args as unknown;
   switch (id) {
-    case 'tableInsert':
-      return isRecord(value) && (value.kind === 'row' || value.kind === 'column') &&
-        (value.position === 'before' || value.position === 'after');
-    case 'tableDelete':
-      return isRecord(value) && ['row', 'column', 'table'].includes(value.kind as string);
     case 'fontFamily':
       return isRecord(value) && nonEmpty(value.family);
     case 'fontSize':
@@ -297,7 +297,8 @@ function validArgs<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K] | un
   }
 }
 
-function documentGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function documentGate(env: PptxCommandEnvironment): Gate {
   switch (env.status) {
     case 'unavailable':
       return 'editor-unavailable';
@@ -310,19 +311,23 @@ function documentGate(env: PptxCommandEnvironment): Gate {
   }
 }
 
-function writeGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function writeGate(env: PptxCommandEnvironment): Gate {
   return documentGate(env) ?? (env.readOnly ? 'read-only' : null);
 }
 
-function slideGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function slideGate(env: PptxCommandEnvironment): Gate {
   return env.slide ? null : 'slide-required';
 }
 
-function reviewGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function reviewGate(env: PptxCommandEnvironment): Gate {
   return env.reviewing ? 'review-active' : null;
 }
 
-function textGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function textGate(env: PptxCommandEnvironment): Gate {
   return (
     writeGate(env) ??
     reviewGate(env) ??
@@ -400,26 +405,6 @@ function evaluate<K extends PptxCommandId>(
   const result = <V extends PptxCommandId>(evaluation: Evaluation<V>) =>
     evaluation as unknown as Evaluation<K>;
   switch (id) {
-    case 'cut':
-    case 'copy':
-      return { gate: (id === 'cut' ? writeGate(env) : documentGate(env)) ?? reviewGate(env) ??
-        (env.text === 'unsupported' ? 'unsupported-selection' : null) ??
-        (current?.kind === 'range' ? null : 'text-selection-required') ??
-        (env.clipboardWrite ? null : 'clipboard-unavailable') };
-    case 'paste':
-      return { gate: textGate(env) ?? (current?.kind === 'shape' ? 'text-selection-required' : null) ??
-        (env.clipboardRead ? null : 'clipboard-unavailable') };
-    case 'deleteObject':
-      return { gate: writeGate(env) ?? reviewGate(env) ?? (env.shape ? null : 'shape-required'),
-        reasonKey: env.shape ? undefined : 'commands.reasons.objectRequired' };
-    case 'deleteSlide':
-    case 'duplicateSlide':
-      return { gate: writeGate(env) ?? reviewGate(env) ?? slideGate(env) ??
-        (id === 'deleteSlide' && (env.slideCount ?? 0) <= 1 ? 'last-slide' : null) };
-    case 'tableInsert':
-    case 'tableDelete':
-      return { gate: writeGate(env) ?? reviewGate(env) ?? slideGate(env) ??
-        (env.table ? null : 'table-required') };
     case 'bold':
     case 'italic':
     case 'underline':
@@ -660,9 +645,8 @@ export function evaluatePptxCommand<K extends PptxCommandId>(
   if (!env) {
     return { enabled: false, disabledReason: commandReason('editor-unavailable', null) };
   }
-  const evaluation: Evaluation<K> = validArgs(id, args)
-    ? evaluate(id, args, env)
-    : { gate: documentGate(env) ?? 'invalid-arguments' };
+  const evaluation: Evaluation<K> = (env.gates?.(id, args, env) as Evaluation<K> | undefined) ??
+    (validArgs(id, args) ? evaluate(id, args, env) : { gate: documentGate(env) ?? 'invalid-arguments' });
   const gate = env.hostDisabled?.(id) ? 'host-disabled' : evaluation.gate;
   const presentation: {
     active?: boolean | 'mixed';

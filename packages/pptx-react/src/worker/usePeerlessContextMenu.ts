@@ -5,7 +5,7 @@ import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuLis
 import type { PptxCommandStore } from '../commands/types';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { pptxContextMenuEntries, type PptxContextMenuTarget } from '../contextMenu/menus';
-import { useTranslation } from '../i18n';
+import { useMenuTranslation } from '../i18n/useMenuTranslation';
 import { hitConfirmedGeometry, peerlessKnownState } from './peerlessViewStore';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
@@ -17,8 +17,9 @@ function disable(entries: readonly OverflowMenuEntry[]): OverflowMenuEntry[] {
 
 /** @internal */
 export function usePeerlessContextMenu(run: PeerlessPresentation | null, commands: PptxCommandStore,
-  surface: RefObject<HTMLDivElement | null>, canvas: RefObject<HTMLCanvasElement | null>, reviewing: boolean) {
-  const { t } = useTranslation();
+  surface: RefObject<HTMLDivElement | null>, canvas: RefObject<HTMLCanvasElement | null>, reviewing: boolean,
+  focus: () => void) {
+  const { t } = useMenuTranslation();
   const subscribe = useCallback((listener: () => void) => {
     const releases = [commands.subscribe(listener), run?.store.subscribePresentation(listener)];
     return () => { for (const release of releases) release?.(); };
@@ -85,6 +86,7 @@ export function usePeerlessContextMenu(run: PeerlessPresentation | null, command
           : view.editState.toolbar.table ? 'table' : 'text';
       }
       return { label: t(target === 'table' ? 'contextMenu.table' : target === 'shape' ? 'contextMenu.shape' : 'contextMenu.text'),
+        returnFocus: focus,
         entries: () => {
           const entries = pptxContextMenuEntries(target, commands, t);
           return ready() && peerlessKnownState(run.store) ? entries : disable(entries);

@@ -7,6 +7,7 @@
 
 import { editorEn } from './editor';
 import { proposalEn } from './proposals';
+import { menuEn } from './menus';
 import { deepMerge } from './runtime';
 import arJson from '../ar.json';
 import deJson from '../de.json';
@@ -33,6 +34,8 @@ export { createT, deepMerge } from './runtime';
 export { editorEn } from './editor';
 /** @internal */
 export { proposalEn } from './proposals';
+/** @internal */
+export { menuEn } from './menus';
 
 export type LocaleStrings = typeof en;
 export type LocaleCode =
@@ -57,7 +60,8 @@ export type LocaleCode =
   | 'zh-CN'
   | 'zh-TW';
 
-export const en = /* @__PURE__ */ deepMerge(editorEn, proposalEn) as typeof editorEn & typeof proposalEn;
+export const en = /* @__PURE__ */ deepMerge(deepMerge(editorEn, proposalEn), menuEn) as typeof editorEn &
+  typeof proposalEn & typeof menuEn;
 export const ar: PartialLocaleStrings = arJson;
 export const de: PartialLocaleStrings = deJson;
 export const es: PartialLocaleStrings = esJson;

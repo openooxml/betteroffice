@@ -8,6 +8,7 @@ import type { PptxCommandStore } from '../commands/types';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import type { SlideFit } from '../fitSlideScale';
 import { useTranslation } from '../i18n';
+import { useMenuTranslation } from '../i18n/useMenuTranslation';
 import { slideActionStyles } from '../components/editorChromeStyles';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessDeleteSlide, peerlessInsertSlide, peerlessMoveSlide } from './peerlessSlideCommands';
@@ -175,7 +176,7 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, comman
   onPreviewSlide?(slideId: string): void;
 }) {
   const { store, client } = run;
-  const { t } = useTranslation();
+  const { t } = useMenuTranslation();
   const strip = useRef<HTMLElement>(null);
   const subscribeMenu = useCallback((listener: () => void) => {
     const releases = [commands.subscribe(listener), store.subscribePresentation(listener)];

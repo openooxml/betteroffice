@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { evaluatePptxCommand, nextFontSize, type PptxTextEnvironment } from './evaluate';
+import { clipboardRefusal } from './menuGates';
 import { testEnvironment } from './testing';
 import type { PptxCommandArgs, PptxCommandId } from './types';
 
@@ -44,6 +45,27 @@ describe('PPTX command gate', () => {
     expect(gate('copy', null, { readOnly: true })).toBeNull();
     expect(gate('cut', null, { readOnly: true })).toBe('read-only');
     expect(gate('paste', null, { readOnly: true })).toBe('read-only');
+  });
+
+  test('menu commands stay unavailable without the binding that brings their gates', () => {
+    for (const [id, args] of [['cut', null], ['paste', null], ['deleteObject', null], ['deleteSlide', null],
+      ['duplicateSlide', null], ['tableInsert', { kind: 'row', position: 'after' }], ['tableDelete', { kind: 'table' }]] as const) {
+      expect(gate(id, args as never, { gates: undefined })).not.toBeNull();
+    }
+    expect(gate('bold', null, { gates: undefined })).toBeNull();
+  });
+
+  test('menu reasons read the menu table and only browser refusals map to clipboard-unavailable', () => {
+    expect(evaluatePptxCommand('deleteSlide', null, testEnvironment({ slideCount: 1 })).disabledReason)
+      .toEqual({ code: 'last-slide', message: 'The last slide cannot be deleted.' });
+    expect(evaluatePptxCommand('tableDelete', { kind: 'row' }, testEnvironment({ table: null })).disabledReason)
+      .toEqual({ code: 'table-required', message: 'Place the cursor in a table cell first.' });
+    const env = testEnvironment();
+    expect(clipboardRefusal(new DOMException('Denied', 'NotAllowedError'), env)).toEqual({ ok: false, failure: {
+      code: 'clipboard-unavailable', message: 'Clipboard access is unavailable or was denied.',
+    } });
+    expect(clipboardRefusal(new Error('boom'), env)).toBeNull();
+    expect(clipboardRefusal(null, env)).toBeNull();
   });
 
   test('object deletion works for pictures and requires a writable selected object', () => {

@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
-import { createT, editorEn, en, proposalEn, type LocaleStrings, type TranslationKey } from './index';
+import { createT, editorEn, en, menuEn, proposalEn, type LocaleStrings, type TranslationKey } from './index';
 import enDefault, { en as enSubpath } from './en';
 import { editorEn as editorTable, createT as createEditorT, deepMerge as mergeEditor } from './editor';
 import { proposalEn as proposalTable } from './proposals';
+import { menuEn as menuTable } from './menus';
 
 const originalProposals = {
   "title": "Agent proposals",
@@ -80,7 +81,13 @@ test('the default editor table excludes every lazy proposal message', () => {
 test('the root and en subpath retain the full English table across separate entry modules', () => {
   const fullTable = {
     ...editorTable,
+    commands: {
+      ...editorTable.commands,
+      ...menuTable.commands,
+      reasons: { ...editorTable.commands.reasons, ...menuTable.commands.reasons },
+    },
     proposals: { ...editorTable.proposals, ...proposalTable.proposals },
+    contextMenu: menuTable.contextMenu,
   };
   for (const english of [en, enSubpath, enDefault]) {
     expect(english).toEqual(fullTable);
@@ -88,5 +95,16 @@ test('the root and en subpath retain the full English table across separate entr
   }
   expect(editorEn).toBe(editorTable);
   expect(proposalEn).toBe(proposalTable);
-  expect(mergeEditor(editorTable, proposalTable)).toEqual(fullTable);
+  expect(menuEn).toBe(menuTable);
+  expect(mergeEditor(mergeEditor(editorTable, proposalTable), menuTable)).toEqual(fullTable);
+});
+
+test('the default editor table leaves context menu messages to the lazy menu table', () => {
+  expect(editorEn).not.toHaveProperty('contextMenu');
+  for (const key of Object.keys(menuEn.commands.reasons)) expect(editorEn.commands.reasons).not.toHaveProperty(key);
+  for (const key of Object.keys(menuEn.commands).filter((key) => key !== 'reasons')) {
+    expect(editorEn.commands).not.toHaveProperty(key);
+  }
+  expect(createT(en)('commands.reasons.lastSlide')).toBe('The last slide cannot be deleted.');
+  expect(createT(en)('contextMenu.table')).toBe('Table menu');
 });

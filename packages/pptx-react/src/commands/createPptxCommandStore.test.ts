@@ -26,16 +26,6 @@ describe('PPTX command store', () => {
     }
   });
 
-  test('denied clipboard access resolves to a localized failure', async () => {
-    const { harness, store } = mounted();
-    harness.state.result = () => { throw new DOMException('Denied', 'NotAllowedError'); };
-    for (const id of ['cut', 'copy', 'paste'] as const) {
-      expect(await store.execute(id, null)).toEqual({ ok: false, failure: {
-        code: 'clipboard-unavailable', message: 'Clipboard access is unavailable or was denied.',
-      } });
-    }
-  });
-
   test('keeps a snapshot until its state changes and notifies only then', () => {
     const { harness, controller, store } = mounted();
     let notified = 0;
