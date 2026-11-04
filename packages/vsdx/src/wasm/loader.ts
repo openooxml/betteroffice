@@ -76,6 +76,7 @@ export function initWasm(input: WasmInitInput = new URL('./generated/vsdx_wasm_b
   initialization = initWasmModule({ module_or_path: input }).then(() => { initialized = true; }, error => { initialization = undefined; throw toError(error); });
   return initialization;
 }
+function ownFace(face: VsdxFontFace): VsdxFontFace { return { family: face.family, bold: face.bold ?? false, italic: face.italic ?? false, bytes: face.bytes.slice() }; }
 function faceKey(face: VsdxFontFace): string { return JSON.stringify([face.family, face.bold ?? false, face.italic ?? false]); }
 export function isWasmAvailable(): boolean { return typeof WebAssembly === 'object'; }
 export function wasmVersion(): string { requireInitialized(); return rendererVersion(); }
@@ -143,7 +144,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     finally { depth--; if (depth === 0) flush(); }
   };
   const json = <T>(operation: () => string, drainUpdates = false): T => JSON.parse(wasm(operation, drainUpdates)) as T;
-  const faces = new Map((options.fonts ?? []).map(face => [faceKey(face), face]));
+  const faces = new Map((options.fonts ?? []).map(face => [faceKey(face), ownFace(face)]));
   return {
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
     masters: () => {
@@ -153,7 +154,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       }
       return masters;
     },
-    registerFont: face => { const id = wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)); faces.set(faceKey(face), face); return id; },
+    registerFont: face => { const id = wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)); faces.set(faceKey(face), ownFace(face)); return id; },
     pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),
     validate: () => mapValidationIssues(json<RawValidationIssue[]>(() => renderer.validateJson(doc)), json<DiagramSnapshot>(() => doc.snapshotJson())),
     validatePage: (pageIndex) => {
@@ -178,7 +179,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     renderPng: async ({ page }, options = {}) => {
       if (!Number.isInteger(page) || page < 0) throw new Error('VSDX page index must be a non-negative integer');
       const scale = options.scale ?? 1;
-      if (!Number.isFinite(scale) || scale <= 0) throw new Error('VSDX PNG scale must be a positive number');
+      if (!Number.isFinite(scale) || scale <= 0) throw new Error('VSDX PNG scale must be a finite positive number');
       return renderEnginePng({
         renderer, doc, fonts: () => [...faces.values()],
         displayList: (index) => {

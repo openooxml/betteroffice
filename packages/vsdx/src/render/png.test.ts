@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import type { PageDisplayList, TextBoxPrimitive, VsdxFontFace } from '../types';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { paintPage } from './canvas';
-import { pageToPng } from './png';
+import { readFileSync } from 'node:fs';
+import { layoutFace, pageToPng, underlineMetrics } from './png';
 
 const run = { text: 'Hello', family: 'Brand Sans', sizeIn: 12, bold: false, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#000000' };
 const textBox: TextBoxPrimitive = { id: 't', zOrder: 1, kind: 'textBox', x: 0, y: 0, width: 100, height: 20, paragraphs: [{ runs: [run] }], lines: [{ x: 0, y: 0, width: 100, height: 20, start: 0, end: 5, caretStops: [] }] };
@@ -11,10 +12,10 @@ const list = (primitives: PageDisplayList['primitives'] = [textBox]) => ({
 }) as unknown as PageDisplayList;
 const face: VsdxFontFace = { family: 'Brand Sans', bytes: new Uint8Array([1, 2, 3]) };
 
-interface Calls { sizes: [number, number][]; ctx: string[]; encoded: number; fonts: string[]; }
+interface Calls { sizes: [number, number][]; ctx: string[]; encoded: number; fonts: string[]; draws: { call: string; args: unknown[]; spacing?: unknown }[]; faces: { family: string; weight: string; style: string; bytes: number[] }[]; }
 
-function stubBrowser(options: { failLoad?: boolean; held?: { family: string; weight: string; style: string; status: string; load(): Promise<unknown> }[] } = {}) {
-  const calls: Calls = { sizes: [], ctx: [], encoded: 0, fonts: [] };
+function stubBrowser(options: { failLoad?: boolean; letterSpacing?: boolean; held?: { family: string; weight: string; style: string; status: string; load(): Promise<unknown> }[] } = {}) {
+  const calls: Calls = { sizes: [], ctx: [], encoded: 0, fonts: [], draws: [], faces: [] };
   const held = [...(options.held ?? [])];
   const loads: string[] = [];
   const set = {
@@ -25,9 +26,10 @@ function stubBrowser(options: { failLoad?: boolean; held?: { family: string; wei
   };
   class StubFace {
     status = 'unloaded'; family: string; weight: string; style: string;
-    constructor(family: string, _source: ArrayBuffer, descriptors: { weight: string; style: string }) {
+    constructor(family: string, source: ArrayBuffer, descriptors: { weight: string; style: string }) {
       this.family = family; this.weight = descriptors.weight; this.style = descriptors.style;
       calls.ctx.push('FontFace');
+      calls.faces.push({ family, weight: descriptors.weight, style: descriptors.style, bytes: [...new Uint8Array(source)] });
     }
     load() {
       if (options.failLoad) return Promise.reject(new Error('bad font'));
@@ -38,9 +40,10 @@ function stubBrowser(options: { failLoad?: boolean; held?: { family: string; wei
   class StubCanvas {
     constructor(width: number, height: number) { calls.sizes.push([width, height]); }
     getContext() {
-      return new Proxy({} as Record<string, unknown>, {
+      return new Proxy((options.letterSpacing ? { letterSpacing: '0px' } : {}) as Record<string, unknown>, {
         get(target, property) {
-          if (property === 'measureText') return () => ({ width: 1 });
+          if (property === 'measureText') return (text: string) => ({ width: [...text].length });
+          if (property === 'fillText' || property === 'fillRect') return (...args: unknown[]) => { calls.ctx.push(property); calls.draws.push({ call: property, args, spacing: target.letterSpacing }); };
           if (property === 'createLinearGradient' || property === 'createRadialGradient') return () => ({ addColorStop: () => undefined });
           if (property in target) return target[property as string];
           return () => { calls.ctx.push(String(property)); };
@@ -169,4 +172,82 @@ describe('pageToPng', () => {
     await expect(pageToPng(list([]), { signal: controller.signal })).rejects.toBeDefined();
     expect(calls.encoded).toBe(0);
   });
+
+  test('paints a run with the registered face layout measured it with, not the browser face for its own name', async () => {
+    const { calls, loads } = stubBrowser();
+    const arial = { family: 'Arial', bytes: new Uint8Array([7]) };
+    const box = { ...textBox, paragraphs: [{ runs: [{ ...run, family: 'Calibri' }] }] };
+    await pageToPng(list([box]), { fonts: [face, arial] });
+    expect(calls.faces).toEqual([{ family: expect.stringMatching(/^bo-vsdx-png-\d+-0$/), weight: '400', style: 'normal', bytes: [7] }]);
+    expect(loads).toEqual([expect.stringMatching(/^16px bo-vsdx-png-\d+-0$/)]);
+    expect(calls.fonts.length).toBeGreaterThan(0);
+    expect(calls.fonts.every((font) => /bo-vsdx-png-\d+-0$/.test(font))).toBe(true);
+  });
+
+  test('resolves faces in layout order: the family, then Arial, then sans-serif, dropping bold before italic', () => {
+    const regular = { family: 'Brand Sans', bytes: new Uint8Array([1]) };
+    const italic = { family: 'Brand Sans', italic: true, bytes: new Uint8Array([2]) };
+    const arialBold = { family: 'Arial', bold: true, bytes: new Uint8Array([3]) };
+    const generic = { family: 'sans-serif', bytes: new Uint8Array([4]) };
+    expect(layoutFace([regular, italic], { family: 'Brand Sans', bold: true, italic: true })).toBe(italic);
+    expect(layoutFace([regular, italic], { family: 'Brand Sans', bold: true, italic: false })).toBe(regular);
+    expect(layoutFace([regular, arialBold], { family: 'Calibri', bold: true, italic: false })).toBe(arialBold);
+    expect(layoutFace([regular, arialBold], { family: 'Calibri', bold: false, italic: false })).toBeUndefined();
+    expect(layoutFace([regular, generic], { family: 'Calibri', bold: false, italic: false })).toBe(generic);
+    expect(layoutFace([regular], { family: 'brand sans', bold: false, italic: false })).toBeUndefined();
+  });
+
+  test('two runs that resolve to one face install it once', async () => {
+    const { calls } = stubBrowser();
+    const arial = { family: 'Arial', bytes: new Uint8Array([7]) };
+    const box = { ...textBox, paragraphs: [{ runs: [{ ...run, family: 'Calibri' }, { ...run, family: 'Cambria' }] }] };
+    await pageToPng(list([box]), { fonts: [arial] });
+    expect(calls.faces).toHaveLength(1);
+  });
+
+  test('spaces glyph by glyph where the context has no letterSpacing, as in older Safari and some workers', async () => {
+    const { calls } = stubBrowser();
+    expect(typeof (new OffscreenCanvas(1, 1).getContext('2d') as unknown as { letterSpacing?: unknown }).letterSpacing).not.toBe('string');
+    calls.sizes.length = 0;
+    const box = { ...textBox, paragraphs: [{ runs: [{ ...run, family: 'Arial', letterSpacing: 0.25 }] }] };
+    await pageToPng(list([box]), { fonts: [{ family: 'Arial', bytes: new Uint8Array([7]) }] });
+    const glyphs = calls.draws.filter((draw) => draw.call === 'fillText');
+    expect(glyphs.map((draw) => draw.args[0])).toEqual(['H', 'e', 'l', 'l', 'o']);
+    expect(glyphs.map((draw) => draw.args[1])).toEqual([0, 25, 50, 75, 100]);
+  });
+
+  test('uses the canvas letter spacing where the context has it, so shaping is kept', async () => {
+    const { calls } = stubBrowser({ letterSpacing: true });
+    const box = { ...textBox, paragraphs: [{ runs: [{ ...run, family: 'Arial', letterSpacing: 0.25 }] }] };
+    await pageToPng(list([box]), { fonts: [{ family: 'Arial', bytes: new Uint8Array([7]) }] });
+    const glyphs = calls.draws.filter((draw) => draw.call === 'fillText');
+    expect(glyphs).toEqual([{ call: 'fillText', args: ['Hello', 0, 0], spacing: '24px' }]);
+  });
+
+  test('underlines a run across its spaced width at the face underline position', async () => {
+    const { calls } = stubBrowser();
+    const font = new Uint8Array(readFileSync(new URL('../../../fonts/assets/LiberationSans-Regular.ttf', import.meta.url)));
+    const box = { ...textBox, paragraphs: [{ runs: [{ ...run, family: 'Arial', sizeIn: 1, underline: true, letterSpacing: 0.25 }] }] };
+    await pageToPng(list([box]), { fonts: [{ family: 'Arial', bytes: font }] });
+    const rules = calls.draws.filter((draw) => draw.call === 'fillRect' && draw.args[3] !== 50);
+    expect(rules).toHaveLength(1);
+    const [x, y, width, height] = rules[0].args as number[];
+    expect(x).toBe(0);
+    expect(width).toBe(5 + 24 * 5);
+    expect(height).toBeCloseTo(96 * 150 / 2048, 6);
+    expect(y + height / 2).toBeCloseTo(96 * 0.8 + 96 * 67 / 2048, 6);
+  });
+
+  test('leaves a run without underline unruled', async () => {
+    const { calls } = stubBrowser();
+    await pageToPng(list(), { fonts: [face] });
+    expect(calls.draws.filter((draw) => draw.call === 'fillRect')).toHaveLength(1);
+  });
+
+  test('reads underline metrics from the post table and falls back to the raster defaults', () => {
+    const font = new Uint8Array(readFileSync(new URL('../../../fonts/assets/LiberationSans-Regular.ttf', import.meta.url)));
+    expect(underlineMetrics(font)).toEqual({ position: -67 / 2048, thickness: 150 / 2048 });
+    expect(underlineMetrics(new Uint8Array([1, 2, 3]))).toEqual({ position: -0.1, thickness: 0.05 });
+  });
 });
+

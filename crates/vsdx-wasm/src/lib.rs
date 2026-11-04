@@ -205,7 +205,9 @@ impl VsdxRenderer {
         let page_part = package
             .page_part_paths
             .get(page_index as usize)
-            .ok_or_else(|| JsValue::from_str("page index is outside the document"))?;
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("page index {page_index} is out of range"))
+            })?;
         let rendered = self
             .renderer
             .layout_page(&package, page_part)

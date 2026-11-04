@@ -156,7 +156,7 @@ describe('VSDX wasm boundary', () => {
       expect(diagram.hitTest(list.width / 2, list.height / 2)).toEqual(before);
       await expect(diagram.renderPng({ page: -1 })).rejects.toThrow('non-negative integer');
       await expect(diagram.renderPng({ page: 0 }, { scale: 0 })).rejects.toThrow('positive number');
-      await expect(diagram.renderPng({ page: 99 })).rejects.toThrow();
+      await expect(diagram.renderPng({ page: 99 })).rejects.toThrow('page index 99 is out of range');
     } finally {
       diagram.dispose();
       restore.restore();
@@ -975,6 +975,33 @@ test('hit testing returns a shape ID accepted by editing commands', () => {
     diagram.setCellFormula(page.id, hit!.shapeId, { cellName: 'PinX' }, '0.25');
     expect(flattenShapes(diagram.snapshot().pages[0].shapes).find(shape => shape.id === hit!.shapeId)?.cells.find(cell => cell.name === 'PinX')?.formula).toBe('0.25');
   } finally { diagram.dispose(); }
+});
+
+test('an export paints with the faces as registered, not as the caller changed them afterwards', async () => {
+  const font = new Uint8Array(await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')));
+  const restore = stubOffscreenCanvas();
+  const sources: Uint8Array[] = [];
+  const scope = globalThis as Record<string, unknown>;
+  const saved = { FontFace: scope.FontFace, fonts: scope.fonts };
+  scope.FontFace = class {
+    constructor(_family: string, source: ArrayBuffer) { sources.push(new Uint8Array(source)); }
+    load() { return Promise.resolve(this); }
+  };
+  scope.fonts = { add() {}, delete() { return true; }, load: () => Promise.resolve([{}]) };
+  const opened = { family: 'Arial', bytes: font.slice() };
+  const diagram = openDiagram(textAccounting, { clientId: 9016, fonts: [opened] });
+  try {
+    const later = { family: 'Arial', bold: true, bytes: font.slice() };
+    diagram.registerFont(later);
+    for (const face of [opened, later]) { face.bytes.fill(0); face.family = 'Changed'; }
+    await diagram.renderPng({ page: 0 });
+    expect(sources.length).toBeGreaterThan(0);
+    for (const source of sources) expect(source).toEqual(font);
+  } finally {
+    diagram.dispose();
+    restore.restore();
+    Object.assign(scope, saved);
+  }
 });
 
 function stubOffscreenCanvas() {
