@@ -45,13 +45,14 @@ for (const method of ['readCells', 'findText', 'validateEdits', 'applyEdits'] as
   });
 }
 
-for (const method of ['renderPng', 'renderRangePng', 'exportStructured', 'exportMarkdown', 'printDisplayList'] as const) {
+for (const method of ['renderPng', 'exportStructured', 'exportMarkdown', 'printDisplayList'] as const) {
   test(`fallback ${method} captures options before delayed input`, async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
     const options = { sheet: 0, range: { start: { row: 0, col: 0 }, end: { row: 1, col: 1 } } };
     const markdownOptions = { includeEmptyCells: true };
-    const args = method === 'exportMarkdown' ? [options, markdownOptions] : [options];
+    const pngOptions = { scale: 2 };
+    const args = method === 'exportMarkdown' ? [options, markdownOptions] : method === 'renderPng' ? [options, pngOptions] : [options];
     const original = structuredClone(args);
     const operation = mock((...captured: unknown[]) => captured);
     const sync = { commands: createXlsxCommandController().store, flushPendingInput: () => pending,
@@ -62,6 +63,7 @@ for (const method of ['renderPng', 'renderRangePng', 'exportStructured', 'export
     options.sheet = 1;
     options.range.start.row = 9;
     markdownOptions.includeEmptyCells = false;
+    pngOptions.scale = 3;
     release();
     await work;
     expect(operation.mock.calls[0]).toEqual(original);

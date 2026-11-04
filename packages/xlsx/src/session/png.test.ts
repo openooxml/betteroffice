@@ -37,11 +37,11 @@ async function failure(call: Promise<unknown>): Promise<string> {
 }
 
 async function matchingPng(lean: WorkbookSession, full: WorkbookSession, sheet: number) {
-  expect(await lean.call.renderPng(viewport, { sheet })).toEqual(await full.call.renderPng(viewport, { sheet }));
-  for (const options of [undefined, { range: 'A1:B3' }, { range: 'B2:D5', scale: 0.75 },
-    { range: 'A1:B3', scale: 1.3 }, { range: 'A1:B3', scale: 2 }]) {
-    expect(await lean.call.renderRangePng(options, { sheet }))
-      .toEqual(await full.call.renderRangePng(options, { sheet }));
+  expect(await lean.call.renderPng({ sheet, viewport })).toEqual(await full.call.renderPng({ sheet, viewport }));
+  for (const [range, options] of [['A1:B3', {}], ['B2:D5', { scale: 0.75 }], ['A1:B3', { scale: 1.3 }],
+    ['A1:B3', { scale: 2 }], ['A1:D9', { scale: 1.3, maxWidth: 97, maxHeight: 41 }]] as const) {
+    expect(await lean.call.renderPng({ sheet, range }, options))
+      .toEqual(await full.call.renderPng({ sheet, range }, options));
   }
 }
 
@@ -60,23 +60,23 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export', () => {
         await session.save();
       }
       expect(rasterRequests(lean.requests)).toEqual([]);
-      for (const [invalid, range] of [
-        [{ ...viewport, width: -1 }, undefined],
-        [{ ...viewport, width: 17000 }, undefined],
-        [undefined, { range: 'nope' }],
-        [undefined, { range: 'A1:B2', scale: 0 }],
+      for (const [target, options] of [
+        [{ sheet: 0, viewport: { ...viewport, width: -1 } }, {}],
+        [{ sheet: 0, viewport: { ...viewport, width: 17000 } }, {}],
+        [{ sheet: 0, range: 'nope' }, {}],
+        [{ sheet: 0, range: 'A1:B2' }, { scale: 0 }],
+        [{ sheet: 9, range: 'A1:B2' }, {}],
       ] as const) {
-        const call = (session: WorkbookSession) => invalid
-          ? session.call.renderPng(invalid) : session.call.renderRangePng(range);
+        const call = (session: WorkbookSession) => session.call.renderPng(target, options);
         expect(await failure(call(lean.session))).toBe(await failure(call(full.session)));
       }
       expect(rasterRequests(lean.requests)).toEqual([]);
       const [png, range] = await Promise.all([
-        lean.session.call.renderPng(viewport, { sheet: 1 }),
-        lean.session.call.renderRangePng({ range: 'A1:B3', scale: 1.3 }, { sheet: 0 }),
+        lean.session.call.renderPng({ sheet: 1, viewport }),
+        lean.session.call.renderPng({ sheet: 0, range: 'A1:B3' }, { scale: 1.3 }),
       ]);
-      expect(png).toEqual(await full.session.call.renderPng(viewport, { sheet: 1 }));
-      expect(range).toEqual(await full.session.call.renderRangePng({ range: 'A1:B3', scale: 1.3 }, { sheet: 0 }));
+      expect(png).toEqual(await full.session.call.renderPng({ sheet: 1, viewport }));
+      expect(range).toEqual(await full.session.call.renderPng({ sheet: 0, range: 'A1:B3' }, { scale: 1.3 }));
       expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
       expect(rasterRequests(lean.requests)).toHaveLength(1);
       for (const session of [lean.session, full.session]) {
@@ -151,9 +151,9 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export while the raste
     const full = await opened(true);
     try {
       let settled = false;
-      const exported = session.call.renderPng(viewport).finally(() => { settled = true; });
+      const exported = session.call.renderPng({ sheet: 0, viewport }).finally(() => { settled = true; });
       const edited = edit(session, 1, 'after export');
-      const before = await full.session.call.renderPng(viewport);
+      const before = await full.session.call.renderPng({ sheet: 0, viewport });
       await edited;
       expect((await session.call.frame(viewport)).sheet).toBe(0);
       expect((await session.save()).byteLength).toBeGreaterThan(0);
@@ -161,9 +161,9 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export while the raste
       expect(settled).toBe(false);
       expect(await exported).toEqual(before);
       await edit(full.session, 1, 'after export');
-      const after = await full.session.call.renderPng(viewport);
+      const after = await full.session.call.renderPng({ sheet: 0, viewport });
       expect(after).not.toEqual(before);
-      expect(await session.call.renderPng(viewport)).toEqual(after);
+      expect(await session.call.renderPng({ sheet: 0, viewport })).toEqual(after);
       expect(rasterRequests(requests)).toHaveLength(1);
       expect(session.failure).toBeUndefined();
     } finally {
@@ -176,12 +176,12 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export while the raste
     const { session, requests } = await controlled('pngRasterFailWorker');
     const full = await opened(true);
     try {
-      expect(await failure(session.call.renderPng(viewport))).toBe('Raster download failed');
+      expect(await failure(session.call.renderPng({ sheet: 0, viewport }))).toBe('Raster download failed');
       expect(session.failure).toBeUndefined();
       await edit(session, 1, 'after failure');
       expect((await session.save()).byteLength).toBeGreaterThan(0);
       await edit(full.session, 1, 'after failure');
-      expect(await session.call.renderPng(viewport)).toEqual(await full.session.call.renderPng(viewport));
+      expect(await session.call.renderPng({ sheet: 0, viewport })).toEqual(await full.session.call.renderPng({ sheet: 0, viewport }));
       expect(rasterRequests(requests)).toHaveLength(2);
       expect(session.failure).toBeUndefined();
     } finally {

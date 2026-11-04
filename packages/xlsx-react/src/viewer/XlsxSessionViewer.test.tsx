@@ -88,7 +88,6 @@ function session() {
     validateEdits: mock(async (): Promise<xlsx.XlsxValidationResult> => { throw new Error('Unexpected mutation'); }),
     applyEdits: mock(async (): Promise<xlsx.XlsxEditResult> => { throw new Error('Unexpected mutation'); }),
     renderPng: mock<WorkbookSession['call']['renderPng']>(async () => { throw new Error('Unexpected export'); }),
-    renderRangePng: mock<WorkbookSession['call']['renderRangePng']>(async () => { throw new Error('Unexpected export'); }),
     exportStructured: mock<WorkbookSession['call']['exportStructured']>(async () => { throw new Error('Unexpected export'); }),
     exportMarkdown: mock<WorkbookSession['call']['exportMarkdown']>(async () => { throw new Error('Unexpected export'); }),
     printDisplayList: mock<WorkbookSession['call']['printDisplayList']>(async () => { throw new Error('Unexpected export'); }),
