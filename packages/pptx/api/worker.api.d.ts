@@ -336,6 +336,11 @@ export type ProposalEdit = {
     slideId: string;
     shapeId: string;
 } | {
+    type: 'reorderShape';
+    slideId: string;
+    shapeId: string;
+    to: 'front' | 'back' | 'forward' | 'backward';
+} | {
     type: 'insertTableRow';
     slideId: string;
     shapeId: string;

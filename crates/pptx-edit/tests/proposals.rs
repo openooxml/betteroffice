@@ -2966,7 +2966,7 @@ fn reorder_proposals_stale_on_shape_capture_or_any_top_level_order_change() {
         let changed = session.snapshot().unwrap();
         assert_eq!(
             session.proposals().unwrap()[0].stale_targets,
-            [target.clone()]
+            std::slice::from_ref(target)
         );
         assert_eq!(
             session
@@ -2974,7 +2974,7 @@ fn reorder_proposals_stale_on_shape_capture_or_any_top_level_order_change() {
                 .unwrap()
                 .proposal
                 .stale_targets,
-            [target.clone()]
+            std::slice::from_ref(target)
         );
         assert_eq!(
             session
@@ -2982,7 +2982,7 @@ fn reorder_proposals_stale_on_shape_capture_or_any_top_level_order_change() {
                 .unwrap()
                 .proposal
                 .stale_targets,
-            [target.clone()]
+            std::slice::from_ref(target)
         );
         assert!(matches!(
             session.accept_proposal(&proposal.id, false),
@@ -3164,7 +3164,7 @@ fn reorder_stales_when_other_shapes_swap_without_moving_the_target() {
     );
     assert_eq!(
         session.proposals().unwrap()[0].stale_targets,
-        [target.clone()]
+        std::slice::from_ref(target)
     );
     assert!(matches!(
         session.accept_proposal(&proposal.id, false),

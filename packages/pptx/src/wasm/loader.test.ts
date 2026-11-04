@@ -1311,7 +1311,7 @@ test.each(['front', 'back', 'forward', 'backward'] as const)('reorderShape %s pr
     expect(diff.snapshot.slides[0]!.shapes.map(shape => shape.id)).toEqual(preview.slides[0]!.shapes.map(shape => shape.id));
     expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'reordered' }]);
     const shapeIds = slide.shapes.map(shape => shape.id);
-    expect([...new Set(diff.frame.primitives.flatMap(primitive => primitive.shapeId && shapeIds.includes(primitive.shapeId) ? [primitive.shapeId] : [])))]).toEqual([...shapeIds].reverse());
+    expect([...new Set(diff.frame.primitives.flatMap(primitive => primitive.shapeId && shapeIds.includes(primitive.shapeId) ? [primitive.shapeId] : []))]).toEqual([...shapeIds].reverse());
     expect(source.proposalSlideStrip(proposal.id)[0]!.status).toBe('changed');
     expect(source.snapshot()).toEqual(before);
     expect(source.rejectProposal(proposal.id)).toBe(true);

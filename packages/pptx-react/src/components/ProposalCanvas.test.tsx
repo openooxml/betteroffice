@@ -228,7 +228,7 @@ test.each([
     expect(diff.snapshot.slides[0]!.shapes.map(shape => shape.id)).toEqual(slide.shapes.map(shape => shape.id).reverse());
     expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'reordered' }]);
     const shapeIds = slide.shapes.map(shape => shape.id);
-    expect([...new Set(diff.frame.primitives.flatMap(primitive => primitive.shapeId && shapeIds.includes(primitive.shapeId) ? [primitive.shapeId] : [])))]).toEqual([...shapeIds].reverse());
+    expect([...new Set(diff.frame.primitives.flatMap(primitive => primitive.shapeId && shapeIds.includes(primitive.shapeId) ? [primitive.shapeId] : []))]).toEqual([...shapeIds].reverse());
     function Details() {
       const { t } = useProposalTranslation();
       return <ProposalChangeDetails change={diff.proposal.changes[0]!} proposal={diff.proposal} t={t} />;
