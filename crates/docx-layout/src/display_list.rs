@@ -8259,6 +8259,7 @@ fn try_emit_glyph_runs(
     let size_px = effective_font_px_of(fmt);
     let features = kern_features_of(fmt, size_px);
     let ws_px = word_spacing.as_ref().map(num_f64).unwrap_or(0.0);
+    let letter_spacing = fmt.letter_spacing.unwrap_or(0.0);
     let direction = shape_direction_for_level(bidi_level);
     let rtl = if direction == ooxml_text::ShapeDirection::Rtl {
         Some(true)
@@ -8412,6 +8413,11 @@ fn try_emit_glyph_runs(
         for (index, g) in glyphs.iter().enumerate() {
             // Fold the justified U+0020 stretch into the glyph advance.
             let mut advance = g.x_advance as f64;
+            if letter_spacing != 0.0
+                && glyphs.get(index + 1).is_none_or(|next| next.cluster != g.cluster)
+            {
+                advance += letter_spacing;
+            }
             if ws_px != 0.0 && sub_bytes.get(g.cluster as usize) == Some(&b' ') {
                 advance += ws_px;
             }
@@ -8494,6 +8500,14 @@ fn try_emit_glyph_runs(
             text_effect: fmt.text_effect.clone(),
             attrs: sub_attrs,
         }));
+    }
+
+    if letter_spacing != 0.0
+        && let Some(Primitive::GlyphRun(run)) = local.last_mut()
+        && let Some(last) = run.glyphs.last_mut()
+    {
+        last.advance = round3(last.advance - letter_spacing);
+        acc -= letter_spacing;
     }
 
     if let Some(target) = exact_width
