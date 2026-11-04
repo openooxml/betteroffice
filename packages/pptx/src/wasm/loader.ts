@@ -16,6 +16,7 @@ import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared
 import { metafileImageBytes } from '../render/browserImage';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { renderPng as renderEnginePng } from './enginePng';
+import { pictureUnavailable } from '../render/png';
 import type { PptxPngOptions, PptxPngTarget } from './pngOptions';
 export type { PptxPngOptions, PptxPngTarget } from './pngOptions';
 import { frameAssetIds } from '../session/frame';
@@ -918,11 +919,16 @@ function openPresentationInternal(
         displayList: (index) => jsonWasmCall<SlideDisplayList>(() => renderer.exportSlideJson(doc, index)),
         media: (assetId) => {
           assertAlive();
+          let source: Uint8Array;
           try {
-            let source = wasmCall(() => doc.mediaBytes(assetId));
+            source = wasmCall(() => doc.mediaBytes(assetId));
             if (isTiff(source) && source.byteLength <= MAX_TIFF_BYTES) source = decodeTiffImage(source);
-            return metafileImageBytes(source, () => wasmCall(() => doc.metafileSvg(assetId)));
           } catch { return undefined; }
+          const bytes = metafileImageBytes(source, () => {
+            try { return wasmCall(() => doc.metafileSvg(assetId)); } catch { return undefined; }
+          });
+          if (source.byteLength && !bytes.byteLength) throw pictureUnavailable('metafile');
+          return bytes;
         },
         fonts: () => [...exportFaces.values()],
       }, { slide }, options).then((bytes) => { assertAlive(); return bytes; });

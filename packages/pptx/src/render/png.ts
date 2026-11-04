@@ -35,6 +35,13 @@ export function canvasUnavailable(): PngExportError {
   return new PngExportError('canvas-unavailable', 'PNG export needs a canvas, and this environment has none. Use @betteroffice/pptx-native.');
 }
 
+/** A picture this engine cannot draw here; the native package draws them all. */
+export function pictureUnavailable(kind: 'svg' | 'metafile'): PngExportError {
+  return new PngExportError('canvas-unavailable', kind === 'svg'
+    ? 'This slide has SVG pictures, which decode only with a document. Export from the page, or use @betteroffice/pptx-native.'
+    : 'This slide has EMF or WMF pictures this engine cannot convert. Use @betteroffice/pptx-native.');
+}
+
 /** Checks a PNG background the way the native renderer does. */
 export function pngBackground(value: unknown): PptxPngBackground {
   if (value === undefined) return 'slide';

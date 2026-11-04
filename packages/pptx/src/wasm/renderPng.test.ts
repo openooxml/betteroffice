@@ -46,9 +46,9 @@ function stubBrowser() {
   }
   const held: Face[] = [];
   const scope = globalThis as Record<string, unknown>;
-  const saved = { OffscreenCanvas: scope.OffscreenCanvas, FontFace: scope.FontFace, fonts: scope.fonts, createImageBitmap: scope.createImageBitmap };
+  const saved = { OffscreenCanvas: scope.OffscreenCanvas, FontFace: scope.FontFace, fonts: scope.fonts, createImageBitmap: scope.createImageBitmap, Image: scope.Image };
   Object.assign(scope, {
-    OffscreenCanvas: Canvas, FontFace: Face,
+    OffscreenCanvas: Canvas, FontFace: Face, Image: undefined,
     createImageBitmap: () => Promise.reject(new Error('no decoder in this test')),
     fonts: {
       add(face: Face) { held.push(face); },
@@ -128,6 +128,20 @@ describe('PresentationHandle.renderPng', () => {
       expect(closed).toEqual([true]);
     }
     expect(browser.held).toEqual([]);
+  });
+
+  test('a slide with metafile pictures the canvas cannot draw rejects instead of leaving them out', async () => {
+    const browser = stubBrowser();
+    const deck = new Uint8Array(await readFile(resolve(root, 'crates/pptx-render/tests/fixtures/metafile-svg-pictures.pptx')));
+    const handle = openPresentation(deck, { clientId: 7105, fonts: [{ family: 'Liberation Sans', bytes: font }] });
+    try {
+      const exported = handle.renderPng({ slide: 0 });
+      if (native) expect(isPng(await exported)).toBe(true);
+      else {
+        await expect(exported).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-unavailable' });
+        expect(browser.sizes).toEqual([]);
+      }
+    } finally { handle.dispose(); }
   });
 
   test('paints each run with the face layout measured it with, as registered, not as the caller changed it afterwards', async () => {

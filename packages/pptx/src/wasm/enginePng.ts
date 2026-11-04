@@ -1,5 +1,4 @@
-import { PngExportError } from '../../../../shared/office-session/pngExportError';
-import { canvasPngAvailable, canvasUnavailable, slideListToPng, type PptxPngBackground } from '../render/png';
+import { canvasPngAvailable, canvasUnavailable, pictureUnavailable, slideListToPng, type PptxPngBackground } from '../render/png';
 import { browserPresentationImageBlob, decodeBrowserPresentationImage, needsElementDecode } from '../render/browserImage';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 
@@ -49,7 +48,7 @@ export async function renderPng(engine: PptxPngEngine, target: { slide: number }
       options.signal?.throwIfAborted();
       const bytes = engine.media(assetId);
       if (bytes?.byteLength && typeof Image === 'undefined' && decodesOnlyWithDocument(bytes)) {
-        throw new PngExportError('canvas-unavailable', 'This slide has SVG or metafile pictures, which decode only with a document. Export from the page, or use @betteroffice/pptx-native.');
+        throw pictureUnavailable('svg');
       }
       images.set(assetId, bytes?.byteLength ? await decodeBrowserPresentationImage(bytes, 'image could not decode').catch(() => null) : null);
     }
