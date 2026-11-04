@@ -1412,7 +1412,7 @@ import type { XlsxExportOptions, XlsxExportResult, XlsxMarkdownContent, XlsxMark
 import type { WorkbookCommand, WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookCommandWireFrame, WorkbookEditState, WorkbookWireAck, WorkbookSharedCommand, WorkbookSharedWireAck, WorkbookCommandFrameRequest } from './commandProtocol';
 import type { Checkpoint, FrameEnvelope } from '../../../../shared/office-session/commands/types';
 import type { XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
-import type { CalculationStatus, CapturedFormat, CellEdit, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport } from '../wasm/loader';
+import type { CalculationStatus, CapturedFormat, CellEdit, CellPoint, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport } from '../wasm/loader';
 /** @internal */
 export interface WorkbookCollaborationPipeReply {
     collabPipe?: PipeOutputBatch<AwarenessPeer>[];
@@ -1561,6 +1561,18 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
     sheetView(sheet: number): WorkbookSheetView;
     cellGeometry(sheet: number, row: number, col: number): WorkbookCellGeometry;
     cellInputs(sheet: number, range: string): WorkbookCellInputs;
+    /** @internal Formulas, without their `=`, moved between cells as a paste moves them. */
+    translateFormulas(items: readonly {
+        formula: string;
+        from: CellPoint;
+        to: CellPoint;
+    }[]): ({
+        ok: true;
+        formula: string;
+    } | {
+        ok: false;
+        error: string;
+    })[];
     selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
     captureFormat(sheet: number, range: string): CapturedFormat;
     sheets(): WorkbookSheetSummary[];
@@ -1596,6 +1608,7 @@ export declare const WORKBOOK_SESSION_METHODS: {
     sheetView: true;
     cellGeometry: true;
     cellInputs: true;
+    translateFormulas: true;
     selectionData: true;
     captureFormat: true;
     sheets: true;
@@ -3033,6 +3046,10 @@ export class XlsxDocument {
      */
     startUpdateObservation(): void;
     /**
+     * @internal
+     */
+    translateFormulasJson(args: string): string;
+    /**
      * undo the last transaction; returns `{"applied":bool,"sheetInfo":{...}}`.
      */
     undoJson(): string;
@@ -3175,6 +3192,7 @@ export interface InitOutput {
     readonly xlsxdocument_sheetInfoForJson: (a: number, b: number) => [number, number, number, number];
     readonly xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
+    readonly xlsxdocument_translateFormulasJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
@@ -3821,6 +3839,21 @@ export declare function createWorkbookSnapshotBuilder(options: OpenWorkbookOptio
 export declare function workbookPeerHydration(handle: WorkbookHandle): string;
 export declare function adoptWorkbookPeerVersion(handle: WorkbookHandle, version: string): void;
 export declare function openWorkbookPeer(bytes: Uint8Array, options: OpenWorkbookOptions, hydration: string): WorkbookHandle;
+/**
+ * @internal Formulas, without their `=`, moved from one cell to another as a paste moves them, by
+ * the engine of `handle`; per item the moved formula, or why a paste would refuse it.
+ */
+export declare function translateFormulasOn(handle: WorkbookHandle, items: readonly {
+    formula: string;
+    from: CellPoint;
+    to: CellPoint;
+}[]): ({
+    ok: true;
+    formula: string;
+} | {
+    ok: false;
+    error: string;
+})[];
 /**
  * Exports `.xlsx` bytes as read, initializing the core if needed. Formula results are the
  * stored ones: nothing is recalculated and no clock is read, so the same bytes and options

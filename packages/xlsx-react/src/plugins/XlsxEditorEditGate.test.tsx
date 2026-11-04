@@ -163,8 +163,11 @@ const A1 = ['A1', 'B1', 'C1', 'D1', 'E1'];
 
 type ClipItem = { types: string[]; getType(type: string): Promise<Blob> };
 
-/** A clipboard holding `text` whose writes land only once every part of the item resolved. */
-function fakeClipboard(text = '') {
+/**
+ * A clipboard holding `text` whose writes land only once every part of the item resolved; reads
+ * of its text wait for `hold`.
+ */
+function fakeClipboard(text = '', hold?: Promise<void>) {
   const plain = (value: string): ClipItem => ({ types: ['text/plain'], getType: async () => new Blob([value], { type: 'text/plain' }) });
   let items = [plain(text)];
   const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
@@ -180,7 +183,11 @@ function fakeClipboard(text = '') {
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: {
-      readText: async () => (await items[0]!.getType('text/plain')).text(),
+      readText: async () => {
+        const read = items[0]!;
+        await hold;
+        return (await read.getType('text/plain')).text();
+      },
       read: async () => items,
       write: async (next: ClipItem[]) => {
         for (const entry of next) for (const type of entry.types) await entry.getType(type);
@@ -799,6 +806,37 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       await book.settle();
       await waitFor(async () => expect(await book.input(0)).toBe(''));
       expect(await clipboard.text()).toBe('1');
+    });
+
+    it('a cut queued behind a paste into its empty cell is decided after the paste, with the clipboard unchanged', async () => {
+      let release!: () => void;
+      const clipboard = fakeClipboard('p', new Promise<void>((done) => { release = done; }));
+      const book = await mountGated(editor, { noCut: { beforeCellCommit: (commit) =>
+        commit.source === 'cut' ? { action: 'refuse', message: 'No cut' } : { action: 'accept' } } });
+      await book.select(2);
+      fireEvent.keyDown(book.surface, { key: 'v', ctrlKey: true });
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await act(async () => { release(); });
+      await book.settle();
+      await waitFor(async () => expect(await book.input(2)).toBe('p'));
+      await waitFor(() => expect(book.refusal()).toBe('No cut'));
+      expect(await clipboard.text()).toBe('p');
+    });
+
+    if (editor === 'peerless') it('a gated cut of a locked cell on a protected sheet is refused before the clipboard is written', async () => {
+      const clipboard = fakeClipboard('before');
+      const asked: string[] = [];
+      const book = await mountGated(editor, { spy: { beforeCellCommit: (commit) => {
+        asked.push(`${commit.source}:${commit.col}`);
+        return { action: 'accept' };
+      } } }, { protectedSheet: true });
+      await book.select(0);
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.settle();
+      await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+      expect(await book.input(0)).toBe('1');
+      expect(await clipboard.text()).toBe('before');
+      expect(asked).toEqual([]);
     });
 
     if (editor === 'peerless') it('a paste over a locked cell of a protected sheet is refused by protection before plugins are asked', async () => {

@@ -104,6 +104,8 @@ export {
   exportXlsxStructured,
   renderXlsxMarkdown,
 } from './wasm/loader';
+/** @internal */
+export { translateFormulasOn } from './wasm/loader';
 export type {
   WasmInitInput,
   WasmInitOptions,

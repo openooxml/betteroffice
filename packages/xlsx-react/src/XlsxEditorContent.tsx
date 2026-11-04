@@ -1698,14 +1698,13 @@ export function XlsxEditorContent({
     [t, gateOutcome, editGate]
   );
 
-  // an input write clearing `target`, while its workbook is still open and writable; a cut
-  // writes what plugins allowed at its version, or asks them again when the workbook moved on.
+  // an input write clearing `target`, while its workbook is still open and writable.
   const writeClear = useCallback(
-    (target: CellTarget, source: 'clear-key' | 'cut', decided?: { version: string; edits: CellInputEdit[] }) => {
+    (target: CellTarget) => {
       const { handle, sheet } = target;
       if (handleRef.current !== handle || readOnlyRef.current) return;
       try {
-        const cleared = decided && decided.version === handle.version() ? decided.edits : gatedClear(target, source);
+        const cleared = gatedClear(target, 'clear-key');
         if (!cleared) return;
         applyResult(handle.editCells(sheet, cleared));
         return true;
@@ -1719,16 +1718,22 @@ export function XlsxEditorContent({
 
   const clearCells = useCallback(() => {
     const target = captureTarget();
-    if (target && !readOnly) void coordinator.input(() => writeClear(target, 'clear-key'));
+    if (target && !readOnly) void coordinator.input(() => writeClear(target));
   }, [captureTarget, writeClear, readOnly, coordinator]);
 
-  const copyTarget = useCallback(async ({ handle, sheet, range: selected }: CellTarget, cut = false) => {
+  /** The range and cells a copy of `target` takes; a selection reaching the sheet edge stops at its used range. */
+  const copiedCells = ({ handle, sheet, range: selected }: CellTarget) => {
+    const range = copiedRange(selected, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
+    const from = handle.cell(sheet, range.top, range.left).a1;
+    const to = handle.cell(sheet, range.bottom, range.right).a1;
+    return { range, cells: handle.rangeCells(sheet, `${from}:${to}`) };
+  };
+
+  const copyTarget = useCallback(async (target: CellTarget, cut = false) => {
+    const { handle, sheet } = target;
     const token = cellClipboard.begin();
     try {
-      const range = copiedRange(selected, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
-      const from = handle.cell(sheet, range.top, range.left).a1;
-      const to = handle.cell(sheet, range.bottom, range.right).a1;
-      const cells = handle.rangeCells(sheet, `${from}:${to}`);
+      const { range, cells } = copiedCells(target);
       const marked = !cut && typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function';
       if (marked) await navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob([toTsv(cells)], { type: 'text/plain' }), 'text/html': clipboardMarker(token, toTsv(cells)),
@@ -1749,25 +1754,81 @@ export function XlsxEditorContent({
     if (target) await copyTarget(target);
   }, [captureTarget, copyTarget]);
 
+  // a cut runs after the input before it, asks plugins about the cells it clears, and only then
+  // writes the clipboard and clears them; a refusal leaves both as they were. With no input
+  // waiting it all happens in the gesture; behind waiting input the clipboard write starts in the
+  // gesture with its text to come, where the browser offers that, else it runs once the cut does.
   const cutSelection = useCallback(() => {
     const target = captureTarget();
     if (!target) return;
     if (readOnly) { void copyTarget(target, true); return; }
-    let decided: { version: string; edits: CellInputEdit[] };
-    try {
-      const version = target.handle.version();
-      const edits = gatedClear(target, 'cut');
-      if (!edits) return;
-      decided = { version, edits };
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    const escapes = cellClipboard.escaped;
+    const current = () => cellClipboard.escaped === escapes && handleRef.current === target.handle && !readOnlyRef.current;
+    const decide = (): { cleared: CellInputEdit[]; text: string } | null => {
+      try {
+        const cleared = current() ? gatedClear(target, 'cut') : null;
+        return cleared && { cleared, text: toTsv(copiedCells(target).cells) };
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    };
+    const writeText = (text: string): Promise<void> => {
+      try {
+        return navigator.clipboard.writeText(text);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    };
+    const clear = async (written: Promise<void>, cleared: CellInputEdit[]) => {
+      try {
+        await written;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      if (!current()) return;
+      try {
+        applyResult(target.handle.editCells(target.sheet, cleared));
+        return true;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return false;
+      }
+    };
+    if (!coordinator.pending) {
+      const decided = decide();
+      if (!decided) return;
+      cellClipboard.begin();
+      const written = writeText(decided.text);
+      void written.catch(() => {});
+      void coordinator.input(() => clear(written, decided.cleared));
       return;
     }
-    const escapes = cellClipboard.escaped;
-    const copied = copyTarget(target, true);
-    void coordinator.input(async () =>
-      (cellClipboard.escaped === escapes && (await copied) ? writeClear(target, 'cut', decided) : undefined));
-  }, [captureTarget, cellClipboard, copyTarget, gatedClear, writeClear, readOnly, coordinator]);
+    let resolve!: (blob: Blob) => void;
+    let reject!: (error: unknown) => void;
+    const payload = new Promise<Blob>((done, fail) => { resolve = done; reject = fail; });
+    void payload.catch(() => {});
+    let write: Promise<void> | null = null;
+    if (typeof ClipboardItem === 'function' && typeof navigator.clipboard?.write === 'function') {
+      try {
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload })]);
+        void write.catch(() => {});
+      } catch {
+        write = null;
+      }
+    }
+    void coordinator.input(async () => {
+      const decided = decide();
+      if (!decided) {
+        reject(new Error('The cut was refused'));
+        return;
+      }
+      cellClipboard.begin();
+      if (write) resolve(new Blob([decided.text], { type: 'text/plain' }));
+      return clear(write ?? writeText(decided.text), decided.cleared);
+    });
+  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator]);
 
   const pasteSelection = useCallback(() => {
     const handle = handleRef.current;

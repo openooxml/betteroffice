@@ -41,7 +41,9 @@ import type { XlsxRevealAlignment } from '../plugins/createPluginClients';
 import { createPeerlessPluginClients } from '../plugins/createPeerlessPluginClients';
 import { createPeerlessPluginDocument, createPeerlessPluginGeometry } from '../plugins/createPeerlessPluginDocument';
 import type { XlsxPluginDocumentAccess } from '../plugins/createPluginDocumentAccess';
-import { changedEdits, coverRanges, GATE_CELL_LIMIT, inputRanges, withGatedInputs } from '../plugins/editGate';
+import {
+  changedEdits, coverRanges, formulaMoves, GATE_CELL_LIMIT, inputRanges, withGatedInputs, writtenInputs,
+} from '../plugins/editGate';
 import type { XlsxPluginCellCommit, XlsxPluginCellRef, XlsxPluginNavigationFailureCode } from '../plugins/types';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginRowGutter } from '../plugins/PluginRowGutter';
@@ -611,16 +613,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     }
     return askPlugins(sheetId, edits, source);
   };
-  /** A cut through the plugins: its cells holding content are asked as cleared, before the clipboard is written. */
+  /**
+   * A cut through the plugins: its cells holding content are asked as cleared. Every refusal,
+   * sheet protection's first, throws before the clipboard is written.
+   */
   const gateCut = async (
     owner: PeerlessWorkbookSession, sheetId: string, range: CellRange, cells: readonly (readonly { input: string }[])[]
   ): Promise<CellInputEdit[]> => {
     const content = cells.flatMap((row, dr) => row.flatMap(({ input }, dc) =>
       input === '' ? [] : [{ row: range.top + dr, col: range.left + dc, input: '' }]));
+    if (content.length === 0) return content;
     if (content.length > GATE_CELL_LIMIT) {
       throw new XlsxHostRefusalError(t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT }));
     }
-    return gateWrites(owner, sheetId, content, 'cut');
+    if (await lockedBySheet(owner, sheetId, coverRanges(content))) {
+      throw new WorkerInputRefusal(t('commands.reasons.sheetProtected'), false, 'sheet-protected');
+    }
+    return askPlugins(sheetId, content, 'cut');
   };
   /**
    * A paste through the plugins: each cell it changes is asked once, with the input written there,
@@ -630,9 +639,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     owner: PeerlessWorkbookSession, sheet: number, sheetId: string, edits: CellInputEdit[]
   ): Promise<CellInputEdit[]> => {
     if (edits.length === 0 || !editGate.gatesEdits() || await lockedBySheet(owner, sheetId, coverRanges(edits))) return edits;
+    const moves = formulaMoves(edits);
     const ranges = inputRanges(edits);
-    const read = await Promise.all(ranges.map(async (range) => (await owner.session.call.cellInputs(sheet, rangeA1(range))).cells));
-    const changed = changedEdits(edits, ranges, read);
+    const [moved, read] = await Promise.all([
+      moves.items.length ? owner.session.call.translateFormulas(moves.items) : [],
+      Promise.all(ranges.map(async (range) => (await owner.session.call.cellInputs(sheet, rangeA1(range))).cells)),
+    ]);
+    const changed = changedEdits(edits, writtenInputs(edits, moves, moved), ranges, read);
     if (changed.length > GATE_CELL_LIMIT) {
       throw new XlsxHostRefusalError(t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT }));
     }

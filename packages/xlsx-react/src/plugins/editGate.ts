@@ -1,7 +1,7 @@
-import type { CellAddr, CellInputEdit, CellRange, WorkbookHandle } from '@betteroffice/xlsx';
+import { translateFormulasOn } from '@betteroffice/xlsx';
+import type { CellAddr, CellInputEdit, CellPoint, CellRange, WorkbookHandle } from '@betteroffice/xlsx';
 import { XlsxHostRefusalError } from '../commands/createXlsxCommandStore';
 import type { XlsxPluginHost } from './createXlsxPluginHost';
-import { columnLetters, translateFormula } from './translateFormula';
 import type { XlsxPluginCellCommit, XlsxPluginCellRef } from './types';
 
 /** The most cells one paste or cut asks plugins about; a larger one is refused. */
@@ -66,14 +66,45 @@ export function gateClear(
   return edits.map((edit) => ({ ...edit, input: inputs.get(`${edit.row}:${edit.col}`) ?? edit.input }));
 }
 
+/** 0 is A, 26 is AA. */
+function columnLetters(col: number): string {
+  let rest = col + 1;
+  let letters = '';
+  while (rest > 0) {
+    rest -= 1;
+    letters = String.fromCharCode(65 + (rest % 26)) + letters;
+    rest = Math.floor(rest / 26);
+  }
+  return letters;
+}
+
 export function rangeA1(range: CellRange): string {
   return `${columnLetters(range.left)}${range.top + 1}:${columnLetters(range.right)}${range.bottom + 1}`;
 }
 
-/** The input the engine writes for a pasted edit: a copied formula moves with its cell. */
-export function writtenInput(edit: CellInputEdit): string {
-  return edit.copyFrom && edit.input.startsWith('=')
-    ? `=${translateFormula(edit.input.slice(1), edit.copyFrom, edit)}` : edit.input;
+type FormulaMoves = { at: number[]; items: { formula: string; from: CellPoint; to: CellPoint }[] };
+type MovedFormula = { ok: true; formula: string } | { ok: false; error: string };
+
+/** The formulas among `edits` copied inside the editor, which the engine moves to their cells. */
+export function formulaMoves(edits: readonly CellInputEdit[]): FormulaMoves {
+  const moves: FormulaMoves = { at: [], items: [] };
+  edits.forEach((edit, at) => {
+    if (!edit.copyFrom || !edit.input.startsWith('=')) return;
+    moves.at.push(at);
+    moves.items.push({ formula: edit.input.slice(1), from: edit.copyFrom, to: { row: edit.row, col: edit.col } });
+  });
+  return moves;
+}
+
+/** The input the engine writes for each edit, with the moved formulas in the order of `moves`. */
+export function writtenInputs(edits: readonly CellInputEdit[], moves: FormulaMoves, moved: readonly MovedFormula[]): string[] {
+  const written = edits.map((edit) => edit.input);
+  moves.at.forEach((at, index) => {
+    const result = moved[index];
+    if (!result?.ok) throw new Error(result?.error ?? 'formula could not be moved');
+    written[at] = `=${result.formula}`;
+  });
+  return written;
 }
 
 /** The ranges to read for the inputs under `edits`: their bounds, or each row of them when large. */
@@ -102,7 +133,8 @@ export function inputRanges(edits: readonly CellInputEdit[]): CellRange[] {
  * inputs of `ranges` before the paste, in their order.
  */
 export function changedEdits(
-  edits: readonly CellInputEdit[], ranges: readonly CellRange[], read: readonly (readonly { input: string }[])[][]
+  edits: readonly CellInputEdit[], written: readonly string[], ranges: readonly CellRange[],
+  read: readonly (readonly { input: string }[])[][]
 ): CellInputEdit[] {
   const current = (row: number, col: number) => {
     const at = ranges.findIndex((range) => row >= range.top && row <= range.bottom && col >= range.left && col <= range.right);
@@ -116,10 +148,10 @@ export function changedEdits(
     };
   })();
   const changed: CellInputEdit[] = [];
-  for (const edit of edits) {
-    const input = writtenInput(edit);
+  edits.forEach((edit, at) => {
+    const input = written[at];
     if (input !== lookup(edit.row, edit.col)) changed.push({ row: edit.row, col: edit.col, input });
-  }
+  });
   return changed;
 }
 
@@ -141,12 +173,14 @@ export function withGatedInputs(
  * and any refusal refuses the whole paste.
  */
 export function gatePaste(
-  gate: XlsxPluginHost, workbook: GateWorkbook & Pick<WorkbookHandle, 'rangeCells'>, sheet: number,
+  gate: XlsxPluginHost, workbook: WorkbookHandle, sheet: number,
   edits: readonly CellInputEdit[], fallback: string, starting: string, tooMany: string
 ): CellInputEdit[] | XlsxHostRefusalError {
   if (edits.length === 0 || !gate.gatesEdits()) return [...edits];
+  const moves = formulaMoves(edits);
+  const written = writtenInputs(edits, moves, moves.items.length ? translateFormulasOn(workbook, moves.items) : []);
   const ranges = inputRanges(edits);
-  const changed = changedEdits(edits, ranges, ranges.map((range) => workbook.rangeCells(sheet, rangeA1(range))));
+  const changed = changedEdits(edits, written, ranges, ranges.map((range) => workbook.rangeCells(sheet, rangeA1(range))));
   if (changed.length > GATE_CELL_LIMIT) return new XlsxHostRefusalError(tooMany);
   const gated = gateWrites(gate, workbook, sheet, changed, 'paste', fallback, starting);
   return Array.isArray(gated) ? withGatedInputs(edits, changed, gated) : gated;
