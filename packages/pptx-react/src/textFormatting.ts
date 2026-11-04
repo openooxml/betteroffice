@@ -132,8 +132,10 @@ export function effectiveStyleFromSelection(
         : formatting.underline
           ? 'sng'
           : 'none',
-    strike: strike ?? (formatting.strikethrough === undefined ? fallback.strike
-      : formatting.strikethrough ? 'sngStrike' : undefined),
+    ...((strike ?? (formatting.strikethrough === undefined ? fallback.strike
+      : formatting.strikethrough ? 'sngStrike' : undefined)) === undefined ? {}
+      : { strike: strike ?? (formatting.strikethrough === undefined ? fallback.strike
+        : formatting.strikethrough ? 'sngStrike' : undefined) }),
     fontSizePt: formatting.fontSize ?? fallback.fontSizePt,
     color: formatting.textColor ?? fallback.color,
     fontFamily: formatting.fontFamily ?? fallback.fontFamily,
@@ -192,7 +194,7 @@ function resolveTextStyle(
     bold: style.bold ?? fallback.bold,
     italic: style.italic ?? fallback.italic,
     underline: style.underline ?? fallback.underline,
-    strike: style.strike ?? fallback.strike,
+    ...((style.strike ?? fallback.strike) === undefined ? {} : { strike: style.strike ?? fallback.strike }),
     fontSizePt: style.fontSizePt ?? fallback.fontSizePt,
     color: style.color ?? fallback.color,
     fontFamily: style.fontFamily ?? fallback.fontFamily,
