@@ -1338,7 +1338,8 @@ mod tests {
             &attrs(20),
             &attrs(40),
         )
-        .unwrap();
+        .ok()
+        .expect("restyled deltas");
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].path, ["characterSpacing", "spacing"]);
     }
