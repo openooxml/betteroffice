@@ -527,7 +527,7 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleClickOutside = (e: PointerEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
@@ -535,12 +535,12 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
 
     // Use timeout to avoid immediately closing on right-click
     const timer = setTimeout(() => {
-      document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('pointerdown', handleClickOutside, true);
     }, 0);
 
     return () => {
       clearTimeout(timer);
-      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('pointerdown', handleClickOutside, true);
     };
   }, [isOpen, onClose]);
 

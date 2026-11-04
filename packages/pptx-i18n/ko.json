@@ -171,6 +171,8 @@
     "loadingDiff": "변경 내용을 불러오는 중…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

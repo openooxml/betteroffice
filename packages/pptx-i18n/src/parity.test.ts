@@ -33,7 +33,7 @@ function pluralCategories(text: string): string[][] {
   );
 }
 
-const fallbackKeys = new Set(['proposals.slideStrip', 'proposals.previewSlide', 'proposals.insertedSlide',
+const fallbackKeys = new Set(['proposals.insertedShape', 'proposals.deletedShape', 'proposals.slideStrip', 'proposals.previewSlide', 'proposals.insertedSlide',
   'proposals.deletedSlide', 'proposals.movedFrom']);
 const enEntries = leafEntries(en);
 const expectedKeys = new Set(enEntries.map(([key]) => key));

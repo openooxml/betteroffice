@@ -29,6 +29,9 @@ test('replays primitives in z order and paints placeholders', async () => {
   expect(log.findIndex(entry => entry.startsWith('moveTo'))).toBeLessThan(log.findIndex(entry => entry.startsWith('strokeRect')));
   expect(log.some(entry => entry.startsWith('strokeRect'))).toBe(true);
   expect(log.some(entry => entry.startsWith('fillText:missing image'))).toBe(true);
+  expect(log).toContain(`font=${(10 / 72) * 96}px sans-serif`);
+  expect(log).toContain(`scale:${1 / 96},${-1 / 96}`);
+  expect(log).toContain(`fillText:missing image,0,${(10 / 72) * 0.8 * 96}`);
 });
 
 test('rejects display-list versions other than v7', async () => {

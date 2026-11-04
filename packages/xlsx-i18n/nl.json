@@ -194,6 +194,7 @@
     "toolbarGroup": "Plug-ins",
     "panelTabs": "Plug-inpanelen",
     "collapsePanel": "{title} samenvouwen",
-    "expandPanel": "{title} uitvouwen"
+    "expandPanel": "{title} uitvouwen",
+    "rowGutter": "Rijmarkeringen van plug-ins"
   }
 }

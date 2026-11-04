@@ -32,8 +32,8 @@ pub use pptx_edit::{
 };
 pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalChangeKind, ProposalEdit, ProposalError,
-    ProposalPreview, ProposalRequest, ProposalResult, ProposalStripEntry, ProposalStripStatus,
-    ProposalTextChange, ProposalTextChangeKind,
+    ProposalPreview, ProposalRequest, ProposalResult, ProposalShapeChange, ProposalShapeChangeKind,
+    ProposalStripEntry, ProposalStripStatus, ProposalTextChange, ProposalTextChangeKind,
 };
 pub use pptx_parse::{
     BlipEffect, Bullet, Comment, CommentAuthor, GraphicFrame, GraphicFrameData, GroupShape,

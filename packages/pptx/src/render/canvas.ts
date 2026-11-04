@@ -15,7 +15,7 @@ import type {
   TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
-import type { ProposalTextChange } from '../proposals';
+import type { ProposalShapeChange, ProposalTextChange } from '../proposals';
 import { imageDecodeScale, setImageDecodeScale } from './browserImage';
 
 type TextChunks = typeof import('./textChunks');
@@ -33,6 +33,7 @@ export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
   maxShadowPixels?: number;
   textChanges?: readonly ProposalTextChange[];
+  shapeChanges?: readonly ProposalShapeChange[];
 }
 
 interface ShadowBudget {
@@ -110,6 +111,8 @@ async function paintPrimitive(
 ): Promise<void> {
   ctx.save();
   try {
+    const deleted = 'shapeId' in primitive && options.shapeChanges?.some(change => change.shapeId === primitive.shapeId && change.kind === 'deleted');
+    if (deleted) ctx.globalAlpha *= 0.4;
     applyTransform(ctx, primitive);
     switch (primitive.kind) {
       case 'shape':
@@ -126,7 +129,9 @@ async function paintPrimitive(
         break;
       case 'chart':
       case 'table':
-        await paintContainer(ctx, primitive, options, deviceScale, shadowBudget, textChunks);
+        await paintContainer(ctx, primitive, deleted ? { ...options,
+          shapeChanges: options.shapeChanges?.filter(change => change.shapeId !== primitive.shapeId),
+        } : options, deviceScale, shadowBudget, textChunks);
         break;
     }
   } finally {

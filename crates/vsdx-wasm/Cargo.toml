@@ -23,7 +23,7 @@ vsdx-parse.workspace = true
 vsdx-render.workspace = true
 vsdx-raster = { workspace = true, optional = true }
 vsdx-validate = { workspace = true }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 

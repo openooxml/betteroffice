@@ -194,6 +194,7 @@
     "toolbarGroup": "प्लगइन",
     "panelTabs": "प्लगइन पैनल",
     "collapsePanel": "{title} संक्षिप्त करें",
-    "expandPanel": "{title} विस्तृत करें"
+    "expandPanel": "{title} विस्तृत करें",
+    "rowGutter": "प्लगइन पंक्ति चिह्न"
   }
 }
