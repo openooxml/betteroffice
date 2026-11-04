@@ -34,6 +34,21 @@ interface PreparedFonts {
 const text = (value: unknown, max = 4096): value is string => typeof value === 'string' && value.length > 0 && value.length <= max;
 const hex = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 
+/** Bundlers may inline slice files as `data:` URLs, so those carry the file itself and are bounded by size, not as links. */
+const MAX_LINK_URL = 8192;
+const MAX_DATA_URL = 16 * 1024 * 1024;
+const MAX_DATA_URLS = 64 * 1024 * 1024;
+
+function validSliceUrls(urls: object): boolean {
+  let inlined = 0;
+  return Object.entries(urls).every(([file, url]) => {
+    if (!text(file) || typeof url !== 'string') return false;
+    if (!url.startsWith('data:')) return text(url, MAX_LINK_URL);
+    inlined += url.length;
+    return url.length <= MAX_DATA_URL && inlined <= MAX_DATA_URLS;
+  });
+}
+
 function validProgressiveSpecs(specs: unknown, faces: readonly DocxFontFace[]): specs is ProgressiveFontSpec[] {
   if (!Array.isArray(specs) || specs.length > faces.length) return false;
   const slots = new Set<number>();
@@ -47,7 +62,7 @@ function validProgressiveSpecs(specs: unknown, faces: readonly DocxFontFace[]): 
     return Number.isSafeInteger(ref.format) && text(ref.index) && hex(ref.indexSha256) && hex(ref.sha256) &&
       Number.isSafeInteger(ref.byteLength) && ref.byteLength > 0 &&
       !!urls && typeof urls === 'object' && !Array.isArray(urls) && Object.keys(urls).length <= 4096 &&
-      Object.entries(urls).every(([file, url]) => text(file) && text(url, 8192)) &&
+      validSliceUrls(urls) &&
       (timeoutMs === undefined || (Number.isSafeInteger(timeoutMs) && timeoutMs > 0));
   });
 }
