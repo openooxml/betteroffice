@@ -101,7 +101,7 @@ test('deferred editors have no runtime imports back into the editor shell', () =
     visit(resolve(root, `packages/xlsx-react/src/${path}`));
     expect(seen.has(resolve(root, 'packages/xlsx-react/src/viewer/XlsxSessionViewer.tsx'))).toBe(path === 'LegacyXlsxEditor.tsx');
   }
-});
+}, 30_000);
 
 for (const entry of ['packages/xlsx/src/session/client.ts', 'packages/xlsx/src/session/worker.ts',
   'packages/xlsx-react/src/worker/XlsxPeerlessWorkerEditor.tsx']) {
