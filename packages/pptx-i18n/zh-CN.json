@@ -231,8 +231,24 @@
       "permissionDenied": "宿主应用未允许此插件使用此命令。",
       "unsupportedPolicy": "插件尚不能运行此命令，请改用编辑批处理。",
       "pluginUnavailable": "插件已不再处于活动状态。",
-      "aborted": "插件操作在命令运行前已取消。"
-    }
+      "aborted": "插件操作在命令运行前已取消。",
+      "clipboardUnavailable": "无法访问剪贴板或访问已被拒绝。",
+      "tableRequired": "请先将光标放在表格单元格中。",
+      "lastSlide": "无法删除最后一张幻灯片。"
+    },
+    "cut": "剪切",
+    "copy": "复制",
+    "paste": "粘贴",
+    "insert": "插入",
+    "delete": "删除",
+    "deleteTable": "删除表格",
+    "duplicateSlide": "复制幻灯片",
+    "insertRowsAbove": "在上方插入行",
+    "insertRowsBelow": "在下方插入行",
+    "insertColumnsLeft": "在左侧插入列",
+    "insertColumnsRight": "在右侧插入列",
+    "deleteRows": "删除行",
+    "deleteColumns": "删除列"
   },
   "plugins": {
     "toolbarGroup": "插件",
@@ -244,5 +260,11 @@
     "label": "协作者",
     "moreCollaborators": "{count, plural, other {还有 # 位协作者}}",
     "moreSelections": "+{count, plural, other {# 个选定内容}}"
+  },
+  "contextMenu": {
+    "text": "文本菜单",
+    "shape": "形状菜单",
+    "table": "表格菜单",
+    "slide": "幻灯片菜单"
   }
 }

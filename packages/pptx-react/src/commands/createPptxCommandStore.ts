@@ -29,6 +29,7 @@ export type PptxCommandAdmissionCode = Extract<
   | 'editor-unavailable'
   | 'read-only'
   | 'invalid-arguments'
+  | 'clipboard-unavailable'
 >;
 
 /** Raised when an admitted command cannot run against its originating input or target. */
@@ -361,6 +362,9 @@ export function createPptxCommandController(): PptxCommandController {
     } catch (error) {
       if (error instanceof PptxCommandAdmissionError)
         return failure(error.code, environment(false));
+      if ((id === 'cut' || id === 'copy' || id === 'paste') && error && typeof error === 'object' &&
+        'name' in error && error.name === 'NotAllowedError')
+        return failure('clipboard-unavailable', environment(false));
       console.error(`[pptx commands] ${id} failed`, error);
       return failure('command-failed', environment(false));
     } finally {

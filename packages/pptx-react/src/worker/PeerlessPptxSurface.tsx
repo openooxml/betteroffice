@@ -43,6 +43,7 @@ import { createPeerlessEditorApi, type PptxAsyncEditorApi } from './createPeerle
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
+import { usePeerlessContextMenu } from './usePeerlessContextMenu';
 
 function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPresentation | null,
   chrome: PeerlessPresentation | null,
@@ -237,6 +238,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   }, [presentation]);
   const commands = usePeerlessCommandBinding(presentation, { tool: insertion.tool, setTool: insertion.setTool,
     openPicture, save, focus, i18n: props.i18n, zoom, setZoom, review, proposals, setReview, exportPng });
+  const contextMenu = usePeerlessContextMenu(presentation, commands, stage, canvas, review.diff);
   const [workspace, available] = useDockArea(Boolean(props.plugins?.length));
   useCommandShortcuts({ commands: pptxCommandController(commands)!, containerRef: editor, editorInput: inputRef,
     suspended: () => review.presenting || Boolean(presentation?.store.getSnapshot().composition) });
@@ -287,13 +289,14 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     </PresentationFailure>}
     <div ref={workspace} style={styles.workspace}>
       <PeerlessImagePicker input={picker} origin={pictureOrigin} onError={(error) => callbacks.current.onError?.(error)} />
-      {chrome && slides && (slides.length > 0 || review.diff && review.selectedId) && <PeerlessSlideStrip run={chrome} previewFit={previewFit} current={current}
+      {chrome && slides && (slides.length > 0 || review.diff && review.selectedId) && <PeerlessSlideStrip run={chrome} commands={commands} previewFit={previewFit} current={current}
         onNavigate={navigate} proposalId={review.diff ? review.selectedId : null} previewSlideId={review.slideVersion && review.slideVersion !== chrome.client.state.version ? null : review.slideId}
         onPreviewSlide={previewSlide} />}
       {plugins.managed && <PluginDock host={plugins.host} placement="left" activations={plugins.activations.filter((entry) => entry.plugin.panel?.placement === 'left')} available={available} />}
       <div ref={stage} role="application" aria-label={t('editor.appLabel')} tabIndex={0}
         aria-readonly={Boolean(props.readOnly || failure)} style={styles.stage}
         onKeyDown={(event) => {
+          if (event.target instanceof Element && event.target.closest('[role="menu"]')) return;
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return;
           if (event.key === 'Escape') insertion.cancel();
           shapes.onKeyDown(event);
@@ -336,6 +339,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     </div>
     {plugins.managed && <PluginDock host={plugins.host} placement="bottom" activations={plugins.activations.filter((entry) => entry.plugin.panel?.placement === 'bottom')} available={available} />}
     {presentation && <PeerlessNotes run={presentation} onError={(error) => callbacks.current.onError?.(error)} />}
+    {contextMenu.element}
   </div></PptxCommandContext.Provider>;
 }
 

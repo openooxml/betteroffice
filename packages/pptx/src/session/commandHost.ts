@@ -121,6 +121,7 @@ export function registerPresentationCommandHandlers(
     version: string; beforeText: string };
   type FormattingProjection = { formatting: TextStyleSnapshot; alignment: ParagraphAlignment | null };
   type CachedStory = { text: PptxStoryText; snapshot: StorySnapshot; echoRanges: { start: number; end: number }[];
+    table: PresentationCommandEditState['toolbar']['table'];
     formatting?: StorySnapshot;
     toolbar?: { story: StorySnapshot; selection: PresentationCommandSelection; marks: TextStyle;
       result: FormattingProjection };
@@ -315,6 +316,20 @@ export function registerPresentationCommandHandlers(
 
   function cacheStories(content: Extract<PresentationCommandReadResult, { ok: true }>): void {
     for (const slide of content.slides) notes.set(slide.id, slide.notes ?? '');
+    const tables = new Map<string, NonNullable<PresentationCommandEditState['toolbar']['table']>>();
+    const visit = (shapes: readonly ShapeSnapshot[]) => {
+      for (const shape of shapes) {
+        const graphic = shape.graphic as { type?: string; grid?: unknown[] } | null;
+        if (graphic?.type === 'table' && Array.isArray(graphic.grid) && graphic.grid.length) {
+          const columns = graphic.grid.length;
+          shape.textStories.forEach((story, index) => tables.set(story.id, {
+            shapeId: shape.id, row: Math.floor(index / columns), column: index % columns,
+          }));
+        }
+        visit(shape.children);
+      }
+    };
+    for (const slide of content.slides) visit(slide.shapes);
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
@@ -322,6 +337,7 @@ export function registerPresentationCommandHandlers(
       keys.add(key);
       slideStoryKeys.set(story.slideId, keys);
       stories.set(key, { text: story, snapshot: presentation().story(story.storyId), echoRanges: [],
+        table: tables.get(story.storyId) ?? null,
         source: new Map((sources.get(story.storyId) ?? []).map((paragraph) => {
           const live = story.paragraphs.find((value) => value.paragraphId === paragraph.paragraphId)!;
           const text = story.text.slice(live.start, live.end);
@@ -674,7 +690,8 @@ export function registerPresentationCommandHandlers(
       textContext: selection ? selection.kind === 'shape' ? 'shape'
         : selection.anchor === selection.focus ? 'caret' : 'range' : null,
       storedMarks: Object.fromEntries(Object.entries(storedMarks).filter(([, value]) => value !== undefined)), formatting, alignment,
-      hyperlink: null, table: null, canEditText: selection !== null && !readOnly, echoRun } };
+      hyperlink: null, table: selection && selection.kind !== 'shape' ? stories.get(storyKey(selection))?.table ?? null : null,
+      canEditText: selection !== null && !readOnly, echoRun } };
     return lastEditState;
   }
 
@@ -1370,9 +1387,9 @@ export function registerPresentationCommandHandlers(
       opened.addUndoBoundary();
       if (before === opened.version()) return false;
       admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: false,
-        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide', 'acceptProposal'].includes(admitted.method) };
+        slideOrderChanged: ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'acceptProposal'].includes(admitted.method) };
       refreshHistory(command.seq, admitted.receipt);
-      if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
+      if (admitted.method === 'insertSlide' || admitted.method === 'duplicateSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
       if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
       objectSelection = object && object.slideId === activeSlideId ? selectedObject(object.slideId, object.shapeId) : null;

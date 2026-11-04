@@ -24,6 +24,9 @@ describe('PPTX command descriptors', () => {
     );
     expect(bindings.sort()).toEqual(
       [
+        'Mod+X cut',
+        'Mod+C copy',
+        'Mod+V paste',
         'Mod+B bold',
         'Mod+I italic',
         'Mod+U underline',

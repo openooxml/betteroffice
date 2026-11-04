@@ -79,6 +79,10 @@ export interface PptxCommandEnvironment {
   canRedo: boolean;
   /** The current slide, or `null` in a deck without slides. */
   slide: { id: string; layoutPartPath: string | null } | null;
+  slideCount?: number;
+  table?: { shapeId: string; row: number; column: number } | null;
+  clipboardRead?: boolean;
+  clipboardWrite?: boolean;
   layouts: readonly PptxCommandChoice<'insertSlide'>[];
   /** `'unsupported'` when the text target could not be read. */
   text: PptxTextEnvironment | 'unsupported' | null;
@@ -99,6 +103,9 @@ export interface PptxCommandEnvironment {
 }
 
 const REASON_KEYS: Record<PptxCommandFailureCode, TranslationKey> = {
+  'clipboard-unavailable': 'commands.reasons.clipboardUnavailable',
+  'table-required': 'commands.reasons.tableRequired',
+  'last-slide': 'commands.reasons.lastSlide',
   'editor-unavailable': 'commands.reasons.editorUnavailable',
   'document-loading': 'commands.reasons.documentLoading',
   'no-document': 'commands.reasons.noDocument',
@@ -224,6 +231,11 @@ function validArgs<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K] | un
   if (args === undefined) return true;
   const value = args as unknown;
   switch (id) {
+    case 'tableInsert':
+      return isRecord(value) && (value.kind === 'row' || value.kind === 'column') &&
+        (value.position === 'before' || value.position === 'after');
+    case 'tableDelete':
+      return isRecord(value) && ['row', 'column', 'table'].includes(value.kind as string);
     case 'fontFamily':
       return isRecord(value) && nonEmpty(value.family);
     case 'fontSize':
@@ -388,6 +400,26 @@ function evaluate<K extends PptxCommandId>(
   const result = <V extends PptxCommandId>(evaluation: Evaluation<V>) =>
     evaluation as unknown as Evaluation<K>;
   switch (id) {
+    case 'cut':
+    case 'copy':
+      return { gate: (id === 'cut' ? writeGate(env) : documentGate(env)) ?? reviewGate(env) ??
+        (env.text === 'unsupported' ? 'unsupported-selection' : null) ??
+        (current?.kind === 'range' ? null : 'text-selection-required') ??
+        (env.clipboardWrite ? null : 'clipboard-unavailable') };
+    case 'paste':
+      return { gate: textGate(env) ?? (current?.kind === 'shape' ? 'text-selection-required' : null) ??
+        (env.clipboardRead ? null : 'clipboard-unavailable') };
+    case 'deleteObject':
+      return { gate: writeGate(env) ?? reviewGate(env) ?? (env.shape ? null : 'shape-required'),
+        reasonKey: env.shape ? undefined : 'commands.reasons.objectRequired' };
+    case 'deleteSlide':
+    case 'duplicateSlide':
+      return { gate: writeGate(env) ?? reviewGate(env) ?? slideGate(env) ??
+        (id === 'deleteSlide' && (env.slideCount ?? 0) <= 1 ? 'last-slide' : null) };
+    case 'tableInsert':
+    case 'tableDelete':
+      return { gate: writeGate(env) ?? reviewGate(env) ?? slideGate(env) ??
+        (env.table ? null : 'table-required') };
     case 'bold':
     case 'italic':
     case 'underline':

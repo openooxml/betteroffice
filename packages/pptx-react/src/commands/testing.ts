@@ -15,6 +15,10 @@ export function testEnvironment(
     pendingInput: false,
     canUndo: true,
     canRedo: true,
+    slideCount: 2,
+    table: { shapeId: 'table', row: 1, column: 1 },
+    clipboardRead: true,
+    clipboardWrite: true,
     slide: { id: 'slide:0:256', layoutPartPath: 'ppt/slideLayouts/slideLayout1.xml' },
     layouts: [
       { args: { layoutPartPath: 'ppt/slideLayouts/slideLayout1.xml' }, label: 'Layout 1' },
@@ -82,6 +86,7 @@ export function testBinding(initial: Partial<PptxCommandEnvironment> = {}) {
     chrome: { i18n: undefined } as PptxChromeContext,
   };
   const immediate: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
+    'cut', 'copy', 'paste',
     'save',
     'zoom',
     'slideshow',

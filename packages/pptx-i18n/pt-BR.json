@@ -231,8 +231,24 @@
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
       "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
       "pluginUnavailable": "O plugin não está mais ativo.",
-      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado."
-    }
+      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado.",
+      "clipboardUnavailable": "O acesso à área de transferência está indisponível ou foi negado.",
+      "tableRequired": "Primeiro, posicione o cursor em uma célula da tabela.",
+      "lastSlide": "Não é possível excluir o último slide."
+    },
+    "cut": "Recortar",
+    "copy": "Copiar",
+    "paste": "Colar",
+    "insert": "Inserir",
+    "delete": "Excluir",
+    "deleteTable": "Excluir tabela",
+    "duplicateSlide": "Duplicar slide",
+    "insertRowsAbove": "Inserir linhas acima",
+    "insertRowsBelow": "Inserir linhas abaixo",
+    "insertColumnsLeft": "Inserir colunas à esquerda",
+    "insertColumnsRight": "Inserir colunas à direita",
+    "deleteRows": "Excluir linhas",
+    "deleteColumns": "Excluir colunas"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
@@ -244,5 +260,11 @@
     "label": "Colaboradores",
     "moreCollaborators": "{count, plural, one {# colaborador adicional} many {# colaboradores adicionais} other {# colaboradores adicionais}}",
     "moreSelections": "+{count, plural, one {# seleção} many {# seleções} other {# seleções}}"
+  },
+  "contextMenu": {
+    "text": "Menu de texto",
+    "shape": "Menu de forma",
+    "table": "Menu de tabela",
+    "slide": "Menu de slide"
   }
 }

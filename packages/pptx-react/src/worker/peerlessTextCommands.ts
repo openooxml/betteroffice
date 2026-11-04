@@ -5,7 +5,7 @@ import type { FormattingAction } from '../components/toolbarTypes';
 import { peerlessInputReference, type PeerlessViewSnapshot, type PeerlessViewStore } from './peerlessViewStore';
 
 export function peerlessTextContext(view: PeerlessViewSnapshot): PptxTextEnvironment | null {
-  if (!view.selection || !view.editState.toolbar.canEditText) return null;
+  if (!view.selection || !view.editState.toolbar.target) return null;
   const { formatting, alignment } = view.editState.toolbar;
   return {
     kind: view.selection.kind === 'shape' || view.selection.kind === 'object' ? 'shape'

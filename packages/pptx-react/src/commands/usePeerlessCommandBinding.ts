@@ -11,8 +11,9 @@ import type { PeerlessPresentation } from '../worker/usePeerlessPresentation';
 import { formatPeerlessText, peerlessTextContext } from '../worker/peerlessTextCommands';
 import { commitComposition, hitConfirmedGeometry } from '../worker/peerlessViewStore';
 import { peerlessHistory } from '../worker/peerlessHistory';
+import { peerlessClipboard, peerlessPaste } from '../worker/peerlessClipboard';
 import { peerlessObjectCommand } from '../worker/peerlessObjectCommands';
-import { peerlessInsertSlide } from '../worker/peerlessSlideCommands';
+import { peerlessDeleteSlide, peerlessInsertSlide } from '../worker/peerlessSlideCommands';
 import { createPptxCommandController, PptxCommandAdmissionError, type PptxCommandBinding, type PptxCommandOrigin } from './createPptxCommandStore';
 import { commandReason, DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES, type PptxCommandEnvironment } from './evaluate';
 import type { PptxCommandArgs, PptxCommandFailureCode, PptxCommandId, PptxCommandResult } from './types';
@@ -20,7 +21,10 @@ import type { PptxCommandArgs, PptxCommandFailureCode, PptxCommandId, PptxComman
 interface Origin extends PptxCommandOrigin { run: PeerlessPresentation; slideId: string | null; target: string | null; id: PptxCommandId }
 
 const supported = new Set<PptxCommandId>(['bold', 'italic', 'underline', 'strikethrough', 'fontFamily', 'fontSize', 'fontSizeStep',
+  'cut', 'copy', 'paste', 'deleteObject', 'deleteSlide', 'duplicateSlide', 'tableInsert', 'tableDelete',
   'textColor', 'alignment', 'tool', 'insertImage', 'save', 'undo', 'redo', 'shapeFill', 'shapeStrokeColor', 'shapeStrokeWidth', 'shapeAdjustment', 'zOrder', 'insertSlide', 'zoom', 'proposalsPanel', 'proposalSelect', 'proposalDiff', 'proposalAccept', 'proposalReject', 'slideshow', 'exportPng']);
+
+const IMMEDIATE = new Set<PptxCommandId>(['tool', 'insertImage', 'cut', 'copy', 'paste']);
 
 function target(run: PeerlessPresentation): string | null {
   const selected = run.store.getSnapshot().selection;
@@ -64,12 +68,15 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         canUndo: view?.editState.canUndo ?? false, canRedo: view?.editState.canRedo ?? false,
         slide: slide ? { id: slide.id, layoutPartPath: slide.layoutPartPath } : null, layouts: [...new Set(run?.client.state.slides.flatMap((slide) => slide.layoutPartPath ? [slide.layoutPartPath] : []))].map((layoutPartPath, index) => ({ value: layoutPartPath, label: t('toolbar.layoutOption', { number: index + 1 }), args: { layoutPartPath } })),
         text, shape: view?.editState.object ?? null, tool, zoom,
+        slideCount: run?.client.state.slides.length ?? 0, table: view?.editState.toolbar.table ?? null,
+        clipboardRead: typeof navigator !== 'undefined' && typeof navigator.clipboard?.readText === 'function',
+        clipboardWrite: typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function',
         fontFamilies: DEFAULT_FONT_FAMILIES, fontSizes: DEFAULT_FONT_SIZES, proposals: { open: review.open, pending: proposals.map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), canvas: { available: proposals.filter((proposal) => proposal.changes.some((change) => change.slideId === slideId || change.kind && change.kind !== 'content' || change.oldText !== change.newText || JSON.stringify(change.before) !== JSON.stringify(change.after))).map((proposal) => ({ id: proposal.id, label: proposal.note ?? proposal.agentId, stale: proposal.staleTargets.length > 0 })), selectedId: review.selectedId, diff: review.diff } },
         hostDisabled: (id) => !supported.has(id), translate: t };
     };
     const value: PptxCommandBinding = {
       environment,
-      ordered: (id) => id !== 'tool' && id !== 'insertImage',
+      ordered: (id) => !IMMEDIATE.has(id),
       admit(operation) {
         try { run?.require(); return Promise.resolve(operation()); }
         catch { return Promise.reject(new PptxCommandAdmissionError('input-failed')); }
@@ -90,6 +97,45 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         const text = (action: Parameters<typeof formatPeerlessText>[1]) => formatPeerlessText(run.store, action);
         let operation: Promise<PresentationCommandAck | null> | null = null;
         switch (id) {
+          case 'cut': case 'copy': case 'paste': {
+            if (id === 'paste') {
+              const ack = await peerlessPaste(run);
+              run.require();
+              const result: PptxCommandResult = ack ? receipt(ack, env) : { ok: true, status: 'noop' };
+              if (result.ok) focus();
+              return result;
+            }
+            const ack = await peerlessClipboard(run, id === 'cut', true);
+            run.require();
+            const result: PptxCommandResult = id === 'cut' ? receipt(ack, env) : { ok: true, status: 'executed' };
+            if (result.ok) focus();
+            return result;
+          }
+          case 'deleteObject': operation = peerlessObjectCommand(run, { kind: 'remove' }); break;
+          case 'deleteSlide': operation = peerlessDeleteSlide(run, env.slide!.id); break;
+          case 'duplicateSlide': {
+            const slide = run.client.state.slides.find((slide) => slide.id === env.slide!.id)!;
+            operation = invokePeerless(run, { method: 'duplicateSlide', args: [slide.id, slide.index + 1] });
+            break;
+          }
+          case 'tableInsert': case 'tableDelete': {
+            const table = env.table!;
+            const slideId = env.slide!.id;
+            if (id === 'tableInsert') {
+              const { kind, position } = args as PptxCommandArgs['tableInsert'];
+              operation = kind === 'row'
+                ? invokePeerless(run, { method: 'insertTableRow', args: [slideId, table.shapeId, table.row, position] })
+                : invokePeerless(run, { method: 'insertTableColumn', args: [slideId, table.shapeId, table.column, position] });
+            } else {
+              const { kind } = args as PptxCommandArgs['tableDelete'];
+              operation = kind === 'table'
+                ? invokePeerless(run, { method: 'removeShape', args: [slideId, table.shapeId] })
+                : kind === 'row'
+                  ? invokePeerless(run, { method: 'deleteTableRow', args: [slideId, table.shapeId, table.row] })
+                  : invokePeerless(run, { method: 'deleteTableColumn', args: [slideId, table.shapeId, table.column] });
+            }
+            break;
+          }
           case 'zoom': setZoom((args as PptxCommandArgs['zoom']).scale); return { ok: true, status: 'executed' };
           case 'proposalsPanel': setReview((state) => ({ ...state, open: args === null ? !state.open : (args as PptxCommandArgs['proposalsPanel'])!.open })); return { ok: true, status: 'opened' };
           case 'proposalSelect': flushSync(() => setReview((state) => ({ ...state, slideId: null, selectedId: (args as PptxCommandArgs['proposalSelect']).proposalId }))); return { ok: true, status: 'executed' };

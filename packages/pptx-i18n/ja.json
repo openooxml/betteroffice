@@ -231,8 +231,24 @@
       "permissionDenied": "ホスト アプリケーションがこのプラグインによるこのコマンドの使用を許可していません。",
       "unsupportedPolicy": "プラグインはまだこのコマンドを実行できません。代わりに編集バッチを使用してください。",
       "pluginUnavailable": "プラグインは現在アクティブではありません。",
-      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。"
-    }
+      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。",
+      "clipboardUnavailable": "クリップボードへのアクセスが利用できないか、拒否されました。",
+      "tableRequired": "先に表のセル内にカーソルを置いてください。",
+      "lastSlide": "最後のスライドは削除できません。"
+    },
+    "cut": "切り取り",
+    "copy": "コピー",
+    "paste": "貼り付け",
+    "insert": "挿入",
+    "delete": "削除",
+    "deleteTable": "表の削除",
+    "duplicateSlide": "スライドの複製",
+    "insertRowsAbove": "上に行を挿入",
+    "insertRowsBelow": "下に行を挿入",
+    "insertColumnsLeft": "左に列を挿入",
+    "insertColumnsRight": "右に列を挿入",
+    "deleteRows": "行の削除",
+    "deleteColumns": "列の削除"
   },
   "plugins": {
     "toolbarGroup": "プラグイン",
@@ -244,5 +260,11 @@
     "label": "共同編集者",
     "moreCollaborators": "{count, plural, other {あと # 人の共同編集者}}",
     "moreSelections": "+{count, plural, other {# 件の選択}}"
+  },
+  "contextMenu": {
+    "text": "テキストメニュー",
+    "shape": "図形メニュー",
+    "table": "表メニュー",
+    "slide": "スライドメニュー"
   }
 }
