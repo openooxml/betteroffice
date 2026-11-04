@@ -7168,7 +7168,9 @@ fn emit_line(
                 space_count = items
                     .iter()
                     .map(|item| match item {
-                        LinePaintItem::Text(text) => text.text.chars().filter(|&ch| ch == ' ').count(),
+                        LinePaintItem::Text(text) => {
+                            text.text.chars().filter(|&ch| ch == ' ').count()
+                        }
                         _ => 0,
                     })
                     .sum();
@@ -7365,7 +7367,8 @@ fn emit_line(
                 } else {
                     item.width
                         + if item.exact_advance {
-                            word_space_extra * item.text.chars().filter(|&ch| ch == ' ').count() as f64
+                            word_space_extra
+                                * item.text.chars().filter(|&ch| ch == ' ').count() as f64
                         } else {
                             0.0
                         }
@@ -8407,7 +8410,8 @@ fn try_emit_glyph_runs(
         };
         let has_extra_advance = letter_spacing != 0.0 || ws_px != 0.0 || !auto_gaps.is_empty();
         let cluster_bounds = if has_extra_advance {
-            let mut bounds: Vec<usize> = glyphs.iter().map(|glyph| glyph.cluster as usize).collect();
+            let mut bounds: Vec<usize> =
+                glyphs.iter().map(|glyph| glyph.cluster as usize).collect();
             bounds.sort_unstable();
             bounds.dedup();
             bounds.push(sub_text.len());
@@ -8419,7 +8423,9 @@ fn try_emit_glyph_runs(
         for (index, g) in glyphs.iter().enumerate() {
             let mut advance = g.x_advance as f64;
             if has_extra_advance
-                && glyphs.get(index + 1).is_none_or(|next| next.cluster != g.cluster)
+                && glyphs
+                    .get(index + 1)
+                    .is_none_or(|next| next.cluster != g.cluster)
             {
                 let start = g.cluster as usize;
                 let boundary = cluster_bounds.binary_search(&start).unwrap();

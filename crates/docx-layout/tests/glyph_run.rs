@@ -1334,7 +1334,10 @@ fn assert_tracking_width(input: &serde_json::Value, list: &DisplayList) {
         .flat_map(|run| &run.glyphs)
         .map(|glyph| glyph.advance)
         .sum();
-    assert!((advances - measured).abs() < 0.01, "{advances} != {measured}");
+    assert!(
+        (advances - measured).abs() < 0.01,
+        "{advances} != {measured}"
+    );
 }
 
 fn assert_tracking_without_reconciliation(text: &str, spacing: f64, rtl: bool) {
@@ -1375,8 +1378,19 @@ fn glyph_run_condensed_spacing_advances_every_character_including_the_last() {
 fn glyph_run_combining_cluster_keeps_spacing_after_its_last_glyph() {
     let store = store_with_liberation();
     let text = "x\u{301}B";
-    let shaped = shape(&store, FontId::from_u32(0), text, 16.0, &kern_features(false)).unwrap();
-    assert!(shaped.windows(2).any(|pair| pair[0].cluster == pair[1].cluster));
+    let shaped = shape(
+        &store,
+        FontId::from_u32(0),
+        text,
+        16.0,
+        &kern_features(false),
+    )
+    .unwrap();
+    assert!(
+        shaped
+            .windows(2)
+            .any(|pair| pair[0].cluster == pair[1].cluster)
+    );
     for spacing in [40.0 / 1440.0 * 96.0, -20.0 / 1440.0 * 96.0] {
         assert_tracking_without_reconciliation(text, spacing, false);
     }
@@ -1399,7 +1413,11 @@ fn glyph_run_rtl_spacing_follows_visual_glyph_order() {
         ShapeDirection::Rtl,
     )
     .unwrap();
-    assert!(shaped.windows(2).all(|pair| pair[0].cluster > pair[1].cluster));
+    assert!(
+        shaped
+            .windows(2)
+            .all(|pair| pair[0].cluster > pair[1].cluster)
+    );
     for spacing in [40.0 / 1440.0 * 96.0, -20.0 / 1440.0 * 96.0] {
         assert_tracking_without_reconciliation("אבג", spacing, true);
         assert_tracking_without_reconciliation("א\u{5b0}בג", spacing, true);
@@ -1545,7 +1563,10 @@ fn spaced_run_carets_hits_and_selection_follow_painted_glyphs() {
                         Some(position + 1),
                         "{twips}: midpoint after {position}"
                     );
-                    assert_eq!(hit_test(&list, 0, midpoint - 0.01, baseline), Some(position));
+                    assert_eq!(
+                        hit_test(&list, 0, midpoint - 0.01, baseline),
+                        Some(position)
+                    );
                     assert_eq!(
                         hit_test(&list, 0, midpoint + 0.01, baseline),
                         Some(position + 1)
@@ -1555,9 +1576,9 @@ fn spaced_run_carets_hits_and_selection_follow_painted_glyphs() {
             let last = runs
                 .iter()
                 .find_map(|run| {
-                    run.glyphs.iter().find(|glyph| {
-                        run.attrs.doc_start.unwrap() + glyph.cluster as i64 == 4
-                    })
+                    run.glyphs
+                        .iter()
+                        .find(|glyph| run.attrs.doc_start.unwrap() + glyph.cluster as i64 == 4)
                 })
                 .unwrap();
             assert!((last.x + last.advance - origins[&5]).abs() < 0.01);
