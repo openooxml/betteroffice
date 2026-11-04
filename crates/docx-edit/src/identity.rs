@@ -562,7 +562,10 @@ impl SourceIndex {
             return true;
         };
         ordinals.iter().any(|&ordinal| {
-            let Some(start) = part.occurrence(ordinal).map(|occurrence| occurrence.tag.start) else {
+            let Some(start) = part
+                .occurrence(ordinal)
+                .map(|occurrence| occurrence.tag.start)
+            else {
                 return true;
             };
             docx_parse::serializer::element_span(&xml[start..], &[])
@@ -4624,8 +4627,8 @@ fn last_block_paragraph(
 }
 
 /// Whether rewriting `xml`, one source paragraph, from the model would lose run content the
-/// model does not round-trip: alternate content with its fallback, a page or column break,
-/// a tracked insertion, deletion or move, a bookmark or permission anchor inside a hyperlink, a
+/// model does not round-trip: alternate content with its fallback, a page or column break (also
+/// one inside a tracked insertion), a bookmark or permission anchor inside a hyperlink, a
 /// field nested in another field's result, or a hyperlink holding field characters. A part where
 /// such a paragraph would be rewritten from the model (a legacy paragraph) is written whole, as
 /// a part that cannot splice is.
@@ -4658,7 +4661,7 @@ fn rewriting_loses_source_runs(xml: &str) -> bool {
             .unwrap_or_default();
         let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
         match local {
-            "AlternateContent" | "ins" | "del" | "moveFrom" | "moveTo" => return true,
+            "AlternateContent" => return true,
             "br" if tag.contains("\"page\"") || tag.contains("\"column\"") => return true,
             "hyperlink" if !empty => {
                 if closing {

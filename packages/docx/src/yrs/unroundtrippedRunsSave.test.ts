@@ -30,7 +30,7 @@ const makeDocx = (body: string) => new Uint8Array(rezipPartsToArrayBuffer(new Ma
   ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
   ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`)],
   ['word/document.xml', toBytes(`${body.startsWith(WORD_ROOT) ? '' : `<w:document ${NS}>`}${body.startsWith(WORD_ROOT) ? body : `<w:body>${body}`}${SECT}</w:body></w:document>`)],
-]))));
+])));
 const partOf = (bytes: Uint8Array) => new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
 const count = (xml: string, pattern: RegExp) => xml.match(pattern)?.length ?? 0;
 
