@@ -1026,7 +1026,7 @@ test('a font environment naming sliced faces is admitted, and malformed slices a
   const arm = await openCommandEngine();
   const environment = { supportsFontEnvironment: true } as Parameters<typeof preflightDocxCommand>[4];
   const source = {
-    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64), byteLength: 100, sha256: 'b'.repeat(64) },
+    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64) },
     urls: { 'face/slices.json': 'https://fonts.example/face/slices.json' },
   };
   const payload = {

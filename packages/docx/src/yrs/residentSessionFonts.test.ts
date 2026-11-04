@@ -51,7 +51,7 @@ test('font publication failures discard prepared faces and retain the old faces'
 test('sliced faces reach registration with their files and get no CSS face; malformed slices are refused', async () => {
   const s = setup();
   const source = {
-    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64), byteLength: 100, sha256: 'b'.repeat(64) },
+    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64) },
     urls: { 'face/slices.json': 'https://fonts.example/face/slices.json' },
     timeoutMs: 30_000,
   };
@@ -70,7 +70,7 @@ test('sliced faces reach registration with their files and get no CSS face; malf
     [{ slot: 2, source }],
     [{ slot: 0, source }, { slot: 0, source }],
     [{ slot: 0, source: { ...source, urls: { 'face/slices.json': 7 } } }],
-    [{ slot: 0, source: { ...source, ref: { ...source.ref, sha256: 'not hex' } } }],
+    [{ slot: 0, source: { ...source, ref: { ...source.ref, indexSha256: 'not hex' } } }],
     [{ slot: 0, source: { ...source, urls: { 'face/slices.json': `https://fonts.example/${'a'.repeat(9000)}` } } }],
     [{ slot: 0, source: { ...source, urls: { 'face/c001.zst': `data:application/octet-stream;base64,${'A'.repeat(16 * 1024 * 1024)}` } } }],
   ]) {

@@ -1,6 +1,6 @@
 /** A sliced face's pack files, as `sliceSourceOf` from `@betteroffice/fonts/progressive` describes them. */
 export interface ProgressiveFontSource {
-  ref: { format: number; index: string; indexSha256: string; byteLength: number; sha256: string };
+  ref: { format: number; index: string; indexSha256: string };
   /** Absolute URL of the index, skeleton, core and every chunk by manifest path. */
   urls: Record<string, string>;
   timeoutMs?: number;
@@ -102,7 +102,7 @@ export class ResidentProgressiveFonts {
     for (const spec of specs) {
       const id = ids[spec.slot];
       if (id === null || id === undefined) continue;
-      const face = `${spec.source.ref.sha256}|${spec.source.ref.index}`;
+      const face = `${spec.source.ref.indexSha256}|${spec.source.ref.index}`;
       const shared = byFace.get(face);
       const owner = shared ?? id;
       if (shared === undefined) byFace.set(face, id);
