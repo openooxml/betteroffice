@@ -5,9 +5,11 @@ import { openProgressiveFace, type ProgressiveFontFace, type SliceLocation } fro
 export { readFontAsset } from './asset';
 export {
   openProgressiveFace,
+  sliceSourceOf,
   type ProgressiveFontFace,
   type SliceLocation,
   type SliceRef,
+  type SliceSource,
   type SliceTransport,
 } from './progressive';
 
@@ -32,6 +34,8 @@ export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFont
   if (pending === undefined) {
     pending = openProgressiveFace(ref, {
       read: async (file) => readFontAsset(file, await url(file), timeoutMs),
+      url,
+      timeoutMs,
       decode,
     });
     cache.set(key, pending);

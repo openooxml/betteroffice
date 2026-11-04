@@ -4,7 +4,7 @@ import pack from '../../fonts-cjk/assets/manifest.json';
 import { createFontProvider as cdn } from './cdn';
 import { decodeFontFace, type FontDecoder } from './decode';
 import { createFontProvider } from './index';
-import { openProgressiveFace, type SliceLocation, type SliceRef, type SliceTransport } from './progressive';
+import { openProgressiveFace, sliceSourceOf, type SliceLocation, type SliceRef, type SliceTransport } from './progressive';
 import { openSlicedFace } from './progressive-entry';
 import { chunkEntries, parseSkeleton } from './slices';
 
@@ -232,6 +232,20 @@ test('providers locate only sliced faces, keep whole-face loading, and share one
   const failing = { ...slices, base: 'https://failing.example/', url: async () => { throw new Error('no such file'); } };
   await expect(openSlicedFace(failing)).rejects.toThrow('no such file');
   await expect(openSlicedFace({ ...failing, url: slices.url })).resolves.toBeDefined();
+});
+
+test('a face opened with file URLs names every slice file and the fetch timeout for another realm', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const resolved = (file: string) => new URL(file, 'https://fonts.example/cjk/');
+  const face = await openProgressiveFace(jpRef, { ...transport([]), url: async (file) => resolved(file), timeoutMs: 30_000 });
+  const source = await sliceSourceOf(face)!;
+  expect(source.ref).toEqual(jpRef);
+  expect(source.timeoutMs).toBe(30_000);
+  const files = [jpRef.index, index.skeleton.file, index.core.file, ...index.chunks.map((chunk) => chunk.file)];
+  expect(Object.keys(source.urls).sort()).toEqual(files.sort());
+  expect(source.urls[index.chunks[0]!.file]).toBe(resolved(index.chunks[0]!.file).href);
+  expect(sliceSourceOf(face)).toBe(sliceSourceOf(face));
+  expect(sliceSourceOf(await openProgressiveFace(jpRef, transport([])))).toBeUndefined();
 });
 
 test('a location without file URLs cannot open, so callers fall back to the whole face', async () => {

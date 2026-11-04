@@ -12,6 +12,9 @@ const HEADER = 32;
 const RUN = 12;
 const ENDCHAR = new Uint8Array([0x0e]);
 
+const UNSUPPORTED = 'Not a supported font slice skeleton';
+const TRUNCATED = 'Truncated font slice chunk';
+
 /** Chunk id of a glyph or codepoint no chunk holds. */
 export const NO_CHUNK = 0xffff;
 
@@ -30,11 +33,8 @@ function fits(offset: number, length: number, limit: number): boolean {
 }
 
 export function parseSkeleton(bytes: Uint8Array): SliceSkeleton {
-  if (bytes.byteLength < HEADER) throw new Error('Truncated font slice skeleton');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (view.getUint32(0) !== MAGIC || view.getUint16(4) !== FORMAT) {
-    throw new Error('Not a supported font slice skeleton');
-  }
+  if (bytes.byteLength < HEADER || view.getUint32(0) !== MAGIC || view.getUint16(4) !== FORMAT) throw new Error(UNSUPPORTED);
   const numGlyphs = view.getUint32(8);
   const cffRecord = view.getUint32(12);
   const cffOffset = view.getUint32(16);
@@ -46,7 +46,7 @@ export function parseSkeleton(bytes: Uint8Array): SliceSkeleton {
   if (prefixLength > bytes.byteLength || runsEnd !== bytes.byteLength - prefixLength || numGlyphs > 0xffff
     || !fits(cffRecord, 16, prefixLength) || !fits(cffOffset, 0, prefixLength)
     || !fits(headOffset, 12, prefixLength)) {
-    throw new Error('Not a supported font slice skeleton');
+    throw new Error(UNSUPPORTED);
   }
   const prefix = bytes.subarray(runsEnd);
   return {
@@ -108,16 +108,16 @@ export function parseSkeleton(bytes: Uint8Array): SliceSkeleton {
 /** `(glyph id, charstring)` pairs of a chunk file; the charstrings view `bytes`. */
 export function chunkEntries(bytes: Uint8Array): Array<[number, Uint8Array]> {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.byteLength < 4) throw new Error('Truncated font slice chunk');
+  if (bytes.byteLength < 4) throw new Error(TRUNCATED);
   const count = view.getUint32(0);
   const entries: Array<[number, Uint8Array]> = [];
   let at = 4;
   for (let index = 0; index < count; index += 1) {
-    if (at + 8 > bytes.byteLength) throw new Error('Truncated font slice chunk');
+    if (at + 8 > bytes.byteLength) throw new Error(TRUNCATED);
     const glyph = view.getUint32(at);
     const length = view.getUint32(at + 4);
     const end = at + 8 + length;
-    if (end > bytes.byteLength) throw new Error('Truncated font slice chunk');
+    if (end > bytes.byteLength) throw new Error(TRUNCATED);
     entries.push([glyph, bytes.subarray(at + 8, end)]);
     at = end;
   }

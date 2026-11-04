@@ -238,6 +238,7 @@ export const editsession_track_undo: (a: number) => void;
 export const editsession_undo: (a: number) => number;
 export const editsession_undo_capture_mode: (a: number) => [number, number];
 export const editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const editsession_update_measure_font_outlines: (a: number, b: number, c: number, d: number) => [number, number];
 export const editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_validate_table_fragment: (a: number, b: number, c: number) => [number, number];
 export const editsession_version: (a: number) => [number, number];
