@@ -1,4 +1,4 @@
-use super::{PatchContext, patch_paragraph_v1};
+use super::{NamespaceScopes, PatchContext, patch_paragraph_v1};
 use crate::paragraph_patch::{
     AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode,
     RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
@@ -1070,7 +1070,8 @@ fn paragraph_patch_keeps_complex_fields_beside_a_hyperlink_label_in_an_sdt() {
         "<w:document xmlns:w='{}'><w:body><w:sdt><w:sdtContent>{source}</w:sdtContent></w:sdt></w:body></w:document>",
         super::lower::WORD
     );
-    let context = PatchContext::at("word/document.xml", &story, story.find("<w:p>").unwrap());
+    let context =
+        NamespaceScopes::new(&story).context("word/document.xml", story.find("<w:p>").unwrap());
     let marks = json!({"hyperlink": {"href": "#_Toc1", "history": true}});
     let mut plan = patch(
         vec![text("Background\t2", marks.clone())],
@@ -2077,4 +2078,70 @@ fn smart_art_many_drawings_patch_with_linear_work() {
         linear_work_growth(small, large),
         "8x the drawings exceeded 10x the work: {small} -> {large}"
     );
+}
+
+fn rescanned_namespaces(source: &str, offset: usize) -> std::collections::BTreeMap<String, String> {
+    let mut scopes = vec![std::collections::BTreeMap::new()];
+    for tag in crate::paragraph_identity::tags(source).unwrap_or_default() {
+        if tag.range.start >= offset {
+            break;
+        }
+        if tag.end {
+            scopes.pop();
+        } else {
+            let mut scope: std::collections::BTreeMap<String, String> =
+                scopes.last().cloned().unwrap_or_default();
+            for (name, range) in tag.attributes {
+                if let Some(prefix) = name
+                    .strip_prefix("xmlns:")
+                    .or_else(|| (name == "xmlns").then_some(""))
+                    && let Ok(value) = super::lower::decode(&source[range])
+                {
+                    scope.insert(prefix.to_owned(), value);
+                }
+            }
+            if !tag.empty {
+                scopes.push(scope);
+            }
+        }
+    }
+    scopes.pop().unwrap_or_default()
+}
+
+#[test]
+fn namespace_scopes_match_a_rescan_at_every_offset() {
+    let sources = [
+        "<w:document xmlns:w='urn:w' xmlns:a='urn:a'><w:body><w:p><w:r><w:t>One</w:t></w:r></w:p>\
+         <mc:AlternateContent xmlns:mc='urn:mc'><mc:Choice xmlns:a='urn:a2' xmlns:wps='urn:wps'>\
+         <w:p xmlns:w='urn:w2'><w:r/></w:p><a:empty xmlns:x='urn:x'/></mc:Choice>\
+         <mc:Fallback xmlns=\"urn:default\"><v:shape/></mc:Fallback></mc:AlternateContent>\
+         <!-- <w:p xmlns:c='urn:c'> --><w:p><w:r><w:t>Two &amp; three</w:t></w:r></w:p></w:body></w:document>",
+        "</w:extra><w:p xmlns:w='urn:w'></w:p></w:p></w:p><w:p xmlns:z='urn:z'><w:r/>",
+        "",
+    ];
+    for source in sources {
+        let scopes = NamespaceScopes::new(source);
+        for offset in 0..=source.len() + 1 {
+            assert_eq!(
+                scopes.context("word/document.xml", offset).namespaces,
+                rescanned_namespaces(source, offset),
+                "offset {offset} of {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn namespace_scopes_hold_each_declaration_once() {
+    let uri = "u".repeat(1 << 20);
+    let paragraphs = "<w:p xmlns:w='urn:w'><w:r/></w:p>".repeat(5_000);
+    let source = format!(
+        "<w:document xmlns:w='urn:w' xmlns:big='{uri}'><w:body>{paragraphs}</w:body></w:document>"
+    );
+    let scopes = NamespaceScopes::new(&source);
+    assert!(scopes.declared_bytes() <= source.len());
+    let at = source.rfind("<w:r/>").unwrap();
+    let namespaces = scopes.context("word/document.xml", at).namespaces;
+    assert_eq!(namespaces.get("big").map(String::len), Some(uri.len()));
+    assert_eq!(namespaces.get("w").map(String::as_str), Some("urn:w"));
 }
