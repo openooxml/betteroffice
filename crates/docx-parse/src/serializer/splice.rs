@@ -1878,8 +1878,8 @@ fn replacement_xml(source: &str, at: usize, serialized: &str, xml: &str) -> Opti
     Some(rooted.into_owned())
 }
 
-/// Whether the comment and bookmark markers outside the paragraphs `part` changes or removes
-/// agree between `source` and `serialized`, so that replacing only those paragraphs keeps every
+/// Whether the comment and bookmark markers outside the paragraphs `part` changes, removes or
+/// inserts agree between `source` and `serialized`, so that replacing only those paragraphs keeps every
 /// range whole rather than duplicating or dropping a marker the model moved across them.
 pub(crate) fn markers_outside_changed_agree(
     source: &str,
@@ -1901,6 +1901,9 @@ pub(crate) fn markers_outside_changed_agree(
         if let Some(xml) = recorded.written.get(&ordinal) {
             subtract(&mut outside_written, marker_counts(xml)?);
         }
+    }
+    for (_, xml) in placed(recorded, &part.inserted)? {
+        subtract(&mut outside_written, marker_counts(xml)?);
     }
     Some(outside_source == outside_written)
 }

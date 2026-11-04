@@ -1130,3 +1130,44 @@ fn paragraph_patch_s13_marker_paragraph_gaining_an_outside_bookmark_is_not_repla
         "{output}"
     );
 }
+
+#[test]
+fn paragraph_patch_s13_marker_paragraph_with_an_inserted_paragraph_gaining_an_outside_bookmark_is_not_replaced_alone()
+ {
+    let paragraph = concat!(
+        "<w:p w:rsidR='87654321'><w:r><w:t>Heading</w:t></w:r>",
+        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>",
+        "<w:r><w:instrText xml:space=\"preserve\"> SEQ x </w:instrText></w:r>",
+        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>",
+        "<w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
+    );
+    let middle = format!(
+        "<w:bookmarkStart w:id=\"5\" w:name=\"moved\"/><w:bookmarkEnd w:id=\"5\"/>{paragraph}"
+    );
+    let (source, mut request) = mixed_request(&middle);
+    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+    part.legacy_paragraphs[0].detail = "marker: mutation or touch".to_owned();
+    part.inserted = vec![crate::serializer::S13SpliceAnchor::After(2)];
+    let inserted: Value = json!({"type": "paragraph", "content": [
+        {"type": "bookmarkStart", "id": 5, "name": "moved", "position": {"offset": 0}},
+        {"type": "run", "content": [{"type": "text", "text": "inserted"}]},
+        {"type": "bookmarkEnd", "id": 5, "position": {"offset": 8}}
+    ]});
+    request
+        .document
+        .content
+        .insert(3, serde_json::from_value(inserted).unwrap());
+    let (saved, _) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let parts = part_map(&saved);
+    let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
+    assert_eq!(
+        output.matches("<w:bookmarkStart w:id=\"5\"").count(),
+        1,
+        "{output}"
+    );
+    assert_eq!(
+        output.matches("<w:bookmarkEnd w:id=\"5\"").count(),
+        1,
+        "{output}"
+    );
+}
