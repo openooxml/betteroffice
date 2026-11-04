@@ -92,6 +92,11 @@ export const pptxProposalEditSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('replaceText'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text, style: pptxRunStyleSchema.nullable().optional() }).strict(),
   z.object({ type: z.literal('formatText'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), patch: pptxRunStyleSchema }).strict(),
   z.object({ type: z.literal('setParagraphAlignment'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), alignment: z.enum(['l', 'ctr', 'r', 'just', 'justLow', 'dist', 'thaiDist']).nullable() }).strict(),
+  z.object({ type: z.literal('setStoryParagraphs'), storyId: proposalStory, paragraphs: z.array(z.object({
+    alignment: z.enum(['l', 'ctr', 'r', 'just', 'justLow', 'dist', 'thaiDist']).nullable().optional(),
+    bullet: z.boolean().optional().describe('true adds a bullet, false removes it; omitted preserves the existing bullet.'),
+    runs: z.array(z.object({ text, style: pptxRunStyleSchema.optional() }).strict()).max(64),
+  }).strict()).min(1).max(100).refine(paragraphs => paragraphs.reduce((total, paragraph) => total + paragraph.runs.reduce((length, run) => length + run.text.length, 0), 0) <= 16000, 'Text exceeds the 16000-character limit.') }).strict(),
   z.object({ type: z.literal('setShapeRect'), slideId: id, shapeId: id, rect: proposalRect }).strict(),
   z.object({ type: z.literal('setShapeFill'), slideId: id, shapeId: id, color: color.nullable() }).strict(),
   z.object({ type: z.literal('setShapeStroke'), slideId: id, shapeId: id, stroke: z.object({ color: color.nullable().optional(), widthPt: z.number().nonnegative().nullable().optional() }).strict() }).strict(),

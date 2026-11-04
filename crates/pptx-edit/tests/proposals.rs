@@ -1236,3 +1236,707 @@ fn created_shape_refs_do_not_capture_unrelated_live_shapes() {
             .any(|story| story.plain_text() == "Draft")
     }));
 }
+
+fn paragraph_edit(story_id: &str, paragraphs: serde_json::Value) -> ProposalEdit {
+    serde_json::from_value(serde_json::json!({
+        "type": "setStoryParagraphs", "storyId": story_id, "paragraphs": paragraphs,
+    }))
+    .unwrap()
+}
+
+fn paragraph_drafts() -> serde_json::Value {
+    serde_json::json!([
+        {"alignment": "ctr", "bullet": true, "runs": [
+            {"text": "First ", "style": {"bold": true, "color": "#123456"}},
+            {"text": "point", "style": {"italic": true, "fontSizePt": 20.0}},
+        ]},
+        {"alignment": "r", "bullet": false, "runs": [{"text": "Second 😀", "style": {}}]},
+    ])
+}
+
+#[test]
+fn paragraph_proposal_previews_accepts_rejects_and_undoes_one_step() {
+    let session = DeckSession::open(SHAPE_DECK, 540).unwrap();
+    session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+    let initial = session.snapshot().unwrap();
+    let slide = &initial.slides[0];
+    let shape = &slide.shapes[0];
+    let story_id = &shape.text_stories[0].id;
+    session
+        .insert_text(
+            &EditCtx::local("human"),
+            story_id,
+            0,
+            "Human ",
+            &Default::default(),
+        )
+        .unwrap();
+    let before = session.snapshot().unwrap();
+    let state = session.encode_state_as_update_v1();
+    let edit = paragraph_edit(story_id, paragraph_drafts());
+    let proposal = session.propose(request(vec![edit.clone()])).unwrap();
+    assert_eq!(proposal.edits, vec![edit.clone()]);
+    let wire = serde_json::to_value(&edit).unwrap();
+    assert_eq!(wire["type"], "setStoryParagraphs");
+    assert_eq!(wire["storyId"], story_id.as_str());
+    let change = &proposal.changes[0];
+    assert_eq!(change.before.as_ref(), Some(&before.slides[0].shapes[0]));
+    assert_eq!(change.old_text, "Human alpha");
+    assert_eq!(change.new_text, "First point\nSecond 😀");
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert_eq!(
+        change.after.as_ref(),
+        Some(&preview.snapshot.slides[0].shapes[0])
+    );
+    let diff = session
+        .preview_proposal_diff_slide(&proposal.id, 0)
+        .unwrap();
+    assert!(
+        diff.text_changes
+            .iter()
+            .any(|change| { change.kind == pptx_edit::ProposalTextChangeKind::Insertion })
+    );
+    assert!(
+        diff.text_changes
+            .iter()
+            .any(|change| { change.kind == pptx_edit::ProposalTextChangeKind::Deletion })
+    );
+    assert_eq!(
+        diff.shape_changes[0].kind,
+        pptx_edit::ProposalShapeChangeKind::Changed
+    );
+    assert_eq!(
+        diff.scope.slide.shapes[0].text_stories[0].plain_text(),
+        "Human alphaFirst point\nSecond 😀"
+    );
+    assert_eq!(
+        diff.text_changes,
+        vec![
+            pptx_edit::ProposalTextChange {
+                story_id: story_id.clone(),
+                start: 0,
+                end: 11,
+                kind: pptx_edit::ProposalTextChangeKind::Deletion
+            },
+            pptx_edit::ProposalTextChange {
+                story_id: story_id.clone(),
+                start: 11,
+                end: 22,
+                kind: pptx_edit::ProposalTextChangeKind::Insertion
+            },
+            pptx_edit::ProposalTextChange {
+                story_id: story_id.clone(),
+                start: 23,
+                end: 32,
+                kind: pptx_edit::ProposalTextChangeKind::Insertion
+            },
+        ]
+    );
+    assert_eq!(session.snapshot().unwrap(), before);
+    assert_eq!(session.encode_state_as_update_v1(), state);
+    let accepted = session.accept_proposal(&proposal.id, false).unwrap();
+    assert!(accepted.applied);
+    assert_eq!(accepted.snapshot, preview.snapshot);
+    let story = session.story(story_id).unwrap();
+    assert_eq!(story.plain_text(), "First point\nSecond 😀");
+    assert_eq!(story.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(story.paragraphs[1].alignment.as_deref(), Some("r"));
+    assert!(
+        story.paragraphs[0]
+            .bullet_json
+            .as_ref()
+            .unwrap()
+            .contains("character")
+    );
+    assert!(
+        story.paragraphs[1]
+            .bullet_json
+            .as_ref()
+            .unwrap()
+            .contains("none")
+    );
+    assert_eq!(story.paragraphs[0].runs[0].style.bold, Some(true));
+    assert_eq!(story.paragraphs[0].runs[1].style.italic, Some(true));
+    let reopened = DeckSession::open(&session.save().unwrap(), 541).unwrap();
+    let saved = reopened.snapshot().unwrap().slides[0].shapes[0].text_stories[0].clone();
+    assert_eq!(saved.plain_text(), story.plain_text());
+    for (saved, expected) in saved.paragraphs.iter().zip(&story.paragraphs) {
+        assert_eq!(saved.alignment, expected.alignment);
+        assert_eq!(saved.bullet_json, expected.bullet_json);
+        assert_eq!(saved.runs, expected.runs);
+    }
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), initial);
+    let rejected = session.propose(request(vec![edit])).unwrap();
+    assert!(session.reject_proposal(&rejected.id));
+    assert!(session.proposals().unwrap().is_empty());
+    assert_eq!(session.snapshot().unwrap(), initial);
+}
+
+#[test]
+fn paragraph_rewrite_diff_keeps_deleted_paragraph_text() {
+    let session = DeckSession::open(SHAPE_DECK, 542).unwrap();
+    let story_id = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+    let paragraphs = serde_json::json!([
+        {"runs": [{"text": "Keep", "style": {}}]},
+        {"runs": [{"text": "Remove me", "style": {}}]},
+        {"runs": [{"text": "Tail", "style": {}}]},
+    ]);
+    session
+        .set_story_paragraphs(
+            &EditCtx::local("human"),
+            &story_id,
+            &serde_json::from_value::<Vec<pptx_edit::TextParagraphDraft>>(paragraphs).unwrap(),
+        )
+        .unwrap();
+    let proposal = session
+        .propose(request(vec![paragraph_edit(
+            &story_id,
+            serde_json::json!([
+                {"runs": [{"text": "Keep", "style": {}}]},
+                {"runs": [{"text": "Tail", "style": {}}]},
+            ]),
+        )]))
+        .unwrap();
+    assert_eq!(proposal.changes[0].old_text, "Keep\nRemove me\nTail");
+    assert_eq!(proposal.changes[0].new_text, "Keep\nTail");
+    for diff in [
+        session
+            .preview_proposal_diff_slide(&proposal.id, 0)
+            .unwrap(),
+        session
+            .preview_proposal_diff_slide_by_id(&proposal.id, &proposal.changes[0].slide_id)
+            .unwrap(),
+    ] {
+        let story = &diff.scope.slide.shapes[0].text_stories[0];
+        let text = story.plain_text();
+        assert_eq!(text, "Keep\nRemove me\nTail");
+        let removed = text.find("Remove me").unwrap() as u32;
+        assert!(diff.text_changes.iter().any(|change| {
+            change.kind == pptx_edit::ProposalTextChangeKind::Deletion
+                && change.start == removed
+                && change.end == removed + 9
+        }));
+        assert!(
+            !diff
+                .text_changes
+                .iter()
+                .any(|change| { change.kind == pptx_edit::ProposalTextChangeKind::Insertion })
+        );
+    }
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(session.story(&story_id).unwrap().plain_text(), "Keep\nTail");
+}
+
+#[test]
+fn paragraph_rewrite_diff_aligns_trailing_deletions() {
+    assert_paragraph_rewrite_diff(
+        &["Keep", "Remove me"],
+        &["Keep"],
+        "Keep\nRemove me",
+        &[(pptx_edit::ProposalTextChangeKind::Deletion, 5, 14)],
+    );
+    assert_paragraph_rewrite_diff(
+        &["Keep", "Remove me", "Remove too"],
+        &["Keep"],
+        "Keep\nRemove me\nRemove too",
+        &[
+            (pptx_edit::ProposalTextChangeKind::Deletion, 5, 14),
+            (pptx_edit::ProposalTextChangeKind::Deletion, 15, 25),
+        ],
+    );
+}
+
+#[test]
+fn paragraph_rewrite_diff_aligns_trailing_insertions() {
+    assert_paragraph_rewrite_diff(
+        &["Alpha"],
+        &["Alpha", "Beta"],
+        "Alpha\nBeta",
+        &[(pptx_edit::ProposalTextChangeKind::Insertion, 6, 10)],
+    );
+    assert_paragraph_rewrite_diff(
+        &["Alpha"],
+        &["Alpha", "Beta", "Gamma"],
+        "Alpha\nBeta\nGamma",
+        &[
+            (pptx_edit::ProposalTextChangeKind::Insertion, 6, 10),
+            (pptx_edit::ProposalTextChangeKind::Insertion, 11, 16),
+        ],
+    );
+}
+
+#[test]
+fn paragraph_rewrite_diff_aligns_middle_insertions() {
+    assert_paragraph_rewrite_diff(
+        &["Keep", "Tail"],
+        &["Keep", "Middle", "Tail"],
+        "Keep\nMiddle\nTail",
+        &[(pptx_edit::ProposalTextChangeKind::Insertion, 5, 11)],
+    );
+    assert_paragraph_rewrite_diff(
+        &["Keep 😀", "Tail"],
+        &["Keep 😀", "Middle 😀", "Tail"],
+        "Keep 😀\nMiddle 😀\nTail",
+        &[(pptx_edit::ProposalTextChangeKind::Insertion, 8, 17)],
+    );
+}
+
+#[test]
+fn paragraph_rewrite_diff_edits_before_deleted_paragraphs() {
+    use pptx_edit::ProposalTextChangeKind::{Deletion, Insertion};
+    for tail in [false, true] {
+        let mut old = serde_json::json!([
+            {"alignment": "l", "bullet": false, "runs": [{"text": "Hello old", "style": {}}]},
+            {"alignment": "r", "bullet": true, "runs": [{"text": "Remove me", "style": {}}]},
+        ]);
+        let mut new = serde_json::json!([
+            {"alignment": "ctr", "bullet": true, "runs": [{"text": "Hello new", "style": {}}]},
+        ]);
+        if tail {
+            let paragraph = serde_json::json!({"alignment": "l", "bullet": false, "runs": [{"text": "Tail", "style": {}}]});
+            old.as_array_mut().unwrap().push(paragraph.clone());
+            new.as_array_mut().unwrap().push(paragraph);
+        }
+        let story = assert_paragraph_draft_diff(
+            old,
+            new,
+            if tail {
+                "Hello oldnew\nRemove me\nTail"
+            } else {
+                "Hello oldnew\nRemove me"
+            },
+            &[(Deletion, 6, 9), (Insertion, 9, 12), (Deletion, 13, 22)],
+        );
+        assert_eq!(story.paragraphs[0].alignment.as_deref(), Some("ctr"));
+        assert_eq!(story.paragraphs[1].alignment.as_deref(), Some("r"));
+        for paragraph in &story.paragraphs[..2] {
+            assert!(
+                paragraph
+                    .bullet_json
+                    .as_ref()
+                    .unwrap()
+                    .contains("character")
+            );
+        }
+        if tail {
+            assert_eq!(story.paragraphs[2].alignment.as_deref(), Some("l"));
+            assert!(
+                story.paragraphs[2]
+                    .bullet_json
+                    .as_ref()
+                    .unwrap()
+                    .contains("none")
+            );
+        }
+    }
+}
+
+#[test]
+fn paragraph_rewrite_diff_inserts_before_rewritten_tail() {
+    use pptx_edit::ProposalTextChangeKind::{Deletion, Insertion};
+    assert_paragraph_rewrite_diff(
+        &["Keep", "OldTail"],
+        &["Keep", "Middle", "NewTail"],
+        "Keep\nMiddle\nOldTailNewTail",
+        &[(Insertion, 5, 11), (Deletion, 12, 19), (Insertion, 19, 26)],
+    );
+}
+
+#[test]
+fn paragraph_rewrite_diff_deletes_middle_while_editing_next() {
+    use pptx_edit::ProposalTextChangeKind::{Deletion, Insertion};
+    assert_paragraph_rewrite_diff(
+        &["Keep", "Remove me", "Tail old"],
+        &["Keep", "Tail new"],
+        "Keep\nRemove me\nTail oldnew",
+        &[(Deletion, 5, 14), (Deletion, 20, 23), (Insertion, 23, 26)],
+    );
+}
+
+#[test]
+fn paragraph_rewrite_diff_inserts_before_restyled_tail() {
+    use pptx_edit::ProposalTextChangeKind::{Deletion, Insertion};
+    let story = assert_paragraph_draft_diff(
+        serde_json::json!([
+            {"runs": [{"text": "Keep", "style": {}}]},
+            {"runs": [{"text": "Tail", "style": {}}]},
+        ]),
+        serde_json::json!([
+            {"runs": [{"text": "Keep", "style": {}}]},
+            {"alignment": "ctr", "bullet": true, "runs": [{"text": "Middle", "style": {}}]},
+            {"alignment": "r", "bullet": false, "runs": [{"text": "Tail", "style": {"bold": true}}]},
+        ]),
+        "Keep\nMiddle\nTailTail",
+        &[(Insertion, 5, 11), (Deletion, 12, 16), (Insertion, 16, 20)],
+    );
+    assert_eq!(story.paragraphs[1].alignment.as_deref(), Some("ctr"));
+    assert!(
+        story.paragraphs[1]
+            .bullet_json
+            .as_ref()
+            .unwrap()
+            .contains("character")
+    );
+    assert_eq!(story.paragraphs[2].alignment.as_deref(), Some("r"));
+    assert!(
+        story.paragraphs[2]
+            .bullet_json
+            .as_ref()
+            .unwrap()
+            .contains("none")
+    );
+    assert_eq!(story.paragraphs[2].runs[1].style.bold, Some(true));
+}
+
+#[test]
+fn paragraph_rewrite_diff_inserts_while_restyling_a_word() {
+    use pptx_edit::ProposalTextChangeKind::{Deletion, Insertion};
+    let story = assert_paragraph_draft_diff(
+        serde_json::json!([
+            {"runs": [{"text": "Keep", "style": {}}]},
+            {"runs": [{"text": "Tail word", "style": {}}]},
+        ]),
+        serde_json::json!([
+            {"runs": [{"text": "Keep", "style": {}}]},
+            {"runs": [{"text": "Middle", "style": {}}]},
+            {"runs": [{"text": "Tail ", "style": {}}, {"text": "word", "style": {"bold": true}}]},
+        ]),
+        "Keep\nMiddle\nTail wordword",
+        &[(Insertion, 5, 11), (Deletion, 17, 21), (Insertion, 21, 25)],
+    );
+    assert_eq!(story.paragraphs[2].runs[2].style.bold, Some(true));
+}
+
+#[test]
+fn paragraph_rewrite_diff_pairs_every_rewritten_paragraph_in_order() {
+    use pptx_edit::ProposalTextChangeKind::{Deletion, Insertion};
+    assert_paragraph_rewrite_diff(
+        &["Old first", "Old second", "Old third"],
+        &["New first", "New second", "New third"],
+        "OldNew first\nOldNew second\nOldNew third",
+        &[
+            (Deletion, 0, 3),
+            (Insertion, 3, 6),
+            (Deletion, 13, 16),
+            (Insertion, 16, 19),
+            (Deletion, 27, 30),
+            (Insertion, 30, 33),
+        ],
+    );
+    assert_paragraph_rewrite_diff(
+        &["Alpha", "Beta", "Gamma"],
+        &["One", "Two", "Three"],
+        "AlphaOne\nBetaTwo\nGammaThree",
+        &[
+            (Deletion, 0, 5),
+            (Insertion, 5, 8),
+            (Deletion, 9, 13),
+            (Insertion, 13, 16),
+            (Deletion, 17, 22),
+            (Insertion, 22, 27),
+        ],
+    );
+}
+
+fn assert_paragraph_rewrite_diff(
+    old: &[&str],
+    new: &[&str],
+    expected_text: &str,
+    expected_changes: &[(pptx_edit::ProposalTextChangeKind, u32, u32)],
+) {
+    let drafts = |texts: &[&str]| {
+        serde_json::Value::Array(
+            texts
+                .iter()
+                .map(|text| serde_json::json!({"runs": [{"text": text, "style": {}}]}))
+                .collect(),
+        )
+    };
+    assert_paragraph_draft_diff(drafts(old), drafts(new), expected_text, expected_changes);
+}
+
+fn assert_paragraph_draft_diff(
+    old: serde_json::Value,
+    new: serde_json::Value,
+    expected_text: &str,
+    expected_changes: &[(pptx_edit::ProposalTextChangeKind, u32, u32)],
+) -> pptx_edit::StorySnapshot {
+    let session = DeckSession::open(SHAPE_DECK, 547).unwrap();
+    let story_id = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+    let new_drafts =
+        serde_json::from_value::<Vec<pptx_edit::TextParagraphDraft>>(new.clone()).unwrap();
+    let new_text = new_drafts
+        .iter()
+        .map(|p| {
+            p.runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    session
+        .set_story_paragraphs(
+            &EditCtx::local("human"),
+            &story_id,
+            &serde_json::from_value::<Vec<pptx_edit::TextParagraphDraft>>(old).unwrap(),
+        )
+        .unwrap();
+    let before = session.snapshot().unwrap();
+    let proposal = session
+        .propose(request(vec![paragraph_edit(&story_id, new)]))
+        .unwrap();
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert_eq!(
+        preview.snapshot.slides[0].shapes[0].text_stories[0].plain_text(),
+        new_text
+    );
+    let deck_diff = session.preview_proposal_diff(&proposal.id).unwrap();
+    for diff in [
+        session
+            .preview_proposal_diff_slide(&proposal.id, 0)
+            .unwrap(),
+        session
+            .preview_proposal_diff_slide_by_id(&proposal.id, &before.slides[0].id)
+            .unwrap(),
+    ] {
+        let story = &diff.scope.slide.shapes[0].text_stories[0];
+        assert_eq!(story.plain_text(), expected_text);
+        assert_eq!(
+            story
+                .paragraphs
+                .iter()
+                .map(|p| p
+                    .runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>())
+                .collect::<Vec<_>>(),
+            expected_text.split('\n').collect::<Vec<_>>()
+        );
+        assert_eq!(
+            story.length,
+            expected_text.encode_utf16().count() as u32 + 1
+        );
+        assert_eq!(diff.snapshot.slides[0], diff.scope.slide);
+        assert_eq!(diff.snapshot.slides[0], deck_diff.snapshot.slides[0]);
+        assert_eq!(diff.text_changes, deck_diff.text_changes);
+        assert_eq!(
+            diff.text_changes,
+            expected_changes
+                .iter()
+                .map(|&(kind, start, end)| pptx_edit::ProposalTextChange {
+                    story_id: story_id.clone(),
+                    start,
+                    end,
+                    kind,
+                })
+                .collect::<Vec<_>>()
+        );
+        let mut offset = 0;
+        for paragraph in &story.paragraphs {
+            for run in &paragraph.runs {
+                let end = offset + run.text.encode_utf16().count() as u32;
+                let marked = expected_changes
+                    .iter()
+                    .find(|&&(_, start, stop)| start <= offset && end <= stop);
+                match marked.map(|&(kind, _, _)| kind) {
+                    Some(pptx_edit::ProposalTextChangeKind::Deletion) => {
+                        assert_eq!(run.style.color.as_deref(), Some("#b91c1c"));
+                    }
+                    Some(pptx_edit::ProposalTextChangeKind::Insertion) => {
+                        assert_eq!(run.style.color.as_deref(), Some("#166534"));
+                    }
+                    None => {
+                        assert_ne!(run.style.color.as_deref(), Some("#b91c1c"));
+                        assert_ne!(run.style.color.as_deref(), Some("#166534"));
+                    }
+                }
+                offset = end;
+            }
+            offset += 1;
+        }
+    }
+    assert_eq!(session.snapshot().unwrap(), before);
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+    deck_diff.snapshot.slides[0].shapes[0].text_stories[0].clone()
+}
+
+#[test]
+fn paragraph_properties_only_still_mark_the_shape_changed() {
+    for property in [
+        serde_json::json!({"bullet": true}),
+        serde_json::json!({"alignment": "ctr"}),
+    ] {
+        let session = DeckSession::open(SHAPE_DECK, 543).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let shape = &snapshot.slides[0].shapes[0];
+        let mut draft = property;
+        draft["runs"] = serde_json::json!([{"text": "alpha", "style": {}}]);
+        let proposal = session
+            .propose(request(vec![paragraph_edit(
+                &shape.text_stories[0].id,
+                serde_json::json!([draft]),
+            )]))
+            .unwrap();
+        assert_eq!(proposal.changes[0].old_text, proposal.changes[0].new_text);
+        assert_ne!(proposal.changes[0].before, proposal.changes[0].after);
+        let diff = session
+            .preview_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        assert!(diff.text_changes.is_empty());
+        assert_eq!(diff.shape_changes[0].shape_id, shape.id);
+        assert_eq!(
+            diff.shape_changes[0].kind,
+            pptx_edit::ProposalShapeChangeKind::Changed
+        );
+        assert_eq!(
+            session.proposal_slide_strip(&proposal.id).unwrap()[0].status,
+            pptx_edit::ProposalStripStatus::Changed
+        );
+    }
+}
+
+#[test]
+fn paragraph_proposal_resolves_created_shape_story_and_accepts_atomically() {
+    let session = DeckSession::open(SHAPE_DECK, 544).unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let proposal = session
+        .propose(request(vec![
+            shape_edit("addTextBox", &slide.id, ""),
+            paragraph_edit("@created", paragraph_drafts()),
+        ]))
+        .unwrap();
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    let shape = preview.snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.id == proposal.refs["created"])
+        .unwrap();
+    assert_eq!(shape.text_stories[0].plain_text(), "First point\nSecond 😀");
+    assert_eq!(proposal.changes[0].old_text, "");
+    assert_eq!(proposal.changes[0].new_text, "First point\nSecond 😀");
+    assert!(proposal.changes[0].before.is_none());
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn paragraph_proposal_stales_on_shape_edits_and_force_requires_a_live_story() {
+    let session = DeckSession::open(SHAPE_DECK, 545).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = &slide.shapes[0];
+    let story_id = &shape.text_stories[0].id;
+    let proposal = session
+        .propose(request(vec![paragraph_edit(story_id, paragraph_drafts())]))
+        .unwrap();
+    session
+        .set_shape_fill(
+            &EditCtx::local("human"),
+            &slide.id,
+            &shape.id,
+            Some("#112233"),
+        )
+        .unwrap();
+    assert_eq!(
+        session.proposals().unwrap()[0].stale_targets.as_slice(),
+        std::slice::from_ref(&shape.id)
+    );
+    assert!(matches!(
+        session.accept_proposal(&proposal.id, false),
+        Err(ProposalError::Stale(_))
+    ));
+    session.preview_proposal(&proposal.id).unwrap();
+    assert!(matches!(
+        session.accept_proposal(&proposal.id, false),
+        Err(ProposalError::Stale(_))
+    ));
+    session.accept_proposal(&proposal.id, true).unwrap();
+    let proposal = session
+        .propose(request(vec![paragraph_edit(story_id, paragraph_drafts())]))
+        .unwrap();
+    session
+        .insert_text(
+            &EditCtx::local("human"),
+            story_id,
+            0,
+            "User ",
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(matches!(
+        session.accept_proposal(&proposal.id, false),
+        Err(ProposalError::Stale(_))
+    ));
+    session
+        .remove_shape(&EditCtx::local("human"), &slide.id, &shape.id)
+        .unwrap();
+    assert!(matches!(
+        session.accept_proposal(&proposal.id, true),
+        Err(ProposalError::Edit(pptx_edit::EditError::StoryNotFound(_)))
+    ));
+    assert!(matches!(
+        session.propose(request(vec![paragraph_edit("missing", paragraph_drafts())])),
+        Err(ProposalError::Edit(pptx_edit::EditError::StoryNotFound(_)))
+    ));
+}
+
+#[test]
+fn invalid_paragraph_drafts_refuse_the_entire_proposal_without_history() {
+    let session = DeckSession::open(SHAPE_DECK, 546).unwrap();
+    let before = session.snapshot().unwrap();
+    let story_id = &before.slides[0].shapes[0].text_stories[0].id;
+    let draft = serde_json::json!({"runs": [{"text": "text", "style": {}}]});
+    for paragraphs in [
+        serde_json::json!([]),
+        serde_json::json!(vec![draft.clone(); 101]),
+        serde_json::json!([{"runs": vec![serde_json::json!({"text": "x", "style": {}}); 65]}]),
+        serde_json::json!([{"alignment": "bad", "runs": []}]),
+        serde_json::json!([{"runs": [{"text": "bad\u{0}", "style": {}}]}]),
+        serde_json::json!([{"runs": [{"text": "bad\r", "style": {}}]}]),
+        serde_json::json!([{"runs": [{"text": "x", "style": {"color": "bad"}}]}]),
+        serde_json::json!([{"runs": [{"text": "x", "style": {"fontSizePt": 0}}]}]),
+        serde_json::json!([{"runs": [{"text": "😀".repeat(8001), "style": {}}]}]),
+    ] {
+        let state = session.encode_state_as_update_v1();
+        assert!(matches!(
+            session.propose(request(vec![
+                shape_edit("addTextBox", &before.slides[0].id, ""),
+                paragraph_edit(story_id, paragraphs),
+            ])),
+            Err(ProposalError::Edit(pptx_edit::EditError::InvalidText(_)))
+        ));
+        assert_eq!(session.encode_state_as_update_v1(), state);
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.proposals().unwrap().is_empty());
+        assert!(!session.can_undo());
+    }
+    assert!(
+        serde_json::from_value::<ProposalEdit>(serde_json::json!({
+            "type": "setStoryParagraphs", "storyId": story_id,
+            "paragraphs": [{"runs": [], "indent": 1}],
+        }))
+        .is_err()
+    );
+    let proposal = session
+        .propose(request(vec![paragraph_edit(
+            story_id,
+            serde_json::json!([{"runs": []}]),
+        )]))
+        .unwrap();
+    assert_eq!(proposal.id, "p1");
+}

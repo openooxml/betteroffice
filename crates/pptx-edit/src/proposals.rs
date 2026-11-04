@@ -6,7 +6,7 @@ use yrs::{ReadTxn, Transact};
 use crate::staging::Adoption;
 use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, PictureDraft, PresetShapeDraft, ShapeDraft,
-    ShapeRect, ShapeSnapshot, ShapeStroke, TextStyle, TextStylePatch,
+    ShapeRect, ShapeSnapshot, ShapeStroke, TextParagraphDraft, TextStyle, TextStylePatch,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,6 +85,10 @@ pub enum ProposalEdit {
         start: u32,
         end: u32,
         alignment: Option<String>,
+    },
+    SetStoryParagraphs {
+        story_id: String,
+        paragraphs: Vec<TextParagraphDraft>,
     },
     SetShapeRect {
         slide_id: String,
@@ -454,7 +458,7 @@ impl DeckSession {
         let applied = before != snapshot;
         if applied {
             let (_, update) = preview.staged_update(&self.doc.transact().state_vector())?;
-            let structural = proposal.edits.iter().any(|edit| {
+            let isolated = proposal.edits.iter().any(|edit| {
                 matches!(
                     edit,
                     ProposalEdit::InsertSlide { .. }
@@ -465,13 +469,14 @@ impl DeckSession {
                         | ProposalEdit::AddShape { .. }
                         | ProposalEdit::AddPicture { .. }
                         | ProposalEdit::RemoveShape { .. }
+                        | ProposalEdit::SetStoryParagraphs { .. }
                 )
             });
-            if structural {
+            if isolated {
                 self.add_undo_barrier();
             }
             let adopted = self.adopt(&preview, update, Adoption::Proposal);
-            if structural {
+            if isolated {
                 self.add_undo_barrier();
             }
             adopted?;
@@ -703,6 +708,7 @@ fn resolve_edit(
         }
         ProposalEdit::ReplaceText { story_id, .. }
         | ProposalEdit::FormatText { story_id, .. }
+        | ProposalEdit::SetStoryParagraphs { story_id, .. }
         | ProposalEdit::SetParagraphAlignment { story_id, .. } => {
             if story_id.starts_with('@') {
                 resolve(story_id)?;
@@ -877,6 +883,12 @@ pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(
                 alignment.as_deref(),
             )?;
         }
+        ProposalEdit::SetStoryParagraphs {
+            story_id,
+            paragraphs,
+        } => {
+            session.set_story_paragraphs(&context, story_id, paragraphs)?;
+        }
         ProposalEdit::SetShapeRect {
             slide_id,
             shape_id,
@@ -973,6 +985,7 @@ fn target(
         )),
         ProposalEdit::ReplaceText { story_id, .. }
         | ProposalEdit::FormatText { story_id, .. }
+        | ProposalEdit::SetStoryParagraphs { story_id, .. }
         | ProposalEdit::SetParagraphAlignment { story_id, .. } => snapshot
             .slides
             .iter()
