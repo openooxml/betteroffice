@@ -378,7 +378,7 @@ export type PresentationPeerHandle = Pick<PresentationHandle,
   'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' |
   'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
   'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
-  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'hitTest' |
+  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'renderPng' | 'hitTest' |
   'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
 >;
 

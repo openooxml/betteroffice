@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openPresentation } from '../index';
+import { engineKind } from './engine';
 
 const root = resolve(import.meta.dir, '../../../..');
 let fixture: Uint8Array;
@@ -59,7 +60,7 @@ function stubBrowser() {
   return { sizes, sources, held };
 }
 
-describe('PresentationHandle.renderPng', () => {
+describe.skipIf(engineKind === 'native')('PresentationHandle.renderPng', () => {
   test('draws a slide by index or ID without moving the slide hit testing reads', async () => {
     const browser = stubBrowser();
     const handle = openPresentation(fixture, { clientId: 7101, fonts: [{ family: 'Liberation Sans', bytes: font }] });
