@@ -529,6 +529,19 @@ impl DeckSession {
                 ));
             }
             let starts = paragraph_offsets(&current);
+            for (index, template) in templates.iter().enumerate() {
+                let Some(template) = template else { continue };
+                self.set_replacement_properties(context, story_id, starts[index], template)?;
+                if current.paragraphs[index].alignment != template.alignment {
+                    self.set_paragraph_alignment(
+                        context,
+                        story_id,
+                        starts[index],
+                        starts[index],
+                        template.alignment.as_deref(),
+                    )?;
+                }
+            }
             for (index, (paragraph, draft)) in
                 current.paragraphs.iter().zip(&draft_text).enumerate().rev()
             {
@@ -586,20 +599,6 @@ impl DeckSession {
             }
             let current = self.story(story_id)?;
             let starts = paragraph_offsets(&current);
-            for (index, template) in templates.iter().enumerate() {
-                let Some(template) = template else { continue };
-                self.set_replacement_properties(context, story_id, starts[index], template)?;
-                if current.paragraphs[index].alignment != template.alignment {
-                    self.set_paragraph_alignment(
-                        context,
-                        story_id,
-                        starts[index],
-                        starts[index],
-                        template.alignment.as_deref(),
-                    )?;
-                }
-            }
-            let current = self.story(story_id)?;
             for (index, paragraph) in paragraphs.iter().enumerate() {
                 if let Some(alignment) = paragraph.alignment.as_deref()
                     && current.paragraphs[index].alignment.as_deref() != Some(alignment)

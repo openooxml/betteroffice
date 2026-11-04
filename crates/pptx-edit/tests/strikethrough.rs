@@ -790,6 +790,66 @@ fn paragraph_strike_deck(first_struck: bool) -> Vec<u8> {
 }
 
 #[test]
+fn replacement_split_paragraph_preserves_explicit_clear_over_inherited_strike() {
+    let session = DeckSession::open(&paragraph_strike_deck(true), 6444).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = &snapshot.slides[0].shapes[3].text_stories[0].id;
+    let drafts: Vec<pptx_edit::TextParagraphDraft> = serde_json::from_value(serde_json::json!([
+        {"runs": [{"text": "AB"}]},
+        {"runs": [{"text": "X", "style": {"strike": "noStrike"}}]},
+        {"runs": [{"text": "C"}]},
+    ]))
+    .unwrap();
+    session
+        .set_story_paragraphs(&EditCtx::local("strike"), story_id, &drafts)
+        .unwrap();
+    let xml = slide_xml(&session.save().unwrap());
+    let paragraph = xml
+        .split("<a:p>")
+        .skip(1)
+        .map(|paragraph| paragraph.split("</a:p>").next().unwrap())
+        .find(|paragraph| paragraph.contains("<a:t>X</a:t>"))
+        .unwrap();
+    assert!(paragraph.contains(r#"<a:pPr><a:defRPr strike="sngStrike"/></a:pPr>"#));
+    let run = paragraph
+        .split("<a:r>")
+        .skip(1)
+        .map(|run| run.split("</a:r>").next().unwrap())
+        .find(|run| run.contains("<a:t>X</a:t>"))
+        .unwrap();
+    assert!(run.contains(r#"strike="noStrike""#));
+}
+
+#[test]
+fn replacement_remaining_paragraph_omits_clear_without_inherited_strike() {
+    let session = DeckSession::open(&paragraph_strike_deck(false), 6445).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = &snapshot.slides[0].shapes[3].text_stories[0].id;
+    let drafts: Vec<pptx_edit::TextParagraphDraft> = serde_json::from_value(serde_json::json!([
+        {"runs": [{"text": "X", "style": {"strike": "noStrike"}}]},
+    ]))
+    .unwrap();
+    session
+        .set_story_paragraphs(&EditCtx::local("strike"), story_id, &drafts)
+        .unwrap();
+    let xml = slide_xml(&session.save().unwrap());
+    let paragraph = xml
+        .split("<a:p>")
+        .skip(1)
+        .map(|paragraph| paragraph.split("</a:p>").next().unwrap())
+        .find(|paragraph| paragraph.contains("<a:t>X</a:t>"))
+        .unwrap();
+    assert!(!paragraph.contains("strike="));
+    let run = paragraph
+        .split("<a:r>")
+        .skip(1)
+        .map(|run| run.split("</a:r>").next().unwrap())
+        .find(|run| run.contains("<a:t>X</a:t>"))
+        .unwrap();
+    assert!(!run.contains("strike="));
+}
+
+#[test]
 fn inserted_paragraph_uses_preserved_defaults_and_shifted_source_identity() {
     for first_struck in [true, false] {
         let session = DeckSession::open(&paragraph_strike_deck(first_struck), 6437).unwrap();
