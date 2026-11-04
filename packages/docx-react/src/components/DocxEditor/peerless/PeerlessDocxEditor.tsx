@@ -1069,7 +1069,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
-    onPaste: props.onPaste, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment });
+    onPaste: props.onPaste, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();
     active.current = null;
