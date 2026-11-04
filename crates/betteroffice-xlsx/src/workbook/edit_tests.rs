@@ -272,6 +272,20 @@ impl Lockstep {
     fn from_bytes(bytes: &[u8], collaborative: bool, rand_seed: Option<u32>) -> Self {
         let fast = open_identical(bytes, collaborative, rand_seed);
         let oracle = open_identical(bytes, collaborative, rand_seed);
+        Self::from_workbooks(fast, oracle)
+    }
+
+    fn from_model(model: WorkbookModel) -> Self {
+        let open = || {
+            let mut workbook = Workbook::from_model_collaborative(model.clone(), 73).unwrap();
+            workbook.mode = WorkbookMode::Standalone;
+            workbook.version_nonce = "singleton-oracle".into();
+            workbook
+        };
+        Self::from_workbooks(open(), open())
+    }
+
+    fn from_workbooks(fast: Workbook, oracle: Workbook) -> Self {
         let fast_events = Arc::new(Mutex::new(Vec::new()));
         let oracle_events = Arc::new(Mutex::new(Vec::new()));
         let events = fast_events.clone();
@@ -377,6 +391,18 @@ impl Lockstep {
             workbook.edit_cell(SheetId(sheet), at, input, options())
         })
     }
+
+    fn format_step(
+        &mut self,
+        apply: impl Fn(&mut Workbook) -> Result<MutationResult>,
+    ) -> std::result::Result<MutationResult, String> {
+        self.fast.authority.materialize().unwrap();
+        self.oracle.authority.materialize().unwrap();
+        let result = self.step(true, apply)?;
+        let input = self.step.to_string();
+        assert!(self.edit(0, r("C1"), &input)?.applied);
+        Ok(result)
+    }
 }
 
 fn assert_range_format_avoids_staging(op: Op) {
@@ -440,6 +466,7 @@ fn collaborative_and_compound_range_formats_keep_staging() {
             workbook.apply_ops(ops, options())
         })
         .unwrap();
+        pair.edit(0, r("C1"), "1").unwrap();
         assert_eq!(fast_range_format_count(), count);
         assert!(local_hydrations() > hydrations);
     }
@@ -491,7 +518,7 @@ fn range_formats_match_full_materialization_and_history() {
         .into_iter()
         .zip(patches)
     {
-        pair.step(true, |workbook| {
+        pair.format_step(|workbook| {
             workbook.patch_range_style(
                 SheetId(0),
                 CellRange::parse_a1(range).unwrap(),
@@ -516,7 +543,7 @@ fn range_formats_match_full_materialization_and_history() {
             },
         ),
     ] {
-        pair.step(true, |workbook| {
+        pair.format_step(|workbook| {
             workbook.set_range_number_format(
                 SheetId(0),
                 CellRange::parse_a1(range).unwrap(),
@@ -534,6 +561,81 @@ fn range_formats_match_full_materialization_and_history() {
     for _ in 0..depth {
         pair.step(true, |workbook| workbook.redo(options())).unwrap();
     }
+}
+
+#[test]
+fn range_style_then_cell_edit_preserves_synthesized_plain_catalog() {
+    use xlsx_model::{Cell, Font, Xf};
+
+    let mut model = WorkbookModel::default();
+    model.styles.fonts = vec![
+        Font {
+            bold: true,
+            ..Font::default()
+        },
+        Font {
+            bold: true,
+            italic: true,
+            ..Font::default()
+        },
+    ];
+    model.styles.cell_xfs = vec![
+        Xf {
+            font: Some(0),
+            ..Xf::default()
+        },
+        Xf {
+            font: Some(1),
+            ..Xf::default()
+        },
+    ];
+    let mut sheet = Sheet::new("Data");
+    for (at, style) in [(r("A1"), 0), (r("B1"), 1)] {
+        sheet.set_cell(
+            at,
+            Cell {
+                value: CellValue::Number { value: 7.0 },
+                style: Some(style),
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut pair = Lockstep::from_model(model);
+    assert_eq!(pair.fast.model.styles.cell_xfs.len(), 2);
+    assert!(pair.fast.model.sheets[0].cell(r("C1")).is_none());
+    let formats = fast_range_format_count();
+    let cells = fast_set_cell_count();
+    pair.format_step(|workbook| {
+        let result = workbook.patch_range_style(
+            SheetId(0),
+            CellRange::parse_a1("A1:B1").unwrap(),
+            StylePatch {
+                bold: Some(false),
+                ..StylePatch::default()
+            },
+            options(),
+        )?;
+        assert_eq!(workbook.model.styles.cell_xfs.len(), 4);
+        assert_eq!(
+            workbook.model.sheets[0].cell(r("A1")).unwrap().style,
+            Some(2)
+        );
+        assert_eq!(
+            workbook.model.sheets[0].cell(r("B1")).unwrap().style,
+            Some(3)
+        );
+        assert_eq!(
+            workbook.model.styles.cell_format(Some(2)),
+            CellFormat::default()
+        );
+        assert!(workbook.model.styles.cell_format(Some(3)).font.italic);
+        Ok(result)
+    })
+    .unwrap();
+    assert_eq!(fast_range_format_count(), formats + 1);
+    assert_eq!(fast_set_cell_count(), cells);
+    assert_eq!(pair.fast.cell(SheetId(0), r("C1")).unwrap().input, "1");
 }
 
 #[test]

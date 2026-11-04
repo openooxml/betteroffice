@@ -795,7 +795,6 @@ pub(crate) struct RangeFormatSync {
     styles: MapRef,
     cells: Vec<(String, Option<Any>)>,
     sheet_order: SheetOrderEntry,
-    plain_style_cells: u64,
 }
 
 impl WorkbookAuthority {
@@ -1464,7 +1463,6 @@ impl WorkbookAuthority {
             target.row_styles = self.base.row_styles.get(base).cloned().unwrap_or_default();
         }
         materialize_style_defaults(&mut target, &sheet_map, &txn).ok()?;
-        let mut previous_plain = 0;
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
@@ -1479,10 +1477,7 @@ impl WorkbookAuthority {
                     let index = *indices.get(&key)?;
                     let style = match index {
                         Some(index) => index,
-                        None => {
-                            previous_plain += 1;
-                            plain?
-                        }
+                        None => plain?,
                     };
                     cell.get_or_insert_default().style = Some(style);
                 }
@@ -1513,9 +1508,8 @@ impl WorkbookAuthority {
         for (key, payload) in &formats {
             catalog.insert(key.clone(), decode_cell_format_entry(key, payload).ok()?);
         }
-        let (_, next_indices) = materialize_cell_format_catalog(catalog, &self.base.styles).ok()?;
+        materialize_cell_format_catalog(catalog, &self.base.styles).ok()?;
         let mut cells = Vec::new();
-        let mut next_plain = 0;
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
@@ -1524,12 +1518,6 @@ impl WorkbookAuthority {
                     .map(|index| style_key(&model.styles, index))
                     .transpose()
                     .ok()?;
-                if style
-                    .as_ref()
-                    .is_some_and(|key| next_indices.get(key) == Some(&None))
-                {
-                    next_plain += 1;
-                }
                 cells.push((cell_key(at), style.map(Any::from)));
             }
         }
@@ -1543,9 +1531,6 @@ impl WorkbookAuthority {
                 before: keys.clone(),
                 after: keys,
             },
-            plain_style_cells: plain_style_cells
-                .checked_sub(previous_plain)?
-                .checked_add(next_plain)?,
         })
     }
 
@@ -1571,9 +1556,6 @@ impl WorkbookAuthority {
         if history == LocalHistory::SheetOrder {
             self.apply_history(HistoryAction::Push(prepared.sheet_order));
         }
-        self.plain_style_cells
-            .store(prepared.plain_style_cells, Ordering::Relaxed);
-        self.projection_valid.store(true, Ordering::Relaxed);
         #[cfg(test)]
         FAST_RANGE_FORMAT_COUNT.set(FAST_RANGE_FORMAT_COUNT.get() + 1);
         Ok(self.encode_ops_update(Some(state_vector)))
@@ -8248,11 +8230,30 @@ mod tests {
                 fast.encode_state_as_update_v1(),
                 oracle.encode_state_as_update_v1()
             );
-            oracle.materialize().unwrap();
+            assert!(!fast.projection_valid.load(Ordering::Relaxed));
+            assert!(!oracle.projection_valid.load(Ordering::Relaxed));
             assert_eq!(
                 fast.plain_style_cells.load(Ordering::Relaxed),
                 oracle.plain_style_cells.load(Ordering::Relaxed)
             );
+            let followup = Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(11, 10),
+                cell: CellState {
+                    value: CellValue::Number {
+                        value: fast.history.undo.len() as f64,
+                    },
+                    ..CellState::default()
+                },
+            };
+            assert_singleton_lockstep(
+                &mut fast,
+                &mut oracle,
+                &[followup],
+                SyncOrigin::User,
+                &model.styles,
+            )
+            .unwrap();
         }
         assert_eq!(fast_range_format_count(), count + 3);
         assert_eq!(fast.materialize().unwrap(), oracle.materialize().unwrap());
