@@ -1199,6 +1199,9 @@ fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError>
 /// clone, and their combined inverse. Consecutive defined-name edits share one lookup of the
 /// name table and one snapshot of it, so a batch editing every name of a large table takes
 /// time and memory linear in its size.
+///
+/// For the workspace crates; not part of the supported API.
+#[doc(hidden)]
 pub struct InPlaceBatch<'a> {
     wb: &'a mut Workbook,
     per_op: Option<Vec<Vec<Op>>>,
