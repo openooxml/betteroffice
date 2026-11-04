@@ -2708,7 +2708,32 @@ fn table_proposals_preserve_collaborative_refusals_and_undo_tracking() {
             &slide.shapes[0].id,
         )]))
         .unwrap();
+    session.preview_proposal(&proposal.id).unwrap();
+    session.proposal_slide_strip(&proposal.id).unwrap();
+    let story_id = slide.shapes[0].text_stories[0].id.clone();
+    let text_proposal = session
+        .propose(request(vec![ProposalEdit::ReplaceText {
+            story_id: story_id.clone(),
+            start: 0,
+            end: 0,
+            text: "Reviewed cell ".into(),
+            style: None,
+        }]))
+        .unwrap();
+    let text_preview = session.preview_proposal(&text_proposal.id).unwrap();
     session.set_collaborative().unwrap();
+    assert!(matches!(
+        session.preview_proposal(&proposal.id),
+        Err(ProposalError::Edit(
+            pptx_edit::EditError::CollaborativeStructureOperation
+        ))
+    ));
+    assert!(matches!(
+        session.proposal_slide_strip(&proposal.id),
+        Err(ProposalError::Edit(
+            pptx_edit::EditError::CollaborativeStructureOperation
+        ))
+    ));
     assert!(matches!(
         session.accept_proposal(&proposal.id, false),
         Err(ProposalError::Edit(
@@ -2716,6 +2741,25 @@ fn table_proposals_preserve_collaborative_refusals_and_undo_tracking() {
         ))
     ));
     assert_eq!(session.snapshot().unwrap(), before);
+    assert_eq!(
+        session.preview_proposal(&text_proposal.id).unwrap(),
+        text_preview
+    );
+    session.proposal_slide_strip(&text_proposal.id).unwrap();
+    assert!(
+        session
+            .accept_proposal(&text_proposal.id, false)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(session.snapshot().unwrap(), text_preview.snapshot);
+    assert!(
+        session
+            .story(&story_id)
+            .unwrap()
+            .plain_text()
+            .starts_with("Reviewed cell ")
+    );
 }
 
 #[test]
