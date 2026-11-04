@@ -136,6 +136,8 @@ interface Book {
   settle(): Promise<void>;
   input(col: number): Promise<string>;
   saved(): Promise<unknown>;
+  /** Re-renders with new definitions for the same plugin ids, keeping the open workbook. */
+  replace(gates: Record<string, Gate>): Promise<void>;
   formula(): HTMLInputElement;
   refusal(): string | null;
   /** A real grid mouse-down and mouse-up on a row 1 cell; in-thread editor only. */
@@ -189,8 +191,10 @@ async function mountGated(
   });
   if (editor === 'in-thread') {
     let api: XlsxEditorApi | undefined;
-    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} plugins={plugins}
-      onPluginError={onPluginError} onReady={(ready) => { api = ready; }} />);
+    const onReady = (ready: XlsxEditorApi) => { api = ready; };
+    const element = (next: XlsxPlugin[]) => <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
+      plugins={next} onPluginError={onPluginError} onReady={onReady} />;
+    const view = render(element(plugins));
     await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     await waitFor(() => expect(log.loaded.size).toBe(plugins.length), MOUNTED);
     const base = common(view);
@@ -226,6 +230,9 @@ async function mountGated(
         await act(async () => { result = await api!.commands.execute('save', null); });
         return result;
       },
+      replace: (next) => act(async () => {
+        view.rerender(element(Object.entries(next).map(([id, gate]) => gatePlugin(id, gate, log))));
+      }),
     };
   }
   const pump = stubFrames();
@@ -237,8 +244,9 @@ async function mountGated(
   const workerCell = async (row: number, col: number) =>
     (await session.call.cellInputs(0, `${String.fromCharCode(65 + col)}${row + 1}`)).cells[0][0].input;
   const ready = mock((_api: XlsxAsyncEditorApi) => {});
-  const view = render(<XlsxWorkerEditor backend="peerless" file={file} plugins={plugins}
-    onPluginError={onPluginError} onReady={ready} />);
+  const element = (next: XlsxPlugin[]) => <XlsxWorkerEditor backend="peerless" file={file} plugins={next}
+    onPluginError={onPluginError} onReady={ready} />;
+  const view = render(element(plugins));
   await waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED);
   await waitFor(() => expect(log.loaded.size).toBe(plugins.length), MOUNTED);
   const api = ready.mock.calls[0][0];
@@ -293,6 +301,12 @@ async function mountGated(
       await act(async () => { result = await api.commands.execute('save', null); });
       return result;
     },
+    replace: async (next) => {
+      await act(async () => {
+        view.rerender(element(Object.entries(next).map(([id, gate]) => gatePlugin(id, gate, log))));
+      });
+      await pump();
+    },
   };
 }
 
@@ -344,6 +358,24 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       await book.type('42');
       await waitFor(async () => expect(await book.input(0)).toBe('42'));
       if (editor === 'in-thread') await waitFor(() => expect(book.refusal()).toBeNull());
+    });
+
+    it('a definition replaced with the same id and revision gates with its own hooks', async () => {
+      const seen: string[] = [];
+      const book = await mountGated(editor, { rule: { beforeCellCommit: (commit) => {
+        seen.push(`old:${commit.input}`);
+        return { action: 'accept' };
+      } } });
+      await book.replace({ rule: { beforeCellCommit: (commit) => {
+        seen.push(`new:${commit.input}`);
+        return { action: 'refuse', message: 'Replaced rule' };
+      } } });
+      await book.select(0);
+      await book.type('7');
+      await waitFor(() => expect(book.refusal()).toBe('Replaced rule'));
+      expect(await book.input(0)).toBe('1');
+      expect(seen).toEqual(['new:7']);
+      expect(book.errors).toEqual([]);
     });
 
     it('after a refused commit and Escape, retyping the cell writes the new input', async () => {

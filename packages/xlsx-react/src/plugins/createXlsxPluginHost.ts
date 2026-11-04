@@ -446,7 +446,7 @@ export function createXlsxPluginHost(
   const gates = () =>
     runtime.activations().filter((entry) =>
       !failing.has(entry.activation) &&
-      (entry.plugin.cellEditable !== undefined || entry.plugin.beforeCellCommit !== undefined)
+      (definitionOf(entry).cellEditable !== undefined || definitionOf(entry).beforeCellCommit !== undefined)
     );
 
   const gateContext = (context: Context): XlsxPluginEditGateContext<unknown> => Object.freeze({
@@ -664,7 +664,7 @@ export function createXlsxPluginHost(
       return {
         cellEditable(cell) {
           for (const entry of gates()) {
-            const hook = entry.plugin.cellEditable;
+            const hook = definitionOf(entry).cellEditable;
             if (!hook) continue;
             const editable = runGate(entry, contexts, (context) => {
               const value: unknown = hook(context, { ...cell });
@@ -678,7 +678,7 @@ export function createXlsxPluginHost(
         beforeCellCommit(commit) {
           let input = commit.input;
           for (const entry of gates()) {
-            const hook = entry.plugin.beforeCellCommit;
+            const hook = definitionOf(entry).beforeCellCommit;
             if (!hook) continue;
             const next = { ...commit, input, kind: commitKind(input) };
             const decision = runGate(entry, contexts, (context) => checkedDecision(hook(context, next)));
