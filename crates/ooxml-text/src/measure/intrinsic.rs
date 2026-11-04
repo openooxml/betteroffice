@@ -68,8 +68,7 @@ fn text_widths(texts: &[(&str, &PreparedText)], widths: &mut Widths) {
     let mut boundary = 0;
     let mut run_start = 0;
     for (_, text) in texts {
-        let mut break_cursor = 0;
-        for (index, cluster) in text.chars.iter().enumerate() {
+        for cluster in &text.chars {
             while boundaries
                 .get(boundary)
                 .is_some_and(|limit| *limit <= run_start + cluster.utf16_offset as usize)
@@ -77,29 +76,12 @@ fn text_widths(texts: &[(&str, &PreparedText)], widths: &mut Widths) {
                 widths.end_word();
                 boundary += 1;
             }
-            while text
-                .breaks
-                .get(break_cursor)
-                .is_some_and(|end| *end <= index)
-            {
-                break_cursor += 1;
-            }
-            let end = text
-                .breaks
-                .get(break_cursor)
-                .copied()
-                .unwrap_or(text.chars.len());
-            let tracking = if index + 1 < end {
-                text.letter_spacing
-            } else {
-                0.0
-            };
             widths.add(
-                cluster.advance + tracking,
+                cluster.advance_with_spacing(text.letter_spacing),
                 if cluster.is_fit_space {
                     0.0
                 } else {
-                    cluster.advance
+                    cluster.advance_with_spacing(text.letter_spacing)
                 },
             );
         }

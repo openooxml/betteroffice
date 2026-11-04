@@ -700,13 +700,10 @@ impl Filler<'_> {
         });
     }
 
-    /// Records a span of shaped clusters, charging letter spacing to every
-    /// cluster but the last — so gaps are counted within the span, never
-    /// across its trailing edge into the next word.
     fn record_text_clusters(&mut self, run_index: u32, chars: &[CharAdv], spacing: f32) {
-        for (index, cluster) in chars.iter().enumerate() {
+        for cluster in chars {
             if cluster.is_space {
-                self.cur.space_width += cluster.advance.max(0.0);
+                self.cur.space_width += cluster.advance_with_spacing(spacing).max(0.0);
             }
             self.update_max_font(
                 cluster.font_size_pt,
@@ -717,12 +714,7 @@ impl Filler<'_> {
                 run_index,
                 start_char: cluster.utf16_offset,
                 end_char: cluster.utf16_offset + cluster.utf16_len,
-                advance: cluster.advance
-                    + if index + 1 < chars.len() {
-                        spacing
-                    } else {
-                        0.0
-                    },
+                advance: cluster.advance_with_spacing(spacing),
                 level: cluster.level,
                 logical_order: run_index
                     .saturating_mul(1_000_000)
@@ -1262,16 +1254,11 @@ pub(super) fn visible_span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 
     span_width(&chars[..end], letter_spacing)
 }
 
-/// Shaped advance sum plus tracking between complete clusters. This is the
-/// authoritative path for paint/hit geometry: no gap may land inside a
-/// ligature, surrogate pair, or combining sequence.
 pub(super) fn span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
-    let advance: f32 = chars.iter().map(|c| c.advance).sum();
-    if letter_spacing != 0.0 && chars.len() > 1 {
-        advance + letter_spacing * (chars.len() - 1) as f32
-    } else {
-        advance
-    }
+    chars
+        .iter()
+        .map(|cluster| cluster.advance_with_spacing(letter_spacing))
+        .sum()
 }
 
 /// Longest cluster prefix whose width stays within `max_width`, in clusters.
@@ -1281,14 +1268,8 @@ fn max_fitting(chars: &[CharAdv], letter_spacing: f32, max_width: f32) -> usize 
     let mut best = 0usize;
     let mut advance = 0.0f32;
     for (k, c) in chars.iter().enumerate() {
-        advance += c.advance;
-        let cluster_count = k + 1;
-        let width = if letter_spacing != 0.0 && cluster_count > 1 {
-            advance + letter_spacing * (cluster_count - 1) as f32
-        } else {
-            advance
-        };
-        if width <= max_width {
+        advance += c.advance_with_spacing(letter_spacing);
+        if advance <= max_width {
             best = k + 1;
         } else if letter_spacing >= 0.0 {
             break;
@@ -1375,6 +1356,7 @@ mod tests {
                 CharAdv {
                     utf16_offset: 0,
                     utf16_len: 1,
+                    source_chars: 1,
                     advance: 10.0,
                     is_space: false,
                     is_fit_space: false,
@@ -1387,6 +1369,7 @@ mod tests {
                 CharAdv {
                     utf16_offset: 1,
                     utf16_len: 2,
+                    source_chars: 1,
                     advance: 10.0,
                     is_space: false,
                     is_fit_space: false,
@@ -1399,6 +1382,7 @@ mod tests {
                 CharAdv {
                     utf16_offset: 3,
                     utf16_len: 1,
+                    source_chars: 1,
                     advance: 10.0,
                     is_space: false,
                     is_fit_space: false,

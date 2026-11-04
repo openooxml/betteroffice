@@ -5,7 +5,7 @@ use docx_layout::display_list::{
     build_display_list_json_with_fonts,
 };
 use docx_layout::hit::{hit_test, range_rects};
-use ooxml_text::{FontId, FontStore, kern_features, shape};
+use ooxml_text::{FontId, FontStore, ShapeDirection, kern_features, shape, shape_with_direction};
 
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
@@ -1199,6 +1199,311 @@ fn hit_test_and_range_rects_resolve_over_glyph_runs() {
         r.x,
         g.glyphs[0].x
     );
+}
+
+fn measure_tracking_input(store: &FontStore, input: &mut serde_json::Value, max_width: f64) {
+    let measure = ooxml_text::measure_paragraph_json(
+        store,
+        &serde_json::json!({
+            "block": input["measured"][0]["block"],
+            "maxWidth": max_width,
+            "fontChains": input["fontChains"],
+            "authoritativeShaping": true,
+            "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12.0}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let measure: serde_json::Value = serde_json::from_str(&measure).unwrap();
+    let fragment = &mut input["layout"]["pages"][0]["fragments"][0];
+    fragment["width"] = serde_json::json!(max_width);
+    fragment["height"] = measure["totalHeight"].clone();
+    fragment["toLine"] = serde_json::json!(measure["lines"].as_array().unwrap().len());
+    let end = input["measured"][0]["block"]["pmEnd"].clone();
+    input["layout"]["pages"][0]["fragments"][0]["pmEnd"] = end;
+    input["measured"][0]["measure"] = measure;
+}
+
+fn tracking_input(
+    store: &FontStore,
+    text: &str,
+    spacing: Option<f64>,
+    max_width: f64,
+    rtl: bool,
+) -> serde_json::Value {
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input(text, 0.0, None, false, Some(&[0]))).unwrap();
+    let end = 1 + text.encode_utf16().count() as i64;
+    input["measured"][0]["block"]["pmEnd"] = serde_json::json!(end + 1);
+    let run = &mut input["measured"][0]["block"]["runs"][0];
+    run["pmEnd"] = serde_json::json!(end);
+    if let Some(spacing) = spacing {
+        run["letterSpacing"] = serde_json::json!(spacing);
+    }
+    if rtl {
+        run["rtl"] = serde_json::json!(true);
+        input["measured"][0]["block"]["attrs"] = serde_json::json!({"bidi": true});
+    }
+    measure_tracking_input(store, &mut input, max_width);
+    input
+}
+
+fn tracking_list(
+    store: &FontStore,
+    input: &serde_json::Value,
+    whole_runs: bool,
+    reconcile: bool,
+) -> DisplayList {
+    let mut input = input.clone();
+    if whole_runs {
+        for line in input["measured"][0]["measure"]["lines"]
+            .as_array_mut()
+            .unwrap()
+        {
+            let line = line.as_object_mut().unwrap();
+            line.remove("clusterAdvances");
+            line.remove("bidiSlices");
+            if !reconcile {
+                line.remove("runAdvances");
+            }
+        }
+    }
+    serde_json::from_str(&build_display_list_json_with_fonts(&input.to_string(), store).unwrap())
+        .unwrap()
+}
+
+fn assert_tracking_glyphs(store: &FontStore, list: &DisplayList, spacing: f64) {
+    let runs = glyph_runs(list);
+    assert!(!runs.is_empty());
+    for run in runs {
+        let direction = if run.rtl == Some(true) {
+            ShapeDirection::Rtl
+        } else {
+            ShapeDirection::Ltr
+        };
+        let shaped = shape_with_direction(
+            store,
+            FontId::from_u32(run.font_id),
+            &run.text,
+            16.0,
+            &kern_features(false),
+            direction,
+        )
+        .unwrap();
+        assert_eq!(run.glyphs.len(), shaped.len());
+        let mut bounds: Vec<usize> = shaped.iter().map(|glyph| glyph.cluster as usize).collect();
+        bounds.sort_unstable();
+        bounds.dedup();
+        bounds.push(run.text.len());
+        let mut pen = run.glyphs[0].x - f64::from(shaped[0].x_offset);
+        for (index, (placed, raw)) in run.glyphs.iter().zip(&shaped).enumerate() {
+            let mut advance = f64::from(raw.x_advance);
+            if shaped
+                .get(index + 1)
+                .is_none_or(|next| next.cluster != raw.cluster)
+            {
+                let start = raw.cluster as usize;
+                let end = bounds[bounds.binary_search(&start).unwrap() + 1];
+                let text = &run.text[start..end];
+                advance += spacing * text.chars().count() as f64;
+                advance += run
+                    .word_spacing
+                    .as_ref()
+                    .and_then(|n| n.as_f64())
+                    .unwrap_or(0.0)
+                    * text.chars().filter(|&ch| ch == ' ').count() as f64;
+            }
+            assert_eq!(placed.id, raw.glyph_id);
+            assert_eq!(placed.cluster, raw.cluster);
+            assert!((placed.x - pen - f64::from(raw.x_offset)).abs() < 0.001);
+            assert!((placed.advance - advance).abs() < 0.001);
+            pen += advance;
+        }
+    }
+}
+
+fn assert_tracking_width(input: &serde_json::Value, list: &DisplayList) {
+    let measured: f64 = input["measured"][0]["measure"]["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line["width"].as_f64().unwrap())
+        .sum();
+    let advances: f64 = glyph_runs(list)
+        .iter()
+        .flat_map(|run| &run.glyphs)
+        .map(|glyph| glyph.advance)
+        .sum();
+    assert!((advances - measured).abs() < 0.01, "{advances} != {measured}");
+}
+
+fn assert_tracking_without_reconciliation(text: &str, spacing: f64, rtl: bool) {
+    let store = store_with_liberation();
+    let input = tracking_input(&store, text, Some(spacing), FRAG_WIDTH, rtl);
+    let exact = tracking_list(&store, &input, true, true);
+    let natural = tracking_list(&store, &input, true, false);
+    assert_eq!(glyph_runs(&exact).len(), 1);
+    assert_eq!(glyph_runs(&natural).len(), 1);
+    assert_tracking_glyphs(&store, &exact, spacing);
+    assert_tracking_glyphs(&store, &natural, spacing);
+    assert_tracking_width(&input, &exact);
+    assert_tracking_width(&input, &natural);
+    for (exact, natural) in glyph_runs(&exact)[0]
+        .glyphs
+        .iter()
+        .zip(&glyph_runs(&natural)[0].glyphs)
+    {
+        assert_eq!(exact.x, natural.x);
+        assert_eq!(exact.advance, natural.advance);
+    }
+    let clusters = tracking_list(&store, &input, false, true);
+    assert_tracking_glyphs(&store, &clusters, spacing);
+    assert_tracking_width(&input, &clusters);
+}
+
+#[test]
+fn glyph_run_expanded_spacing_advances_every_character_including_the_last() {
+    assert_tracking_without_reconciliation("ABCD", 40.0 / 1440.0 * 96.0, false);
+}
+
+#[test]
+fn glyph_run_condensed_spacing_advances_every_character_including_the_last() {
+    assert_tracking_without_reconciliation("ABCD", -20.0 / 1440.0 * 96.0, false);
+}
+
+#[test]
+fn glyph_run_combining_cluster_keeps_spacing_after_its_last_glyph() {
+    let store = store_with_liberation();
+    let text = "x\u{301}B";
+    let shaped = shape(&store, FontId::from_u32(0), text, 16.0, &kern_features(false)).unwrap();
+    assert!(shaped.windows(2).any(|pair| pair[0].cluster == pair[1].cluster));
+    for spacing in [40.0 / 1440.0 * 96.0, -20.0 / 1440.0 * 96.0] {
+        assert_tracking_without_reconciliation(text, spacing, false);
+    }
+}
+
+#[test]
+fn glyph_run_surrogate_pair_counts_as_one_spacing() {
+    assert_tracking_without_reconciliation("A\u{1f600}B", 40.0 / 1440.0 * 96.0, false);
+}
+
+#[test]
+fn glyph_run_rtl_spacing_follows_visual_glyph_order() {
+    let store = store_with_liberation();
+    let shaped = shape_with_direction(
+        &store,
+        FontId::from_u32(0),
+        "אבג",
+        16.0,
+        &kern_features(false),
+        ShapeDirection::Rtl,
+    )
+    .unwrap();
+    assert!(shaped.windows(2).all(|pair| pair[0].cluster > pair[1].cluster));
+    for spacing in [40.0 / 1440.0 * 96.0, -20.0 / 1440.0 * 96.0] {
+        assert_tracking_without_reconciliation("אבג", spacing, true);
+        assert_tracking_without_reconciliation("א\u{5b0}בג", spacing, true);
+    }
+}
+
+#[test]
+fn glyph_run_without_spacing_keeps_unspaced_positions_and_advances() {
+    let store = store_with_liberation();
+    let omitted = tracking_input(&store, "ABCD", None, FRAG_WIDTH, false);
+    let zero = tracking_input(&store, "ABCD", Some(0.0), FRAG_WIDTH, false);
+    let omitted = tracking_list(&store, &omitted, true, true);
+    let zero = tracking_list(&store, &zero, true, true);
+    assert_eq!(glyph_runs(&omitted)[0].glyphs, glyph_runs(&zero)[0].glyphs);
+    assert_tracking_without_reconciliation("ABCD", 0.0, false);
+}
+
+#[test]
+fn glyph_run_spacing_crosses_word_boundaries() {
+    for spacing in [40.0 / 1440.0 * 96.0, -20.0 / 1440.0 * 96.0] {
+        assert_tracking_without_reconciliation("A B C", spacing, false);
+    }
+}
+
+#[test]
+fn glyph_run_spacing_survives_line_splits() {
+    let store = store_with_liberation();
+    for spacing in [40.0 / 1440.0 * 96.0, -20.0 / 1440.0 * 96.0] {
+        let input = tracking_input(&store, "ABCDABCD", Some(spacing), 32.0, false);
+        assert!(
+            input["measured"][0]["measure"]["lines"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 1
+        );
+        let list = tracking_list(&store, &input, true, true);
+        assert_tracking_glyphs(&store, &list, spacing);
+        assert_tracking_width(&input, &list);
+        let text: String = glyph_runs(&list)
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(text, "ABCDABCD");
+    }
+}
+
+#[test]
+fn glyph_run_spacing_and_justification_share_space_advances() {
+    let store = store_with_liberation();
+    for spacing in [40.0 / 1440.0 * 96.0, -20.0 / 1440.0 * 96.0] {
+        let mut input = tracking_input(&store, "A B C", Some(spacing), FRAG_WIDTH, false);
+        input["measured"][0]["block"]["attrs"] = serde_json::json!({"alignment": "justify"});
+        input["measured"][0]["block"]["pmEnd"] = serde_json::json!(8);
+        input["measured"][0]["block"]["runs"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"kind": "lineBreak", "pmStart": 6}));
+        measure_tracking_input(&store, &mut input, FRAG_WIDTH);
+        for whole_runs in [true, false] {
+            let list = tracking_list(&store, &input, whole_runs, true);
+            assert_tracking_glyphs(&store, &list, spacing);
+            let runs = glyph_runs(&list);
+            assert!(runs.iter().any(|run| run.word_spacing.is_some()));
+            let last = runs.last().unwrap().glyphs.last().unwrap();
+            assert!((last.x + last.advance - FRAG_X - FRAG_WIDTH).abs() < 0.01);
+        }
+    }
+}
+
+#[test]
+fn glyph_run_trailing_spacing_separates_adjacent_runs_and_tabs() {
+    let store = store_with_liberation();
+    let spacing = 40.0 / 1440.0 * 96.0;
+    for tab in [false, true] {
+        let mut input = tracking_input(&store, "AB", Some(spacing), FRAG_WIDTH, false);
+        let mut second = input["measured"][0]["block"]["runs"][0].clone();
+        second["text"] = serde_json::json!("CD");
+        second["pmStart"] = serde_json::json!(if tab { 4 } else { 3 });
+        second["pmEnd"] = serde_json::json!(if tab { 6 } else { 5 });
+        let runs = input["measured"][0]["block"]["runs"]
+            .as_array_mut()
+            .unwrap();
+        if tab {
+            runs.push(serde_json::json!({
+                "kind": "tab", "pmStart": 3, "pmEnd": 4,
+                "fontFamily": "Liberation Sans", "fontSize": 12, "letterSpacing": spacing
+            }));
+        }
+        runs.push(second);
+        input["measured"][0]["block"]["pmEnd"] = serde_json::json!(if tab { 7 } else { 6 });
+        measure_tracking_input(&store, &mut input, FRAG_WIDTH);
+        let list = tracking_list(&store, &input, true, true);
+        let runs = glyph_runs(&list);
+        assert_eq!(runs.len(), 2);
+        assert_tracking_glyphs(&store, &list, spacing);
+        if tab {
+            assert!((runs[1].glyphs[0].x - FRAG_X - 48.0).abs() < 0.001);
+        } else {
+            let last = runs[0].glyphs.last().unwrap();
+            assert!((last.x + last.advance - runs[1].glyphs[0].x).abs() < 0.001);
+            assert_tracking_width(&input, &list);
+        }
+    }
 }
 
 #[test]

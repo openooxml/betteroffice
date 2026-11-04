@@ -5045,10 +5045,6 @@ fn text_canvas_clusters(
         .copied()
         .chain(std::iter::once(text.len()))
         .collect();
-    let breaks: std::collections::HashSet<_> = ooxml_text::break_opportunities(&text)
-        .into_iter()
-        .map(|boundary| boundary.byte_index)
-        .collect();
     let horizontal = fmt.horizontal_scale.unwrap_or(100.0) / 100.0;
     let mut pen = 0.0;
     let mut clusters = Vec::new();
@@ -5077,9 +5073,7 @@ fn text_canvas_clusters(
         if horizontal > 0.0 {
             pen +=
                 word_spacing * cluster.chars().filter(|&ch| ch == ' ').count() as f64 / horizontal;
-            if end < text.len() && !breaks.contains(&end) {
-                pen += fmt.letter_spacing.unwrap_or(0.0) / horizontal;
-            }
+            pen += fmt.letter_spacing.unwrap_or(0.0) * cluster.chars().count() as f64 / horizontal;
             if !ooxml_text::level_is_rtl(bidi_level)
                 && let (Some(left), Some(right)) =
                     (cluster.chars().next_back(), text[end..].chars().next())
@@ -7173,8 +7167,11 @@ fn emit_line(
             if let Some(items) = &authoritative_items {
                 space_count = items
                     .iter()
-                    .filter(|item| matches!(item, LinePaintItem::Text(text) if text.text == " "))
-                    .count();
+                    .map(|item| match item {
+                        LinePaintItem::Text(text) => text.text.chars().filter(|&ch| ch == ' ').count(),
+                        _ => 0,
+                    })
+                    .sum();
             } else {
                 for seg in &segments {
                     let text = match seg.run {
@@ -7367,8 +7364,8 @@ fn emit_line(
                     0.0
                 } else {
                     item.width
-                        + if item.exact_advance && item.text == " " {
-                            word_space_extra
+                        + if item.exact_advance {
+                            word_space_extra * item.text.chars().filter(|&ch| ch == ' ').count() as f64
                         } else {
                             0.0
                         }
@@ -8390,7 +8387,6 @@ fn try_emit_glyph_runs(
             Err(_) => return false,
         };
 
-        let sub_bytes = sub_text.as_bytes();
         let auto_gaps: Vec<(usize, f64)> = if auto_space_active {
             let mut gaps = Vec::new();
             let mut chars = sub_text.char_indices().peekable();
@@ -8409,26 +8405,31 @@ fn try_emit_glyph_runs(
         } else {
             Vec::new()
         };
+        let has_extra_advance = letter_spacing != 0.0 || ws_px != 0.0 || !auto_gaps.is_empty();
+        let cluster_bounds = if has_extra_advance {
+            let mut bounds: Vec<usize> = glyphs.iter().map(|glyph| glyph.cluster as usize).collect();
+            bounds.sort_unstable();
+            bounds.dedup();
+            bounds.push(sub_text.len());
+            bounds
+        } else {
+            Vec::new()
+        };
         let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(glyphs.len());
         for (index, g) in glyphs.iter().enumerate() {
-            // Fold the justified U+0020 stretch into the glyph advance.
             let mut advance = g.x_advance as f64;
-            if letter_spacing != 0.0
+            if has_extra_advance
                 && glyphs.get(index + 1).is_none_or(|next| next.cluster != g.cluster)
             {
-                advance += letter_spacing;
-            }
-            if ws_px != 0.0 && sub_bytes.get(g.cluster as usize) == Some(&b' ') {
-                advance += ws_px;
-            }
-            if !auto_gaps.is_empty() {
-                let cluster_end = glyphs
-                    .get(index + 1)
-                    .map(|next| next.cluster as usize)
-                    .unwrap_or(sub_bytes.len());
+                let start = g.cluster as usize;
+                let boundary = cluster_bounds.binary_search(&start).unwrap();
+                let end = cluster_bounds[boundary + 1];
+                let cluster = &sub_text[start..end];
+                advance += letter_spacing * cluster.chars().count() as f64;
+                advance += ws_px * cluster.chars().filter(|&ch| ch == ' ').count() as f64;
                 advance += auto_gaps
                     .iter()
-                    .filter(|(offset, _)| *offset >= g.cluster as usize && *offset < cluster_end)
+                    .filter(|(offset, _)| *offset >= start && *offset < end)
                     .map(|(_, extra)| extra)
                     .sum::<f64>();
             }
@@ -8500,14 +8501,6 @@ fn try_emit_glyph_runs(
             text_effect: fmt.text_effect.clone(),
             attrs: sub_attrs,
         }));
-    }
-
-    if letter_spacing != 0.0
-        && let Some(Primitive::GlyphRun(run)) = local.last_mut()
-        && let Some(last) = run.glyphs.last_mut()
-    {
-        last.advance = round3(last.advance - letter_spacing);
-        acc -= letter_spacing;
     }
 
     if let Some(target) = exact_width
