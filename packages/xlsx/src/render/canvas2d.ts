@@ -426,7 +426,7 @@ function paintRun(
 // css font shorthand: `[italic] [bold] <size>px <family>`. Workbook fonts are
 // often not installed on the host (Calibri on macOS); without a fallback the
 // browser's unknown-family default is serif.
-function fontString(cmd: TextCmd): string {
+export function fontString(cmd: TextCmd): string {
   const style = cmd.italic ? 'italic ' : '';
   const weight = cmd.bold ? 'bold ' : '';
   const family = cmd.fontFamily

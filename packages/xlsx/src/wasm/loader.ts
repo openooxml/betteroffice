@@ -31,6 +31,10 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
 };
 import { wasmAssetUrl } from './asset';
 import { pngDisplayListReaders } from './pngDisplayList';
+import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
+import { resolvePngTarget, type ResolvedPngTarget, type XlsxPngOptions, type XlsxPngTarget } from './pngTarget';
+import { canvasPngAvailable } from '../render/png';
+export type { XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -615,17 +619,12 @@ export interface WorkbookHandle extends CollaborationReplica {
   visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
   historyState(): HistoryState;
   /**
-   * render the current sheet viewport to png bytes via the native raster
-   * backend — the same display list the canvas paints, rasterized server-side.
-   * throws if the embedded wasm was built without png export (the `raster`
-   * cargo feature); guard with {@link isPngExportAvailable}.
+   * Draws a viewport or a cell range of a sheet as PNG bytes, with the
+   * editor's painter on a canvas. Rejects with `PngExportError` rather than
+   * paint a substitute font, and where no canvas exists names
+   * `@betteroffice/xlsx-native`.
    */
-  renderPng(viewport: Viewport): Uint8Array;
-  /**
-   * render an a1 range (default: the used range) at an optional scale to png.
-   * dimensions are capped wasm-side; same availability guard as renderPng.
-   */
-  renderRangePng(opts?: { range?: string; scale?: number }): Uint8Array;
+  renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
   /** serialize the workbook back to .xlsx bytes. */
   save(): Uint8Array;
   /**
@@ -790,14 +789,19 @@ export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
 }
 
-/**
- * Whether the embedded wasm core was built with png export (the `raster` cargo
- * feature). The wasm-bindgen method only exists on the class when compiled in,
- * so chrome can disable an export control instead of calling and catching.
- */
-export function isPngExportAvailable(): boolean {
+/** Whether the embedded wasm core still carries the rasterizer (the `raster` cargo feature). */
+function rasterPngAvailable(): boolean {
   return pngExportAvailable &&
     typeof (XlsxDocument.prototype as { renderPng?: unknown }).renderPng === 'function';
+}
+
+/**
+ * Whether `renderPng` can draw here: through a canvas, through the native
+ * engine, or through a wasm build that still carries the rasterizer. Chrome can
+ * disable an export control instead of calling and catching.
+ */
+export function isPngExportAvailable(): boolean {
+  return engineKind === 'native' || canvasPngAvailable() || rasterPngAvailable();
 }
 
 /**
@@ -1305,19 +1309,23 @@ function wrapWorkbookDocument(
     historyState(): HistoryState {
       return parseJson(() => doc.historyStateJson());
     },
-    renderPng(viewport: Viewport): Uint8Array {
-      return wasmCall(() => {
-        const fn = (doc as { renderPng?: (v: string) => Uint8Array }).renderPng;
-        if (typeof fn !== 'function') throw new Error('png export not in this build');
-        return fn.call(doc, JSON.stringify(viewport)).slice();
-      });
-    },
-    renderRangePng(opts?: { range?: string; scale?: number }): Uint8Array {
-      return wasmCall(() => {
-        const fn = (doc as { renderRangePng?: (a: string) => Uint8Array }).renderRangePng;
-        if (typeof fn !== 'function') throw new Error('png export not in this build');
-        return fn.call(doc, JSON.stringify(opts ?? {})).slice();
-      });
+    renderPng(target: XlsxPngTarget, options: XlsxPngOptions = {}): Promise<Uint8Array> {
+      let resolved: ResolvedPngTarget;
+      try {
+        resolved = resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return renderEnginePng({
+        doc: doc as unknown as XlsxPngEngine['doc'],
+        rasterAvailable: rasterPngAvailable(),
+        onSheet: (sheet, read) => {
+          const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
+          if (sheet === active) return wasmCall(read);
+          mutatingWasmCall(() => doc.setActiveSheet(sheet));
+          try { return wasmCall(read); } finally { mutatingWasmCall(() => doc.setActiveSheet(active)); }
+        },
+      }, resolved, options);
     },
     save(): Uint8Array {
       return wasmCall(() => doc.saveBytes());

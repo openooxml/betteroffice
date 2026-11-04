@@ -1,0 +1,53 @@
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
+import type { DisplayList } from '../display-list/types';
+import { canvasPngAvailable, displayListToPng } from '../render/png';
+import type { Viewport } from './loader';
+import { cappedExtent, type ResolvedPngTarget, type XlsxPngOptions } from './pngTarget';
+
+/** What an engine needs to draw one PNG. The workbook handle builds it; each engine reads what it uses. */
+export interface XlsxPngEngine {
+  /** Runs `read` with `sheet` active and puts the previous sheet back. */
+  onSheet<T>(sheet: number, read: () => T): T;
+  /** The engine document: `pngDisplayListJson`, `rangePngDisplayListJson`, and in raster builds `renderPng`, `renderRangePng`. */
+  doc: {
+    pngDisplayListJson(viewportJson: string): string;
+    rangePngDisplayListJson(argsJson: string): string;
+    renderPng?(viewportJson: string): Uint8Array;
+    renderRangePng?(argsJson: string): Uint8Array;
+  };
+  /** Whether this build's wasm still carries the rasterizer, for runtimes without a canvas. */
+  rasterAvailable: boolean;
+}
+
+/** Draws a resolved target through the canvas, or the build's rasterizer where no canvas exists. */
+export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, options: XlsxPngOptions): Promise<Uint8Array> {
+  const scale = options.scale ?? 1;
+  const canvas = canvasPngAvailable();
+  if (!canvas && !engine.rasterAvailable) {
+    return Promise.reject(new PngExportError('canvas-unavailable', 'PNG export needs a canvas, and this environment has none. Use @betteroffice/xlsx-native.'));
+  }
+  if ('viewport' in target) {
+    const viewport: Viewport = {
+      ...target.viewport,
+      width: cappedExtent(target.viewport.width, options.maxWidth, scale),
+      height: cappedExtent(target.viewport.height, options.maxHeight, scale),
+    };
+    if (!canvas) {
+      if (scale !== 1) return Promise.reject(new PngExportError('canvas-unavailable', 'A scaled viewport PNG needs a canvas here. Use @betteroffice/xlsx-native.'));
+      return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderPng!(JSON.stringify(viewport)).slice()));
+    }
+    const list = JSON.parse(engine.onSheet(target.sheet, () => engine.doc.pngDisplayListJson(JSON.stringify(viewport)))) as DisplayList;
+    return displayListToPng(list, {
+      dpr: scale, signal: options.signal,
+      width: Math.max(1, Math.ceil(Math.fround(viewport.width * scale))),
+      height: Math.max(1, Math.ceil(Math.fround(viewport.height * scale))),
+    });
+  }
+  const args = JSON.stringify({ range: target.range, scale, maxWidth: options.maxWidth, maxHeight: options.maxHeight });
+  if (!canvas) return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderRangePng!(args).slice()));
+  const list = JSON.parse(engine.onSheet(target.sheet, () => engine.doc.rangePngDisplayListJson(args))) as DisplayList;
+  return displayListToPng(list, {
+    dpr: 1, signal: options.signal,
+    width: Math.max(1, Math.ceil(list.width)), height: Math.max(1, Math.ceil(list.height)),
+  });
+}
