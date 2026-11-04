@@ -23,13 +23,11 @@ async function edit(page: Page, background: string | null, color: string, host: 
   await page.goto('/?format=pptx');
   if (host) await page.addStyleTag({ content: `body { color: ${DARK_HOST}; }` });
   await page.locator('input[type=file]').last().setInputFiles(await deck(background, color));
-  await expect(slideCanvas(page)).toBeVisible();
+  await expect(slideCanvas(page)).toHaveAttribute('data-pptx-input-ready', 'true');
+  const canvas = (await slideCanvas(page).boundingBox())!;
+  await page.mouse.click(canvas.x + canvas.width * 0.15, canvas.y + canvas.height * 0.22);
   const input = page.getByRole('textbox', { name: 'Slide text', exact: true });
-  await expect(async () => {
-    const canvas = (await slideCanvas(page).boundingBox())!;
-    await page.mouse.click(canvas.x + canvas.width * 0.15, canvas.y + canvas.height * 0.22);
-    await expect(input).toBeFocused({ timeout: 1_000 });
-  }).toPass({ timeout: 30_000 });
+  await expect(input).toBeFocused();
   await input.press('End');
   await expect(page.getByTestId('pptx-caret')).toBeAttached();
 }
