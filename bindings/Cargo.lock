@@ -599,6 +599,8 @@ dependencies = [
  "betteroffice-python-common",
  "betteroffice-xlsx",
  "pyo3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

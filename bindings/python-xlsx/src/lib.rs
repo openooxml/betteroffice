@@ -6,14 +6,18 @@ use std::path::PathBuf;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyInt};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyBool, PyBytes, PyInt, PyTuple, PyType};
 use python_common::{generated_client_id, map_io_error};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CalculationResult, CellAddress, CellInput, CellRange, CellRef, CellValue,
-    Error as CoreError, HorizontalAlignment, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
-    MutationResult, NumberFormatMutation, Proposal, ProposalEditInput, ProposalRequest,
-    RenderOptions, SheetId, StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
+    CalculationOptions, CalculationResult, CapturedFormat, CellAddress, CellInput, CellRange,
+    CellRef, CellValue, ChartMutation, Error as CoreError, HorizontalAlignment,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MutationResult, NumberFormatMutation, Op,
+    Proposal, ProposalEditInput, ProposalRequest, RenderOptions, SheetId, StylePatch, TextWrapping,
+    VerticalAlignment, Workbook as CoreWorkbook,
 };
 use pyo3::types::PyDict;
 
@@ -65,6 +69,49 @@ create_exception!(
     XlsxError,
     "The operation requires a collaborative workbook."
 );
+create_exception!(
+    _betteroffice_xlsx,
+    CollaborativeStructureError,
+    XlsxError,
+    "A structural operation was refused because the workbook is collaborative."
+);
+
+static OPERATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// `OperationError` subclasses both `XlsxError` and `ValueError`, which `create_exception!`
+/// cannot express, so it is built once with `type()`.
+fn operation_error_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    OPERATION_ERROR
+        .get_or_try_init(py, || {
+            let bases = PyTuple::new(
+                py,
+                [
+                    py.get_type::<XlsxError>().into_any(),
+                    py.get_type::<PyValueError>().into_any(),
+                ],
+            )?;
+            let namespace = PyDict::new(py);
+            namespace.set_item(
+                "__doc__",
+                "The engine refused a well-formed edit operation for this workbook.",
+            )?;
+            namespace.set_item("__module__", "betteroffice_xlsx")?;
+            let created = py.import("builtins")?.getattr("type")?.call1((
+                "OperationError",
+                bases,
+                namespace,
+            ))?;
+            Ok::<_, PyErr>(created.cast_into::<PyType>()?.unbind())
+        })
+        .map(|created| created.bind(py))
+}
+
+fn operation_error(message: String) -> PyErr {
+    Python::attach(|py| match operation_error_type(py) {
+        Ok(created) => PyErr::from_type(created.clone(), message),
+        Err(error) => error,
+    })
+}
 
 /// `sheet_ids` names each drifted cell's sheet in `targets`; without them only `cells` is set.
 fn stale_proposal_error(message: String, cells: Vec<CellAddress>, sheet_ids: &[String]) -> PyErr {
@@ -108,6 +155,10 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::StaleProposal(cells) => stale_proposal_error(message, cells, &[]),
         CoreError::ProposalNotFound(_) => PyKeyError::new_err(message),
         CoreError::NotCollaborative => NotCollaborativeError::new_err(message),
+        CoreError::CollaborativeStructureOperation => CollaborativeStructureError::new_err(message),
+        CoreError::Operation(_)
+        | CoreError::InvalidOperation(_)
+        | CoreError::ChartFrameShifted { .. } => operation_error(message),
         CoreError::InvalidRequest(_) => PyValueError::new_err(message),
         CoreError::Package(_)
         | CoreError::Spreadsheet(_)
@@ -132,6 +183,50 @@ fn map_style_error(error: CoreError) -> PyErr {
     } else {
         map_error(error)
     }
+}
+
+/// Decodes call arguments as the TypeScript handle does, failing with its `bad {what}: ...` text.
+fn wire_args<T: DeserializeOwned>(json: &str, what: &str) -> PyResult<T> {
+    serde_json::from_str(json)
+        .map_err(|error| PyValueError::new_err(format!("bad {what}: {error}")))
+}
+
+/// An A1 range as the TypeScript handle parses one: case as given, `bad range: ...` on failure.
+fn wire_range(range: &str) -> PyResult<CellRange> {
+    CellRange::parse_a1(range).map_err(|error| RangeError::new_err(format!("bad range: {error}")))
+}
+
+#[derive(Deserialize)]
+struct OpsArgs {
+    ops: Vec<Op>,
+}
+
+#[derive(Deserialize)]
+struct MoveRangeArgs {
+    sheet: u32,
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
+struct MoveChartArgs {
+    sheet: u32,
+    chart: String,
+    dx: f32,
+    dy: f32,
+}
+
+#[derive(Deserialize)]
+struct RangeArgs {
+    sheet: u32,
+    range: String,
+}
+
+#[derive(Deserialize)]
+struct ApplyFormatArgs {
+    sheet: u32,
+    range: String,
+    format: CapturedFormat,
 }
 
 fn parse_cell(address: &str) -> PyResult<CellRef> {
@@ -862,6 +957,119 @@ impl PyWorkbook {
         Ok(PyMutation::from_core(&self.inner, &result))
     }
 
+    /// Apply raw op objects (`{"ops": [...]}` JSON) as one undo step.
+    #[pyo3(signature = (transaction, *, now_serial = None))]
+    fn apply_ops_json(
+        &mut self,
+        py: Python<'_>,
+        transaction: &str,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let args: OpsArgs = wire_args(transaction, "ops")?;
+        let result = py
+            .detach(|| {
+                self.inner
+                    .apply_ops(args.ops, CalculationOptions { now_serial })
+            })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    #[pyo3(signature = (args, *, now_serial = None))]
+    fn move_range_json(
+        &mut self,
+        py: Python<'_>,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let args: MoveRangeArgs = wire_args(args, "move range args")?;
+        let source = wire_range(&args.source)?;
+        let destination = CellRef::parse_a1(&args.destination)
+            .map_err(|error| RangeError::new_err(format!("bad move destination: {error}")))?;
+        let result = py
+            .detach(|| {
+                self.inner.move_range(
+                    SheetId(args.sheet),
+                    source,
+                    destination,
+                    CalculationOptions { now_serial },
+                )
+            })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    #[pyo3(signature = (edits, *, now_serial = None))]
+    fn edit_charts_json(
+        &mut self,
+        py: Python<'_>,
+        edits: &str,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let edits: Vec<ChartMutation> = wire_args(edits, "chart edits")?;
+        let result = py
+            .detach(|| {
+                self.inner
+                    .edit_charts(edits, CalculationOptions { now_serial })
+            })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    #[pyo3(signature = (args, *, now_serial = None))]
+    fn move_chart_json(
+        &mut self,
+        py: Python<'_>,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let args: MoveChartArgs = wire_args(args, "chart move args")?;
+        let result = py
+            .detach(|| {
+                self.inner.move_chart(
+                    SheetId(args.sheet),
+                    &args.chart,
+                    args.dx,
+                    args.dy,
+                    CalculationOptions { now_serial },
+                )
+            })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    fn capture_format_json(&self, args: &str) -> PyResult<String> {
+        let args: RangeArgs = wire_args(args, "range args")?;
+        let range = wire_range(&args.range)?;
+        let format = self
+            .inner
+            .capture_format(SheetId(args.sheet), range)
+            .map_err(map_error)?;
+        serde_json::to_string(&format).map_err(|error| XlsxError::new_err(error.to_string()))
+    }
+
+    #[pyo3(signature = (args, *, now_serial = None))]
+    fn apply_format_json(
+        &mut self,
+        py: Python<'_>,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let args: ApplyFormatArgs = wire_args(args, "format args")?;
+        let range = wire_range(&args.range)?;
+        let result = py
+            .detach(|| {
+                self.inner.apply_format(
+                    SheetId(args.sheet),
+                    range,
+                    args.format,
+                    CalculationOptions { now_serial },
+                )
+            })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
     /// Stage edits for a human to accept or reject instead of applying them.
     #[pyo3(signature = (agent_id, edits, *, note = None, now_serial = None))]
     fn propose(
@@ -1262,6 +1470,11 @@ fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "NotCollaborativeError",
         py.get_type::<NotCollaborativeError>(),
     )?;
+    module.add(
+        "CollaborativeStructureError",
+        py.get_type::<CollaborativeStructureError>(),
+    )?;
+    module.add("OperationError", operation_error_type(py)?)?;
     module.add("MAX_COLLABORATION_BYTES", MAX_COLLABORATION_BYTES)?;
     module.add_function(wrap_pyfunction!(export_xlsx_structured_json, module)?)?;
     module.add_function(wrap_pyfunction!(export_xlsx_markdown_json, module)?)?;

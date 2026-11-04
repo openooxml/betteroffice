@@ -222,6 +222,33 @@ wb.set_style("Sheet1", "A1:D1", bold=True, fill_color="#eeeeee",
 `set_number_format` takes `automatic`, `text`, `number`, `percent`,
 `scientific`, `currency`, `date`, `time`, or a custom pattern.
 
+## Structural edits
+
+`apply_ops` applies the raw op objects TypeScript's `applyOps` takes (insert
+or delete rows and columns, merges, sheets, defined names, hyperlinks,
+conditional formats, filters, freeze panes, sizes, visibility, styles and
+chart anchors) as one undo step:
+
+```python
+wb.apply_ops([
+    {"type": "insertRows", "sheet": 0, "at": 2, "count": 3},
+    {"type": "mergeCells", "sheet": 0,
+     "range": {"start": {"row": 0, "col": 0}, "end": {"row": 0, "col": 3}}},
+    {"type": "addSheet", "index": 1, "name": "Notes"},
+])
+```
+
+Ops keep the wire field names, sheets are zero-based indices and ranges are
+inclusive; `betteroffice_xlsx.ops` types each public op (`XlsxOp`). The
+whole-table replacements `setCharts`, `setConditionalFormats` and
+`setDefinedNames` are internal and refused, as in TypeScript. `move_range`,
+`set_hyperlink`, `remove_hyperlink`, `edit_charts`, `move_chart`,
+`capture_format` and `apply_format` mirror the TypeScript handle's methods of
+the same names, with the same arguments. Formulas that depend on moved cells
+are rewritten and recalculated. A collaborative workbook refuses structural ops
+with `CollaborativeStructureError`, and an op the engine refuses raises
+`OperationError`; both carry the message TypeScript throws.
+
 ## Reading without recalculating
 
 `Workbook.open` keeps whatever values the file already carried. Use
@@ -274,6 +301,10 @@ editing.
 | `wb.export_structured(...)` / `export_markdown(...)` | anchored JSON and Markdown export, never recalculated |
 | `export_xlsx_structured(data)` / `export_xlsx_markdown(data)` / `render_xlsx_markdown(content)` | the same from bytes or content |
 | `wb.set_style(...)` / `set_number_format(...)` | formatting over a range |
+| `wb.apply_ops(ops)` | raw structural ops as one undo step |
+| `wb.move_range(...)` / `set_hyperlink` / `remove_hyperlink` | move cells, link or unlink a range |
+| `wb.edit_charts(edits)` / `move_chart(...)` | retitle or repoint charts, slide a chart frame |
+| `wb.capture_format(sheet, range)` / `apply_format(...)` | copy formats between ranges |
 | `wb.diff(sv)` / `apply_update(u)` / `state_vector()` / `state_as_update()` | exchange Yrs updates |
 | `wb.client_id` / `wb.is_collaborative` | which kind of workbook you are holding |
 | `wb.active_sheet` / `set_active_sheet(...)` | read or persist the active tab |
@@ -283,8 +314,9 @@ editing.
 
 The following calculation calls (`open_recalculated`,
 `open_collaborative`, `recalculate`, `set`, `set_many`, `undo`, `redo`,
-`apply_update`, `propose`, `accept_proposal`, `set_number_format`, and
-`set_style`) take a keyword-only `now_serial`. It is the clock `TODAY()` and
+`apply_update`, `propose`, `accept_proposal`, `set_number_format`,
+`set_style`, `apply_ops` and the structural edits above) take a keyword-only
+`now_serial`. It is the clock `TODAY()` and
 `NOW()` read, as an Excel serial number. The engine has none of its own, so
 both return `#VALUE!` unless you pass one:
 
@@ -322,9 +354,12 @@ Addresses are A1 on the active sheet and `Sheet!A1` elsewhere.
 
 Errors raise `XlsxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`StaleProposalError`, `NotCollaborativeError`. Invalid peer updates, broken
-local collaboration state, stale proposals, and collaboration-only operations
-are the last four in that order. `StaleProposalError.cells` lists the changed A1
+`StaleProposalError`, `NotCollaborativeError`, `CollaborativeStructureError`,
+`OperationError`. Invalid peer updates, broken local collaboration state, stale
+proposals, collaboration-only operations, structural operations on a
+collaborative workbook and edits the engine refuses are the last six in that
+order. `OperationError` is also a `ValueError`, so `except ValueError` catches
+a refused op as well as ops and arguments that do not decode. `StaleProposalError.cells` lists the changed A1
 addresses and `targets` their sheets and coordinates, and an unknown proposal ID
 raises `KeyError`.
 
