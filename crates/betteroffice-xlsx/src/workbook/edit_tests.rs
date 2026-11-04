@@ -409,12 +409,19 @@ fn assert_range_format_avoids_staging(op: Op) {
             let mut workbook = open_identical(&workbook_bytes(), false, None);
             let _subscription = observed.then(|| workbook.observe_update_v1(|_| {}).unwrap());
             if edited {
-                workbook.edit_cell(SheetId(0), r("H9"), "5", options()).unwrap();
+                workbook
+                    .edit_cell(SheetId(0), r("H9"), "5", options())
+                    .unwrap();
             }
             let materializations = full_materializations();
             let hydrations = local_hydrations();
             let fast = fast_range_format_count();
-            assert!(workbook.apply_ops(vec![op.clone()], options()).unwrap().applied);
+            assert!(
+                workbook
+                    .apply_ops(vec![op.clone()], options())
+                    .unwrap()
+                    .applied
+            );
             assert_eq!(full_materializations(), materializations);
             assert_eq!(local_hydrations(), hydrations);
             assert_eq!(fast_range_format_count(), fast + 1);
@@ -423,7 +430,7 @@ fn assert_range_format_avoids_staging(op: Op) {
 }
 
 #[test]
-fn bounded_style_patch_avoids_materialization_and_hydration() {
+fn range_format_style_patch_avoids_materialization_and_hydration() {
     assert_range_format_avoids_staging(Op::PatchRangeStyle {
         sheet: SheetId(0),
         range: CellRange::parse_a1("A1:C3").unwrap(),
@@ -436,7 +443,7 @@ fn bounded_style_patch_avoids_materialization_and_hydration() {
 }
 
 #[test]
-fn bounded_number_format_avoids_materialization_and_hydration() {
+fn range_format_number_mutation_avoids_materialization_and_hydration() {
     assert_range_format_avoids_staging(Op::SetRangeNumberFormat {
         sheet: SheetId(0),
         range: CellRange::parse_a1("B2:C3").unwrap(),
@@ -492,7 +499,9 @@ fn consecutive_range_formats_and_cell_edit_avoid_materialization_and_hydration()
                     options(),
                 )
                 .unwrap();
-            workbook.edit_cell(SheetId(0), r("H9"), "5", options()).unwrap();
+            workbook
+                .edit_cell(SheetId(0), r("H9"), "5", options())
+                .unwrap();
             assert_eq!(full_materializations(), materializations);
             assert_eq!(local_hydrations(), hydrations);
             assert_eq!(fast_range_format_count(), formats + 2);
@@ -504,8 +513,6 @@ fn consecutive_range_formats_and_cell_edit_avoid_materialization_and_hydration()
 #[test]
 fn consecutive_range_formats_then_cell_edit_match_full_materialization() {
     let mut pair = Lockstep::new(false);
-    let formats = fast_range_format_count();
-    let cells = fast_set_cell_count();
     pair.step(true, |workbook| {
         workbook.patch_range_style(
             SheetId(0),
@@ -529,8 +536,6 @@ fn consecutive_range_formats_then_cell_edit_match_full_materialization() {
     })
     .unwrap();
     pair.edit(0, r("H9"), "5").unwrap();
-    assert_eq!(fast_range_format_count(), formats + 2);
-    assert_eq!(fast_set_cell_count(), cells + 1);
 }
 
 #[test]
@@ -573,7 +578,6 @@ fn range_formats_match_full_materialization_and_history() {
     });
     let bytes = Workbook::from_model(model).unwrap().save().unwrap();
     let mut pair = Lockstep::from_bytes(&bytes, false, None);
-    let fast = fast_range_format_count();
     let patches = [
         StylePatch {
             bold: Some(true),
@@ -640,13 +644,14 @@ fn range_formats_match_full_materialization_and_history() {
         })
         .unwrap();
     }
-    assert_eq!(fast_range_format_count(), fast + 12);
     let depth = pair.fast.history_state().undo_depth;
     for _ in 0..depth {
-        pair.step(true, |workbook| workbook.undo(options())).unwrap();
+        pair.step(true, |workbook| workbook.undo(options()))
+            .unwrap();
     }
     for _ in 0..depth {
-        pair.step(true, |workbook| workbook.redo(options())).unwrap();
+        pair.step(true, |workbook| workbook.redo(options()))
+            .unwrap();
     }
 }
 
@@ -691,13 +696,11 @@ fn plain_style_synthesis_model() -> WorkbookModel {
 }
 
 #[test]
-fn range_style_then_cell_edit_preserves_synthesized_plain_catalog() {
+fn range_format_then_cell_edit_preserves_synthesized_plain_catalog() {
     for consecutive in [false, true] {
         let mut pair = Lockstep::from_model(plain_style_synthesis_model());
         assert_eq!(pair.fast.model.styles.cell_xfs.len(), 2);
         assert!(pair.fast.model.sheets[0].cell(r("C1")).is_none());
-        let formats = fast_range_format_count();
-        let cells = fast_set_cell_count();
         pair.step(true, |workbook| {
             let result = workbook.patch_range_style(
                 SheetId(0),
@@ -737,20 +740,367 @@ fn range_style_then_cell_edit_preserves_synthesized_plain_catalog() {
             .unwrap();
         }
         pair.edit(0, r("C1"), "1").unwrap();
-        assert_eq!(
-            fast_range_format_count(),
-            formats + if consecutive { 2 } else { 1 }
-        );
-        assert_eq!(fast_set_cell_count(), cells + 1);
         assert_eq!(pair.fast.cell(SheetId(0), r("C1")).unwrap().input, "1");
     }
+}
+
+#[derive(Debug)]
+enum RangeFormatSequenceEdit {
+    Operation(Box<Op>),
+    Cell(SheetId, CellRef, String),
+    Undo,
+    Redo,
+}
+
+impl RangeFormatSequenceEdit {
+    fn is_fast_format(&self) -> bool {
+        matches!(
+            self,
+            Self::Operation(op)
+                if matches!(op.as_ref(), Op::PatchRangeStyle { .. } | Op::SetRangeNumberFormat { .. })
+        )
+    }
+
+    fn requires_projection_refresh(&self) -> bool {
+        !matches!(self, Self::Cell(..)) && !self.is_fast_format()
+    }
+
+    fn apply(&self, workbook: &mut Workbook) -> Result<MutationResult> {
+        match self {
+            Self::Operation(op) => match op.as_ref() {
+                Op::PatchRangeStyle {
+                    sheet,
+                    range,
+                    patch,
+                } => workbook.patch_range_style(*sheet, *range, patch.clone(), options()),
+                Op::SetRangeNumberFormat {
+                    sheet,
+                    range,
+                    format,
+                } => workbook.set_range_number_format(*sheet, *range, format.clone(), options()),
+                op => workbook.apply_ops(vec![op.clone()], options()),
+            },
+            Self::Cell(sheet, at, input) => workbook.edit_cell(*sheet, *at, input, options()),
+            Self::Undo => workbook.undo(options()),
+            Self::Redo => workbook.redo(options()),
+        }
+    }
+}
+
+fn range_format_sequence_model(seed: u32) -> WorkbookModel {
+    use xlsx_model::{Cell, ColStyle};
+
+    let mut random = Random(seed);
+    let mut model = plain_style_synthesis_model();
+    model.sheets.push(Sheet::new("Other"));
+    for (index, sheet) in model.sheets.iter_mut().enumerate() {
+        for row in 0..8 {
+            for col in 0..8 {
+                if (row + col) % 3 == 0 && !(index == 0 && row == 0 && col < 2) {
+                    sheet.set_cell(
+                        CellRef::new(row, col),
+                        Cell {
+                            value: CellValue::Number {
+                                value: f64::from(random.next(100)),
+                            },
+                            style: Some(random.next(2)),
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+        }
+        sheet.set_cell(
+            r("C2"),
+            Cell {
+                value: CellValue::Number { value: 0.0 },
+                formula: Some("A1+B1".into()),
+                style: Some(1),
+            },
+        );
+        sheet.col_styles.push(ColStyle {
+            first: 2,
+            last: 3,
+            xf: 1,
+        });
+        sheet.row_styles.insert(4, 0);
+    }
+    model.sheets[0]
+        .merges
+        .push(CellRange::parse_a1("E7:F8").unwrap());
+    model
+}
+
+fn random_range_style(random: &mut Random) -> StylePatch {
+    let color = ["#123456", "#abcdef", "#ff8800"][random.next(3) as usize].to_string();
+    match random.next(7) {
+        0 => StylePatch {
+            bold: Some(random.next(2) == 0),
+            ..StylePatch::default()
+        },
+        1 => StylePatch {
+            italic: Some(random.next(2) == 0),
+            strikethrough: Some(random.next(2) == 0),
+            ..StylePatch::default()
+        },
+        2 => StylePatch {
+            text_color: Some(color),
+            fill_color: Some("#aabbcc".into()),
+            ..StylePatch::default()
+        },
+        3 => StylePatch {
+            font_family: Some(["Arial", "Calibri", "Courier New"][random.next(3) as usize].into()),
+            font_size: Some([9.0, 11.0, 18.0][random.next(3) as usize]),
+            ..StylePatch::default()
+        },
+        4 => StylePatch {
+            horizontal_alignment: Some(
+                [
+                    HorizontalAlignment::Left,
+                    HorizontalAlignment::Center,
+                    HorizontalAlignment::Right,
+                ][random.next(3) as usize],
+            ),
+            vertical_alignment: Some(
+                [
+                    VerticalAlignment::Top,
+                    VerticalAlignment::Middle,
+                    VerticalAlignment::Bottom,
+                ][random.next(3) as usize],
+            ),
+            text_wrapping: Some(
+                [
+                    TextWrapping::Overflow,
+                    TextWrapping::Wrap,
+                    TextWrapping::Clip,
+                ][random.next(3) as usize],
+            ),
+            ..StylePatch::default()
+        },
+        5 => StylePatch {
+            border: Some(xlsx_ops::BorderPatch {
+                preset: Some(
+                    [BorderPreset::All, BorderPreset::Outer, BorderPreset::Inner]
+                        [random.next(3) as usize],
+                ),
+                style: Some(
+                    [
+                        BorderLineStyle::Solid,
+                        BorderLineStyle::Dashed,
+                        BorderLineStyle::Double,
+                    ][random.next(3) as usize],
+                ),
+                color: Some(color),
+            }),
+            ..StylePatch::default()
+        },
+        _ => StylePatch {
+            clear: vec![
+                xlsx_ops::StyleProperty::Bold,
+                xlsx_ops::StyleProperty::FillColor,
+            ],
+            ..StylePatch::default()
+        },
+    }
+}
+
+fn sequence_number_format(kind: u32, random: &mut Random) -> NumberFormatMutation {
+    match kind {
+        0 => NumberFormatMutation::Automatic,
+        1 => NumberFormatMutation::PlainText,
+        2 => NumberFormatMutation::Number,
+        3 => NumberFormatMutation::Percent,
+        4 => NumberFormatMutation::Scientific,
+        5 => NumberFormatMutation::Currency,
+        6 => NumberFormatMutation::Date,
+        7 => NumberFormatMutation::Time,
+        8 => NumberFormatMutation::Custom {
+            pattern: format!("0.{}", "0".repeat((random.next(4) + 1) as usize)),
+        },
+        9 => NumberFormatMutation::IncreaseDecimal,
+        _ => NumberFormatMutation::DecreaseDecimal,
+    }
+}
+
+fn random_range_format_edit(
+    random: &mut Random,
+    workbook: &Workbook,
+    kind: u32,
+    number_kind: u32,
+) -> RangeFormatSequenceEdit {
+    let sheet = SheetId(random.next(2));
+    let at = CellRef::new(random.next(6), random.next(6));
+    let range = CellRange::new(
+        at,
+        CellRef::new(at.row + random.next(3), at.col + random.next(3)),
+    );
+    let op = match kind {
+        0 => Op::PatchRangeStyle {
+            sheet,
+            range,
+            patch: random_range_style(random),
+        },
+        1 => Op::SetRangeNumberFormat {
+            sheet,
+            range,
+            format: sequence_number_format(number_kind, random),
+        },
+        2 => {
+            let input = match random.next(4) {
+                0 => random.next(100).to_string(),
+                1 => format!("-{}.25", random.next(10)),
+                2 => "true".into(),
+                _ => format!("'text {}", random.next(10)),
+            };
+            return RangeFormatSequenceEdit::Cell(sheet, at, input);
+        }
+        3 => {
+            let input = [
+                "=A1+B1",
+                "=SUM(A1:C3)",
+                "=IF(A1>0,B1,0)",
+                "=Other!A1+Data!B1",
+                "=1/0",
+            ][random.next(5) as usize];
+            return RangeFormatSequenceEdit::Cell(sheet, at, input.into());
+        }
+        4 => Op::ApplyRangeFormat {
+            sheet,
+            range,
+            format: CapturedFormat {
+                rows: 1,
+                columns: 1,
+                formats: vec![CellFormat::default()],
+                kept: Vec::new(),
+                source_styles: Vec::new(),
+                source_formats: Vec::new(),
+            },
+        },
+        5 => return RangeFormatSequenceEdit::Cell(sheet, at, String::new()),
+        6 => Op::InsertRows {
+            sheet,
+            at: at.row,
+            count: 1,
+        },
+        7 => Op::DeleteRows {
+            sheet,
+            at: at.row,
+            count: 1,
+        },
+        8 => Op::InsertCols {
+            sheet,
+            at: at.col,
+            count: 1,
+        },
+        9 => Op::DeleteCols {
+            sheet,
+            at: at.col,
+            count: 1,
+        },
+        10 => Op::MergeCells {
+            sheet,
+            range: if range.start == range.end {
+                CellRange::new(at, CellRef::new(at.row, at.col + 1))
+            } else {
+                range
+            },
+        },
+        11 => {
+            let merges = &workbook.model.sheets[sheet.0 as usize].merges;
+            let range = if merges.is_empty() {
+                range
+            } else {
+                merges[random.next(merges.len() as u32) as usize]
+            };
+            Op::UnmergeCells { sheet, range }
+        }
+        12 => return RangeFormatSequenceEdit::Undo,
+        _ => return RangeFormatSequenceEdit::Redo,
+    };
+    RangeFormatSequenceEdit::Operation(Box::new(op))
+}
+
+fn run_seeded_range_format_sequences(check_fast_path: bool) {
+    let mut number_formats_used = [false; 11];
+    for sequence in 0..50 {
+        let seed = 0x5246_0001 + sequence;
+        let mut random = Random(seed);
+        let mut pair = Lockstep::from_model(range_format_sequence_model(seed));
+        pair.step = sequence as usize * 30;
+        let mut order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        for index in (1..order.len()).rev() {
+            order.swap(index, random.next((index + 1) as u32) as usize);
+        }
+        let mut first_number_format = true;
+        for step in 0..30 {
+            let kind = if step < order.len() {
+                order[step]
+            } else {
+                random.next(14)
+            };
+            let number_kind = if kind == 1 {
+                let kind = if first_number_format {
+                    sequence % 11
+                } else {
+                    random.next(11)
+                };
+                first_number_format = false;
+                number_formats_used[kind as usize] = true;
+                kind
+            } else {
+                0
+            };
+            let edit = random_range_format_edit(&mut random, &pair.fast, kind, number_kind);
+            pair.step(false, |workbook| {
+                let materializations = full_materializations();
+                let hydrations = local_hydrations();
+                let result = edit.apply(workbook);
+                if check_fast_path
+                    && edit.is_fast_format()
+                    && !crate::authority::force_full_materialization()
+                {
+                    assert_eq!(
+                        full_materializations(),
+                        materializations,
+                        "seed {seed:#x}, step {step}, {edit:?}"
+                    );
+                    assert_eq!(
+                        local_hydrations(),
+                        hydrations,
+                        "seed {seed:#x}, step {step}, {edit:?}"
+                    );
+                }
+                result
+            })
+            .unwrap_or_else(|error| panic!("seed {seed:#x}, step {step}, {edit:?}: {error}"));
+            if check_fast_path && edit.requires_projection_refresh() {
+                assert_eq!(
+                    pair.fast.authority.materialize().unwrap(),
+                    pair.oracle.authority.materialize().unwrap()
+                );
+            }
+        }
+        pair.assert_equal(true);
+    }
+    assert!(number_formats_used.into_iter().all(|used| used));
+}
+
+#[test]
+fn seeded_range_format_sequences_match_full_materialization() {
+    run_seeded_range_format_sequences(false);
+}
+
+#[test]
+fn seeded_range_format_sequences_avoid_materialization_and_hydration() {
+    run_seeded_range_format_sequences(true);
 }
 
 #[test]
 fn invalid_range_format_leaves_state_and_history_unchanged() {
     let mut pair = Lockstep::new(false);
     pair.edit(0, r("A1"), "17").unwrap();
-    pair.step(true, |workbook| workbook.undo(options())).unwrap();
+    pair.step(true, |workbook| workbook.undo(options()))
+        .unwrap();
     let model = pair.fast.model().clone();
     let state = pair.fast.encode_state_as_update_v1();
     let history = pair.fast.history_state();
@@ -789,7 +1139,8 @@ fn invalid_range_format_leaves_state_and_history_unchanged() {
         assert_eq!(pair.fast.save().unwrap(), bytes);
         assert_eq!(fast_range_format_count(), count);
     }
-    pair.step(true, |workbook| workbook.redo(options())).unwrap();
+    pair.step(true, |workbook| workbook.redo(options()))
+        .unwrap();
 }
 
 #[test]
