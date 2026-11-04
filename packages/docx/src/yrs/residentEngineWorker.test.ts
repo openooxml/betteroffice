@@ -111,7 +111,6 @@ beforeAll(async () => {
       export const preloadEditWasm = () => testHarness.preload();
       export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
       export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
-      export const engineKind = 'wasm';
     `,
     '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadSave("opc");',
     '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadSave("parse");',
@@ -146,7 +145,6 @@ beforeAll(async () => {
     entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
     target: 'bun',
     format: 'iife',
-    external: ['@betteroffice/fonts'],
     plugins: [
       {
         name: 'isolated-worker-dependencies',

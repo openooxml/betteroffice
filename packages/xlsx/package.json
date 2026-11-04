@@ -69,9 +69,6 @@
     "build:wasm": "bun ../../scripts/build-xlsx-wasm.ts",
     "typecheck": "tsc --noEmit -p ."
   },
-  "dependencies": {
-    "@betteroffice/fonts": "workspace:^"
-  },
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "@types/node": "^26.0.0",

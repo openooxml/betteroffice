@@ -267,7 +267,6 @@
       "name": "@betteroffice/xlsx-native",
       "version": "0.5.1",
       "dependencies": {
-        "@betteroffice/fonts": "workspace:^",
         "@betteroffice/fonts-cjk": "workspace:^",
         "@betteroffice/fonts-intl": "workspace:^",
         "@betteroffice/fonts-latin": "workspace:^",
@@ -500,9 +499,6 @@
     "packages/xlsx": {
       "name": "@betteroffice/xlsx",
       "version": "0.5.1",
-      "dependencies": {
-        "@betteroffice/fonts": "workspace:^",
-      },
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "@types/node": "^26.0.0",

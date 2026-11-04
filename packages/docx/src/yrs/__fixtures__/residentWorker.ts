@@ -38,7 +38,6 @@ const STUBS: Record<string, string> = {
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
     export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
-    export const engineKind = 'wasm';
   `,
   '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
   '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
@@ -87,7 +86,6 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
     entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
     target: 'bun',
     format: 'iife',
-    external: ['@betteroffice/fonts'],
     plugins: [
       {
         name: 'in-process-resident-worker',
