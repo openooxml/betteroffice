@@ -230,6 +230,7 @@ fn run_key(path: &[String]) -> bool {
         "textColor" => Some(&["rgb", "themeColor", "themeTint", "themeShade"]),
         "highlight" => Some(&["color"]),
         "fontSize" => Some(&["size", "sizeCs"]),
+        "characterSpacing" => Some(&["spacing", "position", "scale", "kerning"]),
         "fontFamily" => Some(&[
             "ascii",
             "hAnsi",
@@ -1157,10 +1158,17 @@ fn validate_theme_fonts(
             .iter()
             .any(|key| fonts.get(*key).is_some_and(|value| !value.is_null()))
     });
+    let removes_all = |delta: &AttrDeltaV1| {
+        delta.path.len() == 1
+            && match &delta.after {
+                SlotV1::Missing => true,
+                SlotV1::Present { value } => value.is_null(),
+            }
+    };
     if themed
-        && let Some(delta) = changes
-            .iter()
-            .find(|delta| delta.path.first().is_some_and(|key| key == "fontFamily"))
+        && let Some(delta) = changes.iter().find(|delta| {
+            delta.path.first().is_some_and(|key| key == "fontFamily") && !removes_all(delta)
+        })
     {
         let slot = delta.path.get(1).map_or("fontFamily", String::as_str);
         return Err(context.legacy(
