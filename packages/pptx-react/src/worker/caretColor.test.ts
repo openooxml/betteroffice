@@ -95,3 +95,11 @@ test('translucent fills are composited over what is beneath them', () => {
   expect(pptxCaretColors(slide([shape('#ffffff80')], dark), line(), 0, caret, '#808080')).toEqual({ color: '#000000', background: '#808080' });
   expect(pptxCaretColors(slide([shape('#00000000')]), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff' });
 });
+
+test('a translucent fill over an image keeps the fill unknown', () => {
+  const photo = { kind: 'image', objectId: 3, x: 100, y: 80, w: 300, h: 80 } as SlidePrimitive;
+  expect(pptxCaretColors(slide([photo, shape('#ffffff00')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
+    .toEqual({ color: '#ffffff', background: '#000000', halo: '#000000' });
+  expect(pptxCaretColors(slide([photo, shape('#202020')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
+    .toEqual({ color: '#ffffff', background: '#202020' });
+});

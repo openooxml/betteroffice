@@ -59,9 +59,11 @@ function hex([r, g, b]: Rgb): string {
 
 interface Fill { color: Rgb; solid: boolean }
 
-function fillOf(paint: Paint | undefined, under: Rgb): Fill | null {
-  const color = paintColor(paint, under);
-  return color && paint ? { color, solid: paint.kind === 'solid' } : null;
+function fillOf(paint: Paint | undefined, under: Fill): Fill | null {
+  const color = paintColor(paint, under.color);
+  if (!color || !paint) return null;
+  const opaque = paint.kind === 'solid' && (parseRgba(paint.color)?.[3] ?? 0) >= 1;
+  return { color, solid: paint.kind === 'solid' && (opaque || under.solid) };
 }
 
 function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePrimitive[], x: number, y: number, fill: Fill): Fill {
@@ -72,7 +74,7 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
       continue;
     }
     if (primitive.kind !== 'shape' && primitive.kind !== 'image') continue;
-    const paint = primitive.kind === 'shape' ? fillOf(primitive.fill, fill.color) : null;
+    const paint = primitive.kind === 'shape' ? fillOf(primitive.fill, fill) : null;
     if (primitive.kind === 'shape' && !paint) continue;
     const box = transformedRect(transforms, { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h });
     if (!(x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height)) continue;
@@ -94,7 +96,7 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
 export function pptxCaretColors(list: SlideDisplayList | null | undefined, line: PositionedTextLine | null | undefined,
   position: number | null | undefined, caret: CommandRect | null | undefined,
   insertion?: string | null): { color: string; background: string; halo?: string } {
-  let under: Fill = fillOf(list?.background, [255, 255, 255]) ?? { color: [255, 255, 255], solid: true };
+  let under: Fill = fillOf(list?.background, { color: [255, 255, 255], solid: true }) ?? { color: [255, 255, 255], solid: true };
   if (list && caret) under = fillAt(list.primitives, [], caret.x + caret.width / 2, caret.y + caret.height / 2, under);
   const fill = under.color;
   const runs = line?.runs ?? [];
