@@ -4371,7 +4371,9 @@ fn spliced_part(
         let (is_units, is_tail) = split_tail(&now.units);
         match (was_tail, is_tail) {
             (None, None) => {}
-            (Some(was), Some(is)) if was.content_digest == is.content_digest && !is.inline => {}
+            (Some(was), Some(is))
+                if was.content_digest == is.content_digest
+                    && (!is.inline || was.digest == is.digest) => {}
             _ => return None,
         }
         let was_keys: HashMap<&str, &UnitState> = was_units

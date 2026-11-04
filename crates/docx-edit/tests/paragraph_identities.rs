@@ -1973,6 +1973,45 @@ fn spliced(doc: &EditingDoc, part: &str) -> Option<SplicedPart> {
 }
 
 #[test]
+fn an_unchanged_page_break_ending_the_body_still_splices() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let page_break = r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#;
+    let table = concat!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>"#,
+        r#"<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    for tail in [page_break.to_owned(), format!("{table}{page_break}")] {
+        let doc = seeded(&paragraphs_package(&format!(
+            "{}{}{tail}",
+            paragraph("A"),
+            paragraph("B")
+        )));
+        let unchanged = spliced(&doc, "word/document.xml");
+        assert!(unchanged.is_some(), "{tail}");
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let edited =
+            spliced(&doc, "word/document.xml").expect("an unchanged tail keeps the splice");
+        assert_eq!(edited.changed.len(), 1, "{tail}");
+    }
+}
+
+#[test]
+fn an_edited_page_break_ending_the_body_does_not_splice() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let page_break = r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#;
+    let doc = seeded(&paragraphs_package(&format!(
+        "{}{}{page_break}",
+        paragraph("A"),
+        paragraph("B")
+    )));
+    let end = doc.story_len("body").unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", end - 1, end))
+        .unwrap();
+    assert!(spliced(&doc, "word/document.xml").is_none());
+}
+
+#[test]
 fn story_parts_that_keep_their_paragraphs_splice_with_only_the_edited_ones_changed() {
     let doc = seeded(&plain_fixture());
     let body = spliced(&doc, "word/document.xml").expect("an unchanged body splices");
