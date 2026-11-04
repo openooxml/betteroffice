@@ -138,6 +138,21 @@ test('a glyph whose chunk loaded during another pending request resolves with a 
   expect(await both).toBe(face.revision);
 });
 
+test('a listener that throws neither stops the others nor rejects the load', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const face = await openProgressiveFace(jpRef, transport([]));
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  let glyph = 0;
+  while (skeleton.chunkOfGlyph(glyph) !== 5) glyph += 1;
+  const seen: number[] = [];
+  face.onUpdate(() => {
+    throw new Error('listener failed');
+  });
+  face.onUpdate((revision) => seen.push(revision));
+  expect(await face.ensureGlyphs([glyph])).toBe(2);
+  expect(seen).toEqual([2]);
+});
+
 test('a chunk that fails its checks rejects and loads on a later request', async () => {
   const reads: string[] = [];
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
@@ -169,18 +184,34 @@ test('providers locate only sliced faces, keep whole-face loading, and share one
   const decoder: FontDecoder = (bytes, options) => decodeFontFace(bytes, options.dict, { codec: options.codec, maxOutput: options.maxOutput });
   const runtime = { decoder };
   for (const provider of [createFontProvider({ baseUrl: assets }, runtime), cdn({ baseUrl: assets }, runtime)]) {
-    const sliced = provider.resolveScriptFallback('cjk-jp', false, false) as { slices?: SliceLocation } & (() => Promise<ArrayBuffer>);
+    const sliced = provider.resolveScriptFallback('cjk-jp', false, false)!;
     expect(sliced.slices?.ref).toEqual(jpRef);
     expect(sliced.slices?.decoder).toBe(decoder);
     expect(sha(await sliced())).toBe(jp.sha256);
-    const latin = provider.resolve('Arial', false, false) as { slices?: unknown } | undefined;
-    expect(latin?.slices).toBeUndefined();
+    expect(provider.resolve('Arial', false, false)?.slices).toBeUndefined();
   }
-  const { slices } = createFontProvider({ baseUrl: assets }, runtime).resolveScriptFallback('cjk-jp', false, false) as unknown as { slices: SliceLocation };
+  const slices = createFontProvider({ baseUrl: assets }, runtime).resolveScriptFallback('cjk-jp', false, false)!.slices!;
   const face = await openSlicedFace(slices);
   expect(face.revision).toBeGreaterThanOrEqual(1);
   expect(await openSlicedFace(slices)).toBe(face);
   const failing = { ...slices, base: 'https://failing.example/', url: async () => { throw new Error('no such file'); } };
   await expect(openSlicedFace(failing)).rejects.toThrow('no such file');
   await expect(openSlicedFace({ ...failing, url: slices.url })).resolves.toBeDefined();
+});
+
+test('a location without file URLs cannot open, so callers fall back to the whole face', async () => {
+  const { slices } = createFontProvider({ baseUrl: assets }).resolveScriptFallback('cjk-jp', false, false)!;
+  const { url: _url, ...withoutUrl } = slices!;
+  await expect(openSlicedFace({ ...withoutUrl, base: 'https://no-url.example/' } as SliceLocation)).rejects.toThrow();
+});
+
+test('retain: false opens a fresh face each time instead of keeping one cached', async () => {
+  const decoder: FontDecoder = (bytes, options) => decodeFontFace(bytes, options.dict, { codec: options.codec, maxOutput: options.maxOutput });
+  const kept = createFontProvider({ baseUrl: assets }, { decoder }).resolveScriptFallback('cjk-jp', false, false)!.slices!;
+  const dropped = createFontProvider({ baseUrl: assets }, { decoder: (bytes, options) => decoder(bytes, options), retain: false })
+    .resolveScriptFallback('cjk-jp', false, false)!.slices!;
+  expect(dropped.retain).toBe(false);
+  const first = await openSlicedFace(dropped);
+  expect(await openSlicedFace(dropped)).not.toBe(first);
+  expect(await openSlicedFace(kept)).toBe(await openSlicedFace(kept));
 });

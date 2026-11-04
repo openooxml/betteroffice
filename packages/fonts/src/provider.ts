@@ -41,19 +41,19 @@ export interface BundledFontSource {
     family: string,
     bold: boolean,
     italic: boolean,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
   resolveScriptFallback(
     script: BundledFontScript,
     bold: boolean,
     italic: boolean,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
   /** Coverage for characters absent from a bundled substitute. */
   resolveGlyphFallback?(
     family: string,
     bold: boolean,
     italic: boolean,
     office?: LastResortOffice,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
   resolveLastResort(
     family: string,
     bold: boolean,
@@ -65,7 +65,7 @@ export interface BundledFontSource {
     family: string,
     bold: boolean,
     italic: boolean,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
 }
 
 export function fontProvider(

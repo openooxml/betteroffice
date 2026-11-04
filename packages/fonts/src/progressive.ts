@@ -39,6 +39,8 @@ export interface SliceLocation {
   decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
   /** The host's decoder behind `decode`, when it has one; part of the shared face's identity. */
   decoder?: FontDecoder;
+  /** @internal Drop the opened face from the shared cache once it settles, as `retain: false` does for whole faces. */
+  retain?: boolean;
 }
 
 /** @internal A face row's pointer to its slice index. */
@@ -133,7 +135,11 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     if (!dirty) return revision;
     dirty = false;
     revision += 1;
-    for (const listener of [...listeners]) listener(revision);
+    for (const listener of [...listeners]) {
+      try {
+        listener(revision);
+      } catch {}
+    }
     return revision;
   };
 
