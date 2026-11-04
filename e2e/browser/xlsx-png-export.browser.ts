@@ -1,4 +1,6 @@
 import { test, expect, type Page } from 'playwright/test';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import JSZip from 'jszip';
@@ -23,15 +25,28 @@ interface Export { width: number; height: number; redAtB2: boolean; inkInA1: num
 
 async function exports(page: Page): Promise<Record<string, Export>> {
   const doc = await workbook();
-  await page.route('**/__xlsx/**', async (route) => {
-    const path = new URL(route.request().url()).pathname.replace('/__xlsx/', '');
-    await route.fulfill({ body: await readFile(resolve(root, 'packages/xlsx/dist', path)), contentType: types[extname(path)] ?? 'application/octet-stream' });
-  });
-  await page.route('**/__fixture/doc', async (route) => route.fulfill({ body: doc }));
-  await page.route('**/__page', async (route) => route.fulfill({ contentType: 'text/html', body: `<!doctype html><script type="importmap">${JSON.stringify({ imports: {
-    '#session-worker': '/__xlsx/sessionWorker.browser.js', '#session-scope': '/__xlsx/sessionScope.browser.js',
-  } })}</script><title>png</title>` }));
-  await page.goto('/__page');
+  const server = createServer(async (request, response) => {
+    const path = new URL(request.url ?? '/', 'http://x').pathname;
+    try {
+      if (path === '/') return response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>png</title>');
+      if (path === '/__fixture/doc') return response.writeHead(200).end(doc);
+      const file = path.replace('/__xlsx/', '');
+      let body: Buffer | string = await readFile(resolve(root, 'packages/xlsx/dist', file));
+      if (/\.m?js$/.test(file)) {
+        body = body.toString('utf8').replace(/(["'])#session-(worker|scope)\1/g, (_, quote: string, name: string) =>
+          `${quote}/__xlsx/session${name[0].toUpperCase()}${name.slice(1)}.browser.js${quote}`);
+      }
+      response.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' }).end(body);
+    } catch { response.writeHead(404).end(); }
+  }).listen(0, '127.0.0.1');
+  await new Promise((ready) => server.once('listening', ready));
+  try {
+    await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+    return await evaluate(page);
+  } finally { server.close(); }
+}
+
+function evaluate(page: Page): Promise<Record<string, Export>> {
   return page.evaluate(async () => {
     const xlsx = await import(`${location.origin}/__xlsx/index.js`);
     await xlsx.initWasm();
@@ -41,7 +56,7 @@ async function exports(page: Page): Promise<Record<string, Export>> {
     const b2 = handle.cellRect(0, 1, 1);
     const scale = 2;
     const inspect = async (png: Uint8Array) => {
-      const bitmap = await createImageBitmap(new Blob([png], { type: 'image/png' }));
+      const bitmap = await createImageBitmap(new Blob([new Uint8Array(png)], { type: 'image/png' }));
       const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
       const ctx = canvas.getContext('2d')!;
       ctx.drawImage(bitmap, 0, 0);
