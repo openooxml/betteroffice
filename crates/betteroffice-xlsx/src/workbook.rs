@@ -90,7 +90,7 @@ use crate::{
 use batch::DocumentVersion;
 use staging::CommitHistory;
 
-const MAX_RANGE_CELLS: u64 = 100_000;
+pub(crate) const MAX_RANGE_CELLS: u64 = 100_000;
 pub const DEFAULT_TEXT_SEARCH_LIMIT: usize = 1_000;
 const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
