@@ -56,13 +56,16 @@ impl PatchContext {
 
 /// The namespace bindings in scope at any offset of one part, read in one pass over its tags.
 pub(crate) struct NamespaceScopes {
-    scopes: Vec<BTreeMap<String, String>>,
+    /// Each scope as its parent and the bindings its element declares; scope 0 is the empty
+    /// root. Holding only the declarations keeps the index as large as the declarations in the
+    /// part, however many elements redeclare a namespace.
+    scopes: Vec<(usize, Vec<(String, String)>)>,
     changes: Vec<(usize, usize)>,
 }
 
 impl NamespaceScopes {
     pub(crate) fn new(source: &str) -> Self {
-        let mut scopes = vec![BTreeMap::new()];
+        let mut scopes = vec![(0, Vec::new())];
         let mut changes = Vec::new();
         let mut open = vec![0];
         for tag in tags(source).unwrap_or_default() {
@@ -70,22 +73,23 @@ impl NamespaceScopes {
             if tag.end {
                 open.pop();
             } else if !tag.empty {
-                let mut declared: Option<BTreeMap<String, String>> = None;
-                for (name, range) in tag.attributes {
-                    if let Some(prefix) = name
-                        .strip_prefix("xmlns:")
-                        .or_else(|| (name == "xmlns").then_some(""))
-                        && let Ok(value) = lower::decode(&source[range])
-                    {
-                        declared
-                            .get_or_insert_with(|| scopes[before].clone())
-                            .insert(prefix.to_owned(), value);
-                    }
+                let declared: Vec<(String, String)> = tag
+                    .attributes
+                    .into_iter()
+                    .filter_map(|(name, range)| {
+                        let prefix = name
+                            .strip_prefix("xmlns:")
+                            .or_else(|| (name == "xmlns").then_some(""))?;
+                        let value = lower::decode(&source[range]).ok()?;
+                        Some((prefix.to_owned(), value))
+                    })
+                    .collect();
+                if declared.is_empty() {
+                    open.push(before);
+                } else {
+                    scopes.push((before, declared));
+                    open.push(scopes.len() - 1);
                 }
-                open.push(declared.map_or(before, |scope| {
-                    scopes.push(scope);
-                    scopes.len() - 1
-                }));
             }
             let after = open.last().copied().unwrap_or(0);
             if after != before {
@@ -97,11 +101,31 @@ impl NamespaceScopes {
 
     pub(crate) fn context(&self, part: &str, offset: usize) -> PatchContext {
         let passed = self.changes.partition_point(|(start, _)| *start < offset);
-        let scope = passed.checked_sub(1).map_or(0, |at| self.changes[at].1);
+        let mut scope = passed.checked_sub(1).map_or(0, |at| self.changes[at].1);
+        let mut chain = Vec::new();
+        while scope != 0 {
+            chain.push(scope);
+            scope = self.scopes[scope].0;
+        }
+        let mut namespaces = BTreeMap::new();
+        for scope in chain.into_iter().rev() {
+            for (prefix, value) in &self.scopes[scope].1 {
+                namespaces.insert(prefix.clone(), value.clone());
+            }
+        }
         PatchContext {
             part: part.to_owned(),
-            namespaces: self.scopes[scope].clone(),
+            namespaces,
         }
+    }
+
+    #[cfg(test)]
+    fn declared_bytes(&self) -> usize {
+        self.scopes
+            .iter()
+            .flat_map(|(_, declared)| declared)
+            .map(|(prefix, value)| prefix.len() + value.len())
+            .sum()
     }
 }
 

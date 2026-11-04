@@ -2130,3 +2130,18 @@ fn namespace_scopes_match_a_rescan_at_every_offset() {
         }
     }
 }
+
+#[test]
+fn namespace_scopes_hold_each_declaration_once() {
+    let uri = "u".repeat(1 << 20);
+    let paragraphs = "<w:p xmlns:w='urn:w'><w:r/></w:p>".repeat(5_000);
+    let source = format!(
+        "<w:document xmlns:w='urn:w' xmlns:big='{uri}'><w:body>{paragraphs}</w:body></w:document>"
+    );
+    let scopes = NamespaceScopes::new(&source);
+    assert!(scopes.declared_bytes() <= source.len());
+    let at = source.rfind("<w:r/>").unwrap();
+    let namespaces = scopes.context("word/document.xml", at).namespaces;
+    assert_eq!(namespaces.get("big").map(String::len), Some(uri.len()));
+    assert_eq!(namespaces.get("w").map(String::as_str), Some("urn:w"));
+}
