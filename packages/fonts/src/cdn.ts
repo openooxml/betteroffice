@@ -68,6 +68,7 @@ export function createFontProvider(
       timeoutMs: 30_000,
       decode: sliceDecoder(decoderUrl, runtime?.decoder),
       decoder: runtime?.decoder,
+      retain: runtime?.retain,
     };
   });
 }

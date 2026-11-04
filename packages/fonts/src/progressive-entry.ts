@@ -23,7 +23,7 @@ const engineFaces = new WeakMap<FontDecoder, Map<string, Promise<ProgressiveFont
  * @public
  */
 export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFontFace> {
-  const { ref, base, url, timeoutMs, decode, decoder } = location;
+  const { ref, base, url, timeoutMs, decode, decoder, retain } = location;
   let cache = faces;
   if (decoder !== undefined) {
     cache = engineFaces.get(decoder) ?? new Map();
@@ -40,9 +40,10 @@ export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFont
     });
     cache.set(key, pending);
     const current = pending;
-    pending.catch(() => {
+    const forget = () => {
       if (cache.get(key) === current) cache.delete(key);
-    });
+    };
+    pending.then(retain === false ? forget : undefined, forget);
   }
   return pending;
 }

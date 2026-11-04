@@ -224,7 +224,7 @@ async function sliceAssetUrl(file: string, baseUrl: URL | undefined): Promise<UR
 function sliceLocation(
   face: BundledFontFace,
   baseUrl: URL | undefined,
-  runtime?: { decoder?: FontDecoder },
+  runtime?: { decoder?: FontDecoder; retain?: boolean },
 ): SliceLocation | undefined {
   const ref = sliceRefOf(face.file);
   return ref && {
@@ -233,6 +233,7 @@ function sliceLocation(
     url: (file) => sliceAssetUrl(file, baseUrl),
     decode: sliceDecoder(baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl), runtime?.decoder),
     decoder: runtime?.decoder,
+    retain: runtime?.retain,
   };
 }
 
