@@ -303,7 +303,7 @@ test('paint font forwarding replays earlier host faces and forwards later succes
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: { add: (face: Face) => added.push(face.family) } } });
   pptxWorkerRenderClients.set(owner, { supported: true, fonts: (faces) => forwarded.push(...faces.map((face) => face.family)),
-    view() {}, resync() {}, idle() {}, subscribe: () => () => {}, dispose() {},
+    view() {}, resync() {}, prerender: () => 0, idle() {}, subscribe: () => () => {}, dispose() {},
   });
   try {
     const installed: FontFace[] = [];

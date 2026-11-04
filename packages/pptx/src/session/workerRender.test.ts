@@ -27,7 +27,11 @@ class Port {
   onmessageerror: (() => void) | null = null;
   replies: PptxRenderReply[] = [];
   transfers: Transferable[][] = [];
-  postMessage(reply: PptxRenderReply, transfer: Transferable[]) { this.replies.push(reply); this.transfers.push(transfer); }
+  generations: number[] = [];
+  postMessage(reply: PptxRenderReply, transfer: Transferable[]) {
+    if (reply.kind === 'font-generation') { this.generations.push(reply.fonts); return; }
+    this.replies.push(reply); this.transfers.push(transfer);
+  }
   start() {}
   close() {}
   send(data: PptxRenderRequest) { this.onmessage?.({ data }); }
@@ -451,3 +455,66 @@ test('the worker keeps no copy of a picture after classifying it and still decod
   await tick(); Bun.gc(true); await tick(); Bun.gc(true);
   expect(refs[0]!.deref()).toBeUndefined();
 });
+
+function prerendering(source: (slideId: string) => { slideId: string; version: string; displayList: SlideDisplayList;
+  mediaBytes(assetId: string): Uint8Array } | undefined) {
+  const port = new Port();
+  const renderer = createPptxWorkerRenderer(port as unknown as MessagePort, () => source);
+  renderers.push(renderer);
+  port.send({ kind: 'view', scale: 1, dpr: 1 });
+  return { port, renderer };
+}
+
+test('a prerender paints one slide canvas from the slide source and leaves the active raster deltas intact', async () => {
+  const { port, renderer } = prerendering((slideId) => slideId === 'next'
+    ? { slideId, version: '7', displayList: list('ahead'), mediaBytes: () => new Uint8Array() } : undefined);
+  ack(renderer, frame(1)); await replies(port, 1);
+  const before = Canvas.all.length;
+  port.send({ kind: 'prerender', slideId: 'next', token: 3 }); await replies(port, 2);
+  expect(port.replies[1]).toMatchObject({ kind: 'prerender', slideId: 'next', token: 3, version: '7', fonts: 0, factor: 1,
+    width: 160, height: 120 });
+  expect(port.transfers[1]).toEqual([(port.replies[1] as { bitmap: Transferable }).bitmap]);
+  const painted = Canvas.all.slice(before);
+  expect(painted).toHaveLength(1);
+  expect(painted[0]!.text).toEqual(['ahead', 'steady']);
+  expect([painted[0]!.width, painted[0]!.height]).toEqual([0, 0]);
+  ack(renderer, frame(2, list('ab'))); await replies(port, 3);
+  expect(raster(port, 2).baseEpoch).toBe(1);
+  expect(raster(port, 2).rect).toEqual({ x: 8, y: 10, width: 84, height: 14 });
+});
+
+test('only the latest prerender request is answered and unknown slides answer nothing', async () => {
+  const { port } = prerendering((slideId) => slideId === 'missing' ? undefined
+    : { slideId, version: '1', displayList: list(slideId), mediaBytes: () => new Uint8Array() });
+  port.send({ kind: 'prerender', slideId: 'first', token: 1 });
+  port.send({ kind: 'prerender', slideId: 'second', token: 2 });
+  await replies(port, 1);
+  for (let index = 0; index < 5; index++) await tick();
+  expect(port.replies).toHaveLength(1);
+  expect(port.replies[0]).toMatchObject({ kind: 'prerender', slideId: 'second', token: 2 });
+  port.send({ kind: 'prerender', slideId: 'missing', token: 3 });
+  for (let index = 0; index < 5; index++) await tick();
+  expect(port.replies).toHaveLength(1);
+});
+
+test('a prerender with media not ready yet answers nothing and leaves the media to the active frame', async () => {
+  const { port, renderer } = prerendering((slideId) => ({ slideId, version: '1', displayList: pictureList(),
+    mediaBytes: () => { throw new Error('Slide media is not converted yet'); } }));
+  port.send({ kind: 'prerender', slideId: 'next', token: 1 });
+  for (let index = 0; index < 5; index++) await tick();
+  expect(port.replies).toEqual([]);
+  let reads = 0;
+  ack(renderer, { ...frame(1, pictureList()), mediaBytes: () => { reads += 1; return Uint8Array.of(137, 80, 78, 71); } });
+  await replies(port, 1);
+  expect(reads).toBe(1);
+  expect(raster(port, 0).frameEpoch).toBe(1);
+});
+
+test('worker font changes are announced so finished prerenders can be discarded', async () => {
+  const { port } = prerendering(() => undefined);
+  port.send({ kind: 'fonts', faces: [{ family: 'Late', source: new ArrayBuffer(1), descriptors: {} }] });
+  port.send({ kind: 'fonts', faces: [{ family: 'Later', source: new ArrayBuffer(1), descriptors: {} }] });
+  for (let index = 0; index < 10; index++) await tick();
+  expect(port.generations).toEqual([1, 2]);
+});
+

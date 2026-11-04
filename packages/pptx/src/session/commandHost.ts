@@ -20,8 +20,8 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes } from './commandFrame';
-import type { WorkerSlideFrame } from './workerRender';
+import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList } from './commandFrame';
+import type { WorkerSlideFrame, WorkerSlideRender } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
@@ -80,6 +80,8 @@ export interface PresentationCommandRegistration {
   handlers: MethodHandlers<PresentationCommandMethods & PresentationSharedMethods, null>;
   policies: MethodPolicies<PresentationCommandMethods & PresentationSharedMethods>;
   drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
+  /** Lays out a slide for an ahead-of-time raster without activating it. */
+  renderSlide(slideId: string): WorkerSlideRender | undefined;
   dispose(): void;
 }
 
@@ -708,6 +710,27 @@ export function registerPresentationCommandHandlers(
       geometry, version });
     while (frames.size > 257) frames.delete(frames.keys().next().value!);
     return result;
+  }
+
+  function renderSlide(slideId: string): WorkerSlideRender | undefined {
+    if (!identity) return undefined;
+    let opened: PresentationHandle;
+    try { opened = presentation(); refreshTopology(); } catch { return undefined; }
+    const slideIndex = slideIndices.get(slideId);
+    const revision = revisions.get(slideId);
+    if (slideIndex === undefined || revision === undefined) return undefined;
+    const cached = layouts.get(slideId);
+    let list = cached?.revision === revision && cached.slideIndex === slideIndex ? cached.list : undefined;
+    if (!list) {
+      list = parseCommandDisplayList(opened, slideIndex);
+      layouts.set(slideId, { slideIndex, revision, list, geometry: indexHitGeometry(list) });
+    }
+    return { slideId, version, displayList: list, mediaBytes(assetId) {
+      const pending = new Set<string>();
+      const bytes = commandFrameMediaBytes(opened, assetId, metafiles, pending);
+      if (pending.size) throw new Error('Slide media is not converted yet');
+      return bytes;
+    } };
   }
 
   async function proposalFrame(diff: ProposalDiffSlide): Promise<TransferResult<ProposalDiffSlide>> {
@@ -1868,7 +1891,7 @@ export function registerPresentationCommandHandlers(
     prepareCommandPicture: { lane: 'interactive' },
     accessCommandEditor: { lane: 'interactive' },
     checkpointCommandEditor: { lane: 'interactive' },
-  }, drainPipe: () => pipe?.drain(), dispose };
+  }, drainPipe: () => pipe?.drain(), renderSlide, dispose };
 }
 
 function storyKey(value: PptxStoryTarget): string {
