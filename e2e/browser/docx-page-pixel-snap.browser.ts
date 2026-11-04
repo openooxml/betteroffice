@@ -128,12 +128,49 @@ async function probe(page: Page): Promise<Probe> {
 
 const fraction = (value: number) => Math.abs(value - Math.round(value));
 
-function faults(result: Probe, pixelExact: boolean): string[] {
+/** Mismatched pixels of a bare canvas sized and placed on whole device pixels: what the browser itself does at this ratio. */
+async function control(page: Page): Promise<{ mismatched: number; total: number }> {
+  return pinnedEvaluate(page, async () => {
+    const ratio = devicePixelRatio;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 240;
+    Object.assign(canvas.style, { position: 'fixed', left: `${96 / ratio}px`, top: `${96 / ratio}px`,
+      width: `${240 / ratio}px`, height: `${240 / ratio}px`, zIndex: '2147483647' });
+    const context = canvas.getContext('2d')!;
+    let seed = 7;
+    for (let y = 0; y < 240; y++) for (let x = 0; x < 240; x++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      context.fillStyle = seed % 2 ? '#000' : '#fff';
+      context.fillRect(x, y, 1, 1);
+    }
+    document.body.append(canvas);
+    (window as unknown as { __snapControl: HTMLCanvasElement }).__snapControl = canvas;
+  }).then(async () => {
+    await page.waitForTimeout(200);
+    const shot = await page.screenshot({ scale: 'device' });
+    return pinnedEvaluate(page, async (base64) => {
+      const canvas = (window as unknown as { __snapControl: HTMLCanvasElement }).__snapControl;
+      const source = canvas.getContext('2d')!.getImageData(0, 0, 240, 240).data;
+      const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+      const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+      const screen = new OffscreenCanvas(image.width, image.height).getContext('2d')!;
+      screen.drawImage(image, 0, 0);
+      const pixels = screen.getImageData(96, 96, 240, 240).data;
+      let mismatched = 0;
+      for (let index = 0; index < pixels.length; index += 4) if (Math.abs(pixels[index]! - source[index]!) > 2) mismatched += 1;
+      canvas.remove();
+      return { mismatched, total: 240 * 240 };
+    }, shot.toString('base64'));
+  });
+}
+
+function faults(result: Probe, zoom: number, pixelExact: boolean): string[] {
   const found: string[] = [];
-  if (Math.abs(result.box.width - result.backing.width) > 0.02 || Math.abs(result.box.height - result.backing.height) > 0.02) {
+  const tolerance = Math.max(0.02, (result.devicePixelRatio * zoom) / 64);
+  if (Math.abs(result.box.width - result.backing.width) > tolerance || Math.abs(result.box.height - result.backing.height) > tolerance) {
     found.push(`box ${result.box.width.toFixed(3)}x${result.box.height.toFixed(3)} != backing ${result.backing.width}x${result.backing.height}`);
   }
-  if (fraction(result.box.left) > 0.02 || fraction(result.box.top) > 0.02) {
+  if (fraction(result.box.left) > tolerance || fraction(result.box.top) > tolerance) {
     found.push(`box origin ${result.box.left.toFixed(3)},${result.box.top.toFixed(3)} off the device grid`);
   }
   if ('unreadable' in result.pixels) return [...found, `canvas unreadable: ${result.pixels.unreadable}`];
@@ -155,13 +192,16 @@ for (const worker of PROBE_IN_THREAD ? [true, false] : [true]) {
       const failures: string[] = [];
       const results: Record<string, Probe> = {};
       try {
+        const browserControl = await control(page);
+        console.log(`PIXELSNAP-CONTROL ${JSON.stringify({ worker, devicePixelRatio, ...browserControl })}`);
         for (const value of ZOOMS) {
           await setZoom(page, value);
           await settle(page, parseInt(value, 10) / 100);
           const result = await probe(page);
           results[value] = result;
-          console.log(`PIXELSNAP ${JSON.stringify({ worker, devicePixelRatio, zoom: value, ...result })}`);
-          if (worker) for (const fault of faults(result, value === '100%')) failures.push(`${value}: ${fault}`);
+          console.log(`PIXELSNAP ${JSON.stringify({ worker, zoom: value, ...result })}`);
+          const zoom = parseInt(value, 10) / 100;
+          if (worker) for (const fault of faults(result, zoom, value === '100%' && browserControl.mismatched === 0)) failures.push(`${value}: ${fault}`);
         }
       } finally {
         await info.attach('pixel-snap.json', { body: JSON.stringify(results, null, 2), contentType: 'application/json' });

@@ -31,7 +31,7 @@ import { createDocxCommandConnection, discardCommandPresentation, SessionFailure
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
-import { commandPageGeometry } from './commandPageGeometry';
+import { frameGeometry, type PreparedFrameGeometry } from './commandPageGeometry';
 import { createDocxPluginHost, type DocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { usePluginReservations } from '../../../plugins/reservations';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
@@ -100,41 +100,6 @@ type ResidentResume = Parameters<NonNullable<UsePeerlessEditSessionOptions['reco
 /** @internal */
 /** Events that would type into the document; while it opens they are answered with the typing-paused notice. */
 const typingEvents = ['paste', 'beforeinput', 'compositionstart'] as const;
-interface PreparedFrameGeometry {
-  frame: DocxCommandFrame;
-  retained: RetainedFrame;
-  caret: NonNullable<ReturnType<typeof residentCaretSnapshotForFrame>>;
-  identity: PeerlessViewIdentity;
-  geometry: PeerlessFrameGeometry;
-}
-
-function frameGeometry({ frame, retained, caret, identity }: Omit<PreparedFrameGeometry, 'geometry'>, rasterScale: number): PeerlessFrameGeometry {
-  const pages = commandPageGeometry(retained, frame.payload, rasterScale);
-  return {
-    identity,
-    coversThroughSeq: frame.coversThroughSeq,
-    frameEpoch: retained.frameEpoch,
-    layoutRevision: frame.payload.layoutRevision,
-    layoutEpoch: retained.layoutEpoch,
-    documentVersion: frame.payload.documentVersion,
-    objects: frame.payload.geometry,
-    documentWidth: frame.payload.documentWidth,
-    layoutProvisional: frame.payload.layoutProvisional,
-    ...(frame.payload.reservations ? { reservations: frame.payload.reservations } : {}),
-    rasterScale,
-    pages,
-    caret: caret.caretRect ? { ...caret.caretRect,
-      x: caret.caretRect.x + (pages[caret.caretRect.pageIndex]?.bounds.x ?? 0), y: caret.caretRect.y + (pages[caret.caretRect.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
-    selectionFocus: frame.payload.selectionFocus ? { ...frame.payload.selectionFocus,
-      x: frame.payload.selectionFocus.x + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.x ?? 0),
-      y: frame.payload.selectionFocus.y + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
-    parts: frame.payload.parts,
-    selectionRects: (frame.payload.selectionRects ?? []).map(({ pageIndex, x, y, width, height }) => ({
-      x: x + (pages[pageIndex]?.bounds.x ?? 0), y: y + (pages[pageIndex]?.bounds.y ?? 0), width, height,
-    })),
-  };
-}
-
 const isDocumentInput = (target: EventTarget | null) => target instanceof HTMLTextAreaElement && target.classList.contains('paged-editor__input');
 /** Keys that type or edit text, AltGr and Option characters included; other shortcuts, navigation and Tab keep working. */
 function typingKey({ key, ctrlKey, metaKey, altKey }: React.KeyboardEvent): boolean {
@@ -951,7 +916,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     for (const capture of printCaptures.current) capture.accept(frame);
     if (!identity.current) return undefined;
     const cached = prepared.current.get(frame);
-    if (cached) return cached.geometry.rasterScale === rasterScale ? cached.geometry : rescaleFrameGeometry(cached, rasterScale);
+    if (cached) {
+      if (cached.geometry.rasterScale === rasterScale) return cached.geometry;
+      const geometry = frameGeometry(cached, rasterScale);
+      geometrySources.current.set(geometry, { ...cached, geometry });
+      return geometry;
+    }
     try {
       let next = retained.current;
       for (const delta of decodeCommandFrameDeltas(frame)) next = applyFrameDelta(next, delta);
@@ -969,15 +939,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       return undefined;
     }
   }, []);
-  const rescaleFrameGeometry = useCallback((source: PreparedFrameGeometry, rasterScale: number) => {
-    const geometry = frameGeometry(source, rasterScale);
-    geometrySources.current.set(geometry, { ...source, geometry });
-    return geometry;
-  }, []);
   const rescaleGeometry = useCallback((geometry: PeerlessFrameGeometry, rasterScale: number) => {
     const source = geometrySources.current.get(geometry);
-    return source ? rescaleFrameGeometry(source, rasterScale) : undefined;
-  }, [rescaleFrameGeometry]);
+    if (!source) return undefined;
+    const rescaled = frameGeometry(source, rasterScale);
+    geometrySources.current.set(rescaled, { ...source, geometry: rescaled });
+    return rescaled;
+  }, []);
 
   const recovery = useMemo<UsePeerlessEditSessionOptions['recovery']>(() => ({
     checkpoint: source instanceof Uint8Array ? (resident) => resident.client.call.checkpoint() : undefined,
