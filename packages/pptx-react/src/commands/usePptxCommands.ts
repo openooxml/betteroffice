@@ -145,6 +145,7 @@ const TEXT_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
   'bold',
   'italic',
   'underline',
+  'strikethrough',
   'fontFamily',
   'fontSize',
   'fontSizeStep',
@@ -224,6 +225,7 @@ function textEnvironment(inputs: PptxCommandInputs): PptxTextEnvironment | 'unsu
         bold: style.bold,
         italic: style.italic,
         underline: style.underline !== 'none',
+        strikethrough: style.strike === 'sngStrike' || style.strike === 'dblStrike',
         fontFamily: style.fontFamily,
         fontSize: style.fontSizePt,
         color: hexColor(style.color),
@@ -238,6 +240,7 @@ function textEnvironment(inputs: PptxCommandInputs): PptxTextEnvironment | 'unsu
       bold: mixed(formatting.bold),
       italic: mixed(formatting.italic),
       underline: mixed(formatting.underline),
+      strikethrough: mixed(formatting.strikethrough),
       fontFamily: formatting.fontFamily ?? null,
       fontSize: formatting.fontSize ?? null,
       color: hexColor(formatting.textColor),
@@ -389,6 +392,8 @@ export function usePptxCommandBinding(
           return guarded(() =>
             actions.format({ underline: text?.underline === true ? 'none' : 'sng' })
           );
+        case 'strikethrough':
+          return guarded(() => actions.format({ strike: text?.strikethrough === true ? 'noStrike' : 'sngStrike' }));
         case 'fontFamily':
           return guarded(() => actions.format({ fontFamily: args.family }));
         case 'fontSize':

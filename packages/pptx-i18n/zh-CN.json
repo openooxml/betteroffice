@@ -52,6 +52,7 @@
     "decreaseFontSize": "减小字号",
     "increaseFontSize": "增大字号",
     "underline": "下划线",
+    "strikethrough": "删除线",
     "more": "更多",
     "fillColor": "填充颜色",
     "noFill": "无填充",

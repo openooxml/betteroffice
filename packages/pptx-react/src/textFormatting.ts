@@ -10,6 +10,7 @@ export interface EffectiveTextStyle {
   bold: boolean;
   italic: boolean;
   underline: string;
+  strike?: string;
   fontSizePt: number;
   color: string;
   fontFamily: string;
@@ -29,10 +30,13 @@ export function selectionFormattingFromStory(
 ): SelectionFormatting {
   const styles = selectedStyles(story, anchor, focus, fallback);
   const underline = commonValue(styles, 'underline');
+  const strikes = styles.map((style) => style.strike === 'sngStrike' || style.strike === 'dblStrike');
+  const strikethrough = strikes.every((strike) => strike === strikes[0]) ? strikes[0] : undefined;
   return {
     bold: commonValue(styles, 'bold'),
     italic: commonValue(styles, 'italic'),
     underline: underline === undefined ? undefined : underline !== 'none',
+    strikethrough,
     fontSize: commonValue(styles, 'fontSizePt'),
     textColor: commonValue(styles, 'color'),
     fontFamily: commonValue(styles, 'fontFamily'),
@@ -118,6 +122,7 @@ export function effectiveStyleFromSelection(
   fallback: EffectiveTextStyle
 ): EffectiveTextStyle {
   const formatting = selectionFormattingFromStory(story, anchor, focus, fallback);
+  const strike = commonValue(selectedStyles(story, anchor, focus, fallback), 'strike');
   return {
     bold: formatting.bold ?? fallback.bold,
     italic: formatting.italic ?? fallback.italic,
@@ -127,6 +132,8 @@ export function effectiveStyleFromSelection(
         : formatting.underline
           ? 'sng'
           : 'none',
+    strike: strike ?? (formatting.strikethrough === undefined ? fallback.strike
+      : formatting.strikethrough ? 'sngStrike' : 'noStrike'),
     fontSizePt: formatting.fontSize ?? fallback.fontSizePt,
     color: formatting.textColor ?? fallback.color,
     fontFamily: formatting.fontFamily ?? fallback.fontFamily,
@@ -185,6 +192,7 @@ function resolveTextStyle(
     bold: style.bold ?? fallback.bold,
     italic: style.italic ?? fallback.italic,
     underline: style.underline ?? fallback.underline,
+    strike: style.strike ?? fallback.strike ?? 'noStrike',
     fontSizePt: style.fontSizePt ?? fallback.fontSizePt,
     color: style.color ?? fallback.color,
     fontFamily: style.fontFamily ?? fallback.fontFamily,

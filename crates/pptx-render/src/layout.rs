@@ -5011,7 +5011,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key.push(u8::from(*bold));
     key.push(u8::from(*italic));
     key.push(u8::from(*underline));
-    key_str(key, strike.as_deref().unwrap_or("noStrike"));
+    key_opt_str(key, strike);
     key_str(key, color);
     key.push(match caps {
         TextCaps::None => 0,
@@ -8911,7 +8911,7 @@ mod tests {
             color: "#000000".to_owned(),
             caps: TextCaps::None,
         };
-        let mut variants = vec![style.clone(); 8];
+        let mut variants = vec![style.clone(); 10];
         variants[0].color = "#A99A72".to_owned();
         variants[1].bold = true;
         variants[2].italic = true;
@@ -8922,7 +8922,14 @@ mod tests {
             .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
             .unwrap();
         variants[7].strike = Some("sngStrike".to_owned());
+        variants[8].strike = Some("dblStrike".to_owned());
+        variants[9].strike = Some("noStrike".to_owned());
         for changed in variants {
+            let mut original_key = Vec::new();
+            let mut changed_key = Vec::new();
+            key_style(&mut original_key, &style);
+            key_style(&mut changed_key, &changed);
+            assert_ne!(original_key, changed_key);
             let paragraph = ResolvedParagraph {
                 align: TextAlign::Left,
                 justify: false,

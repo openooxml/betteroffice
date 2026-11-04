@@ -278,3 +278,30 @@ describe('Toolbar shape controls', () => {
     expect(queryByTestId('pptx-shape-adjustment')).toBeNull();
   });
 });
+
+describe('Toolbar strikethrough control', () => {
+  it('emits the command and reflects its active state', async () => {
+    const actions: FormattingAction[] = [];
+    const toolbar = (active: boolean) => (
+      <LocaleProvider>
+        <Toolbar textSelectionActive currentFormatting={{ strikethrough: active }}
+          onFormat={(action) => actions.push(action)} />
+      </LocaleProvider>
+    );
+    const { getByTestId, rerender } = render(toolbar(false));
+    expect(getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(getByTestId('pptx-strikethrough'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(actions).toEqual(['strikethrough']);
+    rerender(toolbar(true));
+    expect(getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(getByTestId('pptx-strikethrough'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(actions).toEqual(['strikethrough', 'strikethrough']);
+  });
+
+  it('is disabled without a text selection', () => {
+    const { getByTestId } = render(<LocaleProvider><Toolbar onFormat={() => {}} /></LocaleProvider>);
+    expect(isDisabled(getByTestId('pptx-strikethrough'))).toBe(true);
+  });
+});

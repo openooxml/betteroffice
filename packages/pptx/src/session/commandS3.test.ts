@@ -535,3 +535,31 @@ test('undefined_format_patch_preserves_marks_and_validates_keys', async () => {
     }
   } finally { await session.dispose(); }
 });
+
+test('strikethrough_toggles_ranges_and_inherited_caret_marks', async () => {
+  const zip = await JSZip.loadAsync(await deck(['alpha']));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace('<a:lstStyle/>',
+    '<a:lstStyle><a:lvl1pPr><a:defRPr strike="dblStrike"/></a:lvl1pPr></a:lstStyle>'));
+  const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const selected = await session.command(session.state, 1, { kind: 'setSelection', payload: {
+      ...input, selection: selection(session.story, 1) } });
+    expect(selected.editState.toolbar.formatting?.strike).toBe('dblStrike');
+    const cleared = await session.command(selected, 2, { kind: 'formatText', payload: { ...input,
+      at: { source: 'afterSeq', seq: 1 }, patch: {}, toggle: 'strikethrough' } }, 1);
+    expect(cleared.editState.toolbar.storedMarks).toEqual({ strike: 'noStrike' });
+    const marked = await session.command(cleared, 3, { kind: 'formatText', payload: { ...input,
+      at: { source: 'afterSeq', seq: 2 }, patch: {}, toggle: 'strikethrough' } }, 2);
+    expect(marked.editState.toolbar.storedMarks).toEqual({ strike: 'sngStrike' });
+    let state = await session.command(marked, 4, { kind: 'setSelection', payload: {
+      ...input, selection: selection(session.story, 0, 5) } });
+    for (const [seq, strike] of [[5, 'noStrike'], [6, 'sngStrike'], [7, 'noStrike']] as const) {
+      state = await session.command(state, seq, { kind: 'formatText', payload: { ...input,
+        at: { source: 'afterSeq', seq: seq - 1 }, patch: {}, toggle: 'strikethrough' } }, seq - 1);
+      expect(state.outcomes[0]?.status).toBe('applied');
+      expect(session.handle().story(session.story.storyId).paragraphs[0]!.runs[0]!.style.strike).toBe(strike);
+      expect(state.editState.toolbar.formatting?.strike).toBe(strike);
+    }
+  } finally { await session.dispose(); }
+});

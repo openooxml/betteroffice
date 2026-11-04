@@ -175,7 +175,7 @@ fn placeholder_text<'a>(
         .and_then(node_text)
 }
 
-fn cell_formatting<'a>(
+pub(crate) fn cell_formatting<'a>(
     package: &'a PptxPackage,
     master: Option<&SlideMaster>,
     node: Option<&'a ShapeNode>,

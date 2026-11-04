@@ -604,6 +604,7 @@ export function registerPresentationCommandHandlers(
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
           italic: run.style.italic ?? DEFAULT_EDITOR_TEXT_STYLE.italic,
           underline: run.style.underline ?? 'none',
+          strike: run.style.strike ?? 'noStrike',
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
@@ -1093,7 +1094,7 @@ export function registerPresentationCommandHandlers(
       }
       const { patch, toggle, fontSizeStep } = command.payload;
       if (patch === undefined || !validStyle(patch) || toggle !== undefined &&
-        !['bold', 'italic', 'underline'].includes(toggle)) return 'invalid-payload';
+        !['bold', 'italic', 'underline', 'strikethrough'].includes(toggle)) return 'invalid-payload';
       const resolved: TextStyle = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
       if (fontSizeStep !== undefined) {
         if (!fontSizeStep || typeof fontSizeStep !== 'object' || Array.isArray(fontSizeStep) || toggle !== undefined ||
@@ -1110,6 +1111,7 @@ export function registerPresentationCommandHandlers(
       if (toggle) {
         const current = formattingAt(at).formatting;
         if (toggle === 'underline') resolved.underline = current.underline !== null && current.underline !== 'none' ? 'none' : 'sng';
+        else if (toggle === 'strikethrough') resolved.strike = current.strike === 'sngStrike' || current.strike === 'dblStrike' ? 'noStrike' : 'sngStrike';
         else resolved[toggle] = current[toggle] !== true;
       }
       return { kind: 'format', selection: { ...at }, patch: resolved };
@@ -1910,12 +1912,13 @@ function validStyle(value: unknown): value is TextStyle | undefined {
     'dash', 'dashHeavy', 'dashLong', 'dashLongHeavy', 'dotDash', 'dotDashHeavy',
     'dotDotDash', 'dotDotDashHeavy', 'wavy', 'wavyHeavy', 'wavyDbl'];
   return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
-    if (!['bold', 'italic', 'fontFamily', 'underline', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
+    if (!['bold', 'italic', 'fontFamily', 'underline', 'strike', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
     if (entry === undefined) return true;
     switch (key) {
       case 'bold':
       case 'italic': return typeof entry === 'boolean';
       case 'fontFamily': return validText(entry);
+      case 'strike': return typeof entry === 'string' && ['noStrike', 'sngStrike', 'dblStrike'].includes(entry);
       case 'underline': return typeof entry === 'string' && underlines.includes(entry);
       case 'color': return typeof entry === 'string' && /^#?[0-9a-f]{6}$/i.test(entry);
       case 'fontSizePt': return typeof entry === 'number' && Number.isFinite(entry) && entry >= MIN_FONT_SIZE_PT && entry <= MAX_FONT_SIZE_PT;

@@ -109,7 +109,7 @@ export type PresentationCommandPayloads = {
   activateSlide: Partial<PresentationCommandInput> & { slideId: string };
   insertText: PresentationCommandTextInput & { text: string; style?: TextStyle };
   replaceText: PresentationCommandTextInput & { text: string; style?: TextStyle };
-  formatText: PresentationCommandTextInput & { patch: TextStyle; toggle?: 'bold' | 'italic' | 'underline';
+  formatText: PresentationCommandTextInput & { patch: TextStyle; toggle?: 'bold' | 'italic' | 'underline' | 'strikethrough';
     fontSizeStep?: { direction: 'increase' | 'decrease'; sizes: readonly number[] } };
   setParagraphAlignment: PresentationCommandTextInput & { alignment: ParagraphAlignment | null };
   deleteBackward: PresentationCommandTextInput & { unit: 'codePoint'; count?: number };

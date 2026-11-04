@@ -12,6 +12,7 @@ const fallback = {
   bold: false,
   italic: false,
   underline: 'none',
+  strike: 'noStrike',
   fontSizePt: 24,
   color: '#111827',
   fontFamily: 'Arial',
@@ -24,6 +25,7 @@ describe('pptx text formatting', () => {
       bold: true,
       italic: false,
       underline: true,
+      strikethrough: false,
       fontSize: 28,
       textColor: '#325ee6',
       fontFamily: 'Aptos',
@@ -42,10 +44,23 @@ describe('pptx text formatting', () => {
       bold: undefined,
       italic: false,
       underline: undefined,
+      strikethrough: false,
       fontSize: undefined,
       textColor: undefined,
       fontFamily: undefined,
     });
+  });
+
+  it('reports single and double strike as active and noStrike as inactive', () => {
+    const marked = story();
+    const runs = marked.paragraphs[0].runs;
+    runs[0].style.strike = 'sngStrike';
+    runs[1].style.strike = 'dblStrike';
+    expect(selectionFormattingFromStory(marked, 0, 10, fallback).strikethrough).toBe(true);
+    expect(effectiveStyleFromSelection(marked, 7, 7, fallback).strike).toBe('dblStrike');
+    runs[1].style.strike = 'noStrike';
+    expect(selectionFormattingFromStory(marked, 7, 7, fallback).strikethrough).toBe(false);
+    expect(selectionFormattingFromStory(marked, 0, 10, fallback).strikethrough).toBeUndefined();
   });
 
   it('maps every shape story paragraph to its text range', () => {

@@ -868,7 +868,7 @@ export type PresentationCommandPayloads = {
     };
     formatText: PresentationCommandTextInput & {
         patch: TextStyle;
-        toggle?: 'bold' | 'italic' | 'underline';
+        toggle?: 'bold' | 'italic' | 'underline' | 'strikethrough';
         fontSizeStep?: {
             direction: 'increase' | 'decrease';
             sizes: readonly number[];
@@ -3005,6 +3005,7 @@ export interface EffectiveTextStyle {
     bold: boolean;
     italic: boolean;
     underline: string;
+    strike?: string;
     fontSizePt: number;
     color: string;
     fontFamily: string;
@@ -3014,6 +3015,7 @@ export interface SelectionTextFormatting {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    strikethrough?: boolean;
     fontSize?: number;
     textColor?: string;
     fontFamily?: string;
@@ -3037,6 +3039,7 @@ export interface TextStyle {
     color?: string;
     fontFamily?: string;
     underline?: string;
+    strike?: string;
     spacingPt?: number;
     baselinePct?: number;
 }
@@ -3048,6 +3051,7 @@ export interface TextStyleSnapshot {
     color: string | null;
     fontFamily: string | null;
     underline: string | null;
+    strike?: string | null;
     spacingPt?: number | null;
     baselinePct?: number | null;
     /** `a:rPr@kern`: the smallest size, in points, the run is kerned at. */
@@ -3578,6 +3582,7 @@ export interface PositionedTextRun {
     bold: boolean;
     italic: boolean;
     underline: boolean;
+    strike?: string;
     color: string;
     letterSpacingPx?: number;
     baselineOffsetPx?: number;

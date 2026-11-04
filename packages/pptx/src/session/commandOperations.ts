@@ -88,7 +88,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         Object.entries(value).every(([key, entry]) => text(key) && validValues(entry, depth + 1));
     };
     const style = (value: unknown, extended = false) => {
-      const keys = ['bold', 'italic', 'fontFamily', 'underline', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'];
+      const keys = ['bold', 'italic', 'fontFamily', 'underline', 'strike', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'];
       if (extended) keys.push('kernPt', 'caps');
       if (!onlyKeys(value, keys)) return false;
       return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
@@ -97,6 +97,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
           case 'bold':
           case 'italic': return typeof entry === 'boolean';
           case 'fontFamily': return text(entry);
+          case 'strike': return typeof entry === 'string' && ['noStrike', 'sngStrike', 'dblStrike'].includes(entry);
           case 'underline': return typeof entry === 'string' && ['none', 'words', 'sng', 'dbl', 'heavy', 'dotted',
             'dottedHeavy', 'dash', 'dashHeavy', 'dashLong', 'dashLongHeavy', 'dotDash', 'dotDashHeavy',
             'dotDotDash', 'dotDotDashHeavy', 'wavy', 'wavyHeavy', 'wavyDbl'].includes(entry);

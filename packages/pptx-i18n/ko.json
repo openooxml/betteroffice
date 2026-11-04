@@ -52,6 +52,7 @@
     "decreaseFontSize": "글꼴 크기 줄이기",
     "increaseFontSize": "글꼴 크기 늘리기",
     "underline": "밑줄",
+    "strikethrough": "취소선",
     "more": "더 보기",
     "fillColor": "채우기 색",
     "noFill": "채우기 없음",

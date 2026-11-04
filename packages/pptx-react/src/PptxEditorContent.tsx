@@ -343,6 +343,7 @@ const initialStyle: EffectiveTextStyle = {
   bold: false,
   italic: false,
   underline: 'none',
+  strike: 'noStrike',
   fontSizePt: 24,
   color: '#111827',
   fontFamily: 'Arial',

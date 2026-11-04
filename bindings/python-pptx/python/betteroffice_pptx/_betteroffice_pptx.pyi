@@ -78,6 +78,8 @@ class TextRun:
     def font_family(self) -> str | None: ...
     @property
     def underline(self) -> str | None: ...
+    @property
+    def strike(self) -> str | None: ...
 
     @property
     def spacing_pt(self) -> float | None: ...
@@ -474,6 +476,7 @@ class Presentation:
         color: str | None = ...,
         font_family: str | None = ...,
         underline: str | None = ...,
+        strike: str | None = ...,
         spacing_pt: float | None = ...,
         baseline_pct: float | None = ...,
         kern_pt: float | None = ...,
@@ -533,6 +536,7 @@ class Presentation:
         color: str | None = ...,
         font_family: str | None = ...,
         underline: str | None = ...,
+        strike: str | None = ...,
         spacing_pt: float | None = ...,
         baseline_pct: float | None = ...,
         kern_pt: float | None = ...,
@@ -551,6 +555,7 @@ class Presentation:
         color: str | None = ...,
         font_family: str | None = ...,
         underline: str | None = ...,
+        strike: str | None = ...,
         spacing_pt: float | None = ...,
         baseline_pct: float | None = ...,
     ) -> TextEdit: ...
