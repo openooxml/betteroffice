@@ -42,11 +42,14 @@ import { useTranslation } from '../i18n';
 import type { XlsxPluginEditorAccess, XlsxRevealAlignment } from '../plugins/createPluginClients';
 
 import { PluginOverlays } from '../plugins/PluginOverlays';
+import { PluginRowGutter } from '../plugins/PluginRowGutter';
+import { ROW_GUTTER_WIDTH } from '../plugins/rowDecorations';
 import { frozenGridExtent } from '../plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
 import { cellInViewport, deriveLimits, expandRangeToMergedCells, extendScrollExtent, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
+import { cellEditorColors } from '../viewer/cellEditorColors';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 
 import { useLegacySessionWorkbook, EditableWorkbookSession, type EditableSessionWorkbookProps } from './useEditableSessionWorkbook';
@@ -1737,6 +1740,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const focusRect = grid && focused ? rangeRect(grid, focused) : null;
   const editRect = editing ? (grid && editing.sheet === painted?.request.sheet ?
     cellRect(grid, editing.row, editing.col) : null) ?? editorRectRef.current ?? { x: 0, y: 0, w: 96, h: 24 } : null;
+  const editColors = editRect ? cellEditorColors(editing?.sheet === painted?.request.sheet ? painted?.displayList : null, editRect) : null;
   const previewRect = previewDraft && grid && previewDraft.sheet === painted?.request.sheet ?
     rangeRect(grid, expandRangeToMergedCells({ top: previewDraft.row, left: previewDraft.col,
       bottom: previewDraft.row, right: previewDraft.col }, merged)) : null;
@@ -1777,6 +1781,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
             <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
               {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
                 style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
+              {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
+                painted={pluginHost.painted} zoom={zoom} />}
               <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
                 onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
                 onDoubleClick={(event) => {
@@ -1786,7 +1792,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                   openEditor();
                 }}
                 onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
-                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none' }}>
+                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none',
+                  ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
                 <div style={{ position: 'absolute', top: 0, left: 0, width: view ? view.contentWidth * zoom : '100%',
                   height: view ? view.contentHeight * zoom : '100%' }} />
                 <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
@@ -1829,7 +1836,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                         if (suppressBlur.current) { suppressBlur.current = false; return; }
                         commitDraft('cell');
                       }}
-                      style={{ ...outline(editRect, `2px solid ${BRAND}`, '#ffffff'), padding: '0 3px',
+                      style={{ ...outline(editRect, `2px solid ${BRAND}`, editColors?.background), color: editColors?.color, padding: '0 3px',
                         font: `${13 * paintedZoom}px system-ui, sans-serif`, pointerEvents: 'auto', outline: 'none' }} />}
                   </div>
                 </div>

@@ -406,3 +406,44 @@ test('worker proposal reads preserve slide refs and structural previews', async 
     expect((diff as import('../proposals').ProposalDiffSlide).snapshot.slides[0]!.notes).toBe('Review me');
   } finally { await session.dispose(); }
 });
+
+test('worker shape proposals resolve story refs and return inserted and deleted diff entries', async () => {
+  const session = await open();
+  try {
+    const before = session.handle().snapshot();
+    const ack = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [
+        { type: 'addTextBox', ref: 'box', slideId: session.story.slideId, draft: { name: 'Box', rect, text: '', style: {} } },
+        { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Filled' },
+        { type: 'addShape', slideId: session.story.slideId, draft: { name: 'Card', rect, geometry: 'rect' } },
+        { type: 'addPicture', slideId: session.story.slideId, draft: { name: 'Pixel', rect, contentType: 'image/png', mediaBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' } },
+        { type: 'removeShape', slideId: session.story.slideId, shapeId: session.story.shapeId },
+      ]],
+    } });
+    expect(ack.outcomes[0]!.status).toBe('applied');
+    const proposal = session.handle().listProposals()[0]!;
+    const diff = await session.rpc.call.accessCommandEditor({ ...identity, seq: 1 }, 'layoutProposalDiffSlideById', [proposal.id, session.story.slideId]) as import('../proposals').ProposalDiffSlide;
+    expect(diff.shapeChanges).toContainEqual({ shapeId: proposal.refs!.box, kind: 'inserted' });
+    expect(diff.shapeChanges).toContainEqual({ shapeId: session.story.shapeId, kind: 'deleted' });
+    expect(diff.snapshot.slides[0]!.shapes.some(shape => shape.id === session.story.shapeId)).toBe(true);
+    expect(session.handle().snapshot()).toEqual(before);
+  } finally { await session.dispose(); }
+});
+
+test('worker proposal admission caps decoded picture totals without the text payload limit', async () => {
+  const session = await open();
+  try {
+    const picture = (size: number) => ({ type: 'addPicture', slideId: session.story.slideId, draft: {
+      name: 'Picture', rect, contentType: 'image/png', mediaBase64: Buffer.alloc(size).toString('base64'),
+    } });
+    const refused = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [picture(4 * 1024 * 1024), picture(4 * 1024 * 1024 + 1)]],
+    } });
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    expect(session.handle().listProposals()).toHaveLength(0);
+    const admitted = await session.command(refused, 2, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [picture(1024 * 1024)]],
+    } });
+    expect(admitted.outcomes[0]!.status).toBe('applied');
+  } finally { await session.dispose(); }
+});

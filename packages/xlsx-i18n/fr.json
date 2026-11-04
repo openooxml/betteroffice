@@ -194,6 +194,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Panneaux des plugins",
     "collapsePanel": "Réduire {title}",
-    "expandPanel": "Développer {title}"
+    "expandPanel": "Développer {title}",
+    "rowGutter": "Marqueurs de ligne des plugins"
   }
 }

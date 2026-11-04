@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from '../bundledFonts';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type { PresentationFrame } from '@betteroffice/pptx/worker';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -16,7 +17,7 @@ import { useTranslation } from '../i18n';
 import { currentContext } from './sessionPaint';
 import { useSessionPresentation, type ViewerSession } from './useSessionPresentation';
 
-export function PptxSessionViewer(props: PptxWorkerViewerProps) {
+export function PptxSessionViewer(props: ResolvedFontProps<PptxWorkerViewerProps>) {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);

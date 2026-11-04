@@ -256,7 +256,13 @@ export type XlsxPluginEvent =
     }
   | { type: 'mode-change'; generation: string; readOnly: boolean }
   | { type: 'layout-change'; generation: string; layout: XlsxPluginLayout | null }
-  | { type: 'grants-change'; generation: string; grant: XlsxPluginGrant };
+  | { type: 'grants-change'; generation: string; grant: XlsxPluginGrant }
+  /**
+   * A row marker was clicked or pressed; sent only to the plugin that owns it.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  | { type: 'row-decoration-activate'; generation: string; id: string; sheetId: string; row: number };
 
 /**
  * What a hook, renderer or action receives. Clients refuse once it is superseded or ended.
@@ -331,7 +337,40 @@ export interface XlsxPluginDefinition<S> {
   commands?: readonly XlsxPluginCommand<S>[];
   /** Local command ids, in display order. */
   toolbar?: readonly string[];
+  /**
+   * Sync and pure. Row markers for the gutter, evaluated on load, after `setState` and after a
+   * document change. A throw or a malformed set ends the plugin with the `row-decorations` phase.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  rowDecorations?(context: XlsxPluginContext<S>): XlsxPluginRowDecorations | null;
 }
+
+/**
+ * A marker in the row gutter. `row` is zero-based; `id` is unique within the plugin; `text`
+ * applies to badges only, at most 4 characters.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginRowDecoration = {
+  id: string;
+  sheetId: string;
+  row: number;
+  kind: 'badge' | 'dot';
+  text?: string;
+  tone?: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+  tooltip?: string;
+};
+
+/**
+ * Row markers computed at a document `version`; shown only while the workbook is at it.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginRowDecorations = {
+  version: string;
+  items: readonly XlsxPluginRowDecoration[];
+};
 
 declare const xlsxPluginBrand: unique symbol;
 
@@ -346,7 +385,7 @@ export interface XlsxPlugin {
   readonly [xlsxPluginBrand]: true;
 }
 
-export type XlsxPluginErrorPhase = PluginErrorPhase;
+export type XlsxPluginErrorPhase = PluginErrorPhase | 'row-decorations';
 
 /**
  * A plugin failure; the failing activation has already been stopped and cleaned up.

@@ -194,6 +194,7 @@
     "toolbarGroup": "Plugin",
     "panelTabs": "Ngăn plugin",
     "collapsePanel": "Thu gọn {title}",
-    "expandPanel": "Mở rộng {title}"
+    "expandPanel": "Mở rộng {title}",
+    "rowGutter": "Dấu hàng của plugin"
   }
 }

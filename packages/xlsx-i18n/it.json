@@ -194,6 +194,7 @@
     "toolbarGroup": "Plugin",
     "panelTabs": "Pannelli del plug-in",
     "collapsePanel": "Comprimi {title}",
-    "expandPanel": "Espandi {title}"
+    "expandPanel": "Espandi {title}",
+    "rowGutter": "Indicatori di riga dei plugin"
   }
 }

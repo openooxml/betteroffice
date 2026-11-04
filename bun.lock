@@ -434,6 +434,7 @@
       "name": "@betteroffice/pptx-react",
       "version": "0.5.1",
       "dependencies": {
+        "@betteroffice/fonts": "workspace:^",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-i18n": "workspace:*",
       },

@@ -87,6 +87,7 @@ import {
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 import { cellInViewport, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
+import { cellEditorColors } from './viewer/cellEditorColors';
 import type {
   XlsxAdmission,
   XlsxPluginEditorAccess,
@@ -94,6 +95,8 @@ import type {
   XlsxRevealAlignment,
 } from './plugins/createPluginClients';
 import { PluginOverlays } from './plugins/PluginOverlays';
+import { PluginRowGutter } from './plugins/PluginRowGutter';
+import { ROW_GUTTER_WIDTH } from './plugins/rowDecorations';
 import { frozenGridExtent, visibleGridRange } from './plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPanels';
 import type { XlsxPluginSelection } from './plugins/types';
@@ -2163,6 +2166,7 @@ export function XlsxEditorContent({
   const scaledSelectionRect = selRect ? scaledRect(selRect, zoom) : null;
   const scaledFocusRect = focusRect ? scaledRect(focusRect, zoom) : null;
   const scaledEditRect = editRect ? scaledRect(editRect, zoom) : null;
+  const editColors = editRect ? cellEditorColors(frameRef.current, editRect) : null;
 
   // the selected chart's outline, placed from the engine-published region and
   // offset by the live drag so the box tracks the pointer before it commits.
@@ -2432,6 +2436,14 @@ export function XlsxEditorContent({
               }}
             />
           )}
+          {pluginHost.rowGutter && (
+            <PluginRowGutter
+              host={pluginHost.host}
+              index={pluginHost.rowGutter}
+              painted={pluginHost.painted}
+              zoom={zoom}
+            />
+          )}
 
           <div
             ref={scrollRef}
@@ -2449,6 +2461,7 @@ export function XlsxEditorContent({
               overflow: 'auto',
               minHeight: 0,
               outline: 'none',
+              ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}),
             }}
           >
             <div
@@ -2595,7 +2608,8 @@ export function XlsxEditorContent({
                       border: `2px solid ${BRAND}`,
                       padding: '0 3px',
                       font: `${13 * zoom}px system-ui, sans-serif`,
-                      background: '#ffffff',
+                      background: editColors?.background,
+                      color: editColors?.color,
                       pointerEvents: 'auto',
                       outline: 'none',
                     }}

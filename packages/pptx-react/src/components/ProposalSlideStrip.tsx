@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type { CanvasImageResolver, ProposalDiffSlide, ProposalStripEntry } from '@betteroffice/pptx';
+import { proposalImages, proposalPaintChanges } from './proposalImages';
 import { useTranslation } from '../i18n';
 
 interface ProposalThumbnailPreview extends ProposalDiffSlide {
@@ -8,11 +9,14 @@ interface ProposalThumbnailPreview extends ProposalDiffSlide {
   release?(): void;
 }
 
-function Thumbnail({ slideId, load, resolveImage }: {
+function Thumbnail({ slideId, load, resolveImage, decodeImage }: {
   slideId: string;
   load(slideId: string): ProposalThumbnailPreview | Promise<ProposalThumbnailPreview>;
   resolveImage?: CanvasImageResolver;
+  decodeImage?: (bytes: Uint8Array, message: string) => Promise<CanvasImageSource>;
 }) {
+  const { t } = useTranslation();
+  const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     let cancelled = false;
@@ -24,23 +28,27 @@ function Thumbnail({ slideId, load, resolveImage }: {
         if (!context) return;
         const scale = 128 / diff.frame.width;
         sizeCanvasForSlide(buffer, diff.frame, 1, scale);
-        await paintSlide(context, diff.frame, 1, scale, { resolveImage: diff.resolveImage ?? resolveImage });
+        const images = proposalImages(diff, diff.resolveImage ?? resolveImage ?? (() => null), decodeImageError, decodeImage);
+        try {
+          await paintSlide(context, diff.frame, 1, scale, { resolveImage: images.resolveImage, textChanges: diff.textChanges.length ? diff.textChanges : undefined, shapeChanges: proposalPaintChanges(diff) });
+        } finally { images.release(); }
         if (cancelled || !canvas.current) return;
         sizeCanvasForSlide(canvas.current, diff.frame, 1, scale);
         canvas.current.getContext('2d')?.drawImage(buffer, 0, 0);
       } finally { diff.release?.(); }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [slideId, load, resolveImage]);
+  }, [slideId, load, resolveImage, decodeImageError, decodeImage]);
   return <canvas ref={canvas} aria-hidden="true" style={{ width: 128, display: 'block' }} />;
 }
 
-export function ProposalSlideStrip({ entries, selectedSlideId, load, onSelect, resolveImage }: {
+export function ProposalSlideStrip({ entries, selectedSlideId, load, onSelect, resolveImage, decodeImage }: {
   entries: ProposalStripEntry[];
   selectedSlideId?: string | null;
   load(slideId: string): ProposalThumbnailPreview | Promise<ProposalThumbnailPreview>;
   onSelect(slideId: string): void;
   resolveImage?: CanvasImageResolver;
+  decodeImage?: (bytes: Uint8Array, message: string) => Promise<CanvasImageSource>;
 }) {
   const { t } = useTranslation();
   return <div aria-label={t('proposals.slideStrip')} data-testid="pptx-proposal-slide-strip">
@@ -54,7 +62,7 @@ export function ProposalSlideStrip({ entries, selectedSlideId, load, onSelect, r
         borderRadius: 5, opacity: entry.status === 'deleted' ? 0.4 : 1,
         background: selectedSlideId === entry.slideId ? '#e0e7ff' : '#fff', color: '#4338ca' }}>
       <span>{index + 1}</span>
-      <Thumbnail slideId={entry.slideId} load={load} resolveImage={resolveImage} />
+      <Thumbnail slideId={entry.slideId} load={load} resolveImage={resolveImage} decodeImage={decodeImage} />
       {entry.status === 'inserted' && <span aria-label={t('proposals.insertedSlide')}>+</span>}
       {entry.status === 'deleted' && <span aria-label={t('proposals.deletedSlide')}>-</span>}
       {entry.status === 'moved' && <span>{t('proposals.movedFrom', { number: (entry.liveIndex ?? 0) + 1 })}</span>}

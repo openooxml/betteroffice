@@ -13,6 +13,7 @@ import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { frameBoundsForShape } from '../interactions';
 import { useTranslation } from '../i18n';
 import { useSyncedState } from '../useSyncedState';
+import { proposalImages, proposalPaintChanges } from './proposalImages';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
 
 export function useProposalCanvas(
@@ -207,9 +208,9 @@ export function ProposalCanvasOverlay({
   diff,
   current,
   frame,
-  slideIndex,
   scale,
   resolveImage,
+  decodeImage,
   onTarget,
   onPainted,
 }: {
@@ -219,21 +220,15 @@ export function ProposalCanvasOverlay({
   slideIndex: number;
   scale: number;
   resolveImage: CanvasImageResolver;
+  decodeImage?: (bytes: Uint8Array, message: string) => Promise<CanvasImageSource>;
   onTarget: (slideId: string, shapeId: string) => void;
   onPainted: (diff: ProposalDiffSlide) => void;
 }) {
   const { t } = useTranslation();
+  const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [painted, setPainted] = useState<ProposalDiffSlide | null>(null);
-  const slideId = current.slides[slideIndex]?.id;
-  const targets = diff.proposal.changes.filter(
-    (change) =>
-      change.slideId === slideId &&
-      change.shapeId &&
-      change.before &&
-      change.after
-  );
   useEffect(() => {
     let cancelled = false;
     const destination = canvas.current;
@@ -246,9 +241,11 @@ export function ProposalCanvasOverlay({
     sizeCanvasForSlide(scratch, diff.frame, dpr, scale);
     destination.dataset.ready = 'false';
     setError(null);
+    const images = proposalImages(diff, resolveImage, decodeImageError, decodeImage);
     void paintSlide(ctx, diff.frame, dpr, scale, {
-      resolveImage,
+      resolveImage: images.resolveImage,
       textChanges: diff.textChanges,
+      shapeChanges: proposalPaintChanges(diff),
     })
       .then(() => {
         if (cancelled) return;
@@ -262,11 +259,11 @@ export function ProposalCanvasOverlay({
       .catch((value) => {
         if (!cancelled)
           setError(value instanceof Error ? value.message : String(value));
-      });
+      }).finally(images.release);
     return () => {
       cancelled = true;
     };
-  }, [diff, scale, resolveImage, onPainted]);
+  }, [diff, scale, resolveImage, onPainted, decodeImageError, decodeImage]);
   return (
     <div style={styles.overlay} data-testid="pptx-canvas-proposal-diff">
       <canvas
@@ -283,16 +280,38 @@ export function ProposalCanvasOverlay({
           {t('proposals.loadingDiff')}
         </p>
       )}
+      <ProposalShapeOutlines diff={diff} current={current} frame={frame} scale={scale} onTarget={onTarget} />
+      {error && (
+        <p role="alert" style={styles.paintError}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function ProposalShapeOutlines({ diff, current, frame, scale, onTarget }: {
+  diff: ProposalDiffSlide;
+  current: DeckSnapshot;
+  frame: SlideDisplayList;
+  scale: number;
+  onTarget: (slideId: string, shapeId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const slideId = diff.snapshot.slides[0]?.id;
+  const targets = diff.proposal.changes.filter(change => change.slideId === slideId && change.shapeId && (change.before || change.after));
+  return <>
       {targets.map((change) => {
-        const before = frameBoundsForShape(current, frame, change.before!);
-        const after = frameBoundsForShape(
-          diff.snapshot,
-          diff.frame,
-          change.after!
-        );
+        const before = change.before ? frameBoundsForShape(current, frame, change.before) : null;
+        const after = change.after
+          ? frameBoundsForShape(diff.snapshot, diff.frame, change.after)
+          : change.before ? frameBoundsForShape(diff.snapshot, diff.frame, change.before) : null;
+        const kind = diff.shapeChanges?.find(entry => entry.shapeId === change.shapeId)?.kind;
+        const deleted = kind === 'deleted' || change.kind === 'deleted';
+        const inserted = kind === 'inserted' || change.kind === 'inserted';
         if (!after) return null;
         const moved =
-          before &&
+          !deleted && before &&
           (before.x !== after.x ||
             before.y !== after.y ||
             before.width !== after.width ||
@@ -331,15 +350,19 @@ export function ProposalCanvasOverlay({
             <button
               type="button"
               data-testid="pptx-proposal-canvas-target"
-              aria-label={`${diff.proposal.agentId}: ${change.after!.name}`}
+              aria-label={`${diff.proposal.agentId}: ${(change.after ?? change.before)!.name}`}
+              data-shape-change={kind ?? change.kind ?? 'changed'}
               onClick={() => onTarget(change.slideId, change.shapeId!)}
               style={{
                 ...styles.outline,
                 ...bounds(after),
-                borderColor: '#16a34a',
+                borderColor: '#4338ca',
+                borderStyle: inserted || deleted ? 'dashed' : 'solid',
                 cursor: 'pointer',
               }}
             >
+              {(inserted || deleted) && <span style={styles.tag}>{t(deleted ? 'proposals.deletedShape' : 'proposals.insertedShape')}</span>}
+              {deleted && <svg data-testid="pptx-proposal-shape-strike" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}><line x1="0" y1="100" x2="100" y2="0" stroke="#4338ca" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg>}
               {moved && (
                 <span
                   style={{
@@ -360,18 +383,12 @@ export function ProposalCanvasOverlay({
       <div style={styles.srOnly}>
         {targets.map((change) => (
           <p key={change.shapeId}>
-            {change.after!.name}: <del>{change.oldText}</del>{' '}
+            {(change.after ?? change.before)!.name}: <del>{change.oldText}</del>{' '}
             <ins>{change.newText}</ins>
           </p>
         ))}
       </div>
-      {error && (
-        <p role="alert" style={styles.paintError}>
-          {error}
-        </p>
-      )}
-    </div>
-  );
+  </>;
 }
 
 export function ProposalNotesDiff({

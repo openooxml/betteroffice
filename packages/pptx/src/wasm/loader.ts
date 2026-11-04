@@ -21,7 +21,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
-import { StaleProposalError } from '../proposals';
+import { ProposalPictureMediaTooLargeError, StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
 import type {
   PptxExportFailure,
@@ -1422,6 +1422,9 @@ function toError(error: unknown): Error {
   if (typeof error === 'string') {
     try {
       const parsed = JSON.parse(error);
+      if (parsed.code === 'proposalPictureMediaTooLarge' && typeof parsed.totalBytes === 'number') {
+        return new ProposalPictureMediaTooLargeError(parsed.totalBytes, parsed.limitBytes);
+      }
       if (parsed.code === 'staleProposal' && Array.isArray(parsed.targets)
           && parsed.targets.every((target: unknown) => typeof target === 'string')) {
         return new StaleProposalError(parsed.targets);

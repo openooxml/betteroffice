@@ -1,5 +1,5 @@
 import { imageSize } from 'image-size';
-import { pptxBatchSchema, pptxProposalSlideEditSchema, type PptxAgentBatch, type PptxAgentEdit, type PptxProposalSlideEdit } from './pptx-schema';
+import { pptxBatchSchema, pptxProposalEditSchema, type PptxAgentBatch, type PptxAgentEdit, type PptxProposalEdit } from './pptx-schema';
 import { loadPptxFonts, pptxFontFaces, pptxThemeFonts, renderPptxSlide, type PptxThemeFonts } from './pptx-render';
 import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type ProposalEdit, type Proposal, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
 import { DocumentToolError, unknownMatchError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
@@ -111,7 +111,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     return { ...this.reference(p), version: read.version, ...textWindow(p.story.text.slice(p.start, p.end), options), editable: p.editable };
   }
 
-  propose(input: { author: string; note?: string; edits: (TextEdit | PptxProposalSlideEdit)[] }) {
+  propose(input: { author: string; note?: string; edits: (TextEdit | PptxProposalEdit)[] }) {
     this.alive();
     if (!Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > 32) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply 1 to 32 proposal edits.');
     const version = this.currentVersion();
@@ -119,10 +119,11 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const steps: PptxEditStep[] = [];
     const structural = input.edits.some(edit => 'type' in edit);
     const proposalEdits: ProposalEdit[] = [];
+    const matchIndices = new Set<number>();
     for (const edit of input.edits) {
       if ('type' in edit) {
-        const parsed = pptxProposalSlideEditSchema.safeParse(edit);
-        if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Invalid slide proposal edit.', { issues: parsed.error.issues });
+        const parsed = pptxProposalEditSchema.safeParse(edit);
+        if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Invalid presentation proposal edit.', { issues: parsed.error.issues });
         proposalEdits.push(parsed.data);
         continue;
       }
@@ -132,21 +133,42 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (hit.version !== version) throw new DocumentToolError('STALE_TARGET', 'Presentation changed. Grep for fresh matches.');
       plainText(edit.newText);
       if (/[\r\n\ufffc]/u.test(edit.newText) || edit.newText.length > 16000) throw new DocumentToolError('INVALID_ARGUMENT', 'Replacement must be plain text in one paragraph, up to 16000 UTF-16 units.');
+      matchIndices.add(proposalEdits.length);
       proposalEdits.push({ type: 'replaceText', storyId: hit.target.storyId, start: hit.start, end: hit.start + hit.text.length, text: edit.newText });
       changes.push({ ref: hit.ref, slide: hit.slide, story: hit.target.storyId, start: hit.start - hit.paragraphStart, oldText: hit.text, newText: edit.newText });
       steps.push({ op: 'replaceText', target: { kind: 'range', ...hit.target, start: hit.start, end: hit.start + hit.text.length }, text: edit.newText, expect: { text: hit.text } });
     }
     if (structural) {
       if (steps.length) this.validate(steps, version);
-      const replacements = new Map<string, Extract<ProposalEdit, { type: 'replaceText' }>[]>();
-      for (const edit of proposalEdits) {
-        if (edit.type !== 'replaceText') continue;
-        const story = replacements.get(edit.storyId) ?? [];
-        story.push(edit);
-        replacements.set(edit.storyId, story);
+      const ranges = new Map<number, { storyId: string; start: number; end: number }>();
+      for (const [index, edit] of proposalEdits.entries()) {
+        if (!matchIndices.has(index) || edit.type !== 'replaceText') continue;
+        ranges.set(index, { storyId: edit.storyId, start: edit.start, end: edit.end });
       }
-      for (const story of replacements.values()) story.sort((left, right) => left.start - right.start);
-      const ordered = proposalEdits.map(edit => edit.type === 'replaceText' ? replacements.get(edit.storyId)!.pop()! : edit);
+      const ordered = proposalEdits.map((edit, index) => {
+        if (edit.type !== 'replaceText') return edit;
+        const match = ranges.get(index);
+        const replacement = match ? { ...edit, start: match.start, end: match.end } : edit;
+        for (const [other, range] of ranges) {
+          if (other === index || range.storyId !== replacement.storyId) continue;
+          const overlaps = range.start === range.end
+            ? replacement.start <= range.start && replacement.end > range.start
+            : replacement.start === replacement.end
+              ? replacement.start > range.start && replacement.start < range.end
+              : replacement.start < range.end && replacement.end > range.start;
+          if (!match && overlaps) throw new DocumentToolError('OVERLAPPING_EDITS', 'Typed text edits and grep replacements must have separate ranges.', { storyId: replacement.storyId });
+          if (replacement.end <= range.start) {
+            const delta = replacement.text.length - (replacement.end - replacement.start);
+            range.start += delta;
+            range.end += delta;
+          }
+        }
+        if (match) {
+          match.start = replacement.start;
+          match.end = replacement.start + replacement.text.length;
+        }
+        return replacement;
+      });
       return this.stageSlideProposal(input, ordered, version);
     }
     return this.stage(input, changes, steps, version);

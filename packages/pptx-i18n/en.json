@@ -171,6 +171,8 @@
     "loadingDiff": "Loading changes…",
     "slideStrip": "Proposed slide order",
     "previewSlide": "Preview slide {number}",
+    "insertedShape": "Inserted shape",
+    "deletedShape": "Deleted shape",
     "insertedSlide": "Inserted slide",
     "deletedSlide": "Deleted slide",
     "movedFrom": "from {number}"

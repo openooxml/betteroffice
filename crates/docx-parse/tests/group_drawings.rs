@@ -344,3 +344,44 @@ fn a_group_with_an_escaped_drawing_id_is_kept() {
     let xml = rewrite_host(&source);
     assert!(xml.contains(&drawing), "{xml}");
 }
+
+fn group_with_child_on_scaled_origin() -> String {
+    r#"<w:drawing><wp:inline><wp:extent cx="5486400" cy="5486400"/><wp:docPr id="40" name="Scaled"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="5486400" cy="5486400"/><a:chOff x="105048" y="105048"/><a:chExt cx="2750159" cy="2750159"/></a:xfrm></wpg:grpSpPr><wps:wsp><wps:cNvPr id="41" name="Part"/><wps:spPr><a:xfrm><a:off x="105048" y="105048"/><a:ext cx="50000" cy="50000"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#.to_owned()
+}
+
+#[test]
+fn decimal_model_numbers_read_back_exactly() {
+    for number in [
+        1523275.4455572385_f64,
+        9.094947017729282e-11,
+        403469.12761057244,
+        0.9738793490454761,
+        2047874.9999999998,
+        23966.650225182002,
+        2.0372681319713593e-10,
+    ] {
+        let text = serde_json::to_string(&number).unwrap();
+        assert_eq!(
+            serde_json::from_str::<f64>(&text).unwrap(),
+            number,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_group_child_on_the_scaled_child_origin_is_written_byte_for_byte() {
+    let drawing = group_with_child_on_scaled_origin();
+    let source = fixture(&format!(
+        r#"<w:p><w:r><w:t>Host</w:t></w:r><w:r>{drawing}</w:r></w:p>"#
+    ));
+    let mut model = package(&source);
+    model["document"]["content"][1]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"run","content":[{"type":"text","text":"Added"}]}));
+    let model: Value = serde_json::from_str(&model.to_string()).unwrap();
+    let xml = save(&source, &model);
+    assert!(xml.contains(">Added<"), "{xml}");
+    assert!(xml.contains(&drawing), "{xml}");
+}
