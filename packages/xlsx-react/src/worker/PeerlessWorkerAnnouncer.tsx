@@ -7,8 +7,8 @@ import {
   cellAddress, isSingleCell, paintedCellText, selectionAnnouncement, selectionKey, type AnnouncementStrings,
 } from './selectionAnnouncement';
 
-/** The loaded input of the active cell, keyed `${sheet}:${A1}`. */
-export const ActiveCellInputContext = createContext<{ at: string; value: string } | null>(null);
+/** The loaded input of the active cell, keyed `${sheet}:${A1}`, with the painted frame it was read for. */
+export const ActiveCellInputContext = createContext<{ at: string; value: string; painted: object | null } | null>(null);
 
 const SETTLE_MS = 150;
 const WAIT_MS = 600;
@@ -69,7 +69,9 @@ export const PeerlessWorkerAnnouncer = memo(function PeerlessWorkerAnnouncer({ s
   useEffect(() => {
     if (!selection || key === null) return;
     const sameCell = spoken.current?.key === key;
-    if (sameCell && (content === null || spoken.current?.content === content)) return;
+    // Merges arrive per frame, so an unchanged selection can look like a range once it scrolls away; only a
+    // cell's value is worth repeating, and only once its input matches the frame that painted the new text.
+    if (sameCell && (!single || content === null || input?.painted !== painted || spoken.current?.content === content)) return;
     const timer = setTimeout(() => {
       const target = focusTarget.current;
       const activeElement = target?.ownerDocument.activeElement;
@@ -85,7 +87,7 @@ export const PeerlessWorkerAnnouncer = memo(function PeerlessWorkerAnnouncer({ s
       setAnnouncement(tick.current ? `${message} ` : message);
     }, ready ? SETTLE_MS : WAIT_MS);
     return () => clearTimeout(timer);
-  }, [selection, key, ready, content, text, formula, strings, active, position, sheet, sheets.length, merged, focusTarget, focusRevision]);
+  }, [selection, key, ready, single, content, input, painted, text, formula, strings, active, position, sheet, sheets.length, merged, focusTarget, focusRevision]);
   return <div data-testid="xlsx-live-region" role="status" aria-live="polite" aria-atomic="true" style={visuallyHidden}>
     {announcement}
   </div>;

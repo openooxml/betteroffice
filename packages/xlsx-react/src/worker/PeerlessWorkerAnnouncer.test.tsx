@@ -32,7 +32,7 @@ function setup() {
   const store = new WorkerPresentationStore();
   const focusTarget: { current: HTMLElement | null } = { current: null };
   const announceRef: { current: (() => void) | null } = { current: null };
-  const Harness = ({ input }: { input: { at: string; value: string } | null }) =>
+  const Harness = ({ input }: { input: { at: string; value: string; painted: object | null } | null }) =>
     <ActiveCellInputContext.Provider value={input}>
       <div ref={(element) => { focusTarget.current = element; }} tabIndex={0} data-testid="grid">
         <input data-testid="editor" />
@@ -52,30 +52,60 @@ describe('peerless worker announcer', () => {
     await select();
     await waitFor(() => expect(spoken()).toBe('A1, empty'), { timeout: 3000 });
     await act(async () => { store.setPainted(frame); });
-    view.rerender(<Harness input={{ at: '0:A1', value: '42' }} />);
+    view.rerender(<Harness input={{ at: '0:A1', value: '42', painted: frame }} />);
     await waitFor(() => expect(spoken()).toBe('A1, 42'), { timeout: 3000 });
   });
 
-  it('speaks a value that changes under the selected cell', async () => {
+  it('speaks a value that changes under the selected cell, once its input matches the frame', async () => {
     const { store, view, Harness, spoken, select } = setup();
-    await act(async () => { view.getByTestId('grid').focus(); store.setPainted(painted('42')); });
-    view.rerender(<Harness input={{ at: '0:A1', value: '42' }} />);
+    const before = painted('=6*7 result');
+    const after = painted('');
+    await act(async () => { view.getByTestId('grid').focus(); store.setPainted(before); });
+    view.rerender(<Harness input={{ at: '0:A1', value: '=6*7', painted: before }} />);
     await select();
-    await waitFor(() => expect(spoken()).toBe('A1, 42'), { timeout: 3000 });
-    await act(async () => { store.setPainted(painted('')); });
-    view.rerender(<Harness input={{ at: '0:A1', value: '' }} />);
+    await waitFor(() => expect(spoken()).toBe('A1, =6*7 result, has formula'), { timeout: 3000 });
+    await act(async () => { store.setPainted(after); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+    expect(spoken()).toBe('A1, =6*7 result, has formula');
+    view.rerender(<Harness input={{ at: '0:A1', value: '', painted: after }} />);
     await waitFor(() => expect(spoken()).toBe('A1, empty'), { timeout: 3000 });
   });
 
   it('stays quiet about a value that changes while the cell editor has focus', async () => {
     const { store, view, Harness, spoken, select } = setup();
-    await act(async () => { view.getByTestId('grid').focus(); store.setPainted(painted('42')); });
-    view.rerender(<Harness input={{ at: '0:A1', value: '42' }} />);
+    const before = painted('42');
+    const after = painted('');
+    await act(async () => { view.getByTestId('grid').focus(); store.setPainted(before); });
+    view.rerender(<Harness input={{ at: '0:A1', value: '42', painted: before }} />);
     await select();
     await waitFor(() => expect(spoken()).toBe('A1, 42'), { timeout: 3000 });
-    await act(async () => { view.getByTestId('editor').focus(); store.setPainted(painted('')); });
-    view.rerender(<Harness input={{ at: '0:A1', value: '' }} />);
+    await act(async () => { view.getByTestId('editor').focus(); store.setPainted(after); });
+    view.rerender(<Harness input={{ at: '0:A1', value: '', painted: after }} />);
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 800)); });
     expect(spoken()).toBe('A1, 42');
+  });
+
+  it('does not repeat a merged selection that scrolls out of the frame and back', async () => {
+    const { store, view, Harness } = setup();
+    const mergedRanges = [{ start: { row: 0, col: 0 }, end: { row: 1, col: 1 } }];
+    const shown = { ...painted('Head'), mergedRanges } as unknown as WorkerPaintResult;
+    const away = { ...painted(''), mergedRanges: [], displayList: { width: 300, height: 40, commands: [],
+      grid: { startRow: 50, startCol: 0, rowOffsets: [0, 20], colOffsets: [0, 64] } } } as unknown as WorkerPaintResult;
+    const back = { ...shown } as WorkerPaintResult;
+    const raw = () => view.getByTestId('xlsx-live-region').textContent;
+    const wait = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 800)); });
+    await act(async () => { view.getByTestId('grid').focus(); store.setPainted(shown); });
+    view.rerender(<Harness input={{ at: '0:A1', value: 'Head', painted: shown }} />);
+    await act(async () => { store.setSelection({ anchor: { row: 0, col: 0 }, focus: { row: 1, col: 1 } }); });
+    await waitFor(() => expect(raw()?.replace(/\u00a0$/, '')).toBe('A1, Head'), { timeout: 3000 });
+    const first = raw();
+    await act(async () => { store.setPainted(away); });
+    view.rerender(<Harness input={{ at: '0:A1', value: 'Head', painted: away }} />);
+    await wait();
+    expect(raw()).toBe(first);
+    await act(async () => { store.setPainted(back); });
+    view.rerender(<Harness input={{ at: '0:A1', value: 'Head', painted: back }} />);
+    await wait();
+    expect(raw()).toBe(first);
   });
 });

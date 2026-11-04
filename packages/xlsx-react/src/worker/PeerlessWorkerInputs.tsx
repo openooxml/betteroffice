@@ -28,7 +28,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   children: ReactNode;
 }) {
   const { selection, view, painted } = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
-  const [focusedInput, setFocusedInput] = useState<{ at: string; value: string } | null>(null);
+  const [focusedInput, setFocusedInput] = useState<{ at: string; value: string; painted: object | null } | null>(null);
   const inputRevision = painted?.coversThroughSeq ?? 0;
   const unavailable = usePeerlessReadOnly(run, readOnly);
   useEffect(() => {
@@ -43,7 +43,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
         navigation.current === at && controller.focusedCellIdentity === draftIdentity) {
         const value = result.cells[0]?.[0]?.input ?? '';
         controller.focusedCellInput = { identity: draftIdentity, value };
-        setFocusedInput({ at: cell, value });
+        setFocusedInput({ at: cell, value, painted });
         controller.presented(inputRevision);
       }
     }).catch((failure) => { if (!cancelled && run.current) run.fail(failure); });
