@@ -472,6 +472,10 @@ fn layout<'s>(
 
 /// The elements a rewritten paragraph may sit in: story roots and table cells, not content
 /// controls or other wrappers.
+/// The content of a block-level content control: a paragraph in it is replaced in place, its
+/// control's properties and its sibling paragraphs kept, as one directly in a story is.
+const BLOCK_CONTROL_CONTENT: &str = "w:sdtContent";
+
 const PARENTS: [&str; 6] = [
     "w:body",
     "w:tc",
@@ -1477,6 +1481,11 @@ fn splice_story_part_inner(
             .get(ordinal)
             .is_some_and(|parent| PARENTS.contains(parent))
     };
+    let replaceable = |ordinal: &u32| {
+        in_story(ordinal)
+            || (!removed.contains(ordinal)
+                && layout.parents.get(ordinal) == Some(&BLOCK_CONTROL_CONTENT))
+    };
     for ordinal in replaced.iter().chain(&removed) {
         let paragraph = &source[spans[ordinal].clone()];
         let admitted = match written.get(ordinal) {
@@ -1501,7 +1510,7 @@ fn splice_story_part_inner(
             }
             None => simple(paragraph)?,
         };
-        if !in_story(ordinal) || !admitted {
+        if !replaceable(ordinal) || !admitted {
             return None;
         }
     }
