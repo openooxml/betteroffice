@@ -186,10 +186,12 @@ const PeerlessDefaultToolbar = memo(function PeerlessDefaultToolbar() {
   </EditorToolbar>;
 });
 
-function disableEntries(entries: readonly OverflowMenuEntry[]): OverflowMenuEntry[] {
-  return entries.map((entry) => entry.kind === 'item' ? { ...entry, disabled: true }
-    : entry.kind === 'submenu' ? { ...entry, disabled: true, entries: disableEntries(entry.entries) }
-      : entry.kind === 'group' ? { ...entry, entries: disableEntries(entry.entries) } : entry);
+function guardEntries(entries: readonly OverflowMenuEntry[], ready: () => boolean): OverflowMenuEntry[] {
+  const live = ready();
+  return entries.map((entry) => entry.kind === 'item'
+    ? { ...entry, disabled: entry.disabled || !live, onSelect: () => { if (ready()) entry.onSelect(); } }
+    : entry.kind === 'submenu' ? { ...entry, disabled: entry.disabled || !live, entries: guardEntries(entry.entries, ready) }
+      : entry.kind === 'group' ? { ...entry, entries: guardEntries(entry.entries, ready) } : entry);
 }
 
 export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
@@ -1638,7 +1640,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     }
     return covers;
   };
-  const menuEntries = (entries: OverflowMenuEntry[], ready: () => boolean) => ready() ? entries : disableEntries(entries);
+
   const gridMenu = useContextMenu({
     surface: scrollRef,
     subscribe: commands.store.subscribe,
@@ -1661,7 +1663,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         ready = covers;
       } else if (chartRef.current) return null;
       return { label: t('editor.cellMenuLabel'), testId: 'xlsx-cell-menu',
-        entries: () => menuEntries(xlsxContextMenuEntries('cell', commands.store, t), ready) };
+        entries: () => guardEntries(xlsxContextMenuEntries('cell', commands.store, t), ready) };
     },
   });
   const tabMenu = useContextMenu({
@@ -1681,7 +1683,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (index !== activeRef.current || id !== activeSheetId.current) navigate(index);
       const ready = () => activeRef.current === index && activeSheetId.current === id;
       return { label: t('editor.sheetTabMenuLabel'), testId: 'xlsx-sheet-tab-menu',
-        entries: () => menuEntries(xlsxContextMenuEntries('sheetTab', commands.store, t), ready) };
+        entries: () => guardEntries(xlsxContextMenuEntries('sheetTab', commands.store, t), ready) };
     },
   });
   const renameDone = useRef(false);
