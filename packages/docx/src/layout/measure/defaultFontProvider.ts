@@ -51,13 +51,15 @@ function implicitFontProvider(
   ): BundledFontLoader | undefined => {
     if (!face) return undefined;
     if (!loader || !face.script) return loader;
-    return Object.assign(async () => {
+    const verify = async (load: () => Promise<ArrayBuffer>) => {
       let bytes: ArrayBuffer;
-      try { bytes = await loader(); }
+      try { bytes = await load(); }
       catch { throw new ImplicitFontAbsentError(face.family); }
       if (bytes.byteLength !== face.byteLength) throw new ImplicitFontAbsentError(face.family);
       return bytes;
-    }, loader);
+    };
+    const read = loader.readOnlyBytes;
+    return Object.assign(() => verify(loader), loader, read && { readOnlyBytes: () => verify(read) });
   };
   const checkedFamilyFallback = (
     loader: BundledFontLoader | undefined,
@@ -74,11 +76,13 @@ function implicitFontProvider(
         provider.resolveFamily(family, false, false),
       face
     );
-    return Object.assign(async () => {
+    const after = async <T>(load: () => Promise<T>) => {
       if (!primary) throw new ImplicitFontAbsentError(face.family);
-      await primary();
-      return loader();
-    }, loader);
+      await (primary.readOnlyBytes ?? primary)();
+      return load();
+    };
+    const read = loader.readOnlyBytes;
+    return Object.assign(() => after(loader), loader, read && { readOnlyBytes: () => after(read) });
   };
   const implicit: BundledFontProvider = {
     ...provider,
