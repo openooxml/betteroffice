@@ -895,8 +895,12 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       const kept = sheets.find((entry) => entry.id === activeSheetId.current);
       if (!kept || kept.index !== activeRef.current) sheetLayout.current += 1;
       if (kept && kept.index !== activeRef.current) {
+        const previous = activeRef.current;
+        geometryRevision.current += 1;
+        if (viewRef.current?.sheet === previous) setView({ ...viewRef.current, sheet: kept.index });
+        if (revealedExtent.current?.sheet === previous) revealedExtent.current = { ...revealedExtent.current, sheet: kept.index };
         setActive(kept.index);
-        refreshSheetGeometry(true);
+        sourceRef.current?.schedule();
       } else if (!kept && sheets.length > 0) {
         const acknowledged = reconcile && ack.selection ? ack.selection : undefined;
         const fallback = (acknowledged && sheets.find((entry) => entry.id === acknowledged.sheetId)) ??

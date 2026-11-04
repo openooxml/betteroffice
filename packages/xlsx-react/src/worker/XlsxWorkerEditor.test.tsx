@@ -2768,7 +2768,8 @@ describe('peerless workbook worker editor', () => {
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
     await act(async () => { fireEvent.click(view.getByRole('tab', { name: 'Second' })); });
     const switched = host.sent[host.sent.length - 1]!;
-    expect(switched).toMatchObject({ kind: 'setActiveSheet', payload: { args: [1] } });
+    if (switched.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(switched.payload.args).toEqual([1]);
     await act(async () => host.ack(switched, { selection: switched.payload.selection, paint: true }));
     expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
     let merging!: Promise<unknown>;
@@ -2802,6 +2803,7 @@ describe('peerless workbook worker editor', () => {
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
     await act(async () => { fireEvent.click(view.getByRole('tab', { name: 'Second' })); });
     const switched = host.sent[host.sent.length - 1]!;
+    if (switched.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
     await act(async () => host.ack(switched, { selection: switched.payload.selection, paint: true }));
     let merging!: Promise<unknown>;
     await act(async () => { merging = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
