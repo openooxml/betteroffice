@@ -14,10 +14,37 @@ use yrs::Transact;
 
 use crate::deck::{map_string, required_map, shape_base, shape_parts, slide_ref};
 use crate::{
-    DeckSession, EditError, EditResult, SHAPES, StorySnapshot, TextRunSnapshot, TextStyle,
+    DeckSession, EditError, EditResult, SHAPES, ShapeSnapshot, SlideSnapshot, StorySnapshot,
+    TextRunSnapshot, TextStyle,
 };
 
 impl DeckSession {
+    pub(crate) fn inherited_story_strikes(&self, story_id: &str) -> EditResult<Vec<bool>> {
+        fn find_shape<'a>(
+            shapes: &'a [ShapeSnapshot],
+            story_id: &str,
+        ) -> Option<&'a ShapeSnapshot> {
+            shapes.iter().find_map(|shape| {
+                if shape.text_stories.iter().any(|story| story.id == story_id) {
+                    Some(shape)
+                } else {
+                    find_shape(&shape.children, story_id)
+                }
+            })
+        }
+        for slide in &self.snapshot()?.slides {
+            if let Some(shape) = find_shape(&slide.shapes, story_id) {
+                let story = shape
+                    .text_stories
+                    .iter()
+                    .find(|story| story.id == story_id)
+                    .unwrap();
+                return Ok(inherited_strikes(self.package(), slide, shape, story));
+            }
+        }
+        Err(EditError::StoryNotFound(story_id.to_owned()))
+    }
+
     pub fn story_formatting(
         &self,
         slide_id: &str,
@@ -98,6 +125,56 @@ impl DeckSession {
         }
         Ok(story)
     }
+}
+
+pub(crate) fn inherited_strikes(
+    package: &PptxPackage,
+    slide: &SlideSnapshot,
+    shape: &ShapeSnapshot,
+    story: &StorySnapshot,
+) -> Vec<bool> {
+    let parents = SlideParents::resolve(
+        package,
+        slide.source_part_path.as_deref(),
+        slide.layout_part_path.as_deref(),
+    );
+    let node = parents
+        .slide
+        .and_then(|slide| find_source_node(&slide.shapes, shape.source_id));
+    let cell = cell_formatting(package, parents.master, node, shape, &story.id);
+    let cascade = if let Some((text, inherited)) = &cell {
+        ParagraphCascade {
+            primary: Some(text),
+            master: Some(inherited),
+            ..ParagraphCascade::default()
+        }
+    } else {
+        shape_cascade(
+            &parents,
+            &package.presentation,
+            shape.placeholder.as_ref(),
+            node.and_then(node_text),
+        )
+    };
+    let prefix = format!("para:{}:", story.id);
+    story
+        .paragraphs
+        .iter()
+        .enumerate()
+        .map(|(index, paragraph)| {
+            let source_index = paragraph
+                .id
+                .strip_prefix(&prefix)
+                .and_then(|index| index.parse::<usize>().ok())
+                .filter(|_| paragraph.preserved_xml.is_none())
+                .unwrap_or(index);
+            cascade
+                .properties(source_index, paragraph.level, None)
+                .default_run
+                .and_then(|properties| properties.strike)
+                .is_some_and(|strike| matches!(strike.as_str(), "sngStrike" | "dblStrike"))
+        })
+        .collect()
 }
 
 fn inherited_text_style(

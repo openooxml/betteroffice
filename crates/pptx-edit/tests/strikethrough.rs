@@ -2,7 +2,7 @@
 mod fixture;
 
 use pptx_edit::engine::{Document, Host};
-use pptx_edit::{DeckSession, EditCtx, TextStyle, TextStylePatch};
+use pptx_edit::{DeckSession, EditCtx, EditRequest, TextStyle, TextStylePatch};
 
 fn authored_properties(strike: &str) -> String {
     format!(
@@ -348,6 +348,12 @@ fn sets_and_clears_strike_without_rewriting_untouched_runs() {
                 },
             )
             .unwrap();
+        assert_eq!(
+            reopened.story(story_id).unwrap().paragraphs[0].runs[0]
+                .style
+                .strike,
+            None
+        );
         let cleared = reopened.save().unwrap();
         let reopened = DeckSession::open(&cleared, 6404).unwrap();
         assert_eq!(
@@ -381,6 +387,13 @@ fn clearing_inherited_strike_saves_an_explicit_override() {
                 },
             )
             .unwrap();
+        assert_eq!(
+            session.story(story_id).unwrap().paragraphs[0].runs[0]
+                .style
+                .strike
+                .as_deref(),
+            Some("noStrike")
+        );
         let reopened = DeckSession::open(&session.save().unwrap(), 6406).unwrap();
         let story = reopened
             .story_formatting(&snapshot.slides[0].id, &shape.id, story_id)
@@ -478,4 +491,192 @@ fn changing_another_mark_preserves_authored_no_strike() {
             ("Q", Some("sngStrike"))
         ]
     );
+}
+
+#[test]
+fn clearing_across_paragraphs_uses_each_paragraphs_inheritance() {
+    let session = DeckSession::open(&fixture::deck(), 6421).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = &snapshot.slides[0].shapes[0].text_stories[0].id;
+    session
+        .format_text(
+            &EditCtx::local("strike"),
+            story_id,
+            0,
+            6,
+            &TextStylePatch {
+                strike: Some("noStrike".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let story = session.story(story_id).unwrap();
+    assert!(
+        story.paragraphs[0]
+            .runs
+            .iter()
+            .all(|run| run.style.strike.as_deref() == Some("noStrike"))
+    );
+    assert!(
+        story.paragraphs[1]
+            .runs
+            .iter()
+            .all(|run| run.style.strike.is_none())
+    );
+    let reopened = DeckSession::open(&session.save().unwrap(), 6422).unwrap();
+    assert_eq!(reopened.story(story_id).unwrap(), story);
+}
+
+#[test]
+fn undoing_a_clear_restores_the_exact_stored_strike() {
+    for strike in ["noStrike", "sngStrike", "dblStrike"] {
+        let session = DeckSession::open(&authored_deck(strike), 6423).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let story_id = &snapshot.slides[0].shapes[3].text_stories[0].id;
+        let before = session.story(story_id).unwrap();
+        session.clear_undo_history();
+        session
+            .format_text(
+                &EditCtx::local("strike"),
+                story_id,
+                4,
+                10,
+                &TextStylePatch {
+                    strike: Some("noStrike".to_owned()),
+                    ..TextStylePatch::default()
+                },
+            )
+            .unwrap();
+        let cleared = session.story(story_id).unwrap();
+        assert!(
+            cleared.paragraphs[0]
+                .runs
+                .iter()
+                .filter(|run| run.text != "Q")
+                .all(|run| run.style.strike.is_none())
+        );
+        assert!(session.undo());
+        assert_eq!(session.story(story_id).unwrap(), before);
+        assert_authored_properties(&session.save().unwrap(), strike, "author", "");
+        assert!(session.redo());
+        assert_eq!(session.story(story_id).unwrap(), cleared);
+    }
+}
+
+#[test]
+fn batch_clear_removes_authored_no_strike_without_inherited_strike() {
+    let session = DeckSession::open(&authored_deck("noStrike"), 6424).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = &slide.shapes[3];
+    let story_id = &shape.text_stories[0].id;
+    let before = session.story(story_id).unwrap();
+    let request: EditRequest = serde_json::from_value(serde_json::json!({
+        "expectVersion": session.version(),
+        "steps": [{
+            "op": "formatText",
+            "target": {
+                "kind": "range",
+                "slideId": slide.id,
+                "shapeId": shape.id,
+                "storyId": story_id,
+                "start": 4,
+                "end": 10,
+            },
+            "patch": {"strike": "noStrike"},
+        }],
+    }))
+    .unwrap();
+    assert!(session.apply_edits(&request).unwrap().unwrap().applied);
+    let cleared = session.story(story_id).unwrap();
+    assert!(
+        cleared.paragraphs[0]
+            .runs
+            .iter()
+            .filter(|run| run.text != "Q")
+            .all(|run| run.style.strike.is_none())
+    );
+    let reopened = DeckSession::open(&session.save().unwrap(), 6425).unwrap();
+    assert_eq!(reopened.story(story_id).unwrap(), cleared);
+    assert!(session.undo());
+    assert_eq!(session.story(story_id).unwrap(), before);
+    assert!(session.redo());
+    assert_eq!(session.story(story_id).unwrap(), cleared);
+}
+
+#[test]
+fn replay_clear_and_history_preserve_literal_strike_values() {
+    for shape_index in [0, 1, 2, 3] {
+        let bytes = authored_deck("noStrike");
+        let session = DeckSession::open_replay_baseline(&bytes, Some(6426), None).unwrap();
+        let identity = session.peer_identity(Vec::new()).unwrap();
+        let peer = DeckSession::open_peer_deck(&bytes, &identity, None).unwrap();
+        peer.register_peer_fonts(Vec::new()).unwrap();
+        peer.adopt_peer_identity().unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let story_id = &snapshot.slides[0].shapes[shape_index].text_stories[0].id;
+        let (start, end, expected) = if shape_index == 3 {
+            (4, 10, None)
+        } else {
+            (0, 1, Some("noStrike"))
+        };
+        let before = session.story(story_id).unwrap();
+        session.clear_undo_history();
+        let mut cleared = None;
+        for (sequence, op) in [
+            serde_json::json!({
+                "method": "formatText",
+                "args": [story_id, start, end, {"strike": "noStrike"}],
+            }),
+            serde_json::json!({"method": "undo", "args": []}),
+            serde_json::json!({"method": "redo", "args": []}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let envelope = serde_json::json!({
+                "sequence": sequence + 1,
+                "baseVersion": session.version(),
+                "op": op,
+            })
+            .to_string();
+            assert_eq!(
+                session.replay_json(&envelope).unwrap(),
+                peer.replay_json(&envelope).unwrap()
+            );
+            assert_eq!(
+                peer.story(story_id).unwrap(),
+                session.story(story_id).unwrap()
+            );
+            let story = session.story(story_id).unwrap();
+            if sequence == 0 {
+                let run = story.paragraphs[0]
+                    .runs
+                    .iter()
+                    .find(|run| run.text != "left")
+                    .unwrap();
+                assert_eq!(run.style.strike.as_deref(), expected);
+                cleared = Some(story);
+            } else if sequence == 1 {
+                assert_eq!(story, before);
+            } else {
+                assert_eq!(Some(story), cleared);
+            }
+            let restored = DeckSession::open_from_update_with_source(
+                &session.encode_state_as_update_v1(),
+                &bytes,
+                6427,
+            )
+            .unwrap();
+            assert_eq!(
+                restored.story(story_id).unwrap(),
+                session.story(story_id).unwrap()
+            );
+            let reopened = DeckSession::open(&session.save().unwrap(), 6428).unwrap();
+            assert_eq!(
+                reopened.story(story_id).unwrap(),
+                session.story(story_id).unwrap()
+            );
+        }
+    }
 }

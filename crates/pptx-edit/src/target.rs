@@ -709,6 +709,10 @@ impl<'a> Deck<'a> {
         Self { snapshot, package }
     }
 
+    pub fn inherited_strikes(&self, view: &StoryView<'_>) -> Vec<bool> {
+        crate::paragraph::inherited_strikes(self.package, view.slide, view.shape, view.story)
+    }
+
     pub fn slide(
         &self,
         slide_id: &str,

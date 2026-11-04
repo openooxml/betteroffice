@@ -93,7 +93,6 @@ fn table_patch(row: usize, text: &str) -> ShapePatch {
                 runs: vec![RunWrite {
                     text: text.to_owned(),
                     properties: RunProperties::default(),
-                    clear_strike: false,
                 }],
             }],
         }],
@@ -118,7 +117,6 @@ fn text_patch(text: &str) -> ShapePatch {
                 runs: vec![RunWrite {
                     text: text.to_owned(),
                     properties: RunProperties::default(),
-                    clear_strike: false,
                 }],
             }],
         }],
@@ -251,7 +249,6 @@ fn clearing_a_table_cell_space_leaves_an_empty_text_element() {
                         runs: vec![RunWrite {
                             text: String::new(),
                             properties: RunProperties::default(),
-                            clear_strike: false,
                         }],
                     }],
                 }],
@@ -300,7 +297,6 @@ fn an_added_and_a_removed_shape_keep_the_survivors_byte_identical() {
                     runs: vec![RunWrite {
                         text: "Added text".to_owned(),
                         properties: RunProperties::default(),
-                        clear_strike: false,
                     }],
                 }]),
                 picture: None,

@@ -179,7 +179,6 @@ pub struct ParagraphWrite {
 pub struct RunWrite {
     pub text: String,
     pub properties: RunProperties,
-    pub clear_strike: bool,
 }
 
 pub struct ShapeAdd {
@@ -2677,9 +2676,6 @@ fn empty_table_runs(
                         XmlNode::Element(XmlElement::new(prefixes.drawing("rPr"))),
                     );
                 }
-                if style.clear_strike {
-                    run.child_mut("rPr").unwrap().attributes.remove("strike");
-                }
                 apply_run_properties(
                     run.child_mut("rPr").unwrap(),
                     &style.properties,
@@ -2983,7 +2979,6 @@ struct RunSegment<'a> {
     line_break: bool,
     text: &'a str,
     properties: &'a RunProperties,
-    clear_strike: bool,
 }
 
 fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
@@ -2995,7 +2990,6 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
                     line_break: true,
                     text: "",
                     properties: &run.properties,
-                    clear_strike: run.clear_strike,
                 });
             }
             if !piece.is_empty() {
@@ -3003,7 +2997,6 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
                     line_break: false,
                     text: piece,
                     properties: &run.properties,
-                    clear_strike: run.clear_strike,
                 });
             }
         }
@@ -3013,10 +3006,7 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
 
 /// Matches text and modeled styling against a source run.
 fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option<&Theme>) -> bool {
-    if element.local_name() == "br" {
-        return segment.line_break;
-    }
-    if segment.line_break {
+    if (element.local_name() == "br") != segment.line_break {
         return false;
     }
     let text = element
@@ -3035,7 +3025,7 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.spacing_pt == target.spacing_pt
         && source.kern_pt == target.kern_pt
         && source.underline == target.underline
-        && (target.strike.is_none() && !segment.clear_strike || source.strike == target.strike)
+        && source.strike == target.strike
         && source.caps == target.caps
         && source.font_family == target.font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
@@ -3499,9 +3489,6 @@ fn segment_properties(
     match template {
         Some(template) => {
             let mut base = template.clone();
-            if segment.clear_strike {
-                base.attributes.remove("strike");
-            }
             apply_run_properties(&mut base, segment.properties, theme, prefixes);
             Some(base)
         }
@@ -3644,8 +3631,11 @@ fn apply_run_properties(
             base.attributes.remove("u");
         }
     }
-    if let Some(strike) = &properties.strike {
-        base.set_attribute("strike", strike.clone());
+    match &properties.strike {
+        Some(strike) => base.set_attribute("strike", strike.clone()),
+        None => {
+            base.attributes.remove("strike");
+        }
     }
     let authored = parse_run_properties(Some(base)).color;
     let keeps_fill = authored == properties.color
@@ -4258,7 +4248,6 @@ mod tests {
                 runs: vec![RunWrite {
                     text: "Ellipse label".to_owned(),
                     properties: RunProperties::default(),
-                    clear_strike: false,
                 }],
             }]),
             picture: None,
@@ -4826,7 +4815,6 @@ mod tests {
                 .map(|(text, properties)| RunWrite {
                     text: (*text).to_owned(),
                     properties: properties.clone(),
-                    clear_strike: false,
                 })
                 .collect(),
         };
@@ -4835,10 +4823,66 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuilt_run_writes_its_literal_strike() {
+        for authored in [None, Some("noStrike"), Some("sngStrike"), Some("dblStrike")] {
+            for strike in [None, Some("noStrike"), Some("sngStrike"), Some("dblStrike")] {
+                let attribute = authored
+                    .map(|strike| format!(r#" strike="{strike}""#))
+                    .unwrap_or_default();
+                let source = format!(
+                    r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"{attribute}><a:ea typeface="Yu Gothic"/></a:rPr><a:t>text</a:t></a:r></a:p>"#
+                );
+                for text in ["text", "edited"] {
+                    let xml = rebuilt_paragraph(
+                        source.as_bytes(),
+                        &[(
+                            text,
+                            RunProperties {
+                                strike: strike.map(str::to_owned),
+                                ..RunProperties::default()
+                            },
+                        )],
+                    );
+                    if let Some(strike) = strike {
+                        assert!(xml.contains(&format!(r#"strike="{strike}""#)), "{xml}");
+                    } else {
+                        assert!(!xml.contains("strike="), "{xml}");
+                    }
+                    assert!(xml.contains(r#"lang="en-US""#), "{xml}");
+                    assert!(xml.contains(r#"<a:ea typeface="Yu Gothic"/>"#), "{xml}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_strike_clear_updates_a_styled_line_break() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:t>First</a:t></a:r><a:br><a:rPr lang="en-US" strike="dblStrike"/></a:br><a:r><a:t>Second</a:t></a:r></a:p>"#,
+            &[("First\nSecond", RunProperties::default())],
+        );
+        assert!(!xml.contains("strike="), "{xml}");
+        assert!(
+            xml.contains(r#"<a:br><a:rPr lang="en-US"/></a:br>"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
     fn an_edit_spanning_several_runs_keeps_each_survivor_on_its_source_run() {
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
-            &[("Seethe doc now", RunProperties::default())],
+            &[
+                ("See", RunProperties::default()),
+                (
+                    "the doc",
+                    RunProperties {
+                        strike: Some("sngStrike".to_owned()),
+                        ..RunProperties::default()
+                    },
+                ),
+                (" now", RunProperties::default()),
+            ],
         );
         assert!(
             xml.contains(r#"<a:r><a:rPr dirty="0" lang="en-US"/><a:t>See</a:t></a:r>"#),
@@ -5087,7 +5131,17 @@ mod tests {
     fn text_typed_at_the_end_of_a_link_stays_inside_it() {
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
-            &[("See the docsX today", RunProperties::default())],
+            &[
+                ("See ", RunProperties::default()),
+                (
+                    "the docsX",
+                    RunProperties {
+                        strike: Some("sngStrike".to_owned()),
+                        ..RunProperties::default()
+                    },
+                ),
+                (" today", RunProperties::default()),
+            ],
         );
         assert!(
             xml.contains(&format!("<a:r>{LINK_PROPERTIES}<a:t>the docsX</a:t></a:r>")),
@@ -5096,13 +5150,20 @@ mod tests {
 
         let bold = RunProperties {
             bold: Some(true),
+            strike: Some("sngStrike".to_owned()),
             ..RunProperties::default()
         };
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
             &[
                 ("See ", RunProperties::default()),
-                ("the docs", RunProperties::default()),
+                (
+                    "the docs",
+                    RunProperties {
+                        strike: Some("sngStrike".to_owned()),
+                        ..RunProperties::default()
+                    },
+                ),
                 ("X", bold),
                 (" today", RunProperties::default()),
             ],
