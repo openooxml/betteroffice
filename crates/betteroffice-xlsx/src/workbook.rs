@@ -2036,17 +2036,18 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut origins = self.preserved.origins.clone();
         let mut names = self.sheet_names();
-        let mut per_op = Vec::with_capacity(ops.len());
         let defined = DefinedFunctionNames::new(&preview.defined_names);
+        let mut batch = xlsx_ops::InPlaceBatch::new(&mut preview);
         for op in &mut ops {
-            keep_stored_formula(&preview, &defined, op);
+            keep_stored_formula(&mut batch, &defined, op);
+            let staged = batch.workbook();
             if let Some(sheet) = worksheet_edit_target(op) {
-                self.ensure_worksheet_sheet_in(&preview, &origins, sheet)?;
+                self.ensure_worksheet_sheet_in(staged, &origins, sheet)?;
             }
             self.ensure_references_stay_valid(&names, op)?;
-            validate_op(&preview, op)?;
-            validate_insert_capacity(&preview, op)?;
-            per_op.push(xlsx_ops::apply_in_place(&mut preview, op)?.0);
+            validate_op(staged, op)?;
+            validate_insert_capacity(staged, op)?;
+            batch.apply(op)?;
             match *op {
                 Op::AddSheet { index, .. } => origins.insert(index, None),
                 Op::RemoveSheet { index } => {
@@ -2060,6 +2061,7 @@ impl Workbook {
             }
             rename_sheet_view(&mut names, op);
         }
+        let inverse = batch.finish();
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
         if preview.defined_names != self.model.defined_names
@@ -2082,10 +2084,6 @@ impl Workbook {
             CalculationScope::of(&self.model, &ops)
         };
         let reached = reached_sheets(&ops);
-        let mut inverse = Vec::new();
-        for chunk in per_op.into_iter().rev() {
-            inverse.extend(chunk);
-        }
         let active_sheet = self.active_sheet_after_ops(&ops);
         let rewritten = rewritten_formulas(&inverse);
         let prepared = self.prepare_commit(
@@ -4873,13 +4871,17 @@ fn committed_formula(typed: String, stored: Option<&str>, names: FormulaNames<'_
 
 /// An op that re-commits a cell formula or defined name in a form that saves
 /// as exactly the stored text keeps the stored text.
-fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, op: &mut Op) {
+fn keep_stored_formula(
+    batch: &mut xlsx_ops::InPlaceBatch<'_>,
+    names: &DefinedFunctionNames,
+    op: &mut Op,
+) {
     match op {
         Op::SetCell { sheet, at, cell } => {
             cell.formula = cell.formula.take().map(|typed| {
                 committed_formula(
                     typed,
-                    stored_formula(workbook, *sheet, *at),
+                    stored_formula(batch.workbook(), *sheet, *at),
                     names.visible_from(Some(*sheet)),
                 )
             });
@@ -4890,12 +4892,8 @@ fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, o
             scope,
             ..
         } => {
-            let stored = workbook
-                .defined_names
-                .iter()
-                .find(|defined| {
-                    defined.local_sheet == *scope && defined.name.eq_ignore_ascii_case(name)
-                })
+            let stored = batch
+                .defined_name(name, *scope)
                 .map(|defined| defined.formula.as_str());
             *refers_to = committed_formula(
                 std::mem::take(refers_to),

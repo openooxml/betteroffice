@@ -10,7 +10,7 @@ mod proposals;
 mod remap;
 mod undo;
 
-pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
+pub use apply::{InPlaceBatch, InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
 pub use conditional_formats::{
     ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_move,
 };
