@@ -25,7 +25,7 @@ import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
 import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 import { createPresentedPageQueries } from './presentedPageQueries';
-import { peerlessCaretColor } from './caretColor';
+import { peerlessCaretPaint } from './caretColor';
 import { useTranslation } from '../../../i18n';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
@@ -157,12 +157,12 @@ function PeerlessCaret({ caret, input, pages }: { caret: DocxEchoRect; input: Re
     const blink = setInterval(() => setLit((shown) => !shown), DEFAULT_BLINK_INTERVAL);
     return () => clearInterval(blink);
   }, [focused, caret.x, caret.y]);
-  const color = useMemo(() => {
+  const { color, halo } = useMemo(() => {
     const page = pages.find(({ bounds }) => caret.x >= bounds.x && caret.x <= bounds.x + bounds.width &&
       caret.y >= bounds.y && caret.y <= bounds.y + bounds.height);
-    return peerlessCaretColor(page?.displayPage, page ? { ...caret, x: caret.x - page.bounds.x, y: caret.y - page.bounds.y } : caret);
+    return peerlessCaretPaint(page?.displayPage, page ? { ...caret, x: caret.x - page.bounds.x, y: caret.y - page.bounds.y } : caret);
   }, [pages, caret]);
-  return <div aria-hidden data-docx-caret style={{ position: 'absolute', left: 0, top: 0, transform: `translate(${caret.x}px, ${caret.y}px)`, willChange: 'transform', width: Math.max(1, caret.width), height: caret.height, background: color, opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
+  return <div aria-hidden data-docx-caret style={{ position: 'absolute', left: 0, top: 0, transform: `translate(${caret.x}px, ${caret.y}px)`, willChange: 'transform', width: Math.max(1, caret.width), height: caret.height, background: color, boxShadow: halo ? `0 0 0 1px ${halo}` : undefined, opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
 }
 
 function useShownProvisionalCaret(viewStore: PeerlessViewStore): PeerlessProvisionalCaret | null {

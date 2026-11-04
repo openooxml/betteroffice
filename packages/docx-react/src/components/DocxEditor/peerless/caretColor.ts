@@ -62,13 +62,14 @@ function runExtent(run: GlyphRunPrimitive): { left: number; right: number; basel
 }
 
 /**
- * Caret paint colour for a page-local caret rect: the colour of the text the
- * caret sits in, unless a known solid fill under the caret would hide it; then
- * black or white by that fill. Shapes and images make the fill unknown, and the
- * text colour is trusted there.
+ * Caret paint for a page-local caret rect: the colour of the text the caret
+ * sits in, unless a known solid fill under the caret would hide it; then black
+ * or white by that fill. Shapes and images make the fill unknown: the text
+ * colour is used as is and `halo` gives the caret a contrasting outline, so it
+ * shows on whatever is painted there.
  */
-export function peerlessCaretColor(page: DisplayPage | undefined, caret: DocxEchoRect): string {
-  if (!page) return '#000';
+export function peerlessCaretPaint(page: DisplayPage | undefined, caret: DocxEchoRect): { color: string; halo?: string } {
+  if (!page) return { color: '#000' };
   const x = caret.x;
   const y = caret.y + caret.height / 2;
   const paintX = caret.x + Math.max(1, caret.width) / 2;
@@ -100,6 +101,15 @@ export function peerlessCaretColor(page: DisplayPage | undefined, caret: DocxEch
   }
   const run = before ?? after;
   const text = parseColor(run?.color);
-  if (run && text && (!known || contrast(text, fill) >= 2)) return run.color;
-  return luminance(fill) < 0.18 ? '#fff' : '#000';
+  const fallback = luminance(fill) < 0.18 ? '#fff' : '#000';
+  if (!known) {
+    const color = run && text ? run.color : fallback;
+    return { color, halo: luminance(text && run ? text : parseColor(color)!) < 0.18 ? '#fff' : '#000' };
+  }
+  return { color: run && text && contrast(text, fill) >= 2 ? run.color : fallback };
+}
+
+/** The caret colour alone, for overlays that draw no halo. */
+export function peerlessCaretColor(page: DisplayPage | undefined, caret: DocxEchoRect): string {
+  return peerlessCaretPaint(page, caret).color;
 }

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { DisplayPage, DisplayPrimitive } from '@betteroffice/docx/layout/render';
-import { peerlessCaretColor } from './caretColor';
+import { peerlessCaretColor, peerlessCaretPaint } from './caretColor';
 
 const caret = { x: 130, y: 100, width: 1, height: 20 };
 
@@ -91,4 +91,11 @@ test('transparent and translucent fills are ignored', () => {
   const clear = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: 'transparent' } as DisplayPrimitive;
   const faint = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: 'rgba(0, 0, 0, 0.1)' } as DisplayPrimitive;
   expect(peerlessCaretColor(page(clear, faint, run('#ffffff', 100, 160)), caret)).toBe('#000');
+});
+
+test('an unknown fill gives the caret a contrasting halo', () => {
+  const shape = { kind: 'shape', x: 90, y: 90, w: 200, h: 40 } as DisplayPrimitive;
+  expect(peerlessCaretPaint(page(shape), caret)).toEqual({ color: '#000', halo: '#fff' });
+  expect(peerlessCaretPaint(page(shape, run('#ffffff', 100, 160)), caret)).toEqual({ color: '#ffffff', halo: '#000' });
+  expect(peerlessCaretPaint(page(run('#c00000', 100, 160)), caret)).toEqual({ color: '#c00000' });
 });
