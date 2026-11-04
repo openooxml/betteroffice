@@ -508,7 +508,7 @@ impl EditSession {
     pub fn register_measure_font(&self, env: Env, bytes: Uint8Array) -> Result<u32> {
         let _call = EngineCall::new(env);
         self.document_unclocked(env)?
-            .register_measure_font(&bytes)
+            .register_measure_font(&bytes[..])
             .map_err(|error| map_error(env, error))
     }
 

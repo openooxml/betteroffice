@@ -4,6 +4,7 @@ import * as fonts from '@betteroffice/fonts';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
+import { engineKind } from '../wasm/engine';
 
 const restorers: (() => void)[] = [];
 
@@ -39,7 +40,7 @@ test('the manager decodes packed faces with the worker engine', async () => {
   expect((await decoder(packed, { codec: 'zstd' })).font.byteLength).toBe((await notoSansJP()).byteLength);
 });
 
-test('coverage prefetch loads each face once and decodes only after the session wasm is ready', async () => {
+test('coverage prefetch loads each face once; faces decode only after the session engine is ready, except large faces on wasm', async () => {
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { release = resolve; });
   const load = mock(async () => bytes);
@@ -53,13 +54,19 @@ test('coverage prefetch loads each face once and decodes only after the session 
   restorers.push(() => create.mockRestore());
   await commandFontProvider.load();
   const decoder = (create.mock.calls[0]![1] as { decoder: typeof decodeFontFace }).decoder;
-  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  const large = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  let largeDecoded = false;
+  const largeDecoding = decoder(large, { codec: 'zstd' }).then((face) => { largeDecoded = true; return face; });
+  if (engineKind === 'wasm') await largeDecoding;
+  const small = await readFile(new URL('../../../fonts-latin/assets/LiberationSans-Regular.ttf.zst', import.meta.url));
   let decoded = false;
-  const decoding = decoder(packed, { codec: 'zstd' }).then((face) => { decoded = true; return face; });
+  const decoding = decoder(small, { codec: 'woff2t+zstd' }).then((face) => { decoded = true; return face; });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(decoded).toBe(false);
+  expect(largeDecoded).toBe(engineKind === 'wasm');
   release();
   expect((await decoding).font.byteLength).toBeGreaterThan(0);
+  expect((await largeDecoding).font.byteLength).toBeGreaterThan(0);
 });
 
 test('a prefetched coverage face and the later request share one decode', async () => {

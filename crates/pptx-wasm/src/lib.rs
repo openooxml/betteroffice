@@ -71,7 +71,7 @@ impl PptxRenderer {
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<u32, JsValue> {
         self.inner
             .register_font(family, bold, italic, bytes)
@@ -84,7 +84,7 @@ impl PptxRenderer {
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<u32, JsValue> {
         self.inner
             .register_fallback_font(family, bold, italic, bytes)

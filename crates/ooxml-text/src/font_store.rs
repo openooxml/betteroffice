@@ -444,6 +444,15 @@ impl FontStore {
         }
     }
 
+    /// [`FontStore::register`] for bytes held either way, copied only when
+    /// borrowed and the store does not already hold them.
+    pub fn register_cow(&mut self, bytes: std::borrow::Cow<'_, [u8]>) -> Result<FontId, FontError> {
+        match bytes {
+            std::borrow::Cow::Borrowed(bytes) => self.register_slice(bytes),
+            std::borrow::Cow::Owned(bytes) => self.register(bytes),
+        }
+    }
+
     /// [`FontStore::register`] for borrowed bytes, copied only when the store
     /// does not already hold them.
     pub fn register_slice(&mut self, bytes: &[u8]) -> Result<FontId, FontError> {
@@ -1083,6 +1092,19 @@ mod tests {
         let mut distinct = ids.clone();
         distinct.dedup();
         assert_eq!(distinct.len(), 300, "every registration keeps its own id");
+    }
+
+    #[test]
+    fn owned_and_borrowed_bytes_share_one_face() {
+        let mut store = FontStore::default();
+        let owned = store
+            .register_cow(std::borrow::Cow::Owned(LIBERATION_SANS.to_vec()))
+            .unwrap();
+        let borrowed = store
+            .register_cow(std::borrow::Cow::Borrowed(LIBERATION_SANS))
+            .unwrap();
+        assert_ne!(owned, borrowed);
+        assert_eq!(store.face_count(), 1);
     }
 
     #[test]

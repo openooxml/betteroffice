@@ -258,26 +258,27 @@ impl SlideRenderer {
         true
     }
 
-    pub fn register_font(
+    pub fn register_font<'a>(
         &mut self,
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
     ) -> Result<u32, RenderError> {
+        let bytes = bytes.into();
         if bytes.len() > MAX_FONT_BYTES {
             return Err(RenderError::ResourceLimit(format!(
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        self.check_font_budget(bytes)?;
+        self.check_font_budget(&bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register_slice(bytes)
+            .register_cow(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         let requested = normalize_family(family);
         let metrics = family_metrics(&requested, bold, italic);
@@ -319,26 +320,27 @@ impl SlideRenderer {
     /// Registers a face drawn only where a run's own face has no glyph, the way
     /// PowerPoint reaches for a script's font when the named one cannot draw a
     /// character. The first registered face that covers a character draws it.
-    pub fn register_fallback_font(
+    pub fn register_fallback_font<'a>(
         &mut self,
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
     ) -> Result<u32, RenderError> {
+        let bytes = bytes.into();
         if bytes.len() > MAX_FONT_BYTES {
             return Err(RenderError::ResourceLimit(format!(
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        self.check_font_budget(bytes)?;
+        self.check_font_budget(&bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register_slice(bytes)
+            .register_cow(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         self.coverage_faces.push((
             bold,
@@ -9284,11 +9286,11 @@ mod tests {
         };
         for index in 0..MAX_FONTS {
             renderer
-                .register_font(&format!("Face {index}"), false, false, &face(index))
+                .register_font(&format!("Face {index}"), false, false, face(index))
                 .unwrap();
         }
         let error = renderer
-            .register_font("Overflow", false, false, &face(MAX_FONTS))
+            .register_font("Overflow", false, false, face(MAX_FONTS))
             .unwrap_err();
         assert!(
             matches!(&error, RenderError::ResourceLimit(message) if message == "more than 256 font faces"),
@@ -9300,10 +9302,10 @@ mod tests {
                 .contains_key(&(normalize_family("Overflow"), false, false))
         );
         renderer
-            .register_fallback_font("Overflow", false, false, &face(7))
+            .register_fallback_font("Overflow", false, false, face(7))
             .unwrap();
         renderer
-            .register_font("Face 3", true, false, &face(3))
+            .register_font("Face 3", true, false, face(3))
             .unwrap();
         assert_eq!(renderer.fonts().face_count(), MAX_FONTS);
     }

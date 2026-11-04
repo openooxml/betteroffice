@@ -5,7 +5,7 @@ import cjkPackage from '../../fonts-cjk/package.json';
 import { CJK_FONT_ASSET_URLS } from '../../fonts-cjk/src';
 import { createFontProvider as cdn } from './cdn';
 import type { FontDecoder } from './decode';
-import { BUNDLED_FONTS, createFontProvider, loadBundledFontBytes } from './index';
+import { BUNDLED_FONTS, createFontProvider, decodeFontFaceOutsideEngine, loadBundledFontBytes } from './index';
 import { isCjkFont, loadPackedFontBytes } from './packed';
 import { fontAssetResponse } from './test-assets';
 
@@ -59,6 +59,16 @@ test('decodes every real CJK face through the packed loader and optional add-on 
     structuredClone(first, { transfer: [first] });
     expect(await loadPackedFontBytes(face, resolveUrl)).toEqual(second);
   }
+});
+
+test('a real CJK face decodes outside the engine to its manifest hash', async () => {
+  const face = cjk.find((face) => face.family === 'Noto Sans JP')!;
+  const entry = pack.faces.find((entry) => entry.file === face.file)!;
+  const encoded = await Bun.file(CJK_FONT_ASSET_URLS[face.file]()).arrayBuffer();
+  const { font } = await decodeFontFaceOutsideEngine(encoded, { codec: entry.codec });
+  expect(createHash('sha256').update(new Uint8Array(font)).digest('hex')).toBe(entry.sha256);
+  const again = await decodeFontFaceOutsideEngine(encoded, { codec: entry.codec });
+  expect(again.font.byteLength).toBe(entry.byteLength);
 });
 
 test('bundled and CDN CJK providers use the bound engine decoder without fetching fontpack.wasm', async () => {
