@@ -761,6 +761,46 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       expect(commits).toEqual([{ ...cell(1), input: '', kind: 'clear', source: 'cut' }]);
     });
 
+    it('a paste while a gating plugin starts is refused, and pastes once it is ready', async () => {
+      fakeClipboard('p');
+      let ready!: () => void;
+      const held = new Promise<void>((done) => { ready = done; });
+      const commits: XlsxPluginCellCommit[] = [];
+      const book = await mountGated(editor, { slow: { initialize: () => held, beforeCellCommit: (commit) => {
+        commits.push(commit);
+        return { action: 'accept' };
+      } } }, { starting: 1 });
+      await book.select(0);
+      await paste(book);
+      await waitFor(() => expect(book.refusal()).toBe(STARTING));
+      expect(await book.input(0)).toBe('1');
+      await act(async () => { ready(); });
+      await waitFor(() => expect(book.log.loaded.has('slow')).toBe(true));
+      await paste(book);
+      await waitFor(async () => expect(await book.input(0)).toBe('p'));
+      expect(commits).toEqual([{ ...cell(0), input: 'p', kind: 'value', source: 'paste' }]);
+    });
+
+    it('a cut while a gating plugin starts is refused with the clipboard and cells unchanged', async () => {
+      const clipboard = fakeClipboard('before');
+      let ready!: () => void;
+      const held = new Promise<void>((done) => { ready = done; });
+      const book = await mountGated(editor, { slow: { initialize: () => held,
+        beforeCellCommit: () => ({ action: 'accept' }) } }, { starting: 1 });
+      await book.select(0);
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.settle();
+      await waitFor(() => expect(book.refusal()).toBe(STARTING));
+      expect(await book.input(0)).toBe('1');
+      expect(await clipboard.text()).toBe('before');
+      await act(async () => { ready(); });
+      await waitFor(() => expect(book.log.loaded.has('slow')).toBe(true));
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.settle();
+      await waitFor(async () => expect(await book.input(0)).toBe(''));
+      expect(await clipboard.text()).toBe('1');
+    });
+
     if (editor === 'peerless') it('a paste over a locked cell of a protected sheet is refused by protection before plugins are asked', async () => {
       fakeClipboard('p');
       const asked: string[] = [];
