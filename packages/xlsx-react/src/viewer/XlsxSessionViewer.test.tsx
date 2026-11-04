@@ -74,6 +74,7 @@ function session() {
     cellInputs: mock(async (sheet: number, range: string) => ({
       sheet, version: 'v1', cells: [[{ a1: range, input: '=SUM(B1:C1)', isFormula: true }]],
     })),
+    translateFormulas: mock<WorkbookSession['call']['translateFormulas']>(async () => { throw new Error('Unexpected formula move'); }),
     version: mock(async () => 'v1'),
     collaborationStateVector: mock<WorkbookSession['call']['collaborationStateVector']>(async () => new Uint8Array()),
     collaborationStateAsUpdate: mock<WorkbookSession['call']['collaborationStateAsUpdate']>(async () => new Uint8Array()),

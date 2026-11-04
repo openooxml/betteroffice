@@ -137,6 +137,7 @@
       "inputFailed": "之前的单元格输入无法保存。",
       "sheetProtected": "此单元格位于受保护的工作表上。",
       "hostRefused": "不允许此编辑。",
+      "tooManyToCheck": "单元格过多，插件无法检查（上限 {limit}）。",
       "hostStarting": "编辑器仍在启动。请稍后再试。",
       "documentReplaced": "已打开另一个工作簿。",
       "targetChanged": "选择已更改。",

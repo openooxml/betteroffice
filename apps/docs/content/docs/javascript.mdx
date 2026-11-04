@@ -650,24 +650,27 @@ caller unchanged.
 `readCells` returns `sheets[].visibility`, which is `unknown` when source sheet metadata is unavailable and the sheet was not added in this session.
 
 **Edit gate (experimental).** `cellEditable(context, { sheetId, row, col })`
-returning false keeps typing, F2, double-click, the formula bar and the clear
-key off that cell. `beforeCellCommit(context, commit)` sees each typed commit
-(`input`, `kind` of `value`, `formula` or `clear`, `source` of `cell-editor`,
-`formula-bar` or `clear-key`) and returns `{ action: "accept" }`,
-`{ action: "replace", input }` or `{ action: "refuse", message }`. Plugins run
-in installation order, replacements chain, and the first refusal leaves the cell
-unchanged, keeps an in-cell draft open and refuses pending work with
-`host-refused`. A clear asks once per cell that holds content and is refused as
-a whole. Until every plugin that defines either hook has loaded the workbook or
-failed, typed commits and clears are refused with `host-refused` and a message
-that the editor is still starting. Both hooks are synchronous and get reads
-only; one that throws or returns something else ends that plugin and counts as
-accept. Where the editor
-refuses locked cells of protected sheets, it does so before plugins are asked.
-Paste, fill, undo, agent, remote and edit-batch writes are not gated yet. The
-gate runs in the in-thread editor and the default worker editor. The legacy
-worker editor (`legacySyncApi` with `experimentalWorkerOpen`) cannot gate edits:
-a plugin that defines either hook is ended there with an `edit-gate` error.
+returning false keeps typing, F2, double-click, the formula bar, the clear key,
+paste and cut off that cell. `beforeCellCommit(context, commit)` sees each cell a
+typed commit, clear, paste or cut changes (`input`, `kind` of `value`, `formula`
+or `clear`, `source` of `cell-editor`, `formula-bar`, `clear-key`, `paste` or
+`cut`) and returns `{ action: "accept" }`, `{ action: "replace", input }` or
+`{ action: "refuse", message }`. Plugins run in installation order, replacements
+chain, and the first refusal leaves the cells unchanged, keeps an in-cell draft
+open and refuses pending work with `host-refused`. A clear or cut asks once per
+cell that holds content, a paste once per cell whose input it changes, with a
+copied formula already moved to that cell; a replaced input is written as given.
+Each is refused as a whole, a refused cut before the clipboard is written, and
+one that would ask about more than 50,000 cells is refused outright. Until every
+plugin that defines either hook has loaded the workbook or failed, these edits
+are refused with `host-refused` and a message that the editor is still starting.
+Both hooks are synchronous and get reads only; one that throws or returns
+something else ends that plugin and counts as accept. Where the editor refuses
+locked cells of protected sheets, it does so before plugins are asked. Fill,
+undo, agent, remote and edit-batch writes are not gated yet. The gate runs in the
+in-thread editor and the default worker editor. The legacy worker editor
+(`legacySyncApi` with `experimentalWorkerOpen`) cannot gate edits: a plugin that
+defines either hook is ended there with an `edit-gate` error.
 
 **Row decorations (experimental).** `rowDecorations(context)` returns null or
 `{ version, items }`, where each item is `{ id, sheetId, row, kind, text, tone,

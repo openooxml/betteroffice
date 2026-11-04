@@ -327,14 +327,15 @@ export interface XlsxPluginCommand<S> {
 export type XlsxPluginCellRef = { sheetId: string; row: number; col: number };
 
 /**
- * A typed commit before it is written: `input` is the text the user committed, empty for a clear.
+ * A cell write before it is made: `input` is the text the cell gets, empty for a clear. A pasted
+ * formula arrives moved to its cell; `cut` asks the cells a cut clears.
  *
  * @experimental The plugin API may change in minor releases.
  */
 export type XlsxPluginCellCommit = XlsxPluginCellRef & {
   input: string;
   kind: 'value' | 'formula' | 'clear';
-  source: 'cell-editor' | 'formula-bar' | 'clear-key';
+  source: 'cell-editor' | 'formula-bar' | 'clear-key' | 'paste' | 'cut';
 };
 
 /** @experimental The plugin API may change in minor releases. */
@@ -372,13 +373,15 @@ export interface XlsxPluginDefinition<S> {
   /** Local command ids, in display order. */
   toolbar?: readonly string[];
   /**
-   * Sync. False makes the cell read-only for typed edits; any plugin returning false wins.
+   * Sync. False makes the cell read-only for typing, clearing, pasting and cutting; any plugin
+   * returning false wins.
    *
    * @experimental The plugin API may change in minor releases.
    */
   cellEditable?(context: XlsxPluginEditGateContext<S>, cell: XlsxPluginCellRef): boolean;
   /**
-   * Sync. Sees a typed commit before it is written. Return `{ action: 'accept' }`,
+   * Sync. Sees each cell a typed commit, clear, paste or cut changes before it is written; a
+   * refusal refuses the whole gesture. Return `{ action: 'accept' }`,
    * `{ action: 'replace', input: string }` (the next plugin sees the replaced input) or
    * `{ action: 'refuse', message?: string }`. Any refusal wins.
    *

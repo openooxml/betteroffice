@@ -48,6 +48,8 @@ export declare class XlsxDocument {
   editCellJson(args: string): string
   editCellProfiledJson(args: string): string
   editCellsJson(args: string): string
+  /** @internal */
+  translateFormulasJson(args: string): string
   moveRangeJson(args: string): string
   applyOpsJson(transactionJson: string): string
   chartsJson(sheet: number): string

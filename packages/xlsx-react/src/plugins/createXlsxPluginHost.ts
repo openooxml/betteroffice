@@ -678,11 +678,12 @@ export function createXlsxPluginHost(
     openGate() {
       documentChanged();
       const contexts = new Map<object, XlsxPluginEditGateContext<unknown>>();
+      const active = gates();
       return {
         cellEditable(cell) {
-          for (const entry of gates()) {
+          for (const entry of active) {
             const hook = definitionOf(entry).cellEditable;
-            if (!hook) continue;
+            if (!hook || failing.has(entry.activation)) continue;
             const editable = runGate(entry, contexts, (context) => {
               const value: unknown = hook(context, { ...cell });
               if (typeof value !== 'boolean') throw new TypeError('cellEditable must return a boolean');
@@ -694,9 +695,9 @@ export function createXlsxPluginHost(
         },
         beforeCellCommit(commit) {
           let input = commit.input;
-          for (const entry of gates()) {
+          for (const entry of active) {
             const hook = definitionOf(entry).beforeCellCommit;
-            if (!hook) continue;
+            if (!hook || failing.has(entry.activation)) continue;
             const next = { ...commit, input, kind: commitKind(input) };
             const decision = runGate(entry, contexts, (context) => checkedDecision(hook(context, next)));
             if (decision?.action === 'refuse') return { ok: false, message: decision.message ?? null };

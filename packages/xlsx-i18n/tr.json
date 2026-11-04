@@ -137,6 +137,7 @@
       "inputFailed": "Bundan önceki hücre girişi kaydedilemedi.",
       "sheetProtected": "Bu hücre korumalı bir sayfada.",
       "hostRefused": "Bu düzenlemeye izin verilmiyor.",
+      "tooManyToCheck": "Eklentilerin denetlemesi için çok fazla hücre var (sınır {limit}).",
       "hostStarting": "Düzenleyici hâlâ başlatılıyor. Birazdan yeniden deneyin.",
       "documentReplaced": "Başka bir çalışma kitabı açıldı.",
       "targetChanged": "Seçim değişti.",
