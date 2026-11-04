@@ -435,7 +435,7 @@ async function savedText(page: Page) {
   ).map((node) => node.textContent ?? '').join(''), xml);
 }
 
-const steadyCaret = '[data-docx-worker-editor] div[aria-hidden="true"][style*="currentcolor" i] { opacity: 1 !important; }';
+const steadyCaret = '[data-docx-worker-editor] [data-docx-caret] { opacity: 1 !important; }';
 
 async function pixels(page: Page, peerless = true) {
   return documentCanvas(page, peerless).screenshot({ animations: 'disabled', style: steadyCaret });
@@ -781,7 +781,7 @@ test('handoff_installs_A_then_redraws_pending_B', { tag: '@harness' }, async ({ 
   expect(await canvas.evaluate((element) => {
     const root = element.closest('[data-docx-worker-editor]');
     const stage = element.closest('.editor-stage');
-    const caret = root?.querySelector<HTMLElement>('div[aria-hidden="true"][style*="currentcolor" i]');
+    const caret = root?.querySelector<HTMLElement>('[data-docx-caret]');
     if (!root || !stage || !caret) return false;
     const rect = caret.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
