@@ -9,9 +9,10 @@ import { useTranslation } from '../i18n';
 import { hitConfirmedGeometry, peerlessKnownState } from './peerlessViewStore';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
-function disable(entries: OverflowMenuEntry[]): OverflowMenuEntry[] {
-  return entries.map((entry) => entry.kind === 'separator' || entry.kind === 'group' ? entry
-    : { ...entry, disabled: true });
+function disable(entries: readonly OverflowMenuEntry[]): OverflowMenuEntry[] {
+  return entries.map((entry) => entry.kind === 'item' ? { ...entry, disabled: true }
+    : entry.kind === 'submenu' ? { ...entry, disabled: true, entries: disable(entry.entries) }
+      : entry.kind === 'group' ? { ...entry, entries: disable(entry.entries) } : entry);
 }
 
 /** @internal */
