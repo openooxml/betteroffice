@@ -196,6 +196,8 @@ the worker editor as a separate chunk with `import()`. Your app needs:
 - a bundler that emits those worker files and chunks at URLs the page can load;
 - a Content Security Policy that allows same-origin workers (`worker-src 'self'`)
   and the chunks;
+- `connect-src` that allows `blob:` and `data:` (embedded pictures, and files
+  opened from object URLs) and the origin your fonts load from;
 - `Worker` and `OffscreenCanvas` in the browser, and for DOCX also
   `HTMLCanvasElement.prototype.transferControlToOffscreen` and
   `createImageBitmap`.

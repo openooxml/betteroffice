@@ -2,7 +2,7 @@ import type { Document } from '../types/document';
 import type { DocxCommandInitRequest } from './residentCommandProtocol';
 
 export interface DocxSourcePreviewOptions extends Partial<Pick<DocxCommandInitRequest,
-  'fonts' | 'fontRegistrationSlots' | 'layoutInput' | 'extras' | 'displayWindow'>> {
+  'fonts' | 'fontRegistrationSlots' | 'layoutInput' | 'extras' | 'displayWindow' | 'progressiveFonts'>> {
   pages?: number;
 }
 

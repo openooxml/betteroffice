@@ -57,6 +57,7 @@ import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDispl
 import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
 import { shipsWasmAsset } from '../wasm/assetEdit';
 import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
+import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
 import {
   createProposalRegistry,
   proposalRevisionPreview,
@@ -697,11 +698,17 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         if (command.command.kind === 'setFontEnvironment') {
           const prepared = preparedFonts.get(command);
           if (!prepared) throw new Error('Worker font environment was not prepared');
-          const snapshot = fonts.commit(prepared, (faces, chains) => {
+          const snapshot = fonts.commit(prepared, (faces, chains, progressive) => {
             engine.clearFonts();
             glyphCache = null;
+            setProgressiveFonts(null);
             const registered = registerCommandFonts(engine, faces);
             if (registered.ids.some(id => id === null)) throw new Error('Worker font registration failed');
+            commandFontSlots = {
+              ids: registered.ids,
+              substituteOf: faces.map((font) => font instanceof Uint8Array ? undefined : font.substituteOf),
+            };
+            setProgressiveFonts(openProgressiveFonts(progressive, init));
             const input = JSON.parse(init.layoutInput);
             input.measurement = { ...input.measurement, fontChains: chains };
             init.layoutInput = registered.remap(JSON.stringify(input));
@@ -1047,7 +1054,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             const retained = retainedPageByKey(layout.frame, page.pageId);
             if (!retained) throw new Error('Command page is unavailable');
             const buffer = new OffscreenCanvas(1, 1);
-            await rasterizeDisplayPageToBackBuffer(buffer, retained.page, rasterOptions, pixelRatio);
+            await rasterizePage(buffer, retained.page, rasterOptions, pixelRatio);
             return buffer.transferToImageBitmap();
           },
           async rasterizeBackground(dependency) {
@@ -1057,7 +1064,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             const device = [rect.x, rect.y, rect.width, rect.height].map((value) => Math.round(value * pixelRatio)) as
               [number, number, number, number];
             const buffer = new OffscreenCanvas(device[2], device[3]);
-            await rasterizeDisplayPageToBackBuffer(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
+            await rasterizePage(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
               pixelRatio, 1, { x: device[0], y: device[1], width: device[2], height: device[3] });
             return buffer.transferToImageBitmap();
           },
@@ -1343,6 +1350,32 @@ let fontsRevision = -1;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 let echoGlyphState: EchoGlyphState | null = null;
+let progressiveFonts: ResidentProgressiveFonts | null = null;
+/** Set while `commandInit` builds and sends its reply: whole-face requests wait until the host knows the session. */
+let holdWholeFaceRequests = false;
+let heldWholeFaceRequest: { session: string; incarnation: number; epoch: number } | null = null;
+
+/** Replaces the sliced faces of the registered fonts; the old ones stop installing outlines. */
+function setProgressiveFonts(next: ResidentProgressiveFonts | null): void {
+  if (progressiveFonts !== next) progressiveFonts?.dispose();
+  progressiveFonts = next;
+}
+
+function requestWholeFaces(identity: { session: string; incarnation: number; epoch: number }): void {
+  if (holdWholeFaceRequests) {
+    heldWholeFaceRequest = identity;
+    return;
+  }
+  reply({ id: 0, ok: true, fontRequirementsHint: { ...identity, wholeFaces: true } });
+}
+
+function releaseWholeFaceRequests(): void {
+  holdWholeFaceRequests = false;
+  const held = heldWholeFaceRequest;
+  heldWholeFaceRequest = null;
+  if (held) requestWholeFaces(held);
+}
+let commandFontSlots: { ids: (number | null)[]; substituteOf: (number | undefined)[] } | null = null;
 let echoGlyphGeneration = 0;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
@@ -1728,7 +1761,13 @@ async function handle(request: ScheduledRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     pendingUpdates = [];
-    replyCommand(request.id, 'commandInitial', await bindResidentCommands(init).initial());
+    setProgressiveFonts(openProgressiveFonts(init.progressiveFonts, init));
+    holdWholeFaceRequests = true;
+    try {
+      replyCommand(request.id, 'commandInitial', await bindResidentCommands(init).initial());
+    } finally {
+      releaseWholeFaceRequests();
+    }
     return;
   }
   if (request.type === 'edit') {
@@ -2286,6 +2325,10 @@ async function handle(request: ScheduledRequest): Promise<void> {
         } finally { queries?.dispose(); }
         break;
       }
+      case 'fontOutlinesInstalled':
+        await progressiveFonts?.whenInstalled();
+        value = { lateInstalls: progressiveFonts?.lateInstalls ?? 0 };
+        break;
       case 'partSnapshot':
         value = { metadata: partMetadata(session.partDocument()), geometry: retainedFrame && retainedLayoutVersion === engine.version() ? session.partGeometry(retainedFrame) : [],
           frameEpoch: retainedFrame && retainedLayoutVersion === engine.version() ? retainedFrame.frameEpoch : null, layoutRevision };
@@ -2900,12 +2943,17 @@ function hydrate(
     if (snapshot.fontsBaseRevision === undefined) {
       session.clearFonts();
       glyphCache = null;
+      setProgressiveFonts(null);
       for (const pageId of activeOffscreenPageIds) pendingOffscreenPageIds.add(pageId);
       intactBackBuffers.clear();
     }
     fontsRevision = -1;
     if (commandFonts) {
       const registered = registerCommandFonts(session, snapshot.fonts);
+      commandFontSlots = {
+        ids: registered.ids,
+        substituteOf: snapshot.fonts.map((font) => font instanceof Uint8Array ? undefined : font.substituteOf),
+      };
       const chains = typeof commandFonts.fontRegistrationSlots === 'object'
         ? commandFonts.fontRegistrationSlots.fontChains : undefined;
       snapshot.layoutInput = registered.remap(snapshot.layoutInput, chains);
@@ -3201,6 +3249,58 @@ const scheduler = createResidentScheduler({
   failed: () => {},
 });
 
+/**
+ * The sliced font slots of the fonts just registered; null without any. A face
+ * whose outlines the engine refuses asks the host, which owns `identity`, for
+ * its whole faces.
+ */
+function openProgressiveFonts(
+  specs: readonly ProgressiveFontSpec[] | undefined,
+  identity: { session: string; incarnation: number; epoch: number } | null,
+): ResidentProgressiveFonts | null {
+  const owner = session;
+  const slots = commandFontSlots;
+  if (!owner || !slots || !specs?.length) return null;
+  const fonts = new ResidentProgressiveFonts(
+    specs, slots.ids, slots.substituteOf,
+    { updateFontOutlines: (fontId, bytes) => owner.updateFontOutlines(fontId, bytes) },
+    async (encoded, maxOutput) => copyDecodedFace(decodePackedFontFace(new Uint8Array(encoded), 'zstd', undefined, maxOutput)).font,
+  );
+  if (fonts.size === 0) return null;
+  fonts.onLateInstall(() => {
+    if (session !== owner || progressiveFonts !== fonts) return;
+    glyphCache = null;
+    echoGlyphState = null;
+    if (commandFrameChanges) commandFrameChanges.repaintPictures = true;
+    if (commandHost) postCommandFrame(0);
+  });
+  if (identity) {
+    fonts.onRefused(() => {
+      if (session !== owner || progressiveFonts !== fonts) return;
+      requestWholeFaces(identity);
+    });
+  }
+  return fonts;
+}
+
+/** Rasterizes a page once the outlines it draws from sliced faces are installed, or their wait runs out. */
+async function rasterizePage(...args: Parameters<typeof rasterizeDisplayPageToBackBuffer>): Promise<void> {
+  await ensureProgressiveOutlines([args[1]]);
+  await rasterizeDisplayPageToBackBuffer(...args);
+}
+
+/** Installs the outlines `pages` draw from sliced faces, then drops their stale cached outlines. */
+async function ensureProgressiveOutlines(pages: Iterable<unknown>): Promise<void> {
+  const fonts = progressiveFonts;
+  if (!fonts) return;
+  const glyphs = new Map<number, Set<number>>();
+  for (const page of pages) glyphsByFont(page, glyphs);
+  const changed = await fonts.ensure(glyphs);
+  if (changed.size === 0 || fonts !== progressiveFonts) return;
+  glyphCache?.invalidateFonts(fonts.fontIdsOf(changed));
+  echoGlyphState = null;
+}
+
 function supersedeBackgroundPageBuild(): void {
   const build = backgroundPageBuild;
   if (!build) return;
@@ -3476,6 +3576,8 @@ function destroySession(keepSurfaces = false): void {
   completedLayout = null;
   retainedFrame = null;
   glyphCache = null;
+  setProgressiveFonts(null);
+  commandFontSlots = null;
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
   if (!keepSurfaces) {
@@ -3665,6 +3767,7 @@ async function replySourcePreview(
     fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
     layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 1, partialDocument: cutPartial,
   }, pages, true, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
+  setProgressiveFonts(openProgressiveFonts(preview.progressiveFonts, null));
   if (layout.provisional) incompleteLayout = {
     layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras,
   };
@@ -3857,7 +3960,7 @@ async function replayOffscreen(
       continue;
     }
     preparations.push(
-      rasterizeDisplayPageToBackBuffer(
+      rasterizePage(
         resolvedBuffer,
         page,
         { glyphCache: glyphCache ?? undefined, ...(images ? { resolveImage: images.resolve } : {}) },

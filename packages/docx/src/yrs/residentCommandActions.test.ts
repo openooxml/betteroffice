@@ -1022,6 +1022,24 @@ test('setObjectProperties aligns side presets at the text margins and round-trip
   }
 }, TIMEOUT);
 
+test('a font environment naming sliced faces is admitted, and malformed slices are refused', async () => {
+  const arm = await openCommandEngine();
+  const environment = { supportsFontEnvironment: true } as Parameters<typeof preflightDocxCommand>[4];
+  const source = {
+    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64) },
+    urls: { 'face/slices.json': 'https://fonts.example/face/slices.json' },
+  };
+  const payload = {
+    faces: [{ family: 'Sliced', data: new Uint8Array(12) }], chains: { 'sliced|0|0': [0] }, families: ['Sliced'],
+    progressive: [{ slot: 0, source }],
+  };
+  const admitted = command(arm, 'setFontEnvironment', payload);
+  expect(preflightDocxCommand(arm.engine, arm.state, admitted, context(arm, admitted), environment).status).toBe('ready');
+  const malformed = command(arm, 'setFontEnvironment', { ...payload, progressive: [{ slot: 9, source }] });
+  expect(preflightDocxCommand(arm.engine, arm.state, malformed, context(arm, malformed), environment))
+    .toMatchObject({ status: 'refused', reason: 'invalid-font-environment' });
+}, TIMEOUT);
+
 const simpleFormatField = '<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>';
 const inlineFormatControl = '<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>';
 const complexFormatField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>' +

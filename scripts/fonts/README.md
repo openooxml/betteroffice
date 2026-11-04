@@ -39,3 +39,23 @@ fetch script's second argument. Local files undergo the same SHA-256 checks.
 The builder requires an absent output directory; preserve `LICENSE` and
 `LICENSES` outside `assets`. These CFF faces use zstd only. Each family has one
 face, so the pack has no dictionaries.
+
+Before building, cut each face into a skeleton and outline chunks (same pinned
+fontTools as above):
+
+```sh
+/tmp/fontpack-venv/bin/python scripts/fonts/cjk-slices.py <dir>
+/tmp/fontpack-venv/bin/python scripts/fonts/test_cjk_slices.py
+```
+
+The second command checks the cutter on a small synthetic CID-keyed face.
+
+It writes `<face>.slices/` and `<face>.slices.sha256` beside each OTF. The
+skeleton keeps every table of the face byte for byte except `CFF `, whose
+CharStrings INDEX is cut off; each chunk holds desubroutinized charstrings by
+glyph id, ordered by Google's frequency-ranked slicing strategies in
+`nam-slices` (Apache License 2.0), with slices 1 to 20 merged into a core.
+The script checks that every chunk holds the GSUB closure of its codepoints and
+that the reassembled face keeps every other table and charstring; `fontpack`
+then compresses the files to `assets/<face>/`, checks that its own reassembly
+matches, and adds a `slices` block to the face's manifest row.
