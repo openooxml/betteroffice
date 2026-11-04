@@ -403,7 +403,12 @@ export interface TextRunPrimitive extends DocAttrs {
   /** Canvas-only width ratio for substitute font bytes. Absent = 1. */
   substituteScale?: number;
   /** Browser text clusters at offsets from the run origin. */
-  canvasClusters?: Array<{ text: string; offset: number }>;
+  canvasClusters?: Array<{
+    text: string;
+    offset: number;
+    /** @internal Source byte range of the cluster, set when the painted text differs from the source. */
+    sourceRange?: { start: number; end: number };
+  }>;
   /** Render glyphs uppercase without changing the accessible source text. */
   allCaps?: boolean;
   /** Render lowercase glyphs as small uppercase. */

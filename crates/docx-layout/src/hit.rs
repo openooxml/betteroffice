@@ -81,6 +81,8 @@ const BLANK_LINE_SELECTION_WIDTH: f64 = 4.0;
 /// Tolerance (px) within which two band centres count as the same line.
 const LINE_CENTER_EPSILON: f64 = 0.5;
 
+const CARET_MIDPOINT_EPSILON: f64 = 0.001;
+
 /// parse the px size out of a CSS font shorthand ("700 16px Calibri, ...")
 fn font_px(font: &str) -> f64 {
     for token in font.split_whitespace() {
@@ -111,10 +113,7 @@ struct TextHit<'a> {
 }
 
 enum StopsSource<'a> {
-    Text {
-        text: &'a str,
-        rtl: bool,
-    },
+    Text(&'a crate::display_list::TextRunPrimitive),
     Glyphs {
         text: &'a str,
         glyphs: &'a [crate::display_list::PlacedGlyph],
@@ -128,9 +127,17 @@ impl TextHit<'_> {
             #[cfg(test)]
             CARET_STOPS_BUILD_COUNT.with(|count| count.set(count.get() + 1));
             match self.stops_source {
-                StopsSource::Text { text, rtl } => {
-                    text_caret_stops(text, self.x, self.width, rtl, self.doc_start, self.doc_end)
-                }
+                StopsSource::Text(run) => canvas_caret_stops(run, self.doc_start, self.doc_end)
+                    .unwrap_or_else(|| {
+                        text_caret_stops(
+                            &run.text,
+                            self.x,
+                            self.width,
+                            is_rtl(&run.attrs, run.rtl),
+                            self.doc_start,
+                            self.doc_end,
+                        )
+                    }),
                 StopsSource::Glyphs { text, glyphs, rtl } => {
                     let stops = glyph_caret_stops(text, glyphs, rtl, self.doc_start, self.doc_end);
                     if stops.is_empty() {
@@ -213,6 +220,67 @@ fn text_caret_stops(
             }
         })
         .collect()
+}
+
+fn canvas_caret_stops(
+    run: &crate::display_list::TextRunPrimitive,
+    doc_start: i64,
+    doc_end: i64,
+) -> Option<Vec<CaretStop>> {
+    if is_rtl(&run.attrs, run.rtl) {
+        return None;
+    }
+    let clusters = run.attrs.canvas_clusters.as_ref()?;
+    let x = run.x.as_f64()?;
+    let scale = run
+        .horizontal_scale
+        .as_ref()
+        .and_then(Number::as_f64)
+        .unwrap_or(100.0)
+        / 100.0
+        * run
+            .substitute_scale
+            .as_ref()
+            .and_then(Number::as_f64)
+            .unwrap_or(1.0);
+    let utf16_len = run.text.encode_utf16().count() as i64;
+    let mut byte = 0;
+    let mut utf16 = 0;
+    let mut stops = Vec::with_capacity(clusters.len() + 1);
+    for cluster in clusters.iter() {
+        let range = if let Some(range) = &cluster.source_range {
+            range.clone()
+        } else {
+            if cluster.text.is_empty() || !run.text.get(byte..)?.starts_with(&cluster.text) {
+                return None;
+            }
+            byte..byte + cluster.text.len()
+        };
+        if range.start > byte || range.end < byte || run.text.get(range.clone())?.is_empty() {
+            return None;
+        }
+        if range.start == byte {
+            stops.push(CaretStop {
+                x: x + cluster.offset.as_f64()? * scale,
+                position: doc_position_at_utf16(doc_start, doc_end, utf16, utf16_len),
+            });
+        }
+        utf16 += run.text.get(byte..range.end)?.encode_utf16().count() as i64;
+        byte = range.end;
+    }
+    if byte != run.text.len() || stops.is_empty() {
+        return None;
+    }
+    stops.push(CaretStop {
+        x: x + run.width.as_f64()?,
+        position: doc_end,
+    });
+    stops.sort_by(|left, right| {
+        left.x
+            .total_cmp(&right.x)
+            .then(left.position.cmp(&right.position))
+    });
+    Some(stops)
 }
 
 /// Caret stops taken from shaped cluster bounds, so ligatures and reordered
@@ -310,10 +378,7 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 bottom: baseline + fp * 0.25,
                 doc_start: ds,
                 doc_end: de,
-                stops_source: StopsSource::Text {
-                    text: &t.text,
-                    rtl: is_rtl(&t.attrs, t.rtl),
-                },
+                stops_source: StopsSource::Text(t),
                 caret_stops: std::cell::OnceCell::new(),
             })
         }
@@ -375,7 +440,9 @@ fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
     let mut best_distance = (x - best.x).abs();
     for stop in stops.iter().copied().skip(1) {
         let distance = (x - stop.x).abs();
-        if distance < best_distance || (distance == best_distance && stop.x > best.x) {
+        if distance < best_distance - CARET_MIDPOINT_EPSILON
+            || ((distance - best_distance).abs() <= CARET_MIDPOINT_EPSILON && stop.x > best.x)
+        {
             best = stop;
             best_distance = distance;
         }
@@ -2799,6 +2866,58 @@ mod tests {
         assert_eq!(hit_test(&dl, 0, 134.0, 195.0), Some(14));
         assert!((caret_rect(&dl, 12).unwrap().x - 120.0).abs() < 0.01);
         assert!((caret_rect(&dl, 14).unwrap().x - 140.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn browser_cluster_carets_hits_and_ranges_follow_paint_offsets() {
+        for spacing in [40.0 / 15.0, -20.0 / 15.0] {
+            for (horizontal, substitute) in [(100.0, 1.0), (80.0, 0.9)] {
+                let scale = horizontal / 100.0 * substitute;
+                let mut pen = 0.0;
+                let mut clusters = Vec::new();
+                let mut origins = Vec::new();
+                for (text, advance) in [("W", 15.0), ("i", 4.0), ("m", 13.0), ("A", 11.0)] {
+                    origins.push(100.0 + pen * scale);
+                    clusters.push(serde_json::json!({ "text": text, "offset": pen }));
+                    pen += advance + spacing;
+                }
+                origins.push(100.0 + pen * scale);
+                let mut spaced = run(100.0, 200.0, pen * scale, 10);
+                spaced["text"] = "WimA".into();
+                spaced["docEnd"] = 14.into();
+                spaced["canvasClusters"] = serde_json::json!(clusters);
+                spaced["letterSpacing"] = serde_json::json!(spacing);
+                spaced["horizontalScale"] = serde_json::json!(horizontal);
+                spaced["substituteScale"] = serde_json::json!(substitute);
+                let dl = page(
+                    serde_json::Value::Null,
+                    vec![spaced, run(origins[4], 200.0, 50.0, 14)],
+                );
+                for (index, &x) in origins.iter().enumerate() {
+                    assert!((caret_rect(&dl, 10 + index as i64).unwrap().x - x).abs() < 0.01);
+                    assert_eq!(hit_test(&dl, 0, x, 195.0), Some(10 + index as i64));
+                    if let Some(&next) = origins.get(index + 1) {
+                        let midpoint = (x + next) / 2.0;
+                        assert_eq!(
+                            hit_test(&dl, 0, midpoint - 0.05, 195.0),
+                            Some(10 + index as i64)
+                        );
+                        assert_eq!(
+                            hit_test(&dl, 0, midpoint + 0.05, 195.0),
+                            Some(11 + index as i64)
+                        );
+                    }
+                }
+                for (from, to) in [(10, 14), (11, 13)] {
+                    let rects = range_rects(&dl, from, to);
+                    assert_eq!(rects.len(), 1);
+                    assert!((rects[0].x - origins[(from - 10) as usize]).abs() < 0.01);
+                    assert!(
+                        (rects[0].x + rects[0].width - origins[(to - 10) as usize]).abs() < 0.01
+                    );
+                }
+            }
+        }
     }
 
     /// Content positioned outside the content box — a floating text box in a

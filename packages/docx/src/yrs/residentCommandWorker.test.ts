@@ -552,6 +552,113 @@ test('the worker and a main-thread session lay out one reservation set identical
   }
 }, TIMEOUT);
 
+for (const twips of [40, -20]) {
+  test(`main-thread and worker carets hits and selections follow glyphs with ${twips} twips spacing`, async () => {
+    const { createDisplayListQueries } = await import('../layout/render/displayListQueries');
+    const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
+    const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:rPr>' +
+      '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="24"/>' +
+      `<w:spacing w:val="${twips}"/></w:rPr><w:t>WimA</w:t></w:r>` +
+      '<w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/>' +
+      '<w:sz w:val="24"/></w:rPr><w:t>BC</w:t></w:r></w:p>';
+    const { client, engine, init, initial, point } = await openWorker({ bodyXml });
+    const host = await createYrsSession({ clientId: 8302 });
+    try {
+      const queryEngine = await loadRustDisplayListQueryEngine();
+      host.seedFromDocx(syntheticDocument(false, false, false, bodyXml));
+      const font = host.registerFont(new Uint8Array(readFileSync(resolve(
+        process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+      ))));
+      const request = JSON.parse(init.layoutInput);
+      request.measurement.fontChains = { 'liberation sans|0|0': [font] };
+      host.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request));
+      const main = applyFrameDeltaOwned(null, decodeFrameDelta(host.buildDisplayListFrame(JSON.stringify({
+        fontChains: { 'liberation sans|0|0': [font] },
+      }), 0)));
+      const worker = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      let commandFrame = initial.frame;
+      let seq = 0;
+      for (const [mode, frame, source] of [
+        ['main-thread', main, queryEngine], ['main-thread retained', main, host],
+        ['worker/resident', worker, queryEngine],
+      ] as const) {
+        const queries = createDisplayListQueries(frame.displayList, source);
+        try {
+          const runs = frame.displayList.pages[0]!.primitives.filter(run => run.kind === 'glyphRun');
+          expect(runs.map(run => run.text).join('')).toBe('WimABC');
+          const origins = new Map(runs.flatMap(run => run.glyphs.map(glyph =>
+            [run.docStart! + glyph.cluster, glyph.x] as const)));
+          expect(origins.size).toBe(6);
+          const start = Math.min(...origins.keys());
+          const baseline = runs[0]!.glyphs[0]!.y;
+          const spaced = runs.find(run => run.docStart === start)!;
+          const unspaced = runs.find(run => run.docStart === start + 4)!;
+          expect(Math.abs(spaced.echo!.letterSpacing! - twips / 15)).toBeLessThan(0.001);
+          expect(unspaced.echo?.letterSpacing ?? 0).toBe(0);
+          for (let offset = 0; offset <= 4; offset += 1) {
+            const position = start + offset;
+            const x = origins.get(position)!;
+            const caret = queries.caretRect(position);
+            expect(caret).not.toBeNull();
+            expect(Math.abs(caret!.x - x)).toBeLessThan(0.01);
+            if (mode === 'worker/resident') {
+              const at = { ...point, offset };
+              const selected = await editWithFrame(client, intent(++seq, 0, 'select', {
+                selection: { anchor: at, focus: at },
+              }));
+              commandFrame = selected.frame!;
+              expect(commandFrame.payload.caret.caretRect).not.toBeNull();
+              expect(Math.abs(commandFrame.payload.caret.caretRect!.x - x)).toBeLessThan(0.01);
+            }
+            if (offset < 4) {
+              const next = origins.get(position + 1)!;
+              const midpoint = (x + next) / 2;
+              for (const [hitX, expected] of [
+                [x, offset], [midpoint - 0.05, offset], [midpoint + 0.05, offset + 1],
+              ] as const) {
+                expect(queries.hitTestRegions(0, hitX, baseline)?.pos).toBe(start + expected);
+                if (mode === 'worker/resident') {
+                  const clicked = await editWithFrame(client, intent(++seq, 0, 'selectPoint', {
+                    page: { pageId: frame.pages[0]!.pageId.toString(), pageIndex: 0 }, x: hitX, y: baseline,
+                    layoutRevision: commandFrame.payload.layoutRevision, frameEpoch: commandFrame.revision,
+                    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+                  }));
+                  commandFrame = clicked.frame!;
+                  expect(engine.selection()!.head.offset).toBe(expected);
+                  expect(Math.abs(commandFrame.payload.caret.caretRect!.x - origins.get(start + expected)!))
+                    .toBeLessThan(0.01);
+                }
+              }
+            }
+          }
+          const last = runs.flatMap(run => run.glyphs.map(glyph =>
+            ({ position: run.docStart! + glyph.cluster, glyph })))
+            .find(entry => entry.position === start + 3)!.glyph;
+          expect(last.advance).toBeDefined();
+          expect(Math.abs(last.x + last.advance! - origins.get(start + 4)!)).toBeLessThan(0.01);
+          const rects = queries.rangeRects(start, start + 4);
+          expect(rects).toHaveLength(1);
+          expect(Math.abs(rects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
+          expect(Math.abs(rects[0]!.x + rects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
+          if (mode === 'worker/resident') {
+            expect(engine.storyRangeRects('body', '', [[start, start + 4]])).toEqual([rects]);
+            const selected = await editWithFrame(client, intent(++seq, 0, 'select', {
+              selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 4 } },
+            }));
+            const frameRects = selected.frame!.payload.selectionRects!;
+            expect(frameRects).toHaveLength(1);
+            expect(Math.abs(frameRects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
+            expect(Math.abs(frameRects[0]!.x + frameRects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
+          }
+        } finally { queries.dispose(); }
+      }
+    } finally {
+      host.destroy();
+      client.destroy();
+    }
+  }, TIMEOUT);
+}
+
 function expectFrameRegions(frame: RetainedFrame, headerText: string, footerText: string): void {
   expect(frameText(frame)).toBe('Seed');
   expect(frame.displayList.pages.length).toBeGreaterThan(0);
