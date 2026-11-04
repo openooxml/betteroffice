@@ -30,7 +30,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
-import { pngDisplayListReaders } from './pngDisplayList';
+import { pngRasterizers } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
 import { resolvePngTarget, type ResolvedPngTarget, type XlsxPngOptions, type XlsxPngTarget } from './pngTarget';
 import { canvasPngAvailable } from '../render/png';
@@ -1319,6 +1319,7 @@ function wrapWorkbookDocument(
       return renderEnginePng({
         doc: doc as unknown as XlsxPngEngine['doc'],
         rasterAvailable: rasterPngAvailable(),
+        rasterize: pngRasterizers.get(handle),
         onSheet: (sheet, read) => {
           const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
           if (sheet === active) return wasmCall(read);
@@ -1471,10 +1472,6 @@ function wrapWorkbookDocument(
       reportDisplayLimit(JSON.parse(json) as DisplayList);
     }
     return json;
-  });
-  pngDisplayListReaders.set(handle, {
-    viewport: (viewport) => wasmCall(() => doc.pngDisplayListJson(JSON.stringify(viewport))),
-    range: (options) => wasmCall(() => doc.rangePngDisplayListJson(JSON.stringify(options ?? {}))),
   });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));

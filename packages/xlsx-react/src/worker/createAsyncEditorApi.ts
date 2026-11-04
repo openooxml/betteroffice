@@ -1,5 +1,5 @@
 import type {
-  Proposal, ProposalEdit, WorkbookHandle, XlsxReadRequest, XlsxReadResult, XlsxFindRequest,
+  Proposal, ProposalEdit, WorkbookHandle, XlsxPngOptions, XlsxPngTarget, XlsxReadRequest, XlsxReadResult, XlsxFindRequest,
   XlsxFindResult, XlsxEditRequest, XlsxEditResult, XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import type { XlsxPluginDocumentAccess } from '../plugins/createPluginDocumentAccess';
@@ -51,8 +51,8 @@ export interface XlsxAsyncEditorApi {
   /** Stages tracked cell edits after pending input drains. */
   proposeChanges?(request: XlsxProposalRequest): Promise<XlsxProposalResult>;
   focus(): void;
-  renderPng(...args: Parameters<WorkbookHandle['renderPng']>): Promise<ReturnType<WorkbookHandle['renderPng']>>;
-  renderRangePng(...args: Parameters<WorkbookHandle['renderRangePng']>): Promise<ReturnType<WorkbookHandle['renderRangePng']>>;
+  /** Draws a viewport or a cell range of a sheet as PNG bytes, after pending input. */
+  renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
   exportStructured(...args: Parameters<WorkbookHandle['exportStructured']>): Promise<ReturnType<WorkbookHandle['exportStructured']>>;
   exportMarkdown(...args: Parameters<WorkbookHandle['exportMarkdown']>): Promise<ReturnType<WorkbookHandle['exportMarkdown']>>;
   printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
@@ -63,7 +63,6 @@ export { XlsxAsyncApiSyncAccessError } from './asyncApiErrors';
 export interface XlsxAsyncExportBridge {
   editorDocument?(): XlsxPluginDocumentAccess | null;
   saved?(bytes: Uint8Array): void;
-  exportSheet(): number;
   exportCoordinator(): PeerlessWorkerInputCoordinator | null;
 }
 
@@ -240,15 +239,11 @@ export function createAsyncEditorApi(
         return proposalRefusal('command-failed');
       }
     },
-    renderPng: (viewport) => exported(() => {
-      const captured = structuredClone(viewport);
-      const sheet = bridge().exportSheet?.() ?? session.session.state.activeSheet;
-      return () => session.session.call.renderPng(captured, { sheet });
-    }),
-    renderRangePng: (options) => exported(() => {
-      const captured = structuredClone(options);
-      const sheet = bridge().exportSheet?.() ?? session.session.state.activeSheet;
-      return () => session.session.call.renderRangePng(captured, { sheet });
+    renderPng: (target, options = {}) => exported(() => {
+      const { signal, ...rest } = options;
+      const captured = structuredClone(target);
+      const wire = structuredClone(rest);
+      return () => session.session.call.renderPng(captured, { ...wire, signal });
     }),
     exportStructured: (options) => exported(() => {
       const captured = structuredClone(options);

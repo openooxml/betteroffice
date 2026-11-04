@@ -232,7 +232,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
     coordinator: () => null, readOnly: () => propsRef.current.readOnly ?? false,
     allowHostProposals: () => propsRef.current.allowHostProposals ?? false, focus,
-    exportSheet: () => activeRef.current, exportCoordinator: () => exportInput.current,
+    exportCoordinator: () => exportInput.current,
     editorDocument: () => pluginAccess, saved: (bytes) => propsRef.current.onSave?.(bytes),
     clearSelection: () => {}, refreshProposals: () => {}, recoverInput: async () => {},
     selectCells: () => false, selectCellsAsync: async () => false, apply: () => {},

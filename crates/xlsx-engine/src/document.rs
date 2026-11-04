@@ -340,6 +340,17 @@ impl Document {
         self.session.render_range_png(args).map_err(message)
     }
 
+    #[cfg(feature = "raster")]
+    pub fn render_png_target(
+        &self,
+        target_json: &str,
+        options_json: &str,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.session
+            .render_png_target(target_json, options_json)
+            .map_err(message)
+    }
+
     pub fn sheet_info_json(&self) -> Result<String, EngineError> {
         self.session.sheet_info_json().map_err(message)
     }

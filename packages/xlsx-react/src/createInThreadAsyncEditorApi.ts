@@ -85,13 +85,11 @@ export function createInThreadAsyncEditorApi(
       onUpdate: (listener) => handle.onUpdate(listener),
     } : null,
     focus: api.focus,
-    renderPng(viewport) {
-      const captured = structuredClone(viewport);
-      return read(() => handle.renderPng(captured));
-    },
-    renderRangePng(options) {
-      const captured = structuredClone(options);
-      return read(() => handle.renderRangePng(captured));
+    async renderPng(target, options = {}) {
+      const { signal, ...rest } = options;
+      const captured = structuredClone(target);
+      const wire = structuredClone(rest);
+      return await read(() => handle.renderPng(captured, { ...wire, signal }));
     },
     exportStructured(options) {
       const captured = structuredClone(options);

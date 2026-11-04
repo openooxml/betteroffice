@@ -516,7 +516,7 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
   return { ...(options.protectedSheets === 'allow' ? { protectedCells: result.applied ? changedProtectedCells : [] } : {}), baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formula source moves unchanged with its row; references keep their original A1 addresses.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };
 }
 
-export function previewXlsx(book: XlsxAgentWorkbook, options: { sheet: string; range: string; scale?: number }) {
+export async function previewXlsx(book: XlsxAgentWorkbook, options: { sheet: string; range: string; scale?: number }) {
   const sheet = book.resolveSheet(options.sheet);
   sized(options.range, 10000);
   const scale = options.scale ?? 1;
@@ -528,12 +528,8 @@ export function previewXlsx(book: XlsxAgentWorkbook, options: { sheet: string; r
   const width = Math.ceil((last.x + last.w - first.x) * scale);
   const height = Math.ceil((last.y + last.h - first.y) * scale);
   if (width <= 0 || height <= 0 || width * height > 16000000) throw new DocumentToolError('PREVIEW_LIMIT', 'Preview exceeds 16 megapixels. Select a smaller range or lower scale.');
-  const active = book.handle.sheetInfo().activeSheet;
-  let png;
-  try {
-    book.handle.setActiveSheet(sheet.index);
-    png = book.handle.renderRangePng({ range: options.range, scale });
-  } finally { book.handle.setActiveSheet(active); }
+  const version = book.handle.version();
+  const png = await book.handle.renderPng({ sheet: sheet.index, range: options.range }, { scale });
   const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
-  return { png, version: book.handle.version(), sheet: sheet.sheetId, range: options.range, width: view.getUint32(16), height: view.getUint32(20), warnings: [] as string[] };
+  return { png, version, sheet: sheet.sheetId, range: options.range, width: view.getUint32(16), height: view.getUint32(20), warnings: [] as string[] };
 }

@@ -11,8 +11,8 @@ export type XlsxRangeAddress =
 
 /** What `renderPng` draws: a viewport of a sheet, or a cell range of it. */
 export type XlsxPngTarget =
-  | { sheet: XlsxSheetRef; viewport: Viewport }
-  | { sheet: XlsxSheetRef; range: XlsxRangeAddress };
+  | { sheet: number | string; viewport: Viewport }
+  | { sheet: number | string; range: XlsxRangeAddress };
 
 export interface XlsxPngOptions {
   /** Device pixels per sheet pixel. Defaults to 1. */
@@ -96,8 +96,8 @@ export function resolvePngTarget(target: unknown, options: XlsxPngOptions, names
   const { sheet } = target as { sheet?: unknown };
   if ('viewport' in target && !('range' in target)) {
     const viewport = (target as { viewport: unknown }).viewport as Viewport;
-    if (typeof viewport !== 'object' || viewport === null || !['x', 'y', 'width', 'height'].every((key) => typeof (viewport as unknown as Record<string, unknown>)[key] === 'number')) {
-      throw new TypeError('viewport must be { x, y, width, height }');
+    if (typeof viewport !== 'object' || viewport === null || !['x', 'y', 'width', 'height'].every((key) => Number.isFinite((viewport as unknown as Record<string, unknown>)[key]))) {
+      throw new TypeError('viewport must be { x, y, width, height } in finite numbers');
     }
     return { sheet: sheetIndex(sheet, names), viewport: { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height } };
   }

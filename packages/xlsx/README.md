@@ -91,9 +91,12 @@ refused rather than discarding the source workbook.
 measured from the workbook's normal font. The caller chooses paper size, margins, and pagination;
 `paintDisplayList` accepts an optional origin in backing-store pixels for positioning the result.
 
-`workbook.renderPng(viewport)` exports the active sheet's viewport. `workbook.renderRangePng()` exports
-its used range, or accepts `{ range, scale }` to select an A1 range and raster scale. Both return PNG
-bytes synchronously; check `isPngExportAvailable()` before calling them.
+`await workbook.renderPng({ sheet, viewport })` draws a viewport of a sheet, and
+`await workbook.renderPng({ sheet, range })` a cell range, as PNG bytes. `sheet` is a zero-based index or
+a tab name; `range` is an A1 string, `{ kind: 'a1', a1 }`, or zero-based `{ kind: 'rowCol', start, end }`.
+Options are `{ scale, maxWidth, maxHeight, signal }`. The editor's painter draws on a canvas, and the call
+rejects with `PngExportError` rather than paint a substitute font. Where there is no canvas, it names
+`@betteroffice/xlsx-native`; `isPngExportAvailable()` reports whether PNG export can run.
 
 ## Worker sessions
 

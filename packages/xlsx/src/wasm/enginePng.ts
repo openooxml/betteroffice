@@ -17,13 +17,15 @@ export interface XlsxPngEngine {
   };
   /** Whether this build's wasm still carries the rasterizer, for runtimes without a canvas. */
   rasterAvailable: boolean;
+  /** A separately loaded rasterizer for the same runtimes, when the session provides one. */
+  rasterize?: (displayListJson: string) => Promise<Uint8Array>;
 }
 
 /** Draws a resolved target through the canvas, or the build's rasterizer where no canvas exists. */
 export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, options: XlsxPngOptions): Promise<Uint8Array> {
   const scale = options.scale ?? 1;
   const canvas = canvasPngAvailable();
-  if (!canvas && !engine.rasterAvailable) {
+  if (!canvas && !engine.rasterAvailable && !engine.rasterize) {
     return Promise.reject(new PngExportError('canvas-unavailable', 'PNG export needs a canvas, and this environment has none. Use @betteroffice/xlsx-native.'));
   }
   if ('viewport' in target) {
@@ -34,7 +36,9 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
     };
     if (!canvas) {
       if (scale !== 1) return Promise.reject(new PngExportError('canvas-unavailable', 'A scaled viewport PNG needs a canvas here. Use @betteroffice/xlsx-native.'));
-      return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderPng!(JSON.stringify(viewport)).slice()));
+      const json = JSON.stringify(viewport);
+      if (engine.rasterAvailable) return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderPng!(json).slice()));
+      return engine.rasterize!(engine.onSheet(target.sheet, () => engine.doc.pngDisplayListJson(json)));
     }
     const list = JSON.parse(engine.onSheet(target.sheet, () => engine.doc.pngDisplayListJson(JSON.stringify(viewport)))) as DisplayList;
     return displayListToPng(list, {
@@ -44,7 +48,8 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
     });
   }
   const args = JSON.stringify({ range: target.range, scale, maxWidth: options.maxWidth, maxHeight: options.maxHeight });
-  if (!canvas) return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderRangePng!(args).slice()));
+  if (!canvas && engine.rasterAvailable) return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderRangePng!(args).slice()));
+  if (!canvas) return engine.rasterize!(engine.onSheet(target.sheet, () => engine.doc.rangePngDisplayListJson(args)));
   const list = JSON.parse(engine.onSheet(target.sheet, () => engine.doc.rangePngDisplayListJson(args))) as DisplayList;
   return displayListToPng(list, {
     dpr: 1, signal: options.signal,

@@ -262,7 +262,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
         const frame = admitted ? admitted.frame : current.frame();
         if (!session.pngExport || !session.call) return fail('png-unavailable');
         if (!frame || !current.deliverPng) return fail('editor-unavailable');
-        const png = await session.call.renderPng(frame.viewport, { sheet: frame.sheet });
+        const png = await session.call.renderPng({ sheet: frame.sheet, viewport: frame.viewport });
         if (bridge().generation() !== generation || bridge().session() !== session) return fail('document-replaced');
         current.deliverPng(png);
         return done();
