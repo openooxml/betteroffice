@@ -1309,6 +1309,7 @@ export interface SelectionMerges {
 }
 
 // ---- session/client.d.ts ----
+import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
 import { type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
 import type { AwarenessCursor } from '../collaboration/types';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
@@ -1356,13 +1357,9 @@ export interface WorkbookSession {
     onAck(listener: (ack: WorkbookAck) => void): () => void;
     markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
     whenPresented(seq: number): Promise<void>;
-    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'printDisplayList'>> & {
         decodeFontFace: FontDecoder;
-        renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
-        renderRangePng(options?: {
-            range?: string;
-            scale?: number;
-        }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
+        renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
         printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
         command(command: WorkbookCommand): Promise<WorkbookAck>;
         /**
@@ -1671,6 +1668,9 @@ import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/prot
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
 import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
+import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
+/** PNG options a session call carries; an abort signal stays on the caller's side. */
+export type WorkbookPngOptions = Omit<XlsxPngOptions, 'signal'>;
 import type { AwarenessPeer, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { XlsxExportOptions, XlsxExportResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxStructuredContent } from '../exports';
 import type { WorkbookCommand, WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookCommandWireFrame, WorkbookEditState, WorkbookWireAck, WorkbookSharedCommand, WorkbookSharedWireAck, WorkbookCommandFrameRequest } from './commandProtocol';
@@ -1829,11 +1829,7 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
     captureFormat(sheet: number, range: string): CapturedFormat;
     sheets(): WorkbookSheetSummary[];
     calculationStatus(): CalculationStatus;
-    renderPng(viewport: Viewport, options?: WorkbookFrameOptions): ArrayBuffer;
-    renderRangePng(options?: {
-        range?: string;
-        scale?: number;
-    }, frameOptions?: WorkbookFrameOptions): ArrayBuffer;
+    renderPng(target: XlsxPngTarget, options?: WorkbookPngOptions): ArrayBuffer;
     exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
     exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
@@ -1865,7 +1861,6 @@ export declare const WORKBOOK_SESSION_METHODS: {
     sheets: true;
     calculationStatus: true;
     renderPng: true;
-    renderRangePng: true;
     exportStructured: true;
     exportMarkdown: true;
     printDisplayList: true;
@@ -2908,6 +2903,13 @@ export * from './client';
 export * from './host';
 export * from './scheduler';
 
+// ---- shared/office-session/pngExportError.d.ts ----
+export type PngExportCode = 'canvas-unavailable' | 'canvas-too-large' | 'font-unavailable';
+export declare class PngExportError extends Error {
+    readonly code: PngExportCode;
+    constructor(code: PngExportCode, message: string);
+}
+
 // ---- shared/office-session/protocol.d.ts ----
 import type { SessionFailureCode } from './types';
 export type ClientMessage = {
@@ -3570,6 +3572,8 @@ import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 export declare const decodeFontFace: FontDecoder;
+import type { XlsxPngOptions, XlsxPngTarget } from './pngTarget';
+export type { XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type { XlsxCellAddress, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
@@ -4041,20 +4045,12 @@ export interface WorkbookHandle extends CollaborationReplica {
     visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
     historyState(): HistoryState;
     /**
-     * render the current sheet viewport to png bytes via the native raster
-     * backend — the same display list the canvas paints, rasterized server-side.
-     * throws if the embedded wasm was built without png export (the `raster`
-     * cargo feature); guard with {@link isPngExportAvailable}.
+     * Draws a viewport or a cell range of a sheet as PNG bytes, with the
+     * editor's painter on a canvas. Rejects with `PngExportError` rather than
+     * paint a substitute font, and where no canvas exists names
+     * `@betteroffice/xlsx-native`.
      */
-    renderPng(viewport: Viewport): Uint8Array;
-    /**
-     * render an a1 range (default: the used range) at an optional scale to png.
-     * dimensions are capped wasm-side; same availability guard as renderPng.
-     */
-    renderRangePng(opts?: {
-        range?: string;
-        scale?: number;
-    }): Uint8Array;
+    renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
     /** serialize the workbook back to .xlsx bytes. */
     save(): Uint8Array;
     /**
@@ -4136,9 +4132,9 @@ export declare function getDisplayListCellLimit(): number;
  */
 export declare function isWasmAvailable(): boolean;
 /**
- * Whether the embedded wasm core was built with png export (the `raster` cargo
- * feature). The wasm-bindgen method only exists on the class when compiled in,
- * so chrome can disable an export control instead of calling and catching.
+ * Whether `renderPng` can draw here: through a canvas, through the native
+ * engine, or through a wasm build that still carries the rasterizer. Chrome can
+ * disable an export control instead of calling and catching.
  */
 export declare function isPngExportAvailable(): boolean;
 /**
@@ -4185,6 +4181,46 @@ export declare function renderXlsxMarkdown(content: XlsxStructuredContent, optio
  */
 export declare function wasmVersion(): string;
 
+// ---- wasm/pngTarget.d.ts ----
+import type { Viewport } from './loader';
+/** A sheet by zero-based index or by tab name. */
+export type XlsxSheetRef = number | string;
+/** A cell range as an A1 string, an A1 object, or zero-based row and column corners. */
+export type XlsxRangeAddress = string | {
+    kind: 'a1';
+    a1: string;
+} | {
+    kind: 'rowCol';
+    start: {
+        row: number;
+        col: number;
+    };
+    end: {
+        row: number;
+        col: number;
+    };
+};
+/**
+ * What `renderPng` draws: a viewport of a sheet, or a cell range of it.
+ * `range: 'used'` draws the sheet's used range as the engine finds it at call time.
+ */
+export type XlsxPngTarget = {
+    sheet: number | string;
+    viewport: Viewport;
+} | {
+    sheet: number | string;
+    range: XlsxRangeAddress | 'used';
+};
+export interface XlsxPngOptions {
+    /** Device pixels per sheet pixel. Defaults to 1. */
+    scale?: number;
+    /** Largest PNG width in pixels; a wider target is cut at its right edge. */
+    maxWidth?: number;
+    /** Largest PNG height in pixels; a taller target is cut at its bottom edge. */
+    maxHeight?: number;
+    signal?: AbortSignal;
+}
+
 // ---- workerSession.d.ts ----
 /** @experimental */
 export { openWorkbookSession } from './session/client';
@@ -4196,6 +4232,9 @@ export { workbookSessionRecovery, WorkbookRecoveryReplayError } from './session/
 export type { WorkbookSessionRecovery } from './session/clientRecovery';
 export { createWorkbookEditSession } from './session/editSession';
 export { WorkbookPngUnavailableError } from './session/methods';
+export { PngExportError } from '../../../shared/office-session/pngExportError';
+export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
 export type { WorkbookEditSession } from './session/editSession';
 /** @experimental */
-export type { WorkbookCellGeometry, WorkbookCellInputs, WorkbookFrame, WorkbookFrameOptions, WorkbookInitialPaint, WorkbookInitialPaintRequest, WorkbookSessionOpenReply, WorkbookSessionEvents, WorkbookSessionMethods, WorkbookSessionOpenOptions, WorkbookSessionState, WorkbookSheetSummary, WorkbookSheetView, } from './session/methods';
+export type { WorkbookCellGeometry, WorkbookCellInputs, WorkbookFrame, WorkbookFrameOptions, WorkbookInitialPaint, WorkbookInitialPaintRequest, WorkbookSessionOpenReply, WorkbookSessionEvents, WorkbookSessionMethods, WorkbookSessionOpenOptions, WorkbookSessionState, WorkbookSheetSummary, WorkbookSheetView, WorkbookPngOptions, } from './session/methods';

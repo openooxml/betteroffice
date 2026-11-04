@@ -2135,6 +2135,10 @@ describe('XlsxEditor commands', () => {
       HTMLCanvasElement.prototype.toBlob = function (callback: BlobCallback) {
         callback(new Blob(['png'], { type: 'image/png' }));
       };
+      const getContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = (() => new Proxy(stubContext() as unknown as Record<string, unknown>, {
+        get: (target, property) => property in target ? target[property as string] : () => ({ addColorStop: () => {} }),
+      })) as unknown as HTMLCanvasElement['getContext'];
       try {
         const editor = await mountCommands({ fileName: 'report.xlsx' });
         const type = (value: string) =>
@@ -2173,6 +2177,7 @@ describe('XlsxEditor commands', () => {
       } finally {
         HTMLAnchorElement.prototype.click = click;
         HTMLCanvasElement.prototype.toBlob = toBlob;
+        HTMLCanvasElement.prototype.getContext = getContext;
       }
     });
   }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { DisplayList } from '../display-list/types';
-import { renderPng, type XlsxPngEngine } from '../wasm/enginePng';
+import { engineKind, renderPng, type XlsxPngEngine } from '../wasm/enginePng';
 import { displayListToPng } from './png';
 
 const text = { op: 'text', x: 4, y: 12, text: 'Total', fontSize: 11, color: '#000000', fontFamily: 'Brand Sans' } as const;
@@ -80,7 +80,7 @@ describe('displayListToPng', () => {
   });
 });
 
-describe('the wasm PNG engine', () => {
+describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
   function engine(overrides: Partial<XlsxPngEngine> = {}) {
     const seen: { sheet: number; call: string; json: string }[] = [];
     let active = 0;
