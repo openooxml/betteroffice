@@ -11,7 +11,7 @@ import type {
 } from '@betteroffice/pptx';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { frameBoundsForShape } from '../interactions';
-import { useTranslation } from '../i18n';
+import { useProposalTranslation } from '../i18n/useProposalTranslation';
 import { useSyncedState } from '../useSyncedState';
 import { proposalImages, proposalPaintChanges } from './proposalImages';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
@@ -94,7 +94,7 @@ export function ProposalCanvasToolbar({
   review: CanvasReview;
   ready: boolean;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const store = usePptxCommands();
   const proposalId = review.selected?.id ?? '';
   const accept = usePptxCommandState('proposalAccept', { proposalId });
@@ -224,7 +224,7 @@ export function ProposalCanvasOverlay({
   onTarget: (slideId: string, shapeId: string) => void;
   onPainted: (diff: ProposalDiffSlide) => void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -297,7 +297,7 @@ export function ProposalShapeOutlines({ diff, current, frame, scale, onTarget }:
   scale: number;
   onTarget: (slideId: string, shapeId: string) => void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const slideId = diff.snapshot.slides[0]?.id;
   const targets = diff.proposal.changes.filter(change => change.slideId === slideId && change.shapeId && (change.before || change.after));
   return <>
@@ -398,7 +398,7 @@ export function ProposalNotesDiff({
   diff: ProposalDiffSlide | null;
   slideId: string;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const notes = diff?.proposal.changes.find(
     (change) =>
       change.slideId === slideId &&

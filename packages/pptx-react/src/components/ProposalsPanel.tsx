@@ -14,7 +14,7 @@ import type {
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { commandReason } from '../commands/evaluate';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
-import { useTranslation } from '../i18n';
+import { useProposalTranslation } from '../i18n/useProposalTranslation';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
 import { proposalSlideLabels } from './proposalLabels';
 import { proposalImages } from './proposalImages';
@@ -91,7 +91,7 @@ export function ProposalsPanel({
   onClose,
   visualDisabledReason,
 }: Props) {
-  const { t, lang } = useTranslation();
+  const { t, lang } = useProposalTranslation();
   const store = usePptxCommands();
   const titleId = useId();
   const [selected, setSelected] = useState<{
@@ -421,7 +421,7 @@ function PreviewCanvas({
   media?: ProposalDiffSlide['media'];
   resolveImage: CanvasImageResolver;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);

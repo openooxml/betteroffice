@@ -159,9 +159,15 @@ const DEFAULT_TOOLBAR: [group: string, controls: string[]][] = [
 test('pptx: long translations keep every toolbar action reachable through More', async ({
   page,
 }) => {
-  const strings = JSON.parse(
-    await readFile(resolve(root, 'packages/pptx-i18n/en.json'), 'utf8')
-  ) as Strings;
+  const [editor, proposals] = await Promise.all(
+    ['en.json', 'proposals/en.json'].map(async (file) => JSON.parse(
+      await readFile(resolve(root, 'packages/pptx-i18n', file), 'utf8')
+    ) as Strings)
+  );
+  const strings: Strings = {
+    ...editor,
+    proposals: { ...(editor.proposals as Strings), ...(proposals.proposals as Strings) },
+  };
   const long = (key: string) => lookup(strings, key) + LONGER;
   await lengthenStrings(page, strings);
   await page.setViewportSize({ width: 320, height: 800 });

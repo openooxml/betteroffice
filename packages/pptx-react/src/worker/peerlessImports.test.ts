@@ -86,6 +86,8 @@ test('default editor static chunks exclude the peerless core', async () => {
       .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path));
   expect(deferredInputs.filter((path) => peerlessCore.test(path))).toHaveLength(7);
   for (const module of [
+    /packages\/pptx-i18n\/proposals\/en\.json$/,
+    /packages\/pptx-react\/src\/i18n\/useProposalTranslation\.ts$/,
     /packages\/pptx-react\/src\/viewer\//,
     /packages\/pptx-react\/src\/worker\/PptxWorkerEditor\.tsx$/,
     /packages\/pptx-react\/src\/worker\/createWorkerEditorApi\.ts$/,

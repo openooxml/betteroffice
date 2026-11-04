@@ -7,7 +7,7 @@ import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 import type { PptxCommandStore } from '../commands/types';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { commandReason } from '../commands/evaluate';
-import { useTranslation } from '../i18n';
+import { useProposalTranslation } from '../i18n/useProposalTranslation';
 import { proposalsPanelStyles as styles } from '../components/proposalsPanelStyles';
 import { PeerlessPresentationOverlay } from './PeerlessPresentationOverlay';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
@@ -30,7 +30,7 @@ function changesKey(proposal: Proposal): string {
 export interface PeerlessReviewState { open: boolean; selectedId: string | null; diff: boolean; presenting: boolean; slideId?: string | null; slideVersion?: string }
 
 function Diff({ run, id, slideId, onPreview, onError, onTarget }: { run: PeerlessPresentation; id: string; slideId?: string | null; onPreview(proposal: Proposal | null): void; onError(error: Error): void; onTarget(): void }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   const [painted, setPainted] = useState<{ diff: ProposalDiffSlide; frame: SlideDisplayList; scale: number } | null>(null);
@@ -85,7 +85,7 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
   run: PeerlessPresentation; diffHost: RefObject<HTMLElement | null>; state: PeerlessReviewState; proposals: Proposal[]; commands: PptxCommandStore;
   onError(error: Error): void; exit(): void;
 }) {
-  const { t, lang } = useTranslation();
+  const { t, lang } = useProposalTranslation();
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [reviewed, setReviewed] = useState<Proposal | null>(null);
   const accepting = useRef(false);
