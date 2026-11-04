@@ -85,8 +85,11 @@ export function fontProvider(
     if (loader === undefined) {
       const slices = locateSlices?.(face);
       const coverage = knownCoverage(face.file);
-      loader = Object.assign(() => loadBytes(face), options, slices ? { slices } : undefined,
-        coverage === undefined ? undefined : { coverage }, readBytes && { readOnlyBytes: () => readBytes(face) });
+      loader = Object.assign(() => loadBytes(face), options, {
+        ...(slices && { slices }),
+        ...(coverage === undefined ? undefined : { coverage }),
+        ...(readBytes && { readOnlyBytes: () => readBytes(face) }),
+      });
       loaders.set(key, loader);
     }
     return loader;
