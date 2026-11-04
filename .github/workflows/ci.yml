@@ -599,6 +599,8 @@ jobs:
           (cd packages/docx && bun scripts/copy-assets.ts)
           node scripts/node-worker-sessions-smoke.mjs
           node scripts/node-worker-sessions-smoke.mjs --keep-alive
+          timeout 300 bun scripts/node-worker-sessions-smoke.mjs
+          timeout 300 deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi scripts/node-worker-sessions-smoke.mjs
           bun scripts/worker-bundling-smoke.mjs
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)

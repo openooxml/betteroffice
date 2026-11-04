@@ -1,5 +1,5 @@
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { createSessionWorker } from '#session-worker';
+import { createSessionWorker } from './sessionWorker';
 import {
   adoptPresentationPeerIdentity, initWasm, openPresentationPeerDeck,
   registerPresentationPeerFonts, type PresentationPeerHandle,

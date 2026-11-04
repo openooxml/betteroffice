@@ -44,14 +44,37 @@ if (process.argv.includes('--keep-alive-child')) {
 } else {
   const pptxBytes = fixture('apps/demo/public/betteroffice-demo.pptx');
   const docxBytes = fixture('apps/demo/public/betteroffice-demo.docx');
+  const runtime = globalThis.Deno ? 'Deno' : globalThis.Bun ? 'Bun' : 'Node';
+  assert.equal(typeof Worker === 'function', runtime !== 'Node', `${runtime} worker sessions use the wrong worker kind`);
+  const started = [];
+  const builtin = globalThis.process?.getBuiltinModule?.bind(globalThis.process);
+  if (builtin) {
+    globalThis.process.getBuiltinModule = (id) => {
+      const module = builtin(id);
+      if (id !== 'node:worker_threads' || !module) return module;
+      return { ...module, Worker: class extends module.Worker {
+        constructor(url, options) { super(url, options); started.push(['worker_threads', String(url)]); }
+      } };
+    };
+  }
+  if (runtime !== 'Node') {
+    globalThis.Worker = class extends globalThis.Worker {
+      constructor(url, options) { super(url, options); started.push(['web', String(url)]); }
+    };
+  }
   for (const suffix of ['', '-native']) {
     for (const format of ['xlsx', 'pptx', 'docx']) {
       const entry = import.meta.resolve(`@betteroffice/${format}${suffix}/worker`);
-      for (const [specifier, variant] of [['#session-worker', 'sessionWorker'], ['#session-scope', 'sessionScope']]) {
-        const adapter = createRequire(entry).resolve(specifier);
-        assert.match(adapter, new RegExp(`${variant}\\.node\\.(?:js|mjs)$`));
-        assert.ok(existsSync(adapter), `Missing conditional worker adapter: ${adapter}`);
+      const dist = new URL('.', entry);
+      for (const worker of format === 'docx' ? ['docxWorker', 'yrs/docxWorker'] : [`${format}SessionWorker`]) {
+        for (const file of [`${worker}.mjs`, `${worker}.node.mjs`]) {
+          assert.ok(existsSync(new URL(file, dist)), `Missing worker entry: ${new URL(file, dist).href}`);
+        }
       }
+      if (runtime !== 'Node') continue;
+      const adapter = createRequire(entry).resolve('#session-worker');
+      assert.match(adapter, /sessionWorker\.node\.(?:js|mjs)$/);
+      assert.ok(existsSync(adapter), `Missing conditional worker adapter: ${adapter}`);
     }
     const { openWorkbookSession } = await import(`@betteroffice/xlsx${suffix}/worker`);
     const workbook = await openWorkbookSession(xlsxBytes);
@@ -124,6 +147,17 @@ if (process.argv.includes('--keep-alive-child')) {
       reopenedDocument?.destroy();
       document.destroy();
     }
-    console.log(`Node XLSX/PPTX${suffix} worker read, edit and save/reopen and DOCX${suffix} worker read and save/reopen checks passed.`);
+    console.log(`${runtime} XLSX/PPTX${suffix} worker read, edit and save/reopen and DOCX${suffix} worker read and save/reopen checks passed.`);
   }
+  const kind = runtime === 'Node' ? 'worker_threads' : 'web';
+  const file = runtime === 'Node' ? /\/(?:xlsxSessionWorker|pptxSessionWorker|docxWorker)\.node\.mjs$/ : /\/(?:xlsxSessionWorker|pptxSessionWorker|docxWorker)\.mjs$/;
+  assert.ok(started.length >= 12, `${runtime} started ${started.length} session workers: ${JSON.stringify(started)}`);
+  for (const [path, url] of started) {
+    assert.equal(path, kind, `${runtime} started a ${path} worker for ${url}`);
+    assert.match(url, file, `${runtime} started the wrong worker file ${url}`);
+  }
+  for (const worker of ['xlsxSessionWorker', 'pptxSessionWorker', 'docxWorker']) {
+    assert.ok(started.some(([, url]) => url.includes(`/${worker}.`)), `${runtime} never started ${worker}`);
+  }
+  console.log(`${runtime} sessions ran on ${kind} workers from the ${runtime === 'Node' ? 'Node' : 'browser'} worker files.`);
 }

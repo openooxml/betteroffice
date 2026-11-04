@@ -71,7 +71,7 @@ describe('native package registry', () => {
     }
   });
 
-  test('selects worker variants through private conditional imports', () => {
+  test('selects the Node worker variant through a private conditional import', () => {
     for (const format of ['xlsx', 'pptx', 'docx']) {
       const extension = format === 'docx' ? 'mjs' : 'js';
       const directory = format === 'docx' ? 'yrs' : 'session';
@@ -80,25 +80,22 @@ describe('native package registry', () => {
       const imports = {
         '#session-worker': {
           node: `./dist/sessionWorker.node.${extension}`,
-          default: `./dist/sessionWorker.browser.${extension}`,
-        },
-        '#session-scope': {
-          node: `./dist/sessionScope.node.${extension}`,
-          default: `./dist/sessionScope.browser.${extension}`,
+          default: `./dist/sessionWorker.missing.${extension}`,
         },
       };
       expect(core.imports).toEqual(imports);
       expect(native.imports).toEqual(imports);
       const config = JSON.parse(readFileSync(new URL(`../packages/${format}/tsconfig.json`, import.meta.url), 'utf8'));
       expect(config.compilerOptions.paths['#session-worker']).toEqual([`./src/${directory}/sessionWorker.node.ts`]);
-      expect(config.compilerOptions.paths['#session-scope']).toEqual([`./src/${directory}/sessionScope.node.ts`]);
+      expect(config.compilerOptions.paths['#session-scope']).toBeUndefined();
+      const worker = format === 'docx' ? "'yrs/docxWorker" : `${format}SessionWorker`;
       for (const path of [`packages/${format}/tsup.config.ts`, `bindings/${format}-native/js/tsup.config.ts`]) {
         const build = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
-        expect(build).toMatch(/external: \[[^\]]*'#session-worker', '#session-scope'/);
-        expect(build).toContain("'sessionWorker.browser':");
+        expect(build).toMatch(/external: \[[^\]]*'#session-worker'\]/);
+        expect(build).not.toContain('#session-scope');
+        expect(build).toContain(`${worker}.node':`);
         expect(build).toContain("'sessionWorker.node':");
-        expect(build).toContain("'sessionScope.browser':");
-        expect(build).toContain("'sessionScope.node':");
+        expect(build).toContain("'sessionWorker.missing':");
       }
     }
   });
@@ -547,8 +544,9 @@ describe('native package release wiring', () => {
     expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs\n');
     expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs --keep-alive');
     expect(smoke.run).toContain('bun scripts/worker-bundling-smoke.mjs');
-    expect(smoke.run).not.toContain('bun scripts/node-worker-sessions-smoke.mjs');
-    expect(smoke.run).not.toContain('deno run scripts/node-worker-sessions-smoke.mjs');
+    expect(smoke.run).toContain('\ntimeout 300 bun scripts/node-worker-sessions-smoke.mjs\n');
+    expect(smoke.run).toContain('\ntimeout 300 deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi scripts/node-worker-sessions-smoke.mjs\n');
+    expect(smoke.run).not.toMatch(/(?:^|\n)(?:bun|deno run)[^\n]*node-worker-sessions-smoke/);
     expect(smoke.run).toContain('bun scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(smoke.run).toContain('$smoke_dir/node_modules/@betteroffice/$format');
