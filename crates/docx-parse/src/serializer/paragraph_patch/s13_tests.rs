@@ -1090,7 +1090,10 @@ fn paragraph_patch_s13_marker_paragraph_the_model_cannot_splice_replaces_only_th
     );
     assert_eq!(
         warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"marker\":1}"]
+        [
+            "DOCX_MODEL_ONLY_RETRY word/document.xml spliced",
+            "DOCX_MINIMAL_PATCH replace counts {\"marker\":1}"
+        ]
     );
 }
 

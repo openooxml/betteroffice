@@ -1492,6 +1492,12 @@ impl StoryParts<'_> {
         if spliced.is_none() && model_part.is_some() {
             reasons.clear();
             spliced = attempt(original, &patched, &mut reasons);
+            let outcome = if spliced.is_some() {
+                "spliced"
+            } else {
+                "whole"
+            };
+            context.warn(format!("DOCX_MODEL_ONLY_RETRY {} {outcome}", original.part));
         }
         let part = original;
         if let Some(spliced) = spliced {
