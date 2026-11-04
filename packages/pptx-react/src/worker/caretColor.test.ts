@@ -89,3 +89,9 @@ test('an empty line over an unknown fill gets a haloed caret, in the insertion c
 test('a known solid fill never gets a halo', () => {
   expect(pptxCaretColors(slide([shape('#202020')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).halo).toBeUndefined();
 });
+
+test('translucent fills are composited over what is beneath them', () => {
+  const dark = { kind: 'solid', color: '#000000' } satisfies Paint;
+  expect(pptxCaretColors(slide([shape('#ffffff80')], dark), line(), 0, caret, '#808080')).toEqual({ color: '#000000', background: '#808080' });
+  expect(pptxCaretColors(slide([shape('#00000000')]), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff' });
+});

@@ -5,24 +5,37 @@ type Rgb = readonly [number, number, number];
 
 const WHITE = '#ffffff';
 
-function parseColor(value: string | undefined): Rgb | null {
+function parseRgba(value: string | undefined): readonly [number, number, number, number] | null {
   if (!value) return null;
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(value.trim());
   if (hex) {
     const digits = hex[1]!.length === 3 ? [...hex[1]!].map((digit) => digit + digit).join('') : hex[1]!;
-    if (digits.length === 8 && parseInt(digits.slice(6), 16) < 128) return null;
-    return [0, 2, 4].map((offset) => parseInt(digits.slice(offset, offset + 2), 16)) as unknown as Rgb;
+    const [r, g, b] = [0, 2, 4].map((offset) => parseInt(digits.slice(offset, offset + 2), 16));
+    return [r!, g!, b!, digits.length === 8 ? parseInt(digits.slice(6), 16) / 255 : 1];
   }
   const rgb = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)(?:[\s,/]+([\d.]+%?))?\s*\)$/i.exec(value.trim());
   if (!rgb) return null;
-  if (rgb[4] !== undefined && parseFloat(rgb[4]) < (rgb[4].endsWith('%') ? 50 : 0.5)) return null;
-  return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+  const alpha = rgb[4] === undefined ? 1 : rgb[4].endsWith('%') ? parseFloat(rgb[4]) / 100 : parseFloat(rgb[4]);
+  return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), Math.min(1, Math.max(0, alpha))];
 }
 
-function paintColor(paint: Paint | undefined): Rgb | null {
+function parseColor(value: string | undefined): Rgb | null {
+  const rgba = parseRgba(value);
+  return rgba && rgba[3] >= 0.5 ? [rgba[0], rgba[1], rgba[2]] : null;
+}
+
+/** A colour painted over `under`, alpha composited. */
+function over(value: string | undefined, under: Rgb): Rgb | null {
+  const rgba = parseRgba(value);
+  if (!rgba) return null;
+  const alpha = rgba[3];
+  return [0, 1, 2].map((channel) => Math.round(rgba[channel]! * alpha + under[channel]! * (1 - alpha))) as unknown as Rgb;
+}
+
+function paintColor(paint: Paint | undefined, under: Rgb): Rgb | null {
   if (!paint) return null;
-  if (paint.kind === 'solid') return parseColor(paint.color);
-  const stops = paint.stops.map((stop) => parseColor(stop.color)).filter((stop): stop is Rgb => stop !== null);
+  if (paint.kind === 'solid') return over(paint.color, under);
+  const stops = paint.stops.map((stop) => over(stop.color, under)).filter((stop): stop is Rgb => stop !== null);
   if (!stops.length) return null;
   return [0, 1, 2].map((channel) => Math.round(stops.reduce((sum, stop) => sum + stop[channel]!, 0) / stops.length)) as unknown as Rgb;
 }
@@ -46,8 +59,8 @@ function hex([r, g, b]: Rgb): string {
 
 interface Fill { color: Rgb; solid: boolean }
 
-function fillOf(paint: Paint | undefined): Fill | null {
-  const color = paintColor(paint);
+function fillOf(paint: Paint | undefined, under: Rgb): Fill | null {
+  const color = paintColor(paint, under);
   return color && paint ? { color, solid: paint.kind === 'solid' } : null;
 }
 
@@ -59,7 +72,7 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
       continue;
     }
     if (primitive.kind !== 'shape' && primitive.kind !== 'image') continue;
-    const paint = primitive.kind === 'shape' ? fillOf(primitive.fill) : null;
+    const paint = primitive.kind === 'shape' ? fillOf(primitive.fill, fill.color) : null;
     if (primitive.kind === 'shape' && !paint) continue;
     const box = transformedRect(transforms, { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h });
     if (!(x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height)) continue;
@@ -81,7 +94,7 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
 export function pptxCaretColors(list: SlideDisplayList | null | undefined, line: PositionedTextLine | null | undefined,
   position: number | null | undefined, caret: CommandRect | null | undefined,
   insertion?: string | null): { color: string; background: string; halo?: string } {
-  let under: Fill = fillOf(list?.background) ?? { color: parseColor(WHITE)!, solid: true };
+  let under: Fill = fillOf(list?.background, [255, 255, 255]) ?? { color: [255, 255, 255], solid: true };
   if (list && caret) under = fillAt(list.primitives, [], caret.x + caret.width / 2, caret.y + caret.height / 2, under);
   const fill = under.color;
   const runs = line?.runs ?? [];
