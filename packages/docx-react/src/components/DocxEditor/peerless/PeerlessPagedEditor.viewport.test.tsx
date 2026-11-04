@@ -11,7 +11,7 @@ import type { PeerlessFrameGeometry } from './viewStore';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
-import { commandPageGeometry } from './commandPageGeometry';
+import { commandPageGeometry, frameGeometry } from './commandPageGeometry';
 import { fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -269,7 +269,8 @@ function scrapedPrepareGeometry(dependencies: Record<string, unknown>) {
   const end = source.indexOf('\n  }, []);', start);
   const body = new Bun.Transpiler({ loader: 'tsx' }).transformSync(`function prepare(frame) {${source.slice(start, end)} }`);
   const all = { identity: { current: identity }, retained: { current: null }, prepared: { current: new WeakMap() },
-    pageIndexes: { current: new Map() }, CANVAS_PAGE_GAP_PX, commandPageGeometry,
+    pageIndexes: { current: new Map() }, geometrySources: { current: new WeakMap() }, rasterScale: 1,
+    CANVAS_PAGE_GAP_PX, commandPageGeometry, frameGeometry,
     decodeCommandFrameDeltas: (candidate: DocxCommandFrame) =>
       [...(candidate.payload.pageFrames ?? []), candidate.payload.frame].map((bytes) =>
         (dependencies.decodeFrameDelta as (bytes: unknown) => unknown)(bytes)),

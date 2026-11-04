@@ -31,7 +31,7 @@ import { createDocxCommandConnection, discardCommandPresentation, SessionFailure
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
-import { commandPageGeometry } from './commandPageGeometry';
+import { frameGeometry, type PreparedFrameGeometry } from './commandPageGeometry';
 import { createDocxPluginHost, type DocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { usePluginReservations } from '../../../plugins/reservations';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
@@ -389,7 +389,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const identity = useRef<PeerlessViewIdentity | null>(null);
   const retained = useRef<RetainedFrame | null>(null);
   const pageIndexes = useRef(new Map<string, number>());
-  const prepared = useRef(new WeakMap<DocxCommandFrame, PeerlessFrameGeometry>());
+  const prepared = useRef(new WeakMap<DocxCommandFrame, PreparedFrameGeometry>());
+  const geometrySources = useRef(new WeakMap<PeerlessFrameGeometry, PreparedFrameGeometry>());
   const renderEnvironment = useRef({ theme: null as DocxEditorProps['theme'], requested: '' });
   const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: DocxFontEnvironment;
     requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'];
@@ -700,6 +701,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       retained.current = null;
       pageIndexes.current = new Map();
       prepared.current = new WeakMap();
+      geometrySources.current = new WeakMap();
       releaseResident.current = abort;
       return connection;
     } catch (error) {
@@ -931,47 +933,39 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     ) ?? null;
   }, []);
 
-  const prepareGeometry = useCallback((frame: DocxCommandFrame): PeerlessFrameGeometry | undefined => {
+  const prepareGeometry = useCallback((frame: DocxCommandFrame, rasterScale = 1): PeerlessFrameGeometry | undefined => {
     for (const capture of printCaptures.current) capture.accept(frame);
     if (!identity.current) return undefined;
     const cached = prepared.current.get(frame);
-    if (cached) return cached;
+    if (cached) {
+      if (cached.geometry.rasterScale === rasterScale) return cached.geometry;
+      const geometry = frameGeometry(cached, rasterScale);
+      geometrySources.current.set(geometry, { ...cached, geometry });
+      return geometry;
+    }
     try {
       let next = retained.current;
       for (const delta of decodeCommandFrameDeltas(frame)) next = applyFrameDelta(next, delta);
       if (!next) return undefined;
       const caret = residentCaretSnapshotForFrame(frame.payload.caret, next);
       if (!caret) return undefined;
-      const pages = commandPageGeometry(next, frame.payload);
-      const geometry: PeerlessFrameGeometry = {
-        identity: identity.current,
-        coversThroughSeq: frame.coversThroughSeq,
-        frameEpoch: next.frameEpoch,
-        layoutRevision: frame.payload.layoutRevision,
-        layoutEpoch: next.layoutEpoch,
-        documentVersion: frame.payload.documentVersion,
-        objects: frame.payload.geometry,
-        documentWidth: frame.payload.documentWidth,
-        layoutProvisional: frame.payload.layoutProvisional,
-        ...(frame.payload.reservations ? { reservations: frame.payload.reservations } : {}),
-        pages,
-        caret: caret.caretRect ? { ...caret.caretRect,
-          x: caret.caretRect.x + (pages[caret.caretRect.pageIndex]?.bounds.x ?? 0), y: caret.caretRect.y + (pages[caret.caretRect.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
-        selectionFocus: frame.payload.selectionFocus ? { ...frame.payload.selectionFocus,
-          x: frame.payload.selectionFocus.x + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.x ?? 0),
-          y: frame.payload.selectionFocus.y + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
-        parts: frame.payload.parts,
-        selectionRects: (frame.payload.selectionRects ?? []).map(({ pageIndex, x, y, width, height }) => ({
-          x: x + (pages[pageIndex]?.bounds.x ?? 0), y: y + (pages[pageIndex]?.bounds.y ?? 0), width, height,
-        })),
-      };
+      const geometry = frameGeometry({ frame, retained: next, caret, identity: identity.current }, rasterScale);
       retained.current = next;
       pageIndexes.current = new Map(next.pages.map(({ pageId, pageIndex }) => [pageId.toString(), pageIndex]));
-      prepared.current.set(frame, geometry);
+      const source = { frame, retained: next, caret, identity: identity.current, geometry };
+      prepared.current.set(frame, source);
+      geometrySources.current.set(geometry, source);
       return geometry;
     } catch {
       return undefined;
     }
+  }, []);
+  const rescaleGeometry = useCallback((geometry: PeerlessFrameGeometry, rasterScale: number) => {
+    const source = geometrySources.current.get(geometry);
+    if (!source) return undefined;
+    const rescaled = frameGeometry(source, rasterScale);
+    geometrySources.current.set(rescaled, { ...source, geometry: rescaled });
+    return rescaled;
   }, []);
 
   const recovery = useMemo<UsePeerlessEditSessionOptions['recovery']>(() => ({
@@ -988,9 +982,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     },
   }), [source, openResident, updateReadOnly, updateRenderEnvironment, updateFontEnvironment]);
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
-    source, openConnection, recovery: workerCollaboration.openOptions ? undefined : recovery, canvasForPage, prepareGeometry, onError: reportError,
+    source, openConnection, recovery: workerCollaboration.openOptions ? undefined : recovery, canvasForPage, prepareGeometry, rescaleGeometry, onError: reportError,
     onRecoverableError: error => { controller.stalled(error); reportRecoverableError(error); },
-  } : null, [source, openConnection, recovery, workerCollaboration.openOptions, canvasForPage, prepareGeometry, reportError, reportRecoverableError, controller]);
+  } : null, [source, openConnection, recovery, workerCollaboration.openOptions, canvasForPage, prepareGeometry, rescaleGeometry, reportError, reportRecoverableError, controller]);
   useEffect(() => {
     if (shellState.status !== 'ready' || !previewJob) return;
     setPreviewJob(null);
