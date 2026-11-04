@@ -137,6 +137,7 @@
       "inputFailed": "לא ניתן לשמור את הזנת התא שלפני כן.",
       "sheetProtected": "תא זה נמצא בגיליון מוגן.",
       "hostRefused": "עריכה זו אינה מותרת.",
+      "tooManyToCheck": "יותר מדי תאים לבדיקה על ידי תוספים (מגבלה {limit}).",
       "documentReplaced": "נפתחה חוברת עבודה אחרת.",
       "targetChanged": "הבחירה השתנתה.",
       "gestureActive": "סיים תחילה להזיז את התרשים.",

@@ -137,6 +137,7 @@
       "inputFailed": "Không thể lưu mục nhập ô trước đó.",
       "sheetProtected": "Ô này nằm trên một trang tính được bảo vệ.",
       "hostRefused": "Không được phép chỉnh sửa này.",
+      "tooManyToCheck": "Quá nhiều ô để plugin kiểm tra (giới hạn {limit}).",
       "documentReplaced": "Đã mở một sổ làm việc khác.",
       "targetChanged": "Vùng chọn đã thay đổi.",
       "gestureActive": "Hãy hoàn tất việc di chuyển biểu đồ trước.",

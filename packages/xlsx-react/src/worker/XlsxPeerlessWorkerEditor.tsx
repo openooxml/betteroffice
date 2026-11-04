@@ -41,6 +41,7 @@ import type { XlsxRevealAlignment } from '../plugins/createPluginClients';
 import { createPeerlessPluginClients } from '../plugins/createPeerlessPluginClients';
 import { createPeerlessPluginDocument, createPeerlessPluginGeometry } from '../plugins/createPeerlessPluginDocument';
 import type { XlsxPluginDocumentAccess } from '../plugins/createPluginDocumentAccess';
+import { changedEdits, coverRanges, GATE_CELL_LIMIT, inputRanges, withGatedInputs } from '../plugins/editGate';
 import type { XlsxPluginCellCommit, XlsxPluginCellRef, XlsxPluginNavigationFailureCode } from '../plugins/types';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginRowGutter } from '../plugins/PluginRowGutter';
@@ -575,21 +576,20 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     return !sheetId || editGate.openGate().cellEditable({ sheetId, row: cell.row, col: cell.col });
   }, [editGate]);
 
-  /** Runs typed writes through the plugins once the worker confirmed protection does not refuse them first. */
-  const gateWrites = async (
-    owner: PeerlessWorkbookSession, sheetId: string, edits: readonly CellInputEdit[],
-    source: XlsxPluginCellCommit['source']
-  ): Promise<CellInputEdit[]> => {
-    if (edits.length === 0) return [...edits];
-    const cells: XlsxPluginCellRef[] = edits.map(({ row, col }) => ({ sheetId, row, col }));
+  /** Whether sheet protection refuses writing `ranges` of a protected sheet, which it does before plugins are asked. */
+  const lockedBySheet = async (owner: PeerlessWorkbookSession, sheetId: string, ranges: readonly CellRange[]) => {
     const catalog = await owner.session.call.readCells({ ranges: [] });
     const entry = catalog.ok ? catalog.sheets.find((sheet) => sheet.sheetId === sheetId) : undefined;
-    if (catalog.ok && entry && !entry.editable) {
-      const check = await owner.session.call.validateEdits({ expectVersion: catalog.version,
-        steps: cells.map(({ row, col }) => ({ op: 'setCellInputs' as const, inputs: [['']],
-          target: { sheetId, range: { kind: 'rowCol' as const, start: { row, col }, end: { row, col } } } })) });
-      if (!check.ok && check.failure.code === 'locked-target') return [...edits];
-    }
+    if (!catalog.ok || !entry || entry.editable) return false;
+    const check = await owner.session.call.validateEdits({ expectVersion: catalog.version,
+      steps: ranges.map(({ top, left, bottom, right }) => ({ op: 'setCellInputs' as const,
+        inputs: Array.from({ length: bottom - top + 1 }, () => Array<string>(right - left + 1).fill('')),
+        target: { sheetId, range: { kind: 'rowCol' as const, start: { row: top, col: left }, end: { row: bottom, col: right } } } })) });
+    return !check.ok && check.failure.code === 'locked-target';
+  };
+  /** Asks the plugins about `edits` in one pass: the inputs to write, or a throw refusing them all. */
+  const askPlugins = (sheetId: string, edits: readonly CellInputEdit[], source: XlsxPluginCellCommit['source']) => {
+    const cells: XlsxPluginCellRef[] = edits.map(({ row, col }) => ({ sheetId, row, col }));
     const refusal = (message: string | null) => new XlsxHostRefusalError(message ?? t('commands.reasons.hostRefused'));
     const pass = editGate.openGate();
     if (!cells.every((cell) => pass.cellEditable(cell))) throw refusal(null);
@@ -598,6 +598,44 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (!outcome.ok) throw refusal(outcome.message);
       return { ...edit, input: outcome.input };
     });
+  };
+  /** Runs typed writes through the plugins once the worker confirmed protection does not refuse them first. */
+  const gateWrites = async (
+    owner: PeerlessWorkbookSession, sheetId: string, edits: readonly CellInputEdit[],
+    source: XlsxPluginCellCommit['source']
+  ): Promise<CellInputEdit[]> => {
+    if (edits.length === 0) return [...edits];
+    if (await lockedBySheet(owner, sheetId, edits.map(({ row, col }) => ({ top: row, bottom: row, left: col, right: col })))) {
+      return [...edits];
+    }
+    return askPlugins(sheetId, edits, source);
+  };
+  /** A cut through the plugins: its cells holding content are asked as cleared, before the clipboard is written. */
+  const gateCut = async (
+    owner: PeerlessWorkbookSession, sheetId: string, range: CellRange, cells: readonly (readonly { input: string }[])[]
+  ): Promise<CellInputEdit[]> => {
+    const content = cells.flatMap((row, dr) => row.flatMap(({ input }, dc) =>
+      input === '' ? [] : [{ row: range.top + dr, col: range.left + dc, input: '' }]));
+    if (content.length > GATE_CELL_LIMIT) {
+      throw new XlsxHostRefusalError(t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT }));
+    }
+    return gateWrites(owner, sheetId, content, 'cut');
+  };
+  /**
+   * A paste through the plugins: each cell it changes is asked once, with the input written there,
+   * after protection had its say; any refusal refuses the whole paste.
+   */
+  const gatePaste = async (
+    owner: PeerlessWorkbookSession, sheet: number, sheetId: string, edits: CellInputEdit[]
+  ): Promise<CellInputEdit[]> => {
+    if (edits.length === 0 || !editGate.gatesEdits() || await lockedBySheet(owner, sheetId, coverRanges(edits))) return edits;
+    const ranges = inputRanges(edits);
+    const read = await Promise.all(ranges.map(async (range) => (await owner.session.call.cellInputs(sheet, rangeA1(range))).cells));
+    const changed = changedEdits(edits, ranges, read);
+    if (changed.length > GATE_CELL_LIMIT) {
+      throw new XlsxHostRefusalError(t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT }));
+    }
+    return withGatedInputs(edits, changed, askPlugins(sheetId, changed, 'paste'));
   };
   /**
    * The cells of `range` that hold content, read inside the used range in bounded chunks; null when
@@ -1264,20 +1302,24 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       const ticket = coordinator.clipboard(() => {
         const reading = access.read!;
         const writing = cellClipboard.pending;
-        return coordinator.runAfterPendingInput(async () => { await writing; return reading; }, true);
-      }, ({ text, html }) => {
-        pasted = cellClipboard.paste(owner, text, range, html, sheet);
-        const rows = pasted ? [] : parseCellClipboardText(text);
-        const edits: CellInputEdit[] = pasted?.edits ?? [];
-        let lastCol = 0;
-        if (!pasted) rows.forEach((row, dr) => {
-          lastCol = Math.max(lastCol, row.length - 1);
-          row.forEach((input, dc) => edits.push({ row: range.top + dr, col: range.left + dc, input }));
-        });
-        const next: Selection = { anchor: { row: range.top, col: range.left }, focus: {
-          row: pasted?.bottom ?? range.top + Math.max(0, rows.length - 1),
-          col: pasted?.right ?? range.left + lastCol,
-        } };
+        return coordinator.runAfterPendingInput(async () => {
+          await writing;
+          const { text, html } = await reading;
+          pasted = cellClipboard.paste(owner, text, range, html, sheet);
+          const rows = pasted ? [] : parseCellClipboardText(text);
+          const edits: CellInputEdit[] = pasted?.edits ?? [];
+          let lastCol = 0;
+          if (!pasted) rows.forEach((row, dr) => {
+            lastCol = Math.max(lastCol, row.length - 1);
+            row.forEach((input, dc) => edits.push({ row: range.top + dr, col: range.left + dc, input }));
+          });
+          const next: Selection = { anchor: { row: range.top, col: range.left }, focus: {
+            row: pasted?.bottom ?? range.top + Math.max(0, rows.length - 1),
+            col: pasted?.right ?? range.left + lastCol,
+          } };
+          return { edits: await gatePaste(owner, sheet, target.sheetId, edits), next };
+        }, true);
+      }, ({ edits, next }) => {
         if (ownerRef.current === owner && navigation.current === at && !draftController.ownsFocus &&
           !selectionNavigation.isPending(navigationContext())) predict(sheet, next, false, true);
         return { kind: 'editCells', payload: { args: [sheet, edits], target, selection: rangeTarget(sheet, next) } };
@@ -1297,7 +1339,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       const range = await copiedSelection(owner.session, sheet, selected);
       const result = await owner.session.call.cellInputs(sheet, rangeA1(range));
       checkOwner();
-      return { range, cells: result.cells };
+      const cleared = kind === 'cut' && editGate.gatesEdits()
+        ? await gateCut(owner, target.sheetId, range, result.cells) : null;
+      return { range, cells: result.cells, cleared };
     }, kind === 'cut' ? true : 'posted');
     const written = copied.then(async ({ range, cells }) => {
       checkOwner();
@@ -1309,9 +1353,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     });
     cellClipboard.pending = written.catch(() => {});
     if (kind === 'cut') {
-      const ticket = coordinator.clipboard(() => written, () => ({ kind: 'applyOps', payload: {
-        toolbar: { id: 'clear', args: null, target }, selection: target,
-      } }));
+      const ticket = coordinator.clipboard(() => written.then(() => copied), ({ cleared }): PeerlessWorkerCommandInput =>
+        cleared?.length ? { kind: 'editCells', payload: { args: [sheet, cleared], target, selection: target } }
+          : { kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } });
       void ticket.result.catch((error) => { reject!(error); report(error); });
     } else void written.catch((error) => { reject!(error); report(error); });
   };

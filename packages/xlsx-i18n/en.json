@@ -137,6 +137,7 @@
       "inputFailed": "The cell entry before this could not be saved.",
       "sheetProtected": "This cell is on a protected sheet.",
       "hostRefused": "This edit is not allowed.",
+      "tooManyToCheck": "Too many cells for plugins to check (limit {limit}).",
       "documentReplaced": "Another workbook was opened.",
       "targetChanged": "The selection changed.",
       "gestureActive": "Finish moving the chart first.",

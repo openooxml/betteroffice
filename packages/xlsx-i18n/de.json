@@ -137,6 +137,7 @@
       "inputFailed": "Die vorherige Zelleneingabe konnte nicht gespeichert werden.",
       "sheetProtected": "Diese Zelle liegt auf einem geschützten Blatt.",
       "hostRefused": "Diese Bearbeitung ist nicht zulässig.",
+      "tooManyToCheck": "Zu viele Zellen für die Prüfung durch Plugins (Limit {limit}).",
       "documentReplaced": "Eine andere Arbeitsmappe wurde geöffnet.",
       "targetChanged": "Die Auswahl hat sich geändert.",
       "gestureActive": "Beenden Sie zuerst das Verschieben des Diagramms.",
