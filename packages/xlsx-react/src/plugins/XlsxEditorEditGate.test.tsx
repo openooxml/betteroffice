@@ -36,6 +36,7 @@ const LAYOUT = [
 ] as const;
 const PROTECTED = 'This cell is on a protected sheet.';
 const NOT_ALLOWED = 'This edit is not allowed.';
+const STARTING = 'The editor is still starting. Try again in a moment.';
 const EDIT_GATE_UNSUPPORTED = 'edit gating is not supported in the legacy worker editor';
 const originalGetContext = HTMLCanvasElement.prototype.getContext;
 const originalLayout = LAYOUT.map(
@@ -93,6 +94,13 @@ async function book({ protectedSheet = false, sparse = false } = {}): Promise<Ui
 }
 
 interface Gate {
+  /** The plugin id when it differs from the key, so two entries can share one. */
+  id?: string;
+  revision?: number;
+  initialize?(): unknown;
+  /** Runs when the activation ends, after its cleanup was logged. */
+  cleanup?(): void;
+  onLoad?(): void;
   createState?(): unknown;
   cellEditable?(cell: XlsxPluginCellRef, context: XlsxPluginEditGateContext<unknown>): unknown;
   beforeCellCommit?(commit: XlsxPluginCellCommit, context: XlsxPluginEditGateContext<unknown>): unknown;
@@ -103,13 +111,17 @@ type GateLog = { loaded: Set<string>; cleanups: string[]; contexts: Record<strin
 function gatePlugin(id: string, gate: Gate, log: GateLog): XlsxPlugin {
   return defineXlsxPlugin<unknown>({
     id,
+    ...(gate.revision !== undefined && { revision: gate.revision }),
     createState: gate.createState ?? (() => null),
     initialize(context) {
       log.contexts[id] = context;
-      context.onCleanup((reason) => { log.cleanups.push(`${id}:${reason}`); });
+      context.onCleanup((reason) => { log.cleanups.push(`${id}:${reason}`); gate.cleanup?.(); });
+      return gate.initialize?.() as Promise<void> | undefined;
     },
     onEvent(_context, event) {
-      if (event.type === 'load') log.loaded.add(id);
+      if (event.type !== 'load') return;
+      log.loaded.add(id);
+      gate.onLoad?.();
     },
     ...(gate.cellEditable && {
       cellEditable: (context, cell) => gate.cellEditable!(cell, context) as boolean,
@@ -175,11 +187,11 @@ function stubFrames(): () => Promise<void> {
 
 async function mountGated(
   editor: Editor, gates: Record<string, Gate>,
-  { protectedSheet = false, sparse = false } = {}
+  { protectedSheet = false, sparse = false, starting = 0 } = {}
 ): Promise<Book> {
   const errors: XlsxPluginError[] = [];
   const log: GateLog = { loaded: new Set<string>(), cleanups: [], contexts: {} };
-  const plugins = Object.entries(gates).map(([id, gate]) => gatePlugin(id, gate, log));
+  const plugins = Object.entries(gates).map(([key, gate]) => gatePlugin(gate.id ?? key, gate, log));
   const file = await book({ protectedSheet, sparse });
   const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
   const common = (view: ReturnType<typeof render>) => ({
@@ -196,7 +208,7 @@ async function mountGated(
       plugins={next} onPluginError={onPluginError} onReady={onReady} />;
     const view = render(element(plugins));
     await waitFor(() => expect(api).toBeDefined(), MOUNTED);
-    await waitFor(() => expect(log.loaded.size).toBe(plugins.length), MOUNTED);
+    await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
     const base = common(view);
     return {
       ...base,
@@ -248,7 +260,7 @@ async function mountGated(
     onPluginError={onPluginError} onReady={ready} />;
   const view = render(element(plugins));
   await waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED);
-  await waitFor(() => expect(log.loaded.size).toBe(plugins.length), MOUNTED);
+  await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
   const api = ready.mock.calls[0][0];
   const base = common(view);
   return {
@@ -390,6 +402,121 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       await waitFor(() => expect(book.editor()).toBeNull());
       await book.type('42');
       await waitFor(async () => expect(await book.input(0)).toBe('42'));
+    });
+
+    it('a commit while a gating plugin starts is refused, and the same Enter commits once it is ready', async () => {
+      let ready!: () => void;
+      const held = new Promise<void>((done) => { ready = done; });
+      const commits: string[] = [];
+      const book = await mountGated(editor, { slow: { initialize: () => held, beforeCellCommit: (commit) => {
+        commits.push(commit.input);
+        return commit.input === 'no' ? { action: 'refuse', message: 'No' } : { action: 'accept' };
+      } } }, { starting: 1 });
+      await book.select(0);
+      await book.type('9');
+      await waitFor(() => expect(book.refusal()).toBe(STARTING));
+      await waitFor(() => expect(book.editor()?.value).toBe('9'));
+      expect(await book.input(0)).toBe('1');
+      expect(commits).toEqual([]);
+      await act(async () => { ready(); });
+      await waitFor(() => expect(book.log.loaded.has('slow')).toBe(true));
+      fireEvent.keyDown(book.editor()!, { key: 'Enter' });
+      await waitFor(async () => expect(await book.input(0)).toBe('9'));
+      expect(commits).toEqual(['9']);
+      await book.select(1);
+      await book.type('no');
+      await waitFor(() => expect(book.refusal()).toBe('No'));
+      expect(await book.input(1)).toBe('2');
+    });
+
+    it('a clear while a gating plugin starts is refused, and clears once it is ready', async () => {
+      let ready!: () => void;
+      const held = new Promise<void>((done) => { ready = done; });
+      const commits: XlsxPluginCellCommit[] = [];
+      const book = await mountGated(editor, { slow: { initialize: () => held, beforeCellCommit: (commit) => {
+        commits.push(commit);
+        return { action: 'accept' };
+      } } }, { starting: 1 });
+      await book.select(0);
+      fireEvent.keyDown(book.surface, { key: 'Delete' });
+      await book.settle();
+      await waitFor(() => expect(book.refusal()).toBe(STARTING));
+      expect(await book.input(0)).toBe('1');
+      await act(async () => { ready(); });
+      await waitFor(() => expect(book.log.loaded.has('slow')).toBe(true));
+      fireEvent.keyDown(book.surface, { key: 'Delete' });
+      await book.settle();
+      await waitFor(async () => expect(await book.input(0)).toBe(''));
+      expect(commits).toEqual([{ ...cell(0), input: '', kind: 'clear', source: 'clear-key' }]);
+    });
+
+    it('two gating plugins sharing an id are rejected and do not hold edits', async () => {
+      const book = await mountGated(editor, {
+        first: { id: 'shared', cellEditable: () => false },
+        second: { id: 'shared', beforeCellCommit: () => ({ action: 'refuse', message: 'Shared' }) },
+      }, { starting: 2 });
+      await waitFor(() => expect(book.errors.some((error) => error.pluginId === 'shared' && error.phase === 'definition')).toBe(true));
+      await book.select(0);
+      await book.type('9');
+      await waitFor(async () => expect(await book.input(0)).toBe('9'));
+      expect(book.refusal()).toBeNull();
+    });
+
+    it('a gating plugin whose initialize throws is ended and does not hold edits', async () => {
+      const book = await mountGated(editor, { broken: {
+        initialize: () => { throw new Error('init exploded'); },
+        beforeCellCommit: () => ({ action: 'refuse', message: 'Broken' }),
+      } }, { starting: 1 });
+      await waitFor(() => expect(book.errors.some((error) => error.pluginId === 'broken' && error.phase === 'initialize')).toBe(true));
+      await book.select(0);
+      await book.type('9');
+      await waitFor(async () => expect(await book.input(0)).toBe('9'));
+      expect(book.refusal()).toBeNull();
+    });
+
+    it('a new revision starting after the old one failed to clean up refuses edits until it loads', async () => {
+      const book = await mountGated(editor, { rule: { revision: 1, cleanup: () => { throw new Error('cleanup exploded'); },
+        beforeCellCommit: () => ({ action: 'accept' }) } });
+      let ready!: () => void;
+      const held = new Promise<void>((done) => { ready = done; });
+      let loaded = false;
+      await book.replace({ rule: { revision: 2, initialize: () => held, onLoad: () => { loaded = true; },
+        beforeCellCommit: (commit) => commit.input === '9' ? { action: 'refuse', message: 'Second rule' } : { action: 'accept' } } });
+      await waitFor(() => expect(book.errors.some((error) => error.pluginId === 'rule' && error.phase === 'cleanup')).toBe(true));
+      await book.select(0);
+      await book.type('9');
+      await waitFor(() => expect(book.refusal()).toBe(STARTING));
+      await waitFor(() => expect(book.editor()?.value).toBe('9'));
+      expect(await book.input(0)).toBe('1');
+      await act(async () => { ready(); });
+      await waitFor(() => expect(loaded).toBe(true));
+      await act(async () => {});
+      fireEvent.keyDown(book.editor()!, { key: 'Enter' });
+      await waitFor(() => expect(book.refusal()).toBe('Second rule'));
+      expect(await book.input(0)).toBe('1');
+    });
+
+    it('a gate added to a plugin that failed to start neither holds edits nor gates them', async () => {
+      const book = await mountGated(editor, { late: { initialize: () => { throw new Error('init exploded'); } } }, { starting: 1 });
+      await waitFor(() => expect(book.errors.some((error) => error.pluginId === 'late' && error.phase === 'initialize')).toBe(true));
+      await book.replace({ late: { beforeCellCommit: () => ({ action: 'refuse', message: 'Late rule' }) } });
+      await book.select(0);
+      await book.type('9');
+      await waitFor(async () => expect(await book.input(0)).toBe('9'));
+      expect(book.refusal()).toBeNull();
+    });
+
+    it('a refusal notice clears once the corrected commit is written', async () => {
+      const book = await mountGated(editor, { numbers: { beforeCellCommit: (commit) =>
+        /^\d+$/.test(commit.input) ? { action: 'accept' } : { action: 'refuse', message: 'Numbers only' } } });
+      await book.select(0);
+      await book.type('abc');
+      await waitFor(() => expect(book.refusal()).toBe('Numbers only'));
+      await waitFor(() => expect(book.editor()?.value).toBe('abc'));
+      fireEvent.change(book.editor()!, { target: { value: '42' } });
+      fireEvent.keyDown(book.editor()!, { key: 'Enter' });
+      await waitFor(async () => expect(await book.input(0)).toBe('42'));
+      await waitFor(() => expect(book.refusal()).toBeNull());
     });
 
     it('replacements chain in installation order', async () => {

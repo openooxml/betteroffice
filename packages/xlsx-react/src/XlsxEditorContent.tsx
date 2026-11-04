@@ -1405,7 +1405,8 @@ export function XlsxEditorContent({
         if (handle.cell(draft.sheet, draft.row, draft.col).input === draft.value) return true;
         const source = draft.source === 'cell' ? 'cell-editor' : 'formula-bar';
         const gated = gateOutcome(gateWrites(editGate, handle, draft.sheet,
-          [{ row: draft.row, col: draft.col, input: draft.value }], source, t('commands.reasons.hostRefused')));
+          [{ row: draft.row, col: draft.col, input: draft.value }], source, t('commands.reasons.hostRefused'),
+          t('commands.reasons.hostStarting')));
         if (!Array.isArray(gated)) return gated;
         const [{ input }] = gated;
         if (handle.cell(draft.sheet, draft.row, draft.col).input !== input) {
@@ -1689,7 +1690,8 @@ export function XlsxEditorContent({
         const edits = clearedCells(range, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
         if (!edits) { setError(t('editor.clearExceedsLimit')); return; }
         const cleared = source
-          ? gateOutcome(gateClear(editGate, handle, sheet, edits, t('commands.reasons.hostRefused'))) : edits;
+          ? gateOutcome(gateClear(editGate, handle, sheet, edits, t('commands.reasons.hostRefused'),
+            t('commands.reasons.hostStarting'))) : edits;
         if (!Array.isArray(cleared)) return;
         applyResult(handle.editCells(sheet, cleared));
         return true;

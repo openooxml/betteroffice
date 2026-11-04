@@ -137,6 +137,7 @@
       "inputFailed": "Poprzedniego wpisu w komórce nie można było zapisać.",
       "sheetProtected": "Ta komórka znajduje się w chronionym arkuszu.",
       "hostRefused": "Ta zmiana jest niedozwolona.",
+      "hostStarting": "Edytor wciąż się uruchamia. Spróbuj ponownie za chwilę.",
       "documentReplaced": "Otwarto inny skoroszyt.",
       "targetChanged": "Zaznaczenie uległo zmianie.",
       "gestureActive": "Najpierw zakończ przenoszenie wykresu.",

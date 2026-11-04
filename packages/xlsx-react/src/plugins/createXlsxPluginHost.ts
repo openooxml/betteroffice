@@ -110,8 +110,13 @@ export interface XlsxPluginHost {
     fallback: T
   ): T;
   fail(pluginId: string, phase: XlsxPluginErrorPhase, error: unknown): void;
-  /** Whether a ready plugin gates typed edits. */
+  /** Whether a ready plugin gates typed edits, or one that gates them is still starting. */
   gatesEdits(): boolean;
+  /**
+   * Whether the running activation of a plugin that gates edits has not loaded the open
+   * workbook yet: edits are refused until it is ready.
+   */
+  editGateStarting(): boolean;
   /** Starts a gate pass for one typed edit, which may cover the cells of a clear. */
   openGate(): XlsxPluginEditGate;
   /**
@@ -656,7 +661,19 @@ export function createXlsxPluginHost(
     guard: (pluginId, phase, call, fallback) => runtime.guard(pluginId, phase, call, fallback),
     fail: (pluginId, phase, error) => runtime.fail(pluginId, phase, error),
 
-    gatesEdits: () => runtime.generation() !== null && gates().length > 0,
+    gatesEdits: () => runtime.generation() !== null && (gates().length > 0 || binding.editGateStarting()),
+
+    editGateStarting() {
+      if (!editGate || runtime.generation() === null) return false;
+      for (const [id, definition] of definitionsById) {
+        if (definition.cellEditable === undefined && definition.beforeCellCommit === undefined) continue;
+        const status = runtime.activationState(id);
+        if (status === 'loading' || (status === 'ready' && !runtime.activations().some((entry) => entry.pluginId === id))) {
+          return true;
+        }
+      }
+      return false;
+    },
 
     openGate() {
       documentChanged();

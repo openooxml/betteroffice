@@ -658,8 +658,11 @@ key off that cell. `beforeCellCommit(context, commit)` sees each typed commit
 in installation order, replacements chain, and the first refusal leaves the cell
 unchanged, keeps an in-cell draft open and refuses pending work with
 `host-refused`. A clear asks once per cell that holds content and is refused as
-a whole. Both hooks are synchronous and get reads only; one that throws or
-returns something else ends that plugin and counts as accept. Where the editor
+a whole. Until every plugin that defines either hook has loaded the workbook or
+failed, typed commits and clears are refused with `host-refused` and a message
+that the editor is still starting. Both hooks are synchronous and get reads
+only; one that throws or returns something else ends that plugin and counts as
+accept. Where the editor
 refuses locked cells of protected sheets, it does so before plugins are asked.
 Paste, fill, undo, agent, remote and edit-batch writes are not gated yet. The
 gate runs in the in-thread editor and the default worker editor. The legacy

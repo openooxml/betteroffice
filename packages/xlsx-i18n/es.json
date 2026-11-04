@@ -137,6 +137,7 @@
       "inputFailed": "La entrada de celda anterior no se pudo guardar.",
       "sheetProtected": "Esta celda está en una hoja protegida.",
       "hostRefused": "Esta edición no está permitida.",
+      "hostStarting": "El editor todavía se está iniciando. Inténtalo de nuevo en un momento.",
       "documentReplaced": "Se abrió otro libro.",
       "targetChanged": "La selección ha cambiado.",
       "gestureActive": "Termine primero de mover el gráfico.",

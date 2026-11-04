@@ -590,6 +590,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           target: { sheetId, range: { kind: 'rowCol' as const, start: { row, col }, end: { row, col } } } })) });
       if (!check.ok && check.failure.code === 'locked-target') return [...edits];
     }
+    if (editGate.editGateStarting()) throw new XlsxHostRefusalError(t('commands.reasons.hostStarting'));
     const refusal = (message: string | null) => new XlsxHostRefusalError(message ?? t('commands.reasons.hostRefused'));
     const pass = editGate.openGate();
     if (!cells.every((cell) => pass.cellEditable(cell))) throw refusal(null);
@@ -777,7 +778,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     }
     if (event.type === 'accepted' && event.seq !== null) {
       const command = issued.get(event.seq);
-      if (event.status?.committed) cellClipboard.changed();
+      if (event.status?.committed) {
+        cellClipboard.changed();
+        setRefusal(null);
+      }
       issued.delete(event.seq);
       const refreshed = command?.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'refreshProposals';
       if (command && !refreshed && command.kind !== 'select' && command.kind !== 'setActiveSheet' &&

@@ -23,12 +23,13 @@ export function cellEditable(gate: XlsxPluginHost, workbook: GateWorkbook, sheet
 
 /**
  * Runs typed writes through the plugins: the inputs to write, or the refusal, whose message is
- * the plugin's or `fallback`.
+ * the plugin's or `fallback`, or `starting` while a gating plugin has not loaded yet.
  */
 export function gateWrites(
   gate: XlsxPluginHost, workbook: GateWorkbook, sheet: number, edits: readonly CellInputEdit[],
-  source: XlsxPluginCellCommit['source'], fallback: string
+  source: XlsxPluginCellCommit['source'], fallback: string, starting: string
 ): CellInputEdit[] | XlsxHostRefusalError {
+  if (edits.length > 0 && gate.editGateStarting()) return new XlsxHostRefusalError(starting);
   const cells = gatedCells(gate, workbook, sheet, edits);
   if (!cells) return [...edits];
   const pass = gate.openGate();
@@ -48,11 +49,11 @@ export function gateWrites(
  */
 export function gateClear(
   gate: XlsxPluginHost, workbook: GateWorkbook & Pick<WorkbookHandle, 'cell'>, sheet: number,
-  edits: readonly CellInputEdit[], fallback: string
+  edits: readonly CellInputEdit[], fallback: string, starting: string
 ): CellInputEdit[] | XlsxHostRefusalError {
   if (!gate.gatesEdits()) return [...edits];
   const content = edits.filter(({ row, col }) => workbook.cell(sheet, row, col).input !== '');
-  const gated = gateWrites(gate, workbook, sheet, content, 'clear-key', fallback);
+  const gated = gateWrites(gate, workbook, sheet, content, 'clear-key', fallback, starting);
   if (!Array.isArray(gated)) return gated;
   const inputs = new Map(gated.map((edit) => [`${edit.row}:${edit.col}`, edit.input]));
   return edits.map((edit) => ({ ...edit, input: inputs.get(`${edit.row}:${edit.col}`) ?? edit.input }));
