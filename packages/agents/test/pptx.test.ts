@@ -673,3 +673,183 @@ test('agent slide proposals drop editor decisions before listing and staging lim
     expect(deck.listProposals()).toMatchObject([{ id: pending.id, status: 'pending' }]);
   } finally { deck.close(); handle.dispose(); }
 });
+
+test('mixed shape proposals preserve sequential typed story edits alongside batch matches', async () => {
+  const bytes = await presentationFixture();
+  const initialized = await openPptx(bytes);
+  initialized.close();
+  const handle = openPresentation(bytes);
+  const deck = attachPptx(handle);
+  try {
+    const before = handle.snapshot();
+    const story = deck.list().items[0].story;
+    const first = deck.grep({ query: 'Keep', story }).matches[0];
+    const second = deck.grep({ query: 'paragraph', story }).matches[0];
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { match: first.match, newText: 'Preserve all of' },
+      { type: 'insertSlide', ref: 'slide', afterSlideId: null },
+      { type: 'addTextBox', ref: 'box', slideId: '@slide', draft: { name: 'Sequential box', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'First' },
+      { type: 'formatText', storyId: '@box', start: 0, end: 5, patch: { bold: true } },
+      { match: second.match, newText: 'text' },
+      { type: 'replaceText', storyId: '@box', start: 5, end: 5, text: ' second' },
+    ] });
+    expect(handle.snapshot()).toEqual(before);
+    await deck.accept(proposal.id);
+    const box = handle.snapshot().slides[0]!.shapes.find(shape => shape.name === 'Sequential box')!;
+    const runs = box.textStories[0]!.paragraphs[0]!.runs;
+    expect(runs.map(run => run.text).join('')).toBe('First second');
+    expect(runs[0]!.style.bold).toBe(true);
+    expect(deck.read(deck.grep({ query: 'Preserve' }).matches[0].ref).text).toBe('Preserve all of this text.');
+    handle.undo();
+    expect(handle.snapshot()).toEqual(before);
+  } finally { deck.close(); handle.dispose(); }
+});
+
+for (const matchFirst of [false, true]) {
+  test(`mixed story proposals remap grep matches with typed inserts, match first: ${matchFirst}`, async () => {
+    const deck = await openPptx(await pptxFixture('abc def'));
+    try {
+      const hit = deck.grep({ query: 'def' }).matches[0]!;
+      const typed = { type: 'replaceText' as const, storyId: hit.story, start: 0, end: 0, text: 'X' };
+      const match = { match: hit.match, newText: 'replacement' };
+      const version = deck.overview().version;
+      const proposal = deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] });
+      expect(deck.overview().version).toBe(version);
+      expect(deck.read(hit.ref).text).toBe('abc def');
+      const preview = await openPptx(await deck.export(proposal.id));
+      try { expect(preview.read(preview.grep({ query: 'replacement' }).matches[0]!.ref).text).toBe('Xabc replacement'); }
+      finally { preview.close(); }
+      await deck.accept(proposal.id);
+      expect(deck.read(hit.ref).text).toBe('Xabc replacement');
+    } finally { deck.close(); }
+  });
+}
+
+for (const [matchFirst, end] of [[false, 5], [true, 5], [false, 6], [true, 6]] as const) {
+  test(`mixed story proposals refuse overlapping typed and match edits, match first: ${matchFirst}, typed end: ${end}`, async () => {
+    const deck = await openPptx(await pptxFixture('abc def'));
+    try {
+      const hit = deck.grep({ query: 'def' }).matches[0]!;
+      const typed = { type: 'replaceText' as const, storyId: hit.story, start: 5, end, text: 'X' };
+      const match = { match: hit.match, newText: 'replacement' };
+      const version = deck.overview().version;
+      let refusal: unknown;
+      try { deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] }); }
+      catch (error) { refusal = error; }
+      expect(refusal).toMatchObject({ name: 'DocumentToolError', code: 'OVERLAPPING_EDITS' });
+      expect(deck.listProposals()).toEqual([]);
+      expect(deck.overview().version).toBe(version);
+      expect(deck.read(hit.ref).text).toBe('abc def');
+    } finally { deck.close(); }
+  });
+}
+
+for (const matchFirst of [false, true]) {
+  test(`mixed story proposals refuse replacement of deleted match text, match first: ${matchFirst}`, async () => {
+    const deck = await openPptx(await pptxFixture('abc def'));
+    try {
+      const hit = deck.grep({ query: 'abc ' }).matches[0]!;
+      const match = { match: hit.match, newText: '' };
+      const typed = { type: 'replaceText' as const, storyId: hit.story, start: 0, end: 3, text: 'replacement' };
+      const version = deck.overview().version;
+      let refusal: unknown;
+      try { deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] }); }
+      catch (error) { refusal = error; }
+      expect(refusal).toMatchObject({ name: 'DocumentToolError', code: 'OVERLAPPING_EDITS' });
+      expect(deck.listProposals()).toEqual([]);
+      expect(deck.overview().version).toBe(version);
+      expect(deck.read(hit.ref).text).toBe('abc def');
+    } finally { deck.close(); }
+  });
+
+  for (const [query, start, end, text, expected] of [
+    ['abc ', 0, 0, 'X', 'Xdef'],
+    ['def', 0, 4, 'prefix ', 'prefix '],
+    ['def', 4, 4, 'X', 'abc X'],
+  ] as const) {
+    test(`mixed story proposals allow deletion boundary edits for ${query} at [${start},${end}], match first: ${matchFirst}`, async () => {
+      const deck = await openPptx(await pptxFixture('abc def'));
+      try {
+        const hit = deck.grep({ query }).matches[0]!;
+        const match = { match: hit.match, newText: '' };
+        const typed = { type: 'replaceText' as const, storyId: hit.story, start, end, text };
+        const version = deck.overview().version;
+        const proposal = deck.propose({ author: 'agent', edits: matchFirst ? [match, typed] : [typed, match] });
+        expect(deck.overview().version).toBe(version);
+        expect(deck.read(hit.ref).text).toBe('abc def');
+        const preview = await openPptx(await deck.export(proposal.id));
+        try { expect(preview.read(preview.grep({ query: expected }).matches[0]!.ref).text).toBe(expected); }
+        finally { preview.close(); }
+        await deck.accept(proposal.id);
+        expect(deck.read(hit.ref).text).toBe(expected);
+      } finally { deck.close(); }
+    });
+  }
+}
+
+test('mixed story proposals keep typed offsets and local refs in staging order across length-changing matches', async () => {
+  const deck = await openPptx(await pptxFixture('abc def ghi'));
+  try {
+    const first = deck.grep({ query: 'abc' }).matches[0]!;
+    const last = deck.grep({ query: 'ghi' }).matches[0]!;
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { match: first.match, newText: 'alphabet' },
+      { type: 'addTextBox', ref: 'box', slideId: first.slideId, draft: { name: 'Local box', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Local' },
+      { type: 'replaceText', storyId: first.story, start: 9, end: 12, text: 'DEF' },
+      { match: last.match, newText: 'GHI' },
+      { type: 'replaceText', storyId: '@box', start: 5, end: 5, text: ' story' },
+    ] });
+    await deck.accept(proposal.id);
+    expect(deck.read(first.ref).text).toBe('alphabet DEF GHI');
+    expect(deck.read(deck.grep({ query: 'Local story' }).matches[0]!.ref).text).toBe('Local story');
+  } finally { deck.close(); }
+});
+
+test('mixed slide proposals preserve adjacent matches when an earlier match is deleted', async () => {
+  const deck = await openPptx(await pptxFixture('abc def'));
+  try {
+    const first = deck.grep({ query: 'abc ' }).matches[0]!;
+    const second = deck.grep({ query: 'def' }).matches[0]!;
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { match: first.match, newText: '' },
+      { type: 'insertSlide', afterSlideId: null },
+      { match: second.match, newText: 'replacement' },
+    ] });
+    await deck.accept(proposal.id);
+    expect(deck.read(first.ref).text).toBe('replacement');
+  } finally { deck.close(); }
+});
+
+test('PPTX shape proposals expose refs, story targeting, previews, acceptance, and rejection', async () => {
+  const handle = openPresentation(await presentationFixture(), { clientId: 732 });
+  const deck = attachPptx(handle);
+  try {
+    const before = handle.snapshot();
+    const slide = before.slides[0]!;
+    const rect = { x: 100000, y: 100000, width: 1000000, height: 500000 };
+    const proposal = deck.propose({ author: 'agent', edits: [
+      { type: 'insertSlide', ref: 'slide', afterSlideId: null },
+      { type: 'addTextBox', ref: 'box', slideId: '@slide', draft: { name: 'Box', rect, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Filled' },
+      { type: 'formatText', storyId: '@box', start: 0, end: 6, patch: { bold: true } },
+      { type: 'setShapeFill', slideId: '@slide', shapeId: '@box', color: '#123456' },
+      { type: 'addShape', ref: 'shape', slideId: '@slide', draft: { name: 'Card', rect, geometry: 'rect' } },
+      { type: 'addPicture', ref: 'image', slideId: '@slide', draft: { name: 'Pixel', rect, contentType: 'image/png', mediaBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' } },
+      { type: 'removeShape', slideId: slide.id, shapeId: slide.shapes[0]!.id },
+    ] });
+    expect(proposal.changes.some(change => change.kind === 'deleted')).toBe(true);
+    expect(handle.snapshot()).toEqual(before);
+    const preview = openPresentation(await deck.export(proposal.id));
+    try { expect(preview.snapshot().slides[0]!.shapes.some(shape => shape.name === 'Box')).toBe(true); }
+    finally { preview.dispose(); }
+    await deck.accept(proposal.id);
+    expect(handle.snapshot().slides[0]!.shapes).toHaveLength(3);
+    handle.undo();
+    expect(handle.snapshot()).toEqual(before);
+    const rejected = deck.propose({ author: 'agent', edits: [{ type: 'addShape', slideId: slide.id, draft: { name: 'Rejected', rect, geometry: 'rect' } }] });
+    deck.reject(rejected.id);
+    expect(handle.listProposals()).toHaveLength(0);
+  } finally { deck.close(); handle.dispose(); }
+});

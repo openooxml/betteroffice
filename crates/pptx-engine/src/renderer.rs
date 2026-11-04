@@ -322,6 +322,7 @@ impl Renderer {
             proposal: preview.proposal,
             snapshot: preview.snapshot,
             text_changes: preview.text_changes,
+            shape_changes: preview.shape_changes,
             frame: rendered.display_list,
         })
         .map_err(engine_error)
@@ -351,6 +352,7 @@ impl Renderer {
             proposal: preview.proposal,
             snapshot: preview.snapshot,
             text_changes: preview.text_changes,
+            shape_changes: preview.shape_changes,
             frame: rendered.display_list,
         })
         .map_err(engine_error)

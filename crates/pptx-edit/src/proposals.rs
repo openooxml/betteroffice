@@ -5,8 +5,8 @@ use yrs::{ReadTxn, Transact};
 
 use crate::staging::Adoption;
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, ShapeRect, ShapeSnapshot, ShapeStroke,
-    TextStyle, TextStylePatch,
+    DeckSession, DeckSnapshot, EditCtx, EditError, PictureDraft, PresetShapeDraft, ShapeDraft,
+    ShapeRect, ShapeSnapshot, ShapeStroke, TextStyle, TextStylePatch,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -17,6 +17,28 @@ use crate::{
     deny_unknown_fields
 )]
 pub enum ProposalEdit {
+    AddTextBox {
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        slide_id: String,
+        draft: ShapeDraft,
+    },
+    AddShape {
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        slide_id: String,
+        draft: PresetShapeDraft,
+    },
+    AddPicture {
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        slide_id: String,
+        draft: PictureDraft,
+    },
+    RemoveShape {
+        slide_id: String,
+        shape_id: String,
+    },
     InsertSlide {
         #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
         reference: Option<String>,
@@ -213,6 +235,13 @@ pub enum ProposalError {
     Stale(Vec<String>),
     #[error("invalid proposal: {0}")]
     Invalid(String),
+    #[error(
+        "proposalPictureMediaTooLarge: picture media exceeds {limit_bytes} decoded bytes ({total_bytes} bytes)"
+    )]
+    PictureMediaTooLarge {
+        total_bytes: usize,
+        limit_bytes: usize,
+    },
     #[error(transparent)]
     Edit(#[from] EditError),
 }
@@ -366,6 +395,10 @@ impl DeckSession {
                         | ProposalEdit::DuplicateSlide { .. }
                         | ProposalEdit::DeleteSlide { .. }
                         | ProposalEdit::MoveSlide { .. }
+                        | ProposalEdit::AddTextBox { .. }
+                        | ProposalEdit::AddShape { .. }
+                        | ProposalEdit::AddPicture { .. }
+                        | ProposalEdit::RemoveShape { .. }
                 )
             }) {
                 pending.changes = preview.proposal.changes.clone();
@@ -428,6 +461,10 @@ impl DeckSession {
                         | ProposalEdit::DuplicateSlide { .. }
                         | ProposalEdit::DeleteSlide { .. }
                         | ProposalEdit::MoveSlide { .. }
+                        | ProposalEdit::AddTextBox { .. }
+                        | ProposalEdit::AddShape { .. }
+                        | ProposalEdit::AddPicture { .. }
+                        | ProposalEdit::RemoveShape { .. }
                 )
             });
             if structural {
@@ -546,14 +583,30 @@ impl DeckSession {
         edits: &[ProposalEdit],
         force: bool,
     ) -> ProposalResult<ProposalStage> {
+        let total_bytes = edits.iter().fold(0usize, |total, edit| {
+            total.saturating_add(match edit {
+                ProposalEdit::AddPicture { draft, .. } => draft.media_bytes.len(),
+                _ => 0,
+            })
+        });
+        let limit_bytes = 8 * 1024 * 1024;
+        if total_bytes > limit_bytes {
+            return Err(ProposalError::PictureMediaTooLarge {
+                total_bytes,
+                limit_bytes,
+            });
+        }
         let preview = self.stage()?;
         let mut refs = BTreeMap::new();
         let mut resolved = Vec::with_capacity(edits.len());
         for edit in edits {
-            let edit = resolve_edit(edit, &refs)?;
+            let edit = resolve_edit(edit, &refs, &preview)?;
             let reference = match &edit {
                 ProposalEdit::InsertSlide { reference, .. }
-                | ProposalEdit::DuplicateSlide { reference, .. } => reference.as_ref(),
+                | ProposalEdit::DuplicateSlide { reference, .. }
+                | ProposalEdit::AddTextBox { reference, .. }
+                | ProposalEdit::AddShape { reference, .. }
+                | ProposalEdit::AddPicture { reference, .. } => reference.as_ref(),
                 _ => None,
             };
             if let Some(reference) = reference
@@ -569,7 +622,7 @@ impl DeckSession {
             if let Some(reference) = reference {
                 refs.insert(
                     reference.clone(),
-                    created.expect("creating edit returns a slide id"),
+                    created.expect("creating edit returns an id"),
                 );
             }
             resolved.push(edit);
@@ -587,6 +640,7 @@ impl DeckSession {
 fn resolve_edit(
     edit: &ProposalEdit,
     refs: &BTreeMap<String, String>,
+    session: &DeckSession,
 ) -> ProposalResult<ProposalEdit> {
     let resolve = |id: &mut String| -> ProposalResult<()> {
         if let Some(reference) = id.strip_prefix('@') {
@@ -603,6 +657,10 @@ fn resolve_edit(
             after_slide_id: Some(id),
             ..
         } => resolve(id)?,
+        ProposalEdit::InsertSlide {
+            after_slide_id: None,
+            ..
+        } => {}
         ProposalEdit::DuplicateSlide {
             slide_id,
             after_slide_id,
@@ -624,11 +682,44 @@ fn resolve_edit(
         }
         ProposalEdit::DeleteSlide { slide_id }
         | ProposalEdit::SetSlideNotes { slide_id, .. }
-        | ProposalEdit::SetShapeRect { slide_id, .. }
-        | ProposalEdit::SetShapeFill { slide_id, .. }
-        | ProposalEdit::SetShapeStroke { slide_id, .. }
-        | ProposalEdit::SetShapeAdjust { slide_id, .. } => resolve(slide_id)?,
-        _ => {}
+        | ProposalEdit::AddTextBox { slide_id, .. }
+        | ProposalEdit::AddShape { slide_id, .. }
+        | ProposalEdit::AddPicture { slide_id, .. } => resolve(slide_id)?,
+        ProposalEdit::SetShapeRect {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::SetShapeFill {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::SetShapeStroke {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::SetShapeAdjust {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::RemoveShape { slide_id, shape_id } => {
+            resolve(slide_id)?;
+            resolve(shape_id)?;
+        }
+        ProposalEdit::ReplaceText { story_id, .. }
+        | ProposalEdit::FormatText { story_id, .. }
+        | ProposalEdit::SetParagraphAlignment { story_id, .. } => {
+            if story_id.starts_with('@') {
+                resolve(story_id)?;
+                let snapshot = session.snapshot()?;
+                let shape = snapshot
+                    .slides
+                    .iter()
+                    .find_map(|slide| find_shape(&slide.shapes, story_id))
+                    .ok_or_else(|| EditError::ShapeNotFound(story_id.clone()))?;
+                *story_id = shape
+                    .text_stories
+                    .first()
+                    .ok_or_else(|| EditError::StoryNotFound(story_id.clone()))?
+                    .id
+                    .clone();
+            }
+        }
     }
     Ok(edit)
 }
@@ -666,6 +757,23 @@ fn apply_structural_edit(
         }
     };
     match edit {
+        ProposalEdit::AddTextBox {
+            slide_id, draft, ..
+        } => Ok(Some(
+            session.add_text_box(&context, slide_id, draft)?.shape_id,
+        )),
+        ProposalEdit::AddShape {
+            slide_id, draft, ..
+        } => Ok(Some(session.add_shape(&context, slide_id, draft)?.shape_id)),
+        ProposalEdit::AddPicture {
+            slide_id, draft, ..
+        } => Ok(Some(
+            session.add_picture(&context, slide_id, draft)?.shape_id,
+        )),
+        ProposalEdit::RemoveShape { slide_id, shape_id } => {
+            session.remove_shape(&context, slide_id, shape_id)?;
+            Ok(None)
+        }
         ProposalEdit::InsertSlide {
             after_slide_id,
             layout_part_path,
@@ -717,7 +825,11 @@ fn apply_structural_edit(
 pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
     let context = EditCtx::local("proposal");
     match edit {
-        ProposalEdit::InsertSlide { .. }
+        ProposalEdit::AddTextBox { .. }
+        | ProposalEdit::AddShape { .. }
+        | ProposalEdit::AddPicture { .. }
+        | ProposalEdit::RemoveShape { .. }
+        | ProposalEdit::InsertSlide { .. }
         | ProposalEdit::DuplicateSlide { .. }
         | ProposalEdit::DeleteSlide { .. }
         | ProposalEdit::MoveSlide { .. } => {
@@ -869,7 +981,8 @@ fn target(
                     .map(|shape| (slide.id.clone(), Some(shape.id.clone())))
             })
             .ok_or_else(|| EditError::StoryNotFound(story_id.clone())),
-        ProposalEdit::SetShapeRect {
+        ProposalEdit::RemoveShape { slide_id, shape_id }
+        | ProposalEdit::SetShapeRect {
             slide_id, shape_id, ..
         }
         | ProposalEdit::SetShapeFill {
@@ -881,7 +994,10 @@ fn target(
         | ProposalEdit::SetShapeAdjust {
             slide_id, shape_id, ..
         } => Ok((slide_id.clone(), Some(shape_id.clone()))),
-        ProposalEdit::SetSlideNotes { slide_id, .. } => Ok((slide_id.clone(), None)),
+        ProposalEdit::AddTextBox { slide_id, .. }
+        | ProposalEdit::AddShape { slide_id, .. }
+        | ProposalEdit::AddPicture { slide_id, .. }
+        | ProposalEdit::SetSlideNotes { slide_id, .. } => Ok((slide_id.clone(), None)),
     }
 }
 
@@ -930,30 +1046,75 @@ fn changes_for(
     for edit in edits {
         if matches!(
             edit,
-            ProposalEdit::InsertSlide { .. }
+            ProposalEdit::AddTextBox { .. }
+                | ProposalEdit::AddShape { .. }
+                | ProposalEdit::AddPicture { .. }
+                | ProposalEdit::InsertSlide { .. }
                 | ProposalEdit::DuplicateSlide { .. }
                 | ProposalEdit::DeleteSlide { .. }
                 | ProposalEdit::MoveSlide { .. }
         ) {
             continue;
         }
-        let (slide_id, shape_id) = target(after, edit).or_else(|_| target(before, edit))?;
+        let Ok((slide_id, shape_id)) = target(after, edit).or_else(|_| target(before, edit)) else {
+            continue;
+        };
         let (old, old_text) = capture(before, &slide_id, shape_id.as_deref()).unwrap_or_default();
         let (new, new_text) = capture(after, &slide_id, shape_id.as_deref()).unwrap_or_default();
+        if shape_id.is_some() && old.is_none() && new.is_none() {
+            continue;
+        }
         changes.insert(
             (slide_id.clone(), shape_id.clone()),
             ProposalChange {
+                kind: match (&old, &new, &shape_id) {
+                    (None, Some(_), Some(_)) => Some(ProposalChangeKind::Inserted),
+                    (Some(_), None, Some(_)) => Some(ProposalChangeKind::Deleted),
+                    _ => None,
+                },
                 slide_id,
                 shape_id,
                 before: old,
                 after: new,
                 old_text,
                 new_text,
-                kind: None,
                 before_index: None,
                 after_index: None,
             },
         );
+    }
+    let added_slides: BTreeSet<_> = edits
+        .iter()
+        .filter_map(|edit| match edit {
+            ProposalEdit::AddTextBox { slide_id, .. }
+            | ProposalEdit::AddShape { slide_id, .. }
+            | ProposalEdit::AddPicture { slide_id, .. } => Some(slide_id),
+            _ => None,
+        })
+        .collect();
+    for slide_id in added_slides {
+        let old_slide = before.slides.iter().find(|slide| &slide.id == slide_id);
+        if let Some(slide) = after.slides.iter().find(|slide| &slide.id == slide_id) {
+            for shape in &slide.shapes {
+                if old_slide.is_some_and(|old| find_shape(&old.shapes, &shape.id).is_some()) {
+                    continue;
+                }
+                changes.insert(
+                    (slide_id.clone(), Some(shape.id.clone())),
+                    ProposalChange {
+                        slide_id: slide_id.clone(),
+                        shape_id: Some(shape.id.clone()),
+                        before: None,
+                        after: Some(shape.clone()),
+                        old_text: String::new(),
+                        new_text: shape_text(shape),
+                        kind: Some(ProposalChangeKind::Inserted),
+                        before_index: None,
+                        after_index: None,
+                    },
+                );
+            }
+        }
     }
     let ids: BTreeSet<_> = before
         .slides
@@ -996,8 +1157,16 @@ fn stale_targets(snapshot: &DeckSnapshot, baseline: &ProposalBaseline) -> Vec<St
     let live = |id: &str| snapshot.slides.iter().find(|slide| slide.id == id);
     let mut stale = BTreeSet::new();
     for edit in &baseline.edits {
+        if matches!(
+            edit,
+            ProposalEdit::AddTextBox { .. }
+                | ProposalEdit::AddShape { .. }
+                | ProposalEdit::AddPicture { .. }
+        ) {
+            continue;
+        }
         if let Ok((slide_id, shape_id)) = target(&baseline.snapshot, edit)
-            && original(&slide_id).is_some()
+            && capture(&baseline.snapshot, &slide_id, shape_id.as_deref()).is_ok()
             && capture(snapshot, &slide_id, shape_id.as_deref()).ok()
                 != capture(&baseline.snapshot, &slide_id, shape_id.as_deref()).ok()
         {
@@ -1021,6 +1190,9 @@ fn stale_targets(snapshot: &DeckSnapshot, baseline: &ProposalBaseline) -> Vec<St
                 true,
             ),
             ProposalEdit::DeleteSlide { slide_id } => (Some(slide_id.as_str()), None, true),
+            ProposalEdit::AddTextBox { slide_id, .. }
+            | ProposalEdit::AddShape { slide_id, .. }
+            | ProposalEdit::AddPicture { slide_id, .. } => (Some(slide_id.as_str()), None, false),
             ProposalEdit::MoveSlide {
                 slide_id,
                 after_slide_id,

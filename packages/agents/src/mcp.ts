@@ -1,4 +1,4 @@
-import { pptxProposalSlideEditSchema } from './pptx-schema';
+import { pptxProposalEditSchema } from './pptx-schema';
 import { PptxAgentPresentation } from './pptx';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -21,7 +21,7 @@ const path = z.string().min(1).max(4096);
 const document = identifier.describe('Open document ID returned by office_open, such as doc1.');
 const proposal = identifier.describe('Proposal ID returned by office_propose.');
 const proposalTextEdit = z.object({ match: identifier.describe('Match ID from office_grep (not the text).'), newText: z.string().max(16000) }).strict();
-const proposalEdit = z.union([proposalTextEdit, pptxProposalSlideEditSchema]).meta({
+const proposalEdit = z.union([proposalTextEdit, pptxProposalEditSchema]).meta({
   properties: z.toJSONSchema(proposalTextEdit, { io: 'input' }).properties,
 });
 const limit = readLimit(100);
@@ -101,7 +101,7 @@ export async function createOfficeMcpServer(options: { root: string; renderer?: 
   tool('office_verify', 'Save and reopen the current document or a pending proposal in memory. Reports completed checks explicitly; does not assert semantic or visual correctness.', { document, proposal: proposal.optional() }, true, async args => result(await workspace.get(args.document).verify(args.proposal)));
   tool('office_close', 'Release an open document and its in-memory proposals. Export any work you want to keep first.', { document }, false, args => result(workspace.close(args.document)));
   if (!options.readOnly) {
-    tool('office_propose', 'DOCX/PPTX: stage 1 to 32 text replacements without changing the document. XLSX uses office_propose_cells. First grep for the exact text you want to replace, then copy the desired occurrence\'s match ID. Supply edits [{match: ID_FROM_GREP, newText: REPLACEMENT}]. To change part of a sentence, grep that part; do not reuse a match for the whole sentence. New text inherits formatting at its start. No paragraph/embedded-content/tracked-change crossings. PPTX also accepts slide edits with type insertSlide {ref?, afterSlideId, layoutPartPath?}, duplicateSlide {ref?, slideId, afterSlideId?}, deleteSlide {slideId}, moveSlide {slideId, afterSlideId}. afterSlideId null means first; omitted on duplicateSlide means after its source. Later slide IDs and anchors may use @ref from a creating edit in this proposal.', {
+    tool('office_propose', 'DOCX/PPTX: stage 1 to 32 text replacements without changing the document. XLSX uses office_propose_cells. First grep for the exact text you want to replace, then copy the desired occurrence\'s match ID. Supply edits [{match: ID_FROM_GREP, newText: REPLACEMENT}]. To change part of a sentence, grep that part; do not reuse a match for the whole sentence. New text inherits formatting at its start. No paragraph/embedded-content/tracked-change crossings. PPTX also accepts slide edits with type insertSlide {ref?, afterSlideId, layoutPartPath?}, duplicateSlide {ref?, slideId, afterSlideId?}, deleteSlide {slideId}, moveSlide {slideId, afterSlideId}. afterSlideId null means first; omitted on duplicateSlide means after its source. PPTX also accepts addTextBox, addShape, addPicture with {ref?, slideId, draft}, and removeShape with {slideId, shapeId}. Draft rectangles use EMU (12700 per point), and picture drafts carry contentType and mediaBase64 with an 8 MB decoded total limit. Later slide IDs, shape IDs and anchors may use @ref. replaceText, formatText and setParagraphAlignment may target storyId @ref for a created shape first text story.', {
       document, author: z.string().min(1).max(200), note: z.string().max(2000).optional(),
       edits: z.array(proposalEdit).min(1).max(32),
     }, false, async args => {
