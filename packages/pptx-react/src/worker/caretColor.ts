@@ -65,7 +65,7 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
     if (!(x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height)) continue;
     const exact = primitive.kind === 'shape' && primitive.geometry === 'rect' &&
       transforms.every(({ transform }) => !transform?.rotationDeg && !transform?.flipH && !transform?.flipV);
-    fill = paint && exact ? paint : { color: paint?.color ?? fill.color, solid: false };
+    fill = paint && exact ? paint : { color: fill.color, solid: false };
   }
   return fill;
 }

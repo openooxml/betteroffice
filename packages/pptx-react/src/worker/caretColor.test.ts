@@ -69,3 +69,11 @@ test('rotated or non-rectangular shapes and images make the fill unknown, so the
   expect(pptxCaretColors(slide([image]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).color).toBe('#ffffff');
   expect(pptxCaretColors(slide([shape('#ffffff')], dark), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).color).toBe('#000000');
 });
+
+test('an empty line over a shape of unknown extent reads against the last known fill', () => {
+  const dark = { kind: 'solid', color: '#000000' } satisfies Paint;
+  const rotated = { ...shape('#ffffff'), transform: { rotationDeg: 45 } } as SlidePrimitive;
+  expect(pptxCaretColors(slide([rotated], dark), line(), 0, caret).color).toBe('#ffffff');
+  const ellipse = { ...shape('#000000'), geometry: 'ellipse' } as SlidePrimitive;
+  expect(pptxCaretColors(slide([ellipse]), line(), 0, caret).color).toBe('#000000');
+});
