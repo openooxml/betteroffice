@@ -708,7 +708,7 @@ export class TextMeasureFontRegistry {
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
               `${error instanceof Error ? error.message : String(error)}`
           );
-          return this.registerBuffer(await loader(), undefined, loader);
+          return this.registerBuffer(await (loader.readOnlyBytes ?? loader)(), undefined, loader);
         }
         const known = loader.coverage === undefined ? undefined
           : Object.assign(async () => face.bytes(), { coverage: loader.coverage });
