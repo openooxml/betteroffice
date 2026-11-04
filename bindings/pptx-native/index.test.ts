@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, spyOn, test } from 'bun:test';
@@ -122,5 +123,21 @@ describe('@betteroffice/pptx-native', () => {
     } finally {
       await session.dispose();
     }
+  });
+});
+
+describe('@betteroffice/pptx-native allocator', () => {
+  test.each([
+    ['in load order', []],
+    ['in reverse load order', ['--reverse']],
+  ])('two images of the binary share a process and its threads, %s', (_order: string, flags: string[]) => {
+    const result = spawnSync(process.execPath, ['scripts/native-allocator-smoke.mjs', 'pptx', ...flags], {
+      cwd: fileURLToPath(new URL('../..', import.meta.url)),
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    expect(result.stderr).not.toContain('Error');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('allocator smoke ok');
   });
 });
