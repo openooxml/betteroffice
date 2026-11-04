@@ -390,9 +390,22 @@ test('checking a character outside known coverage reads the shared face without 
   const source = createRustMeasureSource({ engine: { registerFont: () => 0, clearFonts() {} },
     bundled: { resolve: () => Object.assign(copy, { coverage: known, readOnlyBytes: read }), resolveBaseLatin: () => base } });
   await source.prepareFontRequirements([{ key: 'requested|0|0', family: 'Requested', bold: false, italic: false, characters: ['A', 'Ω'] }]);
-  expect(copy).toHaveBeenCalledTimes(1);
-  expect(read).toHaveBeenCalledTimes(1);
+  expect(copy).not.toHaveBeenCalled();
+  expect(read).toHaveBeenCalledTimes(2);
   expect(base).not.toHaveBeenCalled();
+});
+
+test('registering a shared face hands the engine a view of it, not a copy', async () => {
+  const copy = mock(async () => primary.slice(0));
+  const read = mock(async () => primary);
+  const registered: Uint8Array[] = [];
+  const source = createRustMeasureSource({ engine: { registerFont: (bytes) => registered.push(bytes) - 1, clearFonts() {} },
+    bundled: { resolve: () => Object.assign(copy, { coverage: coverageBits(() => true), readOnlyBytes: read }) } });
+  await source.prepareFontRequirements([{ key: 'requested|0|0', family: 'Requested', bold: false, italic: false, characters: ['A'] }]);
+  expect(copy).not.toHaveBeenCalled();
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(registered.map((bytes) => bytes.buffer)).toEqual([primary]);
+  expect(registered[0]!.buffer).toBe(primary);
 });
 
 test('a loader without a shared read still answers exact coverage from a copy', async () => {

@@ -494,7 +494,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const appendFont = (font: YrsResidentFontRegistration) => {
       signal.throwIfAborted();
       if (disposed) throw new Error('DOCX command fonts are disposed');
-      return fonts.push(font instanceof Uint8Array ? font.slice() : font) - 1;
+      return fonts.push(font) - 1;
     };
     let released = false;
     const abort = () => {
