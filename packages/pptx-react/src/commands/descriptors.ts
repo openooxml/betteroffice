@@ -22,9 +22,9 @@ const plain = <K extends PptxCommandId>(chord: string) =>
 
 /** Every PPTX command, with its label and keyboard bindings. */
 export const PPTX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
-  cut: descriptor('cut', 'commands.cut', true, [plain('Mod+X')]),
-  copy: descriptor('copy', 'commands.copy', false, [plain('Mod+C')]),
-  paste: descriptor('paste', 'commands.paste', true, [plain('Mod+V')]),
+  cut: descriptor('cut', 'commands.cut', true),
+  copy: descriptor('copy', 'commands.copy', false),
+  paste: descriptor('paste', 'commands.paste', true),
   deleteObject: descriptor('deleteObject', 'commands.delete', true),
   deleteSlide: descriptor('deleteSlide', 'toolbar.deleteSlide', true),
   duplicateSlide: descriptor('duplicateSlide', 'commands.duplicateSlide', true),

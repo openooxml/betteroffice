@@ -322,14 +322,14 @@ export function registerPresentationCommandHandlers(
         const graphic = shape.graphic as { type?: string; grid?: unknown[] } | null;
         if (graphic?.type === 'table' && Array.isArray(graphic.grid) && graphic.grid.length) {
           const columns = graphic.grid.length;
-          shape.textStories.forEach((story, index) => tables.set(story.id, {
+          (shape.textStories ?? []).forEach((story, index) => tables.set(story.id, {
             shapeId: shape.id, row: Math.floor(index / columns), column: index % columns,
           }));
         }
-        visit(shape.children);
+        visit(shape.children ?? []);
       }
     };
-    for (const slide of content.slides) visit(slide.shapes);
+    for (const slide of content.slides) visit(slide.shapes ?? []);
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
