@@ -1,14 +1,22 @@
 import type {
   DeckSnapshot,
   ParagraphAlignment,
+  ShapeDraft,
+  PresetShapeDraft,
+  PictureDraft,
   ShapeRect,
   ShapeSnapshot,
   ShapeStroke,
   SlideDisplayList,
+  TextParagraphDraft,
   TextStyleSnapshot,
 } from './types';
 
 export type ProposalEdit =
+  | { type: 'addTextBox'; ref?: string; slideId: string; draft: ShapeDraft }
+  | { type: 'addShape'; ref?: string; slideId: string; draft: PresetShapeDraft }
+  | { type: 'addPicture'; ref?: string; slideId: string; draft: PictureDraft }
+  | { type: 'removeShape'; slideId: string; shapeId: string }
   | { type: 'insertSlide'; ref?: string; afterSlideId: string | null; layoutPartPath?: string }
   | { type: 'duplicateSlide'; ref?: string; slideId: string; afterSlideId?: string | null }
   | { type: 'deleteSlide'; slideId: string }
@@ -35,6 +43,7 @@ export type ProposalEdit =
       end: number;
       alignment: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
     }
+  | { type: 'setStoryParagraphs'; storyId: string; paragraphs: TextParagraphDraft[] }
   | { type: 'setShapeRect'; slideId: string; shapeId: string; rect: ShapeRect }
   | {
       type: 'setShapeFill';
@@ -97,7 +106,13 @@ export interface ProposalTextChange {
   kind: 'insertion' | 'deletion';
 }
 
+export interface ProposalShapeChange {
+  shapeId: string;
+  kind: 'inserted' | 'deleted' | 'moved' | 'resized' | 'changed' | 'reordered';
+}
+
 export interface ProposalDiffSlide extends ProposalPreview {
+  shapeChanges?: ProposalShapeChange[];
   frame: SlideDisplayList;
   textChanges: ProposalTextChange[];
   media?: { assetId: string; bytes: ArrayBuffer }[];
@@ -116,5 +131,14 @@ export class StaleProposalError extends Error {
     super(`Proposal targets changed: ${targets.join(', ')}`);
     this.name = 'StaleProposalError';
     this.targets = targets;
+  }
+}
+
+export class ProposalPictureMediaTooLargeError extends Error {
+  readonly code = 'proposalPictureMediaTooLarge';
+
+  constructor(readonly totalBytes: number, readonly limitBytes = 8 * 1024 * 1024) {
+    super(`Proposal picture media exceeds ${limitBytes} decoded bytes (${totalBytes} bytes)`);
+    this.name = 'ProposalPictureMediaTooLargeError';
   }
 }

@@ -2,7 +2,7 @@ import type { ResolvedFontProps } from './bundledFonts';
 import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
-  initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
+  decodePresentationImage, initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
   slideToPng, StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
 import type {
@@ -552,6 +552,7 @@ export function PptxEditorContent({
     model?.slideIndex ?? 0
   );
   const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
+  const loadProposalSlide = useCallback((slideId: string) => handleRef.current!.layoutProposalDiffSlideById(canvasReview.selected!.id, slideId), [canvasReview.selected, model?.snapshot]);
   const resolveSlideImage = useMemo<CanvasImageResolver>(() => {
     if (!backend) return resolveImages(handleRef, imageCacheRef, decodeImageError);
     return Object.assign((assetId: string) => workerRef.current?.resolveImage(assetId) ?? Promise.resolve(null), {
@@ -2881,7 +2882,7 @@ export function PptxEditorContent({
           {canvasReview.reviewing && canvasReview.selected && handleRef.current && canvasReview.diff ? (
             <ProposalSlideStrip entries={handleRef.current.proposalSlideStrip(canvasReview.selected.id)}
               selectedSlideId={canvasReview.previewSlideId ?? currentSlideId}
-              load={(slideId) => handleRef.current!.layoutProposalDiffSlideById(canvasReview.selected!.id, slideId)}
+              load={loadProposalSlide} decodeImage={decodePresentationImage}
               resolveImage={resolveSlideImage} onSelect={canvasReview.selectSlide} />
           ) : model?.snapshot.slides.map((slide, index) => {
             const slidePresence = remotePeersBySlide.get(slide.id);
@@ -3085,7 +3086,7 @@ export function PptxEditorContent({
                   {canvasReview.diff && <ProposalCanvasOverlay
                     key={`${canvasReview.diff.proposal.id}:${model.slideIndex}`}
                     diff={canvasReview.diff} current={model.snapshot} frame={model.frame}
-                    slideIndex={model.slideIndex} scale={scale} resolveImage={resolveSlideImage}
+                    slideIndex={model.slideIndex} scale={scale} resolveImage={resolveSlideImage} decodeImage={decodePresentationImage}
                     onPainted={setPaintedReview}
                     onTarget={(slideId, shapeId) => {
                       navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id);
@@ -3095,7 +3096,7 @@ export function PptxEditorContent({
               ) : canvasReview.diff && model ? (
                 <div style={{ ...styles.canvasFrame, width: canvasReview.diff.frame.width * scale, height: canvasReview.diff.frame.height * scale }}>
                   <ProposalCanvasOverlay diff={canvasReview.diff} current={model.snapshot} frame={canvasReview.diff.frame}
-                    slideIndex={0} scale={scale} resolveImage={resolveSlideImage} onPainted={setPaintedReview}
+                    slideIndex={0} scale={scale} resolveImage={resolveSlideImage} decodeImage={decodePresentationImage} onPainted={setPaintedReview}
                     onTarget={(slideId, shapeId) => navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id)} />
                 </div>
               ) : (

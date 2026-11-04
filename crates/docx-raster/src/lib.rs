@@ -183,16 +183,31 @@ pub fn render_page_cached(
     glyphs: &mut GlyphCache,
     images: &mut ImageCache,
 ) -> Result<RenderedPage, String> {
+    render_page_cached_scaled(display_list, page_ordinal, resources, glyphs, images, 1.0)
+}
+
+pub fn render_page_cached_scaled(
+    display_list: &DisplayList,
+    page_ordinal: usize,
+    resources: &RenderResources<'_>,
+    glyphs: &mut GlyphCache,
+    images: &mut ImageCache,
+    scale: f32,
+) -> Result<RenderedPage, String> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("scale must be finite and positive".to_owned());
+    }
     let page = display_list
         .pages
         .get(page_ordinal)
         .ok_or_else(|| format!("page ordinal {page_ordinal} is out of range"))?;
-    let width = page_dimension(&page.width, "page width")?;
-    let height = page_dimension(&page.height, "page height")?;
+    let width = scaled_page_dimension(&page.width, "page width", scale)?;
+    let height = scaled_page_dimension(&page.height, "page height", scale)?;
     validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut renderer = Renderer::new(width, height, glyphs, images);
+    renderer.scale = scale;
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
@@ -382,6 +397,7 @@ struct Scratch<'k> {
 }
 
 struct Renderer<'k> {
+    scale: f32,
     clips: ClipSurface,
     scratch: Scratch<'k>,
 }
@@ -394,6 +410,7 @@ impl<'k> Renderer<'k> {
         images: &'k mut ImageCache,
     ) -> Self {
         Self {
+            scale: 1.0,
             clips: ClipSurface::default(),
             scratch: Scratch {
                 glyphs,
@@ -423,7 +440,12 @@ impl<'k> Renderer<'k> {
             .iter()
             .filter(|border| border.z_order == Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
+            paint_page_border(
+                pixmap,
+                border,
+                &mut self.scratch.budget,
+                Transform::from_scale(self.scale, self.scale),
+            )?;
         }
         let (watermark, body) = page.primitives.split_at(
             page.watermark_primitive_count
@@ -456,7 +478,12 @@ impl<'k> Renderer<'k> {
             .iter()
             .filter(|border| border.z_order != Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
+            paint_page_border(
+                pixmap,
+                border,
+                &mut self.scratch.budget,
+                Transform::from_scale(self.scale, self.scale),
+            )?;
         }
         Ok(())
     }
@@ -471,25 +498,35 @@ impl<'k> Renderer<'k> {
         let attrs = primitive_attrs(primitive);
         validate_visual_attrs(primitive, attrs)?;
         let opacity = primitive_opacity(primitive)?;
-        let clip = clip_rect(attrs)?;
+        let clip = clip_rect(attrs)?.map(|clip| FRect {
+            x: clip.x * self.scale,
+            y: clip.y * self.scale,
+            w: clip.w * self.scale,
+            h: clip.h * self.scale,
+        });
+        let base = Transform::from_scale(self.scale, self.scale);
         let clips = &mut self.clips;
         let scratch = &mut self.scratch;
         if let Some(clip) = clip {
             clips.paint(pixmap, clip, scratch, |target, scratch, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, scratch, transform, mask, opacity, scope,
+                    target,
+                    primitive,
+                    resources,
+                    scratch,
+                    if base.is_identity() {
+                        transform
+                    } else {
+                        transform.pre_concat(base)
+                    },
+                    mask,
+                    opacity,
+                    scope,
                 )
             })
         } else {
             paint_primitive_core(
-                pixmap,
-                primitive,
-                resources,
-                scratch,
-                Transform::identity(),
-                None,
-                opacity,
-                scope,
+                pixmap, primitive, resources, scratch, base, None, opacity, scope,
             )
         }
     }
@@ -2265,6 +2302,7 @@ fn paint_page_border(
     pixmap: &mut Pixmap,
     border: &PageBorderPrimitive,
     budget: &mut PageBudget,
+    transform: Transform,
 ) -> Result<(), String> {
     let x = number_f32(&border.x)?;
     let y = number_f32(&border.y)?;
@@ -2281,6 +2319,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.right {
@@ -2294,6 +2333,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.bottom {
@@ -2307,6 +2347,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.left {
@@ -2320,6 +2361,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     Ok(())
@@ -2330,6 +2372,7 @@ fn paint_page_border_side(
     segment: Segment,
     side: &PageBorderSide,
     budget: &mut PageBudget,
+    transform: Transform,
 ) -> Result<(), String> {
     let style = match side.style.as_str() {
         "solid" => DisplayBorderStyle::Solid,
@@ -2350,7 +2393,7 @@ fn paint_page_border_side(
         style,
         None,
         None,
-        Transform::identity(),
+        transform,
         None,
         1.0,
         budget,
@@ -2747,6 +2790,17 @@ fn validate_page_surface(width: u32, height: u32) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn scaled_page_dimension(number: &Number, name: &str, scale: f32) -> Result<u32, String> {
+    if scale == 1.0 {
+        return page_dimension(number, name);
+    }
+    let value = number.as_f64().ok_or_else(|| format!("invalid {name}"))? * f64::from(scale);
+    if !value.is_finite() || value <= 0.0 || value.ceil() > f64::from(u32::MAX) {
+        return Err(format!("invalid scaled {name}"));
+    }
+    Ok(value.ceil() as u32)
 }
 
 fn page_dimension(number: &Number, name: &str) -> Result<u32, String> {

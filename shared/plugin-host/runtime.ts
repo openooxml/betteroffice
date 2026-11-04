@@ -113,6 +113,12 @@ export interface PluginRuntime<Plugin, Context, Event, Phase extends string> {
   touch(): void;
   /** Ready activations in registration order; stable until listeners are notified. */
   activations(): readonly RuntimeActivation<Plugin, Context>[];
+  /**
+   * @internal Where the current registration of `pluginId` stands for the open document:
+   * `loading` until its activation is ready, `ready` after, `none` with no running activation
+   * (rejected, removed, quarantined, ended or no document open).
+   */
+  activationState(pluginId: string): 'none' | 'loading' | 'ready';
   subscribe(listener: () => void): () => void;
   /**
    * Runs a pure plugin function, as during a host render. A throw returns `fallback` and
@@ -650,6 +656,14 @@ export function createPluginRuntime<
     touch: changed,
 
     activations: () => published,
+
+    activationState(pluginId) {
+      const registration = registrations.get(pluginId);
+      const activation = registration?.activation;
+      if (!activation || registration.quarantined || current === null || activation.generation !== current ||
+          activation.status === 'disposed') return 'none';
+      return activation.status === 'ready' ? 'ready' : 'loading';
+    },
 
     subscribe(listener) {
       listeners.add(listener);

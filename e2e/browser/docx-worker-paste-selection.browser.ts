@@ -4,7 +4,7 @@ import JSZip from 'jszip';
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 const overlay = '[data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246"]';
-const caret = '[data-docx-worker-editor] div[aria-hidden="true"][style*="currentcolor" i]';
+const caret = '[data-docx-worker-editor] [data-docx-caret]';
 
 async function open(page: Page) {
   const run = (text: string, rPr = '') => `<w:r><w:rPr>${rPr}<w:sz w:val="24"/></w:rPr><w:t>${text}</w:t></w:r>`;

@@ -6,7 +6,7 @@
  * Edit mode: shows text + URL inputs with Apply button.
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import type { CSSProperties } from 'react';
 import { toast } from 'sonner';
 import { useTranslation } from '../../i18n';
@@ -290,26 +290,17 @@ export function HyperlinkPopup({
   }, [mode]);
 
   // Close on outside click
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!data) return;
 
-    let aborted = false;
-    const handleMouseDown = (e: MouseEvent) => {
+    const handlePointerDown = (e: PointerEvent) => {
       if (popupRef.current && !popupRef.current.contains(e.target as Node)) {
         onClose();
       }
     };
 
-    // Defer so the click that opened the popup doesn't immediately close it
-    const timer = setTimeout(() => {
-      if (!aborted) document.addEventListener('mousedown', handleMouseDown);
-    }, 0);
-
-    return () => {
-      aborted = true;
-      clearTimeout(timer);
-      document.removeEventListener('mousedown', handleMouseDown);
-    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true);
   }, [data, onClose]);
 
   // Close on Escape

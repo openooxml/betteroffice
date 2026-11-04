@@ -43,6 +43,8 @@ export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
   createGeometry?: typeof createPeerlessPluginGeometry;
   /** Stable; its members read the editor at call time. */
   access: XlsxPluginEditorAccess | XlsxPluginDocumentAccess;
+  /** False when the editor cannot gate typed edits; read once. */
+  editGate?: boolean;
   commands: XlsxCommandController;
   readOnly: boolean;
   proposals?: readonly Proposal[];
@@ -107,7 +109,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
       ...options.access,
       translate: (key) => latest.current.t(key),
       geometry: () => geometryRef.current,
-    }, options.createClients)
+    }, options.createClients, { editGate: options.editGate })
   );
 
   const managed = (options.plugins?.length ?? 0) > 0;

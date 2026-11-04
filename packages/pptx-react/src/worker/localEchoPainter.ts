@@ -2,6 +2,7 @@ import type { PositionedTextRun } from '@betteroffice/pptx';
 import type { CommandGeometryLine } from '@betteroffice/pptx/worker';
 import { applyPrimitiveTransform, retainCommandFrameRaster, type CommandFrameLease } from './commandFramePainter';
 import { invalidateCommandFrameCanvas } from './commandFrameRasters';
+import { pptxCaretColors } from './caretColor';
 import type {
   PeerlessActiveLine, PeerlessConfirmedFrame, PeerlessEcho, PeerlessPaintCheckpoint, PeerlessRect,
   PeerlessViewPainters, PeerlessViewSnapshot,
@@ -173,7 +174,9 @@ export function createLocalEchoPainter(
         const start = Math.min(view.composition.selection.anchor, view.composition.selection.focus);
         const left = measure(start);
         const right = measure(start + view.composition.text.length);
-        ctx.fillStyle = '#111827';
+        ctx.fillStyle = pptxCaretColors(view.confirmed?.displayList, active.line,
+          view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret,
+          view.editState?.toolbar?.formatting?.color).color;
         ctx.fillRect(active.line.x + Math.min(left, right), active.line.baseline + 2,
           Math.abs(right - left), 1);
       }

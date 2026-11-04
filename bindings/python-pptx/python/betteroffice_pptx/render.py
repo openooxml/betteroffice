@@ -38,7 +38,16 @@ class SlideDisplayList(_SlideDisplayListOptional):
     primitives: List[Dict[str, Any]]
 
 
-class ProposalDiffSlide(TypedDict):
+class ProposalShapeChange(TypedDict):
+    shapeId: str
+    kind: Literal["inserted", "deleted", "moved", "resized", "changed", "reordered"]
+
+
+class _ProposalDiffSlideOptional(TypedDict, total=False):
+    shapeChanges: List[ProposalShapeChange]
+
+
+class ProposalDiffSlide(_ProposalDiffSlideOptional):
     proposal: Dict[str, Any]
     snapshot: Dict[str, Any]
     textChanges: List[ProposalTextChange]

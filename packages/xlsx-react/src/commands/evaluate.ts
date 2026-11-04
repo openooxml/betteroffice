@@ -93,6 +93,7 @@ const REASON_KEYS: Record<XlsxCommandFailureCode, TranslationKey> = {
   aborted: 'commands.reasons.aborted',
   'input-failed': 'commands.reasons.inputFailed',
   'sheet-protected': 'commands.reasons.sheetProtected',
+  'host-refused': 'commands.reasons.hostRefused',
   'document-replaced': 'commands.reasons.documentReplaced',
   'target-changed': 'commands.reasons.targetChanged',
   'gesture-active': 'commands.reasons.gestureActive',
@@ -104,6 +105,7 @@ const REASON_KEYS: Record<XlsxCommandFailureCode, TranslationKey> = {
 const ENGLISH_REASONS: Partial<Record<XlsxCommandFailureCode, string>> = {
   'editor-unavailable': 'The editor is not ready.',
   'sheet-protected': 'This cell is on a protected sheet.',
+  'host-refused': 'This edit is not allowed.',
 };
 
 /** A localized reason; without an editor the message is English. */

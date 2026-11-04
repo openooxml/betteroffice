@@ -128,7 +128,13 @@ async function loadFace(
     };
     pending.then(runtime?.retain === false ? forget : undefined, forget);
   }
-  return pending;
+  const shared = pending;
+  return shared.then((decoded) => intact(decoded, face) ? decoded : (cache.get(key) === shared && cache.delete(key),
+    loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)));
+}
+
+function intact(decoded: DecodedFace, face: BundledFontFace): boolean {
+  return decoded.font.byteLength === face.byteLength && decoded.payload?.byteLength !== 0;
 }
 
 function packFor(face: BundledFontFace): PackManifest {
