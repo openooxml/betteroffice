@@ -113,6 +113,17 @@ describe('supplied faces', () => {
     expect(calls.encoded).toBe(0);
   });
 
+  test('chart text heading its font list with a supplied family paints with that face, as the editor page does', async () => {
+    const calls = stubBrowser();
+    const chart = { ...calibri, fontFamily: 'Calibri, sans-serif', chart: true };
+    const generic = { ...calibri, fontFamily: 'sans-serif', chart: true };
+    await displayListToPng(list([chart as never, generic as never]), { dpr: 1, width: 121, height: 40, fonts: [{ family: 'Calibri', bytes: new Uint8Array([1]) }] });
+    const fills = calls.painted.filter((font) => font.includes('px'));
+    expect(fills.some((font) => /"bo-xlsx-png-\d+-0", Calibri, sans-serif$/.test(font))).toBe(true);
+    expect(fills.some((font) => font.endsWith('px sans-serif'))).toBe(true);
+    expect(calls.faces).toHaveLength(1);
+  });
+
   test('a bold run takes the bold face when one is supplied', async () => {
     const calls = stubBrowser();
     await displayListToPng(list([{ ...calibri, bold: true }]), { dpr: 1, width: 121, height: 40, fonts: [

@@ -78,13 +78,28 @@ function encode(canvas: ExportCanvas): Promise<Blob> {
   });
 }
 
-const runFont = (cmd: TextCmd): PngRunFont => ({ family: cmd.fontFamily!, bold: cmd.bold === true, italic: cmd.italic === true });
-const isCellText = (cmd: DisplayList['commands'][number]): cmd is TextCmd => cmd.op === 'text' && !!cmd.fontFamily && !cmd.chart;
+const GENERIC = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'ui-sans-serif', 'ui-serif', 'ui-monospace']);
 
-/** The families and styles the sheet's cell text paints with. */
+/** The family a text command asks for first: the cell's family, or the head of a chart's CSS font list unless it is generic. */
+function primaryFamily(cmd: TextCmd): string | undefined {
+  if (!cmd.fontFamily) return undefined;
+  if (!cmd.chart) return cmd.fontFamily;
+  const head = cmd.fontFamily.split(',')[0]?.trim().replace(/^(['"])(.*)\1$/, '$2');
+  return head && !GENERIC.has(head.toLowerCase()) ? head : undefined;
+}
+
+function runFont(cmd: TextCmd): PngRunFont | undefined {
+  const family = primaryFamily(cmd);
+  return family === undefined ? undefined : { family, bold: cmd.bold === true, italic: cmd.italic === true };
+}
+
+/** The families and styles the sheet's cell and chart text paints with. */
 export function sheetFonts(list: DisplayList): PngRunFont[] {
   const fonts = new Map<string, PngRunFont>();
-  for (const cmd of list.commands) if (isCellText(cmd)) fonts.set(JSON.stringify(runFont(cmd)), runFont(cmd));
+  for (const cmd of list.commands) {
+    const font = cmd.op === 'text' ? runFont(cmd) : undefined;
+    if (font) fonts.set(JSON.stringify(font), font);
+  }
   return [...fonts.values()];
 }
 
@@ -105,20 +120,20 @@ export function sheetFace(faces: ReadonlyArray<PngFontFace>, font: PngRunFont): 
 function withFaces(list: DisplayList, family: (font: PngRunFont) => string | undefined): DisplayList {
   let changed = false;
   const commands = list.commands.map((cmd) => {
-    if (!isCellText(cmd)) return cmd;
-    const alias = family(runFont(cmd));
-    if (!alias) return cmd;
+    const font = cmd.op === 'text' ? runFont(cmd) : undefined;
+    const alias = font && family(font);
+    if (!alias || cmd.op !== 'text') return cmd;
     changed = true;
-    return { ...cmd, fontFamily: alias };
+    return { ...cmd, fontFamily: cmd.chart ? `"${alias}", ${cmd.fontFamily}` : alias };
   });
   return changed ? { ...list, commands } : list;
 }
 
-/** Chart text names CSS font lists of its own; wait for them as the editor would. */
+/** Text with no family of its own to supply a face for (generic chart lists, unnamed fonts); wait for it as the editor would. */
 async function loadChartFonts(list: DisplayList): Promise<void> {
   const set = pngFontSet();
   if (!set || typeof set.load !== 'function') return;
   const fonts = new Map<string, string>();
-  for (const cmd of list.commands) if (cmd.op === 'text' && (cmd.chart || !cmd.fontFamily)) fonts.set(fontString(cmd), cmd.fontFamily ?? 'sans-serif');
+  for (const cmd of list.commands) if (cmd.op === 'text' && !runFont(cmd)) fonts.set(fontString(cmd), cmd.fontFamily ?? 'sans-serif');
   for (const [font, family] of fonts) await set.load(font).catch(() => { throw fontUnavailable(family, 'sheet'); });
 }
