@@ -44,6 +44,8 @@ import * as sidebarView from '../../UnifiedSidebar';
 import { toast } from 'sonner';
 import { buildReportIssueUrl } from '../../reportIssue';
 import { ToolbarCommandButton } from '../../toolbar/ToolbarCommand';
+import * as toolbarView from '../DocxEditorToolbar';
+import { useEditorChrome } from '../../EditorToolbarContext';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -379,6 +381,90 @@ afterEach(() => {
 afterAll(async () => {
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+async function shellRenderFixture(extra: Pick<DocxEditorProps, 'showHostProposalsInSidebar'> = {}) {
+  const h = proposalHost({ automatic: false });
+  const geometry = h.binding.viewStore.getSnapshot().geometry!;
+  h.binding.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 1,
+    pages: [{ page: { pageId: '1', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 },
+      transform: [1, 0, 0, 1, 0, 0], displayPage: { pageIndex: 0, width: 600, height: 800, primitives: [], sectionIndex: 0 } }] });
+  const probe = mock(() => { useEditorChrome(); return <div data-testid="toolbar-probe" />; });
+  const toolbar = spyOn(toolbarView, 'DocxEditorToolbar').mockImplementation(probe);
+  restorers.push(() => toolbar.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} {...extra} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  return { h, view, probe, present: async (change: (geometry: PeerlessFrameGeometry) => void = () => {}) => {
+    const next = structuredClone(h.binding.viewStore.getSnapshot().geometry!);
+    next.frameEpoch++;
+    change(next);
+    await act(async () => { h.binding.viewStore.installFrameGeometry(next); });
+  } };
+}
+
+test('paint-only frame bursts keep the shell toolbar stable and point reads use the newest display page', async () => {
+  const { h, view, probe, present } = await shellRenderFixture();
+  const count = probe.mock.calls.length, surfaces = surface.mock.calls.length;
+  const initialPage = h.binding.viewStore.getSnapshot().geometry!.pages[0]!;
+  for (let index = 1; index <= 40; index++) {
+    await present(geometry => { geometry.pages[0]!.displayPage!.sectionIndex = index; });
+  }
+  expect(probe.mock.calls.length).toBe(count);
+  expect(surface.mock.calls.length - surfaces).toBeLessThanOrEqual(2);
+  const onPartPoint = surface.mock.calls.at(-1)![0].onPartPoint!;
+  const intent = { page: initialPage.page, x: 10, y: 5, clickCount: 2, frameEpoch: 1, layoutRevision: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+  const query = spyOn(frameRender, 'findDisplayListHyperlinkAtPoint');
+  restorers.push(() => query.mockRestore());
+  await act(async () => { onPartPoint({ page: initialPage, x: 10, y: 100, clickCount: 1, intent: { ...intent, clickCount: 1 } }); });
+  expect(query.mock.calls.at(-1)![0].pages[0]!.sectionIndex).toBe(40);
+  view.unmount(); h.controller.dispose();
+});
+
+for (const [name, change] of [
+  ['page bounds', (geometry: PeerlessFrameGeometry) => { geometry.pages[0]!.bounds.width++; }],
+  ['caret', (geometry: PeerlessFrameGeometry) => { geometry.caret = { x: 10, y: 20, width: 1, height: 12 }; }],
+  ['selection', (geometry: PeerlessFrameGeometry) => { geometry.selectionRects = [{ x: 10, y: 20, width: 20, height: 12 }]; }],
+  ['layoutRevision', (geometry: PeerlessFrameGeometry) => { geometry.layoutRevision++; }],
+] as const) {
+  test(`${name} frames still render the shell and leave the toolbar alone`, async () => {
+    const { h, view, probe, present } = await shellRenderFixture();
+    const count = probe.mock.calls.length, surfaces = surface.mock.calls.length;
+    await present(change);
+    expect(surface.mock.calls.length).toBeGreaterThan(surfaces);
+    expect(probe.mock.calls.length).toBe(count);
+    view.unmount(); h.controller.dispose();
+  });
+}
+
+test('a shell showing host proposals still follows every frame', async () => {
+  const { h, view, present } = await shellRenderFixture({ showHostProposalsInSidebar: true });
+  const surfaces = surface.mock.calls.length;
+  await present();
+  expect(surface.mock.calls.length).toBeGreaterThan(surfaces);
+  view.unmount(); h.controller.dispose();
+});
+
+test('document edits still render the shell', async () => {
+  const { h, view } = await shellRenderFixture();
+  const surfaces = surface.mock.calls.length;
+  await act(async () => { await h.submit('insertText', { text: 'x' }, {}).ack; });
+  expect(surface.mock.calls.length).toBeGreaterThan(surfaces);
+  view.unmount(); h.controller.dispose();
+});
+
+test('the toolbar follows its own props and chrome configuration', async () => {
+  const { h, view, probe } = await shellRenderFixture();
+  const count = probe.mock.calls.length;
+  await act(async () => { view.rerender(<DocxEditor {...peerlessProps} documentName="renamed" />); });
+  expect(probe.mock.calls.length).toBeGreaterThan(count);
+  expect((probe.mock.calls.at(-1) as unknown as [{ documentName?: string }])[0].documentName).toBe('renamed');
+  const named = probe.mock.calls.length;
+  await act(async () => { view.rerender(<DocxEditor {...peerlessProps} documentName="renamed" showZoomControl={false} />); });
+  expect(probe.mock.calls.length).toBeGreaterThan(named);
+  view.unmount(); h.controller.dispose();
 });
 
 test('a mounted host receives four proposals and a versioned plugin proposal event', async () => {
@@ -823,6 +909,42 @@ test('current comment geometry positions new and moved cards while another page 
   expect(wrapper().style.top).toBe('118px');
   expect(wrapper().style.opacity).toBe('1');
   expect(h.binding.viewStore.getSnapshot().geometry!.pages[1]!.displayPage!.unbuilt).toBe(true);
+  view.unmount();
+  h.controller.dispose();
+});
+
+test('a zoom change after a paint-only frame reprojects comment cards before the review read returns', async () => {
+  const h = proposalHost({ automatic: false });
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
+  const review = { ...base.value, uiComments: [noteComment(3, 'Anchored note')], commentIds: { native: 3 },
+    commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
+  let hold: Promise<void> | null = null;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) => {
+    if (request.kind === 'reviewSnapshot' && hold) await hold;
+    return { status: 'ok', version, value: request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null };
+  }) as never);
+  const column = spyOn(sidebarView, 'UnifiedSidebar');
+  restorers.push(() => readAt.mockRestore(), () => column.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  const cardItem = () => column.mock.calls.at(-1)![0].items.find(item => item.id === 'comment-3');
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(88));
+  let release!: () => void;
+  hold = new Promise<void>(resolve => { release = resolve; });
+  await act(async () => {
+    const frame = h.binding.viewStore.getSnapshot().geometry!;
+    h.binding.viewStore.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1 });
+  });
+  await act(async () => { ref.current!.setZoom(2); });
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(64));
+  hold = null;
+  await act(async () => { release(); await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(cardItem()?.fixedY).toBe(64);
   view.unmount();
   h.controller.dispose();
 });

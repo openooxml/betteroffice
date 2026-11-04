@@ -11,7 +11,7 @@ import { wasmAssetUrl } from '../wasm/asset';
 import {
   decodeFontFace, engineAllocationFailure, initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   workbookPeerSnapshot,
-  openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion,
+  openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion, translateFormulasOn,
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
   type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
@@ -592,6 +592,7 @@ export function createWorkbookSessionHost(
       checkSheet(opened, sheet);
       return { sheet, version: opened.version(), cells: opened.rangeCells(sheet, range) };
     },
+    translateFormulas: (_, items) => translateFormulasOn(workbook(), items),
     captureFormat(_, sheet, range) {
       const opened = workbook();
       checkSheet(opened, sheet);

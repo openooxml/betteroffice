@@ -100,7 +100,9 @@ import { PluginRowGutter } from './plugins/PluginRowGutter';
 import { ROW_GUTTER_WIDTH } from './plugins/rowDecorations';
 import { frozenGridExtent, visibleGridRange } from './plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPanels';
-import { cellEditable as cellEditableByPlugins, gateClear, gateWrites } from './plugins/editGate';
+import {
+  cellEditable as cellEditableByPlugins, gateClear, GATE_CELL_LIMIT, gatePaste, gateWrites,
+} from './plugins/editGate';
 import type { XlsxPluginSelection } from './plugins/types';
 import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
 
@@ -1683,17 +1685,27 @@ export function XlsxEditorContent({
     return { handle, sheet: activeSheetRef.current, range: normalizeRange(selection) };
   }, [selectionRef, activeSheetRef]);
 
+  /** The writes clearing `target` once plugins allowed them, or null when refused. */
+  const gatedClear = useCallback(
+    ({ handle, sheet, range }: CellTarget, source: 'clear-key' | 'cut'): CellInputEdit[] | null => {
+      const edits = clearedCells(range, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
+      if (!edits) { setError(t('editor.clearExceedsLimit')); return null; }
+      const cleared = gateOutcome(gateClear(editGate, handle, sheet, edits, t('commands.reasons.hostRefused'),
+        t('commands.reasons.hostStarting'),
+        source === 'cut' ? { tooMany: t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT }) } : undefined));
+      return Array.isArray(cleared) ? cleared : null;
+    },
+    [t, gateOutcome, editGate]
+  );
+
   // an input write clearing `target`, while its workbook is still open and writable.
   const writeClear = useCallback(
-    ({ handle, sheet, range }: CellTarget, source?: 'clear-key') => {
+    (target: CellTarget) => {
+      const { handle, sheet } = target;
       if (handleRef.current !== handle || readOnlyRef.current) return;
       try {
-        const edits = clearedCells(range, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
-        if (!edits) { setError(t('editor.clearExceedsLimit')); return; }
-        const cleared = source
-          ? gateOutcome(gateClear(editGate, handle, sheet, edits, t('commands.reasons.hostRefused'),
-            t('commands.reasons.hostStarting'))) : edits;
-        if (!Array.isArray(cleared)) return;
+        const cleared = gatedClear(target, 'clear-key');
+        if (!cleared) return;
         applyResult(handle.editCells(sheet, cleared));
         return true;
       } catch (e) {
@@ -1701,21 +1713,27 @@ export function XlsxEditorContent({
         return false;
       }
     },
-    [applyResult, t, gateOutcome, editGate]
+    [applyResult, gatedClear]
   );
 
   const clearCells = useCallback(() => {
     const target = captureTarget();
-    if (target && !readOnly) void coordinator.input(() => writeClear(target, 'clear-key'));
+    if (target && !readOnly) void coordinator.input(() => writeClear(target));
   }, [captureTarget, writeClear, readOnly, coordinator]);
 
-  const copyTarget = useCallback(async ({ handle, sheet, range: selected }: CellTarget, cut = false) => {
+  /** The range and cells a copy of `target` takes; a selection reaching the sheet edge stops at its used range. */
+  const copiedCells = ({ handle, sheet, range: selected }: CellTarget) => {
+    const range = copiedRange(selected, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
+    const from = handle.cell(sheet, range.top, range.left).a1;
+    const to = handle.cell(sheet, range.bottom, range.right).a1;
+    return { range, cells: handle.rangeCells(sheet, `${from}:${to}`) };
+  };
+
+  const copyTarget = useCallback(async (target: CellTarget, cut = false) => {
+    const { handle, sheet } = target;
     const token = cellClipboard.begin();
     try {
-      const range = copiedRange(selected, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
-      const from = handle.cell(sheet, range.top, range.left).a1;
-      const to = handle.cell(sheet, range.bottom, range.right).a1;
-      const cells = handle.rangeCells(sheet, `${from}:${to}`);
+      const { range, cells } = copiedCells(target);
       const marked = !cut && typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function';
       if (marked) await navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob([toTsv(cells)], { type: 'text/plain' }), 'text/html': clipboardMarker(token, toTsv(cells)),
@@ -1736,14 +1754,81 @@ export function XlsxEditorContent({
     if (target) await copyTarget(target);
   }, [captureTarget, copyTarget]);
 
+  // a cut runs after the input before it, asks plugins about the cells it clears, and only then
+  // writes the clipboard and clears them; a refusal leaves both as they were. With no input
+  // waiting it all happens in the gesture; behind waiting input the clipboard write starts in the
+  // gesture with its text to come, where the browser offers that, else it runs once the cut does.
   const cutSelection = useCallback(() => {
     const target = captureTarget();
     if (!target) return;
+    if (readOnly) { void copyTarget(target, true); return; }
     const escapes = cellClipboard.escaped;
-    const copied = copyTarget(target, true);
-    if (readOnly) return;
-    void coordinator.input(async () => (cellClipboard.escaped === escapes && (await copied) ? writeClear(target) : undefined));
-  }, [captureTarget, cellClipboard, copyTarget, writeClear, readOnly, coordinator]);
+    const current = () => cellClipboard.escaped === escapes && handleRef.current === target.handle && !readOnlyRef.current;
+    const decide = (): { cleared: CellInputEdit[]; text: string } | null => {
+      try {
+        const cleared = current() ? gatedClear(target, 'cut') : null;
+        return cleared && { cleared, text: toTsv(copiedCells(target).cells) };
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    };
+    const writeText = (text: string): Promise<void> => {
+      try {
+        return navigator.clipboard.writeText(text);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    };
+    const clear = async (written: Promise<void>, cleared: CellInputEdit[]) => {
+      try {
+        await written;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      if (!current()) return;
+      try {
+        applyResult(target.handle.editCells(target.sheet, cleared));
+        return true;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return false;
+      }
+    };
+    if (!coordinator.pending) {
+      const decided = decide();
+      if (!decided) return;
+      cellClipboard.begin();
+      const written = writeText(decided.text);
+      void written.catch(() => {});
+      void coordinator.input(() => clear(written, decided.cleared));
+      return;
+    }
+    let resolve!: (blob: Blob) => void;
+    let reject!: (error: unknown) => void;
+    const payload = new Promise<Blob>((done, fail) => { resolve = done; reject = fail; });
+    void payload.catch(() => {});
+    let write: Promise<void> | null = null;
+    if (typeof ClipboardItem === 'function' && typeof navigator.clipboard?.write === 'function') {
+      try {
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload })]);
+        void write.catch(() => {});
+      } catch {
+        write = null;
+      }
+    }
+    void coordinator.input(async () => {
+      const decided = decide();
+      if (!decided) {
+        reject(new Error('The cut was refused'));
+        return;
+      }
+      cellClipboard.begin();
+      if (write) resolve(new Blob([decided.text], { type: 'text/plain' }));
+      return clear(write ?? writeText(decided.text), decided.cleared);
+    });
+  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator]);
 
   const pasteSelection = useCallback(() => {
     const handle = handleRef.current;
@@ -1776,7 +1861,10 @@ export function XlsxEditorContent({
           width = Math.max(width, rowArr.length);
           rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
         });
-        applyResult(handle.editCells(sheet, edits));
+        const written = gateOutcome(gatePaste(editGate, handle, sheet, edits, t('commands.reasons.hostRefused'),
+          t('commands.reasons.hostStarting'), t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT })));
+        if (!Array.isArray(written)) return;
+        applyResult(handle.editCells(sheet, written));
         if (selectionRef.current === selection && activeSheetRef.current === sheet) {
           setSelection({
             anchor: { row: r.top, col: r.left },
@@ -1789,7 +1877,7 @@ export function XlsxEditorContent({
         return false;
       }
     });
-  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection, cellClipboard]);
+  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection, cellClipboard, gateOutcome, editGate, t]);
 
   useEffect(() => {
     const handle = handleRef.current;

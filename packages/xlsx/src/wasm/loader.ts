@@ -1476,7 +1476,25 @@ function wrapWorkbookDocument(
     next: () => wasmCall(() => (doc as SnapshotDocument).nextPeerSnapshotChunk()),
     end: () => wasmCall(() => (doc as SnapshotDocument).endPeerSnapshot()),
   });
+  formulaMovers.set(handle, (items) => parseJson(() => doc.translateFormulasJson(JSON.stringify(items))));
   return handle;
+}
+
+type FormulaMoves = readonly { formula: string; from: CellPoint; to: CellPoint }[];
+type MovedFormulas = ({ ok: true; formula: string } | { ok: false; error: string })[];
+
+const formulaMovers = new WeakMap<WorkbookHandle, (items: FormulaMoves) => MovedFormulas>();
+
+/**
+ * @internal Formulas, without their `=`, moved from one cell to another as a paste moves them, by
+ * the engine of `handle`; per item the moved formula, or why a paste would refuse it.
+ */
+export function translateFormulasOn(
+  handle: WorkbookHandle, items: readonly { formula: string; from: CellPoint; to: CellPoint }[]
+): ({ ok: true; formula: string } | { ok: false; error: string })[] {
+  const move = formulaMovers.get(handle);
+  if (!move) throw new TypeError('translateFormulasOn needs a workbook this package opened');
+  return move(items);
 }
 
 type SnapshotDocument = XlsxDocument & {
