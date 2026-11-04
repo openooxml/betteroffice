@@ -18,6 +18,7 @@ import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError, XlsxHostRefusalError } from '../commands/createXlsxCommandStore';
 import { commandForEvent, isMacPlatform } from '../commands/descriptors';
 import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
+import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
 import { xlsxContextMenuEntries } from '../contextMenu/menus';
 import { commandReason, initialZoomScale } from '../commands/evaluate';
 import type { XlsxCommandFailureCode } from '../commands/types';
@@ -1615,18 +1616,24 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   });
   const selectAtPoint = (request: { x: number; y: number }) => {
     const { cell, chart } = point({ clientX: request.x, clientY: request.y });
-    if (chart) { setSelectedChart({ id: chart.id, movable: chart.movable }); return 'chart' as const; }
+    if (chart) { setSelectedChart({ id: chart.id, movable: chart.movable }); return null; }
     if (!cell) return null;
-    const selected = selectionRef.current;
-    const range = selected ? normalizeRange(selected) : null;
-    if (chartRef.current || !range || cell.row < range.top || cell.row > range.bottom || cell.col < range.left || cell.col > range.right) {
+    const sheet = activeRef.current;
+    const covers = () => {
+      const range = selectionRef.current ? normalizeRange(selectionRef.current) : null;
+      return !chartRef.current && range !== null && activeRef.current === sheet &&
+        cell.row >= range.top && cell.row <= range.bottom && cell.col >= range.left && cell.col <= range.right;
+    };
+    if (!covers()) {
       setSelectedChart(null);
       const next = selectionAt(mergeAnchorCell(cell, merges()));
-      predict(activeRef.current, next, true);
-      command({ kind: 'select', payload: { selection: rangeTarget(activeRef.current, next) } });
+      predict(sheet, next, true);
+      command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
     }
-    return 'cell' as const;
+    return covers;
   };
+  const menuEntries = (entries: OverflowMenuEntry[], ready: () => boolean) => ready() ? entries
+    : entries.map((entry) => entry.kind === 'item' || entry.kind === 'submenu' ? { ...entry, disabled: true } : entry);
   const gridMenu = useContextMenu({
     surface: scrollRef,
     subscribe: commands.store.subscribe,
@@ -1642,10 +1649,14 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     resolve: (request) => {
       if (!run?.ready || run.failure || inPluginChrome(request.target)) return null;
       if (draftController.cellInput?.contains(request.target as Node)) return null;
-      if (request.modality === 'pointer' && selectAtPoint(request) !== 'cell') return null;
-      if (request.modality === 'keyboard' && chartRef.current) return null;
+      let ready = () => true;
+      if (request.modality === 'pointer') {
+        const covers = selectAtPoint(request);
+        if (!covers) return null;
+        ready = covers;
+      } else if (chartRef.current) return null;
       return { label: t('editor.cellMenuLabel'), testId: 'xlsx-cell-menu',
-        entries: () => xlsxContextMenuEntries('cell', commands.store, t) };
+        entries: () => menuEntries(xlsxContextMenuEntries('cell', commands.store, t), ready) };
     },
   });
   const tabMenu = useContextMenu({
@@ -1661,9 +1672,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       const tab = request.target instanceof Element ? request.target.closest<HTMLElement>('[role="tab"]') : null;
       const index = Number(tab?.dataset.sheetIndex);
       if (!tab || !Number.isInteger(index)) return null;
-      if (index !== activeRef.current) navigate(index);
+      const id = sheetId(index);
+      if (index !== activeRef.current || id !== activeSheetId.current) navigate(index);
+      const ready = () => activeRef.current === index && activeSheetId.current === id;
       return { label: t('editor.sheetTabMenuLabel'), testId: 'xlsx-sheet-tab-menu',
-        entries: () => xlsxContextMenuEntries('sheetTab', commands.store, t) };
+        entries: () => menuEntries(xlsxContextMenuEntries('sheetTab', commands.store, t), ready) };
     },
   });
   const renameDone = useRef(false);
