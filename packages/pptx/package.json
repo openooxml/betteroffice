@@ -45,15 +45,18 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./worker": {
       "types": "./dist/worker.d.ts",
-      "import": "./dist/worker.js"
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
     },
     "./collaboration": {
       "types": "./dist/collaboration.d.ts",
-      "import": "./dist/collaboration.js"
+      "import": "./dist/collaboration.js",
+      "default": "./dist/collaboration.js"
     }
   },
   "files": [

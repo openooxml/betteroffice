@@ -10,11 +10,13 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
     },
     "./en": {
       "types": "./dist/en.d.mts",
-      "import": "./dist/en.mjs"
+      "import": "./dist/en.mjs",
+      "default": "./dist/en.mjs"
     },
     "./package.json": "./package.json"
   },
