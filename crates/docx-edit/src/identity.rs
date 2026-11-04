@@ -547,6 +547,29 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    /// Whether any of `ordinals` in `part` is a paragraph [`rewriting_loses_source_runs`]; an
+    /// unreadable part or paragraph counts as one.
+    fn rewrite_loses_source_runs(&self, part: &SourcePart, ordinals: &[u32]) -> bool {
+        if ordinals.is_empty() {
+            return false;
+        }
+        let read = || -> Option<String> {
+            let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+            let position = package.parts().position(|(path, _)| path == part.path())?;
+            String::from_utf8(package.read(position).ok()?).ok()
+        };
+        let Some(xml) = read() else {
+            return true;
+        };
+        ordinals.iter().any(|&ordinal| {
+            let Some(start) = part.occurrence(ordinal).map(|occurrence| occurrence.tag.start) else {
+                return true;
+            };
+            docx_parse::serializer::element_span(&xml[start..], &[])
+                .is_none_or(|span| rewriting_loses_source_runs(&xml[start..][span]))
+        })
+    }
+
     fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
         let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
         let position = package.parts().position(|(path, _)| path == part.path())?;
@@ -3908,7 +3931,14 @@ impl EditingDoc {
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
-                    plan.spliced_parts.push(spliced);
+                    let rewritten: Vec<u32> = spliced
+                        .legacy_paragraphs
+                        .iter()
+                        .map(|legacy| legacy.ordinal)
+                        .collect();
+                    if !source.rewrite_loses_source_runs(part, &rewritten) {
+                        plan.spliced_parts.push(spliced);
+                    }
                 } else if part.kind == SourceStoryKind::Body {
                     plan.section_spliced_parts.push(spliced);
                 }
@@ -4591,6 +4621,72 @@ fn last_block_paragraph(
         &mut ordinals,
     )?;
     ordinals.into_iter().max()
+}
+
+/// Whether rewriting `xml`, one source paragraph, from the model would lose run content the
+/// model does not round-trip: alternate content with its fallback, a page or column break,
+/// a tracked insertion, deletion or move, a bookmark or permission anchor inside a hyperlink, a
+/// field nested in another field's result, or a hyperlink holding field characters. A part where
+/// such a paragraph would be rewritten from the model (a legacy paragraph) is written whole, as
+/// a part that cannot splice is.
+fn rewriting_loses_source_runs(xml: &str) -> bool {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    let mut rest = xml;
+    'scan: while let Some(at) = rest.find('<') {
+        rest = &rest[at..];
+        for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
+            if rest.starts_with(open) {
+                let Some(end) = rest.find(close) else {
+                    return true;
+                };
+                rest = &rest[end + close.len()..];
+                continue 'scan;
+            }
+        }
+        let Some(end) = rest.find('>') else {
+            return true;
+        };
+        let tag = &rest[1..end];
+        rest = &rest[end + 1..];
+        let closing = tag.starts_with('/');
+        let empty = tag.ends_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
+        match local {
+            "AlternateContent" | "ins" | "del" | "moveFrom" | "moveTo" => return true,
+            "br" if tag.contains("\"page\"") || tag.contains("\"column\"") => return true,
+            "hyperlink" if !empty => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1);
+                } else {
+                    hyperlinks += 1;
+                }
+            }
+            "bookmarkStart" | "bookmarkEnd" | "permStart" | "permEnd" if hyperlinks > 0 => {
+                return true;
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return true;
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return true;
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// `units` without, and then with, the segments after the last pilcrow.
