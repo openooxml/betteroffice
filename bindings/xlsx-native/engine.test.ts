@@ -34,6 +34,7 @@ type EngineDocument = {
   encodeDiff(stateVector: Uint8Array): Uint8Array;
   recoveryCheckpoint(throughSeq: number): Uint8Array;
   renderPngTarget(targetJson: string, optionsJson: string): Uint8Array;
+  rangePngDisplayListJson(args: string): string;
   startUpdateObservation(): void;
   drainUpdateEvent(): Uint8Array;
   undoJson(): string;
@@ -524,6 +525,8 @@ describe('xlsx native engine parity', () => {
           expect(cappedHeight).toBeGreaterThanOrEqual(22);
         }
       }
+      const used = JSON.parse(doc.rangePngDisplayListJson('{"scale":2}')) as { width: number; height: number };
+      expect(size(render({ sheet: 0, range: 'used' }, { scale: 2 }))).toEqual([Math.ceil(used.width), Math.ceil(used.height)]);
       expect(() => render({ sheet: 99, viewport: box })).toThrow('sheet index 99 out of range');
       expect(() => render({ sheet: 0, range: 'not a range' })).toThrow('invalid range');
       expect(() => doc.renderPngTarget('{"sheet":0,"viewport":{"x":0,"y":0,"width":1e999,"height":1}}', '{}')).toThrow();

@@ -9,10 +9,13 @@ export type XlsxRangeAddress =
   | { kind: 'a1'; a1: string }
   | { kind: 'rowCol'; start: { row: number; col: number }; end: { row: number; col: number } };
 
-/** What `renderPng` draws: a viewport of a sheet, or a cell range of it. */
+/**
+ * What `renderPng` draws: a viewport of a sheet, or a cell range of it.
+ * `range: 'used'` draws the sheet's used range as the engine finds it at call time.
+ */
 export type XlsxPngTarget =
   | { sheet: number | string; viewport: Viewport }
-  | { sheet: number | string; range: XlsxRangeAddress };
+  | { sheet: number | string; range: XlsxRangeAddress | 'used' };
 
 export interface XlsxPngOptions {
   /** Device pixels per sheet pixel. Defaults to 1. */

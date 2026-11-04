@@ -118,6 +118,14 @@ describe('the wasm PNG engine', () => {
     expect(calls.transforms[0]).toEqual([1, 0, 0, 1, 0, 0]);
   });
 
+  test("draws the sheet's used range when the range is 'used'", async () => {
+    stubBrowser();
+    const { value, seen } = engine();
+    await renderPng(value, { sheet: 1, range: 'used' }, { scale: 2 });
+    expect(seen.map(({ sheet, call }) => [sheet, call])).toEqual([[1, 'range']]);
+    expect(JSON.parse(seen[0].json)).toEqual({ scale: 2 });
+  });
+
   test('without a canvas, uses the rasterizer the build carries, then a session rasterizer, then names -native', async () => {
     stubBrowser({ canvas: false });
     const viewport = { x: 0, y: 0, width: 10, height: 10 };

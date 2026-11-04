@@ -1,7 +1,7 @@
 import type { Viewport } from './loader';
 import type { XlsxPngOptions } from './pngTarget';
 
-/** A target with its sheet resolved to an index and its range to an A1 string. */
+/** A target with its sheet resolved to an index and its range to an A1 string or 'used'. */
 export type ResolvedPngTarget =
   | { sheet: number; viewport: Viewport }
   | { sheet: number; range: string };
@@ -79,7 +79,8 @@ export function resolvePngTarget(target: unknown, options: XlsxPngOptions, names
     return { sheet: sheetIndex(sheet, names), viewport: { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height } };
   }
   if ('range' in target && !('viewport' in target)) {
-    return { sheet: sheetIndex(sheet, names), range: rangeA1((target as { range: unknown }).range) };
+    const range = (target as { range: unknown }).range;
+    return { sheet: sheetIndex(sheet, names), range: range === 'used' ? 'used' : rangeA1(range) };
   }
   throw new TypeError('target must be { sheet, viewport } or { sheet, range }');
 }

@@ -646,6 +646,24 @@ impl Session {
                 ))
             }
         };
+        let options = RenderOptions {
+            scale: options.scale.unwrap_or(1.0),
+            max_width: options.max_width,
+            max_height: options.max_height,
+            ..RenderOptions::default()
+        };
+        if let Target::Range(RangeTarget {
+            sheet: index,
+            range,
+        }) = &target
+            && range == "used"
+        {
+            return self
+                .workbook
+                .render_sheet(sheet(*index)?, &options)
+                .map(|rendered| rendered.bytes)
+                .map_err(|error| error.to_string());
+        }
         let target = match target {
             Target::Viewport(target) => betteroffice_xlsx::PngTarget::Viewport {
                 sheet: sheet(target.sheet)?,
@@ -661,12 +679,6 @@ impl Session {
                 range: CellRange::parse_a1(&target.range.to_ascii_uppercase())
                     .map_err(|error| format!("invalid range {:?}: {error}", target.range))?,
             },
-        };
-        let options = RenderOptions {
-            scale: options.scale.unwrap_or(1.0),
-            max_width: options.max_width,
-            max_height: options.max_height,
-            ..RenderOptions::default()
         };
         self.workbook
             .render_png(target, &options)

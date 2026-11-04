@@ -10,7 +10,7 @@ const JS_TARGET: Record<Format, RegExp> = {
   docx: /^\{\s*page: number;?\s*\}$/,
   pptx: /^\{\s*slide: number;?\s*\}$/,
   vsdx: /^\{\s*page: number;?\s*\}$/,
-  xlsx: /^\|?\s*\{\s*sheet: number(?: \| string)?;\s*viewport: \w+;?\s*\}\s*\|\s*\{\s*sheet: number(?: \| string)?;\s*range: (?!number\b|boolean\b)\w+;?\s*\}$/,
+  xlsx: /^\|?\s*\{\s*sheet: number(?: \| string)?;\s*viewport: \w+;?\s*\}\s*\|\s*\{\s*sheet: number(?: \| string)?;\s*range: (?!number\b|boolean\b)\w+(?: \| '\w+')?;?\s*\}$/,
 };
 
 function aliasBody(text: string, name: string): string | undefined {
@@ -103,6 +103,7 @@ describe('the shape checks tell right from wrong', () => {
     ['xlsx', 'type Target = { sheet: number; viewport: Viewport };\nrenderPng(target: Target, options?: O): Promise<Uint8Array>;', false],
     ['xlsx', 'renderPng(target: Missing, options?: O): Promise<Uint8Array>;', false],
     ['xlsx', 'type Target =\n  | { sheet: number | string; viewport: Viewport }\n  | { sheet: number | string; range: XlsxRangeAddress };\nrenderPng(target: Target, options?: O): Promise<Uint8Array>;', true],
+    ['xlsx', 'type Target =\n  | { sheet: number | string; viewport: Viewport }\n  | { sheet: number | string; range: XlsxRangeAddress | \'used\' };\nrenderPng(target: Target, options?: O): Promise<Uint8Array>;', true],
     ['xlsx', 'type Target = { sheet: number | string; viewport: Viewport } | { sheet: number | string; range: number };\nrenderPng(target: Target, options?: O): Promise<Uint8Array>;', false],
     ['xlsx', 'type Target = { sheet: boolean; viewport: Viewport } | { sheet: boolean; range: string };\nrenderPng(target: Target, options?: O): Promise<Uint8Array>;', false],
   ] as const)('js %s %s', (format, text, expected) => expect(jsMatches(format, text)).toBe(expected));

@@ -50,7 +50,7 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
       height: Math.max(1, Math.ceil(Math.fround(viewport.height * scale))),
     });
   }
-  const args = JSON.stringify({ range: target.range, scale, maxWidth: options.maxWidth, maxHeight: options.maxHeight });
+  const args = JSON.stringify({ range: target.range === 'used' ? undefined : target.range, scale, maxWidth: options.maxWidth, maxHeight: options.maxHeight });
   if (!canvas && engine.rasterAvailable) return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderRangePng!(args).slice()));
   if (!canvas) return engine.rasterize!(engine.onSheet(target.sheet, () => engine.doc.rangePngDisplayListJson(args)));
   const list = JSON.parse(engine.onSheet(target.sheet, () => engine.doc.rangePngDisplayListJson(args))) as DisplayList;

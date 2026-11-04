@@ -46,6 +46,7 @@ describe('PNG targets', () => {
   test('resolves targets and checks scale and size limits before any engine call', () => {
     expect(resolvePngTarget({ sheet: 'Other', viewport }, {}, names)).toEqual({ sheet: 1, viewport });
     expect(resolvePngTarget({ sheet: 0, range: { kind: 'a1', a1: 'A1:B2' } }, { scale: 2 }, names)).toEqual({ sheet: 0, range: 'A1:B2' });
+    expect(resolvePngTarget({ sheet: 'Data', range: 'used' }, {}, names)).toEqual({ sheet: 0, range: 'used' });
     expect(() => resolvePngTarget({ sheet: 0, viewport }, { scale: 0 }, names)).toThrow('scale must be a positive number');
     expect(() => resolvePngTarget({ sheet: 0, viewport }, { scale: Number.NaN }, names)).toThrow('scale must be a positive number');
     expect(() => resolvePngTarget({ sheet: 0, viewport }, { maxWidth: 0 }, names)).toThrow('maxWidth must be a positive integer');

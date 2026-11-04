@@ -39,7 +39,7 @@ async function failure(call: Promise<unknown>): Promise<string> {
 async function matchingPng(lean: WorkbookSession, full: WorkbookSession, sheet: number) {
   expect(await lean.call.renderPng({ sheet, viewport })).toEqual(await full.call.renderPng({ sheet, viewport }));
   for (const [range, options] of [['A1:B3', {}], ['B2:D5', { scale: 0.75 }], ['A1:B3', { scale: 1.3 }],
-    ['A1:B3', { scale: 2 }], ['A1:D9', { scale: 1.3, maxWidth: 97, maxHeight: 41 }]] as const) {
+    ['A1:B3', { scale: 2 }], ['A1:D9', { scale: 1.3, maxWidth: 97, maxHeight: 41 }], ['used', {}], ['used', { scale: 0.75 }]] as const) {
     expect(await lean.call.renderPng({ sheet, range }, options))
       .toEqual(await full.call.renderPng({ sheet, range }, options));
   }
