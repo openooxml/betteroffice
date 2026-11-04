@@ -3,7 +3,12 @@
 //! call so the session fails with an out-of-memory error, as a WebAssembly engine at its memory
 //! limit does.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
+
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc as Inner;
+#[cfg(not(feature = "mimalloc"))]
+use std::alloc::System as Inner;
 use std::cell::Cell;
 
 /// The largest memory a wasm32 engine can address.
@@ -84,22 +89,32 @@ pub(crate) fn exceeded() -> String {
 
 /// Returns freed heap pages to the operating system after a failed call, where the allocator keeps them.
 pub(crate) fn release_to_os() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(feature = "mimalloc")]
+    // SAFETY: mi_collect only walks mimalloc's own heaps and takes no pointers.
+    unsafe {
+        mi_collect(true);
+    }
+    #[cfg(all(not(feature = "mimalloc"), target_os = "linux", target_env = "gnu"))]
     // SAFETY: malloc_trim only walks glibc's own arenas and takes no pointers.
     unsafe {
         malloc_trim(0);
     }
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(feature = "mimalloc")]
+unsafe extern "C" {
+    fn mi_collect(force: bool);
+}
+
+#[cfg(all(not(feature = "mimalloc"), target_os = "linux", target_env = "gnu"))]
 unsafe extern "C" {
     fn malloc_trim(pad: usize) -> std::ffi::c_int;
 }
 
-// SAFETY: every call forwards to `System` unchanged; the counters only observe it.
+// SAFETY: every call forwards to the inner allocator unchanged; the counters only observe it.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
+        let pointer = unsafe { Inner.alloc(layout) };
         if !pointer.is_null() {
             grew(layout.size());
         }
@@ -107,7 +122,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
+        let pointer = unsafe { Inner.alloc_zeroed(layout) };
         if !pointer.is_null() {
             grew(layout.size());
         }
@@ -115,12 +130,12 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { Inner.dealloc(pointer, layout) };
         shrank(layout.size());
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let moved = unsafe { System.realloc(pointer, layout, new_size) };
+        let moved = unsafe { Inner.realloc(pointer, layout, new_size) };
         if !moved.is_null() {
             if new_size >= layout.size() {
                 grew(new_size - layout.size());
