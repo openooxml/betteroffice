@@ -362,6 +362,7 @@ export function ProposalShapeOutlines({ diff, current, frame, scale, onTarget }:
               }}
             >
               {(inserted || deleted) && <span style={styles.tag}>{t(deleted ? 'proposals.deletedShape' : 'proposals.insertedShape')}</span>}
+              {kind === 'reordered' && <span style={styles.tag}>{t('proposals.zOrderChanged')}</span>}
               {deleted && <svg data-testid="pptx-proposal-shape-strike" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}><line x1="0" y1="100" x2="100" y2="0" stroke="#4338ca" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg>}
               {moved && (
                 <span

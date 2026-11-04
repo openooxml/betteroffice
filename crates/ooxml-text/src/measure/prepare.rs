@@ -59,6 +59,7 @@ pub(super) struct CharAdv {
     pub utf16_offset: u32,
     /// UTF-16 code units covered by the complete shaped cluster.
     pub utf16_len: u32,
+    pub source_chars: u32,
     pub advance: f32,
     pub is_space: bool,
     /// ASCII space or U+3000: trailing instances ignore wrap fit, never justify-compressed.
@@ -68,6 +69,12 @@ pub(super) struct CharAdv {
     pub font_size_pt: f32,
     pub metrics_font: FontId,
     pub baseline_shift_px: f32,
+}
+
+impl CharAdv {
+    pub fn advance_with_spacing(&self, spacing: f32) -> f32 {
+        self.advance + spacing * self.source_chars as f32
+    }
 }
 
 /// A text run ready for line filling.
@@ -1116,6 +1123,7 @@ fn prepare_text_run(
             chars.push(CharAdv {
                 utf16_offset: pc.utf16_offset,
                 utf16_len,
+                source_chars: (end - start) as u32,
                 advance: advance * pc.advance_scale * scale,
                 is_space: plan[start..end]
                     .iter()

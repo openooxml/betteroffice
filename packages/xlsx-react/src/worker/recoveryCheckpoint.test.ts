@@ -14,7 +14,7 @@ function fakeSession(): WorkbookSession {
       cellGeometry: unexpected, cellInputs: unexpected, translateFormulas: unexpected, selectionData: unexpected, captureFormat: unexpected, sheets: unexpected,
       calculationStatus: unexpected, save: unexpected,
       collaborationStateVector: unexpected, collaborationStateAsUpdate: unexpected, listDefinedNames: unexpected,
-      renderPng: unexpected, renderRangePng: unexpected, exportStructured: unexpected,
+      renderPng: unexpected, renderPngFonts: unexpected, exportStructured: unexpected,
       exportMarkdown: unexpected, printDisplayList: unexpected },
     save: unexpected, on: () => () => {}, onFailure: () => () => {}, failure: undefined, dispose: async () => {},
   };

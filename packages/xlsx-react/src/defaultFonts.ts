@@ -1,4 +1,4 @@
-import type { DisplayList, WorkbookSession } from '@betteroffice/xlsx';
+import { PngExportError, type DisplayList, type WorkbookSession, type XlsxFontFace, type XlsxPngFont } from '@betteroffice/xlsx';
 import type { BundledFontFace } from '@betteroffice/fonts';
 
 export const xlsxDefaultFontManager = {
@@ -201,4 +201,32 @@ export function createDefaultFontPainter(
       pending.clear();
     },
   };
+}
+
+/**
+ * The faces the editor paints `fonts` with, for a PNG export to paint the same:
+ * the bundled metric-compatible or same-family face, fetched as the editor
+ * fetches it. A face the editor would use but cannot fetch rejects with
+ * `font-unavailable`, so the export never paints a substitute for it.
+ */
+export async function exportFaces(
+  fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
+): Promise<XlsxFontFace[]> {
+  if (fonts.length === 0) return [];
+  const bundled = await xlsxDefaultFontManager.load();
+  const source = bundled.createFontProvider(undefined, decoder ? { decoder, retain: false } : undefined);
+  const faces: XlsxFontFace[] = [];
+  for (const font of fonts) {
+    const face = bundled.resolveMetricCompatFace(font.family, font.bold, font.italic)
+      ?? bundled.resolveBundledFamilyFace(font.family, font.bold, font.italic);
+    const load = face && (source.resolve(font.family, font.bold, font.italic) ?? source.resolveFamily(font.family, font.bold, font.italic));
+    if (!face || !load) continue;
+    let bytes: ArrayBuffer;
+    try { bytes = await load(); } catch {
+      throw new PngExportError('font-unavailable', `The font "${font.family}" could not load, so the sheet was not exported with a substitute.`);
+    }
+    if (bytes.byteLength !== face.byteLength) continue;
+    faces.push({ family: font.family, bold: face.weight >= 600, italic: face.style === 'italic', bytes: new Uint8Array(bytes) });
+  }
+  return faces;
 }

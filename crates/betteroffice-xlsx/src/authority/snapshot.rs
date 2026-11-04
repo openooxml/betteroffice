@@ -2019,6 +2019,7 @@ impl AuthoritySnapshotEncoder {
         let WorkbookAuthority {
             doc,
             projection_valid: _,
+            plain_style_cells: _,
             snapshot_revision: _,
             base,
             history: _,
@@ -2110,6 +2111,7 @@ impl WorkbookAuthority {
         let Self {
             doc,
             projection_valid: _,
+            plain_style_cells: _,
             snapshot_revision: _,
             base: _,
             history: _,

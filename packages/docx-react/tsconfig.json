@@ -21,7 +21,6 @@
     "types": ["bun", "node"],
     "paths": {
       "#session-worker": ["../docx/src/yrs/sessionWorker.node.ts"],
-      "#session-scope": ["../docx/src/yrs/sessionScope.node.ts"],
       "@/*": ["./src/*"],
       "@betteroffice/docx": ["../docx/src/core.ts"],
       "@betteroffice/docx/headless": ["../docx/src/headless.ts"],

@@ -650,10 +650,16 @@ impl PyWorkbook {
                     },
                 }
             }
-            (None, Some(range)) => betteroffice_xlsx::PngTarget::Range {
-                sheet,
-                range: png_range(&range)?,
-            },
+            (None, Some(range)) => {
+                if matches!(range.extract::<String>().as_deref(), Ok("used")) {
+                    betteroffice_xlsx::PngTarget::UsedRange { sheet }
+                } else {
+                    betteroffice_xlsx::PngTarget::Range {
+                        sheet,
+                        range: png_range(&range)?,
+                    }
+                }
+            }
             _ => return Err(invalid()),
         };
         let options = RenderOptions {

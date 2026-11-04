@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useMemo, useRef } from 'react';
-import type { DisplayList, WorkbookSession } from '@betteroffice/xlsx';
+import type { DisplayList, WorkbookSession, XlsxFontFace, XlsxPngFont } from '@betteroffice/xlsx';
 import type { createDefaultFontPainter } from './defaultFonts';
 
 export const defaultFontPainterModule = { load: () => import('./defaultFonts') };
@@ -50,4 +50,13 @@ export function useDefaultFonts(
   return useMemo(() => Object.assign(paintWithFonts, {
     preload: (displayList: DisplayList, idle: () => boolean) => { state.current?.painter?.preload(displayList, idle); },
   }), [paintWithFonts]);
+}
+
+/** The faces a PNG export should paint `fonts` with, as the editor paints them; none when default fonts are off. */
+export async function editorExportFaces(
+  fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined, defaultFonts: boolean | undefined,
+): Promise<XlsxFontFace[] | undefined> {
+  if (defaultFonts === false || fonts.length === 0) return undefined;
+  const { exportFaces } = await defaultFontPainterModule.load();
+  return exportFaces(fonts, decoder);
 }

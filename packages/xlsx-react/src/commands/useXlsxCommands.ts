@@ -68,7 +68,7 @@ export interface XlsxEditorBridge {
   markStale(proposalId: string, cells: string[] | null): void;
   refreshProposals(): void;
   deliver(bytes: Uint8Array): void;
-  exportPng(): void;
+  exportPng(): Promise<void>;
   /** True once the canvas paints every committed change; false if it does not in time. */
   afterPaint(): Promise<boolean>;
   focusGrid(): void;
@@ -356,11 +356,16 @@ export function useXlsxCommandBinding(
             current.deliver(handle.save());
             return done();
           });
-        case 'exportPng':
-          return attempt(() => {
-            current.exportPng();
-            return done();
+        case 'exportPng': {
+          const generation = current.generation();
+          let exported: Promise<void>;
+          try { exported = current.exportPng(); } catch (error) { current.fail(error); return fail('command-failed'); }
+          return exported.then(() => bridgeRef.current.generation() !== generation ? fail('document-replaced') : done(), (error: unknown) => {
+            if (bridgeRef.current.generation() !== generation) return fail('document-replaced');
+            current.fail(error);
+            return fail('command-failed');
           });
+        }
         case 'print': {
           const generation = current.generation();
           return current.afterPaint().then((painted) => {

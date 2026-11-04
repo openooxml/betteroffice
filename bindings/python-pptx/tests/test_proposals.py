@@ -61,6 +61,59 @@ def test_stale_force_reject_and_invalid_proposals(sample_bytes):
         deck.propose("python-agent", [{"type": "setSlideNotes", "slideId": slide_id, "text": "Bad", "typo": True}])
 
 
+@pytest.mark.parametrize("kind", ["insertTableRow", "deleteTableRow", "insertTableColumn", "deleteTableColumn"])
+def test_table_proposal_dicts_preview_accept_reject_undo_and_stale(kind, font_bytes):
+    import io
+    import re
+    import zipfile
+    from pathlib import Path
+
+    fixture = Path(__file__).resolve().parents[3] / "crates/pptx-render/tests/fixtures/table-basic.pptx"
+    output = io.BytesIO()
+    with zipfile.ZipFile(fixture) as source, zipfile.ZipFile(output, "w") as target:
+        for part in source.infolist():
+            data = source.read(part.filename)
+            if part.filename == "ppt/slides/slide1.xml":
+                data = re.sub(rb' (gridSpan|rowSpan|hMerge|vMerge)="[^"]*"', b"", data)
+            target.writestr(part, data)
+    deck = bo.Presentation.open(output.getvalue())
+    deck.register_font("Liberation Sans", font_bytes)
+    before = deck.read_content()["slides"]
+    slide_id, shape_id = deck[0].id, deck[0].shapes[0].id
+    edit = {"type": kind, "slideId": slide_id, "shapeId": shape_id, "index": 0}
+    if kind.startswith("insert"):
+        edit.update(position="before", cells=["Python cell"])
+    if kind == "insertTableColumn":
+        edit["width"] = "copy"
+    proposal = deck.propose("python-agent", [edit])
+    assert proposal.changes[0].shape_id == shape_id
+    preview = deck.preview_proposal(proposal.id)
+    table = preview.snapshot["slides"][0]["shapes"][0]["graphic"]
+    rows = 4 if kind == "insertTableRow" else 2 if kind == "deleteTableRow" else 3
+    columns = 4 if kind == "insertTableColumn" else 2 if kind == "deleteTableColumn" else 3
+    assert (len(table["rows"]), len(table["grid"])) == (rows, columns)
+    assert len(deck.render_proposal(proposal.id, 0)) > 0
+    assert deck.read_content()["slides"] == before and not deck.can_undo
+    assert deck.reject_proposal(proposal.id)
+    assert deck.read_content()["slides"] == before
+    proposal = deck.propose("python-agent", [edit])
+    assert deck.accept_proposal(proposal.id)
+    reopened = bo.Presentation.open(deck.save())
+    saved_table = reopened.read_content()["slides"][0]["shapes"][0]["graphic"]
+    assert (len(saved_table["rows"]), len(saved_table["grid"])) == (rows, columns)
+    assert deck.undo()
+    assert deck.read_content()["slides"] == before and not deck.can_undo
+    for invalid in [dict(edit, index=99), dict(edit, extra=True)]:
+        with pytest.raises((bo.PptxError, ValueError)):
+            deck.propose("python-agent", [invalid])
+        assert deck.read_content()["slides"] == before and deck.proposals() == []
+    pending = deck.propose("python-agent", [edit])
+    deck.insert_table_row(slide_id, shape_id, 0, "after")
+    with pytest.raises(bo.StaleProposalError) as stale:
+        deck.accept_proposal(pending.id)
+    assert stale.value.targets == [shape_id]
+
+
 @pytest.fixture
 def structural_proposal(sample_bytes, font_bytes):
     deck = bo.Presentation.open_collaborative(sample_bytes, client_id=9202)
@@ -266,3 +319,39 @@ def test_nonstructural_proposal_omits_indices_and_empty_refs(sample_bytes):
     assert "refs" not in wire
     assert "beforeIndex" not in wire["changes"][0]
     assert "afterIndex" not in wire["changes"][0]
+
+
+@pytest.mark.parametrize("to", ["front", "back", "forward", "backward"])
+def test_reorder_shape_proposal_dict_preview_accept_reject_and_undo(to, font_bytes):
+    path = Path(__file__).resolve().parents[3] / "crates/pptx-edit/tests/fixtures/proposal-shapes.pptx"
+    deck = bo.Presentation.open(path.read_bytes())
+    deck.register_font("Liberation Sans", font_bytes)
+    before = deck.read_content()["slides"]
+    slide = deck[0]
+    original_ids = [shape.id for shape in slide.shapes]
+    shape_id = original_ids[1 if to in ("back", "backward") else 0]
+    edit = {"type": "reorderShape", "slideId": slide.id, "shapeId": shape_id, "to": to}
+    proposal = deck.propose("python-agent", [edit])
+    assert proposal.changes[0].shape_id == shape_id
+    assert proposal.changes[0].kind == "content"
+    preview = deck.preview_proposal(proposal.id)
+    assert [shape["id"] for shape in preview.snapshot["slides"][0]["shapes"]] == original_ids[::-1]
+    diff = deck.layout_proposal_diff_slide_by_id(proposal.id, slide.id)
+    assert diff == deck.layout_proposal_diff_slide(proposal.id, 0)
+    assert diff["shapeChanges"] == [{"shapeId": shape_id, "kind": "reordered"}]
+    assert deck.read_content()["slides"] == before and not deck.can_undo
+    assert deck.reject_proposal(proposal.id)
+    proposal = deck.propose("python-agent", [edit])
+    assert deck.accept_proposal(proposal.id)
+    assert [shape.id for shape in deck[0].shapes] == original_ids[::-1]
+    assert deck.undo()
+    assert deck.read_content()["slides"] == before and not deck.can_undo
+    for invalid in [dict(edit, to="up"), dict(edit, slideId="missing"), dict(edit, shapeId="missing"), dict(edit, extra=True)]:
+        with pytest.raises((bo.PptxError, ValueError, KeyError)):
+            deck.propose("python-agent", [invalid])
+        assert deck.read_content()["slides"] == before and deck.proposals() == []
+    stale = deck.propose("python-agent", [edit])
+    deck.bring_shape_to_front(slide.id, original_ids[0])
+    with pytest.raises(bo.StaleProposalError) as error:
+        deck.accept_proposal(stale.id)
+    assert error.value.targets == [shape_id]

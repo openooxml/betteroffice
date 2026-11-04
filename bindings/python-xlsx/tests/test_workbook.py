@@ -609,6 +609,7 @@ def test_viewport_png_target_scales_and_validates_sheet(sample_bytes):
     assert (second.width, second.height) == (first.width * 2, first.height * 2)
     invalid_targets = [
         {"sheet": 99, "range": "A1:B2"},
+        {"sheet": 99, "range": "used"},
         {"sheet": 99, "viewport": target["viewport"]},
     ]
     for invalid_target in invalid_targets:
@@ -636,6 +637,37 @@ def test_png_target_takes_a_sheet_name_or_index_and_any_range_form(sample_bytes)
 @pytest.mark.parametrize("range_address", [{}, {"kind": "a1"}, {"kind": "rowCol", "start": {"row": 0, "col": 0}}, {"kind": "rowCol", "start": {"row": 5, "col": 5}, "end": {"row": 0, "col": 0}}, {"kind": "rowCol", "start": {"row": 0, "col": 5}, "end": {"row": 5, "col": 0}}, {"kind": "other"}, 1])
 def test_rejects_invalid_png_ranges(sample_bytes, range_address):
     with pytest.raises(bo.RangeError):
+        bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": range_address})
+
+
+@pytest.mark.parametrize("scale,max_width", [(1.0, None), (1.5, 80)])
+def test_png_used_range_matches_render_sheet(sample_bytes, scale, max_width):
+    workbook = bo.Workbook.open(sample_bytes)
+    target = {"sheet": 0, "range": "used"}
+    for address in ("B3", "Z50"):
+        workbook[0][address] = 42
+        expected = workbook.render_sheet(0, scale=scale, max_width=max_width)
+        actual = workbook.render_png(target, scale=scale, max_width=max_width)
+        assert actual.bytes == expected.bytes
+        assert (actual.width, actual.height) == (expected.width, expected.height)
+
+
+def test_png_used_range_takes_a_sheet_name(sample_bytes):
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(sample_bytes)) as source, zipfile.ZipFile(output, "w") as target:
+        for part in source.infolist():
+            contents = source.read(part.filename)
+            if part.filename == "xl/workbook.xml":
+                contents = contents.replace(b'name="Budget"', b'name="Sheet1"')
+            target.writestr(part, contents)
+    workbook = bo.Workbook.open(output.getvalue())
+    assert workbook.sheet_names[0] == "Sheet1"
+    assert workbook.render_png({"sheet": "Sheet1", "range": "used"}).bytes == workbook.render_sheet(0).bytes
+
+
+@pytest.mark.parametrize("range_address", ["USED", "used "])
+def test_png_used_range_requires_the_exact_keyword(sample_bytes, range_address):
+    with pytest.raises(bo.RangeError, match="invalid range"):
         bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": range_address})
 
 

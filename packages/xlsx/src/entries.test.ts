@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import * as xlsx from './index';
 import * as worker from './worker';
 
-const publicWorker = ['WorkbookEditPeerFailedError', 'WorkbookPeerHydrationError', 'WorkbookPngUnavailableError',
+const publicWorker = ['PngExportError', 'WorkbookEditPeerFailedError', 'WorkbookPeerHydrationError', 'WorkbookPngUnavailableError',
   'WorkbookRecoveryReplayError', 'createWorkbookEditSession', 'openWorkbookSession', 'workbookSessionRecovery'];
 const internalWorker = ['WorkbookRecoveryRefusal', 'createWorkbookEditPeer', 'createWorkbookRecoveryMutators',
   'failWorkbookEditPeer', 'hydratePeer', 'localNowSerial', 'workbookEditPeerOperations', 'workbookSessionInternals'];

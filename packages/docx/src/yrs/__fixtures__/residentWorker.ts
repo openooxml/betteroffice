@@ -83,7 +83,7 @@ class Canvas {
  */
 export async function residentWorkerFactory(options: { transferBuffers?: boolean; offscreenCanvas?: unknown } = {}): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
+    entrypoints: [resolve(import.meta.dir, '../docxWorker.browser.ts')],
     target: 'bun',
     format: 'iife',
     plugins: [

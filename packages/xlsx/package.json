@@ -35,29 +35,29 @@
   "imports": {
     "#session-worker": {
       "node": "./dist/sessionWorker.node.js",
-      "default": "./dist/sessionWorker.browser.js"
-    },
-    "#session-scope": {
-      "node": "./dist/sessionScope.node.js",
-      "default": "./dist/sessionScope.browser.js"
+      "default": "./dist/sessionWorker.missing.js"
     }
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./headless": {
       "types": "./dist/headless.d.ts",
-      "import": "./dist/headless.js"
+      "import": "./dist/headless.js",
+      "default": "./dist/headless.js"
     },
     "./worker": {
       "types": "./dist/worker.d.ts",
-      "import": "./dist/worker.js"
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
     },
     "./collaboration": {
       "types": "./dist/collaboration.d.ts",
-      "import": "./dist/collaboration.js"
+      "import": "./dist/collaboration.js",
+      "default": "./dist/collaboration.js"
     }
   },
   "files": [

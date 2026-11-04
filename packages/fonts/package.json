@@ -10,16 +10,19 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
     "./cdn": {
       "types": "./dist/cdn.d.ts",
-      "import": "./dist/cdn.js"
+      "import": "./dist/cdn.js",
+      "default": "./dist/cdn.js"
     },
     "./progressive": {
       "types": "./dist/progressive.d.ts",
-      "import": "./dist/progressive.js"
+      "import": "./dist/progressive.js",
+      "default": "./dist/progressive.js"
     }
   },
   "files": [

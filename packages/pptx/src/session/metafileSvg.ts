@@ -1,4 +1,4 @@
-import { compileSessionWasm } from '#session-scope';
+import { compileSessionWasm } from '../../../../shared/office-session/wasm';
 import { metafileWasmAssetUrl } from '../wasm/asset';
 import { metafileSvgBindings } from '../wasm/engine';
 

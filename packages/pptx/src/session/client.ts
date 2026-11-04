@@ -2,7 +2,7 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { createSessionWorker } from '#session-worker';
+import { createSessionWorker } from './sessionWorker';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { PptxFontFace } from '../types';
 import { sessionWasmAssetUrl, shipsWasmAsset } from '../wasm/asset';

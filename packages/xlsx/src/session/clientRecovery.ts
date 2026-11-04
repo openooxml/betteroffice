@@ -1,7 +1,7 @@
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { createSessionWorker } from '#session-worker';
+import { createSessionWorker } from './sessionWorker';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import type { OpenWorkbookSessionOptions, WorkbookSession } from './client';
 import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContext, WorkbookSharedCommand } from './commandProtocol';

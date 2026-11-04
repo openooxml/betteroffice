@@ -1,5 +1,6 @@
 import { isClientMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
+import { readWasmSync } from './readWasmAsset';
 
 export async function compileWasm(url: URL): Promise<WebAssembly.Module> {
   const response = await fetch(url);
@@ -12,6 +13,15 @@ export async function compileWasm(url: URL): Promise<WebAssembly.Module> {
     }
   }
   return WebAssembly.compile(await response.arrayBuffer());
+}
+
+export async function compileWasmAsset(url: URL): Promise<WebAssembly.Module> {
+  const bytes = readWasmSync(url);
+  return bytes ? WebAssembly.compile(bytes as BufferSource) : compileWasm(url);
+}
+
+export function compileSessionWasm(url: URL): Promise<WebAssembly.Module> {
+  return typeof Worker === 'function' ? compileWasm(url) : compileWasmAsset(url);
 }
 
 export function createWorkerWasmInitializer(

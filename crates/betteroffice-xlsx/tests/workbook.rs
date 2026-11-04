@@ -11319,6 +11319,66 @@ fn unrelated_currency_format_edits_refresh_formula_results() {
 
 #[cfg(feature = "raster")]
 #[test]
+fn png_used_range_matches_render_sheet() {
+    let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let target = betteroffice_xlsx::PngTarget::UsedRange { sheet: SheetId(0) };
+    for address in ["B1", "D5"] {
+        workbook
+            .edit_cell(
+                SheetId(0),
+                cell(address),
+                "42",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        for (scale, max_width) in [(1.0, None), (1.5, Some(80))] {
+            let options = RenderOptions {
+                scale,
+                max_width,
+                ..Default::default()
+            };
+            let expected = workbook.render_sheet(SheetId(0), &options).unwrap();
+            let actual = workbook.render_png(target.clone(), &options).unwrap();
+            assert_eq!(actual, expected);
+            if let Some(cap) = max_width {
+                assert!(actual.width <= cap);
+            }
+            let with_range = RenderOptions {
+                range: Some(CellRange::new(cell("A1"), cell("A1"))),
+                ..options.clone()
+            };
+            assert_eq!(
+                workbook.render_png(target.clone(), &with_range).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_used_range_matches_render_sheet_for_an_empty_sheet() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    for (scale, max_width) in [(1.0, None), (1.5, Some(80))] {
+        let options = RenderOptions {
+            scale,
+            max_width,
+            ..Default::default()
+        };
+        let expected = workbook.render_sheet(SheetId(1), &options);
+        let actual = workbook.render_png(
+            betteroffice_xlsx::PngTarget::UsedRange { sheet: SheetId(1) },
+            &options,
+        );
+        assert_eq!(
+            actual.map_err(|error| format!("{error:?}")),
+            expected.map_err(|error| format!("{error:?}"))
+        );
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
 fn png_dimension_caps_hold_at_fractional_scales() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
     for (scale, cap) in [(1.2, 52), (3.0, 10), (1.7, 33)] {
@@ -11435,7 +11495,7 @@ fn png_dimension_caps_apply_to_both_target_forms() {
 
 #[cfg(feature = "raster")]
 #[test]
-fn png_targets_validate_sheets_and_scale_both_forms() {
+fn png_targets_validate_sheets_and_scale_all_forms() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
     let viewport = Viewport {
         x: 0.0,
@@ -11453,6 +11513,7 @@ fn png_targets_validate_sheets_and_scale_both_forms() {
             sheet: SheetId(0),
             range,
         },
+        betteroffice_xlsx::PngTarget::UsedRange { sheet: SheetId(0) },
     ] {
         let first = workbook
             .render_png(target.clone(), &RenderOptions::default())
@@ -11485,6 +11546,9 @@ fn png_targets_validate_sheets_and_scale_both_forms() {
         betteroffice_xlsx::PngTarget::Range {
             sheet: SheetId(u32::MAX),
             range,
+        },
+        betteroffice_xlsx::PngTarget::UsedRange {
+            sheet: SheetId(u32::MAX),
         },
     ] {
         assert!(matches!(

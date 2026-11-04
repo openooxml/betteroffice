@@ -926,7 +926,7 @@ fn parse_effects(
     (!effects.is_empty()).then_some(effects)
 }
 
-fn parse_text_body_properties(element: &XmlElement) -> ShapeTextBodyProperties {
+pub(crate) fn parse_text_body_properties(element: &XmlElement) -> ShapeTextBodyProperties {
     let vertical = match element.attribute(None, "vert") {
         Some("horz") => Some("horizontal"),
         Some("vert") => Some("vertical"),

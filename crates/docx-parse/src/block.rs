@@ -25,7 +25,7 @@ use crate::table::{
     parse_table_cell_structural_change, parse_table_grid, parse_table_property_changes,
     parse_table_row_property_changes, parse_table_row_structural_change,
 };
-use crate::text_box::{get_text_box_content_element, parse_text_box};
+use crate::text_box::get_text_box_content_element;
 use crate::theme::Theme;
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
@@ -622,7 +622,7 @@ impl StoryParser<'_, '_> {
         run_index: usize,
         depth: usize,
     ) -> Result<(), ParseError> {
-        let Some(text_box) = parse_text_box(drawing) else {
+        let Some(mut shape) = crate::text_box::text_box_shape(drawing, Vec::new()) else {
             return Ok(());
         };
         let content = if let Some(shape) = find_descendant_by_name(drawing, "wps:wsp", 0)
@@ -632,7 +632,7 @@ impl StoryParser<'_, '_> {
         } else {
             Vec::new()
         };
-        let mut shape = crate::text_box::text_box_shape(drawing, text_box, content);
+        shape.text_body.as_mut().unwrap().content = content;
         crate::text_box::capture_bookmark_source(&mut shape, source);
         let mut target = run_index;
         if target >= paragraph.content.len() {

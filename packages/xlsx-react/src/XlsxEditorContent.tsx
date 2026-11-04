@@ -52,7 +52,7 @@ import type {
 import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { CellClipboard, clipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
 import { useTranslation } from './i18n';
-import { useDefaultFonts } from './useDefaultFonts';
+import { editorExportFaces, useDefaultFonts } from './useDefaultFonts';
 import {
   createXlsxCommandController,
   XlsxCommandAdmissionError,
@@ -1927,20 +1927,24 @@ export function XlsxEditorContent({
     return positionAtPoint(painted.frame, painted.sheet, canvasRef.current, clientX, clientY);
   };
 
-  // render the current scroll window to png via the raster backend and download
-  // it, the same display list the canvas paints, rasterized in the core.
-  const exportPng = useCallback(() => {
+  // draw the current scroll window to png with the editor's painter and download it.
+  const exportPng = useCallback(async () => {
     const handle = handleRef.current;
     const scroll = scrollRef.current;
     if (!handle || !scroll) throw new Error('the workbook is not open');
-    const png = handle.renderPng({
-      x: scroll.scrollLeft / zoom,
-      y: scroll.scrollTop / zoom,
-      width: scroll.clientWidth / zoom,
-      height: scroll.clientHeight / zoom,
-    });
+    const target = {
+      sheet: activeSheetRef.current,
+      viewport: {
+        x: scroll.scrollLeft / zoom,
+        y: scroll.scrollTop / zoom,
+        width: scroll.clientWidth / zoom,
+        height: scroll.clientHeight / zoom,
+      },
+    };
+    const fonts = await editorExportFaces(handle.renderPngFonts(target), null, defaultFonts);
+    const png = await handle.renderPng(target, { fonts });
     downloadBytes(png, pngName(fileName), 'image/png');
-  }, [fileName, zoom]);
+  }, [activeSheetRef, defaultFonts, fileName, zoom]);
 
   // commit the formula bar draft to the focused cell.
   /** False when the write was refused and the formula bar keeps the draft. */

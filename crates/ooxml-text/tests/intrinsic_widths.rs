@@ -127,7 +127,7 @@ fn tracking_uses_the_same_run_partitions_as_line_fill() {
         ]),
         json!({}),
     );
-    assert!((line_width - 18.671875).abs() < 0.001);
+    assert!((line_width - 33.671875).abs() < 0.001);
     assert!((maximum - line_width).abs() < 0.001);
     assert!((minimum - maximum).abs() < 0.001);
 
