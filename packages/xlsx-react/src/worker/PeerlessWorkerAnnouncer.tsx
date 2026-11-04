@@ -41,8 +41,8 @@ export const PeerlessWorkerAnnouncer = memo(function PeerlessWorkerAnnouncer({ s
   const [announcement, setAnnouncement] = useState('');
   const [focusRevision, setFocusRevision] = useState(0);
   const tick = useRef(false);
-  /** The key last spoken, suffixed `?` when it was spoken before its cell data arrived. */
-  const spoken = useRef<string | null>(null);
+  /** The selection last handled and what was said for it; `content` is null when its cell data had not arrived. */
+  const spoken = useRef<{ key: string; content: string | null } | null>(null);
   const lastSheet = useRef<number | null>(null);
   useLayoutEffect(() => {
     announceRef.current = () => { spoken.current = null; lastSheet.current = null; setFocusRevision((value) => value + 1); };
@@ -63,24 +63,29 @@ export const PeerlessWorkerAnnouncer = memo(function PeerlessWorkerAnnouncer({ s
   const at = selection ? `${active}:${cellAddress(selection.anchor.row, selection.anchor.col)}` : '';
   const formula = input && input.at === at ? input.value.startsWith('=') : null;
   const ready = !single || (text !== null && formula !== null);
+  const content = !ready ? null : single ? `${text}\n${formula}` : '';
   const position = sheets.findIndex((entry) => entry.index === active);
   const sheet = position >= 0 ? sheets[position] : undefined;
   useEffect(() => {
-    if (!selection || key === null || spoken.current === key || (spoken.current === `${key}?` && !ready)) return;
+    if (!selection || key === null) return;
+    const sameCell = spoken.current?.key === key;
+    if (sameCell && (content === null || spoken.current?.content === content)) return;
     const timer = setTimeout(() => {
       const target = focusTarget.current;
-      const focused = Boolean(target && target.contains(target.ownerDocument.activeElement));
+      const activeElement = target?.ownerDocument.activeElement;
+      const focused = Boolean(target && target.contains(activeElement ?? null));
       const switched = lastSheet.current !== null && lastSheet.current !== active;
-      spoken.current = ready ? key : `${key}?`;
+      spoken.current = { key, content };
       lastSheet.current = active;
-      if (!focused) return;
+      // A value changing under the open cell editor is the user's own typing, which the editor already voices.
+      if (!focused || (sameCell && activeElement !== target)) return;
       const message = selectionAnnouncement(selection, { text, formula }, strings,
         switched && sheet ? { name: sheet.name, index: position, count: sheets.length } : undefined, merged);
       tick.current = !tick.current;
       setAnnouncement(tick.current ? `${message} ` : message);
     }, ready ? SETTLE_MS : WAIT_MS);
     return () => clearTimeout(timer);
-  }, [selection, key, ready, text, formula, strings, active, position, sheet, sheets.length, merged, focusTarget, focusRevision]);
+  }, [selection, key, ready, content, text, formula, strings, active, position, sheet, sheets.length, merged, focusTarget, focusRevision]);
   return <div data-testid="xlsx-live-region" role="status" aria-live="polite" aria-atomic="true" style={visuallyHidden}>
     {announcement}
   </div>;

@@ -52,6 +52,19 @@ test('xlsx screen reader: the grid is a labelled focus target and announces the 
   await info.attach('aria-after.yml', { body: await page.locator('body').ariaSnapshot(), contentType: 'text/yaml' });
 });
 
+test('xlsx screen reader: an edit under the selected cell speaks its new value', async ({ page }) => {
+  await open(page);
+  const grid = page.getByTestId('xlsx-scroll');
+  await grid.focus();
+  await heard(page, 'A1, 21');
+  await grid.press('ArrowRight');
+  await heard(page, 'B1, 42, has formula');
+  await grid.press('Delete');
+  await heard(page, 'B1, empty');
+  await grid.press('ControlOrMeta+z');
+  await heard(page, 'B1, 42, has formula');
+});
+
 test('xlsx screen reader: rapid navigation is announced once, for the cell it stops on', async ({ page }) => {
   await open(page);
   const grid = page.getByTestId('xlsx-scroll');
