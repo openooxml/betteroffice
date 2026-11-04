@@ -59,7 +59,12 @@ mod tests {
                         display_list,
                         workbook.display_list_for(sheet, &viewport).unwrap()
                     );
-                    let full = workbook.render_png_for(sheet, &viewport).unwrap();
+                    let full = workbook
+                        .render_png(
+                            betteroffice_xlsx::PngTarget::Viewport { sheet, viewport },
+                            &betteroffice_xlsx::RenderOptions::default(),
+                        )
+                        .unwrap();
                     assert_eq!((width, height), (full.width, full.height));
                     assert_eq!(round_trip(&display_list), web_png(&display_list));
                 }
@@ -74,7 +79,14 @@ mod tests {
                         let (display_list, width, height) = workbook
                             .range_png_display_list_for(sheet, &options)
                             .unwrap();
-                        let full = workbook.render_sheet(sheet, &options).unwrap();
+                        let full = match options.range {
+                            Some(range) => workbook.render_png(
+                                betteroffice_xlsx::PngTarget::Range { sheet, range },
+                                &options,
+                            ),
+                            None => workbook.render_sheet(sheet, &options),
+                        }
+                        .unwrap();
                         assert_eq!((width, height), (full.width, full.height));
                         assert_eq!(round_trip(&display_list), web_png(&display_list));
                     }

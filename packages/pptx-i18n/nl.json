@@ -156,6 +156,8 @@
     "stalePreview": "Dit voorbeeld gebruikt de bijgewerkte dia. Toepassen overschrijft de gewijzigde doelen.",
     "geometry": "Positie en grootte (x, y, breedte, hoogte)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Indeling gewijzigd",
+    "backgroundChanged": "Achtergrond gewijzigd",
     "appearance": "Weergave of tekstopmaak gewijzigd",
     "changedAgain": "Het doel is opnieuw gewijzigd. Bekijk het vernieuwde voorbeeld voordat u het toepast.",
     "canvasTitle": "Wijzigingen op deze dia",
@@ -171,6 +173,8 @@
     "loadingDiff": "Wijzigingen worden geladen…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

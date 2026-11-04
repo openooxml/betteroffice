@@ -319,7 +319,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
         onPointerCancel={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onPointerCancel(event)) selection.onPointerCancel(event); }}
         onLostPointerCapture={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onLostPointerCapture(event)) selection.onLostPointerCapture(event); }}>
         <div ref={slideFrame} style={styles.slideFrame}>
-        <canvas ref={canvas} style={presentation && !empty && !failure ? styles.slideCanvas : styles.canvas} data-testid="pptx-slide-canvas" />
+        <canvas ref={canvas} style={presentation && !empty && !failure ? styles.slideCanvas : styles.canvas} data-testid="pptx-slide-canvas"
+          data-pptx-input-ready={presentation?.selectionEnabled && !failure ? 'true' : undefined} />
         {insertion.preview && <div data-testid="pptx-insertion-preview" style={{ position: 'absolute', pointerEvents: 'none',
           left: insertion.preview.x * insertionScale, top: insertion.preview.y * insertionScale,
           width: insertion.preview.width * insertionScale, height: insertion.preview.height * insertionScale, border: '1px dashed #2563eb' }} />}

@@ -5,7 +5,7 @@
  * Shows Cut, Copy, Paste, and other text editing options.
  */
 
-import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from 'react';
 import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import { useTranslation } from '../i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
@@ -524,24 +524,17 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
   const navigableItems = menuItems.filter((item) => item.action !== 'separator');
 
   // Handle click outside
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isOpen) return;
 
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleClickOutside = (e: PointerEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
     };
 
-    // Use timeout to avoid immediately closing on right-click
-    const timer = setTimeout(() => {
-      document.addEventListener('mousedown', handleClickOutside);
-    }, 0);
-
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
+    document.addEventListener('pointerdown', handleClickOutside, true);
+    return () => document.removeEventListener('pointerdown', handleClickOutside, true);
   }, [isOpen, onClose]);
 
   // Handle keyboard navigation

@@ -2,7 +2,8 @@ import { useEffect, useRef, useSyncExternalStore, type ReactElement, type RefObj
 import type { PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 import { commitComposition, peerlessInputReference } from './peerlessViewStore';
-import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx/worker';
+import { findLine, indexGeometry, type PresentationCommandAck, type PresentationCommandIntent } from '@betteroffice/pptx/worker';
+import { pptxCaretColors } from './caretColor';
 import type { PptxCommandStore } from '../commands/types';
 import { useTranslation } from '../i18n';
 import { formatPeerlessText } from './peerlessTextCommands';
@@ -240,8 +241,12 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
   const left = (viewport?.left ?? 0) + (view.caret?.x ?? 0) * scale;
   const top = (viewport?.top ?? 0) + (view.caret?.y ?? 0) * scale;
   const height = Math.max(1, (view.caret?.height ?? 1) * scale);
+  const preedit = view.composition?.text && !view.echo && view.caret ? pptxCaretColors(view.confirmed?.displayList,
+    (view.activeLine ?? (view.confirmed ? findLine(indexGeometry(view.confirmed.displayList), view.selection) : null))?.line,
+    view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret,
+    view.editState?.toolbar?.formatting?.color) : null;
   return <>
-    {view.composition?.text && !view.echo && view.caret && <span data-testid="pptx-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', borderBottom: '1px solid currentColor', background: '#fff', pointerEvents: 'none' }}>{view.composition.text}</span>}
+    {preedit && <span data-testid="pptx-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', color: preedit.color, borderBottom: '1px solid currentColor', background: preedit.background, pointerEvents: 'none' }}>{view.composition?.text}</span>}
     <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{view.selection && view.selection.anchor !== view.selection.focus ? selectionAnnouncement : ''}</span>
     <textarea ref={inputRef} aria-label={textInput} autoComplete="off" autoCorrect="off"
     autoCapitalize="off" spellCheck={false} tabIndex={0} readOnly={view.editState.readOnly}

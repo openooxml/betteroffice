@@ -27,7 +27,7 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
   return { faces: fonts.map((font, index) => {
     if (!(font instanceof Uint8Array)) return { ...font };
     const style = styles.get(index);
-    return { family: style?.family ?? 'Liberation Sans', data: font.slice(),
+    return { family: style?.family ?? 'Liberation Sans', data: font,
       weight: style?.bold ? 'bold' : 'normal', style: style?.italic ? 'italic' : 'normal' };
   }), chains: structuredClone(chains), families: [...new Set([...families, ...Array.from(registeredStyles?.values() ?? [], face => face.family)])] };
 }
@@ -78,7 +78,7 @@ export async function prepareWorkerFontEnvironment(options: {
   const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime, engine: {
     registerFont(bytes, face) {
       options.signal.throwIfAborted();
-      const id = fonts.push(bytes.slice()) - 1;
+      const id = fonts.push(bytes) - 1;
       if (face) styles.set(id, face);
       return id;
     },

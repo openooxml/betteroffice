@@ -1,5 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import type { Rect } from '@betteroffice/xlsx';
+import { cellEditorColors } from '../viewer/cellEditorColors';
 import { commandForEvent } from '../commands/descriptors';
 import { FormulaBarContext, presentInputValue, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import type { WorkerDraftController } from './WorkerDraftController';
@@ -7,7 +9,7 @@ import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerPresentationStore } from './WorkerPresentationStore';
 
 export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ controller, presentation, run, active,
-  selectedChart, error, readOnly, navigation, onNavigate, children }: {
+  selectedChart, error, readOnly, navigation, onNavigate, cellEditable, children }: {
   controller: WorkerDraftController;
   presentation: WorkerPresentationStore;
   run: PeerlessWorkbookSession | null;
@@ -17,6 +19,10 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   readOnly: boolean;
   navigation: { current: number };
   onNavigate(cell: { row: number; col: number }): void;
+  /** Whether plugins let the user type into a cell of the active sheet. */
+  cellEditable(cell: { row: number; col: number }): boolean;
+  /** Changes whenever plugin state may change `cellEditable`. */
+  gateRevision: unknown;
   children: ReactNode;
 }) {
   const { selection, view, painted } = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
@@ -66,8 +72,9 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
     if (input && !controller.isComposing('formula') && input.value !== value) presentInputValue(input, value);
   }, [controller, state, value]);
   const disabled = !view || !selection || error;
-  const formula = useMemo<FormulaBarBinding>(() => ({ ...handlers, a1, value, disabled, readOnly: unavailable || selectedChart }),
-    [handlers, a1, value, disabled, unavailable, selectedChart]);
+  const gated = selection !== null && !cellEditable(selection.anchor);
+  const formula = useMemo<FormulaBarBinding>(() => ({ ...handlers, a1, value, disabled, readOnly: unavailable || selectedChart || gated,
+    ...gated && { onChange: () => {} } }), [handlers, a1, value, disabled, unavailable, selectedChart, gated]);
   return <FormulaBarContext.Provider value={formula}>{children}
     {state.refused.map((record) => <button key={record.seq ?? record.draft.revision}
       data-testid="xlsx-refused-draft" data-sheet={record.draft.sheet} data-row={record.draft.row}
@@ -77,9 +84,10 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   </FormulaBarContext.Provider>;
 });
 
-export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ controller, rect, disabled, zoom }: {
+export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ controller, rect, colors, disabled, zoom }: {
   controller: WorkerDraftController;
   rect(row: number, col: number, sheet: number): { x: number; y: number; w: number; h: number } | null;
+  colors?(sheet: number, bounds: Rect): { color: string; background: string };
   disabled: boolean;
   zoom: number;
 }) {
@@ -120,9 +128,10 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
   }, [controller, draft, bounds !== null]);
   if (!draft) return null;
   if (!bounds) return null;
+  const { color, background } = colors?.(draft.sheet, bounds) ?? cellEditorColors(null, bounds);
   const style: CSSProperties = { position: 'absolute', left: bounds.x * zoom, top: bounds.y * zoom,
     width: bounds.w * zoom, height: bounds.h * zoom, boxSizing: 'border-box', border: '2px solid #217346',
-    background: '#ffffff', padding: '0 3px', font: `${13 * zoom}px system-ui, sans-serif`,
+    background, color, padding: '0 3px', font: `${13 * zoom}px system-ui, sans-serif`,
     pointerEvents: 'auto', outline: 'none' };
   return <input ref={inputRef} data-testid="xlsx-cell-editor"
     defaultValue={draft.value} disabled={disabled} style={style}

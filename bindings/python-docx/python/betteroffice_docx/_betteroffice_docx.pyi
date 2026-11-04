@@ -1,5 +1,9 @@
 import os
-from typing import Any, Mapping, final
+from typing import TypedDict, Any, Mapping, final
+
+class PngTarget(TypedDict):
+    page: int
+
 
 __version__: str
 MAX_PIXMAP_DIM: int
@@ -258,7 +262,8 @@ class Document:
     def register_image(
         self, rel_id: str, data: bytes, *, scope: str = ..., part: str | None = ...
     ) -> None: ...
-    def render_png(self, display_list: DisplayList, page: int = ...) -> Png: ...
+    def render_png(self, target: PngTarget, *, scale: float = ...) -> Png: ...
+    def render_display_list_png(self, display_list: DisplayList, page: int = ...) -> Png: ...
     def save(
         self,
         *,

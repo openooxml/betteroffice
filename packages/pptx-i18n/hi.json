@@ -156,6 +156,8 @@
     "stalePreview": "यह पूर्वावलोकन अद्यतन स्लाइड का उपयोग करता है। लागू करने पर बदले गए लक्ष्य ओवरराइट हो जाएंगे।",
     "geometry": "स्थिति और आकार (x, y, चौड़ाई, ऊंचाई)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "लेआउट बदला गया",
+    "backgroundChanged": "पृष्ठभूमि बदली गई",
     "appearance": "रूप या टेक्स्ट प्रारूपण बदला गया",
     "changedAgain": "लक्ष्य फिर से बदल गया है। लागू करने से पहले ताज़ा पूर्वावलोकन की समीक्षा करें।",
     "canvasTitle": "इस स्लाइड पर बदलाव",
@@ -171,6 +173,8 @@
     "loadingDiff": "बदलाव लोड हो रहे हैं…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null
