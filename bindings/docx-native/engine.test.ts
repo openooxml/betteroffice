@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { inflateSync } from 'node:zlib';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
@@ -1025,5 +1026,211 @@ test('native and wasm track and resolve character formatting with the same optio
         session.free();
       }
     }
+  }
+});
+
+function pngPixels(bytes: Uint8Array): Uint8Array {
+  const png = Buffer.from(bytes);
+  expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  expect([png[24], png[25], png[28]]).toEqual([8, 6, 0]);
+  const stride = png.readUInt32BE(16) * 4;
+  const height = png.readUInt32BE(20);
+  const chunks: Buffer[] = [];
+  for (let offset = 8; offset < png.length;) {
+    const size = png.readUInt32BE(offset);
+    if (png.toString('ascii', offset + 4, offset + 8) === 'IDAT') {
+      chunks.push(png.subarray(offset + 8, offset + 8 + size));
+    }
+    offset += size + 12;
+  }
+  const filtered = inflateSync(Buffer.concat(chunks));
+  expect(filtered.length).toBe(height * (stride + 1));
+  const pixels = new Uint8Array(height * stride);
+  for (let row = 0; row < height; row++) {
+    const filter = filtered[row * (stride + 1)];
+    expect(filter).toBeLessThanOrEqual(4);
+    for (let col = 0; col < stride; col++) {
+      const index = row * stride + col;
+      const left = col >= 4 ? pixels[index - 4] : 0;
+      const up = row > 0 ? pixels[index - stride] : 0;
+      const corner = row > 0 && col >= 4 ? pixels[index - stride - 4] : 0;
+      const estimate = left + up - corner;
+      const distances = [Math.abs(estimate - left), Math.abs(estimate - up), Math.abs(estimate - corner)];
+      const paeth = distances[0] <= distances[1] && distances[0] <= distances[2]
+        ? left : distances[1] <= distances[2] ? up : corner;
+      const prediction = [0, left, up, Math.floor((left + up) / 2), paeth][filter];
+      pixels[index] = (filtered[row * (stride + 1) + col + 1] + prediction) & 255;
+    }
+  }
+  return pixels;
+}
+
+function pngDisplayList(session: import('./index.js').EditSession): string {
+  const font = session.register_measure_font(fontBytes);
+  const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+  const materialized = JSON.parse(session.materialize_docx()!) as {
+    document: { package: { theme: { colorScheme: Record<string, string> } } };
+  };
+  const layout = session.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{
+      sectionId: 'main',
+      properties: {
+        pageWidth: 4320, pageHeight: 2880,
+        marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+      },
+    }] },
+    measurement: {
+      fontChains,
+      defaults: { fontSize: 11, fontFamily: 'Calibri' },
+      authoritativeShaping: true,
+    },
+    renderEnv: { themeColors: materialized.document.package.theme.colorScheme },
+  }));
+  return session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }));
+}
+
+test('native docx rasterizes the compiled page at two scales', () => {
+  const raw = require('./index.js') as typeof import('./index.js');
+  const session = new raw.EditSession(401);
+  try {
+    session.open_docx(fixture, true);
+    const list = pngDisplayList(session);
+    const first = session.render_page_png(list, 0, 1);
+    const second = session.render_page_png(list, 0, 2);
+    for (const png of [first, second]) {
+      expectPlainBytes(png);
+      expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+    const one = Buffer.from(first);
+    const two = Buffer.from(second);
+    expect(two.readUInt32BE(16)).toBe(one.readUInt32BE(16) * 2);
+    expect(two.readUInt32BE(20)).toBe(one.readUInt32BE(20) * 2);
+    expect(pngPixels(first).some((value, index) => index % 4 < 3 && value < 200)).toBe(true);
+    expect(pngPixels(second).some((value, index) => index % 4 < 3 && value < 200)).toBe(true);
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx PNG refuses invalid input, missing fonts and oversized surfaces', () => {
+  const raw = require('./index.js') as typeof import('./index.js');
+  const session = new raw.EditSession(402);
+  try {
+    session.open_docx(fixture, true);
+    const list = pngDisplayList(session);
+    for (const call of [
+      () => session.render_page_png(list, 9999, 1),
+      () => session.render_page_png(list, 0, 0),
+      () => session.render_page_png(list, 0, NaN),
+      () => session.render_page_png(list, 0, -1),
+      () => session.render_page_png(list, 0, Infinity),
+      () => session.render_page_png('{', 0, 1),
+      () => session.render_page_png('{}', 0, 1),
+      () => session.render_page_png(JSON.stringify({ pages: [{ pageIndex: 0, width: 0, height: 10, primitives: [] }] }), 0, 1),
+    ]) {
+      const error = caughtValue(call);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toStartWith('png-invalid:');
+      expect(error).not.toHaveProperty('code');
+    }
+    for (const scale of [1e9, Number.MAX_VALUE]) {
+      expect(() => session.render_page_png(list, 0, scale)).toThrow('png-too-large:');
+    }
+    const area = JSON.stringify({ pages: [{ pageIndex: 0, width: 5000, height: 5000, primitives: [] }] });
+    expect(() => session.render_page_png(area, 0, 1)).toThrow('png-too-large:');
+    const stale = JSON.parse(list);
+    const glyph = stale.pages[0].primitives.find((primitive: { kind: string }) => primitive.kind === 'glyphRun');
+    expect(glyph).toBeDefined();
+    glyph.fontId = 0x7ffffffe;
+    expect(() => session.render_page_png(JSON.stringify(stale), 0, 1)).toThrow('png-font-unavailable:');
+    const other = new raw.EditSession(404);
+    try {
+      other.open_docx(fixture, true);
+      expect(() => other.render_page_png(list, 0, 1)).toThrow('png-font-unavailable:');
+      expect(session.render_page_png(list, 0, 1).length).toBeGreaterThan(8);
+    } finally {
+      other.free();
+    }
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx PNG paints theme accent text red', () => {
+  const raw = require('./index.js') as typeof import('./index.js');
+  const encoder = new TextEncoder();
+  const themed = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>'),
+    'word/theme/theme1.xml': encoder.encode('<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Red"><a:themeElements><a:clrScheme name="Red"><a:accent1><a:srgbClr val="FF0000"/></a:accent1></a:clrScheme><a:fontScheme name="Default"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme><a:fmtScheme name="Default"/></a:themeElements></a:theme>'),
+    'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/><w:sz w:val="96"/><w:color w:themeColor="accent1"/></w:rPr><w:t>RED</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'),
+  });
+  const session = new raw.EditSession(403);
+  try {
+    session.open_docx(themed, true);
+    const pixels = pngPixels(session.render_page_png(pngDisplayList(session), 0, 1));
+    let red = false;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] > 200 && pixels[index + 1] < 50 && pixels[index + 2] < 50 && pixels[index + 3] === 255) red = true;
+    }
+    expect(red).toBe(true);
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx PNG uses display list font chains for text primitives', () => {
+  const raw = require('./index.js') as typeof import('./index.js');
+  const session = new raw.EditSession(405);
+  try {
+    session.open_docx(fixture, true);
+    const font = session.register_measure_font(fontBytes);
+    const pages = [{ pageIndex: 0, width: 160, height: 60, primitives: [{
+      kind: 'text', text: 'PNG', x: 5, baselineY: 30, width: 100,
+      font: '24px Calibri', color: '#000000',
+    }] }];
+    const list = JSON.stringify({ pages, fontChains: { 'calibri|0|0': [font] } });
+    expect(pngPixels(session.render_page_png(list, 0, 1)).some((value, index) => index % 4 < 3 && value < 200)).toBe(true);
+    expect(() => session.render_page_png(JSON.stringify({ pages }), 0, 1)).toThrow('png-font-unavailable:');
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx PNG resolves media tokens in every page region and skips missing images', () => {
+  const raw = require('./index.js') as typeof import('./index.js');
+  const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
+  const blue = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==';
+  parts['word/media/image1.png'] = new Uint8Array(Buffer.from(blue, 'base64'));
+  parts['[Content_Types].xml'] = new TextEncoder().encode(new TextDecoder().decode(parts['[Content_Types].xml'])
+    .replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>'));
+  const session = new raw.EditSession(406);
+  try {
+    session.set_media_tokens(true);
+    session.open_docx(wasm.rezip_docx(parts), true);
+    expect(session.media_bytes('media:0')).toEqual(parts['word/media/image1.png']);
+    const image = (x: number, relId = 'media:0') => ({ kind: 'image', relId, x, y: 10, w: 10, h: 10 });
+    const list = JSON.stringify({ pages: [{
+      pageIndex: 0, width: 160, height: 60,
+      primitives: [image(10), image(110, 'media:999'), image(130, `data:image/png;base64,${blue}`)],
+      header: { rId: 'header1', kind: 'header', y: 0, height: 30, primitives: [image(30)] },
+      footer: { rId: 'footer1', kind: 'footer', y: 30, height: 30, primitives: [image(50)] },
+      noteAreas: [{ primitives: [image(70)] }, { kind: 'endnote', primitives: [image(90)] }],
+    }] });
+    for (const scale of [1, 2]) {
+      const png = session.render_page_png(list, 0, scale);
+      const width = Buffer.from(png).readUInt32BE(16);
+      const pixels = pngPixels(png);
+      const pixel = (x: number) => {
+        const offset = (15 * scale * width + x * scale) * 4;
+        return [...pixels.subarray(offset, offset + 4)];
+      };
+      for (const x of [15, 35, 55, 75, 95, 135]) expect(pixel(x)).toEqual([0, 0, 255, 255]);
+      expect(pixel(115)).toEqual([255, 255, 255, 255]);
+    }
+  } finally {
+    session.free();
   }
 });

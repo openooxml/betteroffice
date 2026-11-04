@@ -845,6 +845,10 @@ fn with_measure_fonts<T>(read: impl FnOnce(&std::cell::RefCell<ooxml_text::FontS
     read(&store)
 }
 
+pub fn with_measure_fonts_ref<T>(read: impl FnOnce(&ooxml_text::FontStore) -> T) -> T {
+    with_measure_fonts(|store| read(&store.borrow()))
+}
+
 pub fn take_base_latin_miss() -> bool {
     with_measure_fonts(|store| store.borrow().take_base_latin_miss())
 }

@@ -34,6 +34,7 @@ export declare class EditSession {
   retained_kernel_inputs_json(): string
   reset_frame_base(): void
   build_display_list_json(input: string): string
+  render_page_png(displayListJson: string, page: number, scale: number): Uint8Array
   build_display_list_frame(input: string, expectedFrameEpoch: number): Uint8Array
   set_display_window(start: number, end: number): void
   set_display_retain_built_pages(retain: boolean): void

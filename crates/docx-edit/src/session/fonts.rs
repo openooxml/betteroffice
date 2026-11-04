@@ -16,6 +16,11 @@ fn base_latin_misses_follow_transformed_text_and_font_chains() {
 }
 
 impl EditSessionCore {
+    pub fn with_measure_fonts_ref<T>(&self, read: impl FnOnce(&ooxml_text::FontStore) -> T) -> T {
+        let _fonts = self.fonts.enter();
+        docx_layout::with_measure_fonts_ref(read)
+    }
+
     /// Registers raw sfnt bytes in this session's resident measurement store
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
