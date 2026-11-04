@@ -290,6 +290,44 @@ fn projected_bookmark_result(result: &str) {
     assert!(!xml.contains(">X<"), "{xml}");
 }
 
+fn split_wrapper_result(result: &str, children_path: &str, cache_path: &str) {
+    let source = fixture(&format!(
+        "<w:p>{BEGIN}{}{SEPARATE}{result}</w:p><w:p>{END}</w:p>",
+        instruction("QUOTE")
+    ));
+    let parsed = parse_docx_s9_wire(&source, S9ParseOptions::default()).unwrap();
+    assert_eq!(
+        paragraph_texts(&parsed.document.package.document.content),
+        ["Heading text", ""]
+    );
+    let mut package = serde_json::to_value(parsed.document.package).unwrap();
+    package["document"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sections");
+    let field = &mut package["document"]["content"][0]["content"][0];
+    assert!(field["structuredResult"]["blocks"].is_array());
+    let cached = field.pointer(cache_path).unwrap().clone();
+    let runs = json!([
+        {"type": "run", "content": [{"type": "text", "text": "Heading "}]},
+        {"type": "run", "formatting": {"bold": true}, "content": [{"type": "text", "text": "text"}]}
+    ]);
+    *field.pointer_mut(children_path).unwrap() = runs.clone();
+    field["fieldResult"] = runs;
+    assert_eq!(field.pointer(cache_path).unwrap(), &cached);
+    let saved = save_package(&source, &package);
+    let reopened = parse_docx_s9_wire(&saved, S9ParseOptions::default()).unwrap();
+    assert_eq!(
+        paragraph_texts(&reopened.document.package.document.content),
+        ["Heading text", ""]
+    );
+    let xml = document_xml(&saved);
+    assert_field(&xml, "QUOTE");
+    assert_eq!(xml.matches("<w:bookmarkStart").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:bookmarkEnd").count(), 1, "{xml}");
+    assert_order(&xml, &[START, ">Heading <", "<w:b/>", ">text<", STOP]);
+}
+
 fn assert_field(xml: &str, instruction: &str) {
     for kind in ["begin", "separate", "end"] {
         assert_eq!(
@@ -838,4 +876,28 @@ fn excluded_simple_field_text_in_a_hyperlink_does_not_shift_result_bookmarks() {
         r#"<w:hyperlink w:anchor="target"><w:fldSimple w:instr="AUTHOR"><w:r><w:t>X</w:t></w:r></w:fldSimple>{START}<w:r><w:t>A</w:t></w:r>{STOP}<w:r><w:t>B</w:t></w:r></w:hyperlink>"#
     );
     projected_bookmark_result(&result);
+}
+
+#[test]
+fn split_hyperlink_runs_with_a_stale_structure_keep_the_entire_bookmark() {
+    let result = format!(
+        r#"<w:hyperlink w:anchor="target">{START}<w:r><w:t>Heading text</w:t></w:r>{STOP}</w:hyperlink>"#
+    );
+    split_wrapper_result(
+        &result,
+        "/structuredResult/inline/0/children",
+        "/structuredResult/inline/0/structuredChildren",
+    );
+}
+
+#[test]
+fn split_simple_field_runs_with_a_stale_structure_keep_the_entire_bookmark() {
+    let result = format!(
+        r#"<w:fldSimple w:instr="QUOTE"><w:hyperlink w:anchor="target">{START}</w:hyperlink><w:r><w:t>Heading text</w:t></w:r><w:hyperlink w:anchor="target">{STOP}</w:hyperlink></w:fldSimple>"#
+    );
+    split_wrapper_result(
+        &result,
+        "/structuredResult/inline/0/content",
+        "/structuredResult/inline/0/structuredResult",
+    );
 }

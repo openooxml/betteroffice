@@ -430,34 +430,40 @@ enum FieldResultItem<'a> {
 fn field_result_children<'a>(
     nodes: &'a [InlineNode],
     runs: Vec<&'a Run>,
+    projected: bool,
     items: &mut Vec<FieldResultItem<'a>>,
+    aligned: &mut bool,
 ) {
-    let mut runs = runs.into_iter();
+    *aligned &= nodes
+        .iter()
+        .filter_map(|node| match node {
+            InlineNode::Run(run) => Some(run),
+            _ => None,
+        })
+        .eq(runs);
     for node in nodes {
-        if matches!(node, InlineNode::Run(_)) {
-            if let Some(run) = runs.next() {
+        match node {
+            InlineNode::Run(run) if projected => {
                 items.push(FieldResultItem::Run(run));
             }
-        } else {
-            field_result_items(std::slice::from_ref(node), false, items);
+            _ => field_result_items(std::slice::from_ref(node), false, items, aligned),
         }
     }
-    items.extend(runs.map(FieldResultItem::Run));
 }
 
 fn field_result_items<'a>(
     nodes: &'a [InlineNode],
     projected: bool,
     items: &mut Vec<FieldResultItem<'a>>,
+    aligned: &mut bool,
 ) {
     for node in nodes {
-        let runs = if projected {
-            field_runs(node)
-        } else {
-            Vec::new()
-        };
         match node {
-            InlineNode::Run(_) => items.extend(runs.into_iter().map(FieldResultItem::Run)),
+            InlineNode::Run(run) => {
+                if projected {
+                    items.push(FieldResultItem::Run(run));
+                }
+            }
             InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => {
                 items.push(FieldResultItem::Bookmark(node));
             }
@@ -465,29 +471,44 @@ fn field_result_items<'a>(
                 link.structured_children
                     .as_deref()
                     .unwrap_or(&link.children),
-                runs,
+                field_runs(node),
+                projected,
                 items,
+                aligned,
             ),
             InlineNode::SimpleField(field) => match field
                 .structured_result
                 .as_ref()
                 .and_then(|result| result.inline.as_deref())
             {
-                Some(nodes) => field_result_children(nodes, runs, items),
-                None => items.extend(runs.into_iter().map(FieldResultItem::Run)),
+                Some(nodes) => {
+                    field_result_children(nodes, field_runs(node), projected, items, aligned);
+                }
+                None if projected => {
+                    items.extend(field_runs(node).into_iter().map(FieldResultItem::Run));
+                }
+                None => {}
             },
             InlineNode::ComplexField(field) => {
-                for content in [&field.structured_code, &field.structured_result] {
+                for (content, runs) in [
+                    (&field.structured_code, &field.field_code),
+                    (&field.structured_result, &field.field_result),
+                ] {
                     if let Some(nodes) = content
                         .as_ref()
                         .and_then(|content| content.inline.as_deref())
                     {
-                        field_result_items(nodes, false, items);
+                        *aligned &= nodes.iter().flat_map(field_runs).eq(runs);
+                        field_result_items(nodes, false, items, aligned);
                     }
                 }
             }
-            InlineNode::InlineSdt(sdt) => field_result_items(&sdt.content, false, items),
-            InlineNode::Tracked(change) => field_result_items(&change.content, false, items),
+            InlineNode::InlineSdt(sdt) => {
+                field_result_items(&sdt.content, false, items, aligned);
+            }
+            InlineNode::Tracked(change) => {
+                field_result_items(&change.content, false, items, aligned);
+            }
             InlineNode::Math(_) | InlineNode::RawXml(_) => {}
         }
     }
@@ -515,14 +536,16 @@ fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
         return Vec::new();
     };
     let mut items = Vec::new();
-    field_result_items(nodes, true, &mut items);
-    let in_place = items
-        .iter()
-        .filter_map(|item| match item {
-            FieldResultItem::Run(run) => Some(*run),
-            FieldResultItem::Bookmark(_) => None,
-        })
-        .eq(field.field_result.iter());
+    let mut aligned = true;
+    field_result_items(nodes, true, &mut items, &mut aligned);
+    let in_place = aligned
+        && items
+            .iter()
+            .filter_map(|item| match item {
+                FieldResultItem::Run(run) => Some(*run),
+                FieldResultItem::Bookmark(_) => None,
+            })
+            .eq(field.field_result.iter());
     let mut bookmarks = Vec::new();
     let mut offset = 0usize;
     for item in items {
