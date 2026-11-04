@@ -11,7 +11,6 @@ const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const RICH = '<w:p w:rsidR="00AA0000"><w:pPr><w:pPrChange w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z"><w:pPr/></w:pPrChange></w:pPr><w:r w:rsidR="00BB0000"><w:rPr><w:noProof/><w:specVanish/></w:rPr><w:t>Rich</w:t></w:r><w:proofErr w:type="spellStart"/><w:r><w:t>wrd</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p>';
 const TARGET = '<w:p><w:r><w:t>Target</w:t></w:r></w:p>';
-const PAGE_BREAK = '<w:p w:rsidR="00CC0000"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:noProof/></w:rPr><w:br w:type="page"/></w:r></w:p>';
 const TABLE = '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:tcMar><w:left w:w="99" w:type="dxa"/></w:tcMar></w:tcPr><w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
 const SECT = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>';
 const STYLES = `<w:styles xmlns:w="${W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/></w:style></w:styles>`;
