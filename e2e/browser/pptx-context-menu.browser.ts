@@ -10,7 +10,7 @@ const menu = (page: Page, name: string) => page.getByRole('menu', { name, exact:
 async function fixture() {
   const zip = await JSZip.loadAsync(await readFile(new URL('../../crates/pptx-render/tests/fixtures/table-basic.pptx', import.meta.url)));
   const path = 'ppt/slides/slide1.xml';
-  const shape = (id: number, x: number, text?: string) => `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="Object ${id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${x}" y="2743200"/><a:ext cx="${text ? 3657600 : 1828800}" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="DDEBF7"/></a:solidFill></p:spPr>${text ? `<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"><a:latin typeface="Arial"/></a:rPr><a:t>${text}</a:t></a:r><a:endParaRPr sz="2400"/></a:p></p:txBody>` : ''}</p:sp>`;
+  const shape = (id: number, x: number, text?: string) => `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="Object ${id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${x}" y="2743200"/><a:ext cx="${text ? 3657600 : 1828800}" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="DDEBF7"/></a:solidFill></p:spPr>${text ? `<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400" cap="all"><a:latin typeface="Arial"/></a:rPr><a:t>${text}</a:t></a:r><a:endParaRPr sz="2400"/></a:p></p:txBody>` : ''}</p:sp>`;
   zip.file(path, (await zip.file(path)!.async('string')).replace(/ (gridSpan|rowSpan|hMerge|vMerge)="[^"]*"/gu, '')
     .replace('</p:spTree>', `${shape(10, 914400, 'Menu source')}${shape(11, 6400800)}${shape(12, 8686800)}</p:spTree>`));
   return { name: 'context-menu.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -97,6 +97,9 @@ test('pointer menu selects its target, keeps the range, exposes a11y roles and r
 
 test('text menu copy, cut and paste use the clipboard and preserve paragraph breaks', async ({ page }, info) => {
   await selectText(page);
+  await input(page).press('ControlOrMeta+C');
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Menu source');
+  await page.evaluate(() => navigator.clipboard.writeText(''));
   await choose(page, await openText(page), 'Copy');
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Menu source');
   await choose(page, await openText(page), 'Cut');
