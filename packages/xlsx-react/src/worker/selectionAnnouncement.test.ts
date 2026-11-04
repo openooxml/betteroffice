@@ -42,6 +42,14 @@ describe('selection announcement', () => {
     expect(paintedCellText(spill, 5, 2)).toBe('');
   });
 
+  it('keeps indented text that spills with its own cell', () => {
+    const indented = { ...frame, commands: [
+      { op: 'text', x: 74, y: 14, text: 'Indented', fontSize: 11, color: '#000000', align: 'left', clip: { x: 0, y: 0, w: 128, h: 20 } },
+    ] } as DisplayList;
+    expect(paintedCellText(indented, 4, 1)).toBe('Indented');
+    expect(paintedCellText(indented, 4, 2)).toBe('');
+  });
+
   it('reads right-aligned text of a merged area from its first cell', () => {
     const merged = [{ start: { row: 4, col: 1 }, end: { row: 4, col: 2 } }];
     const area = { ...frame, commands: [

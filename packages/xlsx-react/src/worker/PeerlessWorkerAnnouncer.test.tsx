@@ -34,7 +34,7 @@ describe('peerless worker announcer', () => {
         </div>
       </ActiveCellInputContext.Provider>;
     const view = render(<Harness input={null} />);
-    const spoken = () => view.getByTestId('xlsx-live-region').textContent?.replace(/ $/, '');
+    const spoken = () => view.getByTestId('xlsx-live-region').textContent?.replace(/\u00a0$/, '');
     await act(async () => { view.getByTestId('grid').focus(); });
     await act(async () => { store.setSelection({ anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } }); });
     await waitFor(() => expect(spoken()).toBe('A1, empty'), { timeout: 3000 });

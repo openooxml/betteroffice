@@ -38,10 +38,19 @@ function lastLocalAtOrBefore(start: number, indices: number[] | undefined, count
   return out;
 }
 
+/** A point inside the cell a text run belongs to. */
+function runAnchor(x: number, clip: { x: number; w: number }, align: 'left' | 'center' | 'right' | undefined): number {
+  const inset = Math.min(0.5, clip.w / 2);
+  if (align === 'left') return clip.x + inset;
+  if (align === 'right') return clip.x + clip.w - inset;
+  return Math.min(Math.max(x, clip.x + inset), clip.x + clip.w - inset);
+}
+
 /**
  * The text painted in a cell, or null when the frame does not cover it. Text
- * spilling over blank neighbours clips wider than its cell, so a run belongs to
- * the cell its anchor point lies in, not to the cell its clip starts in.
+ * spilling over blank neighbours clips wider than its cell, toward the side its
+ * alignment opens: a left-aligned run's clip starts in its own cell and a
+ * right-aligned run's clip ends in it.
  */
 export function paintedCellText(displayList: DisplayList, row: number, col: number,
   merged: readonly MergedRange[] = []): string | null {
@@ -62,8 +71,8 @@ export function paintedCellText(displayList: DisplayList, row: number, col: numb
   for (const command of displayList.commands) {
     if (command.op !== 'text' || !command.clip || command.ghost || command.chart) continue;
     if (Math.round(command.clip.y * 1000) !== top) continue;
-    const anchor = Math.min(Math.max(command.x, command.clip.x), command.clip.x + command.clip.w - 1e-3);
-    if (anchor >= left - 1e-3 && anchor < right - 1e-3) parts.push(command.text);
+    const anchor = runAnchor(command.x, command.clip, command.align);
+    if (anchor >= left && anchor < right) parts.push(command.text);
   }
   return parts.join(' ').trim();
 }
