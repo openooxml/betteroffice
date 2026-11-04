@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import { extname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test, type Browser } from 'playwright/test';
 import JSZip from 'jszip';
 
@@ -7,6 +10,26 @@ const relationships = 'http://schemas.openxmlformats.org/officeDocument/2006/rel
 const rels = (body: string) => `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${body}</Relationships>`;
 /** The editor already fetches the opened file from a blob: URL; data: stays refused, so inlined font assets must not be fetched. */
 const strictConnect = "connect-src 'self' blob:";
+const origin = 'http://127.0.0.1:4186';
+const dist = fileURLToPath(new URL('../../apps/desktop/dist/', import.meta.url));
+const types: Record<string, string> = {
+  '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
+  '.json': 'application/json', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.png': 'image/png',
+  '.woff2': 'font/woff2',
+};
+
+/** Serves the built app from disk, as the preview server does, so no response is proxied through the test process. */
+async function fromDist(pathname: string): Promise<{ status: number; type: string; body: Buffer | string }> {
+  const file = resolve(dist, `.${decodeURIComponent(pathname)}`);
+  const page = !file.startsWith(dist) || extname(file) === '';
+  const path = page ? resolve(dist, 'index.html') : file;
+  const type = types[extname(path)] ?? 'application/octet-stream';
+  try {
+    return { status: 200, type, body: await readFile(path) };
+  } catch {
+    return { status: 404, type: 'text/plain', body: 'not found' };
+  }
+}
 
 async function documentBytes() {
   const zip = new JSZip();
@@ -36,12 +59,12 @@ async function open(browser: Browser, whole: boolean): Promise<Opened> {
   let lastRequest = Date.now();
   try {
     await context.route('**/*', async (route) => {
-      const pathname = new URL(route.request().url()).pathname;
-      if (whole && /\/slices(-[\w-]+)?\.json$/.test(pathname)) return route.abort();
-      const response = await route.fetch();
-      const type = response.headers()['content-type'] ?? '';
-      if (!/html|javascript/.test(type)) return route.fulfill({ response });
-      return route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': strictConnect } });
+      const url = new URL(route.request().url());
+      if (url.origin !== origin) return route.continue();
+      if (whole && /\/slices(-[\w-]+)?\.json$/.test(url.pathname)) return route.abort();
+      const { status, type, body } = await fromDist(url.pathname);
+      const policy = /html|javascript/.test(type) ? { 'content-security-policy': strictConnect } : {};
+      return route.fulfill({ status, body, headers: { 'content-type': type, ...policy } });
     });
     context.on('request', (request) => {
       lastRequest = Date.now();
@@ -84,7 +107,7 @@ test('sliced CJK faces paint the first frame under a strict connect-src exactly 
   const paths = sliced.requests.map((url) => new URL(url).pathname);
   expect(paths.filter((path) => /\/slices(-[\w-]+)?\.json$/.test(path)).length).toBeGreaterThanOrEqual(2);
   expect(paths.filter((path) => /\/NotoSans(JP|TC)-Regular\.otf(-[\w-]+)?\.zst$/.test(path))).toEqual([]);
-  expect(sliced.requests.filter((url) => new URL(url).origin !== 'http://127.0.0.1:4186' && !url.startsWith('data:'))).toEqual([]);
+  expect(sliced.requests.filter((url) => new URL(url).origin !== origin && !url.startsWith('data:'))).toEqual([]);
   expect(sliced.violations).toEqual([]);
   expect(sliced.errors).toEqual([]);
   expect(sliced.pixels).toMatch(/ ink=[1-9]\d* /);
