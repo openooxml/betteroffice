@@ -167,7 +167,10 @@ pub fn get_text_box_content_element(shape: &XmlElement) -> Option<&XmlElement> {
 }
 
 /// The model of a standalone text box drawing, with `content` as its text.
-pub(crate) fn text_box_shape(drawing: &XmlElement, content: Vec<serde_json::Value>) -> Option<Shape> {
+pub(crate) fn text_box_shape(
+    drawing: &XmlElement,
+    content: Vec<serde_json::Value>,
+) -> Option<Shape> {
     let (_, element) = text_box_elements(drawing)?;
     let mut shape = crate::shape::parse_shape_from_drawing(drawing)?;
     let body = shape_body_properties(element.child_by_full_name("wps:bodyPr"));
