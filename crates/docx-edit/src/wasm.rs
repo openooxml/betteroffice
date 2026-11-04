@@ -277,6 +277,15 @@ impl EditSession {
         self.core.decode_font(bytes).map_err(JsValue::from)
     }
 
+    /// Replaces the outlines of measurement font `font_id` with `bytes`, a face
+    /// whose every table but `CFF ` is unchanged. Errors, leaving the font as
+    /// it was, for other bytes.
+    pub fn update_measure_font_outlines(&self, font_id: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        self.core
+            .update_measure_font_outlines(font_id, bytes)
+            .map_err(JsValue::from)
+    }
+
     pub fn take_base_latin_miss(&self) -> bool {
         self.core.take_base_latin_miss()
     }

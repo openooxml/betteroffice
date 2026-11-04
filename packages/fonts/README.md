@@ -167,6 +167,7 @@ sources and other consumers:
 | `resolveDigitAdvance`, `maxDigitWidth` | Widest digit advance, recorded or measured. |
 | `loadBundledFontBytes(face, { baseUrl? })` | Fetches a face's bytes, cached per face and base URL. |
 | `registerBundledFontFace(face)` | Registers a face with the browser `FontFace` API; no-op outside the DOM. |
+| `ProgressiveFontFace`, `SliceLocation` (types) | A CJK face opened from its slices: layout tables complete at once, outlines loaded by glyph id (`ensureGlyphs`) or predicted from text (`prefetch`). A sliced face's loader carries an optional `slices` location, which `openSlicedFace` from `@betteroffice/fonts/progressive` opens. Calling the loader itself still returns the whole face. |
 
 ## Documentation
 

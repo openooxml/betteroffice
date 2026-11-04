@@ -1027,6 +1027,18 @@ pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
     })
 }
 
+/// Replaces the outlines of measurement font `id` (and every id sharing its
+/// bytes) with `bytes`, a face whose other tables are unchanged, such as a
+/// sliced face reassembled with more outline chunks. Layout is unaffected.
+pub fn update_measure_font_outlines(id: u32, bytes: &[u8]) -> Result<(), String> {
+    with_measure_fonts(|store| {
+        store
+            .borrow_mut()
+            .update_outlines(ooxml_text::FontId::from_u32(id), bytes.to_vec())
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Reads what measurement font `id` measures with: the bytes it shapes and a descriptor of the
 /// metrics, fallback advance scale and widths layered over them. `None` for an unknown id.
 pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Option<T> {

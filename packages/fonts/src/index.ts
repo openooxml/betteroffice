@@ -2,11 +2,13 @@ export * from './manifest';
 export type { FontDecoder } from './decode';
 import type { FontDecoder } from './decode';
 export type { BundledFontLoader, BundledFontSource } from './provider';
+export type { ProgressiveFontFace, SliceLocation } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont } from './packed';
+import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, sliceDecoder, sliceRefOf } from './packed';
 import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
+import type { SliceLocation } from './progressive';
 
 export interface FontAssetOptions {
   /**
@@ -209,6 +211,32 @@ async function assetUrl(
   throw new Error(`Unknown bundled font asset: ${file}`);
 }
 
+async function sliceAssetUrl(file: string, baseUrl: URL | undefined): Promise<URL> {
+  if (baseUrl !== undefined) return new URL(file, baseUrl);
+  const cjk = await loadCjkAssetUrls();
+  const resolve = cjk?.[file];
+  if (resolve) return resolve();
+  throw new MissingCjkAddonError(cjk
+    ? `Font slice ${file} needs a @betteroffice/fonts-cjk release matching @betteroffice/fonts`
+    : `Font slice ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
+}
+
+function sliceLocation(
+  face: BundledFontFace,
+  baseUrl: URL | undefined,
+  runtime?: { decoder?: FontDecoder; retain?: boolean },
+): SliceLocation | undefined {
+  const ref = sliceRefOf(face.file);
+  return ref && {
+    ref,
+    base: baseUrl?.href ?? '',
+    url: (file) => sliceAssetUrl(file, baseUrl),
+    decode: sliceDecoder(baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl), runtime?.decoder),
+    decoder: runtime?.decoder,
+    retain: runtime?.retain,
+  };
+}
+
 /** Loads font bytes into consumer-owned buffers with retryable failures. */
 export function loadBundledFontBytes(
   face: BundledFontFace,
@@ -316,5 +344,6 @@ export function createFontProvider(
   return fontProvider(
     (face) => loadBundledFontBytes(face, resolvedOptions, runtime),
     (face) => bundledFontBytes(face, readPackedFontBytes, resolvedOptions, runtime),
+    (face) => sliceLocation(face, resolvedOptions?.baseUrl, runtime),
   );
 }

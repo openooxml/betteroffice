@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
+import type { SliceLocation } from '@betteroffice/fonts/progressive';
 import { TextMeasureFontRegistry } from './fontRegistry';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
@@ -345,3 +346,68 @@ function covers(bytes: Uint8Array, character: string): boolean {
   }
   return false;
 }
+
+test('progressive registration registers a sliced script face from its skeleton and core, or whole when it cannot open', async () => {
+  const whole = new ArrayBuffer(32);
+  const sliced = new ArrayBuffer(24);
+  const face = {
+    revision: 1, bytes: () => sliced.slice(0), ensureGlyphs: async () => 1, prefetch() {},
+    onUpdate: () => () => {}, complete: () => false,
+  };
+  const run = async (progressive: boolean, open: () => Promise<typeof face>) => {
+    const lengths: number[] = [];
+    const loader = Object.assign(async () => whole, { slices: {} as SliceLocation });
+    const registry = new TextMeasureFontRegistry(
+      { registerFont: (bytes) => lengths.push(bytes.byteLength) },
+      { progressive: progressive ? open : undefined, bundled: { resolve: () => undefined, resolveScriptFallback: () => loader } },
+    );
+    const ids = await registry.getScriptFallbackIds(['cjk-jp', 'cjk-jp']);
+    return { ids, lengths, faces: registry.progressiveFaces(), registry };
+  };
+
+  const opened = await run(true, async () => face);
+  expect(opened.lengths).toEqual([24]);
+  expect([...opened.faces]).toEqual([[opened.ids[0]!, face]]);
+  opened.registry.clear();
+  expect(opened.registry.progressiveFaces().size).toBe(0);
+
+  const off = await run(false, async () => face);
+  expect(off.lengths).toEqual([32]);
+  expect(off.faces.size).toBe(0);
+
+  const warn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (message: string) => warnings.push(message);
+  try {
+    const failed = await run(true, async () => { throw new Error('index unavailable'); });
+    expect(failed.lengths).toEqual([32]);
+    expect(failed.faces.size).toBe(0);
+    expect(warnings.join('\n')).toContain('loading it whole: index unavailable');
+  } finally {
+    console.warn = warn;
+  }
+});
+
+test('a family mapped to a sliced face registers it progressively once, shared with its script fallback', async () => {
+  const sliced = new ArrayBuffer(24);
+  const face = {
+    revision: 1, bytes: () => sliced.slice(0), ensureGlyphs: async () => 1, prefetch() {},
+    onUpdate: () => () => {}, complete: () => false,
+  };
+  const lengths: number[] = [];
+  const views: string[] = [];
+  const loader = Object.assign(async () => new ArrayBuffer(32), { measureAs: 'MS Gothic', slices: {} as SliceLocation });
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: (bytes) => lengths.push(bytes.byteLength),
+      registerSubstituteFont: (id, family) => { views.push(family); return 100 + id; },
+    },
+    { progressive: async () => face, bundled: { resolve: () => loader, resolveScriptFallback: () => loader } },
+  );
+  const chain = await registry.getFontIdChain('MS Gothic', false, false);
+  const [script] = await registry.getScriptFallbackIds(['cjk-jp']);
+  expect(lengths).toEqual([24]);
+  expect([...registry.progressiveFaces().keys()]).toEqual([script!]);
+  expect(chain[0]).toBe(100 + script!);
+  expect(views).toEqual(['MS Gothic']);
+});

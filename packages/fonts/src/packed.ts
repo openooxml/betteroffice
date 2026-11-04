@@ -5,6 +5,7 @@ import baseLatinManifest from '../assets/base-latin.json';
 import { readFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
 import type { BundledFontFace } from './manifest';
+import type { SliceRef } from './progressive';
 import { sha256 } from './sha256';
 
 interface PackFace {
@@ -16,6 +17,7 @@ interface PackFace {
   encodedLength: number;
   byteLength: number;
   sha256: string;
+  slices?: SliceRef;
 }
 
 interface PackManifest {
@@ -105,9 +107,7 @@ async function loadFace(
       }
       const dictionary = prerequisite === undefined ? undefined
         : (prerequisite.payload ?? prerequisite.font).slice(0);
-      const decoded = decoder === undefined
-        ? await (await import('./decode')).decodeFontFace(encoded, dictionary, { codec: entry.codec, wasmUrl })
-        : await decoder(encoded, { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 });
+      const decoded = await decodeWith(wasmUrl, decoder)(encoded, { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 });
       if (decoded.font.byteLength !== face.byteLength) {
         throw new Error(
           `Bundled font ${face.file} has ${decoded.font.byteLength} bytes; expected ${face.byteLength}`,
@@ -139,6 +139,22 @@ function intact(decoded: DecodedFace, face: BundledFontFace): boolean {
 
 function packFor(face: BundledFontFace): PackManifest {
   return isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl;
+}
+
+/** The host's decoder when it has one, else the bundled one at `wasmUrl`. */
+function decodeWith(wasmUrl?: URL, decoder?: FontDecoder): FontDecoder {
+  return decoder ?? (async (bytes, options) => (await import('./decode')).decodeFontFace(bytes, options.dict, { ...options, wasmUrl }));
+}
+
+/** @internal Decodes slice files the way a provider decodes its whole faces. */
+export function sliceDecoder(wasmUrl?: URL, decoder?: FontDecoder) {
+  const decode = decodeWith(wasmUrl, decoder);
+  return async (encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer> => (await decode(encoded, { codec: 'zstd', maxOutput })).font;
+}
+
+/** @internal The slice pointer of a sliced pack face. */
+export function sliceRefOf(file: string): SliceRef | undefined {
+  return cjk.faces.find((entry) => entry.file === file)?.slices;
 }
 
 export async function loadPackedFontBytes(

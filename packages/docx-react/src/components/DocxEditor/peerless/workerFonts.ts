@@ -17,7 +17,8 @@ export async function customWorkerFontFaces(fonts: ReadonlyArray<FontDefinition>
 
 export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>,
   requirements: ResidentFontRequirement[], families: string[],
-  registeredStyles?: ReadonlyMap<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>): DocxFontEnvironment {
+  registeredStyles?: ReadonlyMap<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>,
+  progressive: DocxFontEnvironment['progressive'] = []): DocxFontEnvironment {
   const styles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>(registeredStyles);
   for (const [key, slots] of Object.entries(chains)) {
     const [family, bold, italic] = key.split('|');
@@ -29,7 +30,8 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
     const style = styles.get(index);
     return { family: style?.family ?? 'Liberation Sans', data: font,
       weight: style?.bold ? 'bold' : 'normal', style: style?.italic ? 'italic' : 'normal' };
-  }), chains: structuredClone(chains), families: [...new Set([...families, ...Array.from(registeredStyles?.values() ?? [], face => face.family)])] };
+  }), chains: structuredClone(chains), families: [...new Set([...families, ...Array.from(registeredStyles?.values() ?? [], face => face.family)])],
+  ...(progressive.length ? { progressive: structuredClone(progressive) } : {}) };
 }
 
 /**
@@ -72,10 +74,13 @@ export async function prepareWorkerFontEnvironment(options: {
   compat: Parameters<ReturnType<typeof createRustMeasureSource>['setCompat']>[0];
   signal: AbortSignal;
   onCoverage?: (covers: (requirements: ResidentFontRequirement[]) => boolean) => void;
+  /** Register sliced script-fallback faces from their skeleton and core; the worker loads their outlines. */
+  progressive?: boolean;
 }): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
   const styles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>();
-  const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime, engine: {
+  const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime,
+    progressive: options.progressive, engine: {
     registerFont(bytes, face) {
       options.signal.throwIfAborted();
       const id = fonts.push(bytes) - 1;
@@ -98,7 +103,9 @@ export async function prepareWorkerFontEnvironment(options: {
     const config = measurement.measurementConfigForRequirements(requirements);
     if (!config) throw new Error('DOCX worker fonts are not ready');
     options.onCoverage?.(measurement.coverageCheck(requirements));
+    const progressive = await measurement.progressiveFonts?.() ?? [];
+    options.signal.throwIfAborted();
     return fontEnvironmentForRegistrations(fonts, config.fontChains, requirements,
-      [...options.families, ...custom.map(face => face.family)], styles);
+      [...options.families, ...custom.map(face => face.family)], styles, progressive);
   } finally { measurement.setEmbeddedFaces([]); measurement.clear(); }
 }

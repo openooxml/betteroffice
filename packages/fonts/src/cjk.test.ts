@@ -16,7 +16,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-test('ships exactly five literal CJK URLs and a schema 1 zstd pack with pinned source hashes', async () => {
+test('ships literal CJK URLs for the five faces and their slices and a schema 1 zstd pack with pinned source hashes', async () => {
   expect(cjkPackage.files).toEqual(['dist', 'assets', 'LICENSE', 'LICENSES', 'README.md']);
   expect(pack.format).toBe(1);
   expect(pack.schema).toBe(1);
@@ -25,10 +25,17 @@ test('ships exactly five literal CJK URLs and a schema 1 zstd pack with pinned s
   expect(cjk).toHaveLength(5);
   const files = cjk.map((face) => face.file).sort();
   expect(pack.faces.map((entry) => entry.file)).toEqual(files);
-  expect(Object.keys(CJK_FONT_ASSET_URLS).sort()).toEqual(files);
+  const sliceFiles: string[] = [];
+  for (const entry of pack.faces) {
+    const index = await Bun.file(new URL(`../../fonts-cjk/assets/${entry.slices.index}`, import.meta.url)).json() as {
+      skeleton: { file: string }; core: { file: string }; chunks: Array<{ file: string }>;
+    };
+    sliceFiles.push(entry.slices.index, index.skeleton.file, index.core.file, ...index.chunks.map((chunk) => chunk.file));
+  }
+  expect(Object.keys(CJK_FONT_ASSET_URLS).sort()).toEqual([...files, ...sliceFiles].sort());
   const source = await Bun.file(new URL('../../fonts-cjk/src/index.ts', import.meta.url)).text();
   const rows = [...source.matchAll(/'([^']+)': \(\) => new URL\('\.\.\/assets\/([^']+)', import\.meta\.url\)/g)];
-  expect(rows.map(([, file]) => file).sort()).toEqual(files);
+  expect(rows.map(([, file]) => file).sort()).toEqual([...files, ...sliceFiles].sort());
   for (const [, file, target] of rows) {
     expect(file).toBe(target);
     expect(CJK_FONT_ASSET_URLS[file]().pathname).toEndWith(`/assets/${file}`);

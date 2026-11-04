@@ -1,3 +1,11 @@
+/** Where a sliced face's files are, as `@betteroffice/fonts` loaders carry it; opaque to the registry. */
+export type SliceLocation = object;
+
+/** What the registry uses of a face `@betteroffice/fonts/progressive` opens. */
+export interface ProgressiveFontFace {
+  bytes(): ArrayBuffer;
+}
+
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
 
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
@@ -15,6 +23,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   measureAs?: string;
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
+  /** Locates a sliced face whose outlines load as they are needed. */
+  slices?: SliceLocation;
   /** @internal Precomputed base Latin coverage bits of the face. */
   coverage?: string;
   /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
@@ -230,13 +240,25 @@ export class TextMeasureFontRegistry {
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
 
+  /** Script-fallback faces registered from their skeleton and core, by font id. */
+  private progressiveIds = new Map<number, ProgressiveFontFace>();
+  private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+
+  /** `progressive` opens sliced faces, which register from their skeleton and core. */
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
+    progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
   }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
     this.baseLatinSource = opts?.baseLatin;
+    this.progressive = opts?.progressive;
+  }
+
+  /** The sliced faces registered from their skeleton and core, by font id. */
+  progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace> {
+    return this.progressiveIds;
   }
 
   /** Shares in-flight resolution but evicts misses for retry. */
@@ -462,6 +484,7 @@ export class TextMeasureFontRegistry {
     this.lastResortIds = new Map();
     this.bufferIds = new WeakMap();
     this.loaderIds = new WeakMap();
+    this.progressiveIds = new Map();
     this.scriptIds = new Map();
     this.scriptResults = new Map();
     this.chains = new Map();
@@ -667,6 +690,38 @@ export class TextMeasureFontRegistry {
     if (coverage) this.coverage.set(id, coverage);
   }
 
+  /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
+  private registerFaceLoader(loader: BundledFontLoader, label: string): Promise<number> {
+    const open = this.progressive;
+    const slices = loader.slices;
+    if (open === undefined || slices === undefined) return this.registerLoader(loader);
+    let pending = this.loaderIds.get(loader);
+    if (!pending) {
+      const ids = this.loaderIds;
+      const generation = this.generation;
+      pending = (async () => {
+        let face: ProgressiveFontFace;
+        try {
+          face = await open(slices);
+        } catch (error) {
+          this.warnFailure(
+            `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
+              `${error instanceof Error ? error.message : String(error)}`
+          );
+          return this.registerBuffer(await (loader.readOnlyBytes ?? loader)(), undefined, loader);
+        }
+        const known = loader.coverage === undefined ? undefined
+          : Object.assign(async () => face.bytes(), { coverage: loader.coverage });
+        const id = await this.registerBuffer(face.bytes(), undefined, known);
+        if (generation === this.generation) this.progressiveIds.set(id, face);
+        return id;
+      })();
+      evictFailedPromise(ids, loader, pending, () => false);
+      ids.set(loader, pending);
+    }
+    return pending;
+  }
+
   private registerLoader(loader: BundledFontLoader, face?: { family: string; bold: boolean; italic: boolean }): Promise<number> {
     let pending = this.loaderIds.get(loader);
     if (!pending) {
@@ -713,7 +768,7 @@ export class TextMeasureFontRegistry {
       const ids = this.bundledIds;
       pending = (async () => {
         try {
-          const base = await this.registerLoader(loader);
+          const base = await this.registerFaceLoader(loader, family);
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
           this.warnFailure(
@@ -780,7 +835,7 @@ export class TextMeasureFontRegistry {
         }
         if (loader) {
           try {
-            id = await this.registerLoader(loader);
+            id = await this.registerFaceLoader(loader, script);
           } catch (error) {
             retryable = true;
             this.warnFailure(

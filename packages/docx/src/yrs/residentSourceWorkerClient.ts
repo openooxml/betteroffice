@@ -25,7 +25,7 @@ export interface DocxEngineWorkerSourceOpened {
 export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
   private fontListeners = new Set<(event: DocxFontEnvironmentEvent) => void>();
   private memoryListeners = new Set<(samples: WasmModuleMemory[]) => void>();
-  private requirementsListeners = new Set<() => void>();
+  private requirementsListeners = new Set<(hint: { wholeFaces: boolean }) => void>();
   private presentedFontsRevision = 0;
   private cutReservation: { bytes?: number } | null = null;
 
@@ -71,7 +71,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
         const hint = response.fontRequirementsHint;
         const identity = this.commandIdentity;
         if (identity && hint.session === identity.session && hint.incarnation === identity.incarnation && hint.epoch === identity.epoch) {
-          for (const listener of this.requirementsListeners) { try { listener(); } catch {} }
+          for (const listener of this.requirementsListeners) { try { listener({ wholeFaces: hint.wholeFaces === true }); } catch {} }
         }
       }
       if (response.ok) {
@@ -177,8 +177,11 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
     return () => { this.fontListeners.delete(listener); };
   }
 
-  /** @internal Called when an applied edit may need fonts the last `fontRequirements` answer lacked. */
-  onFontRequirementsHint(listener: () => void): () => void {
+  /**
+   * @internal Called when an applied edit may need fonts the last `fontRequirements` answer lacked,
+   * or with `wholeFaces` when the engine refused a sliced face's outlines and needs whole faces.
+   */
+  onFontRequirementsHint(listener: (hint: { wholeFaces: boolean }) => void): () => void {
     this.requirementsListeners.add(listener);
     return () => { this.requirementsListeners.delete(listener); };
   }

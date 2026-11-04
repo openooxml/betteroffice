@@ -198,7 +198,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       capture = createWorkerPrintCapture(current.binding, printBitmap, () => active.current === current && !popup.closed);
       printCaptures.current.add(capture);
       const pages = await capture.collect(
-        (indices, epoch) => client.buildPages(indices, epoch), (epoch) => client.completeLayout(epoch));
+        (indices, epoch) => client.buildPages(indices, epoch), (epoch) => client.completeLayout(epoch),
+        async () => (await client.documentRead({ kind: 'fontOutlinesInstalled' })).value.lateInstalls);
       const css = popup.document.createElement('style');
       css.textContent = 'body { margin: 0; } img { display: block; width: 100%; break-after: page; } img:last-child { break-after: auto; } @page { margin: 0; size: auto; } @media print { button { display: none; } }';
       popup.document.head.appendChild(css);
@@ -393,7 +394,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: DocxFontEnvironment;
     requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'];
     covers?: (requirements: ResidentFontRequirement[]) => boolean;
-    initialRequirements: ResidentFontRequirement[]; initialCovers?: (requirements: ResidentFontRequirement[]) => boolean } | null>(null);
+    initialRequirements: ResidentFontRequirement[]; initialCovers?: (requirements: ResidentFontRequirement[]) => boolean;
+    /** Set once the engine refused a sliced face: later environments carry whole faces, the next one even if covered. */
+    wholeFaces: false | 'pending' | 'sent' } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; pick: AbortSignal | null; read: number }>(
@@ -473,8 +476,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const stopMemory = client.onMemory(samples => {
       if (worker.current === client && !signal.aborted) controller.memory(samples);
     });
-    const stopRequirements = client.onFontRequirementsHint(() => {
-      if (worker.current === client && !signal.aborted) refreshFonts.current();
+    let wholeFacesRequested = false;
+    let openedSource: typeof fontSource.current = null;
+    const stopRequirements = client.onFontRequirementsHint((hint) => {
+      if (worker.current !== client || signal.aborted) return;
+      if (hint.wholeFaces) {
+        wholeFacesRequested = true;
+        if (openedSource?.wholeFaces === false) openedSource.wholeFaces = 'pending';
+      }
+      refreshFonts.current();
     });
     const fonts: YrsResidentFontRegistration[] = [];
     const fontIds: number[] = [];
@@ -537,6 +547,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
             clearFonts: disposeFonts,
           },
           bundled: settings.current.measurementFontProvider,
+          progressive: true,
         });
         measurement.setCompat(metadata.package.settings?.compatibilityFlags);
         const embeddedFaces = await extractEmbeddedFontFaces(metadata);
@@ -551,7 +562,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           fontChains: Object.fromEntries(Object.entries(config.fontChains).map(([key, ids]) =>
             [key, [...new Set(ids.map((id) => fontIds[id]))]])),
         };
-        return { environment, layout, requirements, config };
+        const progressive = await measurement.progressiveFonts?.() ?? [];
+        signal.throwIfAborted();
+        return { environment, layout, requirements, config, progressive };
       };
       let measuring: Promise<unknown> = Promise.resolve();
       const measured = (metadata: Document) => {
@@ -561,9 +574,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       };
       let painted = false;
       let dropPreview = () => {};
-      const showPreview = async ({ layout, config }: Awaited<ReturnType<typeof measure>>, live: () => boolean) => {
+      const showPreview = async ({ layout, config, progressive }: Awaited<ReturnType<typeof measure>>, live: () => boolean) => {
         if (!live()) return false;
         const preview = await client.previewSource({ fonts: fonts.slice(), fontRegistrationSlots: { fontChains: config.fontChains },
+          ...(progressive.length ? { progressiveFonts: progressive } : {}),
           layoutInput: JSON.stringify({ ...layout, cachedPageTotals: true }), extras: JSON.stringify({ fontChains: config.fontChains }) });
         signal.throwIfAborted();
         const pages = workerPreviewPages(preview);
@@ -630,7 +644,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const metadata = opened.document;
       sourceComments.current = metadata.package.document.comments ?? [];
       const opening = await measured(metadata);
-      const { environment, layout, requirements, config } = opening;
+      const { environment, layout, requirements, config, progressive } = opening;
       renderEnvironment.current = { theme: metadata.package.theme, requested: JSON.stringify(environment) };
       if (!resume && settings.current.previewFirstPage === true && !previewed) {
         try { await withinPreviewBudget((live) => showPreview(opening, live)); } catch (error) { previewFailed(error); }
@@ -650,6 +664,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         layoutWithRegions: true, layoutRevision: 1, extras: JSON.stringify({ fontChains: config.fontChains }),
         displayWindow: [0, 3], provisionalPages: 3,
         ...(hostImages.length ? { hostImages } : {}),
+        ...(progressive.length ? { progressiveFonts: progressive } : {}),
       });
       initialFrame = initial.frame;
       const connection = await createDocxCommandConnection(client, initial);
@@ -670,10 +685,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         ...(metadata.package.fontTable?.fonts ?? []).map(font => font.name)])];
       const covers = measurement?.coverageCheck(requirements);
       fontSource.current = { document: metadata, layoutInput: JSON.stringify(layout), families, requirements,
-        initial: fontEnvironmentForRegistrations(fonts, config.fontChains, requirements, families, fontStyles),
+        initial: fontEnvironmentForRegistrations(fonts, config.fontChains, requirements, families, fontStyles, progressive),
         signature: settings.current.fonts === undefined && !settings.current.reportFonts ? '[]' : null,
         provider: settings.current.measurementFontProvider,
-        covers, initialRequirements: requirements, initialCovers: covers };
+        covers, initialRequirements: requirements, initialCovers: covers, wholeFaces: wholeFacesRequested ? 'pending' : false };
+      openedSource = fontSource.current;
+      if (wholeFacesRequested) refreshFonts.current();
       controller.fontChoices(families);
       identity.current = {
         session: connection.initial.session,
@@ -785,8 +802,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!isCurrent()) return;
       let payload: DocxFontEnvironment;
       let requirements = opened.requirements;
+      const whole = opened.wholeFaces;
       let covers = opened.covers;
-      if (!requirementsChanged && opened.signature === null && !fonts?.length && provider === opened.provider) {
+      if (!requirementsChanged && !whole && opened.signature === null && !fonts?.length && provider === opened.provider) {
         payload = structuredClone(opened.initial);
         requirements = opened.initialRequirements;
         covers = opened.initialCovers;
@@ -796,11 +814,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         const next = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];
         if (!isCurrent()) return;
         const uncovered = requirementsChanged ? uncoveredFontRequirements(opened.requirements, next,
-          opened.signature === signature && opened.provider === provider ? opened.covers : undefined) : next;
+          opened.signature === signature && opened.provider === provider ? opened.covers : undefined)
+          ?? (whole === 'pending' ? [...opened.requirements] : null) : next;
         if (!uncovered) { settle(); return; }
         requirements = uncovered;
         const embedded = await extractEmbeddedFontFaces(opened.document);
         payload = await prepareWorkerFontEnvironment({ fonts, provider, runtime: client.fontRuntime, embedded, requirements, families: opened.families,
+          progressive: !whole,
           compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal, onCoverage: check => { covers = check; } });
       }
       if (!isCurrent()) return;
@@ -810,6 +830,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           const accepted = outcome.status !== 'refused' && outcome.status !== 'cancelled';
           if (accepted && active.current === current && fontSource.current === opened && worker.current === client) {
             opened.signature = signature; opened.provider = provider; opened.requirements = requirements; opened.covers = covers; opened.initial.faces.length = 0;
+            if (whole) opened.wholeFaces = 'sent';
           }
           if (!isCurrent()) return;
           if (outcome.status === 'refused' || outcome.status === 'cancelled') {
@@ -857,7 +878,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const embedded = await extractEmbeddedFontFaces(opened.document);
       let covers: ((requirements: ResidentFontRequirement[]) => boolean) | undefined;
       const payload = await prepareWorkerFontEnvironment({ fonts: settings.current.fonts,
-        runtime: client.fontRuntime,
+        runtime: client.fontRuntime, progressive: opened.wholeFaces === false,
         provider: settings.current.measurementFontProvider, embedded, requirements, families: [...opened.families, family],
         compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal, onCoverage: check => { covers = check; } });
       if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');
