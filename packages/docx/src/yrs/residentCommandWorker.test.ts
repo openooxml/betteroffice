@@ -2260,6 +2260,72 @@ test('worker cell and text handles survive input and resize the issued cell colu
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+const THREE_COLUMNS = '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+  '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/></w:tblGrid>' +
+  '<w:tr>' + ['A', 'B', 'C'].map(text => `<w:tc><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`).join('') + '</w:tr></w:tbl>';
+
+test('worker column edge drags move one border in one undo step and clamp at the minimum width', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  try {
+    const cells = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'cell');
+    expect(cells.map(cell => cell.cell)).toEqual([0, 1, 2].map(column =>
+      ({ table: 'body#0', row: 0, column, rowspan: 1, colspan: 1, columns: 3 })));
+    const version = (response: { frame?: { payload: { documentVersion?: string } } | null }) => response.frame!.payload.documentVersion!;
+    const drag = (seq: number, base: number, expectVersion: string, columnEdge: number, deltaTwips: number) =>
+      client.edit(intent(seq, base, 'resizeObject', { handle: cells[0]!.handle, expectVersion, columnEdge, deltaTwips }));
+    const first = await drag(1, 0, initial.frame.payload.documentVersion!, 1, 600);
+    expect(first.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    const clamped = await drag(2, 1, version(first), 2, 5000);
+    expect(clamped.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
+    const pinned = await drag(3, 2, version(clamped), 3, -5000);
+    expect(pinned.outcomes[0]?.status).toBe('noop');
+    const widened = await drag(4, 2, version(clamped), 3, 900);
+    expect(widened.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 1200]);
+    const undone = await client.edit(intent(5, 3, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
+    expect((await client.edit(intent(6, 4, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    const current = engine.proposalEngine.version();
+    expect((await drag(7, 5, current, 4, 100)).outcomes[0]).toMatchObject({ status: 'refused', reason: 'unsupported-object' });
+    for (const [index, payload] of [{ columnEdge: 0, deltaTwips: 100 }, { columnEdge: 1, deltaTwips: 1.5 }, { columnEdge: 1 },
+      { columnEdge: 1, deltaTwips: 100, widthTwips: 2000 }].entries()) {
+      expect((await client.edit(intent(8 + index, 5, 'resizeObject', { handle: cells[0]!.handle, expectVersion: current, ...payload } as never))).outcomes[0])
+        .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker column edge drags converge with a concurrent edit in a cell of the same table', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  const remote = await createResidentEngineSession(undefined, 8302);
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const remoteVector = remote.encodeStateVector();
+    const story = 'body:t0:r0c1';
+    remote.insertText({ story, paraId: remote.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 1 }, '+');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 600,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    const localVector = engine.encodeStateVector();
+    engine.applyUpdate(remote.encodeStateAsUpdate(localVector));
+    remote.applyUpdate(engine.encodeStateAsUpdate(remoteVector));
+    for (const peer of [engine, remote]) {
+      expect(peer.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+      expect(peer.paragraphs(story)[0]?.text).toBe('B+');
+    }
+  } finally {
+    remote.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
 for (const kind of ['insertPageBreak', 'insertSectionBreak'] as const) {
   test(`worker safety refuses ${kind} in a cell before mutation and keeps commands usable`, async () => {
     const { client, engine, point } = await openWorker({ bodyXml: '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>', prepare(engine) {

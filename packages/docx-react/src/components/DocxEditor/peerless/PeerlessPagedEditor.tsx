@@ -19,6 +19,7 @@ import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessProvi
 import { clientPointToPage } from './pagePoint';
 import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
+import { tableResizeHandles, tableResizeIntent, type TableResizeHandle } from './tableResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
@@ -36,6 +37,8 @@ const HIT_TEST_LARGE_PAGE_PRIMITIVES = 2000;
 const HIT_TEST_LARGE_PAGE_IDLE_MS = 12;
 const TOUCH_TAP_SLOP_PX = 8;
 const TOUCH_LONG_PRESS_MS = 500;
+const TABLE_HANDLE_PX = 6;
+const tableHandleClass = { col: 'layout-table-resize-handle', right: 'layout-table-edge-handle-right' } as const;
 const pictureHandles = [
   { handle: 'nw', x: 0, y: 0, cursor: 'nw-resize' },
   { handle: 'n', x: 0.5, y: 0, cursor: 'ns-resize' },
@@ -198,7 +201,7 @@ function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActi
   return <PeerlessCaret caret={caret} input={input} pages={pages} />;
 }
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, queryEngineReady }: {
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, tables, queryEngineReady }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
@@ -217,6 +220,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   pageMirror?: 'full' | 'text';
   overlay?: ReactNode;
   pictures?: PeerlessPictureMoves;
+  tables?: PeerlessTableResize;
   queryEngineReady: boolean;
 }): ReactElement {
   const snapshot = useSyncExternalStore(binding.viewStore.subscribe, binding.viewStore.getSnapshot, binding.viewStore.getServerSnapshot);
@@ -568,6 +572,45 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     event.currentTarget.setPointerCapture(event.pointerId);
     input.current?.focus({ preventScroll: true });
   };
+  const canResizeTables = tables?.canResize() ?? false;
+  const tableHandles = useMemo(() => canResizeTables
+    ? tableResizeHandles(geometry, new Set(visiblePages.map(({ page }) => page.pageIndex))) : [],
+  [canResizeTables, geometry, visiblePages]);
+  const tableDrag = useRef<{ pointerId: number; handle: TableResizeHandle; startX: number; scale: number } | null>(null);
+  const [tableDragPreview, setTableDragPreview] = useState<{ id: string; delta: number } | null>(null);
+  const tableDragDelta = (active: NonNullable<typeof tableDrag.current>, clientX: number) =>
+    Math.min(Math.max((clientX - active.startX) / active.scale, active.handle.minDelta), active.handle.maxDelta);
+  const endTableDrag = () => {
+    tableDrag.current = null;
+    setTableDragPreview(null);
+  };
+  const startTableDrag = (event: PointerEvent<HTMLDivElement>, handle: TableResizeHandle) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (event.button !== 0 || event.isPrimary === false || tableDrag.current || !tables?.canResize()) return;
+    const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-docx-pages-host]');
+    const scale = pageHost ? pageHost.getBoundingClientRect().width / width : 0;
+    if (!Number.isFinite(scale) || scale <= 0) return;
+    tableDrag.current = { pointerId: event.pointerId, handle, startX: event.clientX, scale };
+    setTableDragPreview({ id: handle.id, delta: 0 });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    input.current?.focus({ preventScroll: true });
+  };
+  const moveTableDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const active = tableDrag.current;
+    if (active?.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    setTableDragPreview({ id: active.handle.id, delta: tableDragDelta(active, event.clientX) });
+  };
+  const finishTableDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const active = tableDrag.current;
+    if (active?.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    const intent = tableResizeIntent(binding.viewStore.getSnapshot().geometry, active.handle, tableDragDelta(active, event.clientX));
+    endTableDrag();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (intent && tables?.canResize()) tables.resize(intent);
+  };
   const onPoint = (event: PointerEvent<HTMLDivElement>, drag: boolean, host = event.currentTarget) => {
     event.preventDefault();
     const currentSnapshot = binding.viewStore.getSnapshot();
@@ -814,6 +857,20 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           left: selectedPage.bounds.x + resizePreview.rect.x, top: selectedPage.bounds.y + resizePreview.rect.y,
           width: resizePreview.rect.width, height: resizePreview.rect.height, outline: '1px dashed rgb(59, 130, 246)',
           background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', zIndex: 16 }} />}
+        {tableHandles.map((handle) => {
+          const page = pages.find(({ page }) => page.pageIndex === handle.pageIndex);
+          if (!page) return null;
+          const dragging = tableDragPreview?.id === handle.id;
+          const thickness = TABLE_HANDLE_PX / zoom;
+          return <div key={handle.id} className={`${tableHandleClass[handle.kind]}${dragging ? ' dragging' : ''}`} aria-hidden
+            data-handle-type={handle.kind} data-column-edge={handle.columnEdge}
+            onPointerDown={(event) => startTableDrag(event, handle)} onPointerMove={moveTableDrag}
+            onPointerUp={finishTableDrag} onPointerCancel={(event) => { if (tableDrag.current?.pointerId === event.pointerId) endTableDrag(); }}
+            onLostPointerCapture={(event) => { if (tableDrag.current?.pointerId === event.pointerId) endTableDrag(); }}
+            style={{ position: 'absolute', left: page.bounds.x + handle.x + (dragging ? tableDragPreview?.delta ?? 0 : 0) - thickness / 2,
+              top: page.bounds.y + handle.top, width: thickness, height: Math.max(0, handle.bottom - handle.top),
+              cursor: 'col-resize', pointerEvents: 'auto', touchAction: 'none', zIndex: 14 }} />;
+        })}
       </div>
     </div>
   </>;
@@ -840,6 +897,14 @@ export interface PeerlessPagedEditorProps {
   pageMirror?: 'full' | 'text';
   /** Picture selection, floating drags and resizing. */
   pictures?: PeerlessPictureMoves;
+  /** Table column border and right edge dragging. */
+  tables?: PeerlessTableResize;
+}
+
+/** @internal */
+export interface PeerlessTableResize {
+  canResize(): boolean;
+  resize(intent: PeerlessPropertyIntent): void;
 }
 
 /** @internal */
@@ -851,7 +916,7 @@ export interface PeerlessPictureMoves {
 }
 
 /** @internal */
-export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures }: PeerlessPagedEditorProps): ReactElement | null {
+export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, tables }: PeerlessPagedEditorProps): ReactElement | null {
   const { t } = useTranslation();
   const [queryEngineReady, setQueryEngineReady] = useState(() => !!loadedRustDisplayListQueryEngine());
   useEffect(() => {
@@ -975,7 +1040,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} pictures={pictures} queryEngineReady={queryEngineReady} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
     {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       {t('editor.recoverableTextNotice')}

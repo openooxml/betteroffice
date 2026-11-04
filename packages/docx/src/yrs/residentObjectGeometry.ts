@@ -36,6 +36,27 @@ export interface ResidentObjectGeometry {
   paintOrder?: number;
   /** Image anchored inside a cell or text box. */
   nested?: boolean;
+  /** Cells only: where the cell sits in its table's grid. */
+  cell?: ResidentCellPlacement;
+}
+
+export interface ResidentCellPlacement {
+  /** Identifies the table within the document: its story and index there. */
+  table: string;
+  row: number;
+  column: number;
+  rowspan: number;
+  colspan: number;
+  /** Grid columns of the whole table. */
+  columns: number;
+}
+
+export function residentCellPlacement(
+  table: { story: string; tableIndex: number; cells: ReadonlyArray<{ column: number; colspan: number }> },
+  cell: { row: number; column: number; rowspan: number; colspan: number }
+): ResidentCellPlacement {
+  return { table: `${table.story}#${table.tableIndex}`, row: cell.row, column: cell.column, rowspan: cell.rowspan,
+    colspan: cell.colspan, columns: Math.max(0, ...table.cells.map(entry => entry.column + entry.colspan)) };
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
@@ -311,7 +332,8 @@ export async function readResidentFrameGeometry(
     for (const table of tables) for (const cell of table.cells) {
       const boxes = cellGeometry.get(`${table.from}:${cell.row}:${cell.column}`) ?? [];
       if (boxes.length) objects.push({ kind: 'cell', story: cell.story,
-        handle: issue(engine, 'cell', { story: cell.story, paraId: cell.paraId, offset: 0 }, table.at), rects: boxes });
+        handle: issue(engine, 'cell', { story: cell.story, paraId: cell.paraId, offset: 0 }, table.at), rects: boxes,
+        cell: residentCellPlacement(table, cell) });
     }
     const imageStarts: number[] = [];
     if (root === 'body' || prefix === 'hf') for (const page of frame.displayList.pages) {
