@@ -745,6 +745,51 @@ fn range_format_then_cell_edit_preserves_synthesized_plain_catalog() {
 }
 
 #[test]
+fn range_format_then_cell_edit_preserves_projected_style_alias() {
+    for mode in 0..3 {
+        let mut pair = Lockstep::from_model(plain_style_synthesis_model());
+        pair.step(true, |workbook| {
+            workbook.patch_range_style(
+                SheetId(0),
+                CellRange::parse_a1("A1:B1").unwrap(),
+                StylePatch {
+                    bold: Some(false),
+                    ..StylePatch::default()
+                },
+                options(),
+            )
+        })
+        .unwrap();
+        pair.step(true, |workbook| match mode {
+            0 => workbook.edit_cell(SheetId(0), r("A1"), "1", options()),
+            1 => workbook.edit_cells(
+                SheetId(0),
+                &[CellInput {
+                    cell: r("A1"),
+                    input: "1".into(),
+                }],
+                options(),
+            ),
+            _ => workbook.apply_ops(
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: r("A1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 1.0 },
+                        style: current_cell_state(&workbook.model, SheetId(0), r("A1")).style,
+                        ..CellState::default()
+                    },
+                }],
+                options(),
+            ),
+        })
+        .unwrap();
+        pair.edit(0, r("C1"), "2").unwrap();
+        assert_eq!(pair.fast.cell(SheetId(0), r("A1")).unwrap().input, "1");
+    }
+}
+
+#[test]
 fn range_format_then_staged_cell_edit_preserves_synthesized_plain_catalog() {
     for mode in 0..3 {
         let mut pair = Lockstep::from_model(plain_style_synthesis_model());
@@ -1115,55 +1160,72 @@ fn run_seeded_range_format_sequences(check_fast_path: bool) {
             order.swap(index, random.next((index + 1) as u32) as usize);
         }
         let mut first_number_format = true;
-        for step in 0..30 {
-            let kind = if step < order.len() {
-                order[step]
-            } else {
-                random.next(17)
-            };
-            let number_kind = if kind == 1 {
-                let kind = if first_number_format {
-                    sequence % 11
+        let mut operations = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for step in 0..30 {
+                let kind = if step < order.len() {
+                    order[step]
                 } else {
-                    random.next(11)
+                    random.next(17)
                 };
-                first_number_format = false;
-                number_formats_used[kind as usize] = true;
-                kind
-            } else {
-                0
-            };
-            let edit = random_range_format_edit(&mut random, &pair.fast, kind, number_kind);
-            pair.step(false, |workbook| {
-                let materializations = full_materializations();
-                let hydrations = local_hydrations();
-                let result = edit.apply(workbook);
-                if check_fast_path
-                    && edit.is_fast_format()
-                    && !crate::authority::force_full_materialization()
-                {
+                let number_kind = if kind == 1 {
+                    let kind = if first_number_format {
+                        sequence % 11
+                    } else {
+                        random.next(11)
+                    };
+                    first_number_format = false;
+                    number_formats_used[kind as usize] = true;
+                    kind
+                } else {
+                    0
+                };
+                let edit = random_range_format_edit(&mut random, &pair.fast, kind, number_kind);
+                operations.push(format!("{step}: {edit:?}"));
+                pair.step(false, |workbook| {
+                    let materializations = full_materializations();
+                    let hydrations = local_hydrations();
+                    let result = edit.apply(workbook);
+                    if check_fast_path
+                        && edit.is_fast_format()
+                        && !crate::authority::force_full_materialization()
+                    {
+                        assert_eq!(
+                            full_materializations(),
+                            materializations,
+                            "seed {seed:#x}, step {step}, {edit:?}"
+                        );
+                        assert_eq!(
+                            local_hydrations(),
+                            hydrations,
+                            "seed {seed:#x}, step {step}, {edit:?}"
+                        );
+                    }
+                    result
+                })
+                .unwrap_or_else(|error| panic!("seed {seed:#x}, step {step}, {edit:?}: {error}"));
+                if check_fast_path && edit.requires_projection_refresh() {
                     assert_eq!(
-                        full_materializations(),
-                        materializations,
-                        "seed {seed:#x}, step {step}, {edit:?}"
-                    );
-                    assert_eq!(
-                        local_hydrations(),
-                        hydrations,
-                        "seed {seed:#x}, step {step}, {edit:?}"
+                        pair.fast.authority.materialize().unwrap(),
+                        pair.oracle.authority.materialize().unwrap()
                     );
                 }
-                result
-            })
-            .unwrap_or_else(|error| panic!("seed {seed:#x}, step {step}, {edit:?}: {error}"));
-            if check_fast_path && edit.requires_projection_refresh() {
-                assert_eq!(
-                    pair.fast.authority.materialize().unwrap(),
-                    pair.oracle.authority.materialize().unwrap()
-                );
             }
+            pair.assert_equal(true);
+        }));
+        if let Err(failure) = result {
+            let message = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            panic!(
+                "seed {seed:#x}, step {}, global step {}: {message}\noperations:\n{}",
+                operations.len().saturating_sub(1),
+                pair.step,
+                operations.join("\n")
+            );
         }
-        pair.assert_equal(true);
     }
     assert!(number_formats_used.into_iter().all(|used| used));
 }

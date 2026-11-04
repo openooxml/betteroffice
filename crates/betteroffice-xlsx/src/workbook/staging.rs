@@ -138,9 +138,9 @@ impl Workbook {
             PreparedAuthority::Staged(authority) => {
                 self.authority.adopt_local_update(*authority, local_history)
             }
-            PreparedAuthority::RangeFormat(authority) => {
-                self.authority.commit_range_format_sync(*authority, local_history)
-            }
+            PreparedAuthority::RangeFormat(authority) => self
+                .authority
+                .commit_range_format_sync(*authority, local_history),
         }
         .map_err(authority_error)?;
         self.install_model_with_ops(model, &ops)?;

@@ -1965,7 +1965,7 @@ impl WorkbookSnapshotBuilder {
             .take()
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
-        authority.set_snapshot_projection_valid(projection_valid);
+        authority.set_snapshot_projection_valid(projection_valid)?;
         let model_builder = self
             .model
             .take()

@@ -1155,11 +1155,59 @@ impl WorkbookAuthority {
         Ok(self.projection_valid.load(Ordering::Relaxed))
     }
 
-    pub(crate) fn set_snapshot_projection_valid(&mut self, valid: bool) {
-        if !valid || !self.projection_valid.load(Ordering::Relaxed) {
+    pub(crate) fn set_snapshot_projection_valid(
+        &mut self,
+        valid: bool,
+    ) -> crate::snapshot::SnapshotResult<()> {
+        if valid
+            && (!self.projection_valid.load(Ordering::Relaxed)
+                || self.plain_style_cells.load(Ordering::Relaxed) == u64::MAX)
+        {
+            let count = self
+                .count_plain_style_cells()
+                .map_err(crate::snapshot::SnapshotError::new)?;
+            self.plain_style_cells.store(count, Ordering::Relaxed);
+        } else if !valid {
             self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
         }
         self.projection_valid.store(valid, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn count_plain_style_cells(&self) -> Result<u64, String> {
+        let txn = self.doc.transact();
+        let cell_formats = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        let (_, indices) = materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
+        let order = txn
+            .get_array(SHEET_ORDER)
+            .ok_or_else(|| "missing sheet order".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let mut count = 0u64;
+        for key in sheet_keys(&order, &txn)? {
+            let sheet = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("missing sheet {key}"))?;
+            let styles = nested_map(&sheet, &txn, STYLES)?;
+            for (key, value) in styles.iter(&txn) {
+                let style = value
+                    .cast::<String>()
+                    .map_err(|_| format!("cell style {key} is not a string"))?;
+                let index = indices
+                    .get(&style)
+                    .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
+                if index.is_none() {
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| "plain style cell count is too large".to_string())?;
+                }
+            }
+        }
+        Ok(count)
     }
 
     #[cfg(test)]
@@ -1375,9 +1423,7 @@ impl WorkbookAuthority {
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
             materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
-        if count != 0 {
-            styles.plain_xf();
-        }
+        let plain = (count != 0).then(|| styles.plain_xf());
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
         let keys = sheet_keys(&order, &txn).ok()?;
@@ -1398,29 +1444,31 @@ impl WorkbookAuthority {
             Some(value) => Some(value.cast::<String>().ok()?),
             None => None,
         };
+        let current_style = match authored_style.as_ref() {
+            Some(key) => Some((*indices.get(key)?).or(plain)?),
+            None => None,
+        };
         let remapped = remap_styles(ops, source, &mut styles).ok()?;
         let Op::SetCell { cell, .. } = &remapped[0] else {
             return None;
         };
         cell_format_entry(&CellFormat::default()).ok()?;
         for index in 0..styles.cell_xfs.len() {
-            cell_format_entry(&styles.cell_format(Some(u32::try_from(index).ok()?))).ok()?;
+            style_entry(&styles, u32::try_from(index).ok()?).ok()?;
         }
-        let style = cell
-            .style
-            .map(|style| style_key(&styles, style))
-            .transpose()
-            .ok()?;
-        let formatted = style != authored_style;
+        let formatted = cell.style != current_style;
         let was_plain = authored_style
             .as_ref()
             .is_some_and(|key| indices.get(key) == Some(&None));
-        let is_plain = cell
-            .style
-            .map(|index| style_needs_plain(&styles, index, &self.base.styles))
-            .transpose()
-            .ok()?
-            .unwrap_or(false);
+        let is_plain = if formatted {
+            cell.style
+                .map(|index| style_needs_plain(&styles, index, &self.base.styles))
+                .transpose()
+                .ok()?
+                .unwrap_or(false)
+        } else {
+            was_plain
+        };
         let plain_style_cells = Some(
             count
                 .checked_sub(u64::from(was_plain))?
@@ -8237,7 +8285,7 @@ mod tests {
             },
         };
         let update = fast
-            .apply_ops(&[op.clone()], SyncOrigin::User, &model.styles)
+            .apply_ops(std::slice::from_ref(&op), SyncOrigin::User, &model.styles)
             .unwrap();
         let expected =
             with_full_materialization(|| oracle.apply_ops(&[op], SyncOrigin::User, &model.styles))
@@ -8265,6 +8313,59 @@ mod tests {
             &mut fast,
             &mut oracle,
             &[op],
+            SyncOrigin::User,
+            &model.styles,
+        )
+        .unwrap();
+        assert_eq!(fast_set_cell_count(), count + 1);
+    }
+
+    #[test]
+    fn range_format_snapshot_projection_restores_plain_style_count() {
+        let mut model = rich_model();
+        model.styles.fonts.push(xlsx_model::Font {
+            bold: true,
+            ..xlsx_model::Font::default()
+        });
+        model.styles.cell_xfs[0].font = Some(0);
+        let mut source = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let plain = cell_format_entry(&CellFormat::default()).unwrap().0;
+        {
+            let mut txn = source.doc.transact_mut();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            let styles = nested_map(&sheet, &txn, STYLES).unwrap();
+            styles.insert(&mut txn, "0:0", plain.clone());
+            styles.insert(&mut txn, "9:9", plain);
+        }
+        source.materialize().unwrap();
+        assert_eq!(source.plain_style_cells.load(Ordering::Relaxed), 2);
+        let doc = Doc::with_client_id(source.client_id());
+        hydrate_local_doc(&doc, &source.encode_state_as_update_v1()).unwrap();
+        let mut restored = WorkbookAuthority::hydrated(doc, source.base.clone(), 0);
+        let materializations = full_materializations();
+        let hydrations = local_hydrations();
+        restored.set_snapshot_projection_valid(true).unwrap();
+        assert_eq!(restored.plain_style_cells.load(Ordering::Relaxed), 2);
+        assert_eq!(full_materializations(), materializations);
+        assert_eq!(local_hydrations(), hydrations);
+        let count = fast_set_cell_count();
+        assert_singleton_lockstep(
+            &mut restored,
+            &mut source,
+            &[Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(0, 2),
+                cell: CellState {
+                    value: CellValue::Number { value: 1.0 },
+                    ..CellState::default()
+                },
+            }],
             SyncOrigin::User,
             &model.styles,
         )

@@ -791,7 +791,9 @@ impl Workbook {
             model.styles.inherit_xf_xml_markers(styles);
         }
         pulse();
-        authority.set_snapshot_projection_valid(true);
+        authority
+            .set_snapshot_projection_valid(true)
+            .map_err(invalid)?;
         let states = preserved_states
             .into_iter()
             .map(decode_preserved)
