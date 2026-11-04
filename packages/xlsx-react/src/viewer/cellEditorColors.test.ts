@@ -38,3 +38,8 @@ test('translucent overlays and other cells do not colour the editor', () => {
   const otherText: DrawCmd = { op: 'text', x: 303, y: 34, text: 'x', fontSize: 11, color: '#ff0000', clip: { x: 300, y: 20, w: 80, h: 20 } };
   expect(cellEditorColors(list(other, band, otherText), cell)).toEqual({ color: '#000000', background: '#ffffff' });
 });
+
+test('a mostly opaque fill is composited over the cell beneath it', () => {
+  expect(cellEditorColors(list(fill('#000000'), fill('rgba(255, 255, 255, 0.5)'), text('#808080')), cell))
+    .toEqual({ color: '#000000', background: '#808080' });
+});

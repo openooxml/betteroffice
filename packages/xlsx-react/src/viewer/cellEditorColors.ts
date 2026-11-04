@@ -4,17 +4,27 @@ type Rgb = readonly [number, number, number];
 
 const WHITE = '#ffffff';
 
-function parseColor(value: string | undefined): Rgb | null {
+function parseRgba(value: string | undefined): readonly [number, number, number, number] | null {
   if (!value) return null;
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim());
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(value.trim());
   if (hex) {
     const digits = hex[1]!.length === 3 ? [...hex[1]!].map((digit) => digit + digit).join('') : hex[1]!;
-    return [0, 2, 4].map((offset) => parseInt(digits.slice(offset, offset + 2), 16)) as unknown as Rgb;
+    const [r, g, b] = [0, 2, 4].map((offset) => parseInt(digits.slice(offset, offset + 2), 16));
+    return [r!, g!, b!, digits.length === 8 ? parseInt(digits.slice(6), 16) / 255 : 1];
   }
   const rgb = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)(?:[\s,/]+([\d.]+%?))?\s*\)$/i.exec(value.trim());
   if (!rgb) return null;
-  if (rgb[4] !== undefined && parseFloat(rgb[4]) < (rgb[4].endsWith('%') ? 50 : 0.5)) return null;
-  return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+  const alpha = rgb[4] === undefined ? 1 : rgb[4].endsWith('%') ? parseFloat(rgb[4]) / 100 : parseFloat(rgb[4]);
+  return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), Math.min(1, Math.max(0, alpha))];
+}
+
+function parseColor(value: string | undefined): Rgb | null {
+  const rgba = parseRgba(value);
+  return rgba && rgba[3] >= 0.5 ? [rgba[0], rgba[1], rgba[2]] : null;
+}
+
+function hex(rgb: Rgb): string {
+  return '#' + rgb.map((channel) => channel.toString(16).padStart(2, '0')).join('');
 }
 
 function luminance([r, g, b]: Rgb): number {
@@ -48,10 +58,10 @@ export function cellEditorColors(list: DisplayList | null | undefined, cell: Rec
     const y = cell.y + cell.h / 2;
     for (const command of list.commands) {
       if (command.op === 'fillRect') {
-        const parsed = parseColor(command.color);
-        if (parsed && inside(command, x, y) && (!command.clip || inside(command.clip, x, y))) {
-          background = command.color;
-          fill = parsed;
+        const rgba = parseRgba(command.color);
+        if (rgba && rgba[3] >= 0.5 && inside(command, x, y) && (!command.clip || inside(command.clip, x, y))) {
+          fill = [0, 1, 2].map((channel) => Math.round(rgba[channel]! * rgba[3] + fill[channel]! * (1 - rgba[3]))) as unknown as Rgb;
+          background = rgba[3] < 1 ? hex(fill) : command.color;
         }
       } else if (command.op === 'text' && !command.ghost && !command.chart) {
         if (command.clip ? inside(command.clip, x, y) : inside(cell, command.x, command.y)) text = command.color;

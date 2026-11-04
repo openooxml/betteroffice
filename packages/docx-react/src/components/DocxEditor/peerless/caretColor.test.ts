@@ -99,3 +99,18 @@ test('an unknown fill gives the caret a contrasting halo', () => {
   expect(peerlessCaretPaint(page(shape, run('#ffffff', 100, 160)), caret)).toEqual({ color: '#ffffff', halo: '#000' });
   expect(peerlessCaretPaint(page(run('#c00000', 100, 160)), caret)).toEqual({ color: '#c00000' });
 });
+
+test('a rotated shape behind the caret still makes the fill unknown', () => {
+  const rotated = { kind: 'shape', x: 100, y: 150, w: 200, h: 40, transform: { rotation: 90 } } as DisplayPrimitive;
+  const at = { x: 200, y: 100, width: 1, height: 20 };
+  expect(peerlessCaretPaint(page(rotated, run('#ffffff', 190, 230)), at)).toEqual({ color: '#ffffff', halo: '#000' });
+  const image = { kind: 'image', x: 100, y: 150, w: 200, h: 40, rotationDeg: 90 } as DisplayPrimitive;
+  expect(peerlessCaretPaint(page(image), at)).toEqual({ color: '#000', halo: '#fff' });
+});
+
+test('translucent fills are composited over what is beneath them', () => {
+  const grey = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: '#ffffff80' } as DisplayPrimitive;
+  expect(peerlessCaretPaint({ ...page(grey, run('#808080', 100, 160)), background: '#000000' } as DisplayPage, caret)).toEqual({ color: '#000' });
+  const half = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: '#000000', opacity: 0.5 } as DisplayPrimitive;
+  expect(peerlessCaretPaint(page(half, run('#808080', 100, 160)), caret)).toEqual({ color: '#000' });
+});
