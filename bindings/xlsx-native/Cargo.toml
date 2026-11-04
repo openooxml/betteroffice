@@ -12,12 +12,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [features]
-default = ["mimalloc"]
-mimalloc = ["dep:mimalloc"]
 test-hooks = []
 
 [dependencies]
-mimalloc = { version = "0.1", optional = true, default-features = false }
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 betteroffice-xlsx-engine = { path = "../../crates/xlsx-engine", features = ["raster", "fonts"] }
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
