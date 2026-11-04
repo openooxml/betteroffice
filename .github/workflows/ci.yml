@@ -148,6 +148,9 @@ jobs:
           BETTEROFFICE_REQUIRE_WASM: "1"
         run: bun test scripts/wasm-memory.test.ts
 
+      - name: Check exact JSON number parsing in every artifact
+        run: bun test scripts/serde-json-exact.test.ts
+
       - name: Check Wasm artifacts carry no rasterizer and renderPng keeps one shape
         run: bun test scripts/wasm-no-raster.test.ts scripts/render-png-shape.test.ts
 
