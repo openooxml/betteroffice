@@ -35,6 +35,15 @@ impl FontRegistry {
         bytes: &[u8],
         priority: u8,
     ) -> Result<u32> {
+        if family.trim().is_empty() {
+            return Err(Error::Font("font family is empty".into()));
+        }
+        self.register_keyed(chain_key(family, bold, italic), bytes, priority)
+    }
+
+    /// Registers `bytes` into the chain under `key`, ahead of bundled faces for
+    /// embedded (`0`) and application (`1`) priorities.
+    fn register_keyed(&mut self, key: String, bytes: &[u8], priority: u8) -> Result<u32> {
         if bytes.len() > 32 * 1024 * 1024 {
             return Err(Error::ResourceLimit("font exceeds 33554432 bytes".into()));
         }
@@ -46,14 +55,10 @@ impl FontRegistry {
         if self.store.face_count() >= 256 && self.store.find_face(bytes).is_none() {
             return Err(Error::ResourceLimit("more than 256 font faces".into()));
         }
-        if family.trim().is_empty() {
-            return Err(Error::Font("font family is empty".into()));
-        }
         let id = self
             .store
             .register_slice(bytes)
             .map_err(|error| Error::Font(error.to_string()))?;
-        let key = chain_key(family, bold, italic);
         let chain = self.chains.entry(key.clone()).or_default();
         if priority == 2 && chain.contains(&id) {
             return Ok(id.to_u32());
@@ -87,27 +92,30 @@ impl FontRegistry {
             if self.resolved.contains(&resolved_key) {
                 continue;
             }
+            let family = if request.family.trim().is_empty() {
+                DEFAULT_LAYOUT_FAMILY
+            } else {
+                request.family.as_str()
+            };
             let faces = manager.resolve(
-                &request.family,
+                family,
                 request.bold,
                 request.italic,
                 &request.scripts,
                 LastResortOffice::Word,
             );
             for face in faces {
-                self.register(
-                    &request.family,
-                    request.bold,
-                    request.italic,
-                    &face.load()?,
-                    2,
-                )?;
+                self.register_keyed(key.clone(), &face.load()?, 2)?;
             }
             self.resolved.insert(resolved_key);
         }
         Ok(())
     }
 }
+
+/// The family layout measures a run with when it names none.
+#[cfg(feature = "fonts")]
+const DEFAULT_LAYOUT_FAMILY: &str = "Calibri";
 
 fn chain_key(family: &str, bold: bool, italic: bool) -> String {
     format!(
@@ -285,6 +293,36 @@ fn text_scripts(run: &docx_layout::display_list::TextRunPrimitive) -> Vec<String
 mod tests {
     use super::text_requirement;
     use docx_layout::display_list::TextRunPrimitive;
+
+    #[test]
+    fn a_requirement_without_a_family_resolves_through_the_default_family() {
+        use super::{FontRegistry, chain_key};
+        use docx_layout::measure_blocks::FontRequirement;
+        let options = crate::OpenOptions::default();
+        let manager =
+            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)
+                .unwrap();
+        let requirement = |family: &str| FontRequirement {
+            key: chain_key(family, false, false),
+            family: family.to_owned(),
+            bold: false,
+            italic: false,
+            scripts: Vec::new(),
+            characters: Default::default(),
+        };
+        let mut empty = FontRegistry::default();
+        empty.resolve(&manager, &[requirement("")]).unwrap();
+        let mut calibri = FontRegistry::default();
+        calibri
+            .resolve(&manager, &[requirement("Calibri")])
+            .unwrap();
+        let chain = &empty.chains[&chain_key("", false, false)];
+        assert!(!chain.is_empty());
+        assert_eq!(
+            chain.len(),
+            calibri.chains[&chain_key("Calibri", false, false)].len()
+        );
+    }
 
     fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {
         serde_json::from_value(serde_json::json!({
