@@ -156,6 +156,8 @@
     "stalePreview": "Questa anteprima usa la diapositiva aggiornata. L'applicazione sovrascriverà le destinazioni modificate.",
     "geometry": "Posizione e dimensioni (x, y, larghezza, altezza)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Layout modificato",
+    "backgroundChanged": "Sfondo modificato",
     "appearance": "Aspetto o formattazione del testo modificati",
     "changedAgain": "La destinazione è cambiata di nuovo. Rivedi l'anteprima aggiornata prima di applicare.",
     "canvasTitle": "Modifiche in questa diapositiva",
@@ -171,6 +173,8 @@
     "loadingDiff": "Caricamento delle modifiche…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

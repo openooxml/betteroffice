@@ -27,6 +27,8 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   slices?: SliceLocation;
   /** @internal Precomputed base Latin coverage bits of the face. */
   coverage?: string;
+  /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
+  readOnlyBytes?: () => Promise<ArrayBuffer>;
 };
 
 /** Byte sink of the wasm text engine (`crates/docx-text` FontStore). */
@@ -666,7 +668,7 @@ export class TextMeasureFontRegistry {
           this.coverage.set(id, coverage);
           if (bits !== undefined) {
             let exact: Promise<FontCoverage | undefined> | undefined;
-            this.inexact.set(id, () => (exact ??= known!().then((bytes) => parsedCoverage(new Uint8Array(bytes)))));
+            this.inexact.set(id, () => (exact ??= (known!.readOnlyBytes ?? known!)().then((bytes) => parsedCoverage(new Uint8Array(bytes)))));
           }
         }
         return id;
@@ -724,7 +726,7 @@ export class TextMeasureFontRegistry {
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
-      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes, face, loader));
+      pending = Promise.resolve().then(() => (loader.readOnlyBytes ?? loader)()).then((bytes) => this.registerBuffer(bytes, face, loader));
       evictFailedPromise(ids, loader, pending, () => false);
       ids.set(loader, pending);
     }

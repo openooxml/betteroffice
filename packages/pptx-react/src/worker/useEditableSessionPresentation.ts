@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from '../bundledFonts';
 import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
 import type { DeckSnapshot, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorSession } from '@betteroffice/pptx/worker';
@@ -29,7 +30,7 @@ export class EditablePresentation {
   private readonly fonts: FontFace[] = [];
   private fontsReady: Promise<void>;
 
-  constructor(props: PptxWorkerEditorProps, private readonly changed: () => void,
+  constructor(props: ResolvedFontProps<PptxWorkerEditorProps>, private readonly changed: () => void,
     private readonly isCurrent: () => boolean = () => true, warnFonts?: () => void) {
     this.active = Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0;
     this.owner = workerEditorSessionOpener.open(props.file!, {
@@ -182,7 +183,7 @@ export class EditablePresentation {
   }
 }
 
-export function useEditableSessionPresentation(props: PptxWorkerEditorProps) {
+export function useEditableSessionPresentation(props: ResolvedFontProps<PptxWorkerEditorProps>) {
   const fonts = useStableFonts(props.fonts);
   const latest = useRef(props);
   const currentFonts = useRef(fonts);

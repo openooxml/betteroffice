@@ -16,7 +16,7 @@ export interface TableCell {
 export interface ParagraphStyle { id: string; name?: string; isDefault: boolean }
 
 type Pilcrow = Extract<YrsStorySegment, { kind: 'pilcrow' }>;
-const PROTECTED = new Set(['ins', 'del', 'hyperlink']);
+const PROTECTED = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const runAttributes = (attributes: Record<string, unknown>) => Object.fromEntries(Object.entries(attributes).filter(([key]) => !PROTECTED.has(key)));
 const PARAGRAPH_PROPERTIES = new Set([
   'pStyle', 'numPr', 'numPrFromStyle', '_originalFormatting', 'defaultTextFormatting',

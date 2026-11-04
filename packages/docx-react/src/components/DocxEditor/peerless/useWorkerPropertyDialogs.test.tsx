@@ -24,7 +24,8 @@ function fixture() {
   const readAt = mock(async () => ({ selectedText: 'Old' }));
   const submit = mock(async (_intent: unknown) => ({ ok: true, status: 'executed' }));
   const range = { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 5 } };
-  const controller = { subscribe: () => () => {}, getSnapshot: () => state, applyQuery, readAt,
+  const controller = { subscribe: () => () => {}, getSnapshot: () => state,
+    subscribeShell: () => () => {}, getShellSnapshot: () => state, applyQuery, readAt,
     submit,
     environment: () => ({ readOnly: false, mode: 'editing' }), ref: { focus() {}, flushPendingInput: async () => {} },
     query: async (request: { target?: { kind: string } }) => ({ version: 'captured-native', selection,

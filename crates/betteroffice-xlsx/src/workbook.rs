@@ -2779,14 +2779,44 @@ impl Workbook {
     }
 
     #[cfg(feature = "raster")]
-    pub fn render_png(&self, viewport: &Viewport) -> Result<RenderedPng> {
-        self.render_png_for(self.active_sheet, viewport)
-    }
-
-    #[cfg(feature = "raster")]
-    pub fn render_png_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<RenderedPng> {
-        let (display_list, width, height) = self.png_display_list_for(sheet, viewport)?;
-        self.rasterize_display_list(&display_list, width, height)
+    pub fn render_png(
+        &self,
+        target: crate::PngTarget,
+        options: &RenderOptions,
+    ) -> Result<RenderedPng> {
+        if !(options.scale.is_finite() && options.scale > 0.0) {
+            return Err(Error::InvalidScale(options.scale));
+        }
+        match target {
+            crate::PngTarget::Viewport {
+                sheet,
+                mut viewport,
+            } => {
+                validate_viewport(&viewport)?;
+                viewport.width = capped_extent(viewport.width, options.max_width, options.scale);
+                viewport.height = capped_extent(viewport.height, options.max_height, options.scale);
+                validate_viewport(&viewport)?;
+                let width = (viewport.width * options.scale).ceil().max(1.0) as u32;
+                let height = (viewport.height * options.scale).ceil().max(1.0) as u32;
+                validate_render_size(width, height)?;
+                let geometry = self.sheet_geometry(sheet)?;
+                validate_display_region(self.sheet(sheet)?, &geometry, &viewport)?;
+                let display_list = self.display_list_for(sheet, &viewport)?;
+                let display_list = if options.scale == 1.0 {
+                    display_list
+                } else {
+                    scaled(display_list, options.scale)
+                };
+                self.rasterize_display_list(&display_list, width, height)
+            }
+            crate::PngTarget::Range { sheet, range } => self.render_sheet(
+                sheet,
+                &RenderOptions {
+                    range: Some(range),
+                    ..options.clone()
+                },
+            ),
+        }
     }
 
     #[cfg(feature = "raster")]
@@ -2853,12 +2883,8 @@ impl Workbook {
                 renderable(sheet_ref, &geometry, grown, options.scale)
             }),
         };
-        if let Some(width) = options.max_width {
-            viewport.width = viewport.width.min(width as f32 / options.scale);
-        }
-        if let Some(height) = options.max_height {
-            viewport.height = viewport.height.min(height as f32 / options.scale);
-        }
+        viewport.width = capped_extent(viewport.width, options.max_width, options.scale);
+        viewport.height = capped_extent(viewport.height, options.max_height, options.scale);
         validate_viewport(&viewport)?;
         let width = ((viewport.width * options.scale).ceil() as u32).max(1);
         let height = ((viewport.height * options.scale).ceil() as u32).max(1);
@@ -5139,6 +5165,18 @@ fn value_to_input(
         }
         CellValue::Error { value } => value.as_str().to_string(),
     }
+}
+
+/// The largest unscaled extent within `extent` whose scaled, rounded-up pixel size stays within `cap`.
+fn capped_extent(extent: f32, cap: Option<u32>, scale: f32) -> f32 {
+    let Some(cap) = cap else {
+        return extent;
+    };
+    let mut limit = cap as f32 / scale;
+    while limit > 0.0 && (limit * scale).ceil() > cap as f32 {
+        limit = limit.next_down();
+    }
+    extent.min(limit)
 }
 
 fn validate_viewport(viewport: &Viewport) -> Result<()> {

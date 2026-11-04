@@ -4,7 +4,7 @@ export { XlsxAgentWorkbook, openXlsx, attachXlsx, type CellEdit, type CellChange
 export { PptxAgentPresentation, openPptx, attachPptx, type SlideTextChange } from './pptx';
 export type { AgentProposal, PrototypeOptions } from './prototype';
 export type { XlsxProtectionOptions, XlsxScalar, XlsxWriteEdit, XlsxGridEdit, XlsxSheetEdit, XlsxDefinedNameEdit, XlsxFormatEdit } from './xlsx-operations';
-export type { PptxAgentEdit, PptxAgentBatch, PptxProposalSlideEdit } from './pptx-schema';
+export type { PptxAgentEdit, PptxAgentBatch, PptxProposalSlideEdit, PptxProposalShapeEdit, PptxProposalEdit } from './pptx-schema';
 export type { DocxAgentEdit, DocxAgentBatch, DocxEditOutcome } from './docx-schema';
 export { renderPptxSlide } from './pptx-render';
 

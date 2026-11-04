@@ -1,6 +1,7 @@
 import { test, expect, type Locator, type Page } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { inputReady } from './pptx-async-helpers';
 
 const root = resolve(import.meta.dirname, '../..');
 
@@ -159,9 +160,15 @@ const DEFAULT_TOOLBAR: [group: string, controls: string[]][] = [
 test('pptx: long translations keep every toolbar action reachable through More', async ({
   page,
 }) => {
-  const strings = JSON.parse(
-    await readFile(resolve(root, 'packages/pptx-i18n/en.json'), 'utf8')
-  ) as Strings;
+  const [editor, proposals] = await Promise.all(
+    ['en.json', 'proposals/en.json'].map(async (file) => JSON.parse(
+      await readFile(resolve(root, 'packages/pptx-i18n', file), 'utf8')
+    ) as Strings)
+  );
+  const strings: Strings = {
+    ...editor,
+    proposals: { ...(editor.proposals as Strings), ...(proposals.proposals as Strings) },
+  };
   const long = (key: string) => lookup(strings, key) + LONGER;
   await lengthenStrings(page, strings);
   await page.setViewportSize({ width: 320, height: 800 });
@@ -215,6 +222,7 @@ test('pptx: long translations keep every toolbar action reachable through More',
 
 test('pptx: the slide shows the text, move and arrow cursors under the pointer', async ({ page }) => {
   await open(page);
+  await inputReady(page);
   const box = (await page.getByTestId('pptx-slide-canvas').boundingBox())!;
   const seen = new Set<string>();
   for (let row = 1; row < 16; row += 1) {

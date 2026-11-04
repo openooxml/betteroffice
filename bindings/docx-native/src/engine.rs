@@ -225,6 +225,12 @@ fn map_error(env: Env, error: EngineError) -> Error {
                 exception.set_named_property("code", code)?;
                 env.throw(exception)
             }
+            EngineErrorKind::SuggestedFormattingOverContainer => {
+                let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
+                exception.set_named_property("name", "SuggestedFormattingOverContainerError")?;
+                exception.set_named_property("code", "suggested-formatting-over-container")?;
+                env.throw(exception)
+            }
         }
     })();
     match result {
@@ -1199,10 +1205,20 @@ impl EditSession {
         start_offset: u32,
         end_para: String,
         end_offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .clear_formatting(&story, &start_para, start_offset, &end_para, end_offset)
+            .clear_formatting(
+                &story,
+                &start_para,
+                start_offset,
+                &end_para,
+                end_offset,
+                author_name,
+                author_date,
+            )
             .map_err(|error| map_error(env, error))
     }
 
@@ -1550,6 +1566,8 @@ impl EditSession {
         end_para: String,
         end_offset: u32,
         delta_json: String,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -1560,6 +1578,8 @@ impl EditSession {
                 &end_para,
                 end_offset,
                 &delta_json,
+                author_name,
+                author_date,
             )
             .map_err(|error| map_error(env, error))
     }
@@ -2544,6 +2564,8 @@ impl EditSession {
         end_para: String,
         end_offset: u32,
         hyperlink_json: String,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -2554,6 +2576,8 @@ impl EditSession {
                 &end_para,
                 end_offset,
                 &hyperlink_json,
+                author_name,
+                author_date,
             )
             .map_err(|error| map_error(env, error))
     }
@@ -2896,6 +2920,8 @@ impl EditSession {
         end_para: String,
         end_offset: u32,
         mark_json: String,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<()> {
         let _call = EngineCall::new(env);
         self.document(env)?
@@ -2906,6 +2932,8 @@ impl EditSession {
                 &end_para,
                 end_offset,
                 &mark_json,
+                author_name,
+                author_date,
             )
             .map_err(|error| map_error(env, error))
     }

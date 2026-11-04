@@ -282,6 +282,7 @@ fn revision_key(key: &str) -> bool {
             | "pPrIns"
             | "pPrDel"
             | "pPrChange"
+            | "rPrChange"
             | "trIns"
             | "trDel"
             | "tableIns"

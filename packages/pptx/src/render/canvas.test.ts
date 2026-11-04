@@ -2755,3 +2755,29 @@ describe('PPTX canvas Round 6 painter comparisons', () => {
     expect(first.calls).toEqual(second.calls);
   });
 });
+
+test('deleted proposal shapes fade once while surviving shapes keep their opacity', async () => {
+  let alpha = 1;
+  const stack: number[] = [];
+  const painted: number[] = [];
+  const ctx = new Proxy({
+    save() { stack.push(alpha); },
+    restore() { alpha = stack.pop()!; },
+    fill() { painted.push(alpha); },
+  } as Record<string, unknown>, {
+    get(target, key) { return key === 'globalAlpha' ? alpha : target[key as string] ?? (() => undefined); },
+    set(target, key, value) { if (key === 'globalAlpha') alpha = value; else target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const shape = (shapeId: string): ShapePrimitive => ({
+    kind: 'shape', objectId: 1, shapeId, name: shapeId, x: 0, y: 0, w: 10, h: 10, geometry: 'rect',
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 0 }, { type: 'line', x: 1, y: 1 }, { type: 'close' }],
+    fill: { kind: 'solid', color: '#123456' },
+  });
+  const list: SlideDisplayList = { contractVersion: 2, width: 100, height: 100, primitives: [
+    { kind: 'table', objectId: 1, shapeId: 'deleted', name: 'Deleted table', label: 'Table', x: 0, y: 0, w: 10, h: 10, primitives: [shape('deleted')] },
+    shape('surviving'),
+  ] };
+  await paintSlide(ctx, list, 1, 1, { shapeChanges: [{ shapeId: 'deleted', kind: 'deleted' }] });
+  expect(painted).toEqual([0.4, 1]);
+  expect(alpha).toBe(1);
+});

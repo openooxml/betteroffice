@@ -1,6 +1,7 @@
 import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import { inputReady } from './pptx-async-helpers';
 
 type Format = 'docx' | 'xlsx' | 'pptx';
 type BrowserProbe = {
@@ -183,6 +184,7 @@ async function edit(page: Page, format: Format, value: string) {
     await page.keyboard.insertText(value);
     await input.press('Enter');
   } else {
+    await inputReady(page);
     const box = await canvas(page, format).boundingBox();
     expect(box).not.toBeNull();
     await page.mouse.click(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);
@@ -367,6 +369,7 @@ test.describe('touch input', () => {
         await page.keyboard.press('Enter');
         await expect(page.getByTestId('xlsx-name-box')).toHaveValue('B2');
       } else {
+        await inputReady(page);
         await page.touchscreen.tap(box!.x + box!.width * 0.1 + 2, box!.y + box!.height * 0.35);
         await expect(page.getByTestId('pptx-shape-selection')).toBeVisible();
         await page.touchscreen.tap(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);

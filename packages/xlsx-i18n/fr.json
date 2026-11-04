@@ -136,6 +136,9 @@
       "invalidArguments": "Cette valeur n’est pas valide.",
       "inputFailed": "La saisie de cellule précédente n’a pas pu être enregistrée.",
       "sheetProtected": "Cette cellule se trouve sur une feuille protégée.",
+      "hostRefused": "Cette modification n’est pas autorisée.",
+      "tooManyToCheck": "Trop de cellules à vérifier pour les plugins (limite {limit}).",
+      "hostStarting": "L’éditeur est encore en cours de démarrage. Réessayez dans un instant.",
       "documentReplaced": "Un autre classeur a été ouvert.",
       "targetChanged": "La sélection a changé.",
       "gestureActive": "Terminez d’abord de déplacer le graphique.",
@@ -194,6 +197,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Panneaux des plugins",
     "collapsePanel": "Réduire {title}",
-    "expandPanel": "Développer {title}"
+    "expandPanel": "Développer {title}",
+    "rowGutter": "Marqueurs de ligne des plugins"
   }
 }

@@ -44,8 +44,28 @@ import type {
 } from './residentCommandProtocol';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
-const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink']);
+const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const IDENTITY_KEYS = new Set(['paraId', '_kind', 'ooxmlParaId', 'sourceParaId', 'paraOrigin']);
+
+function formattingRangeContainsContainer(engine: DocxWorkerCommandEngine, range: YrsStoryRange): boolean {
+  if (collapsed(range)) return false;
+  const spans = engine.geometryReader.paragraphSpans(range.story);
+  const first = spans.findIndex(span => span.paraId === range.start.paraId);
+  const last = spans.findIndex(span => span.paraId === range.end.paraId);
+  const indices = Array.from({ length: last - first + 1 }, (_, index) => first + index);
+  return engine.paragraphSegments(range.story, indices).some((segments, index) => {
+    const start = index === 0 ? range.start.offset : 0;
+    const end = index === indices.length - 1 ? range.end.offset : Infinity;
+    let offset = 0;
+    return segments.some(segment => {
+      const at = offset;
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+      return Math.min(offset, end) > Math.max(at, start) &&
+        (Object.hasOwn(segment.attributes, 'fieldResult') || segment.kind === 'embed' &&
+          (segment.embedKind === 'sdt' || segment.embedKind === 'field' && segment.payload.modelKind === 'field'));
+    });
+  });
+}
 
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
@@ -718,6 +738,9 @@ export function preflightDocxCommand(
   }
   if (readOnly) return refuse('read-only');
   if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
+  if (['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind) &&
+    'suggesting' in command.payload && command.payload.suggesting !== undefined &&
+    formattingRangeContainsContainer(engine, resolved.range)) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
@@ -1275,15 +1298,15 @@ function applyPreparedDocxCommand(
         { caret, repair: () => repairCommandSelection(engine, state) });
       break;
     }
-    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
+    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }, command.payload.suggesting); break;
     case 'pasteFragment': {
       state.storedMarks = null;
       caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
       break;
     }
-    case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
-    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta); break;
-    case 'clearFormatting': engine.clearFormatting(range); break;
+    case 'toggleMark': engine.toggleMark(range, command.payload.mark, command.payload.suggesting); break;
+    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta, command.payload.suggesting); break;
+    case 'clearFormatting': engine.clearFormatting(range, command.payload.suggesting); break;
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }

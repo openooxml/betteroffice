@@ -1,6 +1,6 @@
 import { test, expect, type Page } from 'playwright/test';
 import { resolve } from 'node:path';
-import { painted, expectRepaint, slideCanvas } from './pptx-async-helpers';
+import { painted, expectRepaint, inputReady, slideCanvas } from './pptx-async-helpers';
 
 const root = resolve(import.meta.dirname, '../..');
 const thumbnails = (page: Page) => page.locator('aside[aria-label="Slides"] button');
@@ -15,6 +15,7 @@ async function openDeck(page: Page) {
 }
 
 async function selectOnFirstSlide(page: Page, group: boolean) {
+  await inputReady(page);
   const box = (await slideCanvas(page).boundingBox())!;
   await page.mouse.click(box.x + box.width * (group ? 0.59 : 0.009375), box.y + box.height * 0.5);
   await expect(selectionBox(page)).toBeVisible();

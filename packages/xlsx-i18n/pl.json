@@ -136,6 +136,9 @@
       "invalidArguments": "Ta wartość jest nieprawidłowa.",
       "inputFailed": "Poprzedniego wpisu w komórce nie można było zapisać.",
       "sheetProtected": "Ta komórka znajduje się w chronionym arkuszu.",
+      "hostRefused": "Ta zmiana jest niedozwolona.",
+      "tooManyToCheck": "Za dużo komórek do sprawdzenia przez wtyczki (limit {limit}).",
+      "hostStarting": "Edytor wciąż się uruchamia. Spróbuj ponownie za chwilę.",
       "documentReplaced": "Otwarto inny skoroszyt.",
       "targetChanged": "Zaznaczenie uległo zmianie.",
       "gestureActive": "Najpierw zakończ przenoszenie wykresu.",
@@ -194,6 +197,7 @@
     "toolbarGroup": "Wtyczki",
     "panelTabs": "Panele wtyczek",
     "collapsePanel": "Zwiń {title}",
-    "expandPanel": "Rozwiń {title}"
+    "expandPanel": "Rozwiń {title}",
+    "rowGutter": "Znaczniki wierszy wtyczek"
   }
 }

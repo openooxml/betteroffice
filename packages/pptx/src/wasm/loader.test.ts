@@ -1042,3 +1042,187 @@ test('structural proposal reads include inserted and deleted slides by ID', () =
     expect(source.snapshot()).toEqual(before);
   } finally { source.dispose(); }
 });
+
+test('shape proposals resolve refs, retain deleted geometry, and undo atomically', async () => {
+  const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-shapes.pptx'));
+  const source = openPresentation(bytes, { clientId: 9203 });
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const rect = { x: 100000, y: 100000, width: 1000000, height: 500000 };
+    const proposal = source.propose('agent', null, [
+      { type: 'addTextBox', ref: 'box', slideId: slide.id, draft: { name: 'New box', rect, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Filled box' },
+      { type: 'setShapeRect', slideId: slide.id, shapeId: '@box', rect: { ...rect, x: 300000 } },
+      { type: 'addShape', ref: 'shape', slideId: slide.id, draft: { name: 'New shape', rect, geometry: 'rect' } },
+      { type: 'addPicture', ref: 'image', slideId: slide.id, draft: { name: 'New image', rect, contentType: 'image/png', mediaBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' } },
+      { type: 'removeShape', slideId: slide.id, shapeId: slide.shapes[0]!.id },
+    ]);
+    const diff = source.layoutProposalDiffSlideById(proposal.id, slide.id);
+    expect(diff.shapeChanges).toContainEqual({ shapeId: proposal.refs!.box, kind: 'inserted' });
+    expect(diff.shapeChanges).toContainEqual({ shapeId: slide.shapes[0]!.id, kind: 'deleted' });
+    expect(diff.frame.primitives.some(primitive => 'shapeId' in primitive && primitive.shapeId === slide.shapes[0]!.id)).toBe(true);
+    expect(source.snapshot()).toEqual(before);
+    source.acceptProposal(proposal.id);
+    expect(source.snapshot().slides[0]!.shapes.some(shape => shape.id === proposal.refs!.image)).toBe(true);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+  } finally { source.dispose(); }
+});
+
+test('picture proposals expose a typed decoded media cap for individual and cumulative media', async () => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-shapes.pptx')));
+  try {
+    const slideId = source.snapshot().slides[0]!.id;
+    const picture = (size: number): import('../proposals').ProposalEdit => ({ type: 'addPicture', slideId, draft: {
+      name: 'Large picture', rect: { x: 0, y: 0, width: 100000, height: 100000 }, contentType: 'image/png', mediaBase64: Buffer.alloc(size).toString('base64'),
+    } });
+    for (const edits of [[picture(8 * 1024 * 1024 + 1)], [picture(4 * 1024 * 1024), picture(4 * 1024 * 1024 + 1)]]) {
+      let failure: unknown;
+      try { source.propose('agent', null, edits); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ name: 'ProposalPictureMediaTooLargeError', code: 'proposalPictureMediaTooLarge', limitBytes: 8 * 1024 * 1024 });
+      expect(source.listProposals()).toHaveLength(0);
+    }
+  } finally { source.dispose(); }
+});
+
+test('paragraph proposals preview complete rewrites, properties and refs through the loader', async () => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-shapes.pptx')));
+  try {
+    const slide = source.snapshot().slides[0]!;
+    const shape = slide.shapes[0]!;
+    const story = shape.textStories[0]!;
+    source.setStoryParagraphs(story.id, ['Keep', 'Remove me', 'Tail'].map(text => ({ runs: [{ text, style: {} }] })));
+    const before = source.snapshot();
+    const proposal = source.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: story.id, paragraphs: [
+      { alignment: 'ctr', bullet: true, runs: [{ text: 'Keep', style: { bold: true } }] },
+      { alignment: 'r', bullet: false, runs: [{ text: 'Tail', style: {} }] },
+    ] }]);
+    expect(proposal.changes[0]).toMatchObject({ oldText: 'Keep\nRemove me\nTail', newText: 'Keep\nTail' });
+    expect(proposal.changes[0]!.before).toEqual(before.slides[0]!.shapes[0]);
+    const diff = source.layoutProposalDiffSlide(proposal.id, 0);
+    expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
+    expect(diff.textChanges.some(change => change.kind === 'deletion')).toBe(true);
+    expect(diff.snapshot.slides[0]!.shapes[0]!.textStories[0]!.paragraphs.flatMap(p => p.runs).map(r => r.text).join('')).toContain('Remove me');
+    expect(source.snapshot()).toEqual(before);
+    const preview = source.previewProposal(proposal.id);
+    expect(proposal.changes[0]!.after).toEqual(preview.snapshot.slides[0]!.shapes[0]);
+    expect(source.acceptProposal(proposal.id).snapshot).toEqual(preview.snapshot);
+    const reopened = openPresentation(source.save());
+    try {
+      const paragraphs = reopened.snapshot().slides[0]!.shapes[0]!.textStories[0]!.paragraphs;
+      expect(paragraphs.map(p => p.runs.map(r => r.text).join(''))).toEqual(['Keep', 'Tail']);
+      expect(paragraphs[0]).toMatchObject({ alignment: 'ctr', runs: [{ text: 'Keep', style: { bold: true } }] });
+      expect(JSON.parse(paragraphs[0]!.bulletJson!)).toEqual({ type: 'character', value: '•' });
+    } finally { reopened.dispose(); }
+    expect(source.undo().snapshot).toEqual(before);
+    const rejected = source.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: story.id, paragraphs: [{ runs: [] }] }]);
+    expect(source.rejectProposal(rejected.id)).toBe(true);
+    expect(source.snapshot()).toEqual(before);
+    const created = source.propose('agent', null, [
+      { type: 'addTextBox', ref: 'box', slideId: slide.id, draft: { name: 'Bullets', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'setStoryParagraphs', storyId: '@box', paragraphs: [{ bullet: true, runs: [{ text: 'From ref', style: {} }] }] },
+    ]);
+    expect(source.layoutProposalDiffSlideById(created.id, slide.id).shapeChanges).toContainEqual({ shapeId: created.refs!.box, kind: 'inserted' });
+    source.acceptProposal(created.id);
+    expect(source.snapshot().slides[0]!.shapes.find(s => s.id === created.refs!.box)!.textStories[0]!.paragraphs[0]!.runs[0]!.text).toBe('From ref');
+    expect(source.undo().snapshot).toEqual(before);
+    expect(() => source.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: story.id, paragraphs: [] }])).toThrow();
+    expect(source.listProposals()).toEqual([]);
+    const stale = source.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: story.id, paragraphs: [{ runs: [{ text: 'Proposed', style: {} }] }] }]);
+    source.insertText(story.id, 0, 'User ');
+    expect(() => source.acceptProposal(stale.id)).toThrow(StaleProposalError);
+    source.removeShape(slide.id, shape.id);
+    expect(() => source.acceptProposal(stale.id, { force: true })).toThrow();
+  } finally { source.dispose(); }
+});
+
+test.each([{ bullet: true }, { alignment: 'ctr' as const }])('paragraph property proposal %j marks a canvas shape without text marks', async property => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-shapes.pptx')));
+  try {
+    const shape = source.snapshot().slides[0]!.shapes[0]!;
+    const proposal = source.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id,
+      paragraphs: [{ ...property, runs: [{ text: 'alpha', style: {} }] }] }]);
+    const diff = source.layoutProposalDiffSlide(proposal.id, 0);
+    expect(diff.textChanges).toEqual([]);
+    expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
+  } finally { source.dispose(); }
+});
+
+test.each(['setSlideLayout', 'setSlideBackground'] as const)('%s proposals render by ID and index, accept, reject and undo through the loader', async type => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx')));
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const edit: import('../proposals').ProposalEdit = type === 'setSlideLayout'
+      ? { type, slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml', mapping: [[slide.shapes[0]!.id, 8]] }
+      : { type, slideId: slide.id, background: { type: 'solid', color: { rgb: '123456' } } };
+    const proposal = source.propose('agent', null, [edit]);
+    expect(proposal.changes).toMatchObject([{ slideId: slide.id, shapeId: null, kind: 'content' }]);
+    expect(source.proposalSlideStrip(proposal.id)[0]!.status).toBe('changed');
+    const diff = source.layoutProposalDiffSlideById(proposal.id, slide.id);
+    expect(source.layoutProposalDiffSlide(proposal.id, 0).frame).toEqual(diff.frame);
+    expect(JSON.stringify(diff.frame)).toContain('#123456');
+    if (type === 'setSlideLayout') {
+      expect(diff.media?.find(asset => asset.assetId === 'ppt/media/proposal-pixel.png')!.bytes.byteLength).toBeGreaterThan(0);
+      expect(JSON.stringify(diff.frame)).toContain('ppt/media/proposal-pixel.png');
+      expect(diff.snapshot.slides[0]!.shapes[0]!.placeholder).toMatchObject({ index: 4 });
+    }
+    expect(source.snapshot()).toEqual(before);
+    source.rejectProposal(proposal.id);
+    expect(source.listProposals()).toHaveLength(0);
+    const accepted = source.propose('agent', null, [edit]);
+    const preview = source.previewProposal(accepted.id).snapshot;
+    source.acceptProposal(accepted.id);
+    expect(source.snapshot()).toEqual(preview);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+  } finally { source.dispose(); }
+});
+
+test('slide background refs, clear and invalid slide properties share proposal validation', async () => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx')));
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const background = { type: 'solid', color: { rgb: '123456' } };
+    const proposal = source.propose('agent', null, [
+      { type: 'insertSlide', ref: 'new', afterSlideId: null, layoutPartPath: slide.layoutPartPath! },
+      { type: 'setSlideLayout', slideId: '@new', layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml' },
+      { type: 'setSlideBackground', slideId: '@new', background },
+    ]);
+    expect(source.previewProposal(proposal.id).snapshot.slides[0]!.background).toEqual(background);
+    source.acceptProposal(proposal.id);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+    for (const edit of [
+      { type: 'setSlideLayout', slideId: slide.id, layoutPartPath: 'unknown.xml' },
+      { type: 'setSlideBackground', slideId: slide.id, background: { type: 'solid', color: { rgb: 'bad' } } },
+      { type: 'setSlideBackground', slideId: 'missing', background: null },
+    ] satisfies import('../proposals').ProposalEdit[]) {
+      expect(() => source.propose('agent', null, [edit])).toThrow();
+      expect(source.listProposals()).toHaveLength(0);
+      expect(source.snapshot()).toEqual(before);
+    }
+  } finally { source.dispose(); }
+});
+
+test('slide property proposal stale targets survive loader preview and forced acceptance', async () => {
+  const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx'));
+  for (const type of ['setSlideLayout', 'setSlideBackground'] as const) {
+    const source = openPresentation(bytes);
+    try {
+      const slide = source.snapshot().slides[0]!;
+      const edit: import('../proposals').ProposalEdit = type === 'setSlideLayout'
+        ? { type, slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml' }
+        : { type, slideId: slide.id, background: { type: 'solid', color: { rgb: '123456' } } };
+      const proposal = source.propose('agent', null, [edit]);
+      source.setSlideNotes(slide.id, 'Human notes');
+      const stale = source.layoutProposalDiffSlide(proposal.id, 0).proposal.staleTargets;
+      expect(stale).toEqual(type === 'setSlideLayout' ? [slide.id] : []);
+      if (type === 'setSlideLayout') expect(() => source.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      source.acceptProposal(proposal.id, { force: true });
+      expect(source.snapshot().slides[0]!.notes).toBe('Human notes');
+    } finally { source.dispose(); }
+  }
+});

@@ -31,6 +31,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import { SelectionOverlay } from './SelectionOverlay';
+import { peerlessCaretPaint } from '../peerless/caretColor';
 
 export interface CanvasSelectionOverlayProps {
   /** Selection rects in page-local px + pageIndex (from the display list). */
@@ -71,11 +72,19 @@ export function CanvasSelectionOverlay({
   sidebarOpen,
   zoom,
 }: CanvasSelectionOverlayProps) {
+  const caretPaint = caretPosition
+    ? peerlessCaretPaint(displayList.pages.find((page) => page.pageIndex === caretPosition.pageIndex),
+      { x: caretPosition.x, y: caretPosition.y, width: 1, height: caretPosition.height })
+    : undefined;
+  const caretColor = caretPaint?.color;
+  const caretHalo = caretPaint?.halo;
   if (directProjection) {
     return (
       <DirectCanvasSelectionOverlay
         selectionRects={selectionRects}
         caretPosition={caretPosition}
+        caretColor={caretColor}
+        caretHalo={caretHalo}
         isFocused={isFocused}
         readOnly={readOnly}
         overlayTarget={overlayTarget}
@@ -90,6 +99,8 @@ export function CanvasSelectionOverlay({
     <ProjectedCanvasSelectionOverlay
       selectionRects={selectionRects}
       caretPosition={caretPosition}
+      caretColor={caretColor}
+      caretHalo={caretHalo}
       isFocused={isFocused}
       readOnly={readOnly}
       overlayTarget={overlayTarget}
@@ -104,13 +115,15 @@ export function CanvasSelectionOverlay({
 function DirectCanvasSelectionOverlay({
   selectionRects,
   caretPosition,
+  caretColor,
+  caretHalo,
   isFocused,
   readOnly,
   overlayTarget,
   displayList,
   sidebarOpen,
   zoom,
-}: Omit<CanvasSelectionOverlayProps, 'canvasHostRef' | 'displayListQueries' | 'directProjection'>) {
+}: Omit<CanvasSelectionOverlayProps, 'canvasHostRef' | 'displayListQueries' | 'directProjection'> & { caretColor?: string; caretHalo?: string }) {
   const rectsByPage = new Map<number, SelectionRect[]>();
   for (const rect of selectionRects) {
     const pageRects = rectsByPage.get(rect.pageIndex) ?? [];
@@ -156,6 +169,8 @@ function DirectCanvasSelectionOverlay({
         <SelectionOverlay
           selectionRects={rects}
           caretPosition={caret}
+          caretColor={caretColor}
+          caretHalo={caretHalo}
           isFocused={isFocused}
           readOnly={readOnly}
         />
@@ -169,6 +184,8 @@ function DirectCanvasSelectionOverlay({
 function ProjectedCanvasSelectionOverlay({
   selectionRects,
   caretPosition,
+  caretColor,
+  caretHalo,
   isFocused,
   readOnly,
   overlayTarget,
@@ -178,6 +195,8 @@ function ProjectedCanvasSelectionOverlay({
   zoom,
 }: Omit<CanvasSelectionOverlayProps, 'displayList' | 'directProjection'> & {
   displayListQueries: DisplayListQueries;
+  caretColor?: string;
+  caretHalo?: string;
 }) {
   const [converted, setConverted] = useState<{
     rects: SelectionRect[];
@@ -263,6 +282,8 @@ function ProjectedCanvasSelectionOverlay({
     <SelectionOverlay
       selectionRects={converted.rects}
       caretPosition={converted.caret}
+      caretColor={caretColor}
+      caretHalo={caretHalo}
       isFocused={isFocused}
       readOnly={readOnly}
     />,

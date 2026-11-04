@@ -19,6 +19,7 @@ import type { DocxCommandArgs, DocxCommandId, DocxCommandResult, DocxImageTransf
 import type { DocxCommentInsertion, DocxDocumentChange, DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
+import { sameShellView } from './shellSnapshot';
 import { readWorkerSelection } from './clipboard';
 import type { PeerlessInputIntent } from './inputEvents';
 import { flushAdmittedInput, type PeerlessAdmissionResult, type PeerlessFormattingIntent } from './inputAdmission';
@@ -106,6 +107,8 @@ export function createPeerlessShellController(initial: Options) {
   let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean } =
     { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false };
   const listeners = new Set<() => void>();
+  let shellSnapshot = snapshot;
+  const shellListeners = new Set<() => void>();
   const waits = new Set<() => void>();
   let closed = false;
   const changes = new Set<(change: DocxDocumentChange) => void>();
@@ -161,8 +164,18 @@ export function createPeerlessShellController(initial: Options) {
     batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
-  const publish = () => { snapshot = { ...snapshot, mode: mode() }; updateAuthor(); commands.refresh(); for (const listener of listeners) listener();
-    for (const wait of [...waits]) wait(); };
+  const publish = (frame = false) => {
+    snapshot = { ...snapshot, mode: mode() };
+    const shellChanged = !frame || shellSnapshot.status !== snapshot.status || shellSnapshot.error !== snapshot.error ||
+      shellSnapshot.mode !== snapshot.mode || shellSnapshot.preview !== snapshot.preview ||
+      shellSnapshot.previewPainted !== snapshot.previewPainted || !sameShellView(shellSnapshot.view, snapshot.view);
+    if (shellChanged) shellSnapshot = snapshot;
+    updateAuthor();
+    if (shellChanged) commands.refresh();
+    for (const listener of listeners) listener();
+    if (shellChanged) for (const listener of shellListeners) listener();
+    for (const wait of [...waits]) wait();
+  };
   const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); };
   const reportMemory = () => {
     const stats = memoryStats();
@@ -983,6 +996,10 @@ export function createPeerlessShellController(initial: Options) {
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
+    /** @internal Stable across frames that change only paint epochs or display page content. */
+    getShellSnapshot: () => shellSnapshot,
+    /** @internal Notifies when shell state changes; full frame consumers use subscribe. */
+    subscribeShell(listener: () => void) { shellListeners.add(listener); return () => { shellListeners.delete(listener); }; },
     update(next: Options) { options = next; translate = translation(next); syncBorderPen();
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
       reportMemory();
@@ -1065,7 +1082,7 @@ export function createPeerlessShellController(initial: Options) {
             emit(own.applied, view);
           }
         }
-        publish();
+        publish(true);
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {
           const change = { version: String(view.version) };
@@ -1084,7 +1101,7 @@ export function createPeerlessShellController(initial: Options) {
       replace();
       reset('empty');
     },
-    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
+    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); shellListeners.clear(); changes.clear(); selections.clear(); },
   };
 }
 

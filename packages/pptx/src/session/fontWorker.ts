@@ -6,6 +6,7 @@ import { shipsWasmAsset } from '../wasm/asset';
 import type { PresentationCommandMethods } from './commandProtocol';
 
 type Methods = Pick<PresentationCommandMethods, 'decodeFontFace'>;
+const UNTRACKED_CALL_ID = 2 ** 40;
 
 interface PreparedFontWorker {
   decoder: FontDecoder;
@@ -22,13 +23,22 @@ const Registry = (globalThis as unknown as {
 }).FinalizationRegistry;
 const abandonedWorkers = Registry ? new Registry(release => release()) : undefined;
 
-export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer): PreparedFontWorker {
-  const existing = preparedWorkers.get(source);
-  if (existing && !existing.retired()) return existing.prepared;
-  const owner = createPreparedFontWorker();
-  preparedWorkers.set(source, owner);
-  abandonedWorkers?.register(owner.prepared.decoder, owner.abandon, owner.token);
-  return owner.prepared;
+/**
+ * Starts the session worker for `source` early and returns a handle to its font decoder; the editor that opens the
+ * same `source` object adopts the worker. Preparing the same `source` again shares the worker: each handle is
+ * released on its own, and the worker stops when the last one is released. Unless `defaultFonts` is false, the
+ * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts` and
+ * `activeSlideIndex` the editor will use.
+ */
+export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
+  options: { defaultFonts?: boolean; activeSlideIndex?: number } = {}): PreparedFontWorker {
+  let owner = preparedWorkers.get(source);
+  if (!owner || owner.retired()) {
+    owner = createPreparedFontWorker();
+    preparedWorkers.set(source, owner);
+    if (options.defaultFonts !== false) owner.prefetchCoverage(source, options.activeSlideIndex ?? 0);
+  }
+  return owner.handle();
 }
 
 function createPreparedFontWorker() {
@@ -42,10 +52,12 @@ function createPreparedFontWorker() {
   let retired = false;
   let active = 0;
   let abandoned = false;
-  const token = {};
+  let holders = 0;
+  const tokens = new Set<object>();
   function detach(): void {
     retired = true;
-    abandonedWorkers?.unregister(token);
+    for (const token of tokens) abandonedWorkers?.unregister(token);
+    tokens.clear();
     for (const stop of subscriptions) stop();
     subscriptions.clear();
   }
@@ -65,29 +77,64 @@ function createPreparedFontWorker() {
   async function track<T>(pending: Promise<T>): Promise<T> {
     active += 1;
     try { return await pending; }
-    finally { if (--active === 0 && abandoned) release(); }
+    finally { if (--active === 0 && abandoned && holders === 0) release(); }
   }
   const decode = rpcFontDecoder((bytes, options, transfer) => rpc.callWithTransfer('decodeFontFace', [bytes, options], transfer));
+  const decoder: FontDecoder = (bytes, options) => retired
+    ? Promise.reject(new Error('Presentation font decoder was released')) : track(decode(bytes, options));
+  function take(): Worker {
+    if (retired) throw new Error('Presentation font decoder was released');
+    detach();
+    void rpc.dispose();
+    return worker;
+  }
   return {
-    token,
     retired: () => retired,
-    abandon() { abandoned = true; if (active === 0) release(); },
-    prepared: {
-      decoder: (bytes, options) => retired
-        ? Promise.reject(new Error('Presentation font decoder was released')) : track(decode(bytes, options)),
-      release,
-      take() {
-        if (retired) throw new Error('Presentation font decoder was released');
-        detach();
-        void rpc.dispose();
-        return worker;
-      },
-    } satisfies PreparedFontWorker,
+    shared: () => holders > 1,
+    take,
+    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number): void {
+      void import('./coverageScan').then((scan) => scan.activeSlideCoverageScripts(source, activeSlideIndex)).then((scripts) => {
+        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: [scripts] }, []);
+      }).catch(() => {});
+    },
+    /** A holder's own handle: the worker stops once every handle is released, or collected after its decodes. */
+    handle(): PreparedFontWorker {
+      holders += 1;
+      abandoned = false;
+      let held = true;
+      const token = {};
+      const drop = (collected: boolean) => {
+        if (!held) return;
+        held = false;
+        tokens.delete(token);
+        abandonedWorkers?.unregister(token);
+        if (--holders > 0) return;
+        if (collected) { abandoned = true; if (active === 0) release(); } else release();
+      };
+      const prepared: PreparedFontWorker = {
+        decoder: (bytes, options) => held ? decoder(bytes, options)
+          : Promise.reject(new Error('Presentation font decoder was released')),
+        release: () => drop(false),
+        take() {
+          if (!held) throw new Error('Presentation font decoder was released');
+          if (holders > 1) throw new Error('Presentation font decoder is shared with another editor');
+          held = false;
+          holders -= 1;
+          return take();
+        },
+      };
+      tokens.add(token);
+      abandonedWorkers?.register(prepared.decoder, () => drop(true), token);
+      return prepared;
+    },
   };
 }
 
+/** The prepared worker for `source`, unless another editor still holds it; that editor's fonts keep loading. */
 export function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined {
   const owner = preparedWorkers.get(source);
+  if (!owner || owner.retired()) { preparedWorkers.delete(source); return undefined; }
+  if (owner.shared()) return undefined;
   preparedWorkers.delete(source);
-  return owner && !owner.retired() ? owner.prepared.take() : undefined;
+  return owner.take();
 }

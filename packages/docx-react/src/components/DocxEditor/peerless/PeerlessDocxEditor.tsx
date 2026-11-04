@@ -46,7 +46,7 @@ import { UnifiedSidebar } from '../../UnifiedSidebar';
 import { createWorkerPluginGeometry, workerDocumentVersion, workerReadRefusal } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
 import { workerReviewRects } from './workerReviewRects';
-import { reviewMatches } from './workerReview';
+import { reviewPlacementMatches } from './workerReview';
 import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevisions';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
@@ -263,7 +263,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
     currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph,
     scrollToReviewTarget: navigation.scrollToReviewTarget }));
-  const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const pluginFrames = !!(props.plugins?.length || props.pluginSidebarItems?.length || props.onRenderedDomContextReady || props.showHostProposalsInSidebar);
+  const getShellState = pluginFrames ? controller.getSnapshot : controller.getShellSnapshot;
+  const shellState = useSyncExternalStore(pluginFrames ? controller.subscribe : controller.subscribeShell, getShellState, getShellState);
   useEffect(() => registerTableActionExecutor((action) =>
     controller.commands.store.execute('tableAction', action as never)), [controller]);
   const documentReady = shellState.status === 'ready' && openedSource.current === sourceKey;
@@ -504,7 +506,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const appendFont = (font: YrsResidentFontRegistration) => {
       signal.throwIfAborted();
       if (disposed) throw new Error('DOCX command fonts are disposed');
-      return fonts.push(font instanceof Uint8Array ? font.slice() : font) - 1;
+      return fonts.push(font) - 1;
     };
     let released = false;
     const abort = () => {
@@ -1087,10 +1089,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [shellState, documentBuffer, parsedDocument, controller]);
   useImperativeHandle(ref, () => controller.ref, [controller]);
 
-  const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
+  const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page: targetPage, x, y, clickCount, intent }) => {
     const gesture = ++linkGesture.current;
     setHyperlinkPopup(null);
     const geometry = controller.getSnapshot().view?.geometry;
+    const page = geometry?.pages.find(page => page.page.pageId === targetPage.page.pageId && page.page.pageIndex === targetPage.page.pageIndex);
+    if (!page) return false;
     const section = 'final';
     const targets = geometry?.parts?.filter(part => part.pageId === page.page.pageId &&
       x >= part.x && x <= part.x + part.width && y >= part.y && y <= part.y + part.height) ?? [];
@@ -1156,10 +1160,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     onTabStopRemove: rulers.handleTabStopRemove, onTabStopsChange: rulers.handleTabStopsChange,
     onDragStart: rulers.startDrag, onDragEnd: () => { void rulers.endDrag(); },
   };
-  const chrome = props.showToolbar === false ? null : props.toolbar !== undefined ? props.toolbar : readOnly ? null :
+  const chrome = useMemo(() => props.showToolbar === false ? null : props.toolbar !== undefined ? props.toolbar : readOnly ? null :
     <DocxEditorToolbar renderLogo={props.renderLogo} documentName={props.documentName}
       onDocumentNameChange={props.onDocumentNameChange} documentNameEditable={props.documentNameEditable}
-      renderTitleBarRight={props.renderTitleBarRight} />;
+      renderTitleBarRight={props.renderTitleBarRight} />,
+    [props.showToolbar, props.toolbar, readOnly, props.renderLogo, props.documentName, props.onDocumentNameChange, props.documentNameEditable, props.renderTitleBarRight]);
+  const { currentProps: pageProps, readCurrent: readPageProps, onApply: applyPageProps } = propertyDialogs.pageLayout;
+  const chromeConfig = useMemo(() => ({ showZoomControl: props.showZoomControl ?? true, toolbarExtra: props.toolbarExtra, prepareSave,
+    pageLayout: { currentProps: pageProps, readCurrent: readPageProps, onApply: applyPageProps, unit: props.rulerUnit ?? 'inch' as const } }),
+    [props.showZoomControl, props.toolbarExtra, prepareSave, pageProps, readPageProps, applyPageProps, props.rulerUnit]);
   const geometry = documentReady && pluginGeometry.layout() ? pluginGeometry.geometry() : null;
   const managedItems = useMemo(() => managedSidebarItems(pluginHost, activations, anchor => {
     const at = { paraId: anchor.paraId, offset: 0 };
@@ -1199,7 +1208,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     [comments, commentsOpen, dotsMode]);
   const commentItems = useCommentSidebarItems({ comments: visibleComments, trackedChanges: commentsOpen || dotsMode ? trackedChanges?.entries ?? EMPTY_CHANGES : EMPTY_CHANGES,
     callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
-  const commentGeometryCurrent = !!(documentReady && shellState.view && review && reviewMatches(shellState.view, review));
+  const commentGeometryCurrent = !!(documentReady && shellState.view && review && reviewPlacementMatches(shellState.view, review));
   const positionedComments = useMemo(() => commentItems.map(item => {
     if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
     const previousY = commentPlacement.positions.get(item.id);
@@ -1321,8 +1330,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           if (heading) void navigation.scrollToParagraph(heading.paraId).catch((error) => reportRecoverableError(error)); },
         onClose: () => navigation.setShowOutline(false), scrollLeft: navigation.pageInfo.scrollLeft }}
       onToggleOutline={() => navigation.setShowOutline(!navigation.showOutline)} scrollPageInfo={navigation.pageInfo}
-      toolbar={<EditorChromeContext.Provider value={{ showZoomControl: props.showZoomControl ?? true, toolbarExtra: props.toolbarExtra, prepareSave,
-        pageLayout: { ...propertyDialogs.pageLayout, unit: props.rulerUnit ?? 'inch' } }}>{chrome}</EditorChromeContext.Provider>}
+      toolbar={<EditorChromeContext.Provider value={chromeConfig}>{chrome}</EditorChromeContext.Provider>}
       renderDock={(placement, available) => <PluginDock host={pluginHost} placement={placement}
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
       overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}

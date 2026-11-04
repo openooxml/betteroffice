@@ -1,7 +1,8 @@
+#[cfg(feature = "raster")]
+use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     Cell, CellRange, CellRef, CellValue, DrawCmd, FreezePane, GridGeometry, MAX_COLS,
-    MAX_DISPLAY_CELLS, MAX_ROWS, RenderOptions, RowId, Sheet, SheetId, Viewport, Workbook,
-    WorkbookModel,
+    MAX_DISPLAY_CELLS, MAX_ROWS, RowId, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
 
 fn workbook() -> Workbook {
@@ -351,16 +352,19 @@ fn display_lists_end_at_the_last_track_with_extent() {
                 .unwrap()
                 .is_empty()
         );
-        let png = workbook
-            .render_sheet(
-                SheetId(0),
-                &RenderOptions {
-                    range: Some(CellRange::new(CellRef::new(0, 0), CellRef::new(59, 25))),
-                    ..RenderOptions::default()
-                },
-            )
-            .unwrap();
-        assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        #[cfg(feature = "raster")]
+        {
+            let png = workbook
+                .render_png(
+                    betteroffice_xlsx::PngTarget::Range {
+                        sheet: SheetId(0),
+                        range: CellRange::new(CellRef::new(0, 0), CellRef::new(59, 25)),
+                    },
+                    &RenderOptions::default(),
+                )
+                .unwrap();
+            assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        }
     }
 }
 

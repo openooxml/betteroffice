@@ -320,3 +320,123 @@ fn reports_native_parse_errors() {
         Err(Error::Parse(_))
     ));
 }
+
+#[test]
+fn facade_paragraph_proposals_preview_save_and_undo() {
+    use betteroffice_pptx::{
+        ProposalEdit, ProposalRequest, ProposalShapeChangeKind, ProposalTextChangeKind,
+        TextParagraphDraft, TextRunDraft, TextStyle,
+    };
+    let fixture = include_bytes!("../../pptx-edit/tests/fixtures/proposal-shapes.pptx");
+    let presentation = Presentation::open(fixture).unwrap();
+    let before = presentation.snapshot().unwrap();
+    let shape = &before.slides[0].shapes[0];
+    let proposal = presentation
+        .propose(ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![ProposalEdit::SetStoryParagraphs {
+                story_id: shape.text_stories[0].id.clone(),
+                paragraphs: vec![
+                    TextParagraphDraft {
+                        alignment: Some("ctr".into()),
+                        bullet: Some(true),
+                        runs: vec![TextRunDraft {
+                            text: "First bullet".into(),
+                            style: TextStyle {
+                                bold: Some(true),
+                                ..Default::default()
+                            },
+                        }],
+                    },
+                    TextParagraphDraft {
+                        alignment: Some("r".into()),
+                        bullet: Some(false),
+                        runs: vec![TextRunDraft {
+                            text: "Second point".into(),
+                            style: TextStyle::default(),
+                        }],
+                    },
+                ],
+            }],
+        })
+        .unwrap();
+    let diff = presentation
+        .layout_proposal_diff_slide(&proposal.id, 0)
+        .unwrap();
+    assert!(
+        diff.text_changes
+            .iter()
+            .any(|change| change.kind == ProposalTextChangeKind::Insertion)
+    );
+    assert!(
+        diff.text_changes
+            .iter()
+            .any(|change| change.kind == ProposalTextChangeKind::Deletion)
+    );
+    assert_eq!(diff.shape_changes[0].kind, ProposalShapeChangeKind::Changed);
+    assert_eq!(presentation.snapshot().unwrap(), before);
+    let preview = presentation.preview_proposal(&proposal.id).unwrap();
+    assert_eq!(
+        presentation
+            .accept_proposal(&proposal.id, false)
+            .unwrap()
+            .snapshot,
+        preview.snapshot
+    );
+    let reopened = Presentation::open(&presentation.save().unwrap()).unwrap();
+    let story = &reopened.snapshot().unwrap().slides[0].shapes[0].text_stories[0];
+    assert_eq!(story.plain_text(), "First bullet\nSecond point");
+    assert_eq!(story.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(story.paragraphs[0].runs[0].style.bold, Some(true));
+    assert!(presentation.undo());
+    assert_eq!(presentation.snapshot().unwrap(), before);
+}
+
+#[test]
+fn facade_slide_property_proposals_render_inherit_accept_reject_and_undo() {
+    use betteroffice_pptx::{ProposalEdit, ProposalRequest, ProposalStripStatus};
+    let fixture = include_bytes!("../../pptx-edit/tests/fixtures/proposal-slide-props.pptx");
+    for kind in ["setSlideLayout", "setSlideBackground"] {
+        let presentation = Presentation::open(fixture).unwrap();
+        let before = presentation.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let edit: ProposalEdit = serde_json::from_value(if kind == "setSlideLayout" {
+            serde_json::json!({"type": kind, "slideId": slide.id, "layoutPartPath": "ppt/slideLayouts/slideLayout2.xml", "mapping": [[slide.shapes[0].id, 8]]})
+        } else {
+            serde_json::json!({"type": kind, "slideId": slide.id, "background": {"type": "solid", "color": {"rgb": "123456"}}})
+        }).unwrap();
+        let request = || ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![edit.clone()],
+        };
+        let proposal = presentation.propose(request()).unwrap();
+        assert_eq!(
+            presentation.proposal_slide_strip(&proposal.id).unwrap()[0].status,
+            ProposalStripStatus::Changed
+        );
+        let by_id = presentation
+            .layout_proposal_diff_slide_by_id(&proposal.id, &slide.id)
+            .unwrap();
+        let by_index = presentation
+            .layout_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        assert_eq!(by_id.frame, by_index.frame);
+        let frame = serde_json::to_string(&by_id.frame).unwrap();
+        if kind == "setSlideLayout" {
+            assert!(frame.contains("ppt/media/proposal-pixel.png"));
+            assert!(frame.contains("#123456"));
+        } else {
+            assert!(frame.contains("#123456"));
+        }
+        assert_eq!(presentation.snapshot().unwrap(), before);
+        assert!(presentation.reject_proposal(&proposal.id));
+        let proposal = presentation.propose(request()).unwrap();
+        let preview = presentation.preview_proposal(&proposal.id).unwrap();
+        presentation.accept_proposal(&proposal.id, false).unwrap();
+        assert_eq!(presentation.snapshot().unwrap(), preview.snapshot);
+        assert!(presentation.undo());
+        assert_eq!(presentation.snapshot().unwrap(), before);
+    }
+}

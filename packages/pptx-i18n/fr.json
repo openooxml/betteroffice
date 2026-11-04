@@ -156,6 +156,8 @@
     "stalePreview": "Cet aperçu utilise la diapositive mise à jour. L'application remplacera les cibles modifiées.",
     "geometry": "Position et taille (x, y, largeur, hauteur)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Disposition modifiée",
+    "backgroundChanged": "Arrière-plan modifié",
     "appearance": "Apparence ou mise en forme du texte modifiée",
     "changedAgain": "La cible a encore changé. Vérifiez l'aperçu actualisé avant d'appliquer.",
     "canvasTitle": "Modifications sur cette diapositive",
@@ -171,6 +173,8 @@
     "loadingDiff": "Chargement des modifications…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

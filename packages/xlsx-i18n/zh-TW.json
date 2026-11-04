@@ -136,6 +136,9 @@
       "invalidArguments": "此值無效。",
       "inputFailed": "先前的儲存格輸入無法儲存。",
       "sheetProtected": "此儲存格位於受保護的工作表上。",
+      "hostRefused": "不允許此編輯。",
+      "tooManyToCheck": "儲存格過多，外掛程式無法檢查（上限 {limit}）。",
+      "hostStarting": "編輯器仍在啟動中。請稍後再試。",
       "documentReplaced": "已開啟另一本活頁簿。",
       "targetChanged": "選取範圍已變更。",
       "gestureActive": "請先完成圖表移動。",
@@ -194,6 +197,7 @@
     "toolbarGroup": "外掛程式",
     "panelTabs": "外掛程式面板",
     "collapsePanel": "收合 {title}",
-    "expandPanel": "展開 {title}"
+    "expandPanel": "展開 {title}",
+    "rowGutter": "外掛程式列標記"
   }
 }
