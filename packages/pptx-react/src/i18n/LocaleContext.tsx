@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import { createT, deepMerge, editorEn } from '@betteroffice/pptx-i18n';
+import { createT, deepMerge, editorEn } from '@betteroffice/pptx-i18n/editor';
 import type { LocaleStrings, TFunction, Translations } from '@betteroffice/pptx-i18n';
 
 const LocaleContext = createContext<Translations>(editorEn);

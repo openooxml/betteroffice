@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import { createT, editorEn, en, proposalEn, type LocaleStrings, type TranslationKey } from './index';
 import enDefault, { en as enSubpath } from './en';
+import { editorEn as editorTable, createT as createEditorT, deepMerge as mergeEditor } from './editor';
+import { proposalEn as proposalTable } from './proposals';
 
 const originalProposals = {
   "title": "Agent proposals",
@@ -64,4 +66,18 @@ test('the default editor table excludes every lazy proposal message', () => {
     expect(editorEn.proposals).not.toHaveProperty(key);
     expect(proposalEn.proposals).toHaveProperty(key, originalProposals[key as keyof typeof originalProposals]);
   }
+});
+
+test('the root and en subpath retain the full English table across separate entry modules', () => {
+  const fullTable = {
+    ...editorTable,
+    proposals: { ...editorTable.proposals, ...proposalTable.proposals },
+  };
+  for (const english of [en, enSubpath, enDefault]) {
+    expect(english).toEqual(fullTable);
+    expect(createEditorT(english)('proposals.layoutChanged')).toBe('Layout changed');
+  }
+  expect(editorEn).toBe(editorTable);
+  expect(proposalEn).toBe(proposalTable);
+  expect(mergeEditor(editorTable, proposalTable)).toEqual(fullTable);
 });

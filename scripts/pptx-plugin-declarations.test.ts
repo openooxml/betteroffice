@@ -32,6 +32,15 @@ const CONSUMER = `import {
   type PptxBundledFont,
 } from '@betteroffice/pptx-react';
 import { resolveMetricCompatFace } from '@betteroffice/fonts';
+import { en, type LocaleStrings } from '@betteroffice/pptx-i18n';
+import enDefault, { en as enSubpath } from '@betteroffice/pptx-i18n/en';
+import { createT, deepMerge, editorEn } from '@betteroffice/pptx-i18n/editor';
+import { proposalEn } from '@betteroffice/pptx-i18n/proposals';
+
+const english: LocaleStrings[] = [en, enSubpath, enDefault];
+const proposalLabel: string = proposalEn.proposals.layoutChanged;
+const translated: string = createT(en)('proposals.layoutChanged');
+void [english, proposalLabel, translated, deepMerge(editorEn, proposalEn)];
 
 type State = { count: number };
 

@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import { createT, deepMerge, proposalEn } from '@betteroffice/pptx-i18n';
+import { createT, deepMerge } from '@betteroffice/pptx-i18n/editor';
+import { proposalEn } from '@betteroffice/pptx-i18n/proposals';
 import type { LocaleStrings, TFunction } from '@betteroffice/pptx-i18n';
 import { useLocaleStrings } from './LocaleContext';
 
