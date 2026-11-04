@@ -874,6 +874,7 @@ fn writable_style(
     validate_style_values(
         style.font_family.as_deref(),
         style.underline.as_deref(),
+        style.strike.as_deref(),
         style.color.as_deref(),
         style.font_size_pt,
         style.spacing_pt,
@@ -910,6 +911,7 @@ fn patch_changes(story: &StorySnapshot, start: u32, end: u32, patch: &TextStyleP
                     || differs(&style.color, &patch.color)
                     || differs(&style.font_family, &patch.font_family)
                     || differs(&style.underline, &patch.underline)
+                    || differs(&style.strike, &patch.strike)
                     || differs(&style.spacing_pt, &patch.spacing_pt)
                     || differs(&style.baseline_pct, &patch.baseline_pct))
             {
@@ -1039,6 +1041,7 @@ fn plan_format(
     validate_style_values(
         patch.font_family.as_deref(),
         patch.underline.as_deref(),
+        patch.strike.as_deref(),
         patch.color.as_deref(),
         patch.font_size_pt,
         patch.spacing_pt,

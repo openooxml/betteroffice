@@ -138,6 +138,7 @@ fn inherited_text_style(
                 .or(fallback.underline)
                 .unwrap_or_else(|| "none".to_owned()),
         ),
+        strike: direct.strike.clone().or(fallback.strike),
         spacing_pt: direct.spacing_pt.or(fallback.spacing_pt),
         baseline_pct: direct.baseline_pct.or(fallback.baseline_pct),
         caps: direct.caps.or(fallback.caps),
@@ -832,6 +833,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     }
     if source.underline.is_some() {
         target.underline.clone_from(&source.underline);
+    }
+    if source.strike.is_some() {
+        target.strike.clone_from(&source.strike);
     }
     if source.font_family.is_some() {
         target.font_family.clone_from(&source.font_family);

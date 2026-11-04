@@ -3028,6 +3028,7 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.spacing_pt == target.spacing_pt
         && source.kern_pt == target.kern_pt
         && source.underline == target.underline
+        && source.strike == target.strike
         && source.caps == target.caps
         && source.font_family == target.font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
@@ -3615,6 +3616,12 @@ fn apply_run_properties(
             base.attributes.remove("u");
         }
     }
+    match &properties.strike {
+        Some(strike) => base.set_attribute("strike", strike.clone()),
+        None => {
+            base.attributes.remove("strike");
+        }
+    }
     let authored = parse_run_properties(Some(base)).color;
     let keeps_fill = authored == properties.color
         || is_flattened_colour_snapshot(authored.as_ref(), properties.color.as_ref(), theme);
@@ -3794,6 +3801,10 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     }
     if let Some(underline) = &properties.underline {
         element.set_attribute("u", underline.clone());
+        present = true;
+    }
+    if let Some(strike) = &properties.strike {
+        element.set_attribute("strike", strike.clone());
         present = true;
     }
     if let Some(caps) = properties.caps {

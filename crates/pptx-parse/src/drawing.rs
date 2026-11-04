@@ -2165,6 +2165,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
+        strike: element.attribute("strike").map(str::to_owned),
         caps: element.attribute("cap").and_then(TextCaps::from_attribute),
         font_family: element
             .child("latin")

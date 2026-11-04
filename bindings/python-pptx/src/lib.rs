@@ -343,6 +343,7 @@ fn text_style(
         color,
         font_family,
         underline,
+        strike: None,
         spacing_pt,
         baseline_pct,
         kern_pt,
@@ -358,6 +359,7 @@ fn text_style_patch(style: TextStyle) -> TextStylePatch {
         color: style.color,
         font_family: style.font_family,
         underline: style.underline,
+        strike: style.strike,
         spacing_pt: style.spacing_pt,
         baseline_pct: style.baseline_pct,
     }

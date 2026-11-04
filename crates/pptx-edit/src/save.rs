@@ -822,6 +822,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline.clone(),
+            strike: run.style.strike.clone(),
             caps: run.style.caps,
             font_family: run.style.font_family.clone(),
             color: run.style.color.as_deref().map(color_from_hex),

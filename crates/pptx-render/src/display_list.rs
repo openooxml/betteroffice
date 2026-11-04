@@ -503,6 +503,8 @@ pub struct PositionedTextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
     pub color: String,
     /// Tracking between clusters in pixels.
     #[serde(default, skip_serializing_if = "is_zero")]

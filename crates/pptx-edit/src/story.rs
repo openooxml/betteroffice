@@ -43,9 +43,11 @@ const ALIGNMENTS: [&str; 7] = ["l", "ctr", "r", "just", "justLow", "dist", "thai
 
 /// The values land in schema-typed attributes, so junk must fail the edit
 /// rather than the file.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_style_values(
     font_family: Option<&str>,
     underline: Option<&str>,
+    strike: Option<&str>,
     color: Option<&str>,
     font_size_pt: Option<f64>,
     spacing_pt: Option<f64>,
@@ -60,6 +62,13 @@ pub(crate) fn validate_style_values(
     {
         return Err(EditError::InvalidText(format!(
             "unrecognized underline type {underline:?}"
+        )));
+    }
+    if let Some(strike) = strike
+        && !["noStrike", "sngStrike", "dblStrike"].contains(&strike)
+    {
+        return Err(EditError::InvalidText(format!(
+            "unrecognized strike type {strike:?}"
         )));
     }
     if let Some(color) = color {
@@ -365,6 +374,7 @@ impl DeckSession {
                 validate_style_values(
                     style.font_family.as_deref(),
                     style.underline.as_deref(),
+                    style.strike.as_deref(),
                     style.color.as_deref(),
                     style.font_size_pt,
                     style.spacing_pt,
@@ -692,6 +702,7 @@ impl DeckSession {
         validate_style_values(
             style.font_family.as_deref(),
             style.underline.as_deref(),
+            style.strike.as_deref(),
             style.color.as_deref(),
             style.font_size_pt,
             style.spacing_pt,
@@ -857,6 +868,7 @@ impl DeckSession {
         validate_style_values(
             patch.font_family.as_deref(),
             patch.underline.as_deref(),
+            patch.strike.as_deref(),
             patch.color.as_deref(),
             patch.font_size_pt,
             patch.spacing_pt,
@@ -1551,7 +1563,7 @@ pub(crate) fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 10] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 11] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -1580,6 +1592,10 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 10] {
                 .unwrap_or(Any::Null),
         ),
         (
+            "strike",
+            style.strike.as_deref().map(Any::from).unwrap_or(Any::Null),
+        ),
+        (
             "spacing",
             style.spacing_pt.map(Any::Number).unwrap_or(Any::Null),
         ),
@@ -1598,7 +1614,7 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 10] {
     ]
 }
 
-fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
+fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 9] {
     [
         ("bold", patch.bold.map(Any::Bool)),
         ("italic", patch.italic.map(Any::Bool)),
@@ -1606,6 +1622,7 @@ fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
         ("color", patch.color.as_deref().map(Any::from)),
         ("fontFamily", patch.font_family.as_deref().map(Any::from)),
         ("underline", patch.underline.as_deref().map(Any::from)),
+        ("strike", patch.strike.as_deref().map(Any::from)),
         ("spacing", patch.spacing_pt.map(Any::Number)),
         ("baseline", patch.baseline_pct.map(Any::Number)),
     ]
@@ -1619,6 +1636,7 @@ pub fn style_from_run_properties(properties: &RunProperties, theme: Option<&Them
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
+        strike: properties.strike.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         kern_pt: properties.kern_pt,
@@ -1634,6 +1652,7 @@ pub(crate) fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         color: attrs.and_then(|attrs| any_string(attrs.get("color"))),
         font_family: attrs.and_then(|attrs| any_string(attrs.get("fontFamily"))),
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
+        strike: attrs.and_then(|attrs| any_string(attrs.get("strike"))),
         spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),
         baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
         kern_pt: attrs.and_then(|attrs| any_number(attrs.get("kern"))),

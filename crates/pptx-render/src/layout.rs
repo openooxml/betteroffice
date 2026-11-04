@@ -4063,6 +4063,7 @@ struct ResolvedStyle {
     bold: bool,
     italic: bool,
     underline: bool,
+    strike: Option<String>,
     color: String,
     caps: TextCaps,
 }
@@ -4512,6 +4513,10 @@ fn resolve_style(
             .as_deref()
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
+        strike: direct
+            .strike
+            .clone()
+            .or_else(|| fallback.and_then(|value| value.strike.clone())),
         color,
         caps: direct
             .caps
@@ -4704,6 +4709,7 @@ fn chart_text_primitive(
                     bold,
                     italic,
                     underline: false,
+                    strike: None,
                     color: text.color.to_owned(),
                     letter_spacing_px: tracking,
                     baseline_offset_px: 0.0,
@@ -4985,6 +4991,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
         bold,
         italic,
         underline,
+        strike,
         color,
         caps,
     } = style;
@@ -5004,6 +5011,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key.push(u8::from(*bold));
     key.push(u8::from(*italic));
     key.push(u8::from(*underline));
+    key_str(key, strike.as_deref().unwrap_or("noStrike"));
     key_str(key, color);
     key.push(match caps {
         TextCaps::None => 0,
@@ -5932,6 +5940,7 @@ fn positioned_runs(
                     && run.bold == cluster.style.bold
                     && run.italic == cluster.style.italic
                     && run.underline == cluster.style.underline
+                    && run.strike == cluster.style.strike
                     && run.color == cluster.style.color
             });
         if !append {
@@ -5951,6 +5960,7 @@ fn positioned_runs(
                 bold: cluster.style.bold,
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
+                strike: cluster.style.strike.clone(),
                 color: cluster.style.color.clone(),
                 letter_spacing_px: cluster.tracking,
                 baseline_offset_px,
@@ -6640,6 +6650,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
             .underline
             .clone()
             .or_else(|| linked.then(|| "sng".to_owned())),
+        strike: properties.strike.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         kern_pt: properties.kern_pt,
@@ -8656,6 +8667,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    strike: None,
                     color: "#000000".to_owned(),
                     caps: TextCaps::None,
                 },
@@ -8895,10 +8907,11 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
+            strike: None,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
         };
-        let mut variants = vec![style.clone(); 7];
+        let mut variants = vec![style.clone(); 8];
         variants[0].color = "#A99A72".to_owned();
         variants[1].bold = true;
         variants[2].italic = true;
@@ -8908,6 +8921,7 @@ mod tests {
         variants[6].face = renderer
             .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
             .unwrap();
+        variants[7].strike = Some("sngStrike".to_owned());
         for changed in variants {
             let paragraph = ResolvedParagraph {
                 align: TextAlign::Left,
@@ -8960,6 +8974,7 @@ mod tests {
                     assert_eq!(actual.bold, expected.style.bold);
                     assert_eq!(actual.italic, expected.style.italic);
                     assert_eq!(actual.underline, expected.style.underline);
+                    assert_eq!(actual.strike, expected.style.strike);
                     assert_eq!(actual.font_id, expected.style.face.id.to_u32());
                     assert_eq!(actual.font_family, expected.style.family);
                     assert_eq!(
@@ -8987,6 +9002,7 @@ mod tests {
             bold: false,
             italic: false,
             underline: true,
+            strike: None,
             color: "#A99A72".to_owned(),
             caps: TextCaps::None,
         };
@@ -9066,6 +9082,7 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
+            strike: None,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
         };

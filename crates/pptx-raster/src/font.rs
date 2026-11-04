@@ -86,6 +86,18 @@ fn paint_run(
             clip,
         );
     }
+    let strike_y = baseline - run.baseline_offset_px - run.font_size_px * 0.3;
+    let thickness = 1.0_f32.max(run.font_size_px * 0.05);
+    let offsets: &[f32] = match run.strike.as_deref() {
+        Some("sngStrike") => &[0.0],
+        Some("dblStrike") => &[-thickness, thickness],
+        _ => &[],
+    };
+    for offset in offsets {
+        if let Some(rect) = Rect::from_xywh(run.x, strike_y + offset, run.width, thickness) {
+            pixmap.fill_rect(rect, &paint, transform, clip);
+        }
+    }
     Ok(())
 }
 

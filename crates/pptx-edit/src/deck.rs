@@ -695,6 +695,7 @@ impl DeckSession {
         crate::story::validate_style_values(
             draft.style.font_family.as_deref(),
             draft.style.underline.as_deref(),
+            draft.style.strike.as_deref(),
             draft.style.color.as_deref(),
             draft.style.font_size_pt,
             draft.style.spacing_pt,
@@ -3944,6 +3945,7 @@ mod tests {
             color: Some("123ABC".into()),
             font_family: Some("Arial".into()),
             underline: Some("dbl".into()),
+            strike: Some("sngStrike".into()),
             spacing_pt: Some(1.5),
             baseline_pct: Some(12.0),
         };
@@ -3963,6 +3965,7 @@ mod tests {
             assert_eq!(style.color, patch.color);
             assert_eq!(style.font_family, patch.font_family);
             assert_eq!(style.underline, patch.underline);
+            assert_eq!(style.strike, patch.strike);
             assert_eq!(style.spacing_pt, patch.spacing_pt);
             assert_eq!(style.baseline_pct, patch.baseline_pct);
             assert_eq!(formatted.paragraphs[0].runs[0].text, "A");
