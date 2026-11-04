@@ -42,6 +42,8 @@ import { useTranslation } from '../i18n';
 import type { XlsxPluginEditorAccess, XlsxRevealAlignment } from '../plugins/createPluginClients';
 
 import { PluginOverlays } from '../plugins/PluginOverlays';
+import { PluginRowGutter } from '../plugins/PluginRowGutter';
+import { ROW_GUTTER_WIDTH } from '../plugins/rowDecorations';
 import { frozenGridExtent } from '../plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
@@ -710,7 +712,11 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [run, active, selection, selectedChart]);
   const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands, editGate: false,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
-    selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t });
+    selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t,
+    positionAtPoint: (clientX, clientY) => {
+      const owner = runRef.current;
+      return owner?.current && !owner.retiring && !owner.failure ? apiBridge.getPositionAtPoint?.(clientX, clientY) ?? null : null;
+    } });
   const presentGridRef = useRef(pluginHost.presentGrid);
   presentGridRef.current = pluginHost.presentGrid;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
@@ -767,6 +773,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const sheetId = run.session.state.sheets[request.sheet]?.id;
         presentGridRef.current(sheetId === undefined ? null : {
           frame: painted.displayList, zoom: request.zoom, viewport: request.viewport, version: painted.version, sheetId,
+          sheet: request.sheet,
         });
         for (const waiter of paintWaiters.current.slice()) {
           const covered = samePaint(painted, waiter.request, waiter.sequence);
@@ -1772,6 +1779,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
             <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
               {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
                 style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
+              {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
+                painted={pluginHost.painted} zoom={zoom} />}
               <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
                 onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
                 onDoubleClick={(event) => {
@@ -1781,7 +1790,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                   openEditor();
                 }}
                 onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
-                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none' }}>
+                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none',
+                  ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
                 <div style={{ position: 'absolute', top: 0, left: 0, width: view ? view.contentWidth * zoom : '100%',
                   height: view ? view.contentHeight * zoom : '100%' }} />
                 <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>

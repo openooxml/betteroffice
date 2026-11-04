@@ -10,7 +10,7 @@ import type {
 } from './methods';
 
 export type PresentationCommandAccessMethods = Pick<PresentationHandle,
-  'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
+  'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
 export type PresentationCommandAccessMethod = keyof PresentationCommandAccessMethods;
 export type PresentationCommandAccessResult = ReturnType<PresentationCommandAccessMethods[PresentationCommandAccessMethod]>;
 

@@ -32,6 +32,7 @@ import type {
   XlsxPluginCommandResult,
   XlsxPluginCommandState,
 } from '../commands/types';
+import type { XlsxPointPosition } from '../XlsxEditor.types';
 
 export type {
   MaybePromise,
@@ -125,8 +126,11 @@ export interface XlsxPluginLayout {
   viewport: { x: number; y: number; width: number; height: number };
 }
 
-/** A cell under the pointer, with the layout it was resolved against. */
-export interface XlsxPluginCellPosition {
+/**
+ * A cell under the pointer, with the layout it was resolved against. `sheet`, `row` and `col`
+ * are what the editor's `getPositionAtPoint` answers for the same point; `sheetId` names that sheet.
+ */
+export interface XlsxPluginCellPosition extends XlsxPointPosition {
   sheetId: string;
   row: number;
   col: number;
@@ -166,7 +170,12 @@ export interface XlsxPluginGeometry {
   getCellRect(target: { sheetId: string; row: number; col: number }): XlsxPluginRect | null;
   /** The visible part of an inclusive range, such as a merged area. */
   getRangeRect(target: { sheetId: string; range: CellRange }): XlsxPluginRect | null;
-  /** Client-coordinate hit testing; null until the editor exposes it. */
+  /**
+   * The cell under client coordinates, through the editor's own hit test; selection and focus
+   * stay where they are. It answers null outside the painted grid, over a chart, for non-finite
+   * coordinates, once this layout is no longer painted or its workbook was replaced, and wherever
+   * that hit test answers null. The member itself is null on hosts without a grid hit test.
+   */
   getPositionAtPoint: ((clientX: number, clientY: number) => XlsxPluginCellPosition | null) | null;
 }
 
@@ -247,7 +256,13 @@ export type XlsxPluginEvent =
     }
   | { type: 'mode-change'; generation: string; readOnly: boolean }
   | { type: 'layout-change'; generation: string; layout: XlsxPluginLayout | null }
-  | { type: 'grants-change'; generation: string; grant: XlsxPluginGrant };
+  | { type: 'grants-change'; generation: string; grant: XlsxPluginGrant }
+  /**
+   * A row marker was clicked or pressed; sent only to the plugin that owns it.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  | { type: 'row-decoration-activate'; generation: string; id: string; sheetId: string; row: number };
 
 /**
  * What a hook, renderer or action receives. Clients refuse once it is superseded or ended.
@@ -373,7 +388,40 @@ export interface XlsxPluginDefinition<S> {
     context: XlsxPluginEditGateContext<S>,
     commit: XlsxPluginCellCommit
   ): XlsxPluginCommitDecision;
+  /**
+   * Sync and pure. Row markers for the gutter, evaluated on load, after `setState` and after a
+   * document change. A throw or a malformed set ends the plugin with the `row-decorations` phase.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  rowDecorations?(context: XlsxPluginContext<S>): XlsxPluginRowDecorations | null;
 }
+
+/**
+ * A marker in the row gutter. `row` is zero-based; `id` is unique within the plugin; `text`
+ * applies to badges only, at most 4 characters.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginRowDecoration = {
+  id: string;
+  sheetId: string;
+  row: number;
+  kind: 'badge' | 'dot';
+  text?: string;
+  tone?: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+  tooltip?: string;
+};
+
+/**
+ * Row markers computed at a document `version`; shown only while the workbook is at it.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginRowDecorations = {
+  version: string;
+  items: readonly XlsxPluginRowDecoration[];
+};
 
 declare const xlsxPluginBrand: unique symbol;
 
@@ -388,7 +436,7 @@ export interface XlsxPlugin {
   readonly [xlsxPluginBrand]: true;
 }
 
-export type XlsxPluginErrorPhase = PluginErrorPhase | 'edit-gate';
+export type XlsxPluginErrorPhase = PluginErrorPhase | 'edit-gate' | 'row-decorations';
 
 /**
  * A plugin failure; the failing activation has already been stopped and cleaned up.

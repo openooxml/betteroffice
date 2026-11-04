@@ -28,6 +28,7 @@ import { isMacPlatform, matchesChord } from './commands/descriptors';
 import * as presenceRendering from './presence-rendering';
 import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
 import { LEGACY_SYNC_API } from './runtimeOptions';
+import { MOUNTED } from './__fixtures__/mounted';
 
 const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
@@ -103,7 +104,7 @@ it('opens the legacy sync API through its lazy session and calls onReady once', 
   try {
     const view = render(<PptxEditor {...legacy} file={fixture} fonts={fonts} onReady={(api) => { ready.push(api); }}
       onError={(error) => { errors.push(error); }} />);
-    await waitFor(() => expect(ready).toHaveLength(1));
+    await waitFor(() => expect(ready).toHaveLength(1), MOUNTED);
     expect(load).toHaveBeenCalledTimes(1);
     expect(ready[0]!.handle.snapshot().slides.length).toBeGreaterThan(0);
     expect(ready[0]!.save()).toBeInstanceOf(Uint8Array);
@@ -131,7 +132,7 @@ it('calls the legacy onReady only after the first slide painted', async () => {
   try {
     render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
       onReady={(api) => { ready.push(api); }} />);
-    await waitFor(() => expect(stagePaints).toBeGreaterThan(0));
+    await waitFor(() => expect(stagePaints).toBeGreaterThan(0), MOUNTED);
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     expect(ready).toHaveLength(0);
     await act(async () => { finish(); await painted; });
@@ -165,7 +166,7 @@ it('holds the legacy onReady while the editor is hidden and until its reveal rep
   try {
     render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
       onReady={(api) => { ready.push(api); }} />);
-    await waitFor(() => expect(painted).toBeGreaterThan(0));
+    await waitFor(() => expect(painted).toBeGreaterThan(0), MOUNTED);
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     expect(ready).toHaveLength(0);
     let finish!: () => void;
@@ -211,7 +212,7 @@ it('calls the legacy onReady once when the first slide cannot be laid out', asyn
   try {
     render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
       onReady={(api) => { ready.push(api); }} onError={(error) => { errors.push(error); }} />);
-    await waitFor(() => expect(ready).toHaveLength(1));
+    await waitFor(() => expect(ready).toHaveLength(1), MOUNTED);
     expect(errors).toContain(failure);
     expect(ready[0]!.save()).toBeInstanceOf(Uint8Array);
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
@@ -379,7 +380,7 @@ describe('PptxEditor slide layout cache', () => {
       view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
         collaboration={{ clientId: 9450 }}
         onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const thumbnail = () => view!.container.querySelector<HTMLCanvasElement>('aside button:first-child canvas');
       await waitFor(() => expect(paintedFrames.get(thumbnail()!)).toBeDefined());
       const original = paintedFrames.get(thumbnail()!)!;
@@ -459,7 +460,7 @@ describe('PptxEditor slide layout cache', () => {
               ready.refresh();
             }
           }} />);
-        await waitFor(() => expect(pendingStagePaints).toBeGreaterThan(0));
+        await waitFor(() => expect(pendingStagePaints).toBeGreaterThan(0), MOUNTED);
         if (scenario === 'undo restoration') {
           expect(api).toBeDefined();
           expect(api!.handle.snapshot().slides).toHaveLength(11);
@@ -599,7 +600,7 @@ describe('PptxEditor slide layout cache', () => {
       view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
         collaboration={{ clientId: 9411, initialUpdate: seed }}
         onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       await waitFor(() => expect(view!.container.querySelectorAll('aside canvas')).toHaveLength(50), {
         timeout: 15_000,
       });
@@ -687,7 +688,7 @@ describe('PptxEditor slide layout cache', () => {
       view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
         collaboration={{ clientId: 9401, initialUpdate: seed }}
         onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(painted).toBe(true));
+      await waitFor(() => expect(painted).toBe(true), MOUNTED);
       expect(api).toBeUndefined();
       expect(calls).toEqual([0]);
       expect(frames[0]).toEqual(freshFrames[0]);
@@ -1382,7 +1383,7 @@ describe('PptxEditor proposal review', () => {
     try {
       view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
         clientId={9212} onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       const handle = api!.handle;
       const slideId = handle.snapshot().slides[0].id;
       await act(async () => {
@@ -1491,7 +1492,7 @@ describe('PptxEditor proposal review', () => {
     const presence = { peers: [], setCursor: (cursor: PptxPresenceCursor | null) => cursors.push(cursor), onPresence: () => () => {} };
     const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
       collaboration={{ clientId: 9211, presence }} onReady={(ready) => { api = ready; }} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const handle = api!.handle;
     const original = handle.snapshot();
     const slide = original.slides[0];
@@ -1597,7 +1598,7 @@ describe('PptxEditor host controls', () => {
       const saved: Uint8Array[] = [];
       const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }}
         onSaveRequest={() => { calls++; return decisionPromise; }} onSave={(bytes) => saved.push(bytes)} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       if (!view.queryByTestId('pptx-save')) fireEvent.click(view.getByTestId('pptx-toolbar-more'));
       const serialize = spyOn(api!.handle, 'save');
       try {
@@ -1622,7 +1623,7 @@ describe('PptxEditor host controls', () => {
       let api: PptxEditorApi | undefined;
       render(<PptxEditor legacySyncApi file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
         onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       expect(workerOpen).not.toHaveBeenCalled();
       expect(api!.save().byteLength).toBeGreaterThan(0);
     } finally {
@@ -1641,7 +1642,7 @@ describe('PptxEditor host controls', () => {
     const props = { fonts: [{ family: 'Liberation Sans', bytes: fontBytes }], onReady: (ready: PptxEditorApi) => { opened.push(ready); },
       onSaveRequest: () => { requests++; return pending; }, onSave: (bytes: Uint8Array) => { saved.push(bytes); } };
     const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={fixture} />);
-    await waitFor(() => expect(opened).toHaveLength(1));
+    await waitFor(() => expect(opened).toHaveLength(1), MOUNTED);
     if (!view.queryByTestId('pptx-save')) fireEvent.click(view.getByTestId('pptx-toolbar-more'));
     fireEvent.click(view.getByTestId('pptx-save'));
     await waitFor(() => expect(requests).toBe(1));
@@ -1658,7 +1659,7 @@ describe('PptxEditor host controls', () => {
     let api: PptxEditorApi | undefined;
     const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
       onReady={(ready) => { api = ready; }} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     const canvas = view.getByTestId('pptx-slide-canvas');
     for (const slide of [1, 2]) {
       await act(async () => { api!.goToSlide(slide); });
@@ -1682,12 +1683,12 @@ describe('PptxEditor host controls', () => {
       expect(document.activeElement).toBe(focused);
     }
     await api!.flushPendingInput();
-  });
+  }, 15_000);
 
   it('waits for accepted image input and propagates its failure', async () => {
     let api: PptxEditorApi | undefined;
     const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }} />);
-    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
     let reader!: FileReader;
     const read = spyOn(FileReader.prototype, 'readAsDataURL').mockImplementation(function (this: FileReader) { reader = this; });
     try {

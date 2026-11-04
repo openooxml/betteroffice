@@ -195,6 +195,7 @@
     "toolbarGroup": "Eklentiler",
     "panelTabs": "Eklenti panelleri",
     "collapsePanel": "{title} daralt",
-    "expandPanel": "{title} genişlet"
+    "expandPanel": "{title} genişlet",
+    "rowGutter": "Eklenti satır işaretleri"
   }
 }

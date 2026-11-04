@@ -45,6 +45,15 @@ export function buildCommandFrame(
   if (!cached) visit(list.primitives);
   parsed?.(list);
   const displayList = new TextEncoder().encode(JSON.stringify(list)).buffer;
+  const media = commandFrameMedia(handle, list, sentMedia, metafiles, pendingMetafiles, extracted);
+  return transferable({ ...tags, displayList, media },
+    [displayList, ...media.map(({ bytes }) => bytes)]);
+}
+
+export function commandFrameMedia(
+  handle: PresentationHandle, list: SlideDisplayList, sentMedia: ReadonlySet<string>,
+  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
+): PresentationCommandFrame['media'] {
   const media: PresentationCommandFrame['media'] = [];
   for (const assetId of frameAssetIds(list)) {
     if (sentMedia.has(assetId)) continue;
@@ -53,8 +62,7 @@ export function buildCommandFrame(
     extracted?.set(assetId, bytes);
     media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
   }
-  return transferable({ ...tags, displayList, media },
-    [displayList, ...media.map(({ bytes }) => bytes)]);
+  return media;
 }
 
 export function commandFrameMediaBytes(

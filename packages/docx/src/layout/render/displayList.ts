@@ -335,7 +335,7 @@ export interface DocAttrs {
    * note's mirror element (W17 backlinks).
    */
   noteRef?: DisplayNoteRef;
-  revision?: { author: string; date: string; revisionId: string; kind: 'ins' | 'del' };
+  revision?: { author: string; date: string; revisionId: string; kind: 'ins' | 'del' | 'format' };
   /** Synthetic numbering glyph for the first line of a list paragraph. */
   listMarker?: boolean;
   /** Pending suggestion paint for a synthetic numbering glyph. */

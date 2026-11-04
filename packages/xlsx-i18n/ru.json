@@ -195,6 +195,7 @@
     "toolbarGroup": "Плагины",
     "panelTabs": "Панели плагинов",
     "collapsePanel": "Свернуть: {title}",
-    "expandPanel": "Развернуть: {title}"
+    "expandPanel": "Развернуть: {title}",
+    "rowGutter": "Метки строк плагинов"
   }
 }

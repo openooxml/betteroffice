@@ -195,6 +195,7 @@
     "toolbarGroup": "추가 기능",
     "panelTabs": "추가 기능 패널",
     "collapsePanel": "{title} 접기",
-    "expandPanel": "{title} 펼치기"
+    "expandPanel": "{title} 펼치기",
+    "rowGutter": "추가 기능 행 표시"
   }
 }

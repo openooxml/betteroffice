@@ -168,7 +168,12 @@
     "canvasStale": "लक्ष्य बदल गए हैं। लागू करने से पहले अद्यतन पूर्वावलोकन देखने के लिए समीक्षा विवरण खोलें।",
     "previousPosition": "पिछला",
     "proposedPosition": "प्रस्तावित",
-    "loadingDiff": "बदलाव लोड हो रहे हैं…"
+    "loadingDiff": "बदलाव लोड हो रहे हैं…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "और नियंत्रण",

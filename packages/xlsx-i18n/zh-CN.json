@@ -195,6 +195,7 @@
     "toolbarGroup": "插件",
     "panelTabs": "插件面板",
     "collapsePanel": "折叠{title}",
-    "expandPanel": "展开{title}"
+    "expandPanel": "展开{title}",
+    "rowGutter": "插件行标记"
   }
 }

@@ -103,6 +103,7 @@ export const TrackedChangeCard = memo(function TrackedChangeCard({
 
 const structuralKeys = {
   paragraphMarkInsertion: 'revisions.paragraphMarkInserted', paragraphMarkDeletion: 'revisions.paragraphMarkDeleted',
+  runPropertiesChanged: 'revisions.runPropertiesChanged',
   paragraphPropertiesChanged: 'revisions.paragraphPropertiesChanged', rowInserted: 'revisions.rowInserted', rowDeleted: 'revisions.rowDeleted',
   cellInserted: 'revisions.cellInserted', cellDeleted: 'revisions.cellDeleted', cellMerged: 'revisions.cellMerged',
   rowPropertiesChanged: 'revisions.rowPropertiesChanged', cellPropertiesChanged: 'revisions.cellPropertiesChanged',

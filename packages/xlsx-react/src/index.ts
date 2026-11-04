@@ -148,6 +148,8 @@ export type {
   XlsxPluginReadClient,
   XlsxPluginRect,
   XlsxPluginRefusal,
+  XlsxPluginRowDecoration,
+  XlsxPluginRowDecorations,
   XlsxPluginSelection,
   XlsxPluginSnapshot,
 } from './plugins/types';

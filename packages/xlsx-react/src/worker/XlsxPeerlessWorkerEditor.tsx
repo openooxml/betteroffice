@@ -43,10 +43,12 @@ import { createPeerlessPluginDocument, createPeerlessPluginGeometry } from '../p
 import type { XlsxPluginDocumentAccess } from '../plugins/createPluginDocumentAccess';
 import type { XlsxPluginCellCommit, XlsxPluginCellRef, XlsxPluginNavigationFailureCode } from '../plugins/types';
 import { PluginOverlays } from '../plugins/PluginOverlays';
+import { PluginRowGutter } from '../plugins/PluginRowGutter';
+import { ROW_GUTTER_WIDTH } from '../plugins/rowDecorations';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost, type XlsxPluginHostBinding } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
-import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll } from '../viewer/sessionGeometry';
+import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll, positionAtPoint } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { XlsxAsyncExportBridge } from './createAsyncEditorApi';
 import { PeerlessWorkbookSession, type PeerlessSessionWorkbookProps } from './usePeerlessSessionWorkbook';
@@ -554,7 +556,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
     createClients: createPeerlessPluginClients, createGeometry: createPeerlessPluginGeometry,
     readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, proposals, staleFor,
-    proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t });
+    proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t,
+    positionAtPoint: (clientX, clientY) => {
+      const owner = ownerRef.current;
+      const frame = sourceRef.current?.painted;
+      if (!owner?.current || owner.retiring || owner.failure || !frame || frame.request.generation !== owner.generation) return null;
+      return positionAtPoint(frame.displayList, frame.request.sheet, canvasRef.current, clientX, clientY);
+    } });
   pluginBindingRef.current = pluginHost;
   const editGate = pluginHost.host;
 
@@ -1064,7 +1072,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         setPainted(frame);
         const sheetId = (run.session.editState.sheets ?? run.session.state.sheets).find((sheet) => sheet.index === frame.request.sheet)?.id;
         pluginHost.presentGrid(sheetId ? { frame: frame.displayList, version: frame.version,
-          sheetId, zoom: frame.request.zoom, viewport: frame.request.viewport } : null);
+          sheetId, sheet: frame.request.sheet, zoom: frame.request.zoom, viewport: frame.request.viewport } : null);
         if (frame.coversThroughSeq !== undefined) run.session.markPresented({
           ...run.session.commandIdentity, coversThroughSeq: frame.coversThroughSeq,
         });
@@ -1692,6 +1700,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
           {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
             style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
+          {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
+            painted={pluginHost.painted} zoom={zoom} />}
           <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
             onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
             onDoubleClick={(event) => {
@@ -1702,7 +1712,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
               openCell();
             }}
             onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
-            style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none' }}>
+            style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none',
+              ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
             <PeerlessWorkerExtent store={presentation} zoom={zoom} />
             <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
               <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />

@@ -195,6 +195,7 @@
     "toolbarGroup": "المكونات الإضافية",
     "panelTabs": "لوحات المكونات الإضافية",
     "collapsePanel": "طي {title}",
-    "expandPanel": "توسيع {title}"
+    "expandPanel": "توسيع {title}",
+    "rowGutter": "علامات صفوف المكونات الإضافية"
   }
 }

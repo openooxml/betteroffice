@@ -432,6 +432,27 @@ describe('pptx native engine parity', () => {
     }
   });
 
+  test('structural proposal strip and by-ID layout match wasm', () => {
+    const docs = [wasm.PptxDocument.openCollaborative(bytes(), 7), native.PptxDocument.openCollaborative(bytes(), 7)];
+    const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+    try {
+      const request = JSON.stringify({ agentId: 'parity', edits: [
+        { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+        { type: 'setSlideNotes', slideId: '@draft', text: 'Review notes' },
+      ] });
+      expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+      const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+      const strips = docs.map((doc, index) => JSON.parse(doc.proposalSlideStripJson(proposals[index].id)));
+      expect(strips[0]).toEqual(strips[1]);
+      expect(strips[0][0]).toMatchObject({ status: 'inserted', liveIndex: null, previewIndex: 0 });
+      const diffs = renderers.map((renderer, index) => normalized(renderer.layoutProposalDiffSlideByIdJson(docs[index], proposals[index].id, strips[index][0].slideId)));
+      expect(diffs[0]).toEqual(diffs[1]);
+    } finally {
+      for (const renderer of renderers) renderer.free();
+      for (const doc of docs) doc.free();
+    }
+  });
+
   test('stale proposal acceptance throws the same string', () => {
     const docs = [wasm.PptxDocument.openCollaborative(bytes(), 7), native.PptxDocument.openCollaborative(bytes(), 7)];
     try {

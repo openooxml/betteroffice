@@ -195,6 +195,7 @@
     "toolbarGroup": "Plugin",
     "panelTabs": "Panel plugin",
     "collapsePanel": "Ciutkan {title}",
-    "expandPanel": "Luaskan {title}"
+    "expandPanel": "Luaskan {title}",
+    "rowGutter": "Penanda baris plugin"
   }
 }

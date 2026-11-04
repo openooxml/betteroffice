@@ -228,6 +228,7 @@ pub enum ChangeKind {
     ParagraphMarkInsertion,
     ParagraphMarkDeletion,
     ParagraphPropertiesChanged,
+    RunPropertiesChanged,
     TableRowInsertion,
     TableRowDeletion,
     TableInsertion,
@@ -333,6 +334,13 @@ fn visit_chunk_revisions<T: ReadTxn>(
             }
         }
     } else {
+        if let Some(Any::Array(changes)) = chunk.attrs.get(crate::format::RPR_CHANGE) {
+            for change in changes.iter() {
+                if let Some(stamp) = revision_parts(change) {
+                    visit(ChangeKind::RunPropertiesChanged, stamp);
+                }
+            }
+        }
         for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
             if let Some(stamp) = chunk.attrs.get(key).and_then(revision_parts) {
                 visit(kind, stamp);
@@ -352,10 +360,29 @@ fn visit_chunk_revisions<T: ReadTxn>(
                         .map(|stamp| (kind, stamp))
                 })
                 .collect();
+            if let Some(Any::Array(changes)) = chunk.attrs.get(crate::format::RPR_CHANGE) {
+                seen.extend(
+                    changes
+                        .iter()
+                        .filter_map(revision_parts)
+                        .map(|stamp| (ChangeKind::RunPropertiesChanged, stamp)),
+                );
+            }
             crate::inline_content::visit(&content, &mut |child| {
                 let Some(Any::Map(attrs)) = child.get("attrs") else {
                     return;
                 };
+                if let Some(Any::Array(changes)) = attrs.get(crate::format::RPR_CHANGE) {
+                    for change in changes.iter() {
+                        if let Some(stamp) = revision_parts(change) {
+                            let entry = (ChangeKind::RunPropertiesChanged, stamp);
+                            if !seen.contains(&entry) {
+                                seen.push(entry.clone());
+                                visit(entry.0, entry.1);
+                            }
+                        }
+                    }
+                }
                 for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
                     if let Some(stamp) = attrs.get(key).and_then(revision_parts) {
                         let entry = (kind, stamp);
@@ -895,16 +922,11 @@ impl EditingDoc {
                         .attrs
                         .get(*key)
                         .and_then(revision_parts)
-                        .map(|(id, ..)| id)
-                        == Some(revision_id.to_owned())
+                        .is_some_and(|(id, ..)| id == revision_id)
                 });
-                if let ChunkKind::Embed(Some(map)) = &chunk.kind
-                    && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
-                {
-                    visit_chunk_revisions(chunk, &txn, |_, (id, ..)| {
-                        matched |= id == revision_id;
-                    });
-                }
+                visit_chunk_revisions(chunk, &txn, |_, (id, ..)| {
+                    matched |= id == revision_id;
+                });
                 if let ChunkKind::Pilcrow(map) = &chunk.kind {
                     matched = matched
                         || [crate::PPR_INS, crate::PPR_DEL].iter().any(|key| {

@@ -148,6 +148,9 @@ jobs:
           BETTEROFFICE_REQUIRE_WASM: "1"
         run: bun test scripts/wasm-memory.test.ts
 
+      - name: Check Wasm artifacts carry no rasterizer and renderPng keeps one shape
+        run: bun test scripts/wasm-no-raster.test.ts scripts/render-png-shape.test.ts
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
@@ -606,3 +609,38 @@ jobs:
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"
+
+  native-hooks:
+    name: Native panic hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings
+          key: native-hooks
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test panics through the test hooks
+        env:
+          BETTEROFFICE_NATIVE_TEST_HOOKS: "1"
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          for package in $(node scripts/native-bindings.mjs --paths); do
+            bunx napi build --cwd "$package" --platform --profile hooks --features test-hooks -- --locked
+            bun test "$package/panic.test.ts"
+          done

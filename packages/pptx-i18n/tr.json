@@ -168,7 +168,12 @@
     "canvasStale": "Hedefler değişti. Uygulamadan önce güncellenmiş önizlemeyi incelemek için İnceleme ayrıntılarını açın.",
     "previousPosition": "Önceki",
     "proposedPosition": "Önerilen",
-    "loadingDiff": "Değişiklikler yükleniyor…"
+    "loadingDiff": "Değişiklikler yükleniyor…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Diğer denetimler",

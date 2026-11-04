@@ -195,6 +195,7 @@
     "toolbarGroup": "Complementos",
     "panelTabs": "Paneles de complementos",
     "collapsePanel": "Contraer {title}",
-    "expandPanel": "Expandir {title}"
+    "expandPanel": "Expandir {title}",
+    "rowGutter": "Marcadores de fila de complementos"
   }
 }

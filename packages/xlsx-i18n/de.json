@@ -195,6 +195,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin-Bereiche",
     "collapsePanel": "{title} einklappen",
-    "expandPanel": "{title} ausklappen"
+    "expandPanel": "{title} ausklappen",
+    "rowGutter": "Zeilenmarkierungen von Plugins"
   }
 }

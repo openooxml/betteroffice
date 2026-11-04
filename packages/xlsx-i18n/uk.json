@@ -195,6 +195,7 @@
     "toolbarGroup": "Плагіни",
     "panelTabs": "Панелі плагінів",
     "collapsePanel": "Згорнути {title}",
-    "expandPanel": "Розгорнути {title}"
+    "expandPanel": "Розгорнути {title}",
+    "rowGutter": "Позначки рядків плагінів"
   }
 }
