@@ -2340,7 +2340,6 @@ dependencies = [
  "betteroffice-fonts",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-parse",
- "betteroffice-vsdx-raster",
  "betteroffice-vsdx-render",
  "betteroffice-vsdx-validate",
  "js-sys",
