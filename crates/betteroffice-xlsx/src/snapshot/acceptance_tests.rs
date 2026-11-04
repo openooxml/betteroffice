@@ -2259,10 +2259,7 @@ fn snapshot_current_state_identity() {
     for budget in budgets() {
         for valid in [false, true] {
             let mut worker = worker(&bytes);
-            worker
-                .authority
-                .set_snapshot_projection_valid(valid)
-                .unwrap();
+            worker.authority.set_snapshot_projection_valid(valid);
             worker.model.sheets[0].set_cell(
                 CellRef::new(8, 0),
                 Cell {
@@ -2312,10 +2309,7 @@ fn snapshot_current_state_identity() {
             )
             .unwrap()
             .0;
-            worker
-                .authority
-                .set_snapshot_projection_valid(valid)
-                .unwrap();
+            worker.authority.set_snapshot_projection_valid(valid);
             let peer = hydrate(&worker, budget);
             assert_current_identity(&worker, &peer);
             assert_eq!(peer.authority.snapshot_projection_valid().unwrap(), valid);

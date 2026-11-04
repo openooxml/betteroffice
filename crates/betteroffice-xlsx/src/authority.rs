@@ -1155,23 +1155,17 @@ impl WorkbookAuthority {
         Ok(self.projection_valid.load(Ordering::Relaxed))
     }
 
-    pub(crate) fn set_snapshot_projection_valid(
-        &mut self,
-        valid: bool,
-    ) -> crate::snapshot::SnapshotResult<()> {
+    pub(crate) fn set_snapshot_projection_valid(&mut self, valid: bool) {
         if valid
             && (!self.projection_valid.load(Ordering::Relaxed)
                 || self.plain_style_cells.load(Ordering::Relaxed) == u64::MAX)
         {
-            let count = self
-                .count_plain_style_cells()
-                .map_err(crate::snapshot::SnapshotError::new)?;
+            let count = self.count_plain_style_cells().unwrap_or(u64::MAX);
             self.plain_style_cells.store(count, Ordering::Relaxed);
         } else if !valid {
             self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
         }
         self.projection_valid.store(valid, Ordering::Relaxed);
-        Ok(())
     }
 
     fn count_plain_style_cells(&self) -> Result<u64, String> {
@@ -8350,7 +8344,7 @@ mod tests {
         let mut restored = WorkbookAuthority::hydrated(doc, source.base.clone(), 0);
         let materializations = full_materializations();
         let hydrations = local_hydrations();
-        restored.set_snapshot_projection_valid(true).unwrap();
+        restored.set_snapshot_projection_valid(true);
         assert_eq!(restored.plain_style_cells.load(Ordering::Relaxed), 2);
         assert_eq!(full_materializations(), materializations);
         assert_eq!(local_hydrations(), hydrations);
