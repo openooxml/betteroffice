@@ -2,6 +2,9 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { act, useRef } from 'react';
 import type { OverflowMenuEntry } from './MenuList';
+import { loadMenuList } from './menuListLoader';
+
+await loadMenuList();
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();

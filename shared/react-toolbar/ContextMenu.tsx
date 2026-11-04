@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
-import { DEFAULT_MENU_COLORS, MenuList } from './MenuList';
+import { DEFAULT_MENU_COLORS } from './menuColors';
+import { loadedMenuList, loadMenuList, preloadMenuList } from './menuListLoader';
 import type { OverflowMenuColors, OverflowMenuEntry } from './MenuList';
 
 /** How a context menu was asked for. */
@@ -51,6 +52,8 @@ export function ContextMenu({
   const returnRef = useRef(returnFocus);
   returnRef.current = returnFocus;
   const closed = useRef(false);
+  const [, listArrived] = useState(0);
+  const MenuList = loadedMenuList();
 
   const finish = useCallback(
     (reason: ContextMenuCloseReason, restore: boolean) => {
@@ -62,6 +65,15 @@ export function ContextMenu({
     },
     [origin]
   );
+
+  useEffect(() => {
+    if (loadedMenuList()) return;
+    let alive = true;
+    loadMenuList().then(() => { if (alive) listArrived((count) => count + 1); }, () => {
+      if (alive) finish('escape', true);
+    });
+    return () => { alive = false; };
+  }, [finish]);
 
   const registerMenu = useCallback((element: HTMLElement) => {
     menus.current.add(element);
@@ -79,12 +91,19 @@ export function ContextMenu({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !inside(event.target)) finish('escape', false);
     };
+    const onPendingKeyDown = (event: KeyboardEvent) => {
+      if (loadedMenuList()) return;
+      if (event.key === 'Escape') finish('escape', false);
+      else if (event.key === 'Tab') finish('tab', false);
+    };
     const onResize = () => finish('resize', inside(document.activeElement));
     document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onPendingKeyDown, true);
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onPendingKeyDown, true);
       document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', onResize);
     };
@@ -105,6 +124,7 @@ export function ContextMenu({
     [point.x, point.y]
   );
 
+  if (!MenuList || closed.current) return null;
   return (
     <MenuList
       label={label}
@@ -191,6 +211,8 @@ export function useContextMenu(options: UseContextMenuOptions): ContextMenuContr
   const sequence = useRef(0);
   const lastPointer = useRef(-Infinity);
   const lastKeyboard = useRef(-Infinity);
+
+  useEffect(() => preloadMenuList(), []);
 
   const open = useCallback((request: ContextMenuRequest) => {
     const spec = optionsRef.current.resolve(request);

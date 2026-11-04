@@ -2,7 +2,8 @@ import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useRef,
 import type { CSSProperties, ReactNode } from 'react';
 import { useFocusRing } from './theme';
 import type { ToolbarControlState } from './theme';
-import { DEFAULT_MENU_COLORS, MenuList } from './MenuList';
+import { DEFAULT_MENU_COLORS } from './menuColors';
+import { loadedMenuList, loadMenuList, preloadMenuList } from './menuListLoader';
 import type { InitialFocus, OverflowMenuColors, OverflowMenuEntry } from './MenuList';
 
 export type { OverflowMenuColors, OverflowMenuEntry } from './MenuList';
@@ -39,6 +40,8 @@ export const OverflowMenu = forwardRef<OverflowMenuHandle, OverflowMenuProps>(fu
   const menus = useRef(new Set<HTMLElement>());
   const menuId = useId();
   const [open, setOpen] = useState<InitialFocus | null>(null);
+  const [, listArrived] = useState(0);
+  const MenuList = loadedMenuList();
   const [hovered, setHovered] = useState(false);
   const focus = useFocusRing<HTMLButtonElement>();
   const palette = { ...DEFAULT_MENU_COLORS, ...colors };
@@ -74,12 +77,29 @@ export const OverflowMenu = forwardRef<OverflowMenuHandle, OverflowMenuProps>(fu
       close();
       if (focused) triggerRef.current?.focus({ preventScroll: true });
     };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!loadedMenuList() && (event.key === 'Escape' || event.key === 'Tab')) close();
+    };
     document.addEventListener('mousedown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('mousedown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('resize', onResize);
     };
+  }, [open, close]);
+
+  useEffect(() => preloadMenuList(), []);
+  useEffect(() => {
+    if (!open || loadedMenuList()) return;
+    let alive = true;
+    loadMenuList().then(() => { if (alive) listArrived((count) => count + 1); }, () => {
+      if (!alive) return;
+      close();
+      triggerRef.current?.focus({ preventScroll: true });
+    });
+    return () => { alive = false; };
   }, [open, close]);
 
   const anchor = useCallback(() => triggerRef.current?.getBoundingClientRect() ?? null, []);
@@ -118,7 +138,7 @@ export const OverflowMenu = forwardRef<OverflowMenuHandle, OverflowMenuProps>(fu
       >
         {trigger}
       </button>
-      {open && (
+      {open && MenuList && (
         <MenuList
             id={menuId}
             label={label}

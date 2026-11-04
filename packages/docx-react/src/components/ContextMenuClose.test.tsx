@@ -3,6 +3,9 @@ import { afterAll, afterEach, expect, test } from 'bun:test';
 import { ImageContextMenu } from './ImageContextMenu';
 import { TextContextMenu } from './TextContextMenu';
 import { HyperlinkPopup } from './ui/HyperlinkPopup';
+import { loadMenuList } from '../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
