@@ -58,6 +58,18 @@ test('a pointer-opened menu is a labelled menu that takes focus', () => {
   expect(described?.textContent).toBe('Paste is unavailable');
 });
 
+test('Escape outside the menu closes it without moving focus', () => {
+  focusOrigin();
+  const closes: string[] = [];
+  mount(<ContextMenu label="Cell" point={{ x: 0, y: 0 }} entries={[item('Cut')]} onClose={(reason) => closes.push(reason)} />);
+  const elsewhere = document.createElement('input');
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  key(elsewhere, { key: 'Escape' });
+  expect(closes).toEqual(['escape']);
+  expect(document.activeElement).toBe(elsewhere);
+});
+
 test('a keyboard-opened menu focuses its first item and arrows move between items', () => {
   focusOrigin();
   mount(<ContextMenu label="Cell" modality="keyboard" point={{ x: 0, y: 0 }} entries={[item('Cut'), item('Copy')]} onClose={() => {}} />);

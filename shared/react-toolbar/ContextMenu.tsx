@@ -76,11 +76,16 @@ export function ContextMenu({
     const onPointerDown = (event: PointerEvent) => {
       if (!inside(event.target)) finish('outside', false);
     };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !inside(event.target)) finish('escape', false);
+    };
     const onResize = () => finish('resize', inside(document.activeElement));
     document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
     window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', onResize);
     };
   }, [finish]);
