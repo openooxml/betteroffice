@@ -20,10 +20,10 @@ struct Widths {
 }
 
 impl Widths {
-    fn add(&mut self, width: f32, visible: f32) {
-        if visible > 0.0 {
-            self.visible_line = self.line + visible;
-            self.visible_word = self.word + visible;
+    fn add(&mut self, width: f32, is_visible: bool) {
+        if is_visible {
+            self.visible_line = self.line + width;
+            self.visible_word = self.word + width;
         }
         self.line += width;
         self.word += width;
@@ -76,13 +76,10 @@ fn text_widths(texts: &[(&str, &PreparedText)], widths: &mut Widths) {
                 widths.end_word();
                 boundary += 1;
             }
+            let advance = cluster.advance_with_spacing(text.letter_spacing);
             widths.add(
-                cluster.advance_with_spacing(text.letter_spacing),
-                if cluster.is_fit_space {
-                    0.0
-                } else {
-                    cluster.advance_with_spacing(text.letter_spacing)
-                },
+                advance,
+                !cluster.is_fit_space && (advance > 0.0 || text.letter_spacing < 0.0),
             );
         }
         run_start += text.utf16_len as usize;
@@ -180,23 +177,23 @@ pub fn measure_intrinsic_widths(
                     f32::MAX,
                 )
                 .width;
-                widths.add(advance, advance);
+                widths.add(advance, advance > 0.0);
                 widths.end_word();
             }
             PreparedRun::Field(field) => {
-                widths.add(field.width, field.width);
+                widths.add(field.width, field.width > 0.0);
                 widths.end_word();
             }
             PreparedRun::InlineImage(image) => {
                 widths.end_word();
-                widths.add(image.width, image.width);
+                widths.add(image.width, image.width > 0.0);
                 widths.end_word();
             }
             PreparedRun::OwnLineImage(image) => {
                 if widths.line > 0.0 {
                     widths.end_line();
                 }
-                widths.add(image.width, image.width);
+                widths.add(image.width, image.width > 0.0);
                 widths.end_line();
             }
             PreparedRun::Hidden { .. } | PreparedRun::SkippedImage { .. } => {}
@@ -208,4 +205,64 @@ pub fn measure_intrinsic_widths(
         widths.minimum.max(0.0),
         widths.maximum.max(widths.minimum).max(0.0),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::line_filler::visible_span_width;
+    use super::*;
+    use crate::measure::MeasureInput;
+
+    #[test]
+    fn condensed_intrinsic_widths_include_nonpositive_visible_clusters() {
+        let mut store = FontStore::new();
+        let font = store
+            .register(include_bytes!("../../tests/fonts/LiberationSans-Regular.ttf").to_vec())
+            .unwrap();
+        for source in ["WW\u{200b}", "WWi", "WWi\u{301}"] {
+            for spacing in [-2.0, -3.0] {
+                for trailing in ["", "  "] {
+                    let input: MeasureInput = serde_json::from_value(serde_json::json!({
+                        "block": {
+                            "kind": "paragraph",
+                            "runs": [{
+                                "kind": "text", "text": format!("{source}{trailing}"),
+                                "letterSpacing": spacing
+                            }]
+                        },
+                        "maxWidth": 1000,
+                        "fontChains": {"arial|0|0": [font.to_u32()]},
+                        "defaults": {"fontFamily": "Arial", "fontSize": 6},
+                        "authoritativeShaping": true
+                    }))
+                    .unwrap();
+                    let request = MeasureRequest {
+                        block: &input.block,
+                        max_width: input.max_width,
+                        font_chains: input::FontChains::Hash(&input.font_chains),
+                        defaults: &input.defaults,
+                        compat: input.compat,
+                        floating_zones: None,
+                        paragraph_y_offset: None,
+                        authoritative_shaping: input.authoritative_shaping,
+                    };
+                    let prepared = prepare_runs(&store, &request).unwrap();
+                    let PreparedRun::Text(text) = &prepared[0] else {
+                        unreachable!()
+                    };
+                    let last = text
+                        .chars
+                        .iter()
+                        .rfind(|cluster| !cluster.is_fit_space)
+                        .unwrap();
+                    assert!(last.advance_with_spacing(text.letter_spacing) <= 0.0);
+                    let expected = visible_span_width(&text.chars, text.letter_spacing);
+                    assert!(expected > 0.0);
+                    let (minimum, maximum) = measure_intrinsic_widths(&store, &request).unwrap();
+                    assert!((minimum - expected).abs() < 0.001, "{source:?}, {spacing}");
+                    assert!((maximum - expected).abs() < 0.001, "{source:?}, {spacing}");
+                }
+            }
+        }
+    }
 }

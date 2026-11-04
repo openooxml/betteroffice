@@ -288,6 +288,12 @@ pub enum Primitive {
 pub struct CanvasTextCluster {
     pub text: String,
     pub offset: Number,
+    #[serde(
+        rename = "sourceRange",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_range: Option<std::ops::Range<usize>>,
 }
 
 /// Everything a primitive carries about the document content it came from:
@@ -5000,11 +5006,21 @@ fn text_canvas_clusters(
     let font = *chain.ids.first()?;
     let coverage_only = chain.coverage_only;
     fonts.store.family_widths(font).ok()??;
-    let text = if fmt.all_caps == Some(true) {
-        text.to_uppercase()
-    } else {
-        text.to_owned()
-    };
+    let mut painted = String::new();
+    let mut source_ranges = Vec::new();
+    for (start, ch) in text.char_indices() {
+        let end = start + ch.len_utf8();
+        let transformed = if fmt.all_caps == Some(true) {
+            ch.to_uppercase().collect::<String>()
+        } else {
+            ch.to_string()
+        };
+        for painted_ch in transformed.chars() {
+            source_ranges.push((painted.len(), start..end));
+            painted.push(painted_ch);
+        }
+    }
+    let text = painted;
     if text.chars().any(|ch| {
         ooxml_text::covered_character(fonts.store, font, ch)
             .ok()
@@ -5052,10 +5068,15 @@ fn text_canvas_clusters(
         let index = bounds.binary_search(&start).ok()?;
         let end = *bounds.get(index + 1)?;
         let cluster = text.get(start..end)?;
+        let source_start = source_ranges.partition_point(|(offset, _)| *offset <= start) - 1;
+        let source_end = source_ranges.partition_point(|(offset, _)| *offset < end) - 1;
         clusters.push(CanvasTextCluster {
             text: text_paint_override(Some(fonts), cluster, fmt)
                 .unwrap_or_else(|| cluster.to_owned()),
             offset: px(pen),
+            source_range: Some(
+                source_ranges[source_start].1.start..source_ranges[source_end].1.end,
+            ),
         });
         pen += if fmt.small_caps == Some(true) {
             painted_text_width(

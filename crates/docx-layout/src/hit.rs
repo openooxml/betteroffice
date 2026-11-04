@@ -248,15 +248,25 @@ fn canvas_caret_stops(
     let mut utf16 = 0;
     let mut stops = Vec::with_capacity(clusters.len() + 1);
     for cluster in clusters.iter() {
-        if cluster.text.is_empty() || !run.text.get(byte..)?.starts_with(&cluster.text) {
+        let range = if let Some(range) = &cluster.source_range {
+            range.clone()
+        } else {
+            if cluster.text.is_empty() || !run.text.get(byte..)?.starts_with(&cluster.text) {
+                return None;
+            }
+            byte..byte + cluster.text.len()
+        };
+        if range.start > byte || range.end < byte || run.text.get(range.clone())?.is_empty() {
             return None;
         }
-        stops.push(CaretStop {
-            x: x + cluster.offset.as_f64()? * scale,
-            position: doc_position_at_utf16(doc_start, doc_end, utf16, utf16_len),
-        });
-        byte += cluster.text.len();
-        utf16 += cluster.text.encode_utf16().count() as i64;
+        if range.start == byte {
+            stops.push(CaretStop {
+                x: x + cluster.offset.as_f64()? * scale,
+                position: doc_position_at_utf16(doc_start, doc_end, utf16, utf16_len),
+            });
+        }
+        utf16 += run.text.get(byte..range.end)?.encode_utf16().count() as i64;
+        byte = range.end;
     }
     if byte != run.text.len() || stops.is_empty() {
         return None;

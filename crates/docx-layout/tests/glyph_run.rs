@@ -429,7 +429,91 @@ fn browser_canvas_clusters_paint_the_same_nonbreaking_hyphen_stand_in() {
     assert_eq!(run.text, "co\u{2011}op");
     let clusters = run.attrs.canvas_clusters.as_ref().unwrap();
     assert_eq!(clusters[2].text, "-");
-    assert_eq!(run.attrs.canvas_clusters, control.attrs.canvas_clusters);
+    let control_clusters = control.attrs.canvas_clusters.as_ref().unwrap();
+    assert_eq!(clusters.len(), control_clusters.len());
+    for (cluster, control) in clusters.iter().zip(control_clusters.iter()) {
+        assert_eq!(cluster.text, control.text);
+        assert_eq!(cluster.offset, control.offset);
+    }
+    assert_eq!(clusters[2].source_range, Some(2..5));
+    assert_eq!(control_clusters[2].source_range, Some(2..3));
+}
+
+#[test]
+fn browser_transformed_cluster_carets_follow_source_boundaries() {
+    let mut store = FontStore::new();
+    let base = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let font = store.register_named_substitute(base, "MS PGothic").unwrap();
+    for (text, all_caps) in [("wim", true), ("co\u{2011}op", false), ("aßw", true)] {
+        for spacing in [-1.0, 2.0] {
+            let run = browser_text_run(
+                &store,
+                "MS PGothic",
+                font,
+                text,
+                serde_json::json!({
+                    "allCaps": all_caps,
+                    "textShadow": true,
+                    "letterSpacing": spacing,
+                    "horizontalScale": 80.0
+                }),
+            );
+            let clusters = run.attrs.canvas_clusters.as_ref().unwrap();
+            let painted: String = clusters
+                .iter()
+                .map(|cluster| cluster.text.as_str())
+                .collect();
+            let expected_paint = if all_caps {
+                text.to_uppercase()
+            } else {
+                text.to_owned()
+            };
+            assert_eq!(painted, expected_paint.replace('\u{2011}', "-"));
+            let list: DisplayList = serde_json::from_value(serde_json::json!({
+                "pages": [{
+                    "pageIndex": 0, "width": 816, "height": 1056,
+                    "primitives": [serde_json::to_value(&run).unwrap()]
+                }]
+            }))
+            .unwrap();
+            let scale = run
+                .horizontal_scale
+                .as_ref()
+                .and_then(|n| n.as_f64())
+                .unwrap_or(100.0)
+                / 100.0
+                * run
+                    .substitute_scale
+                    .as_ref()
+                    .and_then(|n| n.as_f64())
+                    .unwrap_or(1.0);
+            let mut differs_from_uniform = false;
+            for (index, (byte, _)) in text.char_indices().enumerate() {
+                let cluster = clusters
+                    .iter()
+                    .find(|cluster| cluster.source_range.as_ref().unwrap().start == byte)
+                    .unwrap();
+                let range = cluster.source_range.as_ref().unwrap();
+                assert!(text.get(range.clone()).is_some());
+                let position = 1 + text[..byte].encode_utf16().count() as i64;
+                let x = run.x.as_f64().unwrap() + cluster.offset.as_f64().unwrap() * scale;
+                let uniform = run.x.as_f64().unwrap()
+                    + run.width.as_f64().unwrap() * index as f64 / text.chars().count() as f64;
+                differs_from_uniform |= (x - uniform).abs() > 0.01;
+                assert!((caret_rect(&list, position).unwrap().x - x).abs() < 0.002);
+                assert_eq!(
+                    hit_test(&list, 0, x, run.baseline_y.as_f64().unwrap()),
+                    Some(position)
+                );
+            }
+            assert!(differs_from_uniform, "{text:?}, {spacing}");
+            let end = 1 + text.encode_utf16().count() as i64;
+            let x = run.x.as_f64().unwrap() + run.width.as_f64().unwrap();
+            assert!((caret_rect(&list, end).unwrap().x - x).abs() < 0.002);
+        }
+    }
 }
 
 #[test]

@@ -633,14 +633,15 @@ impl Filler<'_> {
             }
 
             if self.cur.width > 0.0
-                && fitting_width > 0.0
-                && self.cur.width + wrap_width
-                    - if self.p.justify {
-                        self.cur.space_width * self.p.space_shrink_limit
-                    } else {
-                        0.0
-                    }
-                    > self.cur.available + WRAP_SLACK_PX
+                && ((t.letter_spacing < 0.0 && self.cur.width > self.cur.available + WRAP_SLACK_PX)
+                    || (fitting_width > 0.0
+                        && self.cur.width + wrap_width
+                            - if self.p.justify {
+                                self.cur.space_width * self.p.space_shrink_limit
+                            } else {
+                                0.0
+                            }
+                            > self.cur.available + WRAP_SLACK_PX))
             {
                 self.start_new_line(ri, utf16_at(t, char_idx))?;
             }
@@ -1267,9 +1268,13 @@ pub(super) fn span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
 fn max_fitting(chars: &[CharAdv], letter_spacing: f32, max_width: f32) -> usize {
     let mut best = 0usize;
     let mut advance = 0.0f32;
+    let mut visible = 0.0f32;
     for (k, c) in chars.iter().enumerate() {
         advance += c.advance_with_spacing(letter_spacing);
-        if advance <= max_width {
+        if !c.is_fit_space {
+            visible = advance;
+        }
+        if advance <= max_width && visible <= max_width {
             best = k + 1;
         } else if letter_spacing >= 0.0 {
             break;
@@ -1433,6 +1438,124 @@ mod tests {
         })
         .unwrap()
         .lines
+    }
+
+    fn spaced_run(parts: &[(&str, f32)], spacing: f32, font: FontId) -> PreparedRun {
+        let mut offset = 0;
+        let chars: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .map(|(index, &(text, advance))| {
+                let utf16_len = text.encode_utf16().count() as u32;
+                let cluster = CharAdv {
+                    utf16_offset: offset,
+                    utf16_len,
+                    source_chars: text.chars().count() as u32,
+                    advance,
+                    is_space: text == " ",
+                    is_fit_space: text == " ",
+                    level: 0,
+                    logical_order: index as u32,
+                    font_size_pt: 12.0,
+                    metrics_font: font,
+                    baseline_shift_px: 0.0,
+                };
+                offset += utf16_len;
+                cluster
+            })
+            .collect();
+        let source: String = parts.iter().map(|(text, _)| *text).collect();
+        let breaks = crate::line_break::break_opportunities(&source)
+            .into_iter()
+            .filter(|boundary| boundary.byte_index > 0 && boundary.byte_index < source.len())
+            .filter_map(|boundary| {
+                let utf16 = source[..boundary.byte_index].encode_utf16().count() as u32;
+                chars
+                    .iter()
+                    .position(|cluster| cluster.utf16_offset == utf16)
+            })
+            .collect();
+        PreparedRun::Text(PreparedText {
+            chars,
+            utf16_len: offset,
+            breaks,
+            letter_spacing: spacing,
+            font_size_pt: 12.0,
+            metrics_font: font,
+            baseline_shift_px: 0.0,
+        })
+    }
+
+    #[test]
+    fn spaced_lines_fit_visible_width_and_place_each_source_character_once() {
+        let mut store = FontStore::new();
+        let font = store.register(FIXTURE.to_vec()).unwrap();
+        let cases: &[&[(&str, f32)]] = &[
+            &[("W", 10.0), (" ", 1.0)],
+            &[("W", 10.0), ("i", 1.0), (" ", 1.0), (" ", 1.0)],
+            &[("W", 10.0), ("\u{200b}", 0.0), ("i", 1.0), (" ", 1.0)],
+            &[("W", 10.0), ("i\u{301}", 1.0), ("W", 10.0), (" ", 1.0)],
+            &[("\u{200b}", 0.0), ("i\u{301}", 1.0), ("W", 10.0)],
+            &[("W", 10.0), (" ", 1.0), ("i\u{301}", 1.0), (" ", 1.0)],
+            &[("W", 10.0), (" ", 1.0), ("\u{200b}", 0.0), ("W", 10.0)],
+        ];
+        for parts in cases {
+            for spacing in [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0] {
+                for available in [1.0, 2.0, 5.0, 7.0, 10.0, 13.0, 20.0] {
+                    let run = spaced_run(parts, spacing, font);
+                    let PreparedRun::Text(text) = &run else {
+                        unreachable!()
+                    };
+                    let lines = fill_at(available, std::slice::from_ref(&run));
+                    let mut next = 0;
+                    for line in lines {
+                        assert_eq!((line.head_run, line.tail_run), (0, 0));
+                        assert_eq!(line.head_char, next);
+                        let start = text
+                            .chars
+                            .partition_point(|c| c.utf16_offset < line.head_char);
+                        let end = text
+                            .chars
+                            .partition_point(|c| c.utf16_offset < line.tail_char);
+                        let clusters = &text.chars[start..end];
+                        assert!(!clusters.is_empty());
+                        assert_eq!(clusters[0].utf16_offset, line.head_char);
+                        let last = clusters.last().unwrap();
+                        assert_eq!(last.utf16_offset + last.utf16_len, line.tail_char);
+                        let visible = visible_span_width(clusters, spacing);
+                        assert!(
+                            visible <= available + WRAP_SLACK_PX || clusters.len() == 1,
+                            "{parts:?}, spacing {spacing}, available {available}, visible {visible}"
+                        );
+                        next = line.tail_char;
+                    }
+                    assert_eq!(next, text.utf16_len);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nonpositive_word_wraps_after_an_indivisible_overflow() {
+        let mut store = FontStore::new();
+        let font = store.register(FIXTURE.to_vec()).unwrap();
+        let runs = [
+            spaced_run(&[("W", 10.0)], 0.0, font),
+            spaced_run(&[("\u{200b}", 0.0)], 0.0, font),
+        ];
+        assert_eq!(fill_at(5.0, &runs).len(), 1);
+        for spacing in [-3.0, -1.0] {
+            let runs = [
+                spaced_run(&[("W", 10.0)], spacing, font),
+                spaced_run(&[("\u{200b}", 0.0)], spacing, font),
+            ];
+            let lines = fill_at(5.0, &runs);
+            assert_eq!(lines.len(), 2);
+            assert_eq!((lines[0].head_run, lines[0].tail_run), (0, 0));
+            assert_eq!((lines[1].head_run, lines[1].tail_run), (1, 1));
+            assert_eq!((lines[0].head_char, lines[0].tail_char), (0, 1));
+            assert_eq!((lines[1].head_char, lines[1].tail_char), (0, 1));
+        }
     }
 
     #[test]
