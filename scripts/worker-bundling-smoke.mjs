@@ -90,7 +90,7 @@ try {
     });
     const inputs = Object.keys(alone.metafile.inputs);
     assert.ok(inputs.every(input => !/sessionWorker\.|nodeSession(?:Worker|Scope)/.test(input)), `${worker} bundles a module that constructs its own worker`);
-    assert.deepEqual(bare.filter(entry => !/^@betteroffice\/fonts \(dynamic-import\)$/.test(entry)), [],
+    assert.deepEqual(bare.filter(entry => !/^@betteroffice\/fonts(?:\/progressive)? \(dynamic-import\)$/.test(entry)), [],
       `${worker} imports specifiers an unbundled browser worker cannot resolve`);
   }
   await checkOutput(esbuildDirectory);

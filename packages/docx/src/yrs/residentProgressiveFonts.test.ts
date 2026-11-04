@@ -172,3 +172,24 @@ test('fonts that were replaced never install outlines that arrive later', async 
   expect(await resident.ensure(new Map([[10, new Set([glyphIn(53)])]]))).toEqual(new Set());
   expect(hits.get(chunkFile(53))).toBeUndefined();
 });
+
+test('a worker that cannot load the progressive module has the face reloaded whole instead of retrying', async () => {
+  const logs: string[] = [];
+  let loads = 0;
+  const resident = new ResidentProgressiveFonts([spec], [10, 11], [undefined, 0], {
+    updateFontOutlines() {
+      throw new Error('no outlines expected');
+    },
+  }, decode, (message) => logs.push(message), async () => {
+    loads += 1;
+    throw new TypeError('Failed to resolve module specifier "@betteroffice/fonts/progressive"');
+  });
+  const refused: number[] = [];
+  resident.onRefused((fontId) => refused.push(fontId));
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set());
+  expect(await resident.ensure(new Map([[11, new Set([glyphIn(42)])]]))).toEqual(new Set());
+  expect(refused).toEqual([10]);
+  expect(loads).toBe(1);
+  expect(hits.size).toBe(0);
+  expect(logs.filter((message) => message.includes('progressive font module is unavailable'))).toHaveLength(1);
+});

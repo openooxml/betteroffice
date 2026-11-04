@@ -63,6 +63,18 @@ export function glyphsByFont(page: unknown, into = new Map<number, Set<number>>(
   return into;
 }
 
+/** What the worker uses of `@betteroffice/fonts/progressive`. */
+interface ProgressiveModule {
+  openProgressiveFace(ref: ProgressiveFontSource['ref'], transport: {
+    read(file: string): Promise<ArrayBuffer>;
+    decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
+  }): Promise<OutlineFace>;
+  readFontAsset(file: string, url: URL, timeoutMs?: number): Promise<ArrayBuffer>;
+}
+
+/** The progressive font module could not be loaded in this worker, as in a host that serves the packages without a bundler. */
+class ProgressiveModuleUnavailable extends Error {}
+
 /**
  * Sliced CJK faces registered from their skeleton and core. Before a page is
  * rasterized, the outlines of the glyphs it draws are fetched (each chunk
@@ -90,6 +102,7 @@ export class ResidentProgressiveFonts {
     private readonly engine: OutlineEngine,
     decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>,
     private readonly log: (message: string) => void = (message) => console.warn(message),
+    loadModule: () => Promise<ProgressiveModule> = () => import('@betteroffice/fonts/progressive'),
   ) {
     const rootSlot = (slot: number): number => {
       let current = slot;
@@ -113,7 +126,9 @@ export class ResidentProgressiveFonts {
       }
       if (shared !== undefined) continue;
       let opening: Promise<OutlineFace> | undefined;
-      const open = () => opening ??= import('@betteroffice/fonts/progressive').then(({ openProgressiveFace, readFontAsset }) =>
+      const open = () => opening ??= loadModule().then(undefined, (error: unknown) => {
+        throw new ProgressiveModuleUnavailable(error instanceof Error ? error.message : String(error));
+      }).then(({ openProgressiveFace, readFontAsset }) =>
         openProgressiveFace(spec.source.ref, {
           read: (file) => {
             const url = spec.source.urls[file];
@@ -222,6 +237,10 @@ export class ResidentProgressiveFonts {
         await state.face.ensureGlyphs(ids);
         return;
       } catch (error) {
+        if (error instanceof ProgressiveModuleUnavailable) {
+          this.refuse(owner, `the progressive font module is unavailable here: ${error.message}`);
+          return;
+        }
         const pause = CHUNK_RETRY_DELAYS_MS[attempt];
         if (pause === undefined) {
           this.log(`[docx] font outline chunks failed to load after ${attempt + 1} attempts; their glyphs stay blank until a frame needs them again: ${error instanceof Error ? error.message : String(error)}`);
@@ -245,15 +264,22 @@ export class ResidentProgressiveFonts {
       return true;
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
-      state.complete = true;
-      state.refused = true;
-      this.log(`[docx] the engine refused the outlines of a sliced face: ${error instanceof Error ? error.message : String(error)}`);
-      for (const listener of [...this.refusalListeners]) listener(owner);
+      this.refuse(owner, `the engine refused the outlines of a sliced face: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   }
 
-  /** Calls `listener` with a font id whose sliced outlines the engine refused; the host reloads it whole. */
+  /** Stops progressive loading for `owner` and asks the host to reload it whole. */
+  private refuse(owner: number, reason: string): void {
+    const state = this.owners.get(owner)!;
+    if (state.refused) return;
+    state.complete = true;
+    state.refused = true;
+    this.log(`[docx] ${reason}`);
+    for (const listener of [...this.refusalListeners]) listener(owner);
+  }
+
+  /** Calls `listener` with a font id that cannot load progressively here (the engine refused its outlines or the module is unavailable); the host reloads it whole. */
   onRefused(listener: (owner: number) => void): () => void {
     this.refusalListeners.add(listener);
     return () => {
