@@ -246,7 +246,7 @@ export function useContextMenu(options: UseContextMenuOptions): ContextMenuContr
       surface.removeEventListener('contextmenu', onContextMenu);
       surface.removeEventListener('keydown', onKeyDown);
     };
-  }, [options.surface, open, keyboardRequest]);
+  });
 
   const subscribe = options.subscribe;
   const isOpen = state !== null;

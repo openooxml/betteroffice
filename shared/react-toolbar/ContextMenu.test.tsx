@@ -142,11 +142,26 @@ test('ArrowRight opens a submenu whose items run, ArrowLeft closes it', () => {
   expect(ran).toEqual(['below']);
 });
 
-function Surface(props: { resolve: Parameters<typeof useContextMenu>[0]['resolve'] }) {
+function Surface(props: { visible?: boolean; resolve: Parameters<typeof useContextMenu>[0]['resolve'] }) {
   const surface = useRef<HTMLDivElement>(null);
   const menu = useContextMenu({ surface, resolve: props.resolve, keyboardPoint: () => ({ x: 7, y: 9 }) });
-  return <><div ref={surface} tabIndex={0} data-testid="surface" />{menu.element}</>;
+  return <>{props.visible !== false && <div ref={surface} tabIndex={0} data-testid="surface" />}{menu.element}</>;
 }
+
+test('attaches to a surface mounted after the hook', () => {
+  const resolve = () => ({ label: 'Surface menu', entries: () => [item('Cut')] });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  unmount = () => root.unmount();
+  act(() => root.render(<Surface visible={false} resolve={resolve} />));
+  act(() => root.render(<Surface resolve={resolve} />));
+  const surface = host.querySelector('[data-testid="surface"]')!;
+  const click = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 });
+  act(() => { surface.dispatchEvent(click); });
+  expect(click.defaultPrevented).toBe(true);
+  expect(document.querySelector('[role="menu"][aria-label="Surface menu"]')).not.toBeNull();
+});
 
 test('right-click, Shift+F10 and the Menu key open the menu on the surface', () => {
   const requests: string[] = [];
