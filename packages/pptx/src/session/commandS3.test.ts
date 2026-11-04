@@ -563,3 +563,37 @@ test('strikethrough_toggles_ranges_and_inherited_caret_marks', async () => {
     }
   } finally { await session.dispose(); }
 });
+
+for (const strike of [undefined, 'sngStrike', 'dblStrike'] as const) {
+  test(`typing_inherits_${strike ?? 'plain'}_and_preserves_explicit_strike_clear`, async () => {
+    const zip = await JSZip.loadAsync(await deck(['alpha']));
+    const path = 'ppt/slides/slide1.xml';
+    if (strike) zip.file(path, (await zip.file(path)!.async('string')).replace('<a:lstStyle/>',
+      `<a:lstStyle><a:lvl1pPr><a:defRPr strike="${strike}"/></a:lvl1pPr></a:lstStyle>`));
+    const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+    const insert = spyOn(session.handle(), 'insertText');
+    try {
+      const selected = await session.command(session.state, 1, { kind: 'setSelection', payload: {
+        ...input, selection: selection(session.story, 2) } });
+      expect(selected.editState.toolbar.formatting?.strike).toBe(strike);
+      const typed = await session.command(selected, 2, { kind: 'insertText', payload: { ...input,
+        at: { source: 'afterSeq', seq: 1 }, text: 'X' } }, 1);
+      expect(typed.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(insert.mock.calls[0]![3]?.strike).toBe(strike);
+      if (strike) {
+        const runs = session.handle().story(session.story.storyId).paragraphs[0]!.runs;
+        expect(runs.find((run) => run.text.includes('X'))?.style.strike).toBe(strike);
+        const cleared = await session.command(typed, 3, { kind: 'formatText', payload: { ...input,
+          at: { source: 'afterSeq', seq: 2 }, patch: {}, toggle: 'strikethrough' } }, 2);
+        expect(cleared.editState.toolbar.storedMarks).toEqual({ strike: 'noStrike' });
+        const plain = await session.command(cleared, 4, { kind: 'insertText', payload: { ...input,
+          at: { source: 'afterSeq', seq: 3 }, text: 'Y' } }, 3);
+        expect(plain.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+        expect(insert).toHaveBeenLastCalledWith(session.story.storyId, 3, 'Y', expect.objectContaining({ strike: 'noStrike' }));
+        expect(session.handle().story(session.story.storyId).paragraphs[0]!.runs
+          .find((run) => run.text.includes('Y'))?.style.strike).toBe('noStrike');
+      }
+    } finally { insert.mockRestore(); await session.dispose(); }
+  });
+}

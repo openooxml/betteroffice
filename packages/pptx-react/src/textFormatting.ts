@@ -133,7 +133,7 @@ export function effectiveStyleFromSelection(
           ? 'sng'
           : 'none',
     strike: strike ?? (formatting.strikethrough === undefined ? fallback.strike
-      : formatting.strikethrough ? 'sngStrike' : 'noStrike'),
+      : formatting.strikethrough ? 'sngStrike' : undefined),
     fontSizePt: formatting.fontSize ?? fallback.fontSizePt,
     color: formatting.textColor ?? fallback.color,
     fontFamily: formatting.fontFamily ?? fallback.fontFamily,
@@ -192,7 +192,7 @@ function resolveTextStyle(
     bold: style.bold ?? fallback.bold,
     italic: style.italic ?? fallback.italic,
     underline: style.underline ?? fallback.underline,
-    strike: style.strike ?? fallback.strike ?? 'noStrike',
+    strike: style.strike ?? fallback.strike,
     fontSizePt: style.fontSizePt ?? fallback.fontSizePt,
     color: style.color ?? fallback.color,
     fontFamily: style.fontFamily ?? fallback.fontFamily,

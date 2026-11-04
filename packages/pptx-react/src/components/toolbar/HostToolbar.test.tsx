@@ -362,4 +362,11 @@ test('strikethrough dispatches through the command store and projects active sta
     controller.refresh();
   });
   expect(screen().getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('true');
+  await act(async () => {
+    const text = harness.state.env.text;
+    if (!text || text === 'unsupported') throw new Error('Missing text environment');
+    harness.update({ text: { ...text, strikethrough: undefined } });
+    controller.refresh();
+  });
+  expect(screen().getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('false');
 });

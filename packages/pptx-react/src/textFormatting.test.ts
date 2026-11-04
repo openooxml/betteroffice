@@ -12,7 +12,6 @@ const fallback = {
   bold: false,
   italic: false,
   underline: 'none',
-  strike: 'noStrike',
   fontSizePt: 24,
   color: '#111827',
   fontFamily: 'Arial',
@@ -54,11 +53,13 @@ describe('pptx text formatting', () => {
   it('reports single and double strike as active and noStrike as inactive', () => {
     const marked = story();
     const runs = marked.paragraphs[0].runs;
+    expect(effectiveStyleFromSelection(marked, 7, 7, fallback).strike).toBeUndefined();
     runs[0].style.strike = 'sngStrike';
     runs[1].style.strike = 'dblStrike';
     expect(selectionFormattingFromStory(marked, 0, 10, fallback).strikethrough).toBe(true);
     expect(effectiveStyleFromSelection(marked, 7, 7, fallback).strike).toBe('dblStrike');
     runs[1].style.strike = 'noStrike';
+    expect(effectiveStyleFromSelection(marked, 7, 7, fallback).strike).toBe('noStrike');
     expect(selectionFormattingFromStory(marked, 7, 7, fallback).strikethrough).toBe(false);
     expect(selectionFormattingFromStory(marked, 0, 10, fallback).strikethrough).toBeUndefined();
   });

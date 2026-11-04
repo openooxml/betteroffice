@@ -282,13 +282,13 @@ describe('Toolbar shape controls', () => {
 describe('Toolbar strikethrough control', () => {
   it('emits the command and reflects its active state', async () => {
     const actions: FormattingAction[] = [];
-    const toolbar = (active: boolean) => (
+    const toolbar = (active?: boolean) => (
       <LocaleProvider>
         <Toolbar textSelectionActive currentFormatting={{ strikethrough: active }}
           onFormat={(action) => actions.push(action)} />
       </LocaleProvider>
     );
-    const { getByTestId, rerender } = render(toolbar(false));
+    const { getByTestId, rerender } = render(toolbar());
     expect(getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(getByTestId('pptx-strikethrough'));
     await new Promise((resolve) => setTimeout(resolve, 0));

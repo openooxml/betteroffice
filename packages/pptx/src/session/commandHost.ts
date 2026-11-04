@@ -604,7 +604,7 @@ export function registerPresentationCommandHandlers(
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
           italic: run.style.italic ?? DEFAULT_EDITOR_TEXT_STYLE.italic,
           underline: run.style.underline ?? 'none',
-          strike: run.style.strike ?? 'noStrike',
+          strike: run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike,
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
@@ -632,7 +632,9 @@ export function registerPresentationCommandHandlers(
       formatting = { ...styles[0]! };
       const keys = new Set(styles.flatMap((style) => Object.keys(style))) as Set<keyof TextStyleSnapshot>;
       for (const key of keys) {
-        if (styles.some((style) => style[key] !== styles[0]![key])) formatting[key] = null;
+        if (styles.some((style) => key === 'strike'
+          ? (style.strike ?? 'noStrike') !== (styles[0]!.strike ?? 'noStrike')
+          : style[key] !== styles[0]![key])) formatting[key] = null;
       }
     }
     const value = alignments.size === 1 ? [...alignments][0] : null;

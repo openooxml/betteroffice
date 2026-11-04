@@ -454,5 +454,5 @@ def test_strike_round_trip_and_clear(sample_bytes):
     cleared = bo.Presentation.open(reopened.save())
     story = next(shape for shape in cleared[0].shapes if shape.name == "Parity text").stories[0]
     assert all(run.strike is None for run in story.paragraphs[0].runs)
-    with pytest.raises(bo.PptxError, match="strike"):
+    with pytest.raises(ValueError, match="strike"):
         cleared.format_text(story.id, 0, 1, strike="invalid")
