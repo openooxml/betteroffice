@@ -145,6 +145,12 @@ pub(super) fn restyle_run_deltas(
                 .get("fontFamily")
                 .and_then(|font| font.get(&path[1]))
                 .is_some_and(|value| !value.is_null()),
+            Some("characterSpacing") => match path.get(1).map(String::as_str) {
+                Some(field @ ("spacing" | "position" | "scale" | "kerning")) => has(field),
+                _ => ["spacing", "position", "scale", "kerning"]
+                    .iter()
+                    .any(|field| has(field)),
+            },
             Some("textColor") => has("color"),
             Some("strike" | "doubleStrike") => has("strike") || has("doubleStrike"),
             Some("superscript" | "subscript") => has("vertAlign"),
@@ -1307,6 +1313,35 @@ fn qualified(child: &str) -> Result<&'static str, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restyling_keeps_a_character_spacing_change_the_source_sets_directly() {
+        let attrs = |spacing: i64| -> Attrs {
+            serde_json::from_value(
+                serde_json::json!({ "characterSpacing": { "spacing": spacing } }),
+            )
+            .unwrap()
+        };
+        let delta = AttrDeltaV1 {
+            path: vec!["characterSpacing".to_owned(), "spacing".to_owned()],
+            before: SlotV1::Present {
+                value: serde_json::json!(20),
+            },
+            after: SlotV1::Present {
+                value: serde_json::json!(40),
+            },
+        };
+        let kept = restyle_run_deltas(
+            r#"<w:rPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:spacing w:val="20"/></w:rPr>"#,
+            &[delta],
+            &attrs(20),
+            &attrs(20),
+            &attrs(40),
+        )
+        .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, ["characterSpacing", "spacing"]);
+    }
 
     #[test]
     fn unknown_property_elements_return_an_unsupported_error() {
