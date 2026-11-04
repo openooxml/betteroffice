@@ -897,6 +897,7 @@ function openPresentationInternal(
     renderPng(target: PptxPngTarget, options: PptxPngOptions = {}): Promise<Uint8Array> {
       let slide: number;
       try {
+        assertAlive();
         if (typeof target !== 'object' || target === null || Object.keys(target).length !== 1 || !('slide' in target)) {
           throw new TypeError('target must be { slide } with a slide index or ID');
         }
@@ -924,7 +925,7 @@ function openPresentationInternal(
           } catch { return undefined; }
         },
         fonts: () => [...exportFaces.values()],
-      }, { slide }, options);
+      }, { slide }, options).then((bytes) => { assertAlive(); return bytes; });
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));

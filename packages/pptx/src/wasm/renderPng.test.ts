@@ -108,6 +108,28 @@ describe('PresentationHandle.renderPng', () => {
     } finally { handle.dispose(); }
   });
 
+  test('a presentation disposed during an export rejects it instead of returning a slide without its pictures', async () => {
+    const browser = stubBrowser();
+    const handle = openPresentation(fixture, { clientId: 7104, fonts: [{ family: 'Liberation Sans', bytes: font }] });
+    const closed: boolean[] = [];
+    let decodes = 0;
+    (globalThis as Record<string, unknown>).createImageBitmap = () => {
+      decodes++;
+      handle.dispose();
+      const bitmap = { width: 4, height: 4, close: () => { closed.push(true); } };
+      return Promise.resolve(bitmap);
+    };
+    const exported = handle.renderPng({ slide: 0 });
+    if (native) handle.dispose();
+    await expect(exported).rejects.toThrow('presentation handle is disposed');
+    await expect(handle.renderPng({ slide: 0 })).rejects.toThrow('presentation handle is disposed');
+    if (!native) {
+      expect(decodes).toBe(1);
+      expect(closed).toEqual([true]);
+    }
+    expect(browser.held).toEqual([]);
+  });
+
   test('paints each run with the face layout measured it with, as registered, not as the caller changed it afterwards', async () => {
     const browser = stubBrowser();
     const opened = { family: 'Liberation Sans', bytes: font.slice() };
