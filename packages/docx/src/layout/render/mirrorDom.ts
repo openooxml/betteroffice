@@ -1041,8 +1041,12 @@ function populateParagraphBlock(
     : MIRROR_CLASS_NAMES.block;
   el.setAttribute('role', chart ? 'img' : 'paragraph');
   if (chart?.label) el.setAttribute('aria-label', chart.label);
+  let open: HTMLElement | null = null;
   for (const p of inLogicalOrder(prims)) {
-    el.appendChild(renderMirrorPrimitive(p, doc, offsetY, ctx));
+    const child = renderMirrorPrimitive(p, doc, offsetY, ctx);
+    if (p.kind === 'glyphRun' && open && joinGlyphRunElement(open, child)) continue;
+    el.appendChild(child);
+    open = p.kind === 'glyphRun' ? child : null;
   }
   const pmarkRevision = findStructuralRevision(prims, 'pmark');
   if (pmarkRevision) applyStructuralRevisionAttrs(el, pmarkRevision);
@@ -1057,6 +1061,50 @@ function populateParagraphBlock(
   }
   applyContainerLanguageAndDirection(el, prims);
   applyBlockObjectA11y(el, prims);
+}
+
+const JOIN_IGNORED_ATTRIBUTES = new Set(['data-doc-start', 'data-doc-end', 'data-logical-order', 'style']);
+const JOIN_IGNORED_STYLES = new Set(['left', 'width']);
+
+/**
+ * Appends glyph run `next` to the touching run `open` on the same line when
+ * nothing else tells them apart, so a line shaped cluster by cluster reads as
+ * one text node: screen readers otherwise hear each positioned cluster as its
+ * own word. Returns false, touching nothing, when they differ.
+ */
+function joinGlyphRunElement(open: HTMLElement, next: HTMLElement): boolean {
+  if (open.tagName !== 'SPAN' || next.tagName !== 'SPAN' || open.id || next.id) return false;
+  const openText = open.firstChild;
+  const nextText = next.firstChild;
+  if (open.childNodes.length !== 1 || next.childNodes.length !== 1) return false;
+  if (openText?.nodeType !== 3 || nextText?.nodeType !== 3) return false;
+  const end = open.dataset.docEnd;
+  if (end === undefined || end !== next.dataset.docStart || next.dataset.docEnd === undefined) return false;
+  if (open.attributes.length !== next.attributes.length) return false;
+  for (const attribute of Array.from(open.attributes)) {
+    if (JOIN_IGNORED_ATTRIBUTES.has(attribute.name)) continue;
+    if (next.getAttribute(attribute.name) !== attribute.value) return false;
+  }
+  if (open.style.length !== next.style.length) return false;
+  for (let index = 0; index < open.style.length; index++) {
+    const name = open.style.item(index);
+    if (!JOIN_IGNORED_STYLES.has(name) && open.style.getPropertyValue(name) !== next.style.getPropertyValue(name)) {
+      return false;
+    }
+  }
+  const openLeft = parseFloat(open.style.left);
+  const openRight = openLeft + parseFloat(open.style.width);
+  const nextLeft = parseFloat(next.style.left);
+  const nextRight = nextLeft + parseFloat(next.style.width);
+  if (![openLeft, openRight, nextLeft, nextRight].every(Number.isFinite)) return false;
+  const rtl = open.getAttribute('dir') === 'rtl';
+  if (Math.abs(rtl ? nextRight - openLeft : nextLeft - openRight) > 0.5) return false;
+  const left = Math.min(openLeft, nextLeft);
+  open.style.left = `${left}px`;
+  open.style.width = `${Math.max(openRight, nextRight) - left}px`;
+  (openText as Text).appendData((nextText as Text).data);
+  open.dataset.docEnd = next.dataset.docEnd;
+  return true;
 }
 
 /**
