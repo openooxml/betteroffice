@@ -174,11 +174,12 @@ function resolveTextStyle(
   style: TextStyleSnapshot,
   fallback: EffectiveTextStyle
 ): EffectiveTextStyle {
+  const strike = style.strike ?? fallback.strike;
   return {
     bold: style.bold ?? fallback.bold,
     italic: style.italic ?? fallback.italic,
     underline: style.underline ?? fallback.underline,
-    strike: style.strike ?? fallback.strike,
+    ...(strike === undefined ? {} : { strike }),
     fontSizePt: style.fontSizePt ?? fallback.fontSizePt,
     color: style.color ?? fallback.color,
     fontFamily: style.fontFamily ?? fallback.fontFamily,

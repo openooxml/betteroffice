@@ -604,7 +604,8 @@ export function registerPresentationCommandHandlers(
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
           italic: run.style.italic ?? DEFAULT_EDITOR_TEXT_STYLE.italic,
           underline: run.style.underline ?? 'none',
-          strike: run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike,
+          ...(run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike) === undefined
+            ? {} : { strike: run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike },
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
