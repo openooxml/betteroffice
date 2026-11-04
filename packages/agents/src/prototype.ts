@@ -1,4 +1,5 @@
 import { DocumentToolError, type GrepOptions, type RenderedPage } from './types';
+import { editLimit } from './edit-limits';
 
 export interface PrototypeOptions {
   name?: string;
@@ -58,6 +59,8 @@ export async function initialize(format: 'xlsx' | 'pptx', init: (input?: Uint8Ar
 }
 
 export abstract class PrototypeDocument<Change, Step> {
+  protected readonly maxEdits: number;
+  protected constructor(maxEdits?: number) { this.maxEdits = editLimit(maxEdits); }
   private readonly proposals = new Map<string, { value: AgentProposal<Change>; steps: Step[]; engineId?: string }>();
   private readonly cursors = new Map<string, { signature: string; version: string; offset: number; remaining?: string[] }>();
   private nextId = 1;
@@ -84,10 +87,11 @@ export abstract class PrototypeDocument<Change, Step> {
 
   protected stage(input: { author: string; note?: string }, changes: Change[], steps: Step[], version: string) {
     this.alive();
-    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !changes.length || changes.length > 32) {
-      throw new DocumentToolError('INVALID_ARGUMENT', 'Supply an author (1–200 characters), note (up to 2000), and 1–32 edits.');
+    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !changes.length || changes.length > this.maxEdits) {
+      throw new DocumentToolError('INVALID_ARGUMENT', `Supply an author (1-200 characters), note (up to 2000), and 1-${this.maxEdits} edits.`);
     }
-    if (JSON.stringify(changes).length > 32000) throw new DocumentToolError('EDIT_LIMIT', 'Combined proposal changes must fit in 32000 UTF-16 units.');
+    const maxChars = Math.max(32000, 1000 * this.maxEdits);
+    if (JSON.stringify(changes).length > maxChars) throw new DocumentToolError('EDIT_LIMIT', `Combined proposal changes must fit in ${maxChars} UTF-16 units.`);
     this.validate(steps, version);
     this.synchronizeProposals();
     if (this.proposals.size >= 64) {

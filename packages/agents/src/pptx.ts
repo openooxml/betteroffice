@@ -32,22 +32,23 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     readonly name = 'presentation.pptx',
     private readonly owned = true,
     private readonly themeFonts?: PptxThemeFonts,
+    maxEdits?: number,
   ) {
-    super();
+    super(maxEdits);
     if (owned) this.sourceVersion = handle.version();
   }
 
-  static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
+  static async open(bytes: Uint8Array, options: PrototypeOptions & { maxEdits?: number } = {}) {
     await initialize('pptx', initWasm, options.wasm);
     if (bytes.length > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a PPTX file up to 64 MiB.');
     const source = bytes.slice();
-    return new PptxAgentPresentation(openPresentation(source), options.name, true, pptxThemeFonts(source));
+    return new PptxAgentPresentation(openPresentation(source), options.name, true, pptxThemeFonts(source), options.maxEdits);
   }
 
-  static attach(handle: PresentationHandle, options: { name?: string } = {}) {
+  static attach(handle: PresentationHandle, options: { name?: string; maxEdits?: number } = {}) {
     const required = ['fork', 'layouts', 'snapshot', 'save', 'applyUpdate', 'encodeStateVector', 'version'] as const;
     if (!handle || required.some(method => typeof handle[method] !== 'function')) throw new DocumentToolError('UNSUPPORTED_SESSION', 'attachPptx requires a PresentationHandle from openPresentation. Worker editor access does not expose state forking or update application.');
-    return new PptxAgentPresentation(handle, options.name, false);
+    return new PptxAgentPresentation(handle, options.name, false, undefined, options.maxEdits);
   }
 
   overview() {
@@ -113,7 +114,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
 
   propose(input: { author: string; note?: string; edits: (TextEdit | PptxProposalEdit)[] }) {
     this.alive();
-    if (!Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > 32) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply 1 to 32 proposal edits.');
+    if (!Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > this.maxEdits) throw new DocumentToolError('INVALID_ARGUMENT', `Supply 1 to ${this.maxEdits} proposal edits.`);
     const version = this.currentVersion();
     const changes: SlideTextChange[] = [];
     const steps: PptxEditStep[] = [];
@@ -773,10 +774,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   }
 }
 
-export async function openPptx(bytes: Uint8Array, options: PrototypeOptions = {}) {
+export async function openPptx(bytes: Uint8Array, options: PrototypeOptions & { maxEdits?: number } = {}) {
   return PptxAgentPresentation.open(bytes, options);
 }
 
-export function attachPptx(handle: PresentationHandle, options: { name?: string } = {}) {
+export function attachPptx(handle: PresentationHandle, options: { name?: string; maxEdits?: number } = {}) {
   return PptxAgentPresentation.attach(handle, options);
 }
