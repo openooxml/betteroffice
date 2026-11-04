@@ -25,7 +25,7 @@ export function ProposalChangeDetails({ change, proposal, t, lang, textOnly, tes
       {change.kind === 'inserted' && <p>{t(change.shapeId ? 'proposals.insertedShape' : 'proposals.insertedSlide')}</p>}
       {change.kind === 'deleted' && <p>{t(change.shapeId ? 'proposals.deletedShape' : 'proposals.deletedSlide')}</p>}
       {change.kind === 'moved' && <p>{t('proposals.movedFrom', { number: (change.beforeIndex ?? 0) + 1 })}</p>}
-      {proposalSlideLabels(change, proposal, t).map(label => <p key={label}>{label}</p>)}
+      {proposalSlideLabels(change, proposal, t).map((label, index) => <p key={index}>{label}</p>)}
       <ProposalTextDiff change={change} t={t} testId={testId} />
       {!textOnly && change.before && change.after && <ShapeChange change={change} t={t} lang={lang} />}
     </>

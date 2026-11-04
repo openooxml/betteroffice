@@ -2310,3 +2310,514 @@ fn slide_property_wire_requires_background_and_valid_placeholder_mapping() {
         assert!(!session.can_undo());
     }
 }
+
+const TABLE_DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
+
+fn table_proposal_source() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(TABLE_DECK).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    let mut xml = String::from_utf8(bytes.clone()).unwrap();
+    for attribute in [
+        "gridSpan=\"2\"",
+        "rowSpan=\"2\"",
+        "hMerge=\"1\"",
+        "vMerge=\"1\"",
+    ] {
+        xml = xml.replace(attribute, "");
+    }
+    *bytes = xml.into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn table_proposal_edit(kind: &str, slide: &str, shape: &str) -> ProposalEdit {
+    let mut value = serde_json::json!({
+        "type": kind, "slideId": slide, "shapeId": shape, "index": 0,
+    });
+    if kind.starts_with("insert") {
+        value["position"] = "after".into();
+        value["cells"] = serde_json::json!(["New cell"]);
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn table_variants_preview_accept_reject_and_undo() {
+    use pptx_edit::{ProposalChangeKind, ProposalShapeChangeKind, ProposalStripStatus};
+    for kind in [
+        "insertTableRow",
+        "deleteTableRow",
+        "insertTableColumn",
+        "deleteTableColumn",
+    ] {
+        let session = DeckSession::open(&table_proposal_source(), 560).unwrap();
+        session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+        let original = session.snapshot().unwrap();
+        let slide_id = original.slides[0].id.clone();
+        session
+            .set_slide_notes(&EditCtx::local("human"), &slide_id, "Earlier work")
+            .unwrap();
+        let before = session.snapshot().unwrap();
+        let shape_id = &before.slides[0].shapes[0].id;
+        let edit = table_proposal_edit(kind, &slide_id, shape_id);
+        let proposal = session.propose(request(vec![edit.clone()])).unwrap();
+        let preview = session.preview_proposal(&proposal.id).unwrap();
+        let change = &proposal.changes[0];
+        assert_eq!(change.kind, Some(ProposalChangeKind::Content));
+        assert_eq!(change.shape_id.as_ref(), Some(shape_id));
+        let shape = &preview.snapshot.slides[0].shapes[0];
+        let Some(pptx_parse::GraphicFrameData::Table(table)) = &shape.graphic else {
+            panic!("expected table")
+        };
+        let rows = if kind == "insertTableRow" {
+            4
+        } else if kind == "deleteTableRow" {
+            2
+        } else {
+            3
+        };
+        let columns = if kind == "insertTableColumn" {
+            4
+        } else if kind == "deleteTableColumn" {
+            2
+        } else {
+            3
+        };
+        assert_eq!((table.rows.len(), table.grid.len()), (rows, columns));
+        assert_eq!(shape.text_stories.len(), rows * columns);
+        let indexed = session
+            .preview_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        let by_id = session
+            .preview_proposal_diff_slide_by_id(&proposal.id, &slide_id)
+            .unwrap();
+        assert_eq!(indexed, by_id);
+        assert_eq!(by_id.scope.slide.shapes[0].graphic, shape.graphic);
+        assert_eq!(
+            by_id.shape_changes[0].kind,
+            ProposalShapeChangeKind::Changed
+        );
+        assert_eq!(
+            session.proposal_slide_strip(&proposal.id).unwrap()[0].status,
+            ProposalStripStatus::Changed
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.reject_proposal(&proposal.id));
+        assert_eq!(session.snapshot().unwrap(), before);
+        let accepted = session.propose(request(vec![edit])).unwrap();
+        session.accept_proposal(&accepted.id, false).unwrap();
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+        let reopened = DeckSession::open(&session.save().unwrap(), 561).unwrap();
+        let saved = reopened.snapshot().unwrap();
+        let Some(pptx_parse::GraphicFrameData::Table(saved_table)) =
+            &saved.slides[0].shapes[0].graphic
+        else {
+            panic!("expected saved table")
+        };
+        assert_eq!(
+            (saved_table.rows.len(), saved_table.grid.len()),
+            (rows, columns)
+        );
+        if kind.starts_with("insert") {
+            assert!(
+                saved.slides[0].shapes[0]
+                    .text_stories
+                    .iter()
+                    .any(|story| story.plain_text() == "New cell")
+            );
+        }
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), original);
+    }
+}
+
+#[test]
+fn table_insert_then_replace_text_uses_the_new_cell_story() {
+    let session = DeckSession::open(&table_proposal_source(), 562).unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let insert = table_proposal_edit("insertTableRow", &slide.id, &slide.shapes[0].id);
+    let draft = session.propose(request(vec![insert.clone()])).unwrap();
+    let preview = session.preview_proposal(&draft.id).unwrap();
+    let story_id = preview.snapshot.slides[0].shapes[0].text_stories[3]
+        .id
+        .clone();
+    assert!(session.reject_proposal(&draft.id));
+    let proposal = session
+        .propose(request(vec![
+            insert,
+            ProposalEdit::ReplaceText {
+                story_id: story_id.clone(),
+                start: 0,
+                end: 8,
+                text: "Reviewed cell".into(),
+                style: None,
+            },
+        ]))
+        .unwrap();
+    assert_eq!(proposal.changes.len(), 1);
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert_eq!(
+        preview.snapshot.slides[0].shapes[0].text_stories[3].plain_text(),
+        "Reviewed cell"
+    );
+    session
+        .preview_proposal_diff_slide(&proposal.id, 0)
+        .unwrap();
+    assert_eq!(session.snapshot().unwrap(), before);
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(
+        session.story(&story_id).unwrap().plain_text(),
+        "Reviewed cell"
+    );
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+    assert!(!session.can_undo());
+}
+
+#[test]
+fn table_proposals_are_stale_after_cell_or_structure_changes() {
+    use pptx_edit::{TableInsertPosition, TextStyle};
+    for kind in [
+        "insertTableRow",
+        "deleteTableRow",
+        "insertTableColumn",
+        "deleteTableColumn",
+    ] {
+        for structure in [false, true] {
+            let session = DeckSession::open(&table_proposal_source(), 563).unwrap();
+            let slide = session.snapshot().unwrap().slides[0].clone();
+            let shape = &slide.shapes[0];
+            let proposal = session
+                .propose(request(vec![table_proposal_edit(
+                    kind, &slide.id, &shape.id,
+                )]))
+                .unwrap();
+            if structure {
+                session
+                    .insert_table_row(
+                        &EditCtx::local("human"),
+                        &slide.id,
+                        &shape.id,
+                        0,
+                        TableInsertPosition::Before,
+                        &[],
+                    )
+                    .unwrap();
+            } else {
+                session
+                    .insert_text(
+                        &EditCtx::local("human"),
+                        &shape.text_stories[0].id,
+                        0,
+                        "Human ",
+                        &TextStyle::default(),
+                    )
+                    .unwrap();
+            }
+            let before = session.snapshot().unwrap();
+            assert_eq!(
+                session.proposals().unwrap()[0].stale_targets,
+                vec![shape.id.clone()]
+            );
+            assert!(matches!(
+                session.accept_proposal(&proposal.id, false),
+                Err(ProposalError::Stale(targets)) if targets == vec![shape.id.clone()]
+            ));
+            assert_eq!(session.snapshot().unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn table_proposal_refusals_are_typed_and_leave_nothing_staged() {
+    use pptx_edit::EditError;
+    for kind in [
+        "insertTableRow",
+        "deleteTableRow",
+        "insertTableColumn",
+        "deleteTableColumn",
+    ] {
+        for (source, invalid_index) in [
+            (table_proposal_source(), true),
+            (TABLE_DECK.to_vec(), false),
+            (SHAPE_DECK.to_vec(), false),
+        ] {
+            let session = DeckSession::open(&source, 564).unwrap();
+            let before = session.snapshot().unwrap();
+            let slide = &before.slides[0];
+            let mut edit =
+                serde_json::to_value(table_proposal_edit(kind, &slide.id, &slide.shapes[0].id))
+                    .unwrap();
+            if invalid_index {
+                edit["index"] = 99.into();
+            }
+            let result = session.propose(request(vec![
+                ProposalEdit::SetSlideNotes {
+                    slide_id: slide.id.clone(),
+                    text: "Must not stage".into(),
+                },
+                serde_json::from_value(edit).unwrap(),
+            ]));
+            assert!(matches!(
+                result,
+                Err(ProposalError::Edit(EditError::InvalidTable(_)))
+            ));
+            assert_eq!(session.snapshot().unwrap(), before);
+            assert!(session.proposals().unwrap().is_empty());
+            assert!(!session.can_undo());
+        }
+    }
+    for kind in ["insertTableRow", "insertTableColumn"] {
+        let session = DeckSession::open(&table_proposal_source(), 565).unwrap();
+        let before = session.snapshot().unwrap();
+        let slide = &before.slides[0];
+        for cells in [vec!["cell"; 4], vec!["line\nbreak"], vec!["\u{0}"]] {
+            let mut edit =
+                serde_json::to_value(table_proposal_edit(kind, &slide.id, &slide.shapes[0].id))
+                    .unwrap();
+            edit["cells"] = serde_json::json!(cells);
+            assert!(matches!(
+                session.propose(request(vec![serde_json::from_value(edit).unwrap()])),
+                Err(ProposalError::Edit(
+                    EditError::InvalidTable(_) | EditError::InvalidText(_)
+                ))
+            ));
+            assert_eq!(session.snapshot().unwrap(), before);
+            assert!(session.proposals().unwrap().is_empty());
+            assert!(!session.can_undo());
+        }
+    }
+}
+
+#[test]
+fn table_proposal_wire_defaults_positions_widths_and_refs() {
+    use pptx_edit::{TableColumnWidth, TableInsertPosition};
+    for position in ["before", "after"] {
+        for width in [None, Some("split"), Some("copy")] {
+            let session = DeckSession::open(&table_proposal_source(), 566).unwrap();
+            let before = session.snapshot().unwrap();
+            let slide = &before.slides[0];
+            let mut wire = serde_json::json!({
+                "type": "insertTableColumn", "slideId": slide.id, "shapeId": slide.shapes[0].id,
+                "index": 0, "position": position,
+            });
+            if let Some(width) = width {
+                wire["width"] = width.into();
+            }
+            let edit: ProposalEdit = serde_json::from_value(wire).unwrap();
+            let proposal = session.propose(request(vec![edit])).unwrap();
+            let preview = session.preview_proposal(&proposal.id).unwrap();
+            let direct = DeckSession::open(&table_proposal_source(), 566).unwrap();
+            direct
+                .insert_table_column_with_width(
+                    &EditCtx::local("test"),
+                    &slide.id,
+                    &slide.shapes[0].id,
+                    0,
+                    if position == "before" {
+                        TableInsertPosition::Before
+                    } else {
+                        TableInsertPosition::After
+                    },
+                    &[],
+                    if width == Some("copy") {
+                        TableColumnWidth::Copy
+                    } else {
+                        TableColumnWidth::Split
+                    },
+                )
+                .unwrap();
+            assert_eq!(preview.snapshot, direct.snapshot().unwrap());
+        }
+    }
+    let session = DeckSession::open(SHAPE_DECK, 567).unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0];
+    for kind in [
+        "insertTableRow",
+        "deleteTableRow",
+        "insertTableColumn",
+        "deleteTableColumn",
+    ] {
+        let edit = table_proposal_edit(kind, "@new", "@shape");
+        assert!(matches!(session.propose(request(vec![
+            ProposalEdit::DuplicateSlide { reference: Some("new".into()), slide_id: slide.id.clone(), after_slide_id: None },
+            shape_edit("addShape", "@new", "unused"),
+            edit,
+        ])), Err(ProposalError::Invalid(message)) if message.contains("unknown ref")));
+        let mut created = shape_edit("addShape", "@new", "unused");
+        if let ProposalEdit::AddShape { reference, .. } = &mut created {
+            *reference = Some("shape".into());
+        }
+        assert!(matches!(
+            session.propose(request(vec![
+                ProposalEdit::DuplicateSlide {
+                    reference: Some("new".into()),
+                    slide_id: slide.id.clone(),
+                    after_slide_id: None
+                },
+                created,
+                table_proposal_edit(kind, "@new", "@shape"),
+            ])),
+            Err(ProposalError::Edit(pptx_edit::EditError::InvalidTable(_)))
+        ));
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.proposals().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn table_proposals_preserve_collaborative_refusals_and_undo_tracking() {
+    for kind in [
+        "insertTableRow",
+        "deleteTableRow",
+        "insertTableColumn",
+        "deleteTableColumn",
+    ] {
+        let session = DeckSession::open(&table_proposal_source(), 568).unwrap();
+        let before = session.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let edit = table_proposal_edit(kind, &slide.id, &slide.shapes[0].id);
+        let proposal = session.propose(request(vec![edit.clone()])).unwrap();
+        session.accept_proposal(&proposal.id, false).unwrap();
+        assert!(session.can_undo());
+        session.set_collaborative().unwrap();
+        assert!(!session.can_undo());
+        let before = session.snapshot().unwrap();
+        assert!(matches!(
+            session.propose(request(vec![edit])),
+            Err(ProposalError::Edit(
+                pptx_edit::EditError::CollaborativeStructureOperation
+            ))
+        ));
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.proposals().unwrap().is_empty());
+    }
+    let session = DeckSession::open(&table_proposal_source(), 569).unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let proposal = session
+        .propose(request(vec![table_proposal_edit(
+            "insertTableRow",
+            &slide.id,
+            &slide.shapes[0].id,
+        )]))
+        .unwrap();
+    session.preview_proposal(&proposal.id).unwrap();
+    session.proposal_slide_strip(&proposal.id).unwrap();
+    let story_id = slide.shapes[0].text_stories[0].id.clone();
+    let text_proposal = session
+        .propose(request(vec![ProposalEdit::ReplaceText {
+            story_id: story_id.clone(),
+            start: 0,
+            end: 0,
+            text: "Reviewed cell ".into(),
+            style: None,
+        }]))
+        .unwrap();
+    let text_preview = session.preview_proposal(&text_proposal.id).unwrap();
+    session.set_collaborative().unwrap();
+    assert!(matches!(
+        session.preview_proposal(&proposal.id),
+        Err(ProposalError::Edit(
+            pptx_edit::EditError::CollaborativeStructureOperation
+        ))
+    ));
+    assert!(matches!(
+        session.proposal_slide_strip(&proposal.id),
+        Err(ProposalError::Edit(
+            pptx_edit::EditError::CollaborativeStructureOperation
+        ))
+    ));
+    assert!(matches!(
+        session.accept_proposal(&proposal.id, false),
+        Err(ProposalError::Edit(
+            pptx_edit::EditError::CollaborativeStructureOperation
+        ))
+    ));
+    assert_eq!(session.snapshot().unwrap(), before);
+    assert_eq!(
+        session.preview_proposal(&text_proposal.id).unwrap(),
+        text_preview
+    );
+    session.proposal_slide_strip(&text_proposal.id).unwrap();
+    assert!(
+        session
+            .accept_proposal(&text_proposal.id, false)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(session.snapshot().unwrap(), text_preview.snapshot);
+    assert!(
+        session
+            .story(&story_id)
+            .unwrap()
+            .plain_text()
+            .starts_with("Reviewed cell ")
+    );
+}
+
+#[test]
+fn table_proposal_wire_refuses_malformed_edits() {
+    let base = serde_json::json!({
+        "type": "insertTableColumn", "slideId": "slide", "shapeId": "shape",
+        "index": 0, "position": "before",
+    });
+    for (key, value) in [
+        ("index", serde_json::json!(-1)),
+        ("index", serde_json::json!(0.5)),
+        ("index", serde_json::json!(4294967296u64)),
+        ("position", serde_json::json!("middle")),
+        ("cells", serde_json::json!([1])),
+        ("width", serde_json::json!("stretch")),
+        ("extra", serde_json::json!(true)),
+    ] {
+        let mut wire = base.clone();
+        wire[key] = value;
+        assert!(serde_json::from_value::<ProposalEdit>(wire).is_err());
+    }
+    let mut wire = base;
+    wire.as_object_mut().unwrap().remove("position");
+    assert!(serde_json::from_value::<ProposalEdit>(wire).is_err());
+}
+
+#[test]
+fn accepted_table_proposals_keep_remote_conflict_and_history_tracking() {
+    let bytes = table_proposal_source();
+    let first = DeckSession::open(&bytes, 570).unwrap();
+    let second = DeckSession::open(&bytes, 571).unwrap();
+    let before = first.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let shape_id = &slide.shapes[0].id;
+    for (session, kind) in [(&first, "insertTableRow"), (&second, "insertTableColumn")] {
+        let proposal = session
+            .propose(request(vec![table_proposal_edit(
+                kind, &slide.id, shape_id,
+            )]))
+            .unwrap();
+        session.accept_proposal(&proposal.id, false).unwrap();
+    }
+    let a = first.encode_state_as_update_v1();
+    let b = second.encode_state_as_update_v1();
+    first.apply_update_v1(&b).unwrap();
+    second.apply_update_v1(&a).unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    assert!(!first.can_undo());
+    assert!(!second.can_undo());
+    let discarded = [
+        first.take_discarded_table_edits(),
+        second.take_discarded_table_edits(),
+    ];
+    assert_eq!(
+        discarded
+            .iter()
+            .filter(|ids| ids.as_slice() == std::slice::from_ref(shape_id))
+            .count(),
+        1
+    );
+}

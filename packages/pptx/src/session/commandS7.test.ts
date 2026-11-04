@@ -557,3 +557,89 @@ test.each(['setSlideLayout', 'setSlideBackground'] as const)('worker %s proposal
     expect(state.outcomes[0]!.status).toBe('applied');
   } finally { await session.dispose(); }
 });
+
+test('a cached table proposal is refused at admission after joining collaboration and text stays writable', async () => {
+  const zip = await JSZip.loadAsync(await readFile(new URL('../../../../crates/pptx-render/tests/fixtures/table-basic.pptx', import.meta.url)));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace(/ (gridSpan|rowSpan|hMerge|vMerge)="[^"]*"/gu, ''));
+  const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+  const acceptance = spyOn(session.handle(), 'acceptProposal');
+  try {
+    const before = session.handle().snapshot();
+    const slide = before.slides[0]!;
+    const shape = slide.shapes[0]!;
+    let state = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [{
+        type: 'insertTableRow', slideId: slide.id, shapeId: shape.id, index: 0, position: 'after', cells: ['Worker cell'],
+      }]] } });
+    expect(state.outcomes).toEqual([{ seq: 1, status: 'applied', committed: false }]);
+    const proposal = session.handle().listProposals()[0]!;
+    session.handle().previewProposal(proposal.id);
+    session.handle().setCollaborative();
+    const refused = await session.command(state, 2, { kind: 'invoke', payload: {
+      ...input, method: 'acceptProposal', args: [proposal.id] } });
+    expect(refused.outcomes).toEqual([{ seq: 2, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(acceptance).not.toHaveBeenCalled();
+    expect(refused.version).toBe(state.version);
+    expect(refused.editState.readOnly).toBe(false);
+    expect(session.handle().snapshot()).toEqual(before);
+    expect(session.handle().listProposals()).toHaveLength(1);
+    expect(session.rpc.failure).toBeUndefined();
+    state = await session.command(refused, 3, { kind: 'insertText', payload: {
+      ...input, at: { source: 'confirmed', selection: {
+        slideId: session.story.slideId, shapeId: session.story.shapeId, storyId: session.story.storyId,
+        anchor: 0, focus: 0, affinity: 'downstream',
+      } }, text: 'Still writable ' } });
+    expect(state.outcomes).toEqual([{ seq: 3, status: 'applied', committed: true }]);
+    expect(state.editState.readOnly).toBe(false);
+    const text = session.handle().story(session.story.storyId).paragraphs[0]!.runs.map(run => run.text).join('');
+    expect(text.startsWith('Still writable ')).toBe(true);
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { acceptance.mockRestore(); await session.dispose(); }
+});
+
+test.each(['insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn'] as const)('worker %s proposals validate, preview, accept, reject and undo', async type => {
+  const zip = await JSZip.loadAsync(await readFile(new URL('../../../../crates/pptx-render/tests/fixtures/table-basic.pptx', import.meta.url)));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace(/ (gridSpan|rowSpan|hMerge|vMerge)="[^"]*"/gu, ''));
+  const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const before = session.handle().snapshot();
+    const slide = before.slides[0]!;
+    const shape = slide.shapes[0]!;
+    const edit = type === 'insertTableRow' || type === 'insertTableColumn'
+      ? { type, slideId: slide.id, shapeId: shape.id, index: 0, position: 'before', cells: ['Worker cell'] }
+      : { type, slideId: slide.id, shapeId: shape.id, index: 0 };
+    let seq = 0;
+    let state = await session.command(session.state, ++seq, { kind: 'invoke', payload: { ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+    expect(state.outcomes[0]!.status).toBe('applied');
+    const proposal = session.handle().listProposals()[0]!;
+    const diff = await session.rpc.call.accessCommandEditor({ ...identity, seq }, 'layoutProposalDiffSlideById', [proposal.id, slide.id]) as import('../proposals').ProposalDiffSlide;
+    const indexed = await session.rpc.call.accessCommandEditor({ ...identity, seq }, 'layoutProposalDiffSlide', [proposal.id, 0]) as import('../proposals').ProposalDiffSlide;
+    expect(diff.frame).toEqual(indexed.frame);
+    expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'changed' }]);
+    const table = diff.snapshot.slides[0]!.shapes[0]!.graphic as { rows: unknown[]; grid: number[] };
+    expect(table.rows.length).toBe(type === 'insertTableRow' ? 4 : type === 'deleteTableRow' ? 2 : 3);
+    expect(table.grid.length).toBe(type === 'insertTableColumn' ? 4 : type === 'deleteTableColumn' ? 2 : 3);
+    expect(session.handle().snapshot()).toEqual(before);
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'acceptProposal', args: [proposal.id] } });
+    expect(state.outcomes[0]!.status).toBe('applied');
+    expect(session.handle().snapshot()).toEqual(diff.snapshot);
+    state = await session.command(state, ++seq, { kind: 'undo', payload: input });
+    expect(state.outcomes[0]!.status).toBe('applied');
+    expect(session.handle().snapshot()).toEqual(before);
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+    expect(state.outcomes[0]!.status).toBe('applied');
+    const rejected = session.handle().listProposals()[0]!;
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'rejectProposal', args: [rejected.id] } });
+    expect(state.outcomes[0]).toMatchObject({ status: 'noop', committed: false });
+    expect(session.handle().listProposals()).toHaveLength(0);
+    expect(session.handle().snapshot()).toEqual(before);
+    for (const invalid of [{ ...edit, index: 99 }, { ...edit, extra: true }, { ...edit, index: -1 }]) {
+      state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'propose', args: ['Writer', null, [invalid]] } });
+      expect(state.outcomes[0]!.status).toBe('refused');
+      expect(session.handle().snapshot()).toEqual(before);
+      expect(session.handle().listProposals()).toHaveLength(0);
+    }
+  } finally { await session.dispose(); }
+});
