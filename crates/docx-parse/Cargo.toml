@@ -16,7 +16,7 @@ name = "docx_parse"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["wasm"]
+default = []
 wasm = ["dep:wasm-bindgen"]
 wasm-layout = ["wasm", "dep:docx-layout"]
 tiff = ["ooxml-drawingml/tiff"]
