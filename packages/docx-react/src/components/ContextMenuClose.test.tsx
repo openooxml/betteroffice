@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { ImageContextMenu } from './ImageContextMenu';
 import { TextContextMenu } from './TextContextMenu';
+import { HyperlinkPopup } from './ui/HyperlinkPopup';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -14,6 +15,7 @@ afterAll(async () => {
 
 function pressOutside() {
   document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+  document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
 }
 
 test('text context menu closes on a press outside right after it opens', () => {
@@ -36,6 +38,14 @@ test('image context menu closes on a press outside right after it opens', () => 
   let closed = 0;
   render(<ImageContextMenu isOpen position={{ x: 10, y: 10 }} currentWrapType="inline"
     onApplyLayout={() => {}} onClose={() => { closed += 1; }} />);
+  pressOutside();
+  expect(closed).toBe(1);
+});
+
+test('link popup closes on a press outside right after it opens', () => {
+  let closed = 0;
+  render(<HyperlinkPopup data={{ href: 'https://example.com', displayText: 'Example', position: { left: 10, top: 10 } }}
+    onNavigate={() => {}} onCopy={() => {}} onEdit={() => {}} onRemove={() => {}} onClose={() => { closed += 1; }} />);
   pressOutside();
   expect(closed).toBe(1);
 });

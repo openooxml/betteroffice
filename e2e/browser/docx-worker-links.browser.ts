@@ -110,15 +110,24 @@ test('worker link under the caret edits and removes from the dialog', async ({ p
   expect(result.links.some(link => link.text === 'Changed link')).toBe(false);
 });
 
-test('worker link popup closes on a click elsewhere inside the page', async ({ page }) => {
+test('worker link popup closes on a press outside in the same turn it opens', async ({ page }) => {
   await open(page);
+  const armed = page.evaluate(() => new Promise<boolean>((resolve) => {
+    const observer = new MutationObserver(() => {
+      if (!document.querySelector('.oox-hyperlink-popup')) return;
+      observer.disconnect();
+      for (const type of ['pointerdown', 'mousedown'] as const) {
+        const init = { bubbles: true, cancelable: true, composed: true, clientX: 2, clientY: 2, button: 0, buttons: 1 };
+        document.body.dispatchEvent(type === 'pointerdown' ? new PointerEvent(type, { ...init, pointerType: 'mouse', isPrimary: true }) : new MouseEvent(type, init));
+      }
+      resolve(true);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    setTimeout(() => { observer.disconnect(); resolve(false); }, 10000);
+  }));
   await clickText(page, 'External link');
-  const popup = page.locator('.oox-hyperlink-popup');
-  await expect(popup).toBeVisible();
-  const link = (await page.locator('.canvas-page-mirror .layout-paragraph').filter({ hasText: 'External link' }).first().boundingBox())!;
-  const surface = (await page.locator('.paged-editor__page').first().boundingBox())!;
-  await page.mouse.click(surface.x + surface.width - 40, link.y + link.height / 2);
-  await expect(popup).toHaveCount(0);
+  expect(await armed).toBe(true);
+  await expect(page.locator('.oox-hyperlink-popup')).toHaveCount(0);
 });
 
 test('worker clicking a body link supports popup copy edit and remove', async ({ page, context }, info) => {

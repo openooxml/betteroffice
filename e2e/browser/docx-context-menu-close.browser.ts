@@ -53,8 +53,9 @@ for (const [arm, label] of [['', 'worker'], ['&peerless=0', 'non-worker']] as co
         if (!document.querySelector('[role="menu"][aria-label="Text editing menu"]')) return;
         observer.disconnect();
         const outside = document.elementFromPoint(4, 996) ?? document.body;
-        outside.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, composed: true,
-          clientX: 4, clientY: 996, button: 0, buttons: 1, pointerType: 'mouse', isPrimary: true }));
+        const init = { bubbles: true, cancelable: true, composed: true, clientX: 4, clientY: 996, button: 0, buttons: 1 };
+        outside.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerType: 'mouse', isPrimary: true }));
+        outside.dispatchEvent(new MouseEvent('mousedown', init));
         resolve(true);
       });
       observer.observe(document.body, { childList: true, subtree: true });
