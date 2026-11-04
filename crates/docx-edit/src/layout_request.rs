@@ -3,6 +3,13 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value, json};
 
 pub fn region_layout_request(package: &Value, page_gap: f64) -> Value {
+    let mut request = raw_request(package, page_gap);
+    integral_numbers(&mut request);
+    request
+}
+
+/// The request with every number as the parse model holds it.
+fn raw_request(package: &Value, page_gap: f64) -> Value {
     let body = package.get("document").filter(|value| !value.is_null());
     let source_sections = body
         .and_then(|body| body.get("sections"))
@@ -74,6 +81,25 @@ pub fn region_layout_request(package: &Value, page_gap: f64) -> Value {
         "notes": {"contents": contents},
         "renderEnv": render_environment(package),
     })
+}
+
+/// Writes integral numbers as integers. The parse model stores every number as a float, while
+/// layout reads ids, counts and starts (note ids, `numStart`, footnote columns) as integers and
+/// accepts integers wherever it reads a float.
+fn integral_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) if !number.is_i64() && !number.is_u64() => {
+            if let Some(float) = number.as_f64()
+                && float.fract() == 0.0
+                && float.abs() <= 9_007_199_254_740_992.0
+            {
+                *value = json!(float as i64);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(integral_numbers),
+        Value::Object(map) => map.values_mut().for_each(integral_numbers),
+        _ => {}
+    }
 }
 
 fn copy_field(target: &mut Map<String, Value>, source: &Value, name: &str) {
@@ -244,12 +270,12 @@ mod tests {
         assert_eq!(
             env["paragraphStyleFontSizes"],
             json!({
-                "Normal": 12.0, "TOC1": 18.0, "Large": 18.0, "CycleA": 12.0, "CycleB": 12.0
+                "Normal": 12, "TOC1": 18, "Large": 18, "CycleA": 12, "CycleB": 12
             })
         );
         assert_eq!(
             env["hyperlinkStyleFontSizes"],
-            json!({"Hyperlink": 18.0, "Visited": 18.0})
+            json!({"Hyperlink": 18, "Visited": 18})
         );
         assert_eq!(env["docDefaultFontSize"], 12.0);
         assert_eq!(env["tocStyleIds"], json!(["TOC1"]));
@@ -280,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             request["options"],
-            json!({"contractVersion": 7, "pageGap": 18.0})
+            json!({"contractVersion": 7, "pageGap": 18})
         );
         assert_eq!(
             request["regions"]["sections"],
@@ -302,13 +328,107 @@ mod tests {
     }
 
     #[test]
+    fn numbers_parsed_as_floats_reach_layout_as_integers() {
+        let request = region_layout_request(
+            &json!({
+                "document": {"finalSectionProperties": {
+                    "footnoteColumns": 2.0,
+                    "pageWidth": 12240.5,
+                    "footnotePr": {"numStart": 3.0}
+                }},
+                "footnotes": [{"id": -1.0, "noteType": "separator"}, {"id": 1.0, "noteType": "normal"}],
+                "endnotes": [{"id": 2.0, "noteType": ""}]
+            }),
+            24.0,
+        );
+        assert_eq!(
+            request["notes"]["contents"],
+            json!([
+                {"id": 1, "noteKind": "footnote", "height": 0},
+                {"id": 2, "noteKind": "endnote", "height": 0}
+            ])
+        );
+        let properties = &request["regions"]["sections"][0]["properties"];
+        assert!(properties["footnoteColumns"].is_i64());
+        assert!(properties["footnotePr"]["numStart"].is_i64());
+        assert_eq!(properties["pageWidth"], json!(12240.5));
+        assert!(request["options"]["pageGap"].is_i64());
+    }
+
+    /// Makes integral only the fields layout cannot read as a float, which the parse model hands
+    /// over as floats.
+    fn integral_where_required(value: &mut Value, key: &str) {
+        match value {
+            Value::Number(_) if matches!(key, "id" | "numStart" | "footnoteColumns") => {
+                integral_numbers(value);
+            }
+            Value::Array(items) => items
+                .iter_mut()
+                .for_each(|item| integral_where_required(item, key)),
+            Value::Object(map) => map
+                .iter_mut()
+                .for_each(|(key, item)| integral_where_required(item, key)),
+            _ => {}
+        }
+    }
+
+    fn laid_out(bytes: &[u8], request: &Value) -> Value {
+        let engine = crate::EngineSession::new(1);
+        crate::seed_from_docx(engine.doc(), bytes).unwrap();
+        serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn integral_numbers_never_change_layout() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixtures = root.join("crates/docx-edit/tests/fixtures/layout-request");
+        let cases: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(fixtures.join("cases.json")).unwrap()).unwrap();
+        for (name, source) in &cases {
+            let bytes = std::fs::read(root.join(source)).unwrap();
+            let parsed = docx_parse::parse_docx_s9_wire(
+                &bytes,
+                docx_parse::S9ParseOptions {
+                    parse_headers_footers: true,
+                    parse_notes: true,
+                    detect_variables: false,
+                    include_canonical: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let package = serde_json::to_value(parsed.document.package).unwrap();
+            let measurement = json!({"defaults": {"fontFamily": "Calibri", "fontSize": 11}});
+            let mut integral = region_layout_request(&package, 24.0);
+            integral["measurement"] = measurement.clone();
+            let mut floats = raw_request(&package, 24.0);
+            integral_where_required(&mut floats, "");
+            floats["measurement"] = measurement;
+            assert_ne!(
+                floats, integral,
+                "{name}: the request has no float to compare"
+            );
+            assert_eq!(
+                laid_out(&bytes, &floats),
+                laid_out(&bytes, &integral),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn omits_undefined_fields_and_uses_style_defaults() {
         let empty = region_layout_request(&json!({}), 24.0);
         assert_eq!(
             empty,
             json!({
                 "bodyStory": "body",
-                "options": {"pageGap": 24.0},
+                "options": {"pageGap": 24},
                 "regions": {"sections": [{"properties": {}}]},
                 "notes": {"contents": []},
                 "renderEnv": {

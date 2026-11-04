@@ -67,6 +67,8 @@ fn layout_requests_match_goldens() {
         .unwrap();
         let package = serde_json::to_value(parsed.document.package).unwrap();
         let request = region_layout_request(&package, 24.0);
+        serde_json::from_value::<docx_layout::regions::RegionLayoutInput>(request.clone())
+            .unwrap_or_else(|error| panic!("{name}: layout cannot read the request: {error}"));
         let golden = fixtures.join(format!("{name}.request.json"));
         if update {
             std::fs::write(

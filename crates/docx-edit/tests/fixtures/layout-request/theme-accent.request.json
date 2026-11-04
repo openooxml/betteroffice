@@ -4,28 +4,28 @@
     "contents": []
   },
   "options": {
-    "pageGap": 24.0
+    "pageGap": 24
   },
   "regions": {
     "sections": [
       {
         "properties": {
-          "marginBottom": 1440.0,
-          "marginLeft": 1440.0,
-          "marginRight": 1440.0,
-          "marginTop": 1440.0,
-          "pageHeight": 15840.0,
-          "pageWidth": 12240.0
+          "marginBottom": 1440,
+          "marginLeft": 1440,
+          "marginRight": 1440,
+          "marginTop": 1440,
+          "pageHeight": 15840,
+          "pageWidth": 12240
         }
       },
       {
         "properties": {
-          "marginBottom": 1440.0,
-          "marginLeft": 1440.0,
-          "marginRight": 1440.0,
-          "marginTop": 1440.0,
-          "pageHeight": 15840.0,
-          "pageWidth": 12240.0
+          "marginBottom": 1440,
+          "marginLeft": 1440,
+          "marginRight": 1440,
+          "marginTop": 1440,
+          "pageHeight": 15840,
+          "pageWidth": 12240
         }
       }
     ],
@@ -41,7 +41,7 @@
         "suppressSpBfAfterPgBrk": false,
         "useWord97LineBreakRules": false
       },
-      "defaultTabStop": 720.0
+      "defaultTabStop": 720
     }
   },
   "renderEnv": {
@@ -57,8 +57,8 @@
       "useWord97LineBreakRules": false
     },
     "defaultParagraphStyleId": "Normal",
-    "defaultTabStopTwips": 720.0,
-    "docDefaultFontSize": 12.0,
+    "defaultTabStopTwips": 720,
+    "docDefaultFontSize": 12,
     "fontTheme": {
       "colorScheme": {
         "accent1": "FF0000",
@@ -91,12 +91,12 @@
       "name": "Red accent"
     },
     "hyperlinkStyleFontSizes": {
-      "Hyperlink": 14.0
+      "Hyperlink": 14
     },
     "numericIds": {},
     "paragraphStyleFontSizes": {
-      "Normal": 12.0,
-      "TOC1": 12.0
+      "Normal": 12,
+      "TOC1": 12
     },
     "showHiddenText": false,
     "themeColors": {
