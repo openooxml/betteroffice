@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, נבחר",
     "emptyCellLabel": "{address}, ריק",
-    "emptyCellLabelSelected": "{address}, ריק, נבחר"
+    "emptyCellLabelSelected": "{address}, ריק, נבחר",
+    "hasFormula": "{label}, מכיל נוסחה",
+    "rangeSelected": "נבחר {start} עד {end}, {rows, plural, one {שורה אחת} two {שתי שורות} other {# שורות}} על {columns, plural, one {עמודה אחת} two {שתי עמודות} other {# עמודות}}",
+    "sheetActivated": "{name}, גיליון {index} מתוך {count}",
+    "cellInputLabel": "עריכת התא {address}",
+    "gridRoleDescription": "גיליון"
   },
   "plugins": {
     "toolbarGroup": "תוספים",

@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, вибрано",
     "emptyCellLabel": "{address}, порожньо",
-    "emptyCellLabelSelected": "{address}, порожньо, вибрано"
+    "emptyCellLabelSelected": "{address}, порожньо, вибрано",
+    "hasFormula": "{label}, містить формулу",
+    "rangeSelected": "Виділено {start} – {end}, {rows, plural, one {# рядок} few {# рядки} many {# рядків} other {# рядка}} на {columns, plural, one {# стовпець} few {# стовпці} many {# стовпців} other {# стовпця}}",
+    "sheetActivated": "{name}, аркуш {index} з {count}",
+    "cellInputLabel": "Редагувати клітинку {address}",
+    "gridRoleDescription": "аркуш"
   },
   "plugins": {
     "toolbarGroup": "Плагіни",

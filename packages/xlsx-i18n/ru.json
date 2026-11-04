@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, выделено",
     "emptyCellLabel": "{address}, пусто",
-    "emptyCellLabelSelected": "{address}, пусто, выделено"
+    "emptyCellLabelSelected": "{address}, пусто, выделено",
+    "hasFormula": "{label}, содержит формулу",
+    "rangeSelected": "Выделено {start} – {end}, {rows, plural, one {# строка} few {# строки} many {# строк} other {# строки}} на {columns, plural, one {# столбец} few {# столбца} many {# столбцов} other {# столбца}}",
+    "sheetActivated": "{name}, лист {index} из {count}",
+    "cellInputLabel": "Изменить ячейку {address}",
+    "gridRoleDescription": "лист"
   },
   "plugins": {
     "toolbarGroup": "Плагины",

@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, selected",
     "emptyCellLabel": "{address}, empty",
-    "emptyCellLabelSelected": "{address}, empty, selected"
+    "emptyCellLabelSelected": "{address}, empty, selected",
+    "hasFormula": "{label}, has formula",
+    "rangeSelected": "{start} to {end} selected, {rows, plural, one {# row} other {# rows}} by {columns, plural, one {# column} other {# columns}}",
+    "sheetActivated": "{name}, sheet {index} of {count}",
+    "cellInputLabel": "Edit cell {address}",
+    "gridRoleDescription": "worksheet"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

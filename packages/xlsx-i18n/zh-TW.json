@@ -191,7 +191,12 @@
     "cellLabel": "{address}，{value}",
     "cellLabelSelected": "{address}，{value}，已選取",
     "emptyCellLabel": "{address}，空白",
-    "emptyCellLabelSelected": "{address}，空白，已選取"
+    "emptyCellLabelSelected": "{address}，空白，已選取",
+    "hasFormula": "{label}，包含公式",
+    "rangeSelected": "已選取 {start} 到 {end}，{rows} 列 × {columns} 欄",
+    "sheetActivated": "{name}，第 {index} 個工作表，共 {count} 個",
+    "cellInputLabel": "編輯儲存格 {address}",
+    "gridRoleDescription": "工作表"
   },
   "plugins": {
     "toolbarGroup": "外掛程式",

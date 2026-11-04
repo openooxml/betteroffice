@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, geselecteerd",
     "emptyCellLabel": "{address}, leeg",
-    "emptyCellLabelSelected": "{address}, leeg, geselecteerd"
+    "emptyCellLabelSelected": "{address}, leeg, geselecteerd",
+    "hasFormula": "{label}, bevat formule",
+    "rangeSelected": "{start} tot {end} geselecteerd, {rows, plural, one {# rij} other {# rijen}} bij {columns, plural, one {# kolom} other {# kolommen}}",
+    "sheetActivated": "{name}, werkblad {index} van {count}",
+    "cellInputLabel": "Cel {address} bewerken",
+    "gridRoleDescription": "werkblad"
   },
   "plugins": {
     "toolbarGroup": "Plug-ins",

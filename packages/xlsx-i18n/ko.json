@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, 선택됨",
     "emptyCellLabel": "{address}, 비어 있음",
-    "emptyCellLabelSelected": "{address}, 비어 있음, 선택됨"
+    "emptyCellLabelSelected": "{address}, 비어 있음, 선택됨",
+    "hasFormula": "{label}, 수식 있음",
+    "rangeSelected": "{start}부터 {end}까지 선택됨, {rows}행 × {columns}열",
+    "sheetActivated": "{name}, 시트 {index}/{count}",
+    "cellInputLabel": "셀 {address} 편집",
+    "gridRoleDescription": "워크시트"
   },
   "plugins": {
     "toolbarGroup": "추가 기능",

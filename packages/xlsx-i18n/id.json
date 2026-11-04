@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, dipilih",
     "emptyCellLabel": "{address}, kosong",
-    "emptyCellLabelSelected": "{address}, kosong, dipilih"
+    "emptyCellLabelSelected": "{address}, kosong, dipilih",
+    "hasFormula": "{label}, memiliki rumus",
+    "rangeSelected": "{start} sampai {end} dipilih, {rows} baris kali {columns} kolom",
+    "sheetActivated": "{name}, lembar {index} dari {count}",
+    "cellInputLabel": "Edit sel {address}",
+    "gridRoleDescription": "lembar kerja"
   },
   "plugins": {
     "toolbarGroup": "Plugin",

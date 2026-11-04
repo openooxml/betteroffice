@@ -12,7 +12,7 @@ import type {
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import { editorExportFaces, useDefaultFonts } from '../useDefaultFonts';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError, XlsxHostRefusalError } from '../commands/createXlsxCommandStore';
@@ -69,6 +69,7 @@ import {
   PeerlessSelectionEffect, PeerlessWorkerAccessibility, PeerlessWorkerExtent, PeerlessWorkerOverlay,
   PeerlessWorkerPresence,
 } from './PeerlessWorkerSurface';
+import { PeerlessWorkerAnnouncer } from './PeerlessWorkerAnnouncer';
 import { WorkbookFailure } from '../components/WorkbookFailure';
 
 const BRAND = '#217346';
@@ -182,6 +183,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [cellClipboard] = useState(() => new CellClipboard());
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const announceRef = useRef<(() => void) | null>(null);
+  const gridId = useId();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pluginBindingRef = useRef<XlsxPluginHostBinding | null>(null);
   const gateCommitRef = useRef<(draft: InputDraft, target: XlsxRangeTarget) => (() => Promise<string>) | null>(() => null);
@@ -1686,6 +1689,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       }
       event.preventDefault(); return;
     }
+    if (event.ctrlKey && !event.metaKey && (event.key === 'PageDown' || event.key === 'PageUp')) {
+      const sheetList = catalogRef.current;
+      const position = sheetList.findIndex((sheet) => sheet.index === activeRef.current);
+      const next = sheetList[position + (event.key === 'PageDown' ? 1 : -1)];
+      if (position >= 0 && next) navigate(next.index);
+      event.preventDefault(); return;
+    }
     const request = selectionDataRequest(event);
     const movement = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden(), merges()).type === 'move';
     if (request || movement) {
@@ -1752,6 +1762,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         onKeyDownCapture={(event) => {
           if (!fromPlugin(event) && event.key === 'Escape') { cellClipboard.cancelCut(); setFormatToken(null); commands.refresh(); }
         }}
+        onKeyDown={(event) => {
+          if (fromPlugin(event) || event.key !== 'F6' || event.altKey || event.ctrlKey || event.metaKey) return;
+          if (cycleEditorRegion(event.currentTarget, scrollRef.current, event.shiftKey)) event.preventDefault();
+        }}
         style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
           minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif', ...props.style }}>
         {props.file && !run?.ready && !error && props.loadingIndicator}
@@ -1764,7 +1778,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
             style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
           {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
             painted={pluginHost.painted} zoom={zoom} />}
-          <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
+          <div ref={scrollRef} id={gridId} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
+            role="application" aria-roledescription={t('a11y.gridRoleDescription')}
+            aria-label={sheets.find((sheet) => sheet.index === active)?.name || t('a11y.gridLabel')}
+            onFocus={(event) => { if (event.target === event.currentTarget) announceRef.current?.(); }}
             onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
             onDoubleClick={(event) => {
               if (fromPlugin(event) || point(event).chart) return;
@@ -1796,14 +1813,24 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
             display: 'grid', placeItems: 'center', color: '#5f6368', pointerEvents: 'none' }}>{t('editor.openPrompt')}</div>}
         </div>
         <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} />
+        <PeerlessWorkerAnnouncer store={presentation} active={active} sheets={sheets} focusTarget={scrollRef} announceRef={announceRef} />
         {refusal && <div data-testid="xlsx-input-refusal" role="alert">
           {refusal.message ?? <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>}
         </div>}
         {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
         {sheets.length > 0 && <div data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
           style={{ display: 'flex', gap: 2, padding: '4px 6px', borderTop: '1px solid #e0e0e0', background: '#fafafa', overflowX: 'auto' }}>
-          {sheets.map((sheet) => <button key={sheet.id} role="tab" aria-selected={sheet.index === active} disabled={Boolean(error)}
+          {sheets.map((sheet, position) => <button key={sheet.id} role="tab" aria-selected={sheet.index === active} disabled={Boolean(error)}
+            tabIndex={sheet.index === active ? 0 : -1} aria-controls={gridId}
             onClick={() => navigate(sheet.index)}
+            onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return;
+              const next = sheetTabTarget(event.key, position, sheets.length);
+              if (next === null) return;
+              event.preventDefault();
+              navigate(sheets[next].index);
+              (event.currentTarget.parentElement?.children[next] as HTMLElement | undefined)?.focus();
+            }}
             style={{ border: 'none', padding: '4px 12px', cursor: 'pointer', background: sheet.index === active ? '#ffffff' : 'transparent',
               borderBottom: sheet.index === active ? `2px solid ${BRAND}` : '2px solid transparent', fontWeight: sheet.index === active ? 600 : 400 }}>
             {sheet.name}
@@ -1813,4 +1840,35 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     </PeerlessWorkerInputs>
     </PeerlessChromeContext.Provider>
   </EditorChromeContext.Provider></XlsxCommandContext.Provider>;
+}
+
+function sheetTabTarget(key: string, position: number, count: number): number | null {
+  if (count === 0) return null;
+  if (key === 'ArrowRight') return (position + 1) % count;
+  if (key === 'ArrowLeft') return (position - 1 + count) % count;
+  if (key === 'Home') return 0;
+  if (key === 'End') return count - 1;
+  return null;
+}
+
+/** F6 / Shift+F6 cycles focus between the toolbar, the grid and the sheet tabs, as Excel does. */
+function cycleEditorRegion(root: HTMLElement, grid: HTMLElement | null, backwards: boolean): boolean {
+  const toolbar = root.querySelector<HTMLElement>('[data-testid="xlsx-toolbar"]');
+  const tabs = root.querySelector<HTMLElement>('[data-testid="xlsx-sheet-tabs"]');
+  const targets = [
+    toolbar?.querySelector<HTMLElement>('[tabindex="0"]:not(:disabled)') ??
+      toolbar?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? null,
+    grid,
+    tabs?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? null,
+  ];
+  const regions = [toolbar, grid, tabs];
+  const active = root.ownerDocument.activeElement;
+  const current = regions.findIndex((region) => region && active && region.contains(active));
+  for (let step = 1; step <= regions.length; step++) {
+    const index = ((current < 0 ? (backwards ? 0 : regions.length - 1) : current) + (backwards ? -step : step) +
+      regions.length * 2) % regions.length;
+    const target = targets[index];
+    if (target) { target.focus(); return true; }
+  }
+  return false;
 }

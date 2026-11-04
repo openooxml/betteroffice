@@ -191,7 +191,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, seleccionada",
     "emptyCellLabel": "{address}, vacía",
-    "emptyCellLabelSelected": "{address}, vacía, seleccionada"
+    "emptyCellLabelSelected": "{address}, vacía, seleccionada",
+    "hasFormula": "{label}, tiene fórmula",
+    "rangeSelected": "{start} a {end} seleccionado, {rows, plural, one {# fila} many {# filas} other {# filas}} por {columns, plural, one {# columna} many {# columnas} other {# columnas}}",
+    "sheetActivated": "{name}, hoja {index} de {count}",
+    "cellInputLabel": "Editar celda {address}",
+    "gridRoleDescription": "hoja de cálculo"
   },
   "plugins": {
     "toolbarGroup": "Complementos",
