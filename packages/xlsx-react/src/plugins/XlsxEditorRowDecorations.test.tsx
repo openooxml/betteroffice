@@ -15,6 +15,7 @@ import {
   defineXlsxPlugin,
   type XlsxEditorApi,
   type XlsxPlugin,
+  type XlsxPluginCommand,
   type XlsxPluginContext,
   type XlsxPluginError,
   type XlsxPluginEvent,
@@ -166,9 +167,10 @@ const setCell = (expectVersion: string, row: number, col: number, value: string)
 });
 
 async function mount(editor: Editor, records: readonly Decorator[],
-  { file = plain, readOnly = false }: { file?: Uint8Array; readOnly?: boolean } = {}): Promise<Book> {
+  { file = plain, readOnly = false, rejected = [] }:
+    { file?: Uint8Array; readOnly?: boolean; rejected?: readonly XlsxPlugin[] } = {}): Promise<Book> {
   const errors: XlsxPluginError[] = [];
-  const plugins = records.map((record) => record.plugin);
+  const plugins = [...records.map((record) => record.plugin), ...rejected];
   const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
   let pump = () => act(async () => {});
   const shared = (view: ReturnType<typeof render>, element: (next: readonly XlsxPlugin[]) => ReactElement) => {
@@ -341,6 +343,22 @@ const staleKey = { key: 'Enter', preventDefault() {}, stopPropagation() {} };
 
 const buttons = (element: HTMLElement | null) =>
   [...(element?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
+
+const noop: XlsxPluginCommand<number> = {
+  id: 'noop', label: 'Noop', mutatesDocument: false, execute: () => ({ ok: true, status: 'executed' }),
+};
+
+/** A definition the editor rejects, as its two commands share one id, that records the events it gets. */
+function rejectedPlugin(id: string, events: XlsxPluginEvent[]): XlsxPlugin {
+  return defineXlsxPlugin<number>({
+    id,
+    createState: () => 0,
+    commands: [noop, noop],
+    onEvent(_context, event) {
+      events.push(event);
+    },
+  });
+}
 
 for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
   describe(`XlsxEditor plugin row decorations (${editor})`, () => {
@@ -515,6 +533,23 @@ for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
       expect(second.activations.map((event) => event.id)).toEqual(['two', 'two']);
       expect(book.errors).toEqual([]);
     }, SLOW);
+
+    for (const rejected of [false, true]) {
+      it(`shows and routes the items of a plugin${rejected ? ' beside a rejected definition under its id' : ''}`, async () => {
+        const record = decorator('x', dots([2], { id: 'mine' }));
+        const stray: XlsxPluginEvent[] = [];
+        const book = await mount(editor, [record], { rejected: rejected ? [rejectedPlugin('x', stray)] : [] });
+        await book.until(() => book.row(2) !== null);
+        expect(buttons(book.row(2)).map((button) => button.dataset.decorationId)).toEqual(['mine']);
+        fireEvent.click(buttons(book.row(2))[0]);
+        await book.until(() => record.activations.length === 1);
+        expect(record.activations[0]).toMatchObject({ id: 'mine', sheetId: SHEET, row: 2 });
+        await book.sync();
+        expect(stray).toEqual([]);
+        expect([...new Set(book.errors.map((error) => `${error.pluginId}:${error.phase}`))])
+          .toEqual(rejected ? ['x:definition'] : []);
+      }, SLOW);
+    }
 
     it('evaluates and routes a replaced definition with the same id and revision', async () => {
       const original = decorator('x', dots([2], { id: 'old' }), 1);

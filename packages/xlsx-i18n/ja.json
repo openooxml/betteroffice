@@ -137,6 +137,7 @@
       "inputFailed": "この前のセルの入力を保存できませんでした。",
       "sheetProtected": "このセルは保護されたシート上にあります。",
       "hostRefused": "この編集は許可されていません。",
+      "tooManyToCheck": "プラグインが確認できるセル数を超えています（上限 {limit}）。",
       "hostStarting": "エディターはまだ起動中です。しばらくしてからもう一度お試しください。",
       "documentReplaced": "別のブックが開かれました。",
       "targetChanged": "選択範囲が変更されました。",

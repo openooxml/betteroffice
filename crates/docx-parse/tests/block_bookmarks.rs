@@ -1286,3 +1286,40 @@ fn a_stale_stored_hash_does_not_redraw_an_unedited_text_box() {
     let xml = part(&save(&source, &model), "textbox");
     assert!(xml.contains(r#"anchor="ctr""#), "{xml}");
 }
+
+#[test]
+fn a_stale_hash_keeps_text_box_body_defaults_when_its_text_changes() {
+    let source = fixture(
+        "textbox",
+        &format!("{START}{}{END}", p("00000002", "Anchor")),
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap();
+    *bytes = String::from_utf8(bytes.clone())
+        .unwrap()
+        .replace(
+            "<wps:bodyPr/>",
+            r#"<wps:bodyPr upright="0" anchorCtr="false" fromWordArt="off" rot="6000000000000000000" numCol="1000000000001" lIns="1000000000001"/>"#,
+        )
+        .replace(
+            r#"<a:prstGeom prst="rect"/>"#,
+            r#"<a:prstGeom prst="rect"/><a:effectLst><a:glow rad="63500"><a:srgbClr val="112233"/></a:glow></a:effectLst>"#,
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut model = package(&source);
+    let shape = model
+        .pointer_mut("/document/content/1/content/0/content/0/shape")
+        .unwrap();
+    shape["drawingModel"]["otherSha256"] = json!("stale hash");
+    shape["textBody"]["content"][1]["content"][0]["content"][0]["text"] = json!("Edited box");
+    let xml = part(&save(&source, &model), "textbox");
+    assert!(xml.contains("<a:glow"), "{xml}");
+    assert!(xml.contains(">Edited box<"), "{xml}");
+    assert!(xml.contains(r#"anchorCtr="false""#), "{xml}");
+    assert!(xml.contains(START), "{xml}");
+    assert!(xml.contains(END), "{xml}");
+}

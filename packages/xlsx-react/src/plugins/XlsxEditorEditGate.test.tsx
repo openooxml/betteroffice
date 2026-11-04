@@ -17,6 +17,7 @@ import {
   type XlsxPlugin,
   type XlsxPluginCellCommit,
   type XlsxPluginCellRef,
+  type XlsxPluginCommand,
   type XlsxPluginCommitDecision,
   type XlsxPluginContext,
   type XlsxPluginEditGateContext,
@@ -35,6 +36,7 @@ const LAYOUT = [
   ['clientHeight', VIEWPORT.height],
 ] as const;
 const PROTECTED = 'This cell is on a protected sheet.';
+const GATE_CELL_LIMIT = 50_000;
 const NOT_ALLOWED = 'This edit is not allowed.';
 const STARTING = 'The editor is still starting. Try again in a moment.';
 const EDIT_GATE_UNSUPPORTED = 'edit gating is not supported in the legacy worker editor';
@@ -102,6 +104,7 @@ interface Gate {
   cleanup?(): void;
   onLoad?(): void;
   createState?(): unknown;
+  commands?: XlsxPluginCommand<unknown>[];
   cellEditable?(cell: XlsxPluginCellRef, context: XlsxPluginEditGateContext<unknown>): unknown;
   beforeCellCommit?(commit: XlsxPluginCellCommit, context: XlsxPluginEditGateContext<unknown>): unknown;
 }
@@ -113,6 +116,7 @@ function gatePlugin(id: string, gate: Gate, log: GateLog): XlsxPlugin {
     id,
     ...(gate.revision !== undefined && { revision: gate.revision }),
     createState: gate.createState ?? (() => null),
+    ...(gate.commands && { commands: gate.commands }),
     initialize(context) {
       log.contexts[id] = context;
       context.onCleanup((reason) => { log.cleanups.push(`${id}:${reason}`); gate.cleanup?.(); });
@@ -158,7 +162,59 @@ interface Book {
   session?: WorkbookSession;
 }
 
-const A1 = ['A1', 'B1', 'C1'];
+const A1 = ['A1', 'B1', 'C1', 'D1', 'E1'];
+
+type ClipItem = { types: string[]; getType(type: string): Promise<Blob> };
+
+/**
+ * A clipboard holding `text` whose writes land only once every part of the item resolved; reads
+ * of its text wait for `hold`.
+ */
+function fakeClipboard(text = '', hold?: Promise<void>) {
+  const plain = (value: string): ClipItem => ({ types: ['text/plain'], getType: async () => new Blob([value], { type: 'text/plain' }) });
+  let items = [plain(text)];
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  const item = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+  Object.defineProperty(globalThis, 'ClipboardItem', {
+    configurable: true,
+    value: class {
+      constructor(private readonly data: Record<string, Blob | Promise<Blob>>) {}
+      get types() { return Object.keys(this.data); }
+      async getType(type: string) { return this.data[type]!; }
+    },
+  });
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      readText: async () => {
+        const read = items[0]!;
+        await hold;
+        return (await read.getType('text/plain')).text();
+      },
+      read: async () => items,
+      write: async (next: ClipItem[]) => {
+        for (const entry of next) for (const type of entry.types) await entry.getType(type);
+        items = next;
+      },
+      writeText: async (value: string) => { items = [plain(value)]; },
+    },
+  });
+  restorers.push(() => {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+    if (item) Object.defineProperty(globalThis, 'ClipboardItem', item);
+    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+  });
+  return { text: async () => (await items[0]!.getType('text/plain')).text() };
+}
+
+const noop: XlsxPluginCommand<unknown> = {
+  id: 'noop', label: 'Noop', mutatesDocument: false, execute: () => ({ ok: true, status: 'executed' }),
+};
+/** A definition error: two commands share one id. */
+const DUPLICATE_COMMANDS = [noop, noop];
+
+const reported = (errors: readonly XlsxPluginError[]) => [...new Set(errors.map((error) => `${error.pluginId}:${error.phase}`))];
 
 /** Queues animation frames, stubs painting and returns a pump that runs the queued frames. */
 function stubFrames(): () => Promise<void> {
@@ -462,6 +518,52 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       expect(book.refusal()).toBeNull();
     });
 
+    for (const rejected of [false, true]) {
+      const variant = rejected ? ' beside a rejected definition under its id' : '';
+      const rejectedGate = (): Record<string, Gate> => rejected ? { rejected: { id: 'x', commands: DUPLICATE_COMMANDS } } : {};
+
+      it(`a gating plugin${variant} refuses a typed commit`, async () => {
+        const commits: string[] = [];
+        const book = await mountGated(editor, {
+          rule: { id: 'x', beforeCellCommit: (commit) => {
+            commits.push(commit.input);
+            return commit.input === 'no' ? { action: 'refuse', message: 'Rule' } : { action: 'accept' };
+          } },
+          ...rejectedGate(),
+        }, { starting: rejected ? 1 : 0 });
+        await book.select(0);
+        await book.type('no');
+        await waitFor(() => expect(book.refusal()).toBe('Rule'));
+        expect(await book.input(0)).toBe('1');
+        expect(commits).toEqual(['no']);
+        expect(reported(book.errors)).toEqual(rejected ? ['x:definition'] : []);
+      });
+
+      it(`a gating plugin${variant} refuses edits while it starts`, async () => {
+        let ready!: () => void;
+        const held = new Promise<void>((done) => { ready = done; });
+        const commits: string[] = [];
+        const book = await mountGated(editor, {
+          rule: { id: 'x', initialize: () => held, beforeCellCommit: (commit) => {
+            commits.push(commit.input);
+            return { action: 'accept' };
+          } },
+          ...rejectedGate(),
+        }, { starting: rejected ? 2 : 1 });
+        await book.select(0);
+        await book.type('9');
+        await waitFor(() => expect(book.refusal()).toBe(STARTING));
+        await waitFor(() => expect(book.editor()?.value).toBe('9'));
+        expect(await book.input(0)).toBe('1');
+        expect(commits).toEqual([]);
+        await act(async () => { ready(); });
+        await waitFor(() => expect(book.log.loaded.has('x')).toBe(true));
+        fireEvent.keyDown(book.editor()!, { key: 'Enter' });
+        await waitFor(async () => expect(await book.input(0)).toBe('9'));
+        expect(commits).toEqual(['9']);
+      });
+    }
+
     it('a gating plugin whose initialize throws is ended and does not hold edits', async () => {
       const book = await mountGated(editor, { broken: {
         initialize: () => { throw new Error('init exploded'); },
@@ -624,24 +726,193 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       expect([await book.input(0), await book.input(1)]).toEqual(['1', '2']);
     });
 
-    it('paste stays ungated in this version and writes a cell that is not editable', async () => {
-      const clipboard = navigator.clipboard;
-      const { read, readText } = clipboard;
-      clipboard.read = undefined as unknown as typeof read;
-      clipboard.readText = () => Promise.resolve('p');
-      restorers.push(() => { clipboard.read = read; clipboard.readText = readText; });
+    const nameBox = (book: Book) => (book.view.getByTestId('xlsx-name-box') as HTMLInputElement).value;
+    const paste = async (book: Book) => {
+      fireEvent.keyDown(book.surface, { key: 'v', ctrlKey: true });
+      await book.settle();
+    };
+
+    it('a paste over a cell that is not editable is refused whole and keeps the selection', async () => {
+      fakeClipboard('p\tq');
+      const commits: XlsxPluginCellCommit[] = [];
+      const book = await mountGated(editor, { lock: {
+        cellEditable: (ref) => ref.col !== 1,
+        beforeCellCommit: (commit) => { commits.push(commit); return { action: 'accept' }; },
+      } });
+      await book.select(0);
+      await paste(book);
+      await waitFor(() => expect(book.refusal()).toBe(NOT_ALLOWED));
+      expect([await book.input(0), await book.input(1)]).toEqual(['1', '2']);
+      expect(nameBox(book)).toBe('A1');
+      expect(commits).toEqual([]);
+    });
+
+    it('a paste asks only the cells it changes', async () => {
+      fakeClipboard('1\t2\tz');
+      const commits: XlsxPluginCellCommit[] = [];
+      const book = await mountGated(editor, { spy: { beforeCellCommit: (commit) => {
+        commits.push(commit);
+        return { action: 'accept' };
+      } } });
+      await book.select(0);
+      await paste(book);
+      await waitFor(async () => expect(await book.input(2)).toBe('z'));
+      expect(commits).toEqual([{ ...cell(2), input: 'z', kind: 'value', source: 'paste' }]);
+    });
+
+    it('a pasted formula reaches plugins moved to its cell, and a replaced one is written as given', async () => {
+      const clipboard = fakeClipboard();
+      const commits: XlsxPluginCellCommit[] = [];
+      const book = await mountGated(editor, { rewrite: { beforeCellCommit: (commit) => {
+        if (commit.source !== 'paste') return { action: 'accept' };
+        commits.push(commit);
+        return commit.col === 2 ? { action: 'replace', input: '=A1' } : { action: 'accept' };
+      } } });
+      await book.select(1);
+      fireEvent.change(book.formula(), { target: { value: '=A1*2' } });
+      fireEvent.keyDown(book.formula(), { key: 'Enter' });
+      await waitFor(async () => expect(await book.input(1)).toBe('=A1*2'));
+      await book.select(1);
+      fireEvent.keyDown(book.surface, { key: 'c', ctrlKey: true });
+      await waitFor(async () => expect(await clipboard.text()).toBe('=A1*2'));
+      await book.select(2);
+      await paste(book);
+      await waitFor(async () => expect(await book.input(2)).toBe('=A1'));
+      await book.select(3);
+      await paste(book);
+      await waitFor(async () => expect(await book.input(3)).toBe('=C1*2'));
+      expect(commits).toEqual([
+        { ...cell(2), input: '=B1*2', kind: 'formula', source: 'paste' },
+        { ...cell(3), input: '=C1*2', kind: 'formula', source: 'paste' },
+      ]);
+    });
+
+    it('a paste changing more cells than plugins may check is refused with the limit', async () => {
+      const cols = 100;
+      const rows = Math.floor(GATE_CELL_LIMIT / cols) + 1;
+      fakeClipboard(Array.from({ length: rows }, () => Array(cols).fill('x').join('\t')).join('\n'));
+      let asked = 0;
+      const book = await mountGated(editor, { spy: {
+        cellEditable: (ref) => { if (ref.row > 0) asked++; return true; },
+        beforeCellCommit: () => { asked++; return { action: 'accept' }; },
+      } });
+      await book.select(0);
+      await paste(book);
+      await waitFor(() => expect(book.refusal()).toBe(`Too many cells for plugins to check (limit ${GATE_CELL_LIMIT}).`),
+        { timeout: 30_000 });
+      expect([await book.input(0), await book.input(2)]).toEqual(['1', '']);
+      expect(asked).toBe(0);
+    }, 60_000);
+
+    it('a cut from a cell that is not editable leaves the clipboard and cells, and an allowed cut clears', async () => {
+      const clipboard = fakeClipboard('before');
       const commits: XlsxPluginCellCommit[] = [];
       const book = await mountGated(editor, { lock: {
         cellEditable: (ref) => ref.col !== 0,
-        beforeCellCommit: (commit) => { commits.push(commit); return { action: 'refuse' }; },
+        beforeCellCommit: (commit) => { commits.push(commit); return { action: 'accept' }; },
       } });
       await book.select(0);
-      fireEvent.keyDown(book.surface, { key: 'F2' });
-      expect(book.editor()).toBeNull();
-      fireEvent.keyDown(book.surface, { key: 'v', ctrlKey: true });
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
       await book.settle();
+      await waitFor(() => expect(book.refusal()).toBe(NOT_ALLOWED));
+      expect(await book.input(0)).toBe('1');
+      expect(await clipboard.text()).toBe('before');
+      await book.select(1);
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.settle();
+      await waitFor(async () => expect(await book.input(1)).toBe(''));
+      expect(await clipboard.text()).toBe('2');
+      expect(commits).toEqual([{ ...cell(1), input: '', kind: 'clear', source: 'cut' }]);
+    });
+
+    it('a paste while a gating plugin starts is refused, and pastes once it is ready', async () => {
+      fakeClipboard('p');
+      let ready!: () => void;
+      const held = new Promise<void>((done) => { ready = done; });
+      const commits: XlsxPluginCellCommit[] = [];
+      const book = await mountGated(editor, { slow: { initialize: () => held, beforeCellCommit: (commit) => {
+        commits.push(commit);
+        return { action: 'accept' };
+      } } }, { starting: 1 });
+      await book.select(0);
+      await paste(book);
+      await waitFor(() => expect(book.refusal()).toBe(STARTING));
+      expect(await book.input(0)).toBe('1');
+      await act(async () => { ready(); });
+      await waitFor(() => expect(book.log.loaded.has('slow')).toBe(true));
+      await paste(book);
       await waitFor(async () => expect(await book.input(0)).toBe('p'));
-      expect(commits).toEqual([]);
+      expect(commits).toEqual([{ ...cell(0), input: 'p', kind: 'value', source: 'paste' }]);
+    });
+
+    it('a cut while a gating plugin starts is refused with the clipboard and cells unchanged', async () => {
+      const clipboard = fakeClipboard('before');
+      let ready!: () => void;
+      const held = new Promise<void>((done) => { ready = done; });
+      const book = await mountGated(editor, { slow: { initialize: () => held,
+        beforeCellCommit: () => ({ action: 'accept' }) } }, { starting: 1 });
+      await book.select(0);
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.settle();
+      await waitFor(() => expect(book.refusal()).toBe(STARTING));
+      expect(await book.input(0)).toBe('1');
+      expect(await clipboard.text()).toBe('before');
+      await act(async () => { ready(); });
+      await waitFor(() => expect(book.log.loaded.has('slow')).toBe(true));
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.settle();
+      await waitFor(async () => expect(await book.input(0)).toBe(''));
+      expect(await clipboard.text()).toBe('1');
+    });
+
+    it('a cut queued behind a paste into its empty cell is decided after the paste, with the clipboard unchanged', async () => {
+      let release!: () => void;
+      const clipboard = fakeClipboard('p', new Promise<void>((done) => { release = done; }));
+      const book = await mountGated(editor, { noCut: { beforeCellCommit: (commit) =>
+        commit.source === 'cut' ? { action: 'refuse', message: 'No cut' } : { action: 'accept' } } });
+      await book.select(2);
+      fireEvent.keyDown(book.surface, { key: 'v', ctrlKey: true });
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await act(async () => { release(); });
+      await book.settle();
+      await waitFor(async () => expect(await book.input(2)).toBe('p'));
+      await waitFor(() => expect(book.refusal()).toBe('No cut'));
+      expect(await clipboard.text()).toBe('p');
+    });
+
+    if (editor === 'peerless') it('a gated cut of a locked cell on a protected sheet is refused before the clipboard is written', async () => {
+      const clipboard = fakeClipboard('before');
+      const asked: string[] = [];
+      const book = await mountGated(editor, { spy: { beforeCellCommit: (commit) => {
+        asked.push(`${commit.source}:${commit.col}`);
+        return { action: 'accept' };
+      } } }, { protectedSheet: true });
+      await book.select(0);
+      fireEvent.keyDown(book.surface, { key: 'x', ctrlKey: true });
+      await book.settle();
+      await waitFor(() => expect(book.refusal()).toBe(PROTECTED));
+      expect(await book.input(0)).toBe('1');
+      expect(await clipboard.text()).toBe('before');
+      expect(asked).toEqual([]);
+    });
+
+    if (editor === 'peerless') it('a paste over a locked cell of a protected sheet is refused by protection before plugins are asked', async () => {
+      fakeClipboard('p');
+      const asked: string[] = [];
+      const book = await mountGated(editor, { spy: {
+        cellEditable: (ref) => { asked.push(`editable:${ref.col}`); return true; },
+        beforeCellCommit: (commit) => { asked.push(`commit:${commit.col}`); return { action: 'accept' }; },
+      } }, { protectedSheet: true });
+      await book.select(0);
+      await paste(book);
+      await waitFor(() => expect(book.refusal()).not.toBeNull());
+      expect(await book.input(0)).toBe('1');
+      expect(asked.filter((entry) => entry.endsWith(':0') || entry.startsWith('commit:'))).toEqual([]);
+      await book.select(1);
+      await paste(book);
+      await waitFor(async () => expect(await book.input(1)).toBe('p'));
+      expect(asked).toContain('commit:1');
+      expect(asked.filter((entry) => entry.endsWith(':0'))).toEqual([]);
     });
 
     it('gate hooks get reads only: no edits, commands, setState or run', async () => {
@@ -703,7 +974,6 @@ for (const editor of ['in-thread', 'peerless'] as const) {
 
     const numbersOnly = () => ({ numbers: { beforeCellCommit: (commit: XlsxPluginCellCommit) =>
       /^\d+$/.test(commit.input) ? { action: 'accept' } : { action: 'refuse', message: 'Numbers only' } } });
-    const nameBox = (book: Book) => (book.view.getByTestId('xlsx-name-box') as HTMLInputElement).value;
 
     if (editor === 'in-thread') it('a grid press away from a refused draft keeps the selection and focuses the draft', async () => {
       const book = await mountGated(editor, numbersOnly());
@@ -790,7 +1060,7 @@ for (const editor of ['in-thread', 'peerless'] as const) {
 async function mountLegacy(gates: Record<string, Gate>) {
   const errors: XlsxPluginError[] = [];
   const log: GateLog = { loaded: new Set<string>(), cleanups: [], contexts: {} };
-  const plugins = Object.entries(gates).map(([id, gate]) => gatePlugin(id, gate, log));
+  const plugins = Object.entries(gates).map(([id, gate]) => gatePlugin(gate.id ?? id, gate, log));
   const file = await book();
   for (const name of ['Worker', 'OffscreenCanvas'] as const) {
     const original = Object.getOwnPropertyDescriptor(globalThis, name);
@@ -847,6 +1117,18 @@ describe('XlsxEditor plugin cell-edit gate (legacy worker editor)', () => {
       expect(legacy.errors).toHaveLength(1);
     });
   }
+
+  it('a rejected gating definition does not end the accepted plugin under its id', async () => {
+    const legacy = await mountLegacy({
+      plain: { id: 'x' },
+      rejected: { id: 'x', commands: DUPLICATE_COMMANDS, beforeCellCommit: () => ({ action: 'refuse', message: 'never' }) },
+    });
+    await waitFor(() => expect(legacy.log.loaded.has('x')).toBe(true), MOUNTED);
+    await legacy.type(0, 'abc');
+    await waitFor(async () => expect(await legacy.input(0)).toBe('abc'));
+    expect(reported(legacy.errors)).toEqual(['x:definition']);
+    expect(legacy.log.cleanups).toEqual([]);
+  });
 
   it('a plugin without gate hooks still runs and typing commits', async () => {
     const legacy = await mountLegacy({ plain: {} });
