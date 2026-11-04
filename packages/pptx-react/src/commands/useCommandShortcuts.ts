@@ -55,7 +55,8 @@ export function useCommandShortcuts({
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.target instanceof Element && event.target.closest('[role="menu"]')) return;
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && event.target instanceof Element &&
+        event.target.closest('[role="menu"]')) return;
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (!owns(event) || suspendedRef.current()) return;
       const binding = BINDINGS.find(({ shortcut }) => matchesChord(shortcut.chord, event));
