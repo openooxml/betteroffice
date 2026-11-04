@@ -3053,6 +3053,12 @@ export interface SelectionTextFormatting {
 export declare function selectionFormattingFromStory(story: StorySnapshot, anchor: number, focus: number, fallback: EffectiveTextStyle): SelectionTextFormatting;
 export declare function storyFormattingFromStory(story: StorySnapshot, fallback: EffectiveTextStyle): SelectionTextFormatting;
 export declare function effectiveStyleFromSelection(story: StorySnapshot, anchor: number, focus: number, fallback: EffectiveTextStyle): EffectiveTextStyle;
+export declare function typingStyle<T extends {
+    strike?: string | null;
+}>(style: T): T;
+export declare function insertionStyle<T extends {
+    strike?: string | null;
+}>(style: T): T;
 export declare function insertionStyleFromSelection(story: StorySnapshot, anchor: number, focus: number, storedMarks: TextStyle): TextStyle;
 export declare function insertionEchoRun(story: StorySnapshot, anchor: number, focus: number, storedMarks: TextStyle): {
     neighbour: 'before' | 'after';
