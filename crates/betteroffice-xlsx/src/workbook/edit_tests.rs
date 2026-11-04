@@ -744,10 +744,68 @@ fn range_format_then_cell_edit_preserves_synthesized_plain_catalog() {
     }
 }
 
+#[test]
+fn range_format_then_staged_cell_edit_preserves_synthesized_plain_catalog() {
+    for mode in 0..3 {
+        let mut pair = Lockstep::from_model(plain_style_synthesis_model());
+        pair.step(true, |workbook| {
+            workbook.patch_range_style(
+                SheetId(0),
+                CellRange::parse_a1("A1:B1").unwrap(),
+                StylePatch {
+                    bold: Some(false),
+                    ..StylePatch::default()
+                },
+                options(),
+            )
+        })
+        .unwrap();
+        pair.step(true, |workbook| match mode {
+            0 => workbook.edit_cells(
+                SheetId(0),
+                &[CellInput {
+                    cell: r("C1"),
+                    input: "1".into(),
+                }],
+                options(),
+            ),
+            1 => workbook.edit_cells(
+                SheetId(0),
+                &[
+                    CellInput {
+                        cell: r("C1"),
+                        input: "1".into(),
+                    },
+                    CellInput {
+                        cell: r("D1"),
+                        input: "2".into(),
+                    },
+                ],
+                options(),
+            ),
+            _ => workbook.apply_ops(
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: r("C1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 1.0 },
+                        ..CellState::default()
+                    },
+                }],
+                options(),
+            ),
+        })
+        .unwrap();
+        pair.edit(0, r("H9"), "3").unwrap();
+        assert_eq!(pair.fast.cell(SheetId(0), r("C1")).unwrap().input, "1");
+    }
+}
+
 #[derive(Debug)]
 enum RangeFormatSequenceEdit {
     Operation(Box<Op>),
     Cell(SheetId, CellRef, String),
+    Cells(SheetId, Vec<CellInput>),
     Undo,
     Redo,
 }
@@ -781,6 +839,7 @@ impl RangeFormatSequenceEdit {
                 op => workbook.apply_ops(vec![op.clone()], options()),
             },
             Self::Cell(sheet, at, input) => workbook.edit_cell(*sheet, *at, input, options()),
+            Self::Cells(sheet, inputs) => workbook.edit_cells(*sheet, inputs, options()),
             Self::Undo => workbook.undo(options()),
             Self::Redo => workbook.redo(options()),
         }
@@ -1015,7 +1074,31 @@ fn random_range_format_edit(
             Op::UnmergeCells { sheet, range }
         }
         12 => return RangeFormatSequenceEdit::Undo,
-        _ => return RangeFormatSequenceEdit::Redo,
+        13 => return RangeFormatSequenceEdit::Redo,
+        14 | 15 => {
+            let mut inputs = vec![CellInput {
+                cell: at,
+                input: (10_000 + random.next(100)).to_string(),
+            }];
+            if kind == 15 {
+                inputs.push(CellInput {
+                    cell: CellRef::new(at.row, at.col + 1),
+                    input: "=A1+B1".into(),
+                });
+            }
+            return RangeFormatSequenceEdit::Cells(sheet, inputs);
+        }
+        _ => Op::SetCell {
+            sheet,
+            at,
+            cell: CellState {
+                value: CellValue::Number {
+                    value: f64::from(20_000 + random.next(100)),
+                },
+                style: current_cell_state(&workbook.model, sheet, at).style,
+                ..CellState::default()
+            },
+        },
     };
     RangeFormatSequenceEdit::Operation(Box::new(op))
 }
@@ -1027,7 +1110,7 @@ fn run_seeded_range_format_sequences(check_fast_path: bool) {
         let mut random = Random(seed);
         let mut pair = Lockstep::from_model(range_format_sequence_model(seed));
         pair.step = sequence as usize * 30;
-        let mut order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let mut order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         for index in (1..order.len()).rev() {
             order.swap(index, random.next((index + 1) as u32) as usize);
         }
@@ -1036,7 +1119,7 @@ fn run_seeded_range_format_sequences(check_fast_path: bool) {
             let kind = if step < order.len() {
                 order[step]
             } else {
-                random.next(14)
+                random.next(17)
             };
             let number_kind = if kind == 1 {
                 let kind = if first_number_format {

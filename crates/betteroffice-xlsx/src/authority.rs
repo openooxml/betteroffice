@@ -1176,6 +1176,7 @@ impl WorkbookAuthority {
         self.doc = doc;
         self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
         self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
+        self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -1272,6 +1273,21 @@ impl WorkbookAuthority {
             return Ok(self.encode_ops_update(state_vector));
         }
         let mut model = self.materialize()?;
+        let plain_cell_baseline = if let [Op::SetCell { sheet, at, .. }] = ops {
+            let was_plain = model
+                .sheet(*sheet)
+                .and_then(|sheet| sheet.cell(*at))
+                .and_then(|cell| cell.style)
+                .map(|index| style_needs_plain(&model.styles, index, &self.base.styles))
+                .transpose()
+                .map_err(AuthorityError::InvalidState)?
+                .unwrap_or(false);
+            self.plain_style_cells
+                .load(Ordering::Relaxed)
+                .checked_sub(u64::from(was_plain))
+        } else {
+            None
+        };
         model.styles.bind_plain_xf();
         let ops =
             remap_styles(ops, styles, &mut model.styles).map_err(AuthorityError::InvalidState)?;
@@ -1302,6 +1318,18 @@ impl WorkbookAuthority {
         if self.base.tables != model.tables {
             Arc::make_mut(&mut self.base).tables = model.tables.clone();
         }
+        let plain_style_cells =
+            if let (Some(count), [Op::SetCell { cell, .. }]) = (plain_cell_baseline, ops) {
+                let is_plain = cell
+                    .style
+                    .map(|index| style_needs_plain(&model.styles, index, &self.base.styles))
+                    .transpose()
+                    .map_err(AuthorityError::InvalidState)?
+                    .unwrap_or(false);
+                count.checked_add(u64::from(is_plain))
+            } else {
+                None
+            };
         self.sync_model(&model, ops, origin, &authored_styles, collaborative)
             .map_err(AuthorityError::InvalidState)?;
         if let [Op::SetCell { at, cell, .. }] = ops
@@ -1309,7 +1337,8 @@ impl WorkbookAuthority {
             && at.col < MAX_COLS
             && !matches!(cell.value, CellValue::Number { value } if !value.is_finite())
         {
-            self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
+            self.plain_style_cells
+                .store(plain_style_cells.unwrap_or(u64::MAX), Ordering::Relaxed);
             self.projection_valid.store(true, Ordering::Relaxed);
         }
         Ok(self.encode_ops_update(state_vector))
@@ -1331,7 +1360,9 @@ impl WorkbookAuthority {
         let [Op::SetCell { sheet, at, cell }] = ops else {
             return None;
         };
+        let count = self.plain_style_cells.load(Ordering::Relaxed);
         if !self.projection_valid.load(Ordering::Relaxed)
+            || count == u64::MAX
             || at.row >= MAX_ROWS
             || at.col >= MAX_COLS
             || matches!(cell.value, CellValue::Number { value } if !value.is_finite())
@@ -1344,8 +1375,7 @@ impl WorkbookAuthority {
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
             materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
-        let count = self.plain_style_cells.load(Ordering::Relaxed);
-        if count != 0 && count != u64::MAX {
+        if count != 0 {
             styles.plain_xf();
         }
         styles.bind_plain_xf();
@@ -1387,19 +1417,15 @@ impl WorkbookAuthority {
             .is_some_and(|key| indices.get(key) == Some(&None));
         let is_plain = cell
             .style
-            .map(|index| style_needs_plain(&styles, index, &indices, &self.base.styles))
+            .map(|index| style_needs_plain(&styles, index, &self.base.styles))
             .transpose()
             .ok()?
             .unwrap_or(false);
-        let plain_style_cells = if count == u64::MAX {
-            None
-        } else {
-            Some(
-                count
-                    .checked_sub(u64::from(was_plain))?
-                    .checked_add(u64::from(is_plain))?,
-            )
-        };
+        let plain_style_cells = Some(
+            count
+                .checked_sub(u64::from(was_plain))?
+                .checked_add(u64::from(is_plain))?,
+        );
         let mut target = Sheet::default();
         target.set_cell(*at, cell.clone().into());
         Some(SetCellSync {
@@ -2075,6 +2101,12 @@ impl WorkbookAuthority {
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, baseline).map_err(AuthorityError::InvalidState)?;
         let mut staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
+        if projection_valid {
+            staged.plain_style_cells.store(
+                self.plain_style_cells.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
         staged
             .projection_valid
             .store(projection_valid, Ordering::Relaxed);
@@ -2306,6 +2338,7 @@ impl WorkbookAuthority {
         self.doc = doc;
         self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
         self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
+        self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
         self.undo_stack = undo_stack;
         self.redo_stack = redo_stack;
         Ok(())
@@ -4743,13 +4776,9 @@ fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
 fn style_needs_plain(
     stylesheet: &Stylesheet,
     index: u32,
-    indices: &BTreeMap<String, Option<u32>>,
     base: &Stylesheet,
 ) -> Result<bool, String> {
     let key = style_key(stylesheet, index)?;
-    if let Some(index) = indices.get(&key) {
-        return Ok(index.is_none());
-    }
     if stylesheet.format_source(index).1.is_some()
         || stylesheet.cell_format(Some(index)) != CellFormat::default()
     {
@@ -6700,6 +6729,7 @@ impl WorkbookAuthority {
         let mut model = self.base.workbook();
         model.styles = styles;
         let mut plain = None;
+        let mut plain_style_cells = 0;
         let expected_sheet_keys = sheet_schema_keys(version);
         let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
@@ -6757,7 +6787,10 @@ impl WorkbookAuthority {
                 &sheet_map,
                 &txn,
                 &style_indices,
-                &mut || *plain.get_or_insert_with(|| model.styles.plain_xf()),
+                &mut || {
+                    plain_style_cells += 1;
+                    *plain.get_or_insert_with(|| model.styles.plain_xf())
+                },
                 version,
                 SheetFallbacks {
                     freeze_pane,
@@ -6856,6 +6889,8 @@ impl WorkbookAuthority {
             baseline_merges,
             shared_types,
         };
+        self.plain_style_cells
+            .store(plain_style_cells, Ordering::Relaxed);
         self.projection_valid.store(true, Ordering::Relaxed);
         Ok((model, structure))
     }
@@ -8184,6 +8219,57 @@ mod tests {
         );
         assert_eq!(fast.encode_state_as_update_v1(), before);
         assert_eq!(fast_set_cell_count(), count);
+    }
+
+    #[test]
+    fn range_format_unknown_plain_count_requires_materialization() {
+        let model = rich_model();
+        let mut fast = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let mut oracle = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        fast.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
+        let count = fast_set_cell_count();
+        let op = Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(1, 2),
+            cell: CellState {
+                value: CellValue::Number { value: 1.0 },
+                ..CellState::default()
+            },
+        };
+        let update = fast
+            .apply_ops(&[op.clone()], SyncOrigin::User, &model.styles)
+            .unwrap();
+        let expected =
+            with_full_materialization(|| oracle.apply_ops(&[op], SyncOrigin::User, &model.styles))
+                .unwrap();
+        assert_eq!(update, expected);
+        assert_eq!(fast_set_cell_count(), count);
+        assert_ne!(fast.plain_style_cells.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(
+            fast.plain_style_cells.load(Ordering::Relaxed),
+            oracle.plain_style_cells.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            fast.encode_state_as_update_v1(),
+            oracle.encode_state_as_update_v1()
+        );
+        let op = Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(1, 2),
+            cell: CellState {
+                value: CellValue::Number { value: 2.0 },
+                ..CellState::default()
+            },
+        };
+        assert_singleton_lockstep(
+            &mut fast,
+            &mut oracle,
+            &[op],
+            SyncOrigin::User,
+            &model.styles,
+        )
+        .unwrap();
+        assert_eq!(fast_set_cell_count(), count + 1);
     }
 
     #[test]
