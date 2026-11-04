@@ -14,6 +14,8 @@ const read = async (file: string) => Bun.file(new URL(file, assets)).arrayBuffer
 const decode = async (file: string) => new Uint8Array((await decodeFontFace(await read(file))).font);
 
 interface Index {
+  byteLength: number;
+  sha256: string;
   skeleton: { file: string };
   core: { file: string };
   chunks: Array<{ id: number; file: string }>;
@@ -32,6 +34,24 @@ function transport(reads: string[], tamper?: (file: string) => boolean): SliceTr
   };
 }
 
+/** Serves `file` with one byte flipped after decoding, so only its SHA-256 can tell. */
+function flipping(file: string): SliceTransport {
+  const served = new WeakSet<ArrayBuffer>();
+  return {
+    async read(name) {
+      const bytes = new Uint8Array(await read(name));
+      if (name === file && name.endsWith('.json')) bytes[bytes.indexOf(0x30)] = 0x31;
+      if (name === file) served.add(bytes.buffer);
+      return bytes.buffer;
+    },
+    async decode(encoded, maxOutput) {
+      const font = new Uint8Array((await decodeFontFace(encoded, undefined, { maxOutput })).font);
+      if (served.has(encoded)) font[font.length >> 1] ^= 1;
+      return font.buffer;
+    },
+  };
+}
+
 const jp = pack.faces.find((face) => face.file === 'NotoSansJP-Regular.otf.zst')!;
 const jpRef = jp.slices as SliceRef;
 
@@ -45,8 +65,8 @@ test('every sliced face reassembles from all its chunks to its recorded SHA-256 
       for (const [glyph, outline] of chunkEntries(await decode(file))) outlines.set(glyph, outline);
     }
     const font = skeleton.reassemble(outlines);
-    expect(font.byteLength).toBe(ref.byteLength);
-    expect(sha(font)).toBe(ref.sha256);
+    expect(font.byteLength).toBe(index.byteLength);
+    expect(sha(font)).toBe(index.sha256);
     expect(skeleton.chunkOfCodepoint(0x20)).toBe(0);
     expect(skeleton.chunkOfGlyph(skeleton.numGlyphs)).toBeUndefined();
   }
@@ -172,6 +192,21 @@ test('a chunk that fails its checks rejects and loads on a later request', async
 test('opening rejects an index whose SHA-256 differs from the manifest pointer', async () => {
   await expect(openProgressiveFace({ ...jpRef, indexSha256: '0'.repeat(64) }, transport([])))
     .rejects.toThrow('SHA-256 mismatch');
+});
+
+test('a served index, skeleton, core or chunk changed at its recorded length is refused by its SHA-256', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  await expect(openProgressiveFace(jpRef, flipping(jpRef.index))).rejects.toThrow(`Font slice index ${jpRef.index} SHA-256 mismatch`);
+  for (const file of [index.skeleton.file, index.core.file]) {
+    await expect(openProgressiveFace(jpRef, flipping(file))).rejects.toThrow(`Font slice ${file} SHA-256 mismatch`);
+  }
+  const chunk = index.chunks[9]!.file;
+  const face = await openProgressiveFace(jpRef, flipping(chunk));
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  let glyph = 0;
+  while (skeleton.chunkOfGlyph(glyph) !== 10) glyph += 1;
+  await expect(face.ensureGlyphs([glyph])).rejects.toThrow(`Font slice ${chunk} SHA-256 mismatch`);
+  expect(face.revision).toBe(1);
 });
 
 test('the progressive entry reaches no module that reads import.meta, so classic workers can load it', async () => {

@@ -47,9 +47,8 @@ export interface SliceLocation {
 export interface SliceRef {
   format: number;
   index: string;
+  /** Pins the index, which pins every file it lists by length and SHA-256. */
   indexSha256: string;
-  byteLength: number;
-  sha256: string;
 }
 
 interface SliceFile {
@@ -130,7 +129,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
   const indexBytes = await transport.read(ref.index);
   if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
   const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
-  if (index.format !== 1 || index.sha256 !== ref.sha256) throw new Error(`Font slice index ${ref.index} mismatch`);
+  if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
   const [skeletonBytes, core] = await Promise.all([readFile(transport, index.skeleton), readFile(transport, index.core)]);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));
