@@ -1441,49 +1441,59 @@ impl StoryParts<'_> {
             return Err(save_error("section splice conflict"));
         }
         let empty = BTreeMap::new();
-        let mut model_part;
-        let (part, patches) = if model_only {
-            model_part = part.clone();
+        let original = part;
+        let model_part = model_only.then(|| {
+            let mut model_part = part.clone();
             model_part.paragraph_patches.clear();
             model_part.legacy_paragraphs.clear();
-            (&model_part, &empty)
-        } else {
-            (part, &patched)
-        };
+            model_part
+        });
+        let attempt =
+            |part: &S13SplicedPart, patches: &BTreeMap<u32, String>, reasons: &mut Vec<String>| {
+                if written.conflict {
+                    None
+                } else if strict {
+                    super::splice::splice_section_story_part(
+                        source,
+                        &serialized,
+                        &written,
+                        part,
+                        assignments,
+                        patches,
+                        reasons,
+                    )
+                } else {
+                    super::splice::splice_story_part(
+                        source,
+                        &serialized,
+                        &written,
+                        part,
+                        assignments,
+                        patches,
+                        reasons,
+                    )
+                    .or_else(|| {
+                        super::splice::splice_source_direct(
+                            source,
+                            &serialized,
+                            &written,
+                            part,
+                            assignments,
+                            patches,
+                        )
+                    })
+                }
+            };
         let mut reasons = Vec::new();
-        let spliced = if written.conflict {
-            None
-        } else if strict {
-            super::splice::splice_section_story_part(
-                source,
-                &serialized,
-                &written,
-                part,
-                assignments,
-                patches,
-                &mut reasons,
-            )
-        } else {
-            super::splice::splice_story_part(
-                source,
-                &serialized,
-                &written,
-                part,
-                assignments,
-                patches,
-                &mut reasons,
-            )
-            .or_else(|| {
-                super::splice::splice_source_direct(
-                    source,
-                    &serialized,
-                    &written,
-                    part,
-                    assignments,
-                    patches,
-                )
-            })
+        let mut spliced = match &model_part {
+            Some(model_part) => attempt(model_part, &empty, &mut reasons),
+            None => attempt(original, &patched, &mut reasons),
         };
+        if spliced.is_none() && model_part.is_some() {
+            reasons.clear();
+            spliced = attempt(original, &patched, &mut reasons);
+        }
+        let part = original;
         if let Some(spliced) = spliced {
             for reason in reasons {
                 count_replace(context, &part.part, 0, &reason)?;

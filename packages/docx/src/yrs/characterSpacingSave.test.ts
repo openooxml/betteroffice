@@ -89,3 +89,23 @@ for (const [saveName, save] of Object.entries(SAVES)) {
     for (const wrapper of WRAPPERS) expect(xml).toContain(wrapper);
   });
 }
+
+const RICH = '<w:p w:rsidR="00AA0000"><w:pPr><w:pPrChange w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z"><w:pPr/></w:pPrChange></w:pPr><w:r w:rsidR="00BB0000"><w:rPr><w:noProof/><w:specVanish/></w:rPr><w:t>Rich</w:t></w:r><w:proofErr w:type="spellStart"/><w:r><w:t>Wrod</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p>';
+const HEADING = '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="0" w:name="_Toc1"/><w:r><w:rPr><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr><w:t>Heading</w:t></w:r><w:bookmarkEnd w:id="0"/></w:p>';
+for (const [saveName, save] of Object.entries(SAVES)) {
+  test(`${saveName}: typing at a bookmark that starts a theme-font heading changes only that heading`, async () => {
+    const session = await createYrsSession();
+    open.push(session);
+    const before = `${RICH}${HEADING}${RICH.replace('00AA0000', '00AA0001')}`;
+    session.seedFromDocx(makeDocx(before));
+    const heading = (session.paragraphs('body') as Array<{ paraId: string; text: string }>).find(entry => entry.text === 'Heading')!;
+    session.insertText({ story: 'body', paraId: heading.paraId, offset: 0 }, 'X');
+    const xml = partOf(await save(session));
+    const source = partOf(makeDocx(before));
+    const start = source.indexOf(HEADING);
+    const suffix = source.slice(start + HEADING.length);
+    expect(xml.slice(0, start)).toBe(source.slice(0, start));
+    expect(xml.endsWith(suffix)).toBe(true);
+    expect(xml.slice(start, xml.length - suffix.length)).toContain('>XHeading<');
+  });
+}
