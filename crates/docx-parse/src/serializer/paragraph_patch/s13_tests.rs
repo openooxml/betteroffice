@@ -49,17 +49,13 @@ fn save_patch_with_warnings(
 
 #[test]
 fn paragraph_patch_s13_keeps_source_and_allows_insertions() {
-    let source =
-        "<w:p w:rsidR='87654321'><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>";
+    let source = "<w:p w:rsidR='87654321'><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>";
     let output = save_patch(source, "old").unwrap();
     let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
-    assert_eq!(
-        output,
-        format!(
-            "{root}{}<w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p></w:body></w:document>",
-            source.replace("old", "new")
-        )
-    );
+    assert_eq!(output, format!(
+        "{root}{}<w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p></w:body></w:document>",
+        source.replace("old", "new")
+    ));
 }
 
 #[test]
@@ -173,10 +169,7 @@ fn paragraph_patch_s13_seed_mismatch_uses_counted_paragraph_replacement() {
     let (output, warnings) = save_patch_with_warnings(source, "bad").unwrap();
     let (expected, _) = save_patch_with_warnings(source, "old").unwrap();
     assert_eq!(output.as_bytes(), expected.as_bytes());
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
 }
 
 #[test]
@@ -191,10 +184,7 @@ fn paragraph_patch_s13_unsupported_structure_uses_legacy_replacement() {
             "{root}<w:p><w:r><w:t>new</w:t></w:r></w:p><w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n{keep}</w:body></w:document>"
         )
     );
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
 fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
@@ -254,8 +244,7 @@ fn assert_writer_conflict_replaces_only_paragraph(
     let (source, mut request) = mixed_request(middle);
     let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
     part.legacy_paragraphs.clear();
-    part.paragraph_patches
-        .push(serde_json::from_value(patch).unwrap());
+    part.paragraph_patches.push(serde_json::from_value(patch).unwrap());
     paragraph["sourceOrdinal"] = json!(2);
     request.document.content[2] = serde_json::from_value(paragraph).unwrap();
     assert_ambiguous_paragraph_replacement(&source, request, middle, replacement);
@@ -271,10 +260,7 @@ fn assert_ambiguous_paragraph_replacement(
     let parts = part_map(&saved);
     let expected = source.replace("old", "new").replace(middle, replacement);
     assert_eq!(parts["word/document.xml"].as_slice(), expected.as_bytes());
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
 }
 
 #[test]
@@ -315,8 +301,7 @@ fn paragraph_patch_s13_whitespace_comment_id_replaces_only_changed_paragraph() {
     });
     let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
     part.legacy_paragraphs.clear();
-    part.paragraph_patches
-        .push(serde_json::from_value(patch).unwrap());
+    part.paragraph_patches.push(serde_json::from_value(patch).unwrap());
     let mut paragraph = text_paragraph("aXc", None);
     paragraph["sourceOrdinal"] = json!(2);
     paragraph["content"].as_array_mut().unwrap().push(json!({
@@ -546,14 +531,9 @@ fn paragraph_patch_s13_body_edit_keeps_overlapping_header_and_footer_unchanged()
     let body = std::str::from_utf8(&after["word/document.xml"]).unwrap();
     assert_eq!(
         body,
-        source
-            .replace("old", "new")
-            .replace(">field<", ">replaced<")
+        source.replace("old", "new").replace(">field<", ">replaced<")
     );
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
 #[test]
@@ -569,22 +549,16 @@ fn paragraph_patch_s13_resolves_retained_attributes_at_ancestor_namespaces() {
             .replace("<w:r><w:rPr>", "<w:r x:keep='A&#x26;B'><w:rPr>");
         request.paragraph_ids.as_mut().unwrap().spliced_parts[0].sha256 =
             format!("{:x}", Sha256::digest(source.as_bytes()));
-        let (saved, warnings) =
-            write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
         let parts = part_map(&saved);
         let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
         assert_eq!(
             output,
-            source
-                .replace("old", "new")
-                .replace(">field<", ">replaced<"),
+            source.replace("old", "new").replace(">field<", ">replaced<"),
             "{element}"
         );
         assert_eq!(output.matches("x:keep='A&#x26;B'").count(), 2);
-        assert_eq!(
-            warnings,
-            ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]
-        );
+        assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
     }
 }
 
@@ -597,14 +571,9 @@ fn paragraph_patch_s13_admission_rejection_replaces_only_changed_paragraphs() {
     let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
     let parts = part_map(&saved);
     let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
-    let expected = source
-        .replace("old", "new")
-        .replace(">field<", ">replaced<");
+    let expected = source.replace("old", "new").replace(">field<", ">replaced<");
     assert_eq!(output, expected);
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
 #[test]
@@ -631,9 +600,10 @@ fn paragraph_patch_s13_admission_rejection_keeps_patched_neighbors_exact() {
         let (saved, warnings) =
             write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
         let parts = part_map(&saved);
-        let expected = source
-            .replace("old", "new")
-            .replace(rejected, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>");
+        let expected = source.replace("old", "new").replace(
+            rejected,
+            "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>",
+        );
         assert_eq!(parts["word/document.xml"].as_slice(), expected.as_bytes());
         assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"sdt\":1}"]);
     }
@@ -646,8 +616,7 @@ fn paragraph_patch_s13_admission_replacement_keeps_insertion_anchors() {
         "<w:t>old</w:t></w:r></w:p>"
     );
     let (output, warnings) = save_patch_with_warnings(source, "old").unwrap();
-    let root =
-        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#;
+    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#;
     let expected = format!(
         "{root}<w:body>{}<w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n\
          <w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p></w:body></w:document>",
@@ -757,10 +726,7 @@ fn paragraph_patch_s13_legacy_only_and_captured_plans_reject_source_drift() {
         let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
         assert_eq!(output, source.replace(">field<", ">replaced<"));
         if legacy {
-            assert_eq!(
-                warnings,
-                ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]
-            );
+            assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]);
         } else {
             assert!(warnings.is_empty(), "{warnings:?}");
         }
@@ -822,9 +788,10 @@ fn paragraph_patch_s13_replaces_only_the_balanced_field_paragraph() {
     let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
     assert_eq!(
         output,
-        source
-            .replace("old", "new")
-            .replace(field, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>")
+        source.replace("old", "new").replace(
+            field,
+            "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>"
+        )
     );
     assert!(warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":1}".to_owned()));
 }
@@ -842,10 +809,7 @@ fn paragraph_patch_s13_unadmitted_structure_uses_counted_paragraph_replacement()
             .replace("old", "new")
             .replace(field, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>")
     );
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
 #[test]
@@ -858,10 +822,7 @@ fn paragraph_patch_s13_rejects_selective_patch_plans() {
     let error = write_docx_s13(request, &base_package(&source))
         .unwrap_err()
         .to_string();
-    assert!(
-        error.contains("DOCX_MINIMAL_PATCH [INVALID_PLAN]"),
-        "{error}"
-    );
+    assert!(error.contains("DOCX_MINIMAL_PATCH [INVALID_PLAN]"), "{error}");
 }
 
 #[test]
@@ -1047,8 +1008,7 @@ fn paragraph_patch_s13_counts_changed_inheritance_as_restyle() {
             }]}
         }))
         .unwrap();
-        let (saved, warnings) =
-            write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
         let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
         assert_eq!(
             output,
@@ -1064,113 +1024,4 @@ fn paragraph_patch_s13_counts_changed_inheritance_as_restyle() {
             "{scope}"
         );
     }
-}
-
-#[test]
-fn paragraph_patch_s13_marker_paragraph_the_model_cannot_splice_replaces_only_that_paragraph() {
-    let middle = concat!(
-        "<w:p w:rsidR='87654321'><w:bookmarkStart w:id=\"1\" w:name=\"_Toc1\"/>",
-        "<w:r><w:t>Heading</w:t></w:r><w:bookmarkEnd w:id=\"1\"/>",
-        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>",
-        "<w:r><w:instrText xml:space=\"preserve\"> SEQ x </w:instrText></w:r>",
-        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>",
-        "<w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
-    );
-    let (source, mut request) = mixed_request(middle);
-    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
-    part.legacy_paragraphs[0].detail = "marker: mutation or touch".to_owned();
-    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
-    let parts = part_map(&saved);
-    let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
-    assert_eq!(
-        output,
-        source
-            .replace("old", "new")
-            .replace(middle, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>")
-    );
-    assert_eq!(
-        warnings,
-        [
-            "DOCX_MODEL_ONLY_RETRY word/document.xml spliced",
-            "DOCX_MINIMAL_PATCH replace counts {\"marker\":1}"
-        ]
-    );
-}
-
-#[test]
-fn paragraph_patch_s13_marker_paragraph_gaining_an_outside_bookmark_is_not_replaced_alone() {
-    let paragraph = concat!(
-        "<w:p w:rsidR='87654321'><w:r><w:t>Heading</w:t></w:r>",
-        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>",
-        "<w:r><w:instrText xml:space=\"preserve\"> SEQ x </w:instrText></w:r>",
-        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>",
-        "<w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
-    );
-    let middle = format!(
-        "<w:bookmarkStart w:id=\"5\" w:name=\"moved\"/><w:bookmarkEnd w:id=\"5\"/>{paragraph}"
-    );
-    let (source, mut request) = mixed_request(&middle);
-    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
-    part.legacy_paragraphs[0].detail = "marker: mutation or touch".to_owned();
-    let mut moved: Value = json!({"type": "paragraph", "content": [
-        {"type": "bookmarkStart", "id": 5, "name": "moved", "position": {"offset": 0}},
-        {"type": "run", "content": [{"type": "text", "text": "replaced"}]},
-        {"type": "bookmarkEnd", "id": 5, "position": {"offset": 8}}
-    ]});
-    moved["sourceOrdinal"] = json!(2);
-    request.document.content[2] = serde_json::from_value(moved).unwrap();
-    let (saved, _) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
-    let parts = part_map(&saved);
-    let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
-    assert_eq!(
-        output.matches("<w:bookmarkStart w:id=\"5\"").count(),
-        1,
-        "{output}"
-    );
-    assert_eq!(
-        output.matches("<w:bookmarkEnd w:id=\"5\"").count(),
-        1,
-        "{output}"
-    );
-}
-
-#[test]
-fn paragraph_patch_s13_marker_paragraph_with_an_inserted_paragraph_gaining_an_outside_bookmark_is_not_replaced_alone()
- {
-    let paragraph = concat!(
-        "<w:p w:rsidR='87654321'><w:r><w:t>Heading</w:t></w:r>",
-        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>",
-        "<w:r><w:instrText xml:space=\"preserve\"> SEQ x </w:instrText></w:r>",
-        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>",
-        "<w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
-    );
-    let middle = format!(
-        "<w:bookmarkStart w:id=\"5\" w:name=\"moved\"/><w:bookmarkEnd w:id=\"5\"/>{paragraph}"
-    );
-    let (source, mut request) = mixed_request(&middle);
-    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
-    part.legacy_paragraphs[0].detail = "marker: mutation or touch".to_owned();
-    part.inserted = vec![crate::serializer::S13SpliceAnchor::After(2)];
-    let inserted: Value = json!({"type": "paragraph", "content": [
-        {"type": "bookmarkStart", "id": 5, "name": "moved", "position": {"offset": 0}},
-        {"type": "run", "content": [{"type": "text", "text": "inserted"}]},
-        {"type": "bookmarkEnd", "id": 5, "position": {"offset": 8}}
-    ]});
-    request
-        .document
-        .content
-        .insert(3, serde_json::from_value(inserted).unwrap());
-    let (saved, _) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
-    let parts = part_map(&saved);
-    let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
-    assert_eq!(
-        output.matches("<w:bookmarkStart w:id=\"5\"").count(),
-        1,
-        "{output}"
-    );
-    assert_eq!(
-        output.matches("<w:bookmarkEnd w:id=\"5\"").count(),
-        1,
-        "{output}"
-    );
 }

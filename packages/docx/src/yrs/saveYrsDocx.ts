@@ -606,7 +606,7 @@ export async function writeSessionSave(
       withSourceOrdinals(output, spliced), source, options, undefined, undefined, plan, skipMutations, yieldSave
     );
     for (const warning of warnings) {
-      if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts') || warning.startsWith('DOCX_MODEL_ONLY_RETRY ')) {
+      if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
         console.debug(warning);
       } else if (warning.startsWith('SmartArt ') || warning.startsWith('Drawing run ')) {
         console.warn(warning);
