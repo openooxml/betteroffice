@@ -3006,7 +3006,10 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
 
 /// Matches text and modeled styling against a source run.
 fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option<&Theme>) -> bool {
-    if (element.local_name() == "br") != segment.line_break {
+    if element.local_name() == "br" {
+        return segment.line_break;
+    }
+    if segment.line_break {
         return false;
     }
     let text = element
@@ -4856,14 +4859,13 @@ mod tests {
     }
 
     #[test]
-    fn a_strike_clear_updates_a_styled_line_break() {
+    fn a_strike_clear_preserves_a_matched_styled_line_break() {
         let xml = rebuilt_paragraph(
             br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:t>First</a:t></a:r><a:br><a:rPr lang="en-US" strike="dblStrike"/></a:br><a:r><a:t>Second</a:t></a:r></a:p>"#,
             &[("First\nSecond", RunProperties::default())],
         );
-        assert!(!xml.contains("strike="), "{xml}");
         assert!(
-            xml.contains(r#"<a:br><a:rPr lang="en-US"/></a:br>"#),
+            xml.contains(r#"<a:br><a:rPr lang="en-US" strike="dblStrike"/></a:br>"#),
             "{xml}"
         );
     }

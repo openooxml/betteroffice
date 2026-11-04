@@ -23,6 +23,10 @@ fn authored_deck() -> Vec<u8> {
             )
         })
         .collect::<String>();
+    deck_with_paragraphs(&paragraphs)
+}
+
+fn deck_with_paragraphs(paragraphs: &str) -> Vec<u8> {
     let mut parts = ooxml_opc::unzip_parts(&fixture::deck()).unwrap();
     let (_, bytes) = parts
         .iter_mut()
@@ -32,7 +36,7 @@ fn authored_deck() -> Vec<u8> {
         r#"<a:p><a:r><a:t>P</a:t></a:r><a:r><a:rPr strike="sngStrike"/><a:t>Q</a:t></a:r></a:p>"#;
     let xml = String::from_utf8(bytes.clone()).unwrap();
     assert_eq!(xml.matches(original).count(), 1);
-    *bytes = xml.replace(original, &paragraphs).into_bytes();
+    *bytes = xml.replace(original, paragraphs).into_bytes();
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -221,6 +225,81 @@ fn formatting_one_property_preserves_every_other_authored_property() {
             Some(target),
         );
     }
+}
+
+fn assert_formatting_first_run_preserves_line_break(patch: &TextStylePatch, target: (&str, &str)) {
+    let properties = r#"<a:rPr lang="en-GB" dirty="0" smtClean="0"/>"#;
+    let line_break = format!("<a:br>{properties}</a:br>");
+    let paragraph = format!(
+        r#"<a:p><a:r>{properties}<a:t>left</a:t></a:r>{line_break}<a:r><a:rPr sz="2400"/><a:t>right</a:t></a:r></a:p>"#
+    );
+    let bytes = deck_with_paragraphs(&paragraph);
+    for end in [4, 5] {
+        let (session, story_id) = open_deck(&bytes);
+        let snapshot = session.snapshot().unwrap();
+        let shape = snapshot.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.source_id == 5)
+            .unwrap();
+        assert_eq!(shape.text_stories[0].paragraphs[0].runs[0].text, "left\n");
+        session
+            .format_text(&EditCtx::local("authored"), &story_id, 0, end, patch)
+            .unwrap();
+        let (_, saved) = ooxml_opc::unzip_parts(&session.save().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "ppt/slides/slide1.xml")
+            .unwrap();
+        let xml = String::from_utf8(saved).unwrap();
+        let shape = xml.rsplit_once("<p:sp>").unwrap().1;
+        let shape = shape.split("</p:sp>").next().unwrap();
+        assert_eq!(shape.matches("<a:br").count(), 1);
+        let start = shape.find("<a:br").unwrap();
+        let end_break = start + shape[start..].find("</a:br>").unwrap() + "</a:br>".len();
+        assert_eq!(&shape[start..end_break], line_break, "range 0..{end}");
+        let first_run = shape.split_once("<a:r>").unwrap().1;
+        let (saved_properties, text) = first_run.split_once("<a:t>").unwrap();
+        assert!(saved_properties.contains(&format!(" {}=\"{}\"", target.0, target.1)));
+        assert!(text.starts_with("left</a:t></a:r>"));
+        assert!(shape.contains(r#"<a:r><a:rPr sz="2400"/><a:t>right</a:t></a:r>"#));
+    }
+}
+
+#[test]
+fn formatting_first_run_preserves_following_line_break_properties() {
+    for (patch, target) in [
+        (
+            TextStylePatch {
+                bold: Some(true),
+                ..TextStylePatch::default()
+            },
+            ("b", "1"),
+        ),
+        (
+            TextStylePatch {
+                italic: Some(true),
+                ..TextStylePatch::default()
+            },
+            ("i", "1"),
+        ),
+        (
+            TextStylePatch {
+                underline: Some("sng".to_owned()),
+                ..TextStylePatch::default()
+            },
+            ("u", "sng"),
+        ),
+    ] {
+        assert_formatting_first_run_preserves_line_break(&patch, target);
+    }
+}
+
+#[test]
+fn formatting_strike_on_first_run_preserves_following_line_break_properties_branch() {
+    let patch: TextStylePatch =
+        serde_json::from_value(serde_json::json!({ "strike": "sngStrike" })).unwrap();
+    assert_formatting_first_run_preserves_line_break(&patch, ("strike", "sngStrike"));
 }
 
 #[test]
