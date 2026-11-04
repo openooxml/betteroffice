@@ -580,7 +580,13 @@ impl Session {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
         self.workbook
-            .render_png(&viewport)
+            .render_png(
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet: self.workbook.active_sheet(),
+                    viewport,
+                },
+                &RenderOptions::default(),
+            )
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
@@ -607,8 +613,15 @@ impl Session {
     #[cfg(feature = "raster")]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, String> {
         let options = range_png_options(args)?;
-        self.workbook
-            .render_sheet(self.workbook.active_sheet(), &options)
+        let sheet = self.workbook.active_sheet();
+        let rendered = match options.range {
+            Some(range) => self.workbook.render_png(
+                betteroffice_xlsx::PngTarget::Range { sheet, range },
+                &options,
+            ),
+            None => self.workbook.render_sheet(sheet, &options),
+        };
+        rendered
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }

@@ -203,6 +203,18 @@ pub struct ProposalAcceptance {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum PngTarget {
+    Viewport {
+        sheet: SheetId,
+        viewport: crate::Viewport,
+    },
+    Range {
+        sheet: SheetId,
+        range: CellRange,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderOptions {
     pub range: Option<CellRange>,
     pub scale: f32,

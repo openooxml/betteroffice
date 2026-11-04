@@ -851,3 +851,388 @@ fn structural_accept_is_isolated_in_manual_undo_capture() {
     assert_eq!(session.snapshot().unwrap(), before);
     assert!(session.can_undo());
 }
+
+const SHAPE_DECK: &[u8] = include_bytes!("fixtures/proposal-shapes.pptx");
+const PIXEL: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+fn shape_edit(kind: &str, slide: &str, shape: &str) -> ProposalEdit {
+    let rect = serde_json::json!({"x": 100000, "y": 100000, "width": 1000000, "height": 500000});
+    let draft = match kind {
+        "addTextBox" => {
+            serde_json::json!({"name": "Draft box", "rect": rect, "text": "", "style": {}})
+        }
+        "addShape" => {
+            serde_json::json!({"name": "Draft shape", "rect": rect, "geometry": "rect", "fill": "#123456"})
+        }
+        _ => {
+            serde_json::json!({"name": "Draft picture", "rect": rect, "contentType": "image/png", "mediaBase64": PIXEL})
+        }
+    };
+    serde_json::from_value(if kind == "removeShape" {
+        serde_json::json!({"type": kind, "slideId": slide, "shapeId": shape})
+    } else {
+        serde_json::json!({"type": kind, "ref": "created", "slideId": slide, "draft": draft})
+    })
+    .unwrap()
+}
+
+#[test]
+fn shape_variants_preview_accept_reject_and_undo() {
+    for kind in ["addTextBox", "addShape", "addPicture", "removeShape"] {
+        let session = DeckSession::open(SHAPE_DECK, 530).unwrap();
+        session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+        let before = session.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let edit = shape_edit(kind, &slide.id, &slide.shapes[0].id);
+        let rejected = session.propose(request(vec![edit.clone()])).unwrap();
+        assert!(session.reject_proposal(&rejected.id));
+        assert_eq!(session.snapshot().unwrap(), before);
+        let proposal = session.propose(request(vec![edit])).unwrap();
+        let preview = session.preview_proposal(&proposal.id).unwrap();
+        let change = &proposal.changes[0];
+        assert_eq!(
+            change.kind,
+            Some(if kind == "removeShape" {
+                pptx_edit::ProposalChangeKind::Deleted
+            } else {
+                pptx_edit::ProposalChangeKind::Inserted
+            })
+        );
+        assert_eq!(change.before.is_none(), kind != "removeShape");
+        assert_eq!(change.after.is_none(), kind == "removeShape");
+        let diff = session
+            .preview_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        assert!(
+            diff.scope
+                .slide
+                .shapes
+                .iter()
+                .any(|shape| Some(&shape.id) == change.shape_id.as_ref())
+        );
+        assert_eq!(
+            diff.shape_changes[0].shape_id,
+            *change.shape_id.as_ref().unwrap()
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+        session.accept_proposal(&proposal.id, false).unwrap();
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.redo());
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+    }
+}
+
+#[test]
+fn slide_shape_and_story_refs_chain_and_refresh() {
+    let session = DeckSession::open(SHAPE_DECK, 531).unwrap();
+    let mut box_edit = shape_edit("addTextBox", "@slide", "");
+    if let ProposalEdit::AddTextBox { reference, .. } = &mut box_edit {
+        *reference = Some("box".into());
+    }
+    let proposal = session
+        .propose(request(vec![
+            ProposalEdit::InsertSlide {
+                reference: Some("slide".into()),
+                after_slide_id: None,
+                layout_part_path: None,
+            },
+            box_edit,
+            ProposalEdit::ReplaceText {
+                story_id: "@box".into(),
+                start: 0,
+                end: 0,
+                text: "Filled".into(),
+                style: None,
+            },
+            ProposalEdit::FormatText {
+                story_id: "@box".into(),
+                start: 0,
+                end: 6,
+                patch: pptx_edit::TextStylePatch {
+                    bold: Some(true),
+                    ..Default::default()
+                },
+            },
+            ProposalEdit::SetParagraphAlignment {
+                story_id: "@box".into(),
+                start: 0,
+                end: 6,
+                alignment: Some("ctr".into()),
+            },
+            ProposalEdit::SetShapeFill {
+                slide_id: "@slide".into(),
+                shape_id: "@box".into(),
+                color: Some("#123456".into()),
+            },
+        ]))
+        .unwrap();
+    session
+        .insert_slide(&EditCtx::local("human"), 0, None)
+        .unwrap();
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert_ne!(preview.proposal.refs["box"], proposal.refs["box"]);
+    assert!(preview.proposal.stale_targets.is_empty());
+    let shape = preview.snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.id == preview.proposal.refs["box"])
+        .unwrap();
+    assert_eq!(shape.text_stories[0].plain_text(), "Filled");
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+}
+
+#[test]
+fn shape_staleness_preserves_user_edits_and_missing_targets_error_under_force() {
+    let session = DeckSession::open(SHAPE_DECK, 532).unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let shape = &slide.shapes[0];
+    let removal = session
+        .propose(request(vec![shape_edit(
+            "removeShape",
+            &slide.id,
+            &shape.id,
+        )]))
+        .unwrap();
+    let addition = session
+        .propose(request(vec![shape_edit("addTextBox", &slide.id, "")]))
+        .unwrap();
+    session
+        .set_shape_fill(
+            &EditCtx::local("human"),
+            &slide.id,
+            &shape.id,
+            Some("#112233"),
+        )
+        .unwrap();
+    assert!(matches!(
+        session.accept_proposal(&removal.id, false),
+        Err(ProposalError::Stale(_))
+    ));
+    assert!(
+        session
+            .proposals()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == addition.id)
+            .unwrap()
+            .stale_targets
+            .is_empty()
+    );
+    session
+        .remove_shape(&EditCtx::local("human"), &slide.id, &shape.id)
+        .unwrap();
+    assert!(matches!(
+        session.accept_proposal(&removal.id, true),
+        Err(ProposalError::Edit(pptx_edit::EditError::ShapeNotFound(_)))
+    ));
+    session
+        .delete_slide(&EditCtx::local("human"), &slide.id)
+        .unwrap();
+    assert!(matches!(
+        session.accept_proposal(&addition.id, false),
+        Err(ProposalError::Stale(_))
+    ));
+    assert!(matches!(
+        session.accept_proposal(&addition.id, true),
+        Err(ProposalError::Edit(pptx_edit::EditError::SlideNotFound(_)))
+    ));
+}
+
+#[test]
+fn proposal_picture_cap_counts_decoded_bytes_and_the_total() {
+    let session = DeckSession::open(SHAPE_DECK, 533).unwrap();
+    let before = session.snapshot().unwrap();
+    let picture = |size| ProposalEdit::AddPicture {
+        reference: None,
+        slide_id: before.slides[0].id.clone(),
+        draft: pptx_edit::PictureDraft {
+            name: "Picture".into(),
+            rect: ShapeRect {
+                x: 0,
+                y: 0,
+                width: 100000,
+                height: 100000,
+            },
+            content_type: "image/png".into(),
+            media_bytes: vec![0; size],
+        },
+    };
+    for edits in [
+        vec![picture(8 * 1024 * 1024 + 1)],
+        vec![picture(4 * 1024 * 1024), picture(4 * 1024 * 1024 + 1)],
+    ] {
+        assert!(matches!(
+            session.propose(request(edits)),
+            Err(ProposalError::PictureMediaTooLarge { .. })
+        ));
+        assert!(session.proposals().unwrap().is_empty());
+        assert_eq!(session.snapshot().unwrap(), before);
+    }
+    let wire = serde_json::to_string(&picture(8 * 1024 * 1024)).unwrap();
+    let edit = serde_json::from_str(&wire).unwrap();
+    assert!(session.propose(request(vec![edit])).is_ok());
+}
+
+#[test]
+fn shape_diff_reports_geometry_appearance_and_deleted_shapes() {
+    use pptx_edit::ProposalShapeChangeKind::{Changed, Deleted, Moved, Resized};
+    for (kind, expected) in [
+        ("move", Moved),
+        ("resize", Resized),
+        ("fill", Changed),
+        ("remove", Deleted),
+    ] {
+        let session = DeckSession::open(SHAPE_DECK, 534).unwrap();
+        let before = session.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let shape = &slide.shapes[0];
+        let edit = match kind {
+            "fill" => ProposalEdit::SetShapeFill {
+                slide_id: slide.id.clone(),
+                shape_id: shape.id.clone(),
+                color: Some("#123456".into()),
+            },
+            "remove" => shape_edit("removeShape", &slide.id, &shape.id),
+            _ => ProposalEdit::SetShapeRect {
+                slide_id: slide.id.clone(),
+                shape_id: shape.id.clone(),
+                rect: ShapeRect {
+                    x: shape.x + if kind == "move" { 100000 } else { 0 },
+                    y: shape.y,
+                    width: shape.width + if kind == "resize" { 100000 } else { 0 },
+                    height: shape.height,
+                },
+            },
+        };
+        let proposal = session.propose(request(vec![edit])).unwrap();
+        let diff = session
+            .preview_proposal_diff_slide_by_id(&proposal.id, &slide.id)
+            .unwrap();
+        assert_eq!(diff.shape_changes[0].kind, expected);
+        if kind == "remove" {
+            assert_eq!(&diff.scope.slide.shapes[0], shape);
+        }
+    }
+}
+
+#[test]
+fn created_shape_refs_support_geometry_stroke_adjustment_and_removal() {
+    let session = DeckSession::open(SHAPE_DECK, 535).unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0].id;
+    let proposal = session
+        .propose(request(vec![
+            shape_edit("addShape", slide, ""),
+            ProposalEdit::SetShapeRect {
+                slide_id: slide.clone(),
+                shape_id: "@created".into(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 2000000,
+                    height: 1000000,
+                },
+            },
+            ProposalEdit::SetShapeStroke {
+                slide_id: slide.clone(),
+                shape_id: "@created".into(),
+                stroke: pptx_edit::ShapeStroke {
+                    color: Some("#123456".into()),
+                    width_pt: Some(2.0),
+                },
+            },
+            ProposalEdit::SetShapeAdjust {
+                slide_id: slide.clone(),
+                shape_id: "@created".into(),
+                adjustments: Default::default(),
+            },
+            ProposalEdit::RemoveShape {
+                slide_id: slide.clone(),
+                shape_id: "@created".into(),
+            },
+        ]))
+        .unwrap();
+    assert_eq!(
+        session.preview_proposal(&proposal.id).unwrap().snapshot,
+        before
+    );
+    assert!(
+        !session
+            .accept_proposal(&proposal.id, false)
+            .unwrap()
+            .applied
+    );
+    for edits in [
+        vec![
+            shape_edit("addShape", slide, ""),
+            shape_edit("addTextBox", slide, ""),
+        ],
+        vec![ProposalEdit::RemoveShape {
+            slide_id: slide.clone(),
+            shape_id: "@unknown".into(),
+        }],
+    ] {
+        assert!(matches!(
+            session.propose(request(edits)),
+            Err(ProposalError::Invalid(_))
+        ));
+        assert_eq!(session.snapshot().unwrap(), before);
+    }
+}
+
+#[test]
+fn created_shape_refs_do_not_capture_unrelated_live_shapes() {
+    let session = DeckSession::open(SHAPE_DECK, 536).unwrap();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    let proposal = session
+        .propose(request(vec![
+            shape_edit("addTextBox", &slide, ""),
+            ProposalEdit::ReplaceText {
+                story_id: "@created".into(),
+                start: 0,
+                end: 0,
+                text: "Draft".into(),
+                style: None,
+            },
+            ProposalEdit::SetShapeFill {
+                slide_id: slide.clone(),
+                shape_id: "@created".into(),
+                color: Some("#123456".into()),
+            },
+        ]))
+        .unwrap();
+    session
+        .add_shape(
+            &EditCtx::local("human"),
+            &slide,
+            &pptx_edit::PresetShapeDraft {
+                name: "Human shape".into(),
+                geometry: "rect".into(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 100000,
+                    height: 100000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert!(preview.proposal.stale_targets.is_empty());
+    assert_ne!(preview.proposal.refs["created"], proposal.refs["created"]);
+    session.accept_proposal(&proposal.id, false).unwrap();
+    let shapes = &session.snapshot().unwrap().slides[0].shapes;
+    assert!(shapes.iter().any(|shape| shape.name == "Human shape"));
+    assert!(shapes.iter().any(|shape| {
+        shape
+            .text_stories
+            .iter()
+            .any(|story| story.plain_text() == "Draft")
+    }));
+}

@@ -8,7 +8,7 @@ use crate::drawingml::{
 use crate::image::{
     ImagePadding, ImagePosition, ImageSize, ImageWrap, parse_anchor_position, parse_anchor_wrap,
 };
-use crate::shape::{Shape, ShapeTextBody};
+use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
 use crate::xml::XmlElement;
 
 const DEFAULT_MARGIN_EMU: f64 = 91_440.0;
@@ -159,6 +159,46 @@ pub fn get_text_box_content_element(shape: &XmlElement) -> Option<&XmlElement> {
     shape
         .child_by_full_name("wps:txbx")?
         .child_by_full_name("w:txbxContent")
+}
+
+/// The model of a standalone text box drawing, with `content` as its text.
+pub(crate) fn text_box_shape(
+    drawing: &XmlElement,
+    text_box: TextBox,
+    content: Vec<serde_json::Value>,
+) -> Shape {
+    let mut shape = crate::shape::parse_shape_from_drawing(drawing).unwrap_or_else(|| {
+        let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
+        shape.id = text_box.id;
+        shape.name = text_box.name;
+        shape.position = text_box.position;
+        shape.wrap = text_box.wrap;
+        shape.fill = text_box.fill;
+        shape.outline = text_box.outline;
+        shape
+    });
+    let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
+    shape.text_body = Some(ShapeTextBody {
+        vertical: body.as_ref().and_then(|body| {
+            body.vertical
+                .as_deref()
+                .filter(|value| *value != "horizontal")
+                .map(|_| true)
+        }),
+        rotation: body.as_ref().and_then(|body| body.rotation),
+        anchor: body.as_ref().and_then(|body| body.anchor.clone()),
+        anchor_center: body.as_ref().and_then(|body| body.anchor_center),
+        auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
+        margins: text_box.margins.map(|margins| RelativeRect {
+            left: margins.left,
+            top: margins.top,
+            right: margins.right,
+            bottom: margins.bottom,
+        }),
+        content,
+    });
+    shape.text_body_properties = shape.text_body_properties.or(body);
+    shape
 }
 
 pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {

@@ -280,3 +280,32 @@ test('office_propose exposes slide structure edits with local refs', async () =>
     expect((await call('pptx_outline', { document })).total).toBe(outline.total + 1);
   } finally { await context.dispose(); }
 });
+
+test('office_propose exposes shape edits and created story refs end to end', async () => {
+  const context = await connect();
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await context.client.callTool({ name, arguments: args });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    return result.structuredContent as Record<string, any>;
+  };
+  try {
+    const { document } = await call('office_open', { path: 'deck.pptx' });
+    const outline = await call('pptx_outline', { document });
+    const slideId = outline.slides[0].id;
+    const rect = { x: 100000, y: 100000, width: 1000000, height: 500000 };
+    const pending = await call('office_propose', { document, author: 'agent', edits: [
+      { type: 'addTextBox', ref: 'box', slideId, draft: { name: 'Box', rect, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Proposed text' },
+      { type: 'setParagraphAlignment', storyId: '@box', start: 0, end: 13, alignment: 'ctr' },
+      { type: 'addShape', ref: 'card', slideId, draft: { name: 'Card', rect, geometry: 'rect' } },
+      { type: 'addPicture', slideId, draft: { name: 'Pixel', rect, contentType: 'image/png', mediaBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' } },
+      { type: 'removeShape', slideId, shapeId: outline.slides[0].shapes[0].id },
+    ] });
+    expect((await call('pptx_read_slide', { document, slide: slideId })).shapes.some((shape: any) => shape.name === 'Box')).toBe(false);
+    await call('office_accept', { document, proposal: pending.id });
+    const slide = await call('pptx_read_slide', { document, slide: slideId });
+    expect(slide.shapes.some((shape: any) => shape.name === 'Box')).toBe(true);
+    expect(slide.shapes.some((shape: any) => shape.name === 'Card')).toBe(true);
+    expect(slide.shapes.some((shape: any) => shape.name === 'Pixel')).toBe(true);
+  } finally { await context.dispose(); }
+});

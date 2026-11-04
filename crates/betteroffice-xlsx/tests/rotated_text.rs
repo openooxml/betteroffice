@@ -73,12 +73,12 @@ fn package(alignment: &str) -> Vec<u8> {
 fn ink_extent(alignment: &str) -> (usize, usize) {
     let workbook = Workbook::open_for_read(&package(alignment)).unwrap();
     let png = workbook
-        .render_sheet(
-            SheetId(0),
-            &RenderOptions {
-                range: Some(CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0))),
-                ..RenderOptions::default()
+        .render_png(
+            betteroffice_xlsx::PngTarget::Range {
+                sheet: SheetId(0),
+                range: CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
             },
+            &RenderOptions::default(),
         )
         .unwrap();
     let mut reader = png::Decoder::new(std::io::Cursor::new(&png.bytes))

@@ -144,6 +144,48 @@ fn parse_range(address: &str) -> PyResult<CellRange> {
         .map_err(|error| RangeError::new_err(format!("invalid range {address:?}: {error}")))
 }
 
+/// A PNG range: an A1 string, or the address dictionaries the edit API takes.
+fn png_range(range: &Bound<'_, PyAny>) -> PyResult<CellRange> {
+    if let Ok(address) = range.extract::<String>() {
+        return parse_range(&address);
+    }
+    let invalid = || RangeError::new_err("range must be an A1 string or a range address");
+    let address = range.cast::<PyDict>().map_err(|_| invalid())?;
+    let kind = address.get_item("kind")?.ok_or_else(invalid)?;
+    match kind.extract::<String>().map_err(|_| invalid())?.as_str() {
+        "a1" if address.len() == 2 => {
+            let a1 = address.get_item("a1")?.ok_or_else(invalid)?;
+            parse_range(&a1.extract::<String>().map_err(|_| invalid())?)
+        }
+        "rowCol" if address.len() == 3 => {
+            let position = |key: &str| -> PyResult<CellRef> {
+                let position = address.get_item(key)?.ok_or_else(invalid)?;
+                let position = position.cast::<PyDict>().map_err(|_| invalid())?;
+                if position.len() != 2 {
+                    return Err(invalid());
+                }
+                let index = |key: &str| -> PyResult<u32> {
+                    let value = position.get_item(key)?.ok_or_else(invalid)?;
+                    if value.is_instance_of::<PyBool>() {
+                        return Err(invalid());
+                    }
+                    value.extract::<u32>().map_err(|_| invalid())
+                };
+                Ok(CellRef::new(index("row")?, index("col")?))
+            };
+            let start = position("start")?;
+            let end = position("end")?;
+            if start.row > end.row || start.col > end.col {
+                return Err(RangeError::new_err(
+                    "range start must be above and left of its end",
+                ));
+            }
+            Ok(CellRange::new(start, end))
+        }
+        _ => Err(invalid()),
+    }
+}
+
 /// An Excel error value, distinct from a cell holding that text.
 #[pyclass(module = "betteroffice_xlsx", name = "CellError", frozen)]
 pub struct PyCellError {
@@ -568,8 +610,70 @@ impl PyWorkbook {
         Ok(PyMutation::from_core(&self.inner, &result))
     }
 
-    #[pyo3(signature = (sheet, *, scale = 1.0, range = None, max_width = None, max_height = None))]
+    #[pyo3(signature = (target, *, scale = 1.0, max_width = None, max_height = None))]
     fn render_png(
+        &self,
+        py: Python<'_>,
+        target: &Bound<'_, PyAny>,
+        scale: f32,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+    ) -> PyResult<PyPng> {
+        let invalid =
+            || RangeError::new_err("target requires a sheet and exactly one viewport or range");
+        let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+        if target.len() != 2 {
+            return Err(invalid());
+        }
+        let sheet = target.get_item("sheet")?.ok_or_else(invalid)?;
+        let sheet = self.resolve_sheet(&sheet)?;
+        let target = match (target.get_item("viewport")?, target.get_item("range")?) {
+            (Some(viewport), None) => {
+                let viewport = viewport.cast::<PyDict>().map_err(|_| invalid())?;
+                if viewport.len() != 4 {
+                    return Err(invalid());
+                }
+                let number = |key: &str| -> PyResult<f32> {
+                    let value = viewport.get_item(key)?.ok_or_else(invalid)?;
+                    if value.is_instance_of::<PyBool>() {
+                        return Err(invalid());
+                    }
+                    value.extract::<f32>().map_err(|_| invalid())
+                };
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet,
+                    viewport: betteroffice_xlsx::Viewport {
+                        x: number("x")?,
+                        y: number("y")?,
+                        width: number("width")?,
+                        height: number("height")?,
+                    },
+                }
+            }
+            (None, Some(range)) => betteroffice_xlsx::PngTarget::Range {
+                sheet,
+                range: png_range(&range)?,
+            },
+            _ => return Err(invalid()),
+        };
+        let options = RenderOptions {
+            scale,
+            max_width,
+            max_height,
+            ..Default::default()
+        };
+        let rendered = py
+            .detach(|| self.inner.render_png(target, &options))
+            .map_err(map_error)?;
+        Ok(PyPng {
+            data: rendered.bytes,
+            width: rendered.width,
+            height: rendered.height,
+        })
+    }
+
+    #[pyo3(signature = (sheet, *, scale = 1.0, range = None, max_width = None, max_height = None))]
+    fn render_sheet(
         &self,
         py: Python<'_>,
         sheet: &Bound<'_, PyAny>,

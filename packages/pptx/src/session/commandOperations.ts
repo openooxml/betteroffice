@@ -55,10 +55,14 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     const [agent, note, edits] = args;
     if (!text(agent, 1024) || !agent.trim() || note !== null && !text(note) ||
       !Array.isArray(edits) || !edits.length || edits.length > 256) return null;
-    try { if (JSON.stringify(edits).length > 1e6) return null; }
+    try { if (JSON.stringify(edits).length > 1e6 + 4 * Math.ceil(8 * 1024 * 1024 / 3)) return null; }
     catch { return null; }
     if (handle.listProposals().length >= 64) return null;
     const fields = new Map<ProposalEdit['type'], readonly string[]>([
+      ['addTextBox', ['ref', 'slideId', 'draft']],
+      ['addShape', ['ref', 'slideId', 'draft']],
+      ['addPicture', ['ref', 'slideId', 'draft']],
+      ['removeShape', ['slideId', 'shapeId']],
       ['insertSlide', ['ref', 'afterSlideId', 'layoutPartPath']],
       ['duplicateSlide', ['ref', 'slideId', 'afterSlideId']],
       ['deleteSlide', ['slideId']],
@@ -108,14 +112,16 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!content.ok) return null;
     const steps: PptxEditStep[] = [];
     const canonicalEdits: ProposalEdit[] = [];
-    const structural = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide'].includes(edit?.type));
+    const structural = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape'].includes(edit?.type));
     for (const candidate of edits) {
       if (!candidate || typeof candidate !== 'object') return null;
       const keys = fields.get(candidate.type);
       if (!keys || !onlyKeys(candidate, ['type', ...keys])) return null;
       const source = candidate as unknown as Record<string, unknown>;
       const edit = Object.fromEntries(['type', ...keys].map((key) => [key, source[key]])) as ProposalEdit;
-      if (!validValues(edit) || edit.type === 'replaceText' && edit.style != null && !style(edit.style, true) ||
+      const values = edit.type === 'addPicture' ? { ...edit, draft: { ...edit.draft, mediaBase64: undefined } } : edit;
+      if (edit.type === 'addPicture' && !text(edit.draft?.mediaBase64, 4 * Math.ceil(8 * 1024 * 1024 / 3))) return null;
+      if (!validValues(values) || edit.type === 'replaceText' && edit.style != null && !style(edit.style, true) ||
         edit.type === 'formatText' && !style(edit.patch) ||
         edit.type === 'setShapeRect' && !onlyKeys(edit.rect, ['x', 'y', 'width', 'height']) ||
         edit.type === 'setShapeStroke' && !onlyKeys(edit.stroke, ['color', 'widthPt'])) return null;
@@ -134,6 +140,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         else return null;
       } else {
         if (!['setShapeRect', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'setSlideNotes'].includes(edit.type)) return null;
+        if (edit.type === 'addTextBox' || edit.type === 'addShape' || edit.type === 'addPicture' || edit.type === 'removeShape') return null;
         if (edit.type === 'insertSlide' || edit.type === 'duplicateSlide' || edit.type === 'deleteSlide' || edit.type === 'moveSlide') return null;
         const { type, ...fields } = edit;
         const { slideId, ...rest } = fields;
@@ -142,6 +149,8 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         steps.push({ op: type, target: shapeId === undefined ? { slideId } : { slideId, shapeId }, ...rest } as PptxEditStep);
       }
     }
+    if (JSON.stringify(canonicalEdits.map(edit => edit.type === 'addPicture'
+      ? { ...edit, draft: { ...edit.draft, mediaBase64: undefined } } : edit)).length > 1e6) return null;
     if (structural) {
       const context = presentationContexts.get(handle);
       if (!context || typeof context.doc.validateProposalJson !== 'function') return null;

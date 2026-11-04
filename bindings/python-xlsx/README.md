@@ -41,10 +41,15 @@ file.
 ## Render a sheet to PNG
 
 ```python
-png = wb.render_png("Sheet1", scale=2.0, range="A1:H40")
+png = wb.render_png({"sheet": 0, "range": "A1:H40"}, scale=2.0)
 png.write("preview.png")
 print(png.width, png.height)
 ```
+
+PNG targets take a sheet name or zero-based index, with either a `viewport` or a `range`
+(an A1 string or an address dictionary). `max_width` and `max_height` cap the output for
+both. `render_sheet(sheet)` frames the sheet's used range when no range is given.
+
 
 Rendering is the same grid layout and display list the browser editor uses, so
 server-side output matches what the web canvas paints. Cell text uses the
@@ -271,7 +276,8 @@ editing.
 | `wb.diff(sv)` / `apply_update(u)` / `state_vector()` / `state_as_update()` | exchange Yrs updates |
 | `wb.client_id` / `wb.is_collaborative` | which kind of workbook you are holding |
 | `wb.active_sheet` / `set_active_sheet(...)` | read or persist the active tab |
-| `wb.render_png(sheet, ...)` | render to PNG |
+| `wb.render_png(target, *, scale=1.0, max_width=None, max_height=None)` | render a range or viewport to PNG |
+| `wb.render_sheet(sheet, *, scale=1.0, range=None, max_width=None, max_height=None)` | render a sheet to PNG, framing its used range by default |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
 
 The following calculation calls (`open_recalculated`,

@@ -315,8 +315,27 @@ export type PptxFindResult = {
 } | PptxEditRefusal;
 
 // ---- proposals.d.ts ----
-import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextStyleSnapshot } from './types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextStyleSnapshot } from './types';
 export type ProposalEdit = {
+    type: 'addTextBox';
+    ref?: string;
+    slideId: string;
+    draft: ShapeDraft;
+} | {
+    type: 'addShape';
+    ref?: string;
+    slideId: string;
+    draft: PresetShapeDraft;
+} | {
+    type: 'addPicture';
+    ref?: string;
+    slideId: string;
+    draft: PictureDraft;
+} | {
+    type: 'removeShape';
+    slideId: string;
+    shapeId: string;
+} | {
     type: 'insertSlide';
     ref?: string;
     afterSlideId: string | null;
@@ -415,7 +434,12 @@ export interface ProposalTextChange {
     end: number;
     kind: 'insertion' | 'deletion';
 }
+export interface ProposalShapeChange {
+    shapeId: string;
+    kind: 'inserted' | 'deleted' | 'moved' | 'resized' | 'changed' | 'reordered';
+}
 export interface ProposalDiffSlide extends ProposalPreview {
+    shapeChanges?: ProposalShapeChange[];
     frame: SlideDisplayList;
     textChanges: ProposalTextChange[];
     media?: {
@@ -431,6 +455,12 @@ export interface ProposalAcceptance {
 export declare class StaleProposalError extends Error {
     readonly targets: string[];
     constructor(targets: string[]);
+}
+export declare class ProposalPictureMediaTooLargeError extends Error {
+    readonly totalBytes: number;
+    readonly limitBytes: number;
+    readonly code = "proposalPictureMediaTooLarge";
+    constructor(totalBytes: number, limitBytes?: number);
 }
 
 // ---- render/browserFrameImages.d.ts ----
@@ -456,9 +486,32 @@ export declare function createBrowserFrameImages(decode: (bytes: Uint8Array, err
     dispose(): void;
 };
 
+// ---- render/browserImage.d.ts ----
+export interface PresentationImageDecodeOptions {
+    maxDimension?: number;
+}
+export declare function imageDecodeScale(source: CanvasImageSource): {
+    x: number;
+    y: number;
+};
+export declare function setImageDecodeScale(source: CanvasImageSource, scale: {
+    x: number;
+    y: number;
+}): void;
+export declare function browserPresentationImageBlob(bytes: Uint8Array): Blob;
+export declare function needsElementDecode(blob: Blob): boolean;
+export declare function decodeBrowserPresentationImage(bytes: Uint8Array, errorMessage: string, options?: PresentationImageDecodeOptions): Promise<CanvasImageSource>;
+export declare function decodeBrowserImageBlob(blob: Blob, errorMessage: string, options?: PresentationImageDecodeOptions): Promise<CanvasImageSource>;
+/**
+ * A metafile's display bytes: `resolve`'s replay of it, unless the browser
+ * path already draws it (a plain bitmap wrapper). Other images are unchanged.
+ * @internal
+ */
+export declare function metafileImageBytes(bytes: Uint8Array, resolve?: () => Uint8Array | undefined): Uint8Array;
+
 // ---- render/canvas.d.ts ----
 import type { ImageEffect, SlideDisplayList } from '../types';
-import type { ProposalTextChange } from '../proposals';
+import type { ProposalShapeChange, ProposalTextChange } from '../proposals';
 export type CanvasImageResolver = ((assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null) & {
     acquire?(): CanvasImageResolver;
     release?(): void;
@@ -467,6 +520,7 @@ export interface PaintSlideOptions {
     resolveImage?: CanvasImageResolver;
     maxShadowPixels?: number;
     textChanges?: readonly ProposalTextChange[];
+    shapeChanges?: readonly ProposalShapeChange[];
 }
 export interface SlideCanvasLike {
     width: number;
@@ -1044,6 +1098,8 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
     result: PptxReadResult;
 }
 export type PresentationCommandMethods = FontDecoderMethods & {
+    /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
+    prefetchCoverageFonts(scripts: string[]): void;
     openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
     command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
     thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -1082,6 +1138,7 @@ export interface PresentationCommandClient {
 }
 export declare const PRESENTATION_COMMAND_METHODS: {
     decodeFontFace: true;
+    prefetchCoverageFonts: true;
     openCommandEditor: true;
     command: true;
     thumbnailFrame: true;
@@ -1233,7 +1290,18 @@ interface PreparedFontWorker {
     release(): void;
     take(): Worker;
 }
-export declare function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer): PreparedFontWorker;
+/**
+ * Starts the session worker for `source` early and returns a handle to its font decoder; the editor that opens the
+ * same `source` object adopts the worker. Preparing the same `source` again shares the worker: each handle is
+ * released on its own, and the worker stops when the last one is released. Unless `defaultFonts` is false, the
+ * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts` and
+ * `activeSlideIndex` the editor will use.
+ */
+export declare function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer, options?: {
+    defaultFonts?: boolean;
+    activeSlideIndex?: number;
+}): PreparedFontWorker;
+/** The prepared worker for `source`, unless another editor still holds it; that editor's fonts keep loading. */
 export declare function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined;
 export {};
 
@@ -4309,6 +4377,7 @@ export { DEFAULT_EDITOR_TEXT_STYLE, effectiveStyleFromSelection, selectionFormat
 export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatting';
 /** @internal */
 export { browserFrameImages } from './render/browserFrameImages';
+export { decodeBrowserPresentationImage } from './render/browserImage';
 /** @experimental */
 export { createPptxWorkerEditorSession } from './session/editorSession';
 export { preparePresentationFontDecoder } from './session/fontWorker';

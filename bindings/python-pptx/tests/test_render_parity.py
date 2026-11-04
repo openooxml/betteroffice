@@ -109,11 +109,12 @@ def test_proposal_geometry_diff_matches_native_preview_frame(deck):
     saved = deck.save()
     before = deck[0].shapes[0].x
     result = deck.layout_proposal_diff_slide(proposal.id, 0)
-    assert set(result) == {"proposal", "snapshot", "textChanges", "frame"}
+    assert set(result) == {"proposal", "snapshot", "textChanges", "shapeChanges", "frame"}
     assert result["proposal"]["id"] == proposal.id
     preview = deck.preview_proposal(proposal.id).snapshot
     assert result["snapshot"] == dict(preview, slides=[preview["slides"][0]])
     assert result["textChanges"] == []
+    assert result["shapeChanges"] == [{"shapeId": shape.id, "kind": "moved"}]
     assert result["frame"] == diff_frame(deck.render_proposal(proposal.id, 0).to_dict())
     assert deck.layout_proposal_diff_slide(proposal.id, deck.slide_ids[0]) == result
     assert deck[0].shapes[0].x == before

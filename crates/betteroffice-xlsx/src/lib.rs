@@ -47,7 +47,7 @@ pub use structured::{
 };
 pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
-    EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
+    EditStage, HistoryState, MutationResult, NumberFormatKind, PngTarget, ProposalAcceptance,
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
     TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };

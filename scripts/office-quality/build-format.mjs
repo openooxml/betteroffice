@@ -14,6 +14,8 @@ const build = resolve(output, 'build');
 await mkdir(resolve(build, 'src'), { recursive: true });
 await copyFile(new URL(`./native/${format}.rs`, import.meta.url), resolve(build, 'src/main.rs'));
 await copyFile(resolve(source, 'Cargo.lock'), resolve(build, 'Cargo.lock'));
+const pngTarget = format === 'pptx' &&
+  /pub fn render_png\(\s*&self,\s*target: PngTarget/.test(await readFile(resolve(source, 'crates/betteroffice-pptx/src/render.rs'), 'utf8'));
 await writeFile(resolve(build, 'Cargo.toml'), `[package]
 name = "${format}-native-bench"
 version = "0.0.0"
@@ -21,6 +23,10 @@ edition = "2024"
 publish = false
 
 [workspace]
+
+[features]
+default = [${pngTarget ? '"png-target"' : ''}]
+png-target = []
 
 [dependencies]
 betteroffice-${format} = { path = ${JSON.stringify(resolve(source, `crates/betteroffice-${format}`))}, default-features = false${format === 'pptx' ? ', features = ["raster"]' : ''} }

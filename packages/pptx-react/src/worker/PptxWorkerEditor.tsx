@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from '../bundledFonts';
 import type { PptxInThreadEditorProps } from '../PptxEditor';
 import { LEGACY_SYNC_API } from '../runtimeOptions';
 import { PptxEditorContent } from '../PptxEditorContent';
@@ -15,7 +16,7 @@ export type PptxWorkerEditorProps = Omit<PptxInThreadEditorProps, 'onReady' | 'r
   onReady?: (api: PptxWorkerEditorApi) => void;
 };
 
-export function PptxWorkerEditor(props: PptxWorkerEditorProps) {
+export function PptxWorkerEditor(props: ResolvedFontProps<PptxWorkerEditorProps>) {
   const backend = useEditableSessionPresentation(props);
   const { onReady, ...content } = props;
   return <PptxEditorContent {...content} backend={backend} onWorkerReady={onReady} />;

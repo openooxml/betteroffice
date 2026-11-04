@@ -95,6 +95,16 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
     }
 }
 
+fn png_target_slide<'py>(target: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let invalid =
+        || RangeError::new_err("target must be a dict containing only a slide index or ID");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    target.get_item("slide")?.ok_or_else(invalid)
+}
+
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
     match error {
@@ -2554,16 +2564,17 @@ impl PyPresentation {
     /// Rasterize one slide to deterministic PNG bytes. Media resolves from the
     /// package, so only fonts need registering; `background` is `"slide"`,
     /// `"transparent"`, or a `#rrggbb` color painted under the slide's own.
-    #[pyo3(signature = (slide, *, scale = 1.0, background = "slide", max_shadow_pixels = None))]
+    #[pyo3(signature = (target, *, scale = 1.0, background = "slide", max_shadow_pixels = None))]
     fn render_png(
         &self,
         py: Python<'_>,
-        slide: &Bound<'_, PyAny>,
+        target: &Bound<'_, PyAny>,
         scale: f32,
         background: &str,
         max_shadow_pixels: Option<u64>,
     ) -> PyResult<PyPng> {
-        let index = self.resolve_slide_index(slide)?;
+        let slide = self.resolve_slide_index(&png_target_slide(target)?)?;
+        let target = betteroffice_pptx::PngTarget { slide };
         let options = RenderOptions {
             scale,
             background: parse_background(background)?,
@@ -2573,7 +2584,7 @@ impl PyPresentation {
         let deck = DetachedDeck(&self.presentation);
         py.detach(move || {
             let deck = deck;
-            deck.0.render_png(index, &options)
+            deck.0.render_png(target, &options)
         })
         .map(|rendered| PyPng {
             data: rendered.bytes,

@@ -1124,3 +1124,97 @@ fn a_leader_font_shorthand_resolves_its_family() {
     );
     assert!(ink_bounds(&render_png(&scene, 0, &resources).unwrap()).is_some());
 }
+
+#[test]
+fn scale_transforms_geometry_and_clip_masks() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        64.0,
+        32.0,
+        vec![json!({
+            "kind": "rect", "x": 4, "y": 4, "w": 20, "h": 16, "fill": "#000000",
+            "clipGroup": {"clip": {"x": 8, "y": 6, "w": 8, "h": 8}}
+        })],
+    );
+    let first = render_page(&scene, 0, &resources).unwrap();
+    let second = docx_raster::render_page_cached_scaled(
+        &scene,
+        0,
+        &resources,
+        &mut GlyphCache::default(),
+        &mut ImageCache::default(),
+        2.0,
+    )
+    .unwrap();
+    assert_eq!(ink_bounds(&first.bytes), Some((8, 15, 6, 13)));
+    assert_eq!(ink_bounds(&second.bytes), Some((16, 31, 12, 27)));
+    assert_eq!(
+        u32::from_be_bytes(second.bytes[16..20].try_into().unwrap()),
+        128
+    );
+    assert_eq!(
+        u32::from_be_bytes(second.bytes[20..24].try_into().unwrap()),
+        64
+    );
+}
+
+#[test]
+fn scale_transforms_text_paint_clips() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        80.0,
+        40.0,
+        vec![json!({
+            "kind": "text", "text": "@@@@@@@@@@", "x": 4, "baselineY": 31,
+            "width": 12, "font": "400 28px Carlito, sans-serif", "color": "#000000",
+            "paintClip": {"x": 8, "w": 8},
+            "clipGroup": {"clip": {"x": 0, "y": 0, "w": 80, "h": 40}}
+        })],
+    );
+    let second = docx_raster::render_page_cached_scaled(
+        &scene,
+        0,
+        &resources,
+        &mut GlyphCache::default(),
+        &mut ImageCache::default(),
+        2.0,
+    )
+    .unwrap();
+    let (left, right, _, _) = ink_bounds(&second.bytes).unwrap();
+    assert!(left >= 16);
+    assert!(right < 32);
+}
+
+#[test]
+fn scale_validates_surface_limits_before_painting() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for scene in [list(10_000.0, 1.0, vec![]), list(2049.0, 2049.0, vec![])] {
+        assert!(
+            docx_raster::render_page_cached_scaled(
+                &scene,
+                0,
+                &resources,
+                &mut GlyphCache::default(),
+                &mut ImageCache::default(),
+                2.0,
+            )
+            .is_err()
+        );
+    }
+    for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert!(
+            docx_raster::render_page_cached_scaled(
+                &list(64.0, 32.0, vec![]),
+                0,
+                &resources,
+                &mut GlyphCache::default(),
+                &mut ImageCache::default(),
+                scale,
+            )
+            .is_err()
+        );
+    }
+}

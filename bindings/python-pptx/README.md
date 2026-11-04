@@ -231,10 +231,13 @@ editor paints, as JSON) for hosts that paint it themselves. `render_png`
 rasterizes a slide instead, resolving pictures out of the package:
 
 ```python
-png = deck.render_png(0, scale=2.0)
+png = deck.render_png({"slide": 0}, scale=2.0)
 print(png.width, png.height, png.skipped_images)   # 2560 1440 0
 png.write("slide-0.png")
 ```
+
+The `PngTarget` dictionary takes a zero-based slide index or a slide ID. Scale defaults to 1.0;
+`background` and `max_shadow_pixels` remain keyword-only options.
 
 `background` picks what fills the pixels the slide leaves uncovered: `"slide"`
 (the default, opaque white under the slide's own background), `"transparent"`,
