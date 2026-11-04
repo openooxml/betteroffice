@@ -110,6 +110,17 @@ test('worker link under the caret edits and removes from the dialog', async ({ p
   expect(result.links.some(link => link.text === 'Changed link')).toBe(false);
 });
 
+test('worker link popup closes on a click elsewhere inside the page', async ({ page }) => {
+  await open(page);
+  await clickText(page, 'External link');
+  const popup = page.locator('.oox-hyperlink-popup');
+  await expect(popup).toBeVisible();
+  const link = (await page.locator('.canvas-page-mirror .layout-paragraph').filter({ hasText: 'External link' }).first().boundingBox())!;
+  const surface = (await page.locator('.paged-editor__page').first().boundingBox())!;
+  await page.mouse.click(surface.x + surface.width - 40, link.y + link.height / 2);
+  await expect(popup).toHaveCount(0);
+});
+
 test('worker clicking a body link supports popup copy edit and remove', async ({ page, context }, info) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.addInitScript(() => {
