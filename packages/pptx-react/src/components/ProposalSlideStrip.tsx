@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type { CanvasImageResolver, ProposalDiffSlide, ProposalStripEntry } from '@betteroffice/pptx';
 import { proposalImages, proposalPaintChanges } from './proposalImages';
-import { useTranslation } from '../i18n';
+import { useProposalTranslation } from '../i18n/useProposalTranslation';
 
 interface ProposalThumbnailPreview extends ProposalDiffSlide {
   resolveImage?: CanvasImageResolver;
@@ -15,7 +15,7 @@ function Thumbnail({ slideId, load, resolveImage, decodeImage }: {
   resolveImage?: CanvasImageResolver;
   decodeImage?: (bytes: Uint8Array, message: string) => Promise<CanvasImageSource>;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -50,7 +50,7 @@ export function ProposalSlideStrip({ entries, selectedSlideId, load, onSelect, r
   resolveImage?: CanvasImageResolver;
   decodeImage?: (bytes: Uint8Array, message: string) => Promise<CanvasImageSource>;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   return <div aria-label={t('proposals.slideStrip')} data-testid="pptx-proposal-slide-strip">
     {entries.map((entry, index) => <button key={entry.slideId} type="button"
       data-testid={`pptx-proposal-slide-${entry.status}`} data-slide-id={entry.slideId}

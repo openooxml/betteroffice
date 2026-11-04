@@ -75,6 +75,8 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
       ['setShapeFill', ['slideId', 'shapeId', 'color']],
       ['setShapeStroke', ['slideId', 'shapeId', 'stroke']],
       ['setShapeAdjust', ['slideId', 'shapeId', 'adjustments']],
+      ['setSlideLayout', ['slideId', 'layoutPartPath', 'mapping']],
+      ['setSlideBackground', ['slideId', 'background']],
       ['setSlideNotes', ['slideId', 'text']],
     ]);
     const onlyKeys = (value: unknown, keys: readonly string[]) => Boolean(value && typeof value === 'object' &&
@@ -113,7 +115,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!content.ok) return null;
     const steps: PptxEditStep[] = [];
     const canonicalEdits: ProposalEdit[] = [];
-    const staged = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape', 'setStoryParagraphs'].includes(edit?.type));
+    const staged = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape', 'setStoryParagraphs', 'setSlideLayout', 'setSlideBackground'].includes(edit?.type));
     for (const candidate of edits) {
       if (!candidate || typeof candidate !== 'object') return null;
       const keys = fields.get(candidate.type);
@@ -143,6 +145,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
       } else {
         if (!['setShapeRect', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'setSlideNotes'].includes(edit.type)) return null;
         if (edit.type === 'addTextBox' || edit.type === 'addShape' || edit.type === 'addPicture' || edit.type === 'removeShape') return null;
+        if (edit.type === 'setSlideLayout' || edit.type === 'setSlideBackground') return null;
         if (edit.type === 'insertSlide' || edit.type === 'duplicateSlide' || edit.type === 'deleteSlide' || edit.type === 'moveSlide') return null;
         const { type, ...fields } = edit;
         const { slideId, ...rest } = fields;

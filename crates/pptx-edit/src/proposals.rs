@@ -6,7 +6,8 @@ use yrs::{ReadTxn, Transact};
 use crate::staging::Adoption;
 use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, PictureDraft, PresetShapeDraft, ShapeDraft,
-    ShapeRect, ShapeSnapshot, ShapeStroke, TextParagraphDraft, TextStyle, TextStylePatch,
+    ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, TextParagraphDraft, TextStyle,
+    TextStylePatch,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -110,10 +111,27 @@ pub enum ProposalEdit {
         shape_id: String,
         adjustments: BTreeMap<String, f64>,
     },
+    SetSlideLayout {
+        slide_id: String,
+        layout_part_path: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mapping: Vec<(String, u32)>,
+    },
+    SetSlideBackground {
+        slide_id: String,
+        #[serde(deserialize_with = "required_background")]
+        background: Option<ShapeFill>,
+    },
     SetSlideNotes {
         slide_id: String,
         text: String,
     },
+}
+
+fn required_background<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ShapeFill>, D::Error> {
+    Option::<ShapeFill>::deserialize(deserializer)
 }
 
 fn required_anchor<'de, D: serde::Deserializer<'de>>(
@@ -470,6 +488,8 @@ impl DeckSession {
                         | ProposalEdit::AddPicture { .. }
                         | ProposalEdit::RemoveShape { .. }
                         | ProposalEdit::SetStoryParagraphs { .. }
+                        | ProposalEdit::SetSlideLayout { .. }
+                        | ProposalEdit::SetSlideBackground { .. }
                 )
             });
             if isolated {
@@ -527,7 +547,7 @@ impl DeckSession {
         let Some(baseline) = store.baselines.get(&proposal.id) else {
             return Vec::new();
         };
-        stale_targets(snapshot, baseline)
+        stale_targets(snapshot, baseline, &self.package)
     }
 
     pub fn proposal_slide_strip(&self, id: &str) -> ProposalResult<Vec<ProposalStripEntry>> {
@@ -548,7 +568,9 @@ impl DeckSession {
                     ProposalStripStatus::Moved
                 } else if preview.proposal.changes.iter().any(|change| {
                     change.slide_id == slide.id
-                        && (change.before != change.after || change.old_text != change.new_text)
+                        && (change.kind == Some(ProposalChangeKind::Content)
+                            || change.before != change.after
+                            || change.old_text != change.new_text)
                 }) {
                     ProposalStripStatus::Changed
                 } else {
@@ -687,6 +709,8 @@ fn resolve_edit(
         }
         ProposalEdit::DeleteSlide { slide_id }
         | ProposalEdit::SetSlideNotes { slide_id, .. }
+        | ProposalEdit::SetSlideLayout { slide_id, .. }
+        | ProposalEdit::SetSlideBackground { slide_id, .. }
         | ProposalEdit::AddTextBox { slide_id, .. }
         | ProposalEdit::AddShape { slide_id, .. }
         | ProposalEdit::AddPicture { slide_id, .. } => resolve(slide_id)?,
@@ -917,6 +941,19 @@ pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(
         } => {
             session.set_shape_adjust(&context, slide_id, shape_id, adjustments)?;
         }
+        ProposalEdit::SetSlideLayout {
+            slide_id,
+            layout_part_path,
+            mapping,
+        } => {
+            session.set_slide_layout(&context, slide_id, layout_part_path, mapping)?;
+        }
+        ProposalEdit::SetSlideBackground {
+            slide_id,
+            background,
+        } => {
+            session.set_slide_background(&context, slide_id, background.as_ref())?;
+        }
         ProposalEdit::SetSlideNotes { slide_id, text } => {
             session.set_slide_notes(&context, slide_id, text)?
         }
@@ -1010,7 +1047,9 @@ fn target(
         ProposalEdit::AddTextBox { slide_id, .. }
         | ProposalEdit::AddShape { slide_id, .. }
         | ProposalEdit::AddPicture { slide_id, .. }
-        | ProposalEdit::SetSlideNotes { slide_id, .. } => Ok((slide_id.clone(), None)),
+        | ProposalEdit::SetSlideNotes { slide_id, .. }
+        | ProposalEdit::SetSlideLayout { slide_id, .. }
+        | ProposalEdit::SetSlideBackground { slide_id, .. } => Ok((slide_id.clone(), None)),
     }
 }
 
@@ -1077,12 +1116,26 @@ fn changes_for(
         if shape_id.is_some() && old.is_none() && new.is_none() {
             continue;
         }
+        let slide_content = changes
+            .get(&(slide_id.clone(), shape_id.clone()))
+            .is_some_and(|change: &ProposalChange| {
+                change.kind == Some(ProposalChangeKind::Content)
+            });
         changes.insert(
             (slide_id.clone(), shape_id.clone()),
             ProposalChange {
                 kind: match (&old, &new, &shape_id) {
                     (None, Some(_), Some(_)) => Some(ProposalChangeKind::Inserted),
                     (Some(_), None, Some(_)) => Some(ProposalChangeKind::Deleted),
+                    _ if slide_content
+                        || matches!(
+                            edit,
+                            ProposalEdit::SetSlideLayout { .. }
+                                | ProposalEdit::SetSlideBackground { .. }
+                        ) =>
+                    {
+                        Some(ProposalChangeKind::Content)
+                    }
                     _ => None,
                 },
                 slide_id,
@@ -1165,7 +1218,100 @@ fn changes_for(
     Ok(changes.into_values().collect())
 }
 
-fn stale_targets(snapshot: &DeckSnapshot, baseline: &ProposalBaseline) -> Vec<String> {
+fn effective_background(
+    package: &pptx_parse::PptxPackage,
+    slide: &crate::SlideSnapshot,
+) -> serde_json::Value {
+    let parents = crate::paragraph::SlideParents::resolve(
+        package,
+        slide.source_part_path.as_deref(),
+        slide.layout_part_path.as_deref(),
+    );
+    let theme = pptx_parse::slide_theme(
+        package,
+        slide.source_part_path.as_deref(),
+        slide.layout_part_path.as_deref(),
+    );
+    let theme_part = parents
+        .master
+        .and_then(|master| master.theme_part_path.as_deref())
+        .and_then(|path| package.themes.iter().find(|part| part.part_path == path))
+        .or_else(|| package.themes.first());
+    let own = if slide.background_edited {
+        Some((slide.background.as_ref(), None, None))
+    } else {
+        parents.slide.map(|source| {
+            (
+                source.background.as_ref(),
+                source.background_picture.as_deref(),
+                source.background_reference.as_ref(),
+            )
+        })
+    };
+    let sources = [
+        own,
+        parents.layout.map(|layout| {
+            (
+                layout.background.as_ref(),
+                layout.background_picture.as_deref(),
+                layout.background_reference.as_ref(),
+            )
+        }),
+        parents.master.map(|master| {
+            (
+                master.background.as_ref(),
+                master.background_picture.as_deref(),
+                master.background_reference.as_ref(),
+            )
+        }),
+    ];
+    let Some((fill, picture, reference)) =
+        sources
+            .into_iter()
+            .flatten()
+            .find(|(fill, picture, reference)| {
+                fill.is_some() || picture.is_some() || reference.is_some()
+            })
+    else {
+        return serde_json::Value::Null;
+    };
+    let resolved = reference.map(|reference| {
+        ooxml_drawingml::style_fill(
+            &theme_part
+                .map(|part| part.format_scheme.clone())
+                .unwrap_or_default(),
+            reference,
+            &theme,
+        )
+    });
+    let fill = resolved.as_ref().or(fill);
+    let picture = picture.or_else(|| {
+        let index = reference?.index.checked_sub(1001)?;
+        theme_part?
+            .background_pictures
+            .get(index as usize)?
+            .as_ref()
+    });
+    let color = |value: &crate::ColorValue| {
+        ooxml_drawingml::resolve_color_value_to_rgba_hex(Some(value), Some(&theme))
+    };
+    serde_json::json!({
+        "type": fill.map(|fill| &fill.fill_type),
+        "color": fill.and_then(|fill| fill.color.as_ref()).and_then(color),
+        "gradient": fill.and_then(|fill| fill.gradient.as_ref()).map(|gradient| serde_json::json!({
+            "type": gradient.gradient_type,
+            "angle": gradient.angle,
+            "stops": gradient.stops.iter().map(|stop| (stop.position, color(&stop.color))).collect::<Vec<_>>(),
+        })),
+        "picture": picture,
+    })
+}
+
+fn stale_targets(
+    snapshot: &DeckSnapshot,
+    baseline: &ProposalBaseline,
+    package: &pptx_parse::PptxPackage,
+) -> Vec<String> {
     let original = |id: &str| baseline.snapshot.slides.iter().find(|slide| slide.id == id);
     let live = |id: &str| snapshot.slides.iter().find(|slide| slide.id == id);
     let mut stale = BTreeSet::new();
@@ -1175,6 +1321,8 @@ fn stale_targets(snapshot: &DeckSnapshot, baseline: &ProposalBaseline) -> Vec<St
             ProposalEdit::AddTextBox { .. }
                 | ProposalEdit::AddShape { .. }
                 | ProposalEdit::AddPicture { .. }
+                | ProposalEdit::SetSlideLayout { .. }
+                | ProposalEdit::SetSlideBackground { .. }
         ) {
             continue;
         }
@@ -1202,7 +1350,19 @@ fn stale_targets(snapshot: &DeckSnapshot, baseline: &ProposalBaseline) -> Vec<St
                     .map_or(Some(slide_id.as_str()), |id| id.as_deref()),
                 true,
             ),
-            ProposalEdit::DeleteSlide { slide_id } => (Some(slide_id.as_str()), None, true),
+            ProposalEdit::SetSlideBackground { slide_id, .. } => {
+                if let Some(before) = original(slide_id)
+                    && live(slide_id).map(|slide| effective_background(package, slide))
+                        != Some(effective_background(package, before))
+                {
+                    stale.insert(slide_id.clone());
+                }
+                continue;
+            }
+            ProposalEdit::DeleteSlide { slide_id }
+            | ProposalEdit::SetSlideLayout { slide_id, .. } => {
+                (Some(slide_id.as_str()), None, true)
+            }
             ProposalEdit::AddTextBox { slide_id, .. }
             | ProposalEdit::AddShape { slide_id, .. }
             | ProposalEdit::AddPicture { slide_id, .. } => (Some(slide_id.as_str()), None, false),

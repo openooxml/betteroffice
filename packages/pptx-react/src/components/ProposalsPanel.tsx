@@ -8,13 +8,15 @@ import type {
   Proposal,
   ProposalChange,
   ProposalPreview,
+  ProposalDiffSlide,
   SlideDisplayList,
 } from '@betteroffice/pptx';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { commandReason } from '../commands/evaluate';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
-import { useTranslation } from '../i18n';
+import { useProposalTranslation } from '../i18n/useProposalTranslation';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
+import { proposalSlideLabels } from './proposalLabels';
 import { proposalImages } from './proposalImages';
 import { proposalsPanelStyles as styles } from './proposalsPanelStyles';
 
@@ -25,8 +27,9 @@ function previewFrames(handle: PresentationHandle, id: string, slideId: string, 
   const previewIndex = preview.slides.findIndex(slide => slide.id === slideId);
   const before = liveIndex >= 0 ? handle.layoutSlide(liveIndex) : null;
   const after = previewIndex >= 0 ? handle.layoutProposalSlide(id, previewIndex) : null;
+  const media = previewIndex >= 0 ? handle.layoutProposalDiffSlideById(id, slideId).media : undefined;
   if (!before && !after) throw new Error(missingMessage);
-  return { before: before ?? { ...after!, primitives: [] }, after: after ?? { ...before!, primitives: [] } };
+  return { media, before: before ?? { ...after!, primitives: [] }, after: after ?? { ...before!, primitives: [] } };
 }
 
 interface Props {
@@ -88,7 +91,7 @@ export function ProposalsPanel({
   onClose,
   visualDisabledReason,
 }: Props) {
-  const { t, lang } = useTranslation();
+  const { t, lang } = useProposalTranslation();
   const store = usePptxCommands();
   const titleId = useId();
   const [selected, setSelected] = useState<{
@@ -101,6 +104,7 @@ export function ProposalsPanel({
     data: ProposalPreview;
     before: SlideDisplayList;
     after: SlideDisplayList;
+    media?: ProposalDiffSlide['media'];
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -116,8 +120,8 @@ export function ProposalsPanel({
       const data = handle.previewProposal(selected.id);
       const change = data.proposal.changes[selected.index];
       if (!change) throw new Error(t('proposals.targetMissing'));
-      const { before, after } = previewFrames(handle, selected.id, change.slideId, snapshot, data.snapshot, t('proposals.targetMissing'));
-      setPreview({ data, before, after });
+      const { before, after, media } = previewFrames(handle, selected.id, change.slideId, snapshot, data.snapshot, t('proposals.targetMissing'));
+      setPreview({ data, before, after, media });
       setError(null);
     } catch (value) {
       setPreview(null);
@@ -131,12 +135,12 @@ export function ProposalsPanel({
     if (!selected && element?.open) element.close();
   }, [selected]);
 
-  const location = (change: ProposalChange) => {
+  const location = (change: ProposalChange, proposal: Proposal) => {
     const index = snapshot.slides.findIndex(
       (slide) => slide.id === change.slideId
     );
-    const label = change.shapeId ? (change.after ?? change.before)?.name || t('proposals.appearance') : change.kind === 'inserted' ? t('proposals.insertedSlide')
-      : change.kind === 'deleted' ? t('proposals.deletedSlide') : change.before?.name || t('notes.panelLabel');
+    const label = proposalSlideLabels(change, proposal, t).join(', ') || (change.shapeId ? (change.after ?? change.before)?.name || t('proposals.appearance') : change.kind === 'inserted' ? t('proposals.insertedSlide')
+      : change.kind === 'deleted' ? t('proposals.deletedSlide') : change.before?.name || t('notes.panelLabel'));
     return index < 0 && change.kind === 'inserted' ? t('proposals.target', { slide: (change.afterIndex ?? 0) + 1, name: label })
       : index < 0
       ? t('proposals.targetMissing')
@@ -247,11 +251,11 @@ export function ProposalsPanel({
                 onClick={() => onNavigate(change.slideId, change.shapeId, proposal.id)}
                 style={styles.link}
               >
-                {location(change)}
+                {location(change, proposal)}
               </button>
               {!visualDisabledReason && (
                 <Suspense fallback={null}>
-                  <ProposalChangeDetails change={change} t={t} lang={lang} />
+                  <ProposalChangeDetails change={change} proposal={proposal} t={t} lang={lang} />
                 </Suspense>
               )}
               <button
@@ -344,13 +348,13 @@ export function ProposalsPanel({
               >
                 {preview.data.proposal.changes.map((change, index) => (
                   <option key={index} value={index}>
-                    {location(change)}
+                    {location(change, preview.data.proposal)}
                   </option>
                 ))}
               </select>
             </label>
             <Suspense fallback={null}>
-              <ProposalChangeDetails change={preview.data.proposal.changes[selected.index]} t={t} lang={lang} textOnly />
+              <ProposalChangeDetails change={preview.data.proposal.changes[selected.index]} proposal={preview.data.proposal} t={t} lang={lang} textOnly />
             </Suspense>
             <div style={styles.previews}>
               <PreviewCanvas
@@ -360,6 +364,7 @@ export function ProposalsPanel({
               />
               <PreviewCanvas
                 label={t('proposals.after')}
+                media={preview.media}
                 frame={preview.after}
                 snapshot={preview.data.snapshot}
                 resolveImage={resolveImage}
@@ -407,14 +412,16 @@ function PreviewCanvas({
   label,
   frame,
   snapshot,
+  media,
   resolveImage,
 }: {
   label: string;
   frame: SlideDisplayList;
   snapshot?: DeckSnapshot;
+  media?: ProposalDiffSlide['media'];
   resolveImage: CanvasImageResolver;
 }) {
-  const { t } = useTranslation();
+  const { t } = useProposalTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const canvas = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -430,7 +437,7 @@ function PreviewCanvas({
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(scratch, frame, dpr, scale);
     setError(null);
-    const images = snapshot ? proposalImages({ snapshot }, resolveImage, decodeImageError, decodePresentationImage) : null;
+    const images = snapshot ? proposalImages({ snapshot, media }, resolveImage, decodeImageError, decodePresentationImage) : null;
     void paintSlide(context, frame, dpr, scale, { resolveImage: images?.resolveImage ?? resolveImage })
       .then(() => {
         if (cancelled) return;
@@ -445,7 +452,7 @@ function PreviewCanvas({
     return () => {
       cancelled = true;
     };
-  }, [frame, snapshot, resolveImage, decodeImageError]);
+  }, [frame, snapshot, media, resolveImage, decodeImageError]);
   return (
     <figure style={styles.figure}>
       <figcaption style={styles.caption}>{label}</figcaption>

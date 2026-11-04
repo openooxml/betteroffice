@@ -11,6 +11,14 @@
       "types": "./dist/index.d.mts",
       "import": "./dist/index.mjs"
     },
+    "./editor": {
+      "types": "./dist/editor.d.mts",
+      "import": "./dist/editor.mjs"
+    },
+    "./proposals": {
+      "types": "./dist/proposals.d.mts",
+      "import": "./dist/proposals.mjs"
+    },
     "./en": {
       "types": "./dist/en.d.mts",
       "import": "./dist/en.mjs"

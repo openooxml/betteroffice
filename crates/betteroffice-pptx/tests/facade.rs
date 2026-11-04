@@ -392,3 +392,51 @@ fn facade_paragraph_proposals_preview_save_and_undo() {
     assert!(presentation.undo());
     assert_eq!(presentation.snapshot().unwrap(), before);
 }
+
+#[test]
+fn facade_slide_property_proposals_render_inherit_accept_reject_and_undo() {
+    use betteroffice_pptx::{ProposalEdit, ProposalRequest, ProposalStripStatus};
+    let fixture = include_bytes!("../../pptx-edit/tests/fixtures/proposal-slide-props.pptx");
+    for kind in ["setSlideLayout", "setSlideBackground"] {
+        let presentation = Presentation::open(fixture).unwrap();
+        let before = presentation.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let edit: ProposalEdit = serde_json::from_value(if kind == "setSlideLayout" {
+            serde_json::json!({"type": kind, "slideId": slide.id, "layoutPartPath": "ppt/slideLayouts/slideLayout2.xml", "mapping": [[slide.shapes[0].id, 8]]})
+        } else {
+            serde_json::json!({"type": kind, "slideId": slide.id, "background": {"type": "solid", "color": {"rgb": "123456"}}})
+        }).unwrap();
+        let request = || ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![edit.clone()],
+        };
+        let proposal = presentation.propose(request()).unwrap();
+        assert_eq!(
+            presentation.proposal_slide_strip(&proposal.id).unwrap()[0].status,
+            ProposalStripStatus::Changed
+        );
+        let by_id = presentation
+            .layout_proposal_diff_slide_by_id(&proposal.id, &slide.id)
+            .unwrap();
+        let by_index = presentation
+            .layout_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        assert_eq!(by_id.frame, by_index.frame);
+        let frame = serde_json::to_string(&by_id.frame).unwrap();
+        if kind == "setSlideLayout" {
+            assert!(frame.contains("ppt/media/proposal-pixel.png"));
+            assert!(frame.contains("#123456"));
+        } else {
+            assert!(frame.contains("#123456"));
+        }
+        assert_eq!(presentation.snapshot().unwrap(), before);
+        assert!(presentation.reject_proposal(&proposal.id));
+        let proposal = presentation.propose(request()).unwrap();
+        let preview = presentation.preview_proposal(&proposal.id).unwrap();
+        presentation.accept_proposal(&proposal.id, false).unwrap();
+        assert_eq!(presentation.snapshot().unwrap(), preview.snapshot);
+        assert!(presentation.undo());
+        assert_eq!(presentation.snapshot().unwrap(), before);
+    }
+}

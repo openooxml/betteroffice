@@ -33,16 +33,18 @@ test('default editor reaches the peerless surface only through a dynamic import'
     seen.add(path);
     const walk = (node: ts.Node): void => {
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
-        !node.importClause?.isTypeOnly && node.moduleSpecifier.text.startsWith('.')) {
+        !node.importClause?.isTypeOnly) {
         const bindings = node.importClause?.namedBindings;
         if (!node.importClause?.name && bindings && ts.isNamedImports(bindings) &&
           bindings.elements.every((entry) => entry.isTypeOnly)) return;
-        visit(modulePath(path, node.moduleSpecifier.text));
+        expect(node.moduleSpecifier.text).not.toBe('@betteroffice/pptx-i18n');
+        if (node.moduleSpecifier.text.startsWith('.')) visit(modulePath(path, node.moduleSpecifier.text));
       } else if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier &&
-        ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.startsWith('.')) {
+        ts.isStringLiteral(node.moduleSpecifier)) {
         if (node.exportClause && ts.isNamedExports(node.exportClause) &&
           node.exportClause.elements.every((entry) => entry.isTypeOnly)) return;
-        visit(modulePath(path, node.moduleSpecifier.text));
+        expect(node.moduleSpecifier.text).not.toBe('@betteroffice/pptx-i18n');
+        if (node.moduleSpecifier.text.startsWith('.')) visit(modulePath(path, node.moduleSpecifier.text));
       } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
         node.arguments[0] && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text.startsWith('.')) {
         deferred.add(modulePath(path, node.arguments[0].text));
@@ -77,6 +79,8 @@ test('default editor static chunks exclude the peerless core', async () => {
     }
   };
   visit(entry);
+  const staticInputs = [...seen].flatMap((path) => Object.keys(outputs[path].inputs));
+  expect(staticInputs.filter((path) => /packages\/pptx-i18n\/(?:src\/index\.ts|proposals\/en\.json)$/.test(path))).toEqual([]);
   const inputs = [...seen].flatMap((path) => Object.entries(outputs[path].inputs)
     .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path));
   const peerlessCore = /packages\/pptx\/src\/session\/command(?:Client|Session|Geometry|SharedAdapter)\.ts$|shared\/office-session\/commands\/(?:session|presenter|outbox)\.ts$/;
@@ -86,6 +90,8 @@ test('default editor static chunks exclude the peerless core', async () => {
       .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path));
   expect(deferredInputs.filter((path) => peerlessCore.test(path))).toHaveLength(7);
   for (const module of [
+    /packages\/pptx-i18n\/proposals\/en\.json$/,
+    /packages\/pptx-react\/src\/i18n\/useProposalTranslation\.ts$/,
     /packages\/pptx-react\/src\/viewer\//,
     /packages\/pptx-react\/src\/worker\/PptxWorkerEditor\.tsx$/,
     /packages\/pptx-react\/src\/worker\/createWorkerEditorApi\.ts$/,

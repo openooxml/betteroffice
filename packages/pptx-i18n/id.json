@@ -156,6 +156,8 @@
     "stalePreview": "Pratinjau ini menggunakan slide yang diperbarui. Menerapkannya akan menimpa target yang berubah.",
     "geometry": "Posisi dan ukuran (x, y, lebar, tinggi)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Tata letak diubah",
+    "backgroundChanged": "Latar belakang diubah",
     "appearance": "Tampilan atau pemformatan teks berubah",
     "changedAgain": "Target berubah lagi. Tinjau pratinjau yang dimuat ulang sebelum menerapkannya.",
     "canvasTitle": "Perubahan pada slide ini",

@@ -156,6 +156,8 @@
     "stalePreview": "Bản xem trước này dùng trang chiếu đã cập nhật. Việc áp dụng sẽ ghi đè các đối tượng đã thay đổi.",
     "geometry": "Vị trí và kích cỡ (x, y, chiều rộng, chiều cao)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Đã thay đổi bố cục",
+    "backgroundChanged": "Đã thay đổi nền",
     "appearance": "Đã thay đổi diện mạo hoặc định dạng văn bản",
     "changedAgain": "Đối tượng lại thay đổi. Hãy xem lại bản xem trước đã làm mới trước khi áp dụng.",
     "canvasTitle": "Thay đổi trên trang chiếu này",

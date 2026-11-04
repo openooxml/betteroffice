@@ -1,8 +1,10 @@
 import type { CSSProperties } from 'react';
-import type { ProposalChange } from '@betteroffice/pptx';
+import type { Proposal, ProposalChange } from '@betteroffice/pptx';
 import type { TFunction } from '@betteroffice/pptx-i18n';
 
-interface Props { change: ProposalChange; t: TFunction; lang?: string; textOnly?: boolean; testId?: string }
+import { proposalSlideLabels } from './proposalLabels';
+
+interface Props { change: ProposalChange; proposal?: Proposal; t: TFunction; lang?: string; textOnly?: boolean; testId?: string }
 
 function ProposalTextDiff({ change, t, testId }: Props) {
   if (change.oldText === change.newText) return null;
@@ -17,12 +19,13 @@ function ProposalTextDiff({ change, t, testId }: Props) {
   );
 }
 
-export function ProposalChangeDetails({ change, t, lang, textOnly, testId }: Props) {
+export function ProposalChangeDetails({ change, proposal, t, lang, textOnly, testId }: Props) {
   return (
     <>
       {change.kind === 'inserted' && <p>{t(change.shapeId ? 'proposals.insertedShape' : 'proposals.insertedSlide')}</p>}
       {change.kind === 'deleted' && <p>{t(change.shapeId ? 'proposals.deletedShape' : 'proposals.deletedSlide')}</p>}
       {change.kind === 'moved' && <p>{t('proposals.movedFrom', { number: (change.beforeIndex ?? 0) + 1 })}</p>}
+      {proposalSlideLabels(change, proposal, t).map(label => <p key={label}>{label}</p>)}
       <ProposalTextDiff change={change} t={t} testId={testId} />
       {!textOnly && change.before && change.after && <ShapeChange change={change} t={t} lang={lang} />}
     </>

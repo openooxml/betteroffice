@@ -633,3 +633,38 @@ test('paragraph proposal JSON, preview, acceptance and undo match wasm', async (
     for (const doc of docs) doc.free();
   }
 });
+
+test.each(['setSlideLayout', 'setSlideBackground'] as const)('%s proposal JSON, preview and undo match wasm', async type => {
+  const fixture = new Uint8Array(readFileSync(new URL('../../crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx', import.meta.url)));
+  const docs = [wasm.PptxDocument.openCollaborative(fixture, 10), native.PptxDocument.openCollaborative(fixture, 10)];
+  const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+  try {
+    const before = docs.map(doc => JSON.parse(doc.snapshotJson()));
+    const slide = before[0].slides[0];
+    const edit = type === 'setSlideLayout'
+      ? { type, slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml', mapping: [[slide.shapes[0].id, 8]] }
+      : { type, slideId: slide.id, background: { type: 'solid', color: { rgb: '123456' } } };
+    const request = JSON.stringify({ agentId: 'parity', edits: [edit] });
+    expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+    const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+    expect(proposals[0]).toEqual(proposals[1]);
+    const diffs = renderers.map((renderer, index) => JSON.parse(renderer.layoutProposalDiffSlideJson(docs[index], proposals[index].id, 0)));
+    expect(diffs[0]).toEqual(diffs[1]);
+    expect(JSON.stringify(diffs[0].frame)).toContain('#123456');
+    for (const [index, doc] of docs.entries()) {
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+      expect(JSON.parse(doc.proposalSlideStripJson(proposals[index].id))[0].status).toBe('changed');
+      const byId = JSON.parse(renderers[index].layoutProposalDiffSlideByIdJson(doc, proposals[index].id, slide.id));
+      expect(byId.frame).toEqual(diffs[index].frame);
+      doc.acceptProposalJson(JSON.stringify({ id: proposals[index].id }));
+    }
+    await expectSavedPartsEqual(docs[0].saveBytes(), docs[1].saveBytes());
+    for (const [index, doc] of docs.entries()) {
+      doc.undoJson();
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+    }
+  } finally {
+    for (const renderer of renderers) renderer.free();
+    for (const doc of docs) doc.free();
+  }
+});

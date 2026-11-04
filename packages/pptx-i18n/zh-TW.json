@@ -156,6 +156,8 @@
     "stalePreview": "此預覽使用更新後的投影片。套用將覆寫已變更的目標。",
     "geometry": "位置與大小 (x, y, 寬度, 高度)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "版面配置已變更",
+    "backgroundChanged": "背景已變更",
     "appearance": "外觀或文字格式已變更",
     "changedAgain": "目標再次變更。套用前請檢閱更新後的預覽。",
     "canvasTitle": "此投影片上的變更",

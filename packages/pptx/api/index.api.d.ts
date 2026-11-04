@@ -499,7 +499,7 @@ export { openPresentationSession } from './session/client';
 export { createPptxWorkerEditorSession } from './session/editorSession';
 
 // ---- proposals.d.ts ----
-import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextParagraphDraft, TextStyleSnapshot } from './types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextParagraphDraft, TextStyleSnapshot } from './types';
 export type ProposalEdit = {
     type: 'addTextBox';
     ref?: string;
@@ -581,6 +581,15 @@ export type ProposalEdit = {
     slideId: string;
     shapeId: string;
     adjustments: Record<string, number>;
+} | {
+    type: 'setSlideLayout';
+    slideId: string;
+    layoutPartPath: string;
+    mapping?: [string, number][];
+} | {
+    type: 'setSlideBackground';
+    slideId: string;
+    background: ShapeFill | null;
 } | {
     type: 'setSlideNotes';
     slideId: string;
