@@ -12,7 +12,7 @@ const SPACING_IN = 0.1;
 
 async function diagram(cells: string): Promise<Buffer> {
   const zip = await JSZip.loadAsync(await readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/text-lock.vsdx')));
-  const shape = `<Shape ID='2' Type='Shape'><Cell N='Width' V='4'/><Cell N='Height' V='1'/><Cell N='PinX' V='3'/><Cell N='PinY' V='2'/><Cell N='LocPinX' V='2'/><Cell N='LocPinY' V='0.5'/><Section N='Character'><Row IX='0'><Cell N='Size' V='${SIZE_IN}'/>${cells}</Row></Section><Text>${TEXT}</Text></Shape>`;
+  const shape = `<Shape ID='2' Type='Shape'><Cell N='Width' V='4'/><Cell N='Height' V='1'/><Cell N='PinX' V='3'/><Cell N='PinY' V='2'/><Cell N='LocPinX' V='2'/><Cell N='LocPinY' V='0.5'/><Cell N='LinePattern' V='0'/><Cell N='FillPattern' V='0'/><Section N='Geometry' IX='0'><Row IX='1' T='MoveTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row IX='2' T='LineTo'><Cell N='X' V='4'/><Cell N='Y' V='0'/></Row><Row IX='3' T='LineTo'><Cell N='X' V='4'/><Cell N='Y' V='1'/></Row><Row IX='4' T='LineTo'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row><Row IX='5' T='LineTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row></Section><Section N='Character'><Row IX='0'><Cell N='Size' V='${SIZE_IN}'/>${cells}</Row></Section><Text><cp IX='0'/>${TEXT}</Text></Shape>`;
   zip.file('visio/pages/page1.xml', `<PageContents xmlns='http://schemas.microsoft.com/office/visio/2012/main'><Shapes>${shape}</Shapes></PageContents>`);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
