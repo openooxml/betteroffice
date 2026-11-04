@@ -35,6 +35,18 @@ async function open(browser: Browser, worker: boolean) {
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
   if (worker) await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false');
   await page.addStyleTag({ content: SETTLE });
+  let height = -1;
+  await expect.poll(async () => {
+    const next = await page.evaluate(() => {
+      let scroller = document.querySelector('.canvas-page[data-page-index]')!.parentElement;
+      while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+      return scroller?.scrollHeight ?? 0;
+    });
+    const stable = next === height;
+    height = next;
+    return stable;
+  }, { timeout: 30_000, intervals: [1_000] }).toBe(true);
+  await page.waitForTimeout(1_000);
   return { context, page };
 }
 
@@ -99,16 +111,19 @@ async function state(page: Page, worker: boolean) {
     const rect = (scroller ?? document.documentElement).getBoundingClientRect();
     return { x: rect.x, y: rect.y, width: Math.min(rect.width, innerWidth - rect.x), height: Math.min(rect.height, innerHeight - rect.y) };
   });
-  const readText = () => page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
-    .map((element) => `${element.dataset.pageIndex}:${element.textContent ?? ''}`));
-  let text = await readText();
-  for (let attempt = 0; attempt < 20; attempt++) {
-    await page.waitForTimeout(250);
-    const next = await readText();
-    if (JSON.stringify(next) === JSON.stringify(text)) break;
-    text = next;
+  const readTree = async () => ({
+    text: await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
+      .map((element) => `${element.dataset.pageIndex}:${element.textContent ?? ''}`)),
+    aria: await root.ariaSnapshot(),
+  });
+  let tree = await readTree();
+  for (let attempt = 0; attempt < 40; attempt++) {
+    await page.waitForTimeout(500);
+    const next = await readTree();
+    if (JSON.stringify(next) === JSON.stringify(tree)) break;
+    tree = next;
   }
-  return { ...layout, text, aria: await root.ariaSnapshot(), pixels: await settledShot(page, clip) };
+  return { ...layout, ...tree, pixels: await settledShot(page, clip) };
 }
 
 /** A screenshot of the document area once two consecutive captures agree. */
