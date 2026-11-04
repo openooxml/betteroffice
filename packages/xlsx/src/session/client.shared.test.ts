@@ -159,11 +159,11 @@ const reads: { name: string; method: string; call(session: WorkbookSession): Pro
     expected: (seq) => ({ sheet: 0, version: `opaque:${seq}`, cells: [[{ input: String(seq) }]] }) },
   { name: 'frame', method: 'frame', call: (session) => session.call.frame(viewport),
     value: paint, expected: (seq) => ({ ...paint(seq), displayList }) },
-  ...['renderPng', 'renderRangePng'].map((method) => ({
-    name: method, method,
-    call: (session: WorkbookSession) => method === 'renderPng'
-      ? session.call.renderPng(viewport, { sheet: 0 })
-      : session.call.renderRangePng({ range: 'A1', scale: 2 }, { sheet: 0 }),
+  ...['viewport', 'range'].map((form) => ({
+    name: `renderPng ${form}`, method: 'renderPng',
+    call: (session: WorkbookSession) => form === 'viewport'
+      ? session.call.renderPng({ sheet: 0, viewport })
+      : session.call.renderPng({ sheet: 0, range: 'A1' }, { scale: 2 }),
     value: (seq: number) => Uint8Array.of(137, 80, 78, 71, seq).buffer,
     expected: (seq: number) => Uint8Array.of(137, 80, 78, 71, seq),
   })),
@@ -207,30 +207,31 @@ const reads: { name: string; method: string; call(session: WorkbookSession): Pro
   ].map((read) => ({ ...read, method: read.name, expected: read.value })),
 ];
 
-test('exports capture sheet, viewport, scope and print metrics before the command fence', async () => {
+test('exports capture target, scale, scope and print metrics before the command fence', async () => {
   const port = controlled(() => new ArrayBuffer(0));
   const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
   const window = { ...viewport };
-  const range = { range: 'A1', scale: 2 };
+  const target = { sheet: 0, viewport: window };
+  const range = { sheet: 0, range: 'A1' };
+  const scale = { scale: 2 };
   const options = { scope: [{ sheet: 0, range: 'A1' }], maxCells: 8 };
   const markdown = { maxRows: 2 };
   const metrics = { dpi: 96, maxDigitWidth: 7, defaultRowHeightPt: 15,
     fontSizePt: 11, fontFamily: 'Arial', fontAscent: 10, fontDescent: 3 };
-  const sheet = { sheet: 0 };
   try {
     const earlier = session.submit(command(1));
-    const exports = [session.call.renderPng(window, sheet), session.call.renderRangePng(range, sheet),
+    const exports = [session.call.renderPng(target), session.call.renderPng(range, scale),
       session.call.exportStructured(options), session.call.exportMarkdown(options, markdown),
       session.call.printDisplayList(0, 'A1', metrics, true)];
     for (const pending of exports) void pending.catch(() => {});
-    window.x = 900; range.range = 'B2'; options.scope[0].sheet = 1;
-    options.maxCells = 1; markdown.maxRows = 1; metrics.dpi = 300; sheet.sheet = 1;
+    window.x = 900; target.sheet = 1; range.range = 'B2'; scale.scale = 3; options.scope[0].sheet = 1;
+    options.maxCells = 1; markdown.maxRows = 1; metrics.dpi = 300;
     port.ack(0);
     await earlier;
     await drain();
     expect(port.calls.slice(1).map((call) => [call.method, call.args])).toEqual([
-      ['renderPng', [viewport, { sheet: 0 }]],
-      ['renderRangePng', [{ range: 'A1', scale: 2 }, { sheet: 0 }]],
+      ['renderPng', [{ sheet: 0, viewport }, {}]],
+      ['renderPng', [{ sheet: 0, range: 'A1' }, { scale: 2 }]],
       ['exportStructured', [{ scope: [{ sheet: 0, range: 'A1' }], maxCells: 8 }]],
       ['exportMarkdown', [{ scope: [{ sheet: 0, range: 'A1' }], maxCells: 8 }, { maxRows: 2 }]],
       ['printDisplayList', [0, 'A1', { ...metrics, dpi: 96 }, true]],
@@ -240,7 +241,7 @@ test('exports capture sheet, viewport, scope and print metrics before the comman
 
 for (const entry of ['compatibility', 'native'] as const) {
   for (const read of reads) {
-    const posted = read.method === 'renderPng' || read.method === 'renderRangePng';
+    const posted = read.method === 'renderPng';
     test(`${read.name} fences 65 ${entry} edits before any ack and holds later dispatch until it is ${posted ? 'posted' : 'answered'}`, async () => {
       const port = controlled(read.value);
       const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);

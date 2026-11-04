@@ -614,6 +614,101 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// Renders `{ sheet, viewport }` or `{ sheet, range }` with `{ scale, maxWidth, maxHeight }`.
+    #[cfg(feature = "raster")]
+    pub fn render_png_target(
+        &self,
+        target_json: &str,
+        options_json: &str,
+    ) -> Result<Vec<u8>, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ViewportTarget {
+            sheet: u32,
+            viewport: ViewportBox,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ViewportBox {
+            x: f32,
+            y: f32,
+            width: f32,
+            height: f32,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RangeTarget {
+            sheet: u32,
+            range: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Target {
+            Viewport(ViewportTarget),
+            Range(RangeTarget),
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Options {
+            scale: Option<f32>,
+            max_width: Option<u32>,
+            max_height: Option<u32>,
+        }
+
+        let target: Target = serde_json::from_str(target_json)
+            .map_err(|_| "target must be { sheet, viewport } or { sheet, range }".to_owned())?;
+        let options: Options =
+            serde_json::from_str(options_json).map_err(|error| format!("bad options: {error}"))?;
+        let count = self.workbook.sheet_count();
+        let sheet = |index: u32| {
+            if (index as usize) < count {
+                Ok(SheetId(index))
+            } else {
+                Err(format!(
+                    "sheet index {index} out of range for {count} sheet(s)"
+                ))
+            }
+        };
+        let options = RenderOptions {
+            scale: options.scale.unwrap_or(1.0),
+            max_width: options.max_width,
+            max_height: options.max_height,
+            ..RenderOptions::default()
+        };
+        if let Target::Range(RangeTarget {
+            sheet: index,
+            range,
+        }) = &target
+            && range == "used"
+        {
+            return self
+                .workbook
+                .render_sheet(sheet(*index)?, &options)
+                .map(|rendered| rendered.bytes)
+                .map_err(|error| error.to_string());
+        }
+        let target = match target {
+            Target::Viewport(target) => betteroffice_xlsx::PngTarget::Viewport {
+                sheet: sheet(target.sheet)?,
+                viewport: Viewport {
+                    x: target.viewport.x,
+                    y: target.viewport.y,
+                    width: target.viewport.width,
+                    height: target.viewport.height,
+                },
+            },
+            Target::Range(target) => betteroffice_xlsx::PngTarget::Range {
+                sheet: sheet(target.sheet)?,
+                range: CellRange::parse_a1(&target.range.to_ascii_uppercase())
+                    .map_err(|error| format!("invalid range {:?}: {error}", target.range))?,
+            },
+        };
+        self.workbook
+            .render_png(target, &options)
+            .map(|rendered| rendered.bytes)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;

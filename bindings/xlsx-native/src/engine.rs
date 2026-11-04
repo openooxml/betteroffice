@@ -557,19 +557,15 @@ impl XlsxDocument {
     }
 
     #[napi(catch_unwind)]
-    pub fn render_png(&self, env: Env, viewport_json: String) -> Result<Uint8Array> {
+    pub fn render_png_target(
+        &self,
+        env: Env,
+        target_json: String,
+        options_json: String,
+    ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .render_png(&viewport_json)
-            .map_err(|error| map_error(env, error))
-            .and_then(|bytes| byte_result(env, bytes))
-    }
-
-    #[napi(catch_unwind)]
-    pub fn render_range_png(&self, env: Env, args: String) -> Result<Uint8Array> {
-        let _call = EngineCall::new(env);
-        self.document(env)?
-            .render_range_png(&args)
+            .render_png_target(&target_json, &options_json)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
     }

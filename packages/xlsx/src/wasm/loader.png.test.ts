@@ -74,7 +74,7 @@ describe('wasm PNG initialization', () => {
     expect(loader.isPngExportAvailable()).toBe(true);
     const handle = loader.openWorkbook(fixture);
     try {
-      expect(Array.from(handle.renderPng(viewport).subarray(0, 8)))
+      expect(Array.from((await handle.renderPng({ sheet: 0, viewport })).subarray(0, 8)))
         .toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
     } finally { handle.dispose(); }
   });
@@ -101,8 +101,8 @@ describe('wasm PNG initialization', () => {
     try {
       expect(leanHandle.sheetInfo()).toEqual(fullHandle.sheetInfo());
       expect(leanHandle.displayList(viewport)).toEqual(fullHandle.displayList(viewport));
-      expect(() => leanHandle.renderPng(viewport)).toThrow('png export not in this build');
-      expect(() => leanHandle.renderRangePng({ range: 'A1:B2' })).toThrow('png export not in this build');
+      await expect(leanHandle.renderPng({ sheet: 0, viewport })).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-unavailable' });
+      await expect(leanHandle.renderPng({ sheet: 0, range: 'A1:B2' })).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-unavailable' });
       for (const handle of [leanHandle, fullHandle]) {
         expect(handle.editCell(0, 2, 1, '1234').applied).toBe(true);
         expect(handle.cell(0, 2, 1).input).toBe('1234');
@@ -130,7 +130,7 @@ describe('wasm PNG initialization', () => {
     expect(full.isPngExportAvailable()).toBe(true);
     expect(lean.isPngExportAvailable()).toBe(false);
     const handle = lean.openWorkbook(fixture);
-    try { expect(() => handle.renderPng(viewport)).toThrow('png export not in this build'); }
+    try { await expect(handle.renderPng({ sheet: 0, viewport })).rejects.toMatchObject({ code: 'canvas-unavailable' }); }
     finally { handle.dispose(); }
   });
 

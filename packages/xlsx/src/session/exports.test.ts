@@ -182,17 +182,16 @@ test('PNG and print exports use the requested sheet after edits without navigati
     const printing = session.call.printDisplayList(1, 'A1:B2', metrics, false);
     expect(await printing).toEqual(main.printDisplayList(1, 'A1:B2', metrics, false));
     await editing;
-    main.setActiveSheet(1);
     expect(session.pngExport).toBe(wasm.isPngExportAvailable());
     const renders = [
-      { call: () => session.call.renderPng(viewport, { sheet: 1 }), expected: () => main.renderPng(viewport) },
-      { call: () => session.call.renderRangePng({ range: 'A1:B2', scale: 1.5 }, { sheet: 1 }),
-        expected: () => main.renderRangePng({ range: 'A1:B2', scale: 1.5 }) },
+      { call: () => session.call.renderPng({ sheet: 1, viewport }), expected: () => main.renderPng({ sheet: 1, viewport }) },
+      { call: () => session.call.renderPng({ sheet: 'Other', range: 'A1:B2' }, { scale: 1.5 }),
+        expected: () => main.renderPng({ sheet: 1, range: 'A1:B2' }, { scale: 1.5 }) },
     ];
     for (const render of renders) {
       if (session.pngExport) {
         const png = await render.call();
-        expect(png).toEqual(render.expected());
+        expect(png).toEqual(await render.expected());
         expect([...png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
       } else await expect(render.call()).rejects.toMatchObject({
         name: 'WorkbookPngUnavailableError', code: 'png-unavailable',
@@ -212,7 +211,7 @@ test('PNG unavailability is typed and leaves the session usable', async () => {
     const { session } = await opened();
     try {
       expect(session.pngExport).toBe(false);
-      for (const call of [() => session.call.renderPng(viewport), () => session.call.renderRangePng()]) {
+      for (const call of [() => session.call.renderPng({ sheet: 0, viewport }), () => session.call.renderPng({ sheet: 0, range: 'A1' })]) {
         await expect(call()).rejects.toMatchObject({ name: 'WorkbookPngUnavailableError', code: 'png-unavailable' });
       }
       expect(session.failure).toBeUndefined();

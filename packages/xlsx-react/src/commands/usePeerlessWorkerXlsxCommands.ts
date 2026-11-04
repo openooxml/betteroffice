@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from 'react';
 import { normalizeRange } from '@betteroffice/xlsx';
-import type { WorkbookHandle, WorkbookSession, XlsxRangeTarget } from '@betteroffice/xlsx';
+import type { WorkbookHandle, WorkbookSession, XlsxFontFace, XlsxPngFont, XlsxRangeTarget } from '@betteroffice/xlsx';
 import type {
   WorkbookAck, WorkbookCommandSelection, WorkbookCommandFrameRequest, WorkbookEditState,
 } from '@betteroffice/xlsx/worker';
@@ -45,6 +45,8 @@ export interface PeerlessWorkerXlsxEditorBridge extends Omit<WorkerXlsxEditorBri
     WorkbookSession, 'editState' | 'selection'
   > & Partial<Pick<WorkbookSession, 'call' | 'pngExport'>>) | null;
   deliverPng?(bytes: Uint8Array): void;
+  /** The faces the editor paints these fonts with, forwarded to a PNG export. */
+  exportFonts?(fonts: XlsxPngFont[]): Promise<XlsxFontFace[] | undefined>;
   coordinator: PeerlessWorkerInputCoordinator;
   frame(): WorkbookCommandFrameRequest | undefined;
   selectionRevision(): number;
@@ -262,7 +264,9 @@ export function createPeerlessWorkerXlsxCommandBinding(
         const frame = admitted ? admitted.frame : current.frame();
         if (!session.pngExport || !session.call) return fail('png-unavailable');
         if (!frame || !current.deliverPng) return fail('editor-unavailable');
-        const png = await session.call.renderPng(frame.viewport, { sheet: frame.sheet });
+        const target = { sheet: frame.sheet, viewport: frame.viewport };
+        const fonts = await current.exportFonts?.(await session.call.renderPngFonts(target));
+        const png = await session.call.renderPng(target, { fonts });
         if (bridge().generation() !== generation || bridge().session() !== session) return fail('document-replaced');
         current.deliverPng(png);
         return done();
