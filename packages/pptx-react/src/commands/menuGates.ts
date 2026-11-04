@@ -8,15 +8,8 @@ import {
   writeGate,
   type PptxCommandEnvironment,
   type PptxCommandEvaluation,
-  type PptxMenuReasonCode,
 } from './evaluate';
 import type { CommandReason, PptxCommandId } from './types';
-
-const REASON_KEYS: Record<PptxMenuReasonCode, TranslationKey> = {
-  'clipboard-unavailable': 'commands.reasons.clipboardUnavailable',
-  'table-required': 'commands.reasons.tableRequired',
-  'last-slide': 'commands.reasons.lastSlide',
-};
 
 const MENU_COMMANDS = new Set<PptxCommandId>(['cut', 'copy', 'paste', 'deleteObject', 'deleteSlide',
   'duplicateSlide', 'tableInsert', 'tableDelete']);
@@ -36,21 +29,14 @@ function validArgs(id: PptxCommandId, args: unknown): boolean {
 }
 
 function evaluation(gate: PptxCommandEvaluation['gate'], reasonKey?: TranslationKey): PptxCommandEvaluation {
-  const key = gate && gate in REASON_KEYS ? REASON_KEYS[gate as PptxMenuReasonCode] : reasonKey;
-  return key ? { gate, reasonKey: key } : { gate };
-}
-
-/** @internal Why a menu command cannot run, with its message from the menu table. */
-export function menuReason(code: PptxMenuReasonCode,
-  env: Pick<PptxCommandEnvironment, 'translate'>): CommandReason<PptxMenuReasonCode> {
-  return commandReason(code, env, REASON_KEYS[code]);
+  return reasonKey ? { gate, reasonKey } : { gate };
 }
 
 /** @internal The result for a clipboard call the browser refused, or null for any other error. */
 export function clipboardRefusal(error: unknown,
-  env: Pick<PptxCommandEnvironment, 'translate'>): { ok: false; failure: CommandReason<PptxMenuReasonCode> } | null {
+  env: Pick<PptxCommandEnvironment, 'translate'>): { ok: false; failure: CommandReason<'clipboard-unavailable'> } | null {
   return error && typeof error === 'object' && 'name' in error && error.name === 'NotAllowedError'
-    ? { ok: false, failure: menuReason('clipboard-unavailable', env) } : null;
+    ? { ok: false, failure: commandReason('clipboard-unavailable', env) } : null;
 }
 
 /**

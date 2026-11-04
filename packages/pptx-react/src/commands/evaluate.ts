@@ -104,10 +104,10 @@ export interface PptxCommandEnvironment {
   translate: TFunction;
 }
 
-/** @internal Failure codes whose messages load with the binding that raises them. */
-export type PptxMenuReasonCode = 'clipboard-unavailable' | 'table-required' | 'last-slide';
-
-const REASON_KEYS: Record<Exclude<PptxCommandFailureCode, PptxMenuReasonCode>, TranslationKey> = {
+const REASON_KEYS: Record<PptxCommandFailureCode, TranslationKey> = {
+  'clipboard-unavailable': 'commands.reasons.clipboardUnavailable',
+  'table-required': 'commands.reasons.tableRequired',
+  'last-slide': 'commands.reasons.lastSlide',
   'editor-unavailable': 'commands.reasons.editorUnavailable',
   'document-loading': 'commands.reasons.documentLoading',
   'no-document': 'commands.reasons.noDocument',
@@ -145,7 +145,7 @@ const REASON_KEYS: Record<Exclude<PptxCommandFailureCode, PptxMenuReasonCode>, T
 export function commandReason<Code extends PptxCommandFailureCode>(
   code: Code,
   env: Pick<PptxCommandEnvironment, 'translate'> | null,
-  key: TranslationKey = REASON_KEYS[code as Exclude<Code, PptxMenuReasonCode>]
+  key: TranslationKey = REASON_KEYS[code]
 ): CommandReason<Code> {
   return {
     code,
