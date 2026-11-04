@@ -645,10 +645,10 @@ for (const twips of [40, -20]) {
             const selected = await editWithFrame(client, intent(++seq, 0, 'select', {
               selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 4 } },
             }));
-            const rects = selected.frame!.payload.selectionRects!;
-            expect(rects).toHaveLength(1);
-            expect(Math.abs(rects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
-            expect(Math.abs(rects[0]!.x + rects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
+            const frameRects = selected.frame!.payload.selectionRects!;
+            expect(frameRects).toHaveLength(1);
+            expect(Math.abs(frameRects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
+            expect(Math.abs(frameRects[0]!.x + frameRects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
           }
         } finally { queries.dispose(); }
       }
