@@ -240,7 +240,9 @@ fn pixel(width: u32, pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 #[test]
 fn renders_an_embedded_image_from_its_data_url_without_an_image_map() {
     let document = document();
-    let rendered = document.render_png(&embedded_image_page(), 0).unwrap();
+    let rendered = document
+        .render_display_list_png(&embedded_image_page(), 0)
+        .unwrap();
     assert_eq!(rendered.skipped_images, 0);
     assert_eq!(&rendered.bytes[..8], PNG_MAGIC);
     let (width, height, pixels) = decode(&rendered.bytes);
@@ -252,14 +254,16 @@ fn renders_an_embedded_image_from_its_data_url_without_an_image_map() {
 #[test]
 fn renders_text_only_once_its_family_is_registered() {
     let mut document = document();
-    let error = document.render_png(&text_page(), 0).unwrap_err();
+    let error = document
+        .render_display_list_png(&text_page(), 0)
+        .unwrap_err();
     assert_eq!(error.to_string(), "missing font chain for `carlito|0|0`");
 
     let id = document
         .register_font("Carlito", false, false, CARLITO)
         .unwrap();
     assert_eq!(id, 0);
-    let rendered = document.render_png(&text_page(), 0).unwrap();
+    let rendered = document.render_display_list_png(&text_page(), 0).unwrap();
     assert_eq!(&rendered.bytes[..8], PNG_MAGIC);
     let (_, _, pixels) = decode(&rendered.bytes);
     let (quads, _) = pixels.as_chunks::<4>();
@@ -281,7 +285,10 @@ fn a_face_registered_between_pages_leaves_the_cached_outlines_alone() {
             .unwrap(),
         0
     );
-    let latin = warmed.render_png(&text_page(), 0).unwrap().bytes;
+    let latin = warmed
+        .render_display_list_png(&text_page(), 0)
+        .unwrap()
+        .bytes;
     assert_eq!(
         warmed
             .register_font("Carlito", false, false, SMALL_FONT)
@@ -297,10 +304,16 @@ fn a_face_registered_between_pages_leaves_the_cached_outlines_alone() {
 
     let page = mixed_script_page();
     assert_eq!(
-        warmed.render_png(&page, 0).unwrap().bytes,
-        cold.render_png(&page, 0).unwrap().bytes
+        warmed.render_display_list_png(&page, 0).unwrap().bytes,
+        cold.render_display_list_png(&page, 0).unwrap().bytes
     );
-    assert_eq!(warmed.render_png(&text_page(), 0).unwrap().bytes, latin);
+    assert_eq!(
+        warmed
+            .render_display_list_png(&text_page(), 0)
+            .unwrap()
+            .bytes,
+        latin
+    );
 }
 
 /// Font ids are store-local. Two documents registering different faces under
@@ -318,15 +331,15 @@ fn two_documents_sharing_a_family_name_paint_their_own_faces() {
 
     let page = mixed_script_page();
     assert_ne!(
-        latin.render_png(&page, 0).unwrap().bytes,
-        hebrew.render_png(&page, 0).unwrap().bytes
+        latin.render_display_list_png(&page, 0).unwrap().bytes,
+        hebrew.render_display_list_png(&page, 0).unwrap().bytes
     );
 }
 
 #[test]
 fn rejects_a_page_ordinal_past_the_end() {
     let error = document()
-        .render_png(&embedded_image_page(), 1)
+        .render_display_list_png(&embedded_image_page(), 1)
         .unwrap_err();
     assert_eq!(error.to_string(), "page ordinal 1 is out of range");
 }
@@ -335,7 +348,7 @@ fn rejects_a_page_ordinal_past_the_end() {
 fn an_unresolvable_image_is_skipped_rather_than_failing_the_page() {
     let document = document();
     let rendered = document
-        .render_png(&shared_relationship_id_page(), 0)
+        .render_display_list_png(&shared_relationship_id_page(), 0)
         .unwrap();
     assert_eq!(rendered.skipped_images, 2);
     let (width, _, pixels) = decode(&rendered.bytes);
@@ -353,7 +366,7 @@ fn a_registered_image_resolves_per_part_so_a_shared_id_stays_distinct() {
         .register_image(ImageScope::HeaderFooter("rId7"), "rId9", BLUE_PNG)
         .unwrap();
     let rendered = document
-        .render_png(&shared_relationship_id_page(), 0)
+        .render_display_list_png(&shared_relationship_id_page(), 0)
         .unwrap();
     assert_eq!(rendered.skipped_images, 0);
     let (width, _, pixels) = decode(&rendered.bytes);
@@ -368,7 +381,7 @@ fn a_registration_does_not_leak_into_another_part() {
         .register_image(ImageScope::HeaderFooter("rId7"), "rId9", BLUE_PNG)
         .unwrap();
     let rendered = document
-        .render_png(&shared_relationship_id_page(), 0)
+        .render_display_list_png(&shared_relationship_id_page(), 0)
         .unwrap();
     assert_eq!(rendered.skipped_images, 1);
     let (width, _, pixels) = decode(&rendered.bytes);
@@ -382,7 +395,9 @@ fn a_note_image_resolves_for_an_area_that_omits_its_kind() {
     document
         .register_image(ImageScope::Notes(NoteKind::Footnote), "rId9", RED_PNG)
         .unwrap();
-    let rendered = document.render_png(&unnamed_note_area_page(), 0).unwrap();
+    let rendered = document
+        .render_display_list_png(&unnamed_note_area_page(), 0)
+        .unwrap();
     assert_eq!(rendered.skipped_images, 0);
     let (width, _, pixels) = decode(&rendered.bytes);
     assert_eq!(pixel(width, &pixels, 8, 8), [255, 0, 0, 255]);
@@ -416,7 +431,7 @@ fn rejects_an_image_registration_the_backend_could_never_match() {
 #[test]
 fn rejects_a_page_wider_than_the_per_side_budget() {
     let error = document()
-        .render_png(&sized_page(MAX_PIXMAP_DIM as u64 + 1, 1, vec![]), 0)
+        .render_display_list_png(&sized_page(MAX_PIXMAP_DIM as u64 + 1, 1, vec![]), 0)
         .unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -427,7 +442,7 @@ fn rejects_a_page_wider_than_the_per_side_budget() {
 #[test]
 fn rejects_a_page_over_the_area_budget_that_fits_the_per_side_budget() {
     let error = document()
-        .render_png(&sized_page(4096, 4097, vec![]), 0)
+        .render_display_list_png(&sized_page(4096, 4097, vec![]), 0)
         .unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -455,7 +470,8 @@ fn refuses_an_oversized_page_before_the_backend_allocates_its_surface() {
         ),
     ] {
         let page = sized_page(width, height, vec![]);
-        let (error, allocated) = allocated_by(|| document.render_png(&page, 0).unwrap_err());
+        let (error, allocated) =
+            allocated_by(|| document.render_display_list_png(&page, 0).unwrap_err());
         assert_eq!(error.to_string(), message);
         assert!(
             allocated < 1 << 20,
@@ -473,7 +489,8 @@ fn repeated_references_to_one_image_decode_once() {
         .register_image(ImageScope::Body, "rId9", &solid_png(512, 512))
         .unwrap();
     let list = repeated_image_page(32, "rId9");
-    let (rendered, allocated) = allocated_by(|| document.render_png(&list, 0).unwrap());
+    let (rendered, allocated) =
+        allocated_by(|| document.render_display_list_png(&list, 0).unwrap());
     assert_eq!(rendered.skipped_images, 0);
     assert!(
         allocated < 4 * 512 * 512 * 4,
@@ -568,10 +585,84 @@ fn grouped_picture_skips_only_unsupported_picture_primitive_in_native_png() {
             "geometryPath": [], "fillPaint": {"kind": "picture", "pictureSrc": src, "pictureRelId": "rId7"}
         });
         let rendered = document()
-            .render_png(&page(vec![picture, sibling.clone()]), 0)
+            .render_display_list_png(&page(vec![picture, sibling.clone()]), 0)
             .unwrap();
         let (width, _, pixels) = decode(&rendered.bytes);
         assert_eq!(pixel(width, &pixels, 48, 16), [255, 0, 0, 255]);
         assert_eq!(pixel(width, &pixels, 16, 16), [255, 255, 255, 255]);
     }
+}
+
+#[test]
+fn page_targets_validate_indexes_and_scale_dimensions() {
+    let mut document = document();
+    document
+        .register_font("Calibri", false, false, CARLITO)
+        .unwrap();
+    let target = betteroffice_docx::PngTarget { page: 0 };
+    let first = document
+        .render_png(target, &betteroffice_docx::RenderOptions::default())
+        .unwrap();
+    let second = document
+        .render_png(target, &betteroffice_docx::RenderOptions { scale: 2.0 })
+        .unwrap();
+    let (width, height, _) = decode(&first.bytes);
+    let (scaled_width, scaled_height, _) = decode(&second.bytes);
+    assert_eq!((scaled_width, scaled_height), (width * 2, height * 2));
+    assert!(
+        document
+            .render_png(
+                betteroffice_docx::PngTarget { page: usize::MAX },
+                &betteroffice_docx::RenderOptions::default()
+            )
+            .is_err()
+    );
+    for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert!(
+            document
+                .render_png(target, &betteroffice_docx::RenderOptions { scale })
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn png_uses_the_document_theme_accent() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../docx-edit/tests/fixtures/layout-request/theme-accent.docx");
+    let bytes = std::fs::read(path).unwrap();
+    let mut document = Document::open(&bytes).unwrap();
+    document
+        .register_font("Calibri", false, false, CARLITO)
+        .unwrap();
+    document
+        .register_font("Calibri", true, false, CARLITO)
+        .unwrap();
+    let rendered = document
+        .render_png(
+            betteroffice_docx::PngTarget { page: 0 },
+            &betteroffice_docx::RenderOptions::default(),
+        )
+        .unwrap();
+    let (_, _, pixels) = decode(&rendered.bytes);
+    let close = |pixel: &[u8], color: [u8; 3]| {
+        pixel[..3]
+            .iter()
+            .zip(color)
+            .all(|(&value, target)| value.abs_diff(target) <= 12)
+    };
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| close(pixel, [255, 0, 0]))
+    );
+    assert!(
+        !pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| close(pixel, [0x44, 0x72, 0xc4]))
+    );
 }
