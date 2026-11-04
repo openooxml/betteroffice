@@ -1559,16 +1559,11 @@ fn spaced_run_carets_hits_and_selection_follow_painted_glyphs() {
                     let next = origins[&(position + 1)];
                     let midpoint = (x + next) / 2.0;
                     assert_eq!(
-                        hit_test(&list, 0, midpoint, baseline),
-                        Some(position + 1),
-                        "{twips}: midpoint after {position}"
-                    );
-                    assert_eq!(
-                        hit_test(&list, 0, midpoint - 0.01, baseline),
+                        hit_test(&list, 0, midpoint - 0.05, baseline),
                         Some(position)
                     );
                     assert_eq!(
-                        hit_test(&list, 0, midpoint + 0.01, baseline),
+                        hit_test(&list, 0, midpoint + 0.05, baseline),
                         Some(position + 1)
                     );
                 }

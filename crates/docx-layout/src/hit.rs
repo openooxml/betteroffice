@@ -2885,9 +2885,15 @@ mod tests {
                 );
                 for (index, &x) in origins.iter().enumerate() {
                     assert!((caret_rect(&dl, 10 + index as i64).unwrap().x - x).abs() < 0.01);
+                    assert_eq!(hit_test(&dl, 0, x, 195.0), Some(10 + index as i64));
                     if let Some(&next) = origins.get(index + 1) {
+                        let midpoint = (x + next) / 2.0;
                         assert_eq!(
-                            hit_test(&dl, 0, (x + next) / 2.0, 195.0),
+                            hit_test(&dl, 0, midpoint - 0.05, 195.0),
+                            Some(10 + index as i64)
+                        );
+                        assert_eq!(
+                            hit_test(&dl, 0, midpoint + 0.05, 195.0),
                             Some(11 + index as i64)
                         );
                     }

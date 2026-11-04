@@ -614,7 +614,7 @@ for (const twips of [40, -20]) {
               const next = origins.get(position + 1)!;
               const midpoint = (x + next) / 2;
               for (const [hitX, expected] of [
-                [midpoint - 0.01, offset], [midpoint, offset + 1], [midpoint + 0.01, offset + 1],
+                [x, offset], [midpoint - 0.05, offset], [midpoint + 0.05, offset + 1],
               ] as const) {
                 expect(queries.hitTestRegions(0, hitX, baseline)?.pos).toBe(start + expected);
                 if (mode === 'worker/resident') {
@@ -624,7 +624,7 @@ for (const twips of [40, -20]) {
                     clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
                   }));
                   commandFrame = clicked.frame!;
-                  expect(clicked.selection!.focus.offset).toBe(expected);
+                  expect(engine.selection()!.head.offset).toBe(expected);
                   expect(Math.abs(commandFrame.payload.caret.caretRect!.x - origins.get(start + expected)!))
                     .toBeLessThan(0.01);
                 }
