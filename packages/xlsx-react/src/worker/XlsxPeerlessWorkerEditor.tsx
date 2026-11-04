@@ -1297,7 +1297,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const selected = selectionRef.current;
     if (!editable() || !target || !owner || !selected) return undefined;
     const cleared: PeerlessWorkerCommandInput = { kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } };
-    if (!editGate.gatesEdits()) { command(cleared); return coordinator.whenPresented(); }
+    if (!editGate.gatesEdits()) { command(cleared); return undefined; }
     const sheet = activeRef.current;
     const range = normalizeRange(selected);
     const gated = coordinator.runAfterPendingInput(async () => {

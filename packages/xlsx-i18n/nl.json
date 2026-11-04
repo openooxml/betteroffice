@@ -192,7 +192,7 @@
     "cellMenuLabel": "Celmenu",
     "sheetTabMenuLabel": "Menu van het bladtabblad",
     "renameSheetLabel": "Naam van blad wijzigen",
-    "sheetNamePrefix": "Blad"
+    "sheetNamePrefix": "Werkblad"
   },
   "presence": {
     "label": "Medewerkers",

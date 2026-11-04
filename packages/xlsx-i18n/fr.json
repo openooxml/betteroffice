@@ -192,7 +192,7 @@
     "cellMenuLabel": "Menu de la cellule",
     "sheetTabMenuLabel": "Menu de l’onglet de feuille",
     "renameSheetLabel": "Renommer la feuille",
-    "sheetNamePrefix": "Feuil"
+    "sheetNamePrefix": "Feuille"
   },
   "presence": {
     "label": "Collaborateurs",

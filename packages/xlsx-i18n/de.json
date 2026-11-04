@@ -192,7 +192,7 @@
     "cellMenuLabel": "Zellenmenü",
     "sheetTabMenuLabel": "Menü der Blattregisterkarte",
     "renameSheetLabel": "Blatt umbenennen",
-    "sheetNamePrefix": "Tabelle"
+    "sheetNamePrefix": "Arbeitsblatt"
   },
   "presence": {
     "label": "Mitbearbeiter",

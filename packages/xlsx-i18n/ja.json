@@ -192,7 +192,7 @@
     "cellMenuLabel": "セル メニュー",
     "sheetTabMenuLabel": "シート見出しメニュー",
     "renameSheetLabel": "シート名の変更",
-    "sheetNamePrefix": "Sheet"
+    "sheetNamePrefix": "シート"
   },
   "presence": {
     "label": "共同編集者",

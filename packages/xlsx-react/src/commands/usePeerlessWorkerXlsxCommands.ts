@@ -332,7 +332,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
           const after = argsRecord.position === 'below' || argsRecord.position === 'right';
           const count = rows ? cells.bottom - cells.top + 1 : cells.right - cells.left + 1;
           const at = rows ? (after ? cells.bottom + 1 : cells.top) : (after ? cells.right + 1 : cells.left);
-          const type = { insertRows: 'insertRows', deleteRows: 'deleteRows', insertColumns: 'insertCols', deleteColumns: 'deleteCols' }[id];
+          const type = id === 'insertRows' ? 'insertRows' : id === 'deleteRows' ? 'deleteRows' : id === 'insertColumns' ? 'insertCols' : 'deleteCols';
           input = { kind: 'applyOps', payload: { args: [[{ type, sheet: cells.sheet, at, count, target }]], selection } };
           break;
         }

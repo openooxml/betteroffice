@@ -192,7 +192,7 @@
     "cellMenuLabel": "单元格菜单",
     "sheetTabMenuLabel": "工作表标签菜单",
     "renameSheetLabel": "重命名工作表",
-    "sheetNamePrefix": "Sheet"
+    "sheetNamePrefix": "工作表"
   },
   "presence": {
     "label": "协作者",

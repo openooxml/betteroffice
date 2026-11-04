@@ -192,7 +192,7 @@
     "cellMenuLabel": "셀 메뉴",
     "sheetTabMenuLabel": "시트 탭 메뉴",
     "renameSheetLabel": "시트 이름 바꾸기",
-    "sheetNamePrefix": "Sheet"
+    "sheetNamePrefix": "시트"
   },
   "presence": {
     "label": "공동 작업자",
