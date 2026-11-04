@@ -31,7 +31,7 @@ test('PNG export names the download after the file and the slide', async () => {
   const { names, result, targets } = await exporting(value, png, () => value.api.commands.execute('exportPng', null));
   expect(result).toMatchObject({ ok: true });
   expect(names).toEqual(['Quarterly-slide-3.png']);
-  expect(targets).toEqual([{ slide: 2 }]);
+  expect(targets).toEqual([{ slide: value.client.state.slides[2]!.id }]);
 });
 
 test('PNG export without a file name falls back to the presentation name', async () => {

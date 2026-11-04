@@ -60,9 +60,10 @@ export async function peerlessExportPng(run: PeerlessPresentation): Promise<{ pn
   run.require();
   await run.store.fence();
   run.require();
-  const index = run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId);
-  if (index < 0 || !run.client.renderPng) throw new Error('Slide is unavailable');
-  const bytes = await run.client.renderPng({ slide: index }, { scale: 1 });
+  const slideId = run.client.state.activeSlideId;
+  const index = run.client.state.slides.findIndex((slide) => slide.id === slideId);
+  if (index < 0 || !slideId || !run.client.renderPng) throw new Error('Slide is unavailable');
+  const bytes = await run.client.renderPng({ slide: slideId }, { scale: 1 });
   run.require();
   return { png: new Blob([new Uint8Array(bytes)], { type: 'image/png' }), index };
 }

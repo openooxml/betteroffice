@@ -526,13 +526,15 @@ impl Renderer {
         let cached = self.rendered.get_mut(id).unwrap();
         cached.used = self.clock;
         cached.validated_at = (Rc::clone(version), self.font_epoch);
-        self.last_slide = Some(id.clone());
+        let previous = self.last_slide.replace(id.clone());
         while self.rendered.len() > LAYOUT_CACHE_CAPACITY {
             let oldest = self
                 .rendered
                 .iter()
                 .filter(|(candidate, _)| {
-                    Some(*candidate) != self.active_slide.as_ref() && *candidate != id
+                    Some(*candidate) != self.active_slide.as_ref()
+                        && Some(*candidate) != previous.as_ref()
+                        && *candidate != id
                 })
                 .min_by_key(|(_, cached)| cached.used)
                 .map(|(id, _)| id.clone())
@@ -709,6 +711,47 @@ mod tests {
         assert_eq!(renderer.last_slide, shown);
         assert_eq!(exported, renderer.layout_slide_json(&document, 1).unwrap());
         assert_ne!(renderer.last_slide, shown);
+    }
+
+    #[test]
+    fn exports_keep_the_hit_test_slide_laid_out() {
+        let document = pptx_edit::DeckSession::open(DECK, 916).unwrap();
+        let context = EditCtx::local("test");
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        while document.slide_ids().unwrap().len() <= LAYOUT_CACHE_CAPACITY + 1 {
+            let count = document.slide_ids().unwrap().len() as u32;
+            document.insert_slide(&context, count, None).unwrap();
+        }
+        let shown = serde_json::from_str::<serde_json::Value>(
+            &renderer.layout_slide_json(&document, 0).unwrap(),
+        )
+        .unwrap();
+        let hit = renderer
+            .hit_test_json(
+                shown["width"].as_f64().unwrap() as f32 / 2.0,
+                shown["height"].as_f64().unwrap() as f32 / 2.0,
+            )
+            .unwrap();
+        let count = document.slide_ids().unwrap().len() as u32;
+        for slide in 1..count {
+            renderer.export_slide_json(&document, slide).unwrap();
+        }
+        assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
+        assert!(
+            renderer
+                .rendered
+                .contains_key(renderer.last_slide.as_ref().unwrap())
+        );
+        assert_eq!(
+            renderer
+                .hit_test_json(
+                    shown["width"].as_f64().unwrap() as f32 / 2.0,
+                    shown["height"].as_f64().unwrap() as f32 / 2.0
+                )
+                .unwrap(),
+            hit
+        );
     }
 
     #[test]

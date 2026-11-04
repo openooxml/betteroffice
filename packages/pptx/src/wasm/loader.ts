@@ -916,6 +916,7 @@ function openPresentationInternal(
         doc, renderer,
         displayList: (index) => jsonWasmCall<SlideDisplayList>(() => renderer.exportSlideJson(doc, index)),
         media: (assetId) => {
+          assertAlive();
           try {
             let source = wasmCall(() => doc.mediaBytes(assetId));
             if (isTiff(source) && source.byteLength <= MAX_TIFF_BYTES) source = decodeTiffImage(source);

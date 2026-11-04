@@ -116,7 +116,7 @@ test('PNG export resolves the active slide after navigation acknowledgement', as
     const exporting = value.api.commands.execute('exportPng', null);
     replyControl.release();
     await act(async () => { await navigation; expect(await exporting).toMatchObject({ ok: true }); });
-    expect(encode.mock.calls.map(([target]) => target)).toEqual([{ slide: 1 }]);
+    expect(encode.mock.calls.map(([target]) => target)).toEqual([{ slide: value.client.state.slides[1]!.id }]);
   } finally {
     replyControl.release(); encode.mockRestore(); createUrl.mockRestore(); revokeUrl.mockRestore(); download.mockRestore();
   }
@@ -169,7 +169,7 @@ test('async_review_export', async () => {
   const download = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
   try {
     await act(async () => { expect(await value.api.commands!.execute('exportPng', null)).toMatchObject({ ok: true }); });
-    expect(encode).toHaveBeenCalledWith({ slide: 0 }, { scale: 1 });
+    expect(encode).toHaveBeenCalledWith({ slide: value.client.state.slides[0]!.id }, { scale: 1 });
     const blob = createUrl.mock.calls[0]![0] as Blob;
     expect([blob.type, [...new Uint8Array(await blob.arrayBuffer())]]).toEqual(['image/png', [...png]]);
     expect(download).toHaveBeenCalledTimes(1);
