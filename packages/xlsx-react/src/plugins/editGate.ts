@@ -28,12 +28,13 @@ export function cellEditable(gate: XlsxPluginHost, workbook: GateWorkbook, sheet
 
 /**
  * Runs typed writes through the plugins: the inputs to write, or the refusal, whose message is
- * the plugin's or `fallback`.
+ * the plugin's or `fallback`, or `starting` while a gating plugin has not loaded yet.
  */
 export function gateWrites(
   gate: XlsxPluginHost, workbook: GateWorkbook, sheet: number, edits: readonly CellInputEdit[],
-  source: XlsxPluginCellCommit['source'], fallback: string
+  source: XlsxPluginCellCommit['source'], fallback: string, starting: string
 ): CellInputEdit[] | XlsxHostRefusalError {
+  if (edits.length > 0 && gate.editGateStarting()) return new XlsxHostRefusalError(starting);
   const cells = gatedCells(gate, workbook, sheet, edits);
   if (!cells) return [...edits];
   const pass = gate.openGate();
@@ -53,13 +54,13 @@ export function gateWrites(
  */
 export function gateClear(
   gate: XlsxPluginHost, workbook: GateWorkbook & Pick<WorkbookHandle, 'cell'>, sheet: number,
-  edits: readonly CellInputEdit[], fallback: string, cut?: { tooMany: string }
+  edits: readonly CellInputEdit[], fallback: string, starting: string, cut?: { tooMany: string }
 ): CellInputEdit[] | XlsxHostRefusalError {
   if (!gate.gatesEdits()) return [...edits];
   const content = edits.filter(({ row, col }) => workbook.cell(sheet, row, col).input !== '');
   if (cut && content.length > GATE_CELL_LIMIT) return new XlsxHostRefusalError(cut.tooMany);
   const source = cut ? 'cut' : 'clear-key';
-  const gated = gateWrites(gate, workbook, sheet, content, source, fallback);
+  const gated = gateWrites(gate, workbook, sheet, content, source, fallback, starting);
   if (!Array.isArray(gated)) return gated;
   const inputs = new Map(gated.map((edit) => [`${edit.row}:${edit.col}`, edit.input]));
   return edits.map((edit) => ({ ...edit, input: inputs.get(`${edit.row}:${edit.col}`) ?? edit.input }));
@@ -141,13 +142,13 @@ export function withGatedInputs(
  */
 export function gatePaste(
   gate: XlsxPluginHost, workbook: GateWorkbook & Pick<WorkbookHandle, 'rangeCells'>, sheet: number,
-  edits: readonly CellInputEdit[], fallback: string, tooMany: string
+  edits: readonly CellInputEdit[], fallback: string, starting: string, tooMany: string
 ): CellInputEdit[] | XlsxHostRefusalError {
   if (edits.length === 0 || !gate.gatesEdits()) return [...edits];
   const ranges = inputRanges(edits);
   const changed = changedEdits(edits, ranges, ranges.map((range) => workbook.rangeCells(sheet, rangeA1(range))));
   if (changed.length > GATE_CELL_LIMIT) return new XlsxHostRefusalError(tooMany);
-  const gated = gateWrites(gate, workbook, sheet, changed, 'paste', fallback);
+  const gated = gateWrites(gate, workbook, sheet, changed, 'paste', fallback, starting);
   return Array.isArray(gated) ? withGatedInputs(edits, changed, gated) : gated;
 }
 

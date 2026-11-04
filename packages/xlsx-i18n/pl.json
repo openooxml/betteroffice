@@ -138,6 +138,7 @@
       "sheetProtected": "Ta komórka znajduje się w chronionym arkuszu.",
       "hostRefused": "Ta zmiana jest niedozwolona.",
       "tooManyToCheck": "Za dużo komórek do sprawdzenia przez wtyczki (limit {limit}).",
+      "hostStarting": "Edytor wciąż się uruchamia. Spróbuj ponownie za chwilę.",
       "documentReplaced": "Otwarto inny skoroszyt.",
       "targetChanged": "Zaznaczenie uległo zmianie.",
       "gestureActive": "Najpierw zakończ przenoszenie wykresu.",

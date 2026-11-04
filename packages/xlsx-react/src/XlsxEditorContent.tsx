@@ -1407,7 +1407,8 @@ export function XlsxEditorContent({
         if (handle.cell(draft.sheet, draft.row, draft.col).input === draft.value) return true;
         const source = draft.source === 'cell' ? 'cell-editor' : 'formula-bar';
         const gated = gateOutcome(gateWrites(editGate, handle, draft.sheet,
-          [{ row: draft.row, col: draft.col, input: draft.value }], source, t('commands.reasons.hostRefused')));
+          [{ row: draft.row, col: draft.col, input: draft.value }], source, t('commands.reasons.hostRefused'),
+          t('commands.reasons.hostStarting')));
         if (!Array.isArray(gated)) return gated;
         const [{ input }] = gated;
         if (handle.cell(draft.sheet, draft.row, draft.col).input !== input) {
@@ -1689,6 +1690,7 @@ export function XlsxEditorContent({
       const edits = clearedCells(range, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
       if (!edits) { setError(t('editor.clearExceedsLimit')); return null; }
       const cleared = gateOutcome(gateClear(editGate, handle, sheet, edits, t('commands.reasons.hostRefused'),
+        t('commands.reasons.hostStarting'),
         source === 'cut' ? { tooMany: t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT }) } : undefined));
       return Array.isArray(cleared) ? cleared : null;
     },
@@ -1798,7 +1800,7 @@ export function XlsxEditorContent({
           rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
         });
         const written = gateOutcome(gatePaste(editGate, handle, sheet, edits, t('commands.reasons.hostRefused'),
-          t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT })));
+          t('commands.reasons.hostStarting'), t('commands.reasons.tooManyToCheck', { limit: GATE_CELL_LIMIT })));
         if (!Array.isArray(written)) return;
         applyResult(handle.editCells(sheet, written));
         if (selectionRef.current === selection && activeSheetRef.current === sheet) {

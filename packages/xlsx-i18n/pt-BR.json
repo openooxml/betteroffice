@@ -138,6 +138,7 @@
       "sheetProtected": "Esta célula está em uma planilha protegida.",
       "hostRefused": "Esta edição não é permitida.",
       "tooManyToCheck": "Células demais para os plug-ins verificarem (limite {limit}).",
+      "hostStarting": "O editor ainda está iniciando. Tente novamente em instantes.",
       "documentReplaced": "Outra pasta de trabalho foi aberta.",
       "targetChanged": "A seleção foi alterada.",
       "gestureActive": "Termine primeiro de mover o gráfico.",

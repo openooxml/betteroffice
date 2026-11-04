@@ -661,7 +661,9 @@ open and refuses pending work with `host-refused`. A clear or cut asks once per
 cell that holds content, a paste once per cell whose input it changes, with a
 copied formula already moved to that cell; a replaced input is written as given.
 Each is refused as a whole, a refused cut before the clipboard is written, and
-one that would ask about more than 50,000 cells is refused outright.
+one that would ask about more than 50,000 cells is refused outright. Until every
+plugin that defines either hook has loaded the workbook or failed, these edits
+are refused with `host-refused` and a message that the editor is still starting.
 Both hooks are synchronous and get reads only; one that throws or returns
 something else ends that plugin and counts as accept. Where the editor refuses
 locked cells of protected sheets, it does so before plugins are asked. Fill,

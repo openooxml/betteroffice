@@ -138,6 +138,7 @@
       "sheetProtected": "Esta celda está en una hoja protegida.",
       "hostRefused": "Esta edición no está permitida.",
       "tooManyToCheck": "Demasiadas celdas para que los complementos las comprueben (límite {limit}).",
+      "hostStarting": "El editor todavía se está iniciando. Inténtalo de nuevo en un momento.",
       "documentReplaced": "Se abrió otro libro.",
       "targetChanged": "La selección ha cambiado.",
       "gestureActive": "Termine primero de mover el gráfico.",

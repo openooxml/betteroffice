@@ -138,6 +138,7 @@
       "sheetProtected": "This cell is on a protected sheet.",
       "hostRefused": "This edit is not allowed.",
       "tooManyToCheck": "Too many cells for plugins to check (limit {limit}).",
+      "hostStarting": "The editor is still starting. Try again in a moment.",
       "documentReplaced": "Another workbook was opened.",
       "targetChanged": "The selection changed.",
       "gestureActive": "Finish moving the chart first.",
