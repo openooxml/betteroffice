@@ -42,7 +42,7 @@ describe('canvas page stack', () => {
       const scale = { rasterScale: ratio * zoom, unitScale: ratio };
       for (const [index, box] of canvasPageStack(pages, { scale, padding: CANVAS_PAGES_PADDING_PX }).entries()) {
         expect(onGrid(box.top * ratio)).toBe(true);
-        expect(box.height * ratio).toBeCloseTo(Math.ceil(pages[index]!.height * ratio * zoom), 6);
+        expect(box.height * ratio).toBeCloseTo(Math.ceil(pages[index]!.height * (ratio * zoom)), 6);
       }
     }
   });

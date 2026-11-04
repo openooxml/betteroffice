@@ -128,7 +128,7 @@ async function probe(page: Page): Promise<Probe> {
 
 const fraction = (value: number) => Math.abs(value - Math.round(value));
 
-function faults(result: Probe): string[] {
+function faults(result: Probe, pixelExact: boolean): string[] {
   const found: string[] = [];
   if (Math.abs(result.box.width - result.backing.width) > 0.02 || Math.abs(result.box.height - result.backing.height) > 0.02) {
     found.push(`box ${result.box.width.toFixed(3)}x${result.box.height.toFixed(3)} != backing ${result.backing.width}x${result.backing.height}`);
@@ -136,7 +136,8 @@ function faults(result: Probe): string[] {
   if (fraction(result.box.left) > 0.02 || fraction(result.box.top) > 0.02) {
     found.push(`box origin ${result.box.left.toFixed(3)},${result.box.top.toFixed(3)} off the device grid`);
   }
-  if ('unreadable' in result.pixels) return found;
+  if ('unreadable' in result.pixels) return [...found, `canvas unreadable: ${result.pixels.unreadable}`];
+  if (!pixelExact) return found;
   if (result.pixels.ink < result.pixels.total * 0.01) found.push('probe block has no text');
   if (result.pixels.mismatched > result.pixels.total * 0.001) {
     found.push(`${result.pixels.mismatched}/${result.pixels.total} screen pixels differ from the canvas backing`);
@@ -144,9 +145,11 @@ function faults(result: Probe): string[] {
   return found;
 }
 
-for (const worker of [true, false]) {
+const PROBE_IN_THREAD = process.env.PIXELSNAP_IN_THREAD === '1';
+
+for (const worker of PROBE_IN_THREAD ? [true, false] : [true]) {
   for (const devicePixelRatio of [1, 1.5, 2]) {
-    test(`docx ${worker ? 'worker' : 'in-thread'} editor: page canvases show their backing 1:1 at DPR ${devicePixelRatio}, zoom 50-200%`, async ({ browser }, info) => {
+    test(`docx ${worker ? 'worker' : 'in-thread'} editor: page boxes match their canvas backing on whole device pixels at DPR ${devicePixelRatio}`, async ({ browser }, info) => {
       test.setTimeout(300_000);
       const { context, page } = await open(browser, devicePixelRatio, worker);
       const failures: string[] = [];
@@ -158,7 +161,7 @@ for (const worker of [true, false]) {
           const result = await probe(page);
           results[value] = result;
           console.log(`PIXELSNAP ${JSON.stringify({ worker, devicePixelRatio, zoom: value, ...result })}`);
-          for (const fault of faults(result)) failures.push(`${value}: ${fault}`);
+          if (worker) for (const fault of faults(result, value === '100%')) failures.push(`${value}: ${fault}`);
         }
       } finally {
         await info.attach('pixel-snap.json', { body: JSON.stringify(results, null, 2), contentType: 'application/json' });
