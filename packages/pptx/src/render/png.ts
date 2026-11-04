@@ -40,11 +40,6 @@ export function pngBackground(value: unknown): PptxPngBackground {
   throw new TypeError(`background must be "slide", "transparent", or a #rrggbb color, not ${JSON.stringify(value)}`);
 }
 
-/**
- * Paints one laid-out slide with the editor's painter and encodes it. Faces in
- * `fonts` are installed for this export under private names; one that cannot
- * load rejects with `PngExportError` rather than paint a substitute.
- */
 /** Checks a slide export's options and size the way every engine does, and returns the PNG size. */
 export function slidePngRequest(
   list: Pick<SlideDisplayList, 'width' | 'height'>, options: Pick<SlideListToPngOptions, 'scale' | 'background' | 'maxShadowPixels'>,
@@ -62,6 +57,11 @@ export function slidePngRequest(
   return { width, height, scale, background };
 }
 
+/**
+ * Paints one laid-out slide with the editor's painter and encodes it. Faces in
+ * `fonts` are installed for this export under private names; one that cannot
+ * load rejects with `PngExportError` rather than paint a substitute.
+ */
 export async function slideListToPng(list: SlideDisplayList, options: SlideListToPngOptions = {}): Promise<Uint8Array> {
   const { width, height, scale, background } = slidePngRequest(list, options);
   options.signal?.throwIfAborted();
