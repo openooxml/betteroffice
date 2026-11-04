@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Rect } from '@betteroffice/xlsx';
+import { cellEditorColors } from '../viewer/cellEditorColors';
 import { commandForEvent } from '../commands/descriptors';
 import { FormulaBarContext, presentInputValue, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import type { WorkerDraftController } from './WorkerDraftController';
@@ -81,7 +82,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
 export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ controller, rect, colors, disabled, zoom }: {
   controller: WorkerDraftController;
   rect(row: number, col: number, sheet: number): { x: number; y: number; w: number; h: number } | null;
-  colors(sheet: number, bounds: Rect): { color: string; background: string };
+  colors?(sheet: number, bounds: Rect): { color: string; background: string };
   disabled: boolean;
   zoom: number;
 }) {
@@ -122,7 +123,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
   }, [controller, draft, bounds !== null]);
   if (!draft) return null;
   if (!bounds) return null;
-  const { color, background } = colors(draft.sheet, bounds);
+  const { color, background } = colors?.(draft.sheet, bounds) ?? cellEditorColors(null, bounds);
   const style: CSSProperties = { position: 'absolute', left: bounds.x * zoom, top: bounds.y * zoom,
     width: bounds.w * zoom, height: bounds.h * zoom, boxSizing: 'border-box', border: '2px solid #217346',
     background, color, padding: '0 3px', font: `${13 * zoom}px system-ui, sans-serif`,
