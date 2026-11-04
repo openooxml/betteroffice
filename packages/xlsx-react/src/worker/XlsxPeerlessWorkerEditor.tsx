@@ -883,22 +883,25 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       }
       commands.refresh();
     }
-    if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
-      const sheets = ack.editState.sheets;
-      setCatalog(sheets);
-      const kept = sheets.find((entry) => entry.id === activeSheetId.current);
-      if (kept && kept.index !== activeRef.current && selectionRef.current) placeSelection(kept.index, selectionRef.current);
-      else if (!kept && sheets.length > 0) {
-        const fallback = sheets.find((entry) => entry.index === run.session.editState.activeSheet) ??
-          sheets.find((entry) => entry.index === Math.min(activeRef.current, sheets.length - 1)) ?? sheets[0]!;
-        placeSelection(fallback.index, sheetSelection(fallback.index));
-        queueMicrotask(() => sheetNavigation.current(fallback.index));
-      }
-    }
     const latestSelection = Math.max(0, ...selectionCommands);
     const reconcile = !selectionNavigation.isPending(navigationContext()) && latestSelection > 0 && ack.throughSeq >= latestSelection &&
       selectionRevisions.get(latestSelection) === navigation.current &&
       !draftController.ownsFocus;
+    if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
+      const sheets = ack.editState.sheets;
+      setCatalog(sheets);
+      const kept = sheets.find((entry) => entry.id === activeSheetId.current);
+      if (kept && kept.index !== activeRef.current) setActive(kept.index);
+      else if (!kept && sheets.length > 0) {
+        const acknowledged = reconcile && ack.selection ? ack.selection : undefined;
+        const fallback = (acknowledged && sheets.find((entry) => entry.id === acknowledged.sheetId)) ??
+          sheets.find((entry) => entry.index === run.session.editState.activeSheet) ??
+          sheets.find((entry) => entry.index === Math.min(activeRef.current, sheets.length - 1)) ?? sheets[0]!;
+        const restored = acknowledged?.sheetId === fallback.id ? commandSelection(acknowledged, selectionRef.current) : null;
+        placeSelection(fallback.index, restored ?? sheetSelection(fallback.index));
+        queueMicrotask(() => sheetNavigation.current(fallback.index));
+      }
+    }
     if (ack.selection && reconcile) {
       const target = ack.selection;
       const sheet = run.session.editState.sheets?.find((entry) => entry.id === target.sheetId)?.index;
