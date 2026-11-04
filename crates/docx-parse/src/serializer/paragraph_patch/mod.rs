@@ -45,43 +45,62 @@ pub(crate) struct PatchContext {
 }
 
 impl PatchContext {
-    pub(crate) fn at(part: &str, source: &str, offset: usize) -> Self {
-        let mut scopes = vec![BTreeMap::new()];
-        if let Some(tags) = tags(source) {
-            for tag in tags {
-                if tag.range.start >= offset {
-                    break;
-                }
-                if tag.end {
-                    scopes.pop();
-                } else {
-                    let mut scope = scopes.last().cloned().unwrap_or_default();
-                    for (name, range) in tag.attributes {
-                        if let Some(prefix) = name
-                            .strip_prefix("xmlns:")
-                            .or_else(|| (name == "xmlns").then_some(""))
-                            && let Ok(value) = lower::decode(&source[range])
-                        {
-                            scope.insert(prefix.to_owned(), value);
-                        }
-                    }
-                    if !tag.empty {
-                        scopes.push(scope);
-                    }
-                }
-            }
-        }
-        Self {
-            part: part.to_owned(),
-            namespaces: scopes.pop().unwrap_or_default(),
-        }
-    }
-
     #[cfg(test)]
     fn word_document() -> Self {
         Self {
             part: "word/document.xml".to_owned(),
             namespaces: BTreeMap::from([("w".to_owned(), lower::WORD.to_owned())]),
+        }
+    }
+}
+
+/// The namespace bindings in scope at any offset of one part, read in one pass over its tags.
+pub(crate) struct NamespaceScopes {
+    scopes: Vec<BTreeMap<String, String>>,
+    changes: Vec<(usize, usize)>,
+}
+
+impl NamespaceScopes {
+    pub(crate) fn new(source: &str) -> Self {
+        let mut scopes = vec![BTreeMap::new()];
+        let mut changes = Vec::new();
+        let mut open = vec![0];
+        for tag in tags(source).unwrap_or_default() {
+            let before = open.last().copied().unwrap_or(0);
+            if tag.end {
+                open.pop();
+            } else if !tag.empty {
+                let mut declared: Option<BTreeMap<String, String>> = None;
+                for (name, range) in tag.attributes {
+                    if let Some(prefix) = name
+                        .strip_prefix("xmlns:")
+                        .or_else(|| (name == "xmlns").then_some(""))
+                        && let Ok(value) = lower::decode(&source[range])
+                    {
+                        declared
+                            .get_or_insert_with(|| scopes[before].clone())
+                            .insert(prefix.to_owned(), value);
+                    }
+                }
+                open.push(declared.map_or(before, |scope| {
+                    scopes.push(scope);
+                    scopes.len() - 1
+                }));
+            }
+            let after = open.last().copied().unwrap_or(0);
+            if after != before {
+                changes.push((tag.range.start, after));
+            }
+        }
+        Self { scopes, changes }
+    }
+
+    pub(crate) fn context(&self, part: &str, offset: usize) -> PatchContext {
+        let passed = self.changes.partition_point(|(start, _)| *start < offset);
+        let scope = passed.checked_sub(1).map_or(0, |at| self.changes[at].1);
+        PatchContext {
+            part: part.to_owned(),
+            namespaces: self.scopes[scope].clone(),
         }
     }
 }
