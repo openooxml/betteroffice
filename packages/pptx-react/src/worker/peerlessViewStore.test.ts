@@ -175,12 +175,18 @@ class FakeCommandClient implements PresentationCommandClient {
   }
 }
 
-test('clipboard write starts synchronously from confirmed text and cut waits for success', async () => {
+test('clipboard write starts synchronously with the authored story text and cut waits for success', async () => {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const itemDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
   const written = deferred<void>();
-  const writeText = mock((_text: string) => written.promise);
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
+  const items: Record<string, Promise<Blob>>[] = [];
+  class Item { constructor(readonly data: Record<string, Promise<Blob>>) { items.push(data); } }
+  const write = mock((_items: unknown[]) => written.promise);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { write, writeText: mock(async () => {}) } } });
+  Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
   const client = new FakeCommandClient('a😀c');
+  client.read = mock(async () => ({ result: { ok: true, version: client.state.version,
+    stories: [{ slideId: 'slide', shapeId: 'box', storyId: 'story', text: 'A😀C' }] } }) as unknown as PresentationCommandReadResult);
   const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
   const run = { store, client, current: true, inputEnabled: true, require() {} } as unknown as PeerlessPresentation;
   try {
@@ -189,9 +195,9 @@ test('clipboard write starts synchronously from confirmed text and cut waits for
     const dispatch = client.dispatch;
     client.dispatch = mock((intent, basis) => { sent.resolve(); return dispatch(intent, basis); });
     const cut = peerlessClipboard(run, true);
-    expect(writeText.mock.calls).toEqual([['😀']]);
+    expect(write).toHaveBeenCalledTimes(1);
     expect(client.sent).toEqual([]);
-    expect(client.read).not.toHaveBeenCalled();
+    expect(await (await items[0]!['text/plain']!).text()).toBe('😀');
     written.resolve();
     await sent.promise;
     expect(client.sent[0]).toMatchObject({ kind: 'replaceText', payload: { text: '',
@@ -202,6 +208,8 @@ test('clipboard write starts synchronously from confirmed text and cut waits for
     store.dispose();
     if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);
     else Reflect.deleteProperty(globalThis, 'navigator');
+    if (itemDescriptor) Object.defineProperty(globalThis, 'ClipboardItem', itemDescriptor);
+    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
   }
 });
 
@@ -214,6 +222,8 @@ test('clipboard denial never cuts text and a changed target never receives a pen
     clipboard: { writeText: () => Promise.reject(denied), readText },
   } });
   const client = new FakeCommandClient();
+  client.read = mock(async () => ({ result: { ok: true, version: client.state.version,
+    stories: [{ slideId: 'slide', shapeId: 'box', storyId: 'story', text: 'abc' }] } }) as unknown as PresentationCommandReadResult);
   const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
   const run = { store, client, current: true, inputEnabled: true, require() {} } as unknown as PeerlessPresentation;
   try {
@@ -227,8 +237,9 @@ test('clipboard denial never cuts text and a changed target never receives a pen
     await expect(paste).rejects.toMatchObject({ code: 'target-changed' });
     expect(client.sent).toEqual([]);
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {} });
-    await expect(peerlessPaste(run)).rejects.toMatchObject({ code: 'clipboard-unavailable' });
-    await expect(peerlessClipboard(run, false)).rejects.toMatchObject({ code: 'clipboard-unavailable' });
+    await expect(peerlessPaste(run)).rejects.toMatchObject({ name: 'NotAllowedError' });
+    await expect(peerlessClipboard(run, false, true)).rejects.toMatchObject({ name: 'NotAllowedError' });
+    expect(await peerlessClipboard(run, false)).toBeNull();
   } finally {
     store.dispose();
     if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);

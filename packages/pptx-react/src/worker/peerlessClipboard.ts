@@ -6,7 +6,7 @@ import type { PeerlessPresentation } from './usePeerlessPresentation';
 export async function peerlessClipboard(run: PeerlessPresentation, cut: boolean, strict = false): Promise<PresentationCommandAck | null> {
   run.require();
   if (typeof navigator === 'undefined' || typeof navigator.clipboard?.writeText !== 'function') {
-    if (strict) throw new PptxCommandAdmissionError('clipboard-unavailable');
+    if (strict) throw new DOMException('Clipboard unavailable', 'NotAllowedError');
     return null;
   }
   const view = run.store.getSnapshot();
@@ -48,7 +48,7 @@ export async function peerlessClipboard(run: PeerlessPresentation, cut: boolean,
 export async function peerlessPaste(run: PeerlessPresentation) {
   run.require();
   if (typeof navigator === 'undefined' || typeof navigator.clipboard?.readText !== 'function')
-    throw new PptxCommandAdmissionError('clipboard-unavailable');
+    throw new DOMException('Clipboard unavailable', 'NotAllowedError');
   const view = run.store.getSnapshot();
   const selection = view.selection;
   if (!selection || selection.kind === 'object' || selection.kind === 'shape' || view.composition)

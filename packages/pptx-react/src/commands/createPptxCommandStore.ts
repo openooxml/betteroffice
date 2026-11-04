@@ -29,7 +29,6 @@ export type PptxCommandAdmissionCode = Extract<
   | 'editor-unavailable'
   | 'read-only'
   | 'invalid-arguments'
-  | 'clipboard-unavailable'
 >;
 
 /** Raised when an admitted command cannot run against its originating input or target. */
