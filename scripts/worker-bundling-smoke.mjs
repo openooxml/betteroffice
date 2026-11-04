@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build as esbuild } from 'esbuild';
 import { build as vite } from 'vite';
+import { nextWebpack } from './check-webpack-exports.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const cache = join(root, 'node_modules/.cache');
@@ -105,10 +105,7 @@ try {
   });
   await checkOutput(viteDirectory);
 
-  const nextWebpack = createRequire(join(root, 'apps/demo/package.json'))('next/dist/compiled/webpack/webpack');
-  if (typeof nextWebpack.init === 'function') nextWebpack.init();
-  const webpack = nextWebpack.webpack;
-  assert.equal(typeof webpack, 'function', 'Next.js ships no bundled webpack');
+  const webpack = nextWebpack();
   const bundle = (context, app, output) => new Promise((done, fail) => webpack({
     mode: 'production', target: 'web', devtool: false, context,
     entry: { app },
