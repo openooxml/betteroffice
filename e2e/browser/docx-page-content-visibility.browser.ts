@@ -22,7 +22,7 @@ async function longDocument(): Promise<Buffer> {
 }
 
 async function open(browser: Browser, worker: boolean) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 2000 } });
   const page = await context.newPage();
   await page.goto(`/?format=docx&peerless=${worker ? 1 : 0}`);
   await page.locator('input[type=file]').last().setInputFiles({
@@ -99,8 +99,15 @@ async function state(page: Page, worker: boolean) {
     const rect = (scroller ?? document.documentElement).getBoundingClientRect();
     return { x: rect.x, y: rect.y, width: Math.min(rect.width, innerWidth - rect.x), height: Math.min(rect.height, innerHeight - rect.y) };
   });
-  const text = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
+  const readText = () => page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
     .map((element) => `${element.dataset.pageIndex}:${element.textContent ?? ''}`));
+  let text = await readText();
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await page.waitForTimeout(250);
+    const next = await readText();
+    if (JSON.stringify(next) === JSON.stringify(text)) break;
+    text = next;
+  }
   return { ...layout, text, aria: await root.ariaSnapshot(), pixels: await settledShot(page, clip) };
 }
 
@@ -152,13 +159,22 @@ async function interactions(page: Page) {
   const word = await settledSelection(page);
   await page.mouse.click(box.x + 200, box.y + 400, { clickCount: 3 });
   const paragraph = await settledSelection(page);
-  await scrollToPage(page, 12, 500);
+  await scrollToPage(page, 12, 1200);
   const upper = await canvasBox(page, 11), lower = await canvasBox(page, 12);
-  await page.mouse.move(upper.x + 150, upper.y + upper.height - 260);
+  await page.mouse.move(upper.x + 150, upper.y + 300);
   await page.mouse.down();
   await page.mouse.move(lower.x + 300, lower.y + 220, { steps: 12 });
   await page.mouse.up();
   const drag = await settledSelection(page);
+  const dragPages = await page.evaluate((rects) => {
+    const host = document.querySelector('[data-docx-pages-host]')!.getBoundingClientRect();
+    return [...new Set(rects.flatMap((rect) => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
+      .filter((element) => {
+        const box = element.getBoundingClientRect();
+        const y = host.y + rect.y + rect.height / 2;
+        return y >= box.top && y <= box.bottom;
+      }).map((element) => Number(element.dataset.pageIndex))))].sort((a, b) => a - b);
+  }, drag);
   box = await canvasBox(page, 12);
   await page.mouse.click(box.x + 150, box.y + 150);
   await input.press('ControlOrMeta+f');
@@ -169,7 +185,7 @@ async function interactions(page: Page) {
   await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
   await scrollToPage(page, 0);
   await page.mouse.click((await canvasBox(page, 0)).x + 150, (await canvasBox(page, 0)).y + 150);
-  return { word, paragraph, drag, found };
+  return { word, paragraph, drag, dragPages, found };
 }
 
 for (const worker of [true, false]) {
@@ -240,11 +256,12 @@ test('docx worker editor: selection and find on skipped pages match fully painte
     const skipped = await interactions(page);
     await forceVisible(page, true);
     const shown = await interactions(page);
+    expect(skipped.dragPages, 'drag spans the page boundary').toEqual([11, 12]);
+    expect(shown.dragPages, 'drag spans the page boundary').toEqual([11, 12]);
     for (const key of ['word', 'paragraph', 'drag', 'found'] as const) {
       expect(skipped[key].length, key).toBeGreaterThan(0);
       expect(skipped[key], key).toEqual(shown[key]);
     }
-    expect(new Set(skipped.drag.map((rect) => Math.floor(rect.y / 1000))).size, 'drag spans two pages').toBeGreaterThan(1);
   } finally {
     await context.close();
   }
