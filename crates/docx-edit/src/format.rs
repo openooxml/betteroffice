@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
-use yrs::{Any, Out, ReadTxn, Text, TextRef};
+use yrs::{Any, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt};
 use crate::{DEL, EditCtx, EditingDoc, INS, StoryRange, out_len, story_ref};
@@ -15,7 +15,9 @@ use crate::{DEL, EditCtx, EditingDoc, INS, StoryRange, out_len, story_ref};
 pub const HYPERLINK: &str = "hyperlink";
 
 /// Attributes protected from formatting sweeps.
-pub(crate) const PROTECTED_ATTRS: [&str; 3] = [INS, DEL, HYPERLINK];
+pub(crate) const RPR_CHANGE: &str = "rPrChange";
+
+pub(crate) const PROTECTED_ATTRS: [&str; 4] = [INS, DEL, HYPERLINK, RPR_CHANGE];
 
 /// Word's closed highlight palette keyed by exact uppercase hex.
 const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [
@@ -458,7 +460,6 @@ impl EditingDoc {
         crate::check_range(&story, &txn, range.start, len)?;
         (range.start, range.end) =
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
-        let len = range.end - range.start;
         let (key, on_value, counterpart) = match format {
             SimpleFormat::Bold => ("bold", Any::Bool(true), None),
             SimpleFormat::Italic => ("italic", Any::Bool(true), None),
@@ -489,11 +490,12 @@ impl EditingDoc {
         {
             attrs.insert(Arc::from(counterpart), Any::Null);
         }
-        story.format(&mut txn, range.start, len, attrs);
+        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs)?;
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {
             range: Some(loc_range),
+            revision_ids,
             ..Receipt::default()
         })
     }
@@ -515,14 +517,12 @@ impl EditingDoc {
         crate::check_range(&story, &txn, range.start, len)?;
         (range.start, range.end) =
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
-        let len = range.end - range.start;
-        if !attrs.is_empty() {
-            story.format(&mut txn, range.start, len, attrs);
-        }
+        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs)?;
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {
             range: Some(loc_range),
+            revision_ids,
             ..Receipt::default()
         })
     }
@@ -546,6 +546,53 @@ impl EditingDoc {
         (range.start, range.end) =
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
         let len = range.end - range.start;
+        if ctx.is_suggesting() {
+            let mut runs = Vec::new();
+            let mut changed = false;
+            for chunk in crate::ops::snapshot_range(&story, &txn, range.start, range.end) {
+                let start = chunk.start.max(range.start);
+                let end = chunk.end().min(range.end);
+                if start >= end {
+                    continue;
+                }
+                if [INS, DEL, RPR_CHANGE]
+                    .iter()
+                    .any(|key| chunk.attrs.contains_key(*key))
+                {
+                    return Err(OpError::OverlapsTrackedChange);
+                }
+                let crate::ops::ChunkKind::Text(text) = &chunk.kind else {
+                    return Err(OpError::InvalidFormatValue(
+                        "suggested hyperlinks require a text range".to_owned(),
+                    ));
+                };
+                let text = String::from_utf16_lossy(
+                    &text.encode_utf16().collect::<Vec<_>>()
+                        [(start - chunk.start) as usize..(end - chunk.start) as usize],
+                );
+                let mut attrs = chunk.attrs.clone();
+                changed |= attrs.get(HYPERLINK) != hyperlink.as_ref();
+                attrs.remove(HYPERLINK);
+                if let Some(value) = &hyperlink {
+                    attrs.insert(HYPERLINK.to_owned(), value.clone());
+                }
+                runs.push(crate::RichRun {
+                    text,
+                    attrs: attrs.into_iter().collect(),
+                });
+            }
+            if !changed {
+                return Ok(Receipt::default());
+            }
+            let (receipt, at) = self.replace_range_rich_placed_in(&mut txn, ctx, range, &runs)?;
+            story.format(
+                &mut txn,
+                at,
+                len,
+                Attrs::from([(Arc::from(HYPERLINK), hyperlink.unwrap_or(Any::Null))]),
+            );
+            return Ok(receipt);
+        }
         story.format(
             &mut txn,
             range.start,
@@ -571,7 +618,6 @@ impl EditingDoc {
         crate::check_range(&story, &txn, range.start, len)?;
         (range.start, range.end) =
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
-        let len = range.end - range.start;
         let mut keys: BTreeMap<String, ()> = BTreeMap::new();
         let mut offset = 0;
         for diff in story.diff(&txn, YChange::identity) {
@@ -591,20 +637,143 @@ impl EditingDoc {
                 break;
             }
         }
-        if !keys.is_empty() {
-            let attrs: Attrs = keys
-                .into_keys()
-                .map(|key| (Arc::from(key.as_str()), Any::Null))
-                .collect();
-            story.format(&mut txn, range.start, len, attrs);
-        }
+        let attrs: Attrs = keys
+            .into_keys()
+            .map(|key| (Arc::from(key.as_str()), Any::Null))
+            .collect();
+        let revision_ids = self.apply_run_format(&mut txn, ctx, &story, &range, attrs)?;
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {
             range: Some(loc_range),
+            revision_ids,
             ..Receipt::default()
         })
     }
+
+    fn apply_run_format(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
+        story: &TextRef,
+        range: &StoryRange,
+        delta: Attrs,
+    ) -> OpResult<Vec<String>> {
+        if !ctx.is_suggesting() {
+            if !delta.is_empty() {
+                story.format(txn, range.start, range.end - range.start, delta);
+            }
+            return Ok(Vec::new());
+        }
+        let chunks = crate::ops::snapshot_range(story, txn, range.start, range.end);
+        if chunks.iter().any(|chunk| {
+            chunk.attrs.contains_key("fieldResult")
+                || matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                    if crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
+                        || (crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("field")
+                            && crate::map_string(map, txn, "modelKind").as_deref() == Some("field")))
+        }) {
+            return Err(OpError::SuggestedFormattingOverContainer);
+        }
+        let mut revision_ids = Vec::new();
+        let mut new_id = None;
+        for chunk in chunks {
+            let start = chunk.start.max(range.start);
+            let end = chunk.end().min(range.end);
+            if start >= end
+                || matches!(chunk.kind, crate::ops::ChunkKind::Pilcrow(_))
+                || matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                    if crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("field")
+                        && crate::map_string(map, txn, "modelKind").as_deref() == Some("commentReference"))
+            {
+                continue;
+            }
+            let mut current = chunk.attrs.clone();
+            for (key, value) in &delta {
+                if *value == Any::Null {
+                    current.remove(key.as_ref());
+                } else {
+                    current.insert(key.to_string(), value.clone());
+                }
+            }
+            if current == chunk.attrs {
+                continue;
+            }
+            let mut patch = delta.clone();
+            let mut changes = match chunk.attrs.get(RPR_CHANGE) {
+                Some(Any::Array(changes)) => changes.to_vec(),
+                _ => Vec::new(),
+            };
+            if changes.is_empty() {
+                let id = new_id.get_or_insert_with(|| self.next_id());
+                let previous: HashMap<_, _> = chunk
+                    .attrs
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), INS | DEL | HYPERLINK | RPR_CHANGE))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                changes.push(Any::Map(Arc::new(HashMap::from([
+                    ("type".to_owned(), Any::from("runPropertyChange")),
+                    (
+                        "info".to_owned(),
+                        crate::revision_value(id, &ctx.revision_author()),
+                    ),
+                    (
+                        "previousFormatting".to_owned(),
+                        crate::seed::mark_run_formatting(previous.iter()).unwrap_or(Any::Null),
+                    ),
+                    (
+                        "previousAttributes".to_owned(),
+                        Any::Map(Arc::new(previous)),
+                    ),
+                ]))));
+            }
+            for change in &mut changes {
+                if let Some((id, ..)) = crate::queries::revision_parts(change)
+                    && !revision_ids.contains(&id)
+                {
+                    revision_ids.push(id);
+                }
+                if let Any::Map(values) = change {
+                    let mut values = values.as_ref().clone();
+                    values.insert(
+                        "currentFormatting".to_owned(),
+                        crate::seed::mark_run_formatting(current.iter()).unwrap_or(Any::Null),
+                    );
+                    *change = Any::Map(Arc::new(values));
+                }
+            }
+            patch.insert(Arc::from(RPR_CHANGE), Any::Array(Arc::from(changes)));
+            story.format(txn, start, end - start, patch);
+        }
+        Ok(revision_ids)
+    }
+}
+
+pub(crate) fn previous_run_properties(attrs: &BTreeMap<String, Any>, change: &Any) -> Attrs {
+    let mut patch: Attrs = attrs
+        .keys()
+        .filter(|key| !PROTECTED_ATTRS.contains(&key.as_str()))
+        .map(|key| (Arc::from(key.as_str()), Any::Null))
+        .collect();
+    if let Any::Map(change) = change {
+        let previous = match change.get("previousAttributes") {
+            Some(Any::Map(previous)) => previous
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            _ => change
+                .get("previousFormatting")
+                .map(crate::seed::mark_run_attrs)
+                .unwrap_or_default(),
+        };
+        for (key, value) in previous {
+            if !PROTECTED_ATTRS.contains(&key.as_str()) {
+                patch.insert(Arc::from(key), value);
+            }
+        }
+    }
+    patch
 }
 
 pub(crate) fn range_len(range: &StoryRange) -> OpResult<u32> {
@@ -616,3 +785,7 @@ pub(crate) fn range_len(range: &StoryRange) -> OpResult<u32> {
             end: range.end,
         })
 }
+
+#[cfg(test)]
+#[path = "format_tests.rs"]
+mod tests;

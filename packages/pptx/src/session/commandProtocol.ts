@@ -300,6 +300,8 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
 }
 
 export type PresentationCommandMethods = FontDecoderMethods & {
+  /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
+  prefetchCoverageFonts(scripts: string[]): void;
   openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
   command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -337,6 +339,7 @@ export interface PresentationCommandClient {
 
 export const PRESENTATION_COMMAND_METHODS = {
   decodeFontFace: true,
+  prefetchCoverageFonts: true,
   openCommandEditor: true,
   command: true,
   thumbnailFrame: true,

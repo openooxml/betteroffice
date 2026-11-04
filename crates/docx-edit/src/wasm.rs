@@ -105,6 +105,16 @@ impl From<EngineError> for JsValue {
                 value.into()
             }
             EngineErrorKind::Message => JsValue::from_str(&error.message),
+            EngineErrorKind::SuggestedFormattingOverContainer => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("SuggestedFormattingOverContainerError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("suggested-formatting-over-container"),
+                );
+                value.into()
+            }
         }
     }
 }
@@ -1658,8 +1668,7 @@ impl EditSession {
     /// {"type":"fontFamily"|"color","value":string} |
     /// {"type":"fontSize","value":number}`. The six boolean types TOGGLE —
     /// they turn on unless the whole range already carries the mark — while
-    /// font family, size and color SET. Formatting is always a plain local
-    /// edit, never a tracked change, so there is no receipt. Errors on an
+    /// font family, size and color SET. Errors on an
     /// unknown `"type"` or a missing/mistyped `"value"`.
     #[allow(clippy::too_many_arguments)]
     pub fn toggle_mark(
@@ -1670,6 +1679,8 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         mark_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<(), JsValue> {
         self.core
             .toggle_mark(
@@ -1679,6 +1690,8 @@ impl EditSession {
                 end_para,
                 end_offset,
                 mark_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
@@ -1702,8 +1715,7 @@ impl EditSession {
     ///
     /// `false` clears `bold`, `italic`, `underline` and `strike`. `color`
     /// takes exactly one of `rgb` or `themeColor`. `other` writes arbitrary
-    /// run attributes, with `null` removing one. Always a plain local edit, so
-    /// there is no receipt. Errors when a key carries a type not listed here.
+    /// run attributes, with `null` removing one. Errors on invalid types.
     #[allow(clippy::too_many_arguments)]
     pub fn format_range(
         &self,
@@ -1713,6 +1725,8 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         delta_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<(), JsValue> {
         self.core
             .format_range(
@@ -1722,6 +1736,8 @@ impl EditSession {
                 end_para,
                 end_offset,
                 delta_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
@@ -1740,6 +1756,8 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         hyperlink_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<(), JsValue> {
         self.core
             .set_hyperlink(
@@ -1749,6 +1767,8 @@ impl EditSession {
                 end_para,
                 end_offset,
                 hyperlink_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
@@ -1764,9 +1784,19 @@ impl EditSession {
         start_offset: u32,
         end_para: &str,
         end_offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<(), JsValue> {
         self.core
-            .clear_formatting(story, start_para, start_offset, end_para, end_offset)
+            .clear_formatting(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                author_name,
+                author_date,
+            )
             .map_err(JsValue::from)
     }
 
@@ -2472,7 +2502,7 @@ impl EditSession {
     /// `[{"revisionId","author","date","kind","story","preview",
     /// "range":{"story","start":{"paraId","offset"},"end":{…}}}, …]`. `kind`
     /// is one of `"insertion"`, `"deletion"`, `"pPrIns"`, `"pPrDel"`,
-    /// `"pPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
+    /// `"pPrChange"`, `"rPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
     /// `preview` holds the first few characters of the affected text, and is
     /// empty for every structural kind, which covers no text.
     pub fn list_revisions(&self) -> Result<String, JsValue> {
@@ -3058,7 +3088,16 @@ mod tests {
         crate::STORY_INDEX_UNITS_BUILT.with(|built| assert!(built.get() <= 3));
         assert_targeted(false);
         session
-            .format_range("body", &para_id, 0, &para_id, 1, r#"{"bold":true}"#)
+            .format_range(
+                "body",
+                &para_id,
+                0,
+                &para_id,
+                1,
+                r#"{"bold":true}"#,
+                None,
+                None,
+            )
             .unwrap();
         assert_targeted(true);
         crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(0));
@@ -3134,7 +3173,16 @@ mod tests {
             .unwrap();
         assert_targeted();
         session
-            .format_range("body", &para_id, 0, &para_id, 1, r#"{"bold":true}"#)
+            .format_range(
+                "body",
+                &para_id,
+                0,
+                &para_id,
+                1,
+                r#"{"bold":true}"#,
+                None,
+                None,
+            )
             .unwrap();
         crate::TABLE_MEMBERSHIP_STORIES_SCANNED.with(|scanned| scanned.set(0));
         let context = read_context("body", &para_id);

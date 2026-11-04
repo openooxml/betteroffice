@@ -135,6 +135,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             change_author: _,
             change_date: _,
             change_revision_id: _,
+            format_change: None,
             logical_order: _,
             bidi_level: _,
         } = fmt

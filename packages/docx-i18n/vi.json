@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "Đã chèn dấu ngắt đoạn",
     "paragraphMarkDeleted": "Đã xóa dấu ngắt đoạn",
     "paragraphPropertiesChanged": "Đã thay đổi thuộc tính đoạn văn",
+    "runPropertiesChanged": "Đã thay đổi định dạng văn bản",
     "rowInserted": "Đã chèn hàng",
     "rowDeleted": "Đã xóa hàng",
     "rowPropertiesChanged": "Đã thay đổi thuộc tính hàng",

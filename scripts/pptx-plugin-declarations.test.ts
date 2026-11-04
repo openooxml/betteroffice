@@ -16,7 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '..');
 const declarationMode = process.env.BETTEROFFICE_PACKAGE_DECLARATIONS;
-const PACKAGES = ['pptx-i18n', 'pptx', 'pptx-react'];
+const PACKAGES = ['fonts', 'pptx-i18n', 'pptx', 'pptx-react'];
 const LINKED = ['react', 'react-dom', '@types/react', '@types/react-dom', 'csstype'];
 
 const CONSUMER = `import {
@@ -28,7 +28,10 @@ const CONSUMER = `import {
   type PptxPluginContext,
   type PptxPluginGrant,
   type PptxPluginNavigationResult,
+  type BundledFontFace,
+  type PptxBundledFont,
 } from '@betteroffice/pptx-react';
+import { resolveMetricCompatFace } from '@betteroffice/fonts';
 
 type State = { count: number };
 
@@ -65,9 +68,12 @@ const grant: PptxPluginGrant = { document: 'write', editBatches: true, commands:
 const invalid: PptxPluginGrant = { editBatches: true };
 void invalid;
 
+const face: BundledFontFace | undefined = resolveMetricCompatFace('Arial', false, false);
+const bundled: PptxBundledFont[] = face ? [{ face, baseUrl: 'https://example.test/fonts/' }] : [];
+
 export const editor = (
   <PptxEditor
-    fonts={[]}
+    fonts={bundled}
     plugins={[review]}
     pluginGrants={{ 'acme.review': grant }}
     onPluginError={(error) => console.error(error.phase)}
