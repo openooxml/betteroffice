@@ -1093,3 +1093,40 @@ fn paragraph_patch_s13_marker_paragraph_the_model_cannot_splice_replaces_only_th
         ["DOCX_MINIMAL_PATCH replace counts {\"marker\":1}"]
     );
 }
+
+#[test]
+fn paragraph_patch_s13_marker_paragraph_gaining_an_outside_bookmark_is_not_replaced_alone() {
+    let paragraph = concat!(
+        "<w:p w:rsidR='87654321'><w:r><w:t>Heading</w:t></w:r>",
+        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>",
+        "<w:r><w:instrText xml:space=\"preserve\"> SEQ x </w:instrText></w:r>",
+        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>",
+        "<w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
+    );
+    let middle = format!(
+        "<w:bookmarkStart w:id=\"5\" w:name=\"moved\"/><w:bookmarkEnd w:id=\"5\"/>{paragraph}"
+    );
+    let (source, mut request) = mixed_request(&middle);
+    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+    part.legacy_paragraphs[0].detail = "marker: mutation or touch".to_owned();
+    let mut moved: Value = json!({"type": "paragraph", "content": [
+        {"type": "bookmarkStart", "id": 5, "name": "moved", "position": {"offset": 0}},
+        {"type": "run", "content": [{"type": "text", "text": "replaced"}]},
+        {"type": "bookmarkEnd", "id": 5, "position": {"offset": 8}}
+    ]});
+    moved["sourceOrdinal"] = json!(2);
+    request.document.content[2] = serde_json::from_value(moved).unwrap();
+    let (saved, _) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let parts = part_map(&saved);
+    let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
+    assert_eq!(
+        output.matches("<w:bookmarkStart w:id=\"5\"").count(),
+        1,
+        "{output}"
+    );
+    assert_eq!(
+        output.matches("<w:bookmarkEnd w:id=\"5\"").count(),
+        1,
+        "{output}"
+    );
+}

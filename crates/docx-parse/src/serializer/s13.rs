@@ -1513,6 +1513,13 @@ impl StoryParts<'_> {
             });
         }
         if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
+            && (model_part.is_none()
+                || super::splice::markers_outside_changed_agree(
+                    source,
+                    &serialized,
+                    &written,
+                    part,
+                ) == Some(true))
             && let Some(replaced) = super::splice::replace_story_part(
                 source,
                 &serialized,
