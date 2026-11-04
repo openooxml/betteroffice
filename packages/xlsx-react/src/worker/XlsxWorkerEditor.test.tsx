@@ -2760,6 +2760,40 @@ describe('peerless editor chunk failures', () => {
 });
 
 describe('peerless workbook worker editor', () => {
+  it('follows the worker to a surviving sheet when a remote update removes the active sheet', async () => {
+    const host = collaborativePeerlessHarness();
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const view = render(host.asyncEditor({ collaboration: { clientId: 101 }, onReady: ready }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    await act(async () => { fireEvent.click(view.getByRole('tab', { name: 'Second' })); });
+    const switched = host.sent[host.sent.length - 1]!;
+    expect(switched).toMatchObject({ kind: 'setActiveSheet', payload: { args: [1] } });
+    await act(async () => host.ack(switched, { selection: switched.payload.selection, paint: true }));
+    expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+    let merging!: Promise<unknown>;
+    await act(async () => { merging = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
+    const updateIndex = host.sent.length - 1;
+    const update = host.sent[updateIndex]!;
+    expect(update.kind).toBe('applyUpdate');
+    const seen = { sheetView: host.sheetView.mock.calls.length, cellGeometry: host.cellGeometry.mock.calls.length,
+      cellInputs: host.cellInputs.mock.calls.length, frame: host.frame.mock.calls.length };
+    await act(async () => host.push({ throughSeq: update.seq, version: 'v9',
+      statuses: [{ seq: update.seq, status: 'applied', committed: true, result: { remoteUpdate: true, proposals: [] } }],
+      editState: { activeSheet: 0, sheets: [{ id: 'sheet:0', index: 0, name: 'First' }] } }));
+    await merging;
+    await advance();
+    expect(view.queryByRole('tab', { name: 'Second' })).toBeNull();
+    expect(view.getByRole('tab', { name: 'First' }).getAttribute('aria-selected')).toBe('true');
+    expect(host.sent.slice(updateIndex + 1).filter((command) => command.kind === 'setActiveSheet'))
+      .toEqual([expect.objectContaining({ payload: expect.objectContaining({ args: [0] }) })]);
+    expect(host.sent.slice(updateIndex + 1).filter((command) => (command.frame?.sheet ?? 0) !== 0)).toEqual([]);
+    expect(host.sheetView.mock.calls.slice(seen.sheetView).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.cellGeometry.mock.calls.slice(seen.cellGeometry).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.cellInputs.mock.calls.slice(seen.cellInputs).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.frame.mock.calls.slice(seen.frame).filter(([, options]) => (options?.sheet ?? 0) !== 0)).toEqual([]);
+  });
+
   it('bounds visible Enter commits with unchanged formatting and geometry', async () => {
     const formattingRenders = mock(() => {});
     const formulaRenders = mock(() => {});

@@ -230,6 +230,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const flushNudgeRef = useRef<(retained?: boolean) => void>(() => {});
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const nameNavigation = useRef<(cell: CellAddr) => void>(() => {});
+  const sheetNavigation = useRef<(sheet: number) => void>(() => {});
   const navigateFromNameBox = useCallback((cell: CellAddr) => nameNavigation.current(cell), []);
   const exportInput = useRef<ReturnType<typeof createPeerlessWorkerInputCoordinator> | null>(null);
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
@@ -883,7 +884,16 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       commands.refresh();
     }
     if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
-      setCatalog(ack.editState.sheets);
+      const sheets = ack.editState.sheets;
+      setCatalog(sheets);
+      const kept = sheets.find((entry) => entry.id === activeSheetId.current);
+      if (kept && kept.index !== activeRef.current && selectionRef.current) placeSelection(kept.index, selectionRef.current);
+      else if (!kept && sheets.length > 0) {
+        const fallback = sheets.find((entry) => entry.index === run.session.editState.activeSheet) ??
+          sheets.find((entry) => entry.index === Math.min(activeRef.current, sheets.length - 1)) ?? sheets[0]!;
+        placeSelection(fallback.index, sheetSelection(fallback.index));
+        queueMicrotask(() => sheetNavigation.current(fallback.index));
+      }
     }
     const latestSelection = Math.max(0, ...selectionCommands);
     const reconcile = !selectionNavigation.isPending(navigationContext()) && latestSelection > 0 && ack.throughSeq >= latestSelection &&
@@ -1460,6 +1470,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     } }, sheet, true);
   };
   nameNavigation.current = (cell) => { navigate(activeRef.current, selectionAt(cell)); focus(); };
+  sheetNavigation.current = (sheet) => { if (sheet === activeRef.current) navigate(sheet); };
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false, generation = run?.generation) => {
     if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure ||
       !retained && !editable() || dx === 0 && dy === 0) return;
