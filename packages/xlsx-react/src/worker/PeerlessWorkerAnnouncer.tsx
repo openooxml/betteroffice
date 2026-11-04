@@ -44,7 +44,7 @@ export const PeerlessWorkerAnnouncer = memo(function PeerlessWorkerAnnouncer({ s
   const spoken = useRef<string | null>(null);
   const lastSheet = useRef<number | null>(null);
   useLayoutEffect(() => {
-    announceRef.current = () => { spoken.current = null; setFocusRevision((value) => value + 1); };
+    announceRef.current = () => { spoken.current = null; lastSheet.current = null; setFocusRevision((value) => value + 1); };
     return () => { announceRef.current = null; };
   }, [announceRef]);
   const strings = useMemo<AnnouncementStrings>(() => ({

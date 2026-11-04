@@ -1855,9 +1855,10 @@ function sheetTabTarget(key: string, position: number, count: number): number | 
 function cycleEditorRegion(root: HTMLElement, grid: HTMLElement | null, backwards: boolean): boolean {
   const toolbar = root.querySelector<HTMLElement>('[data-testid="xlsx-toolbar"]');
   const tabs = root.querySelector<HTMLElement>('[data-testid="xlsx-sheet-tabs"]');
+  const focusable = toolbar ? [...toolbar.querySelectorAll<HTMLElement>('button, input, select, [tabindex]')]
+    .filter((element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled) : [];
   const targets = [
-    toolbar?.querySelector<HTMLElement>('[tabindex="0"]:not(:disabled)') ??
-      toolbar?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? null,
+    focusable.find((element) => element.getAttribute('tabindex') === '0') ?? focusable[0] ?? null,
     grid,
     tabs?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? null,
   ];
