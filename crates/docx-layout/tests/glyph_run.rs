@@ -474,7 +474,7 @@ fn browser_transformed_cluster_carets_follow_source_boundaries() {
             let list: DisplayList = serde_json::from_value(serde_json::json!({
                 "pages": [{
                     "pageIndex": 0, "width": 816, "height": 1056,
-                    "primitives": [serde_json::to_value(&run).unwrap()]
+                    "primitives": [serde_json::to_value(Primitive::Text(run.clone())).unwrap()]
                 }]
             }))
             .unwrap();
