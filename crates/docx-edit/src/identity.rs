@@ -3950,15 +3950,17 @@ impl EditingDoc {
                         .filter(|patch| !patch.run_edits.is_empty())
                         .map(|patch| patch.ordinal)
                         .collect();
-                    if !source.rewrite_loses_source_runs(
-                        part,
-                        &rewritten,
-                        rewriting_loses_source_runs,
-                    ) && !source.rewrite_loses_source_runs(
-                        part,
-                        &reformatted,
-                        reformatting_loses_fields,
-                    ) {
+                    if !ends_with_inline_tail(seeded, part)
+                        || (!source.rewrite_loses_source_runs(
+                            part,
+                            &rewritten,
+                            rewriting_loses_source_runs,
+                        ) && !source.rewrite_loses_source_runs(
+                            part,
+                            &reformatted,
+                            reformatting_loses_fields,
+                        ))
+                    {
                         plan.spliced_parts.push(spliced);
                     }
                 } else if part.kind == SourceStoryKind::Body {
@@ -4753,6 +4755,14 @@ fn rewriting_loses_source_runs(xml: &str) -> bool {
 }
 
 /// `units` without, and then with, the segments after the last pilcrow.
+/// Whether a story of `part` ends with inline content after its last pilcrow. Such a part
+/// splices only since the unchanged tail is accepted; before, it was always written whole.
+fn ends_with_inline_tail(seeded: &HashMap<String, Arc<StoryState>>, part: &SourcePart) -> bool {
+    part_stories(seeded, part)
+        .values()
+        .any(|state| split_tail(&state.units).1.is_some_and(|tail| tail.inline))
+}
+
 fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
     match units.split_last() {
         Some((tail, rest)) if tail.key.is_none() => (rest, Some(tail)),

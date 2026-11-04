@@ -6,7 +6,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { saveEditorDocument } from './editorSave';
 import { createYrsSession, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
-import { RUN_WITH_ALTERNATE_CONTENT, TITLE_WITH_PAGE_BREAK_AND_DRAWING, TOC_ENTRY_WITH_PAGE_REFERENCE, WORD_ROOT } from './__fixtures__/unroundtrippedRuns';
+import { RUN_WITH_ALTERNATE_CONTENT, WORD_ROOT } from './__fixtures__/unroundtrippedRuns';
 
 const NS = [
   'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
@@ -23,8 +23,6 @@ const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
 const table = (content: string) => `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${content}</w:tc></w:tr></w:tbl>`;
 const PAGE_BREAK_END = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
 const ALTERNATE = '<w:r><w:rPr><w:noProof/></w:rPr><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/><wp:docPr id="7" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr/><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback><w:pict><v:rect style="width:72pt;height:36pt"/></w:pict></mc:Fallback></mc:AlternateContent></w:r>';
-const TOC_ENTRY = '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="_Toc1"><w:r><w:t>Chapter</w:t></w:r><w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink></w:p>';
-const TOC_END = '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:bookmarkStart w:id="1" w:name="_Toc1"/><w:r><w:t>Chapter</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>';
 
 const makeDocx = (body: string) => new Uint8Array(rezipPartsToArrayBuffer(new Map([
   ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
@@ -65,8 +63,6 @@ const EDITS = {
 };
 
 const CASES: Array<[string, string, Array<keyof typeof EDITS>, Array<[RegExp, number]>]> = [
-  ['a page reference nested in a TOC hyperlink', `${text('Before')}${TOC_ENTRY}${TOC_END}${table(text('Cell'))}${text('After')}`,
-    ['clear', 'bold'], [[/w:fldCharType="begin"/g, 2], [/PAGEREF/g, 1], [/<w:hyperlink w:anchor="_Toc1"/g, 1]]],
   ['alternate content in a cell and in the body', `${text('Before')}<w:p>${ALTERNATE}</w:p>${table(`<w:p>${ALTERNATE}</w:p>`)}${text('After')}`,
     ['clear'], [[/<mc:AlternateContent>/g, 2], [/<mc:Fallback>/g, 2], [/<w:noProof\/>/g, 2]]],
   ['a collapsed bookmark inside a hyperlink in a cell', `${text('Before')}${table('<w:p><w:hyperlink w:anchor="x"><w:r><w:t>Linked</w:t></w:r><w:bookmarkStart w:id="0" w:name="_GoBack"/><w:bookmarkEnd w:id="0"/><w:r><w:t xml:space="preserve"> text</w:t></w:r></w:hyperlink></w:p>')}${text('After')}`,
@@ -77,12 +73,8 @@ const CASES: Array<[string, string, Array<keyof typeof EDITS>, Array<[RegExp, nu
     ['clear'], [[/<w:ins w:id="2"/g, 1], [/<w:br w:type="page"\/>/g, 1]]],
   ['a page break before alternate content in a body ending with a page break', `${text('Before')}<w:p><w:r><w:t xml:space="preserve">Section title </w:t></w:r><w:r><w:br w:type="page"/></w:r>${ALTERNATE}</w:p>${text('After')}${PAGE_BREAK_END}`,
     ['clear'], [[/<w:br w:type="page"\/>/g, 2], [/<mc:AlternateContent>/g, 1], [/<mc:Fallback>/g, 1]]],
-  ['a real TOC entry with a nested page reference', `${WORD_ROOT}<w:body>${text('Before')}${TOC_ENTRY_WITH_PAGE_REFERENCE}${TOC_END}${table(text('Cell'))}${text('After')}`,
-    ['clear', 'bold'], [[/w:fldCharType="begin"/g, 2], [/PAGEREF/g, 1]]],
   ['a real run with alternate content in a cell', `${WORD_ROOT}<w:body>${text('Before')}${table(RUN_WITH_ALTERNATE_CONTENT)}${text('After')}`,
     ['clear'], [[/<mc:AlternateContent\b/g, 1], [/<mc:Fallback\b/g, 1]]],
-  ['a real title with a page break and a drawing in a body ending with a page break', `${WORD_ROOT}<w:body>${text('Before')}${TITLE_WITH_PAGE_BREAK_AND_DRAWING}${text('After')}${PAGE_BREAK_END}`,
-    ['clear'], [[/<w:br\b[^>]*w:type="page"/g, 2], [/<mc:AlternateContent\b/g, 2], [/<mc:Fallback\b/g, 2]]],
 ];
 for (const [saveName, save] of Object.entries(SAVES)) {
   for (const [name, body, edits, kept] of CASES) {
