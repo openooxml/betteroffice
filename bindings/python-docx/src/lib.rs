@@ -64,6 +64,20 @@ create_exception!(
     "The engine refused a structured export's or a content-control listing's options."
 );
 
+fn png_target_index(target: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let invalid =
+        || PyValueError::new_err("target must be a dict containing only a nonnegative page index");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    let index = target.get_item("page")?.ok_or_else(invalid)?;
+    if index.is_instance_of::<PyBool>() {
+        return Err(invalid());
+    }
+    index.extract::<usize>().map_err(|_| invalid())
+}
+
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
     match error {
@@ -1341,9 +1355,23 @@ impl PyDocument {
             .map_err(map_error)
     }
 
-    /// Rasterize one display-list page to deterministic PNG bytes.
+    #[pyo3(signature = (target, *, scale = 1.0))]
+    fn render_png(&self, py: Python<'_>, target: &Bound<'_, PyAny>, scale: f32) -> PyResult<PyPng> {
+        let target = betteroffice_docx::PngTarget {
+            page: png_target_index(target)?,
+        };
+        let options = betteroffice_docx::RenderOptions { scale };
+        let rendered = py
+            .detach(|| self.inner.render_png(target, &options))
+            .map_err(map_error)?;
+        Ok(PyPng {
+            data: rendered.bytes,
+            skipped_images: rendered.skipped_images,
+        })
+    }
+
     #[pyo3(signature = (display_list, page = 0))]
-    fn render_png(
+    fn render_display_list_png(
         &self,
         py: Python<'_>,
         display_list: &PyDisplayList,
@@ -1351,7 +1379,7 @@ impl PyDocument {
     ) -> PyResult<PyPng> {
         let list = &display_list.inner;
         let rendered = py
-            .detach(|| self.inner.render_png(list, page))
+            .detach(|| self.inner.render_display_list_png(list, page))
             .map_err(map_error)?;
         Ok(PyPng {
             data: rendered.bytes,

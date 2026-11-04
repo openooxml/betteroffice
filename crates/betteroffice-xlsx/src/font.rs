@@ -256,7 +256,13 @@ mod tests {
         );
         assert_eq!(
             workbook
-                .render_png_for(SheetId(0), &viewport())
+                .render_png(
+                    crate::PngTarget::Viewport {
+                        sheet: SheetId(0),
+                        viewport: viewport()
+                    },
+                    &crate::RenderOptions::default()
+                )
                 .unwrap()
                 .bytes,
             xlsx_raster::render_png(&display).unwrap()

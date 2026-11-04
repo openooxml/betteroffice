@@ -1,5 +1,20 @@
 import os
-from typing import final
+from typing import TypedDict, final
+
+class Viewport(TypedDict):
+    x: float
+    y: float
+    width: float
+    height: float
+
+class ViewportTarget(TypedDict):
+    sheet: int | str
+    viewport: Viewport
+
+class PngRangeTarget(TypedDict):
+    sheet: int | str
+    range: str | dict[str, object]
+
 
 __version__: str
 MAX_COLLABORATION_BYTES: int
@@ -217,7 +232,8 @@ class Workbook:
         text_wrapping: str | None = ...,
         now_serial: float | None = ...,
     ) -> Mutation: ...
-    def render_png(
+    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = ..., max_width: int | None = ..., max_height: int | None = ...) -> Png: ...
+    def render_sheet(
         self,
         sheet: int | str,
         *,
