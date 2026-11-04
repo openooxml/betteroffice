@@ -104,3 +104,41 @@ test('a placeholder label is drawn at label size inside the page', async ({ page
     expect(label.y).toBeLessThan(drawn.height);
   }
 });
+
+test('a placeholder is a thin dashed outline, not a filled block', async ({ page }) => {
+  await page.route('**/__vsdx/**', async (route) => {
+    const path = new URL(route.request().url()).pathname.replace('/__vsdx/', '');
+    const body = await readFile(resolve(root, 'packages/vsdx/dist', path));
+    await route.fulfill({ body, contentType: types[extname(path)] ?? 'application/octet-stream' });
+  });
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const vsdx = await import(`${location.origin}/__vsdx/index.js`);
+    const list = { contractVersion: 7, width: 384, height: 288, printWidth: 384, printHeight: 288,
+      paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 288 },
+      primitives: [{ kind: 'placeholder', id: 'p', zOrder: 0, x: 1, y: 1, width: 2, height: 1, reason: '' }] };
+    const canvas = document.createElement('canvas');
+    document.body.append(canvas);
+    const dpr = vsdx.sizeCanvasForPage(canvas, list, 1, 1);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('2d canvas context unavailable');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await vsdx.paintPage(ctx, list, dpr, 1);
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const gray = (x: number, y: number) => { const i = (y * canvas.width + x) * 4; return data[i + 3] === 0 ? 255 : Math.min(data[i], data[i + 1], data[i + 2]); };
+    const inked = [];
+    for (let y = 92; y <= 100; y++) if ([150, 153, 156].some((x) => gray(x, y) < 200)) inked.push(y);
+    const row = inked[0] ?? 96;
+    const marks = [];
+    for (let x = 98; x < 286; x++) marks.push(gray(x, row) < 200);
+    let runs = 0;
+    for (let i = 1; i < marks.length; i++) if (marks[i] !== marks[i - 1]) runs++;
+    return { center: gray(192, 144), inked, runs, ink: marks.filter(Boolean).length, total: marks.length };
+  });
+  expect(result.center).toBe(255);
+  expect(result.inked.length).toBeGreaterThan(0);
+  expect(result.inked.length).toBeLessThanOrEqual(2);
+  expect(result.runs).toBeGreaterThanOrEqual(40);
+  expect(result.ink).toBeGreaterThan(result.total / 3);
+});

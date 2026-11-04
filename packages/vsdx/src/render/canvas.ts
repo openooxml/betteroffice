@@ -168,7 +168,12 @@ function utf8Slice(value: string, start: number, end: number): string { return n
 /** The canvas font string a text run paints with. */
 export function canvasFontFor(run: Pick<TextRun, 'family' | 'bold' | 'italic'>, sizePx: number): string { return `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${sizePx}px ${quote(run.family)}`; }
 function quote(family: string): string { return family.includes(' ') ? JSON.stringify(family) : family; }
-function strokePlaceholder(ctx: CanvasRenderingContext2D, value: { x: number; y: number; width: number; height: number }): void { ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]); }
+function strokePlaceholder(ctx: CanvasRenderingContext2D, value: { x: number; y: number; width: number; height: number }): void {
+  const matrix = (ctx as CanvasRenderingContext2D & { getTransform?: () => DOMMatrix }).getTransform?.();
+  const devicePerInch = matrix ? Math.hypot(matrix.a, matrix.b) : 0;
+  const pixel = 1 / TEXT_UNITS_PER_INCH;
+  ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = devicePerInch > 0 ? Math.max(pixel, 1 / devicePerInch) : pixel; ctx.setLineDash([4 * pixel, 3 * pixel]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]);
+}
 const PLACEHOLDER_LABEL_IN = 10 / 72;
 function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void {
   strokePlaceholder(ctx, value);

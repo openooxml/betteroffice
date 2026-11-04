@@ -320,8 +320,42 @@ export interface XlsxPluginCommand<S> {
 }
 
 /**
- * A plugin. `createState`, renderers and command `getState` must be pure; `initialize`,
- * `onEvent`, command `execute` and `context.run` are managed effects.
+ * A cell as the edit gate sees it; zero-based `row` and `col`.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginCellRef = { sheetId: string; row: number; col: number };
+
+/**
+ * A typed commit before it is written: `input` is the text the user committed, empty for a clear.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginCellCommit = XlsxPluginCellRef & {
+  input: string;
+  kind: 'value' | 'formula' | 'clear';
+  source: 'cell-editor' | 'formula-bar' | 'clear-key';
+};
+
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginCommitDecision =
+  | { action: 'accept' }
+  | { action: 'replace'; input: string }
+  | { action: 'refuse'; message?: string };
+
+/**
+ * What the edit gate hooks receive: reads only, since they run synchronously and must not mutate.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginEditGateContext<S> = Pick<
+  XlsxPluginContext<S>,
+  'pluginId' | 'snapshot' | 'state' | 'read'
+>;
+
+/**
+ * A plugin. `createState`, renderers, command `getState`, `cellEditable` and `beforeCellCommit`
+ * must be pure; `initialize`, `onEvent`, command `execute` and `context.run` are managed effects.
  *
  * @experimental The plugin API may change in minor releases.
  */
@@ -337,6 +371,23 @@ export interface XlsxPluginDefinition<S> {
   commands?: readonly XlsxPluginCommand<S>[];
   /** Local command ids, in display order. */
   toolbar?: readonly string[];
+  /**
+   * Sync. False makes the cell read-only for typed edits; any plugin returning false wins.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  cellEditable?(context: XlsxPluginEditGateContext<S>, cell: XlsxPluginCellRef): boolean;
+  /**
+   * Sync. Sees a typed commit before it is written. Return `{ action: 'accept' }`,
+   * `{ action: 'replace', input: string }` (the next plugin sees the replaced input) or
+   * `{ action: 'refuse', message?: string }`. Any refusal wins.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  beforeCellCommit?(
+    context: XlsxPluginEditGateContext<S>,
+    commit: XlsxPluginCellCommit
+  ): XlsxPluginCommitDecision;
   /**
    * Sync and pure. Row markers for the gutter, evaluated on load, after `setState` and after a
    * document change. A throw or a malformed set ends the plugin with the `row-decorations` phase.
@@ -385,7 +436,7 @@ export interface XlsxPlugin {
   readonly [xlsxPluginBrand]: true;
 }
 
-export type XlsxPluginErrorPhase = PluginErrorPhase | 'row-decorations';
+export type XlsxPluginErrorPhase = PluginErrorPhase | 'edit-gate' | 'row-decorations';
 
 /**
  * A plugin failure; the failing activation has already been stopped and cleaned up.
