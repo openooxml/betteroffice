@@ -153,3 +153,37 @@ test('insert_table_column schema names invalid width values', () => {
     expect(result.error.message).toContain('width');
   }
 });
+
+test.each(['insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn'] as const)('office_propose exposes %s and accepts table edits atomically', async type => {
+  const c = await connect();
+  try {
+    const { document, slide, shape } = c;
+    const before = await c.call('pptx_read_slide', { document, slide });
+    const edit = type === 'insertTableRow' || type === 'insertTableColumn'
+      ? { type, slideId: slide, shapeId: shape, index: 0, position: 'after', cells: ['Agent cell'] }
+      : { type, slideId: slide, shapeId: shape, index: 0 };
+    const pending = await c.call('office_propose', { document, author: 'agent', edits: [edit] });
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(before);
+    await c.call('office_reject', { document, proposal: pending.id });
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(before);
+    const accepted = await c.call('office_propose', { document, author: 'agent', edits: [edit] });
+    await c.call('office_accept', { document, proposal: accepted.id });
+    const after = await c.call('pptx_read_slide', { document, slide });
+    const table = after.shapes.find((entry: any) => entry.id === shape).table;
+    expect(table.rows).toBe(type === 'insertTableRow' ? 4 : type === 'deleteTableRow' ? 2 : 3);
+    expect(table.columns).toBe(type === 'insertTableColumn' ? 4 : type === 'deleteTableColumn' ? 2 : 3);
+    const invalid = await c.raw('office_propose', { document, author: 'agent', edits: [{ ...edit, index: 99 }] });
+    expect(invalid.isError).toBe(true);
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(after);
+  } finally { await c.close(); }
+});
+
+test('table proposal schema rejects invalid positions, widths, indices and extra keys', async () => {
+  const { pptxProposalEditSchema } = await import('../src/pptx-schema');
+  const edit = { type: 'insertTableColumn', slideId: '@slide', shapeId: '@shape', index: 0, position: 'before' };
+  expect(pptxProposalEditSchema.safeParse(edit).success).toBe(true);
+  expect(pptxProposalEditSchema.safeParse({ ...edit, width: 'copy', cells: ['A'] }).success).toBe(true);
+  for (const extra of [{ index: -1 }, { index: 0.5 }, { index: 4294967296 }, { position: 'middle' }, { width: 'stretch' }, { cells: [1] }, { extra: true }]) {
+    expect(pptxProposalEditSchema.safeParse({ ...edit, ...extra }).success).toBe(false);
+  }
+});

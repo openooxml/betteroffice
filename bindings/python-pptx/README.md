@@ -117,8 +117,12 @@ Snapshot and edit dictionaries use the core's camelCase JSON fields; the
 dataclass attributes use Python snake_case.
 
 Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
-`setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`, and
-`setSlideNotes`. They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
+`setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`,
+`setSlideNotes`, `insertTableRow`, `deleteTableRow`, `insertTableColumn`, and
+`deleteTableColumn`. Table edits use `slideId`, `shapeId`, and a zero-based `index`.
+Inserts require `position` (`before` or `after`) and accept optional `cells`;
+column inserts accept `width` (`split` by default or `copy`).
+They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
 Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
 geometry uses EMU. A group has 1 to 256 edits, applied in order, with up to 64
 pending groups per session.

@@ -14,8 +14,8 @@ use crate::inherit::{SlideContext, record_inherited};
 use crate::proposals::shape_text;
 use crate::{
     DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot, Proposal, ProposalChange,
-    ProposalEdit, ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot,
-    TextRunSnapshot, TextStyle,
+    ProposalChangeKind, ProposalEdit, ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope,
+    StorySnapshot, TextRunSnapshot, TextStyle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +51,10 @@ fn proposal_shape_changes(proposal: &Proposal, slide_id: &str) -> Vec<ProposalSh
                 | ProposalEdit::AddShape { .. }
                 | ProposalEdit::AddPicture { .. }
                 | ProposalEdit::RemoveShape { .. }
+                | ProposalEdit::InsertTableRow { .. }
+                | ProposalEdit::DeleteTableRow { .. }
+                | ProposalEdit::InsertTableColumn { .. }
+                | ProposalEdit::DeleteTableColumn { .. }
                 | ProposalEdit::SetShapeRect { .. }
                 | ProposalEdit::SetShapeFill { .. }
                 | ProposalEdit::SetShapeStroke { .. }
@@ -71,6 +75,11 @@ fn proposal_shape_changes(proposal: &Proposal, slide_id: &str) -> Vec<ProposalSh
             let kind = match (&change.before, &change.after) {
                 (None, Some(_)) => ProposalShapeChangeKind::Inserted,
                 (Some(_), None) => ProposalShapeChangeKind::Deleted,
+                (Some(before), Some(after))
+                    if before != after && change.kind == Some(ProposalChangeKind::Content) =>
+                {
+                    ProposalShapeChangeKind::Changed
+                }
                 (Some(before), Some(after))
                     if before.width != after.width || before.height != after.height =>
                 {
@@ -137,6 +146,10 @@ impl DeckSession {
                     | ProposalEdit::RemoveShape { .. }
                     | ProposalEdit::SetSlideLayout { .. }
                     | ProposalEdit::SetSlideBackground { .. }
+                    | ProposalEdit::InsertTableRow { .. }
+                    | ProposalEdit::DeleteTableRow { .. }
+                    | ProposalEdit::InsertTableColumn { .. }
+                    | ProposalEdit::DeleteTableColumn { .. }
             )
         }) {
             let slide_id =
@@ -365,6 +378,18 @@ fn scoped_target<T: ReadTxn>(txn: &T, edit: &ProposalEdit) -> EditResult<(String
             slide_id, shape_id, ..
         }
         | ProposalEdit::SetShapeAdjust {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::InsertTableRow {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::DeleteTableRow {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::InsertTableColumn {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::DeleteTableColumn {
             slide_id, shape_id, ..
         } => Ok((slide_id.clone(), Some(shape_id.clone()))),
         ProposalEdit::SetSlideNotes { slide_id, .. }

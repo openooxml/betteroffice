@@ -440,3 +440,75 @@ fn facade_slide_property_proposals_render_inherit_accept_reject_and_undo() {
         assert_eq!(presentation.snapshot().unwrap(), before);
     }
 }
+
+#[test]
+fn facade_table_proposals_preview_accept_reject_and_undo() {
+    use betteroffice_pptx::{ProposalEdit, ProposalRequest, ProposalShapeChangeKind};
+    let mut parts = ooxml_opc::unzip_parts(include_bytes!(
+        "../../pptx-render/tests/fixtures/table-basic.pptx"
+    ))
+    .unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    let mut xml = String::from_utf8(bytes.clone()).unwrap();
+    for attribute in [
+        "gridSpan=\"2\"",
+        "rowSpan=\"2\"",
+        "hMerge=\"1\"",
+        "vMerge=\"1\"",
+    ] {
+        xml = xml.replace(attribute, "");
+    }
+    *bytes = xml.into_bytes();
+    let fixture = ooxml_opc::rezip_parts(&parts).unwrap();
+    for kind in [
+        "insertTableRow",
+        "deleteTableRow",
+        "insertTableColumn",
+        "deleteTableColumn",
+    ] {
+        let presentation = Presentation::open(&fixture).unwrap();
+        let before = presentation.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let mut wire = serde_json::json!({
+            "type": kind, "slideId": slide.id, "shapeId": slide.shapes[0].id, "index": 0,
+        });
+        if kind.starts_with("insert") {
+            wire["position"] = "before".into();
+            wire["cells"] = serde_json::json!(["Native cell"]);
+        }
+        let edit: ProposalEdit = serde_json::from_value(wire).unwrap();
+        let request = || ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![edit.clone()],
+        };
+        let proposal = presentation.propose(request()).unwrap();
+        let preview = presentation.preview_proposal(&proposal.id).unwrap();
+        let by_id = presentation
+            .layout_proposal_diff_slide_by_id(&proposal.id, &slide.id)
+            .unwrap();
+        let indexed = presentation
+            .layout_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        assert_eq!(by_id.frame, indexed.frame);
+        assert_eq!(
+            by_id.shape_changes[0].kind,
+            ProposalShapeChangeKind::Changed
+        );
+        assert_eq!(
+            by_id.snapshot.slides[0].shapes[0].graphic,
+            preview.snapshot.slides[0].shapes[0].graphic
+        );
+        assert_eq!(presentation.snapshot().unwrap(), before);
+        assert!(presentation.reject_proposal(&proposal.id));
+        let proposal = presentation.propose(request()).unwrap();
+        let accepted = presentation.preview_proposal(&proposal.id).unwrap();
+        presentation.accept_proposal(&proposal.id, false).unwrap();
+        assert_eq!(presentation.snapshot().unwrap(), accepted.snapshot);
+        assert!(presentation.undo());
+        assert_eq!(presentation.snapshot().unwrap(), before);
+    }
+}
