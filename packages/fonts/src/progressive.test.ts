@@ -119,7 +119,7 @@ test('a progressive face loads index, skeleton and core, then only the chunks of
 
   await face.ensureGlyphs(Array.from({ length: skeleton.numGlyphs }, (_, glyph) => glyph));
   expect(face.complete()).toBe(true);
-  expect(sha(face.bytes())).toBe(jpRef.sha256);
+  expect(sha(face.bytes())).toBe(index.sha256);
 });
 
 test('a glyph whose chunk loaded during another pending request resolves with a revision that draws it', async () => {
