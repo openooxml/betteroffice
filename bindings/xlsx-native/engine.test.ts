@@ -8,6 +8,7 @@ import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
+import { cappedExtent } from '../../packages/xlsx/src/wasm/pngTarget';
 
 const native = require('./index.js');
 
@@ -529,6 +530,24 @@ describe('xlsx native engine parity', () => {
       expect(() => render({ sheet: 0, viewport: box }, { scale: 1, dpi: 2 })).toThrow('bad options');
       expect(() => render({ sheet: 0, viewport: box, extra: true })).toThrow('target must be');
       expect(() => render({ sheet: 0, viewport: { ...box, z: 1 } })).toThrow('target must be');
+    } finally {
+      doc.free();
+    }
+  });
+
+  test('the canvas path caps a viewport to the same PNG size as the native engine', () => {
+    const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    try {
+      for (const [extent, cap, scale] of [
+        [300, 37, 1], [300, 37, 1.3], [300, 37, 2.7], [300, 100, 3], [300, 391, 1.3], [300, 390, 1.3],
+        [300, 810, 2.7], [300, 811, 2.7], [120.5, 23, 1.3], [64.75, 97, 0.75], [300, 1, 2.7],
+      ] as const) {
+        const bytes = doc.renderPngTarget(JSON.stringify({ sheet: 0, viewport: { x: 0, y: 0, width: extent, height: 40 } }),
+          JSON.stringify({ scale, maxWidth: cap }));
+        const nativeWidth = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(16);
+        const canvasWidth = Math.max(1, Math.ceil(Math.fround(cappedExtent(extent, cap, scale) * Math.fround(scale))));
+        expect(canvasWidth, `extent ${extent}, cap ${cap}, scale ${scale}`).toBe(nativeWidth);
+      }
     } finally {
       doc.free();
     }
