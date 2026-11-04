@@ -149,8 +149,31 @@
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
       "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
-      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
-    }
+      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde.",
+      "clipboardUnavailable": "Dieser Browser erlaubt kein Einfügen über ein Menü. Verwenden Sie die Tastenkombination.",
+      "lastSheet": "Eine Arbeitsmappe braucht mindestens ein Blatt.",
+      "sheetAtEdge": "Das Blatt kann nicht weiter verschoben werden.",
+      "sheetNameInvalid": "Blattnamen brauchen 1 bis 31 Zeichen, müssen eindeutig sein und dürfen : \\ / ? * [ ] nicht enthalten.",
+      "clipboardDenied": "Der Browser hat den Zugriff auf die Zwischenablage nicht erlaubt."
+    },
+    "cut": "Ausschneiden",
+    "copy": "Kopieren",
+    "paste": "Einfügen",
+    "pastePlainText": "Als Nur-Text einfügen",
+    "clearContents": "Inhalte löschen",
+    "insert": "Einfügen",
+    "delete": "Löschen",
+    "insertRowsAbove": "Zeilen oberhalb einfügen",
+    "insertRowsBelow": "Zeilen unterhalb einfügen",
+    "insertColumnsLeft": "Spalten links einfügen",
+    "insertColumnsRight": "Spalten rechts einfügen",
+    "deleteRows": "Zeilen löschen",
+    "deleteColumns": "Spalten löschen",
+    "insertSheet": "Blatt einfügen",
+    "deleteSheet": "Blatt löschen",
+    "renameSheet": "Umbenennen",
+    "moveSheetLeft": "Nach links verschieben",
+    "moveSheetRight": "Nach rechts verschieben"
   },
   "editor": {
     "appLabel": "Editor für Tabellen",
@@ -165,7 +188,11 @@
     "showDetails": "Details anzeigen",
     "openPrompt": "Eine XLSX-Datei öffnen",
     "sheetTabsLabel": "Blätter",
-    "clearExceedsLimit": "Das Löschen überschreitet das Zelllimit."
+    "clearExceedsLimit": "Das Löschen überschreitet das Zelllimit.",
+    "cellMenuLabel": "Zellenmenü",
+    "sheetTabMenuLabel": "Menü der Blattregisterkarte",
+    "renameSheetLabel": "Blatt umbenennen",
+    "sheetNamePrefix": "Tabelle"
   },
   "presence": {
     "label": "Mitbearbeiter",

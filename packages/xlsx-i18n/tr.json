@@ -149,8 +149,31 @@
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
       "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
-      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
-    }
+      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi.",
+      "clipboardUnavailable": "Bu tarayıcı menüden yapıştırmaya izin vermiyor. Klavye kısayolunu kullanın.",
+      "lastSheet": "Bir çalışma kitabında en az bir sayfa olmalıdır.",
+      "sheetAtEdge": "Sayfa daha fazla taşınamaz.",
+      "sheetNameInvalid": "Sayfa adları 1 ile 31 karakter arasında ve benzersiz olmalı, : \\ / ? * [ ] içeremez.",
+      "clipboardDenied": "Tarayıcı panoya erişime izin vermedi."
+    },
+    "cut": "Kes",
+    "copy": "Kopyala",
+    "paste": "Yapıştır",
+    "pastePlainText": "Düz metin olarak yapıştır",
+    "clearContents": "İçeriği temizle",
+    "insert": "Ekle",
+    "delete": "Sil",
+    "insertRowsAbove": "Üste satır ekle",
+    "insertRowsBelow": "Alta satır ekle",
+    "insertColumnsLeft": "Sola sütun ekle",
+    "insertColumnsRight": "Sağa sütun ekle",
+    "deleteRows": "Satırları sil",
+    "deleteColumns": "Sütunları sil",
+    "insertSheet": "Sayfa ekle",
+    "deleteSheet": "Sayfayı sil",
+    "renameSheet": "Yeniden adlandır",
+    "moveSheetLeft": "Sola taşı",
+    "moveSheetRight": "Sağa taşı"
   },
   "editor": {
     "appLabel": "E-tablo düzenleyicisi",
@@ -165,7 +188,11 @@
     "showDetails": "Ayrıntıları göster",
     "openPrompt": "XLSX dosyası aç",
     "sheetTabsLabel": "Sayfalar",
-    "clearExceedsLimit": "Temizleme hücre sınırını aşıyor."
+    "clearExceedsLimit": "Temizleme hücre sınırını aşıyor.",
+    "cellMenuLabel": "Hücre menüsü",
+    "sheetTabMenuLabel": "Sayfa sekmesi menüsü",
+    "renameSheetLabel": "Sayfayı yeniden adlandır",
+    "sheetNamePrefix": "Sayfa"
   },
   "presence": {
     "label": "Katkıda Bulunanlar",

@@ -149,8 +149,31 @@
       "permissionDenied": "Ứng dụng chủ chưa cho phép plugin này dùng lệnh này.",
       "unsupportedPolicy": "Plugin chưa thể chạy lệnh này. Hãy dùng một đợt chỉnh sửa thay thế.",
       "pluginUnavailable": "Plugin không còn hoạt động.",
-      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy."
-    }
+      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy.",
+      "clipboardUnavailable": "Trình duyệt này không cho phép dán từ menu. Hãy dùng phím tắt.",
+      "lastSheet": "Sổ làm việc cần ít nhất một trang tính.",
+      "sheetAtEdge": "Không thể di chuyển trang tính xa hơn.",
+      "sheetNameInvalid": "Tên trang tính cần từ 1 đến 31 ký tự, không trùng lặp và không chứa : \\ / ? * [ ].",
+      "clipboardDenied": "Trình duyệt không cho phép truy cập bảng tạm."
+    },
+    "cut": "Cắt",
+    "copy": "Sao chép",
+    "paste": "Dán",
+    "pastePlainText": "Dán dưới dạng văn bản thuần",
+    "clearContents": "Xóa nội dung",
+    "insert": "Chèn",
+    "delete": "Xóa",
+    "insertRowsAbove": "Chèn hàng phía trên",
+    "insertRowsBelow": "Chèn hàng phía dưới",
+    "insertColumnsLeft": "Chèn cột bên trái",
+    "insertColumnsRight": "Chèn cột bên phải",
+    "deleteRows": "Xóa hàng",
+    "deleteColumns": "Xóa cột",
+    "insertSheet": "Chèn trang tính",
+    "deleteSheet": "Xóa trang tính",
+    "renameSheet": "Đổi tên",
+    "moveSheetLeft": "Di chuyển sang trái",
+    "moveSheetRight": "Di chuyển sang phải"
   },
   "editor": {
     "appLabel": "Trình chỉnh sửa bảng tính",
@@ -165,7 +188,11 @@
     "showDetails": "Hiển thị chi tiết",
     "openPrompt": "Mở tệp XLSX",
     "sheetTabsLabel": "Trang tính",
-    "clearExceedsLimit": "Xóa vượt quá giới hạn ô"
+    "clearExceedsLimit": "Xóa vượt quá giới hạn ô",
+    "cellMenuLabel": "Menu ô",
+    "sheetTabMenuLabel": "Menu tab trang tính",
+    "renameSheetLabel": "Đổi tên trang tính",
+    "sheetNamePrefix": "Trang"
   },
   "presence": {
     "label": "Cộng tác viên",
