@@ -6,6 +6,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { saveEditorDocument } from './editorSave';
 import { createYrsSession, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
+import { RUN_WITH_ALTERNATE_CONTENT, TITLE_WITH_PAGE_BREAK_AND_DRAWING, TOC_ENTRY_WITH_PAGE_REFERENCE, WORD_ROOT } from './__fixtures__/unroundtrippedRuns';
 
 const NS = [
   'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
@@ -28,7 +29,7 @@ const TOC_END = '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:b
 const makeDocx = (body: string) => new Uint8Array(rezipPartsToArrayBuffer(new Map([
   ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
   ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`)],
-  ['word/document.xml', toBytes(`<w:document ${NS}><w:body>${body}${SECT}</w:body></w:document>`)],
+  ['word/document.xml', toBytes(`${body.startsWith(WORD_ROOT) ? '' : `<w:document ${NS}>`}${body.startsWith(WORD_ROOT) ? body : `<w:body>${body}`}${SECT}</w:body></w:document>`)],
 ]))));
 const partOf = (bytes: Uint8Array) => new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
 const count = (xml: string, pattern: RegExp) => xml.match(pattern)?.length ?? 0;
@@ -76,6 +77,12 @@ const CASES: Array<[string, string, Array<keyof typeof EDITS>, Array<[RegExp, nu
     ['clear'], [[/<w:ins w:id="2"/g, 1], [/<w:br w:type="page"\/>/g, 1]]],
   ['a page break before alternate content in a body ending with a page break', `${text('Before')}<w:p><w:r><w:t xml:space="preserve">Section title </w:t></w:r><w:r><w:br w:type="page"/></w:r>${ALTERNATE}</w:p>${text('After')}${PAGE_BREAK_END}`,
     ['clear'], [[/<w:br w:type="page"\/>/g, 2], [/<mc:AlternateContent>/g, 1], [/<mc:Fallback>/g, 1]]],
+  ['a real TOC entry with a nested page reference', `${WORD_ROOT}<w:body>${text('Before')}${TOC_ENTRY_WITH_PAGE_REFERENCE}${TOC_END}${table(text('Cell'))}${text('After')}`,
+    ['clear', 'bold'], [[/w:fldCharType="begin"/g, 2], [/PAGEREF/g, 1]]],
+  ['a real run with alternate content in a cell', `${WORD_ROOT}<w:body>${text('Before')}${table(RUN_WITH_ALTERNATE_CONTENT)}${text('After')}`,
+    ['clear'], [[/<mc:AlternateContent>/g, 1], [/<mc:Fallback>/g, 1]]],
+  ['a real title with a page break and a drawing in a body ending with a page break', `${WORD_ROOT}<w:body>${text('Before')}${TITLE_WITH_PAGE_BREAK_AND_DRAWING}${text('After')}${PAGE_BREAK_END}`,
+    ['clear'], [[/<w:br w:type="page"\/>/g, 2], [/<mc:AlternateContent>/g, 2]]],
 ];
 for (const [saveName, save] of Object.entries(SAVES)) {
   for (const [name, body, edits, kept] of CASES) {
