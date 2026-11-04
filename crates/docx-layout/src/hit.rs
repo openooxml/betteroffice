@@ -427,9 +427,14 @@ fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
         x: hit.x,
         position: hit.doc_start,
     });
+    let mut best_distance = (x - best.x).abs();
     for stop in stops.iter().copied().skip(1) {
-        if stop.x > best.x && x >= (best.x + stop.x) / 2.0 - CARET_MIDPOINT_EPSILON {
+        let distance = (x - stop.x).abs();
+        if distance < best_distance - CARET_MIDPOINT_EPSILON
+            || ((distance - best_distance).abs() <= CARET_MIDPOINT_EPSILON && stop.x > best.x)
+        {
             best = stop;
+            best_distance = distance;
         }
     }
     best.position
@@ -2892,8 +2897,7 @@ mod tests {
                     assert_eq!(rects.len(), 1);
                     assert!((rects[0].x - origins[(from - 10) as usize]).abs() < 0.01);
                     assert!(
-                        (rects[0].x + rects[0].width - origins[(to - 10) as usize]).abs()
-                            < 0.01
+                        (rects[0].x + rects[0].width - origins[(to - 10) as usize]).abs() < 0.01
                     );
                 }
             }
