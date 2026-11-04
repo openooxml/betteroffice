@@ -28,9 +28,11 @@ export async function peerlessClipboard(run: PeerlessPresentation, cut: boolean,
     return { text: story.text.slice(Math.min(selection.anchor, selection.focus), Math.max(selection.anchor, selection.focus)), version: result.version };
   })();
   read.catch(() => {});
-  if (typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function')
-    await navigator.clipboard.write([new ClipboardItem({ 'text/plain': read.then(({ text }) => new Blob([text], { type: 'text/plain' })) })]);
-  else await navigator.clipboard.writeText((await read).text);
+  if (typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function') {
+    const payload = read.then(({ text }) => new Blob([text], { type: 'text/plain' }));
+    payload.catch(() => {});
+    await navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload })]);
+  } else await navigator.clipboard.writeText((await read).text);
   const { version } = await read;
   run.require();
   if (!cut) return null;
