@@ -245,7 +245,7 @@ fn nested_result_bookmarks(result: &str, marker_paths: [&str; 2]) {
 
 fn wrapped_result_bookmarks(open: &str, close: &str, marker_path: &str) {
     let result = format!(
-        r#"<w:r><w:t>Before</w:t></w:r><w:fldSimple w:instr="QUOTE">{open}<w:hyperlink w:anchor="target">{START}</w:hyperlink>{close}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{open}<w:hyperlink w:anchor="target">{STOP}</w:hyperlink>{close}</w:fldSimple><w:r><w:t>After</w:t></w:r>"#
+        r#"<w:r><w:t>Before</w:t></w:r><w:fldSimple w:instr="QUOTE">{open}<w:hyperlink w:anchor="target"><w:r><w:t>X</w:t></w:r>{START}<w:r><w:t>Y</w:t></w:r></w:hyperlink>{close}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{open}<w:hyperlink w:anchor="target"><w:r><w:t>X</w:t></w:r>{STOP}<w:r><w:t>Y</w:t></w:r></w:hyperlink>{close}</w:fldSimple><w:r><w:t>After</w:t></w:r>"#
     );
     nested_result_bookmarks(
         &result,
@@ -260,7 +260,7 @@ fn tracked_result_bookmarks(tag: &str) {
     wrapped_result_bookmarks(
         &format!(r#"<w:sdt><w:sdtPr/><w:sdtContent><w:{tag} w:id="1" w:author="Reviewer">"#),
         &format!("</w:{tag}></w:sdtContent></w:sdt>"),
-        "/content/0/content/0/children/0",
+        "/content/0/content/0/children/1",
     );
 }
 
@@ -275,6 +275,19 @@ fn hyperlink_result_bookmarks(open: &str, close: &str) {
             "/structuredResult/inline/1/children/3",
         ],
     );
+}
+
+fn projected_bookmark_result(result: &str) {
+    let body = format!(
+        "<w:p>{BEGIN}{}{SEPARATE}{result}</w:p><w:p>{END}</w:p>",
+        instruction("QUOTE")
+    );
+    let xml = repacked_field_document(&body, &["AB", ""]);
+    assert_field(&xml, "QUOTE");
+    assert_eq!(xml.matches("<w:bookmarkStart").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:bookmarkEnd").count(), 1, "{xml}");
+    assert_order(&xml, &[START, ">A<", STOP, ">B<"]);
+    assert!(!xml.contains(">X<"), "{xml}");
 }
 
 fn assert_field(xml: &str, instruction: &str) {
@@ -753,7 +766,7 @@ fn result_bookmarks_cross_hyperlink_boundaries_across_paragraphs() {
 
 #[test]
 fn simple_field_children_keep_result_bookmarks_across_paragraphs() {
-    wrapped_result_bookmarks("", "", "/children/0");
+    wrapped_result_bookmarks("", "", "/children/1");
 }
 
 #[test]
@@ -761,7 +774,7 @@ fn inline_control_children_keep_result_bookmarks_across_paragraphs() {
     wrapped_result_bookmarks(
         "<w:sdt><w:sdtPr/><w:sdtContent>",
         "</w:sdtContent></w:sdt>",
-        "/content/0/children/0",
+        "/content/0/children/1",
     );
 }
 
@@ -788,15 +801,41 @@ fn move_to_children_keep_result_bookmarks_across_paragraphs() {
 #[test]
 fn nested_complex_field_results_keep_bookmarks_across_paragraphs() {
     let result = format!(
-        "<w:r><w:t>Before</w:t></w:r>{BEGIN}{}{SEPARATE}{START}{END}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{BEGIN}{}{SEPARATE}{STOP}{END}<w:r><w:t>After</w:t></w:r>",
+        "<w:r><w:t>Before</w:t></w:r>{BEGIN}{}{SEPARATE}<w:r><w:t>X</w:t></w:r>{START}<w:r><w:t>Y</w:t></w:r>{END}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{BEGIN}{}{SEPARATE}<w:r><w:t>X</w:t></w:r>{STOP}<w:r><w:t>Y</w:t></w:r>{END}<w:r><w:t>After</w:t></w:r>",
         instruction("QUOTE"),
         instruction("QUOTE"),
     );
     nested_result_bookmarks(
         &result,
         [
-            "/structuredResult/inline/1/structuredResult/inline/0",
-            "/structuredResult/inline/4/structuredResult/inline/0",
+            "/structuredResult/inline/1/structuredResult/inline/1",
+            "/structuredResult/inline/4/structuredResult/inline/1",
         ],
     );
+}
+
+#[test]
+fn excluded_nested_complex_field_text_does_not_shift_result_bookmarks() {
+    let result = format!(
+        "{BEGIN}{}{SEPARATE}<w:r><w:t>X</w:t></w:r>{END}{START}<w:r><w:t>A</w:t></w:r>{STOP}<w:r><w:t>B</w:t></w:r>",
+        instruction("PAGE")
+    );
+    projected_bookmark_result(&result);
+}
+
+#[test]
+fn nested_field_code_bookmarks_survive_the_result_fallback() {
+    let result = format!(
+        "{BEGIN}{START}{}{SEPARATE}<w:r><w:t>X</w:t></w:r>{END}<w:r><w:t>A</w:t></w:r>{STOP}<w:r><w:t>B</w:t></w:r>",
+        instruction("PAGE")
+    );
+    projected_bookmark_result(&result);
+}
+
+#[test]
+fn excluded_simple_field_text_in_a_hyperlink_does_not_shift_result_bookmarks() {
+    let result = format!(
+        r#"<w:hyperlink w:anchor="target"><w:fldSimple w:instr="AUTHOR"><w:r><w:t>X</w:t></w:r></w:fldSimple>{START}<w:r><w:t>A</w:t></w:r>{STOP}<w:r><w:t>B</w:t></w:r></w:hyperlink>"#
+    );
+    projected_bookmark_result(&result);
 }

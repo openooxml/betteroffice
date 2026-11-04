@@ -6,7 +6,7 @@ use crate::formatting::{
 };
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
-    RunContent, SdtProperties, SimpleField,
+    RunContent, SdtProperties, SimpleField, field_runs,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -422,38 +422,50 @@ fn serialize_simple_field(
     Ok(output)
 }
 
-fn code_runs(node: &InlineNode) -> Vec<&Run> {
-    match node {
-        InlineNode::Run(run) => vec![run],
-        InlineNode::Hyperlink(hyperlink) => hyperlink
-            .children
-            .iter()
-            .filter_map(|child| match child {
-                InlineNode::Run(run) => Some(run),
-                _ => None,
-            })
-            .collect(),
-        InlineNode::SimpleField(field) => field.content.iter().collect(),
-        _ => Vec::new(),
-    }
-}
-
 enum FieldResultItem<'a> {
     Run(&'a Run),
     Bookmark(&'a InlineNode),
 }
 
-fn field_result_items<'a>(nodes: &'a [InlineNode], items: &mut Vec<FieldResultItem<'a>>) {
+fn field_result_children<'a>(
+    nodes: &'a [InlineNode],
+    runs: Vec<&'a Run>,
+    items: &mut Vec<FieldResultItem<'a>>,
+) {
+    let mut runs = runs.into_iter();
     for node in nodes {
+        if matches!(node, InlineNode::Run(_)) {
+            if let Some(run) = runs.next() {
+                items.push(FieldResultItem::Run(run));
+            }
+        } else {
+            field_result_items(std::slice::from_ref(node), false, items);
+        }
+    }
+    items.extend(runs.map(FieldResultItem::Run));
+}
+
+fn field_result_items<'a>(
+    nodes: &'a [InlineNode],
+    projected: bool,
+    items: &mut Vec<FieldResultItem<'a>>,
+) {
+    for node in nodes {
+        let runs = if projected {
+            field_runs(node)
+        } else {
+            Vec::new()
+        };
         match node {
-            InlineNode::Run(run) => items.push(FieldResultItem::Run(run)),
+            InlineNode::Run(_) => items.extend(runs.into_iter().map(FieldResultItem::Run)),
             InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => {
                 items.push(FieldResultItem::Bookmark(node));
             }
-            InlineNode::Hyperlink(link) => field_result_items(
+            InlineNode::Hyperlink(link) => field_result_children(
                 link.structured_children
                     .as_deref()
                     .unwrap_or(&link.children),
+                runs,
                 items,
             ),
             InlineNode::SimpleField(field) => match field
@@ -461,19 +473,21 @@ fn field_result_items<'a>(nodes: &'a [InlineNode], items: &mut Vec<FieldResultIt
                 .as_ref()
                 .and_then(|result| result.inline.as_deref())
             {
-                Some(nodes) => field_result_items(nodes, items),
-                None => items.extend(field.content.iter().map(FieldResultItem::Run)),
+                Some(nodes) => field_result_children(nodes, runs, items),
+                None => items.extend(runs.into_iter().map(FieldResultItem::Run)),
             },
-            InlineNode::ComplexField(field) => match field
-                .structured_result
-                .as_ref()
-                .and_then(|result| result.inline.as_deref())
-            {
-                Some(nodes) => field_result_items(nodes, items),
-                None => items.extend(field.field_result.iter().map(FieldResultItem::Run)),
-            },
-            InlineNode::InlineSdt(sdt) => field_result_items(&sdt.content, items),
-            InlineNode::Tracked(change) => field_result_items(&change.content, items),
+            InlineNode::ComplexField(field) => {
+                for content in [&field.structured_code, &field.structured_result] {
+                    if let Some(nodes) = content
+                        .as_ref()
+                        .and_then(|content| content.inline.as_deref())
+                    {
+                        field_result_items(nodes, false, items);
+                    }
+                }
+            }
+            InlineNode::InlineSdt(sdt) => field_result_items(&sdt.content, false, items),
+            InlineNode::Tracked(change) => field_result_items(&change.content, false, items),
             InlineNode::Math(_) | InlineNode::RawXml(_) => {}
         }
     }
@@ -501,7 +515,7 @@ fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
         return Vec::new();
     };
     let mut items = Vec::new();
-    field_result_items(nodes, &mut items);
+    field_result_items(nodes, true, &mut items);
     let in_place = items
         .iter()
         .filter_map(|item| match item {
@@ -573,7 +587,11 @@ fn serialize_complex_field(
         .and_then(|content| content.inline.as_deref())
         .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
     let in_place = code_nodes.filter(|nodes| {
-        !field.field_code.is_empty() && nodes.iter().flat_map(code_runs).eq(field.field_code.iter())
+        !field.field_code.is_empty()
+            && nodes
+                .iter()
+                .flat_map(field_runs)
+                .eq(field.field_code.iter())
     });
     if let Some(nodes) = in_place {
         for node in nodes {
