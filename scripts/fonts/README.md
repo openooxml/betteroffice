@@ -45,7 +45,10 @@ fontTools as above):
 
 ```sh
 /tmp/fontpack-venv/bin/python scripts/fonts/cjk-slices.py <dir>
+/tmp/fontpack-venv/bin/python scripts/fonts/test_cjk_slices.py
 ```
+
+The second command checks the cutter on a small synthetic CID-keyed face.
 
 It writes `<face>.slices/` and `<face>.slices.sha256` beside each OTF. The
 skeleton keeps every table of the face byte for byte except `CFF `, whose

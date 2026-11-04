@@ -492,8 +492,27 @@ def verify(source, font, outlines, glyph_sets, files, edges, cp_glyphs, chunks, 
             raise ValueError(f"charstring of {name} differs after reassembly")
     for partial in ([], pieces[:1]):
         TTFont(io.BytesIO(reassemble(skeleton, partial)), lazy=False)["CFF "].cff.topDictIndex[0].CharStrings
+    emitted = []
+    for index in range(len(glyph_sets)):
+        data = files["core.bin" if index == 0 else f"c{index:03d}.bin"]
+        (count,) = struct.unpack_from(">I", data)
+        at, entries = 4, {}
+        for _ in range(count):
+            gid, length = struct.unpack_from(">II", data, at)
+            entries[gid] = data[at + 8:at + 8 + length]
+            at += 8 + length
+        if at != len(data):
+            raise ValueError(f"chunk {index} does not end after its entries")
+        for gid, outline in entries.items():
+            if outline != outlines[gid]:
+                raise ValueError(f"chunk {index} carries a wrong outline for glyph {gid}")
+        emitted.append(set(entries))
+    (num_glyphs,) = struct.unpack_from(">I", skeleton, 8)
+    for gid, chunk in enumerate(struct.unpack_from(f">{num_glyphs}H", skeleton, 32)):
+        if chunk != NO_CHUNK and gid not in emitted[chunk]:
+            raise ValueError(f"glyph {gid} maps to chunk {chunk}, which does not carry it")
     chunk_of_glyph = {}
-    for index, gids in enumerate(glyph_sets):
+    for index, gids in enumerate(emitted):
         for gid in gids:
             chunk_of_glyph.setdefault(gid, set()).add(index)
     for index, codepoints in enumerate(chunks):
