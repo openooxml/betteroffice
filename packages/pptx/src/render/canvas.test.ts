@@ -2816,3 +2816,64 @@ test('paints strike rules with raster geometry, colour, clip and transform', asy
     { args: [30, 34, 20, 2], color: '#475467', clipped: true, transformed: true },
   ]);
 });
+
+describe('font coverage before text paints', () => {
+  const run = (text: string, fontFamily: string, x: number): PositionedTextRun => ({
+    text, start: 0, end: text.length, x, width: 20 * text.length, fontId: 1,
+    fontFamily, fontSizePx: 20, bold: false, italic: false, underline: false, color: '#000000',
+    glyphs: [...text].map((_, index) => ({ glyphId: index + 1, cluster: index, x: x + index * 20, advance: 20, xOffset: 0, yOffset: 68 })),
+  });
+  const textBox = (runs: PositionedTextRun[], objectId: number): TextBoxPrimitive => ({
+    kind: 'textBox', objectId, x: 0, y: 0, w: 320, h: 80, anchor: 'top', paragraphs: [],
+    lines: [{ x: 0, y: 0, width: 320, height: 24, baseline: 20, start: 0, end: 10, caretStops: [], runs }],
+  });
+  const list = (): SlideDisplayList => ({
+    contractVersion: 1, width: 320, height: 180,
+    primitives: [
+      textBox([run('かな', 'Noto Sans JP', 0), run('ab', 'Arial', 60)], 1),
+      { kind: 'table', objectId: 2, x: 0, y: 90, w: 320, h: 80, primitives: [textBox([run('漢字', 'Noto Sans JP', 0)], 3)] } as TablePrimitive,
+    ],
+  });
+  const recording = () => {
+    const events: string[] = [];
+    const state: Record<string, unknown> = { font: '' };
+    state.fillText = (text: string) => events.push(`draw ${text} ${state.font}`);
+    const ctx = new Proxy(state, {
+      get: (target, key) => target[key as string] ?? (() => undefined),
+      set: (target, key, value) => { target[key as string] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx, events };
+  };
+
+  test('every family a slide draws, tables included, is prepared with all its text before any text paints', async () => {
+    const { ctx, events } = recording();
+    await paintSlide(ctx, list(), 1, 1, { fontCoverage: {
+      async prepare(family, text) {
+        await Promise.resolve();
+        events.push(`prepare ${family} ${[...text].sort().join('')}`);
+        return family === 'Noto Sans JP' ? 'Noto Sans JP r2' : family;
+      },
+    } });
+    const firstDraw = events.findIndex((event) => event.startsWith('draw'));
+    expect(events.slice(0, firstDraw).sort()).toEqual(['prepare Arial ab', `prepare Noto Sans JP ${[...'かな漢字'].sort().join('')}`]);
+    expect(events.filter((event) => event.startsWith('draw') && event.includes('Noto Sans JP'))
+      .every((event) => event.endsWith('"Noto Sans JP r2"'))).toBe(true);
+    expect(events.some((event) => event.startsWith('draw') && event.endsWith(' Arial'))).toBe(true);
+  });
+
+  test('without a coverage provider text draws with each run\'s own family', async () => {
+    const { ctx, events } = recording();
+    await paintSlide(ctx, list(), 1, 1);
+    expect(events.some((event) => event.includes('prepare'))).toBe(false);
+    expect(events.filter((event) => event.includes('Noto Sans JP')).every((event) => event.endsWith('"Noto Sans JP"'))).toBe(true);
+  });
+
+  test('document text gets its font and is drawn only where the coverage families apply', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const canvas = await readFile(new URL('./canvas.ts', import.meta.url), 'utf8');
+    const fonts = [...canvas.matchAll(/ctx\.font = ([^;]+);/g)].map((match) => match[1]);
+    expect(fonts).toEqual(['`${style}${weight}${run.fontSizePx}px ${quoteFamily(families(run.fontFamily))}`', "'12px sans-serif'"]);
+    const chunks = await readFile(new URL('./textChunks.ts', import.meta.url), 'utf8');
+    expect(chunks.includes('.font =')).toBe(false);
+  });
+});

@@ -173,6 +173,41 @@ test('a listener that throws neither stops the others nor rejects the load', asy
   expect(seen).toEqual([2]);
 });
 
+test('ensureText loads the chunks of the characters it is given and resolves once they draw', async () => {
+  const reads: string[] = [];
+  const face = await openProgressiveFace(jpRef, transport(reads));
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  const characterIn = (chunk: number) => {
+    let codepoint = 0;
+    while (skeleton.chunkOfCodepoint(codepoint) !== chunk) codepoint += 1;
+    return String.fromCodePoint(codepoint);
+  };
+  reads.length = 0;
+  const revision = await face.ensureText(characterIn(70) + characterIn(71) + characterIn(70));
+  expect(reads.sort()).toEqual([index.chunks[69]!.file, index.chunks[70]!.file].sort());
+  expect(revision).toBe(face.revision);
+  reads.length = 0;
+  expect(await face.ensureText(characterIn(70) + 'A')).toBe(revision);
+  expect(reads).toEqual([]);
+});
+
+test('ensureText rejects when a character\'s chunk fails, and loads it on a later call', async () => {
+  const reads: string[] = [];
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const broken = index.chunks[11]!.file;
+  let tampering = true;
+  const face = await openProgressiveFace(jpRef, transport(reads, (file) => tampering && file === broken));
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  let codepoint = 0;
+  while (skeleton.chunkOfCodepoint(codepoint) !== 12) codepoint += 1;
+  const text = String.fromCodePoint(codepoint);
+  await expect(face.ensureText(text)).rejects.toThrow('encoded bytes');
+  tampering = false;
+  expect(await face.ensureText(text)).toBe(face.revision);
+  expect(reads.filter((file) => file === broken)).toHaveLength(2);
+});
+
 test('a chunk that fails its checks rejects and loads on a later request', async () => {
   const reads: string[] = [];
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
