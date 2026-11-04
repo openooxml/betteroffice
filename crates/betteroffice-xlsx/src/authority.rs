@@ -100,6 +100,9 @@ pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 thread_local! {
     static FORCE_FULL_MATERIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAST_SET_CELL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FAST_RANGE_FORMAT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FULL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LOCAL_HYDRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FINGERPRINT_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -131,6 +134,21 @@ pub(crate) fn with_full_materialization<T>(f: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 pub(crate) fn fast_set_cell_count() -> usize {
     FAST_SET_CELL_COUNT.get()
+}
+
+#[cfg(test)]
+pub(crate) fn fast_range_format_count() -> usize {
+    FAST_RANGE_FORMAT_COUNT.get()
+}
+
+#[cfg(test)]
+pub(crate) fn full_materializations() -> usize {
+    FULL_MATERIALIZATIONS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn local_hydrations() -> usize {
+    LOCAL_HYDRATIONS.get()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -749,6 +767,8 @@ fn with_schema_six_key_validation<T>(body: impl FnOnce() -> T) -> T {
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
     projection_valid: Arc<AtomicBool>,
+    /// Authored styles needing a synthesized plain xf; `u64::MAX` means unknown.
+    plain_style_cells: AtomicU64,
     snapshot_revision: Arc<AtomicU64>,
     base: Arc<WorkbookBase>,
     history: SheetOrderHistory,
@@ -765,6 +785,17 @@ struct SetCellSync {
     sheet: Sheet,
     at: CellRef,
     formatted: bool,
+    plain_style_cells: Option<u64>,
+}
+
+pub(crate) struct RangeFormatSync {
+    revision: u64,
+    cell_formats: MapRef,
+    formats: Vec<(String, String)>,
+    styles: MapRef,
+    cells: Vec<(String, Option<Any>)>,
+    sheet_order: SheetOrderEntry,
+    plain_style_cells: u64,
 }
 
 impl WorkbookAuthority {
@@ -966,6 +997,7 @@ impl WorkbookAuthority {
         Self {
             doc,
             projection_valid,
+            plain_style_cells: AtomicU64::new(u64::MAX),
             snapshot_revision,
             base,
             history: SheetOrderHistory::default(),
@@ -1124,6 +1156,9 @@ impl WorkbookAuthority {
     }
 
     pub(crate) fn set_snapshot_projection_valid(&mut self, valid: bool) {
+        if !valid || !self.projection_valid.load(Ordering::Relaxed) {
+            self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
+        }
         self.projection_valid.store(valid, Ordering::Relaxed);
     }
 
@@ -1228,6 +1263,9 @@ impl WorkbookAuthority {
             }
             drop(txn);
             self.apply_history(history);
+            if let Some(count) = prepared.plain_style_cells {
+                self.plain_style_cells.store(count, Ordering::Relaxed);
+            }
             self.projection_valid.store(true, Ordering::Relaxed);
             #[cfg(test)]
             FAST_SET_CELL_COUNT.set(FAST_SET_CELL_COUNT.get() + 1);
@@ -1271,6 +1309,7 @@ impl WorkbookAuthority {
             && at.col < MAX_COLS
             && !matches!(cell.value, CellValue::Number { value } if !value.is_finite())
         {
+            self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
             self.projection_valid.store(true, Ordering::Relaxed);
         }
         Ok(self.encode_ops_update(state_vector))
@@ -1303,7 +1342,7 @@ impl WorkbookAuthority {
         }
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
-        let (mut styles, _) =
+        let (mut styles, indices) =
             materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
@@ -1339,6 +1378,25 @@ impl WorkbookAuthority {
             .transpose()
             .ok()?;
         let formatted = style != authored_style;
+        let was_plain = authored_style
+            .as_ref()
+            .is_some_and(|key| indices.get(key) == Some(&None));
+        let is_plain = cell
+            .style
+            .map(|index| style_needs_plain(&styles, index, &indices, &self.base.styles))
+            .transpose()
+            .ok()?
+            .unwrap_or(false);
+        let count = self.plain_style_cells.load(Ordering::Relaxed);
+        let plain_style_cells = if count == u64::MAX {
+            None
+        } else {
+            Some(
+                count
+                    .checked_sub(u64::from(was_plain))?
+                    .checked_add(u64::from(is_plain))?,
+            )
+        };
         let mut target = Sheet::default();
         target.set_cell(*at, cell.clone().into());
         Some(SetCellSync {
@@ -1349,7 +1407,176 @@ impl WorkbookAuthority {
             sheet: target,
             at: *at,
             formatted,
+            plain_style_cells,
         })
+    }
+
+    pub(crate) fn prepare_range_format_sync(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+    ) -> Option<RangeFormatSync> {
+        #[cfg(test)]
+        if force_full_materialization() {
+            return None;
+        }
+        let [op] = ops else {
+            return None;
+        };
+        let (sheet, range) = match op {
+            Op::PatchRangeStyle { sheet, range, .. }
+            | Op::SetRangeNumberFormat { sheet, range, .. } => (*sheet, *range),
+            _ => return None,
+        };
+        let plain_style_cells = self.plain_style_cells.load(Ordering::Relaxed);
+        if !matches!(origin, SyncOrigin::User | SyncOrigin::Agent)
+            || !self.projection_valid.load(Ordering::Relaxed)
+            || plain_style_cells == u64::MAX
+            || self.schema_version().ok()? != SCHEMA_VERSION
+            || !self.has_current_base_fingerprint()
+            || range.start.row > range.end.row
+            || range.start.col > range.end.col
+            || range.end.row >= MAX_ROWS
+            || range.end.col >= MAX_COLS
+            || (u64::from(range.end.row - range.start.row) + 1)
+                * (u64::from(range.end.col - range.start.col) + 1)
+                > crate::workbook::MAX_RANGE_CELLS
+        {
+            return None;
+        }
+        let txn = self.doc.transact();
+        let cell_formats = txn.get_map(CELL_FORMATS)?;
+        let (mut stylesheet, indices) =
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+        let plain = (plain_style_cells != 0).then(|| stylesheet.plain_xf());
+        stylesheet.bind_plain_xf();
+        let order = txn.get_array(SHEET_ORDER)?;
+        let keys = sheet_keys(&order, &txn).ok()?;
+        self.validate_sync_state(&keys, &keys).ok()?;
+        let key = keys.get(sheet.0 as usize)?;
+        let sheets = txn.get_map(SHEETS)?;
+        let sheet_map = sheets.get(&txn, key)?.cast::<MapRef>().ok()?;
+        let contents = nested_map(&sheet_map, &txn, CONTENTS).ok()?;
+        let styles = nested_map(&sheet_map, &txn, STYLES).ok()?;
+        let mut target = Sheet::default();
+        if let Some(base) = base_sheet_index(key) {
+            target.col_styles = self.base.col_styles.get(base).cloned().unwrap_or_default();
+            target.row_styles = self.base.row_styles.get(base).cloned().unwrap_or_default();
+        }
+        materialize_style_defaults(&mut target, &sheet_map, &txn).ok()?;
+        let mut previous_plain = 0;
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let at = CellRef::new(row, col);
+                let key = cell_key(at);
+                let mut cell = match contents.get(&txn, &key) {
+                    Some(Out::Any(value)) => Some(content_from_any(&value).ok()?),
+                    Some(_) => return None,
+                    None => None,
+                };
+                if let Some(value) = styles.get(&txn, &key) {
+                    let key = value.cast::<String>().ok()?;
+                    let index = *indices.get(&key)?;
+                    let style = match index {
+                        Some(index) => index,
+                        None => {
+                            previous_plain += 1;
+                            plain?
+                        }
+                    };
+                    cell.get_or_insert_default().style = Some(style);
+                }
+                if let Some(cell) = cell {
+                    target.set_cell(at, cell);
+                }
+            }
+        }
+        let mut model = WorkbookModel {
+            styles: stylesheet,
+            sheets: vec![target],
+            ..WorkbookModel::default()
+        };
+        let mut op = op.clone();
+        match &mut op {
+            Op::PatchRangeStyle { sheet, .. } | Op::SetRangeNumberFormat { sheet, .. } => {
+                *sheet = SheetId(0);
+            }
+            _ => return None,
+        }
+        xlsx_ops::apply_in_place(&mut model, &op).ok()?;
+        let mut formats = vec![cell_format_entry(&CellFormat::default()).ok()?];
+        for index in 0..model.styles.cell_xfs.len() {
+            let index = u32::try_from(index).ok()?;
+            formats.push(style_entry(&model.styles, index).ok()?);
+        }
+        let mut catalog = read_cell_format_catalog(&cell_formats, &txn).ok()?;
+        for (key, payload) in &formats {
+            catalog.insert(key.clone(), decode_cell_format_entry(key, payload).ok()?);
+        }
+        let (_, next_indices) = materialize_cell_format_catalog(catalog, &self.base.styles).ok()?;
+        let mut cells = Vec::new();
+        let mut next_plain = 0;
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let at = CellRef::new(row, col);
+                let index = model.sheets[0].cell(at).and_then(|cell| cell.style);
+                let style = index
+                    .map(|index| style_key(&model.styles, index))
+                    .transpose()
+                    .ok()?;
+                if style
+                    .as_ref()
+                    .is_some_and(|key| next_indices.get(key) == Some(&None))
+                {
+                    next_plain += 1;
+                }
+                cells.push((cell_key(at), style.map(Any::from)));
+            }
+        }
+        Some(RangeFormatSync {
+            revision: self.snapshot_revision.load(Ordering::Relaxed),
+            cell_formats,
+            formats,
+            styles,
+            cells,
+            sheet_order: SheetOrderEntry {
+                before: keys.clone(),
+                after: keys,
+            },
+            plain_style_cells: plain_style_cells
+                .checked_sub(previous_plain)?
+                .checked_add(next_plain)?,
+        })
+    }
+
+    pub(crate) fn commit_range_format_sync(
+        &mut self,
+        prepared: RangeFormatSync,
+        history: LocalHistory,
+    ) -> Result<Option<Vec<u8>>, AuthorityError> {
+        if self.snapshot_revision.load(Ordering::Relaxed) != prepared.revision {
+            return Err(AuthorityError::InvalidState(
+                "prepared range format baseline changed".into(),
+            ));
+        }
+        let state_vector = self.doc.transact().state_vector();
+        let mut txn = self.doc.transact_mut_with(UNTRACKED_ORIGIN);
+        for (key, payload) in prepared.formats {
+            prepared.cell_formats.try_update(&mut txn, key, payload);
+        }
+        for (key, style) in prepared.cells {
+            sync_optional(&prepared.styles, &mut txn, &key, style);
+        }
+        drop(txn);
+        if history == LocalHistory::SheetOrder {
+            self.apply_history(HistoryAction::Push(prepared.sheet_order));
+        }
+        self.plain_style_cells
+            .store(prepared.plain_style_cells, Ordering::Relaxed);
+        self.projection_valid.store(true, Ordering::Relaxed);
+        #[cfg(test)]
+        FAST_RANGE_FORMAT_COUNT.set(FAST_RANGE_FORMAT_COUNT.get() + 1);
+        Ok(self.encode_ops_update(Some(state_vector)))
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -2214,6 +2441,8 @@ impl WorkbookAuthority {
         &self,
         strict: bool,
     ) -> Result<(WorkbookModel, WorkbookStructure), String> {
+        #[cfg(test)]
+        FULL_MATERIALIZATIONS.set(FULL_MATERIALIZATIONS.get() + 1);
         let txn = self.doc.transact();
         if strict {
             require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
@@ -2259,6 +2488,7 @@ impl WorkbookAuthority {
         let mut model = self.base.workbook();
         model.styles = styles;
         let mut plain = None;
+        let mut plain_style_cells = 0;
         let expected_sheet_keys = sheet_schema_keys(version);
         let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
@@ -2317,7 +2547,10 @@ impl WorkbookAuthority {
                 &sheet_map,
                 &txn,
                 &style_indices,
-                &mut || *plain.get_or_insert_with(|| model.styles.plain_xf()),
+                &mut || {
+                    plain_style_cells += 1;
+                    *plain.get_or_insert_with(|| model.styles.plain_xf())
+                },
                 version,
                 SheetFallbacks {
                     freeze_pane,
@@ -2417,6 +2650,8 @@ impl WorkbookAuthority {
             baseline_merges,
             shared_types,
         };
+        self.plain_style_cells
+            .store(plain_style_cells, Ordering::Relaxed);
         self.projection_valid.store(true, Ordering::Relaxed);
         Ok((model, structure))
     }
@@ -3027,6 +3262,8 @@ fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
 }
 
 fn hydrate_local_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
+    #[cfg(test)]
+    LOCAL_HYDRATIONS.set(LOCAL_HYDRATIONS.get() + 1);
     let update = decode_local_update_v1(update)?;
     doc.transact_mut_with(HYDRATE_ORIGIN)
         .apply_update(update)
@@ -4315,23 +4552,40 @@ fn materialize_cell_formats<T: ReadTxn>(
     txn: &T,
     base: &Stylesheet,
 ) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
+    materialize_cell_format_catalog(read_cell_format_catalog(map, txn)?, base)
+}
+
+fn decode_cell_format_entry(key: &str, payload: &str) -> Result<StoredCellFormat, String> {
+    if payload.len() > MAX_CELL_FORMAT_BYTES {
+        return Err(format!("cell format {key} exceeds its size limit"));
+    }
+    let stored = serde_json::from_str::<StoredCellFormat>(payload)
+        .map_err(|error| format!("invalid cell format {key}: {error}"))?;
+    let (expected, canonical) = stored_format_entry(&stored)?;
+    if key != expected || payload != canonical {
+        return Err(format!("cell format {key} is not canonical"));
+    }
+    Ok(stored)
+}
+
+fn read_cell_format_catalog<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+) -> Result<BTreeMap<String, StoredCellFormat>, String> {
     let mut catalog = BTreeMap::new();
     for (key, value) in map.iter(txn) {
         let Out::Any(Any::String(payload)) = value else {
             return Err(format!("cell format {key} is not a string"));
         };
-        if payload.len() > MAX_CELL_FORMAT_BYTES {
-            return Err(format!("cell format {key} exceeds its size limit"));
-        }
-        let stored = serde_json::from_str::<StoredCellFormat>(&payload)
-            .map_err(|error| format!("invalid cell format {key}: {error}"))?;
-        let (expected, canonical) = stored_format_entry(&stored)?;
-        if key != expected || *payload != canonical {
-            return Err(format!("cell format {key} is not canonical"));
-        }
-        catalog.insert(key.to_string(), stored);
+        catalog.insert(key.to_string(), decode_cell_format_entry(key, &payload)?);
     }
+    Ok(catalog)
+}
 
+fn materialize_cell_format_catalog(
+    catalog: BTreeMap<String, StoredCellFormat>,
+    base: &Stylesheet,
+) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
     let mut styles = base.clone();
     styles.preserve_style_identity();
     let mut known = BTreeMap::new();
@@ -4481,6 +4735,31 @@ fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
         return Err(format!("cell style index {style} is out of range"));
     }
     style_entry(stylesheet, style).map(|(key, _)| key)
+}
+
+fn style_needs_plain(
+    stylesheet: &Stylesheet,
+    index: u32,
+    indices: &BTreeMap<String, Option<u32>>,
+    base: &Stylesheet,
+) -> Result<bool, String> {
+    let key = style_key(stylesheet, index)?;
+    if let Some(index) = indices.get(&key) {
+        return Ok(index.is_none());
+    }
+    if stylesheet.format_source(index).1.is_some()
+        || stylesheet.cell_format(Some(index)) != CellFormat::default()
+    {
+        return Ok(false);
+    }
+    for index in 0..base.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        if style_key(base, index)? == key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn style_entry(stylesheet: &Stylesheet, index: u32) -> Result<(String, String), String> {
@@ -7902,6 +8181,83 @@ mod tests {
         );
         assert_eq!(fast.encode_state_as_update_v1(), before);
         assert_eq!(fast_set_cell_count(), count);
+    }
+
+    #[test]
+    fn range_format_sync_preserves_synthesized_plain_formats() {
+        let mut model = rich_model();
+        model.styles.fonts.push(xlsx_model::Font {
+            bold: true,
+            ..xlsx_model::Font::default()
+        });
+        model.styles.cell_xfs[0].font = Some(0);
+        let mut fast = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let mut oracle = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let plain = cell_format_entry(&CellFormat::default()).unwrap().0;
+        for authority in [&fast, &oracle] {
+            let mut txn = authority.doc.transact_mut();
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            let styles = nested_map(&sheet, &txn, STYLES).unwrap();
+            styles.insert(&mut txn, "9:9", plain.clone());
+            styles.insert(&mut txn, "0:0", plain.clone());
+        }
+        fast.materialize().unwrap();
+        oracle.materialize().unwrap();
+        let count = fast_range_format_count();
+        for op in [
+            Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("B2:C3").unwrap(),
+                format: xlsx_ops::NumberFormatMutation::Currency,
+            },
+            Op::PatchRangeStyle {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:C3").unwrap(),
+                patch: xlsx_ops::StylePatch {
+                    bold: Some(false),
+                    ..xlsx_ops::StylePatch::default()
+                },
+            },
+            Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:J10").unwrap(),
+                format: xlsx_ops::NumberFormatMutation::Automatic,
+            },
+        ] {
+            let ops = [op];
+            let prepared = fast
+                .prepare_range_format_sync(&ops, SyncOrigin::User)
+                .unwrap();
+            let update = fast
+                .commit_range_format_sync(prepared, LocalHistory::SheetOrder)
+                .unwrap();
+            let staged = with_full_materialization(|| {
+                oracle.stage_standalone_ops_v1(&ops, SyncOrigin::User, &model.styles, None)
+            })
+            .unwrap();
+            let expected = oracle
+                .adopt_local_update(staged, LocalHistory::SheetOrder)
+                .unwrap();
+            assert_eq!(update, expected);
+            assert_eq!(
+                fast.encode_state_as_update_v1(),
+                oracle.encode_state_as_update_v1()
+            );
+            oracle.materialize().unwrap();
+            assert_eq!(
+                fast.plain_style_cells.load(Ordering::Relaxed),
+                oracle.plain_style_cells.load(Ordering::Relaxed)
+            );
+        }
+        assert_eq!(fast_range_format_count(), count + 3);
+        assert_eq!(fast.materialize().unwrap(), oracle.materialize().unwrap());
+        assert_eq!(fast.history.undo, oracle.history.undo);
+        assert_eq!(fast.history.redo, oracle.history.redo);
     }
 
     #[test]

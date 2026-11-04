@@ -1,5 +1,8 @@
 use super::*;
-use crate::authority::{fast_set_cell_count, with_full_materialization};
+use crate::authority::{
+    fast_range_format_count, fast_set_cell_count, full_materializations, local_hydrations,
+    with_full_materialization,
+};
 
 pub(super) fn r(a1: &str) -> CellRef {
     CellRef::parse_a1(a1).unwrap()
@@ -263,8 +266,12 @@ impl Lockstep {
 
     fn with_rand_seed(collaborative: bool, rand_seed: Option<u32>) -> Self {
         let bytes = workbook_bytes();
-        let fast = open_identical(&bytes, collaborative, rand_seed);
-        let oracle = open_identical(&bytes, collaborative, rand_seed);
+        Self::from_bytes(&bytes, collaborative, rand_seed)
+    }
+
+    fn from_bytes(bytes: &[u8], collaborative: bool, rand_seed: Option<u32>) -> Self {
+        let fast = open_identical(bytes, collaborative, rand_seed);
+        let oracle = open_identical(bytes, collaborative, rand_seed);
         let fast_events = Arc::new(Mutex::new(Vec::new()));
         let oracle_events = Arc::new(Mutex::new(Vec::new()));
         let events = fast_events.clone();
@@ -329,6 +336,10 @@ impl Lockstep {
         );
         assert_eq!(self.fast.preserved.axes, self.oracle.preserved.axes);
         assert_eq!(self.fast.preserved.created, self.oracle.preserved.created);
+        assert_eq!(
+            self.fast.sheet_info().unwrap(),
+            self.oracle.sheet_info().unwrap()
+        );
         let fast_events = std::mem::take(&mut *self.fast_events.lock().unwrap());
         let oracle_events = std::mem::take(&mut *self.oracle_events.lock().unwrap());
         assert_eq!(fast_events, oracle_events, "events at step {}", self.step);
@@ -366,6 +377,209 @@ impl Lockstep {
             workbook.edit_cell(SheetId(sheet), at, input, options())
         })
     }
+}
+
+fn assert_range_format_avoids_staging(op: Op) {
+    for observed in [false, true] {
+        for edited in [false, true] {
+            let mut workbook = open_identical(&workbook_bytes(), false, None);
+            let _subscription = observed.then(|| workbook.observe_update_v1(|_| {}).unwrap());
+            if edited {
+                workbook.edit_cell(SheetId(0), r("H9"), "5", options()).unwrap();
+            }
+            let materializations = full_materializations();
+            let hydrations = local_hydrations();
+            let fast = fast_range_format_count();
+            assert!(workbook.apply_ops(vec![op.clone()], options()).unwrap().applied);
+            assert_eq!(full_materializations(), materializations);
+            assert_eq!(local_hydrations(), hydrations);
+            assert_eq!(fast_range_format_count(), fast + 1);
+        }
+    }
+}
+
+#[test]
+fn bounded_style_patch_avoids_materialization_and_hydration() {
+    assert_range_format_avoids_staging(Op::PatchRangeStyle {
+        sheet: SheetId(0),
+        range: CellRange::parse_a1("A1:C3").unwrap(),
+        patch: StylePatch {
+            bold: Some(true),
+            fill_color: Some("#123456".into()),
+            ..StylePatch::default()
+        },
+    });
+}
+
+#[test]
+fn bounded_number_format_avoids_materialization_and_hydration() {
+    assert_range_format_avoids_staging(Op::SetRangeNumberFormat {
+        sheet: SheetId(0),
+        range: CellRange::parse_a1("B2:C3").unwrap(),
+        format: NumberFormatMutation::Currency,
+    });
+}
+
+#[test]
+fn collaborative_and_compound_range_formats_keep_staging() {
+    for collaborative in [false, true] {
+        let mut pair = Lockstep::new(collaborative);
+        let count = fast_range_format_count();
+        let hydrations = local_hydrations();
+        pair.step(true, |workbook| {
+            let op = Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:C3").unwrap(),
+                format: NumberFormatMutation::Currency,
+            };
+            let ops = if collaborative {
+                vec![op]
+            } else {
+                vec![op.clone(), op]
+            };
+            workbook.apply_ops(ops, options())
+        })
+        .unwrap();
+        assert_eq!(fast_range_format_count(), count);
+        assert!(local_hydrations() > hydrations);
+    }
+}
+
+#[test]
+fn range_formats_match_full_materialization_and_history() {
+    let mut model = Workbook::open(&workbook_bytes()).unwrap().model().clone();
+    model.sheets[0]
+        .merges
+        .push(CellRange::parse_a1("E6:F7").unwrap());
+    model.sheets[0].row_styles.insert(6, 1);
+    model.sheets[0].col_styles.push(xlsx_model::ColStyle {
+        first: 4,
+        last: 6,
+        xf: 1,
+    });
+    let bytes = Workbook::from_model(model).unwrap().save().unwrap();
+    let mut pair = Lockstep::from_bytes(&bytes, false, None);
+    let fast = fast_range_format_count();
+    let patches = [
+        StylePatch {
+            bold: Some(true),
+            fill_color: Some("#123456".into()),
+            ..StylePatch::default()
+        },
+        StylePatch {
+            bold: Some(true),
+            fill_color: Some("#123456".into()),
+            ..StylePatch::default()
+        },
+        StylePatch {
+            clear: vec![
+                xlsx_ops::StyleProperty::Bold,
+                xlsx_ops::StyleProperty::FillColor,
+            ],
+            ..StylePatch::default()
+        },
+        StylePatch {
+            border: Some(xlsx_ops::BorderPatch {
+                preset: Some(BorderPreset::Outer),
+                color: Some("#abcdef".into()),
+                ..xlsx_ops::BorderPatch::default()
+            }),
+            ..StylePatch::default()
+        },
+    ];
+    for (range, patch) in ["A1:C3", "E6:G8", "A1:G8", "E6:F7"]
+        .into_iter()
+        .zip(patches)
+    {
+        pair.step(true, |workbook| {
+            workbook.patch_range_style(
+                SheetId(0),
+                CellRange::parse_a1(range).unwrap(),
+                patch.clone(),
+                options(),
+            )
+        })
+        .unwrap();
+    }
+    for (range, format) in [
+        ("B2:C3", NumberFormatMutation::Currency),
+        ("E6:G8", NumberFormatMutation::Currency),
+        ("A1:G8", NumberFormatMutation::IncreaseDecimal),
+        ("A1:G8", NumberFormatMutation::DecreaseDecimal),
+        ("A1:G8", NumberFormatMutation::Automatic),
+        ("D2:F7", NumberFormatMutation::PlainText),
+        ("E6:F7", NumberFormatMutation::Date),
+        (
+            "E6:F7",
+            NumberFormatMutation::Custom {
+                pattern: "0.0000".into(),
+            },
+        ),
+    ] {
+        pair.step(true, |workbook| {
+            workbook.set_range_number_format(
+                SheetId(0),
+                CellRange::parse_a1(range).unwrap(),
+                format.clone(),
+                options(),
+            )
+        })
+        .unwrap();
+    }
+    assert_eq!(fast_range_format_count(), fast + 12);
+    let depth = pair.fast.history_state().undo_depth;
+    for _ in 0..depth {
+        pair.step(true, |workbook| workbook.undo(options())).unwrap();
+    }
+    for _ in 0..depth {
+        pair.step(true, |workbook| workbook.redo(options())).unwrap();
+    }
+}
+
+#[test]
+fn invalid_range_format_leaves_state_and_history_unchanged() {
+    let mut pair = Lockstep::new(false);
+    pair.edit(0, r("A1"), "17").unwrap();
+    pair.step(true, |workbook| workbook.undo(options())).unwrap();
+    let model = pair.fast.model().clone();
+    let state = pair.fast.encode_state_as_update_v1();
+    let history = pair.fast.history_state();
+    let version = pair.fast.version();
+    let info = pair.fast.sheet_info().unwrap();
+    let bytes = pair.fast.save().unwrap();
+    let count = fast_range_format_count();
+    for patch in [
+        StylePatch {
+            font_size: Some(0.0),
+            ..StylePatch::default()
+        },
+        StylePatch {
+            font_family: Some("f".repeat(70_000)),
+            ..StylePatch::default()
+        },
+    ] {
+        pair.fast.authority.materialize().unwrap();
+        pair.oracle.authority.materialize().unwrap();
+        assert!(
+            pair.step(true, |workbook| {
+                workbook.patch_range_style(
+                    SheetId(0),
+                    CellRange::parse_a1("A1:C3").unwrap(),
+                    patch.clone(),
+                    options(),
+                )
+            })
+            .is_err()
+        );
+        assert_eq!(pair.fast.model(), &model);
+        assert_eq!(pair.fast.encode_state_as_update_v1(), state);
+        assert_eq!(pair.fast.history_state(), history);
+        assert_eq!(pair.fast.version(), version);
+        assert_eq!(pair.fast.sheet_info().unwrap(), info);
+        assert_eq!(pair.fast.save().unwrap(), bytes);
+        assert_eq!(fast_range_format_count(), count);
+    }
+    pair.step(true, |workbook| workbook.redo(options())).unwrap();
 }
 
 #[test]
