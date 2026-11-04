@@ -55,6 +55,11 @@ test('default editor reaches the peerless surface only through a dynamic import'
   expect([...seen].map((path) => relative(root, path))).not.toContain('packages/pptx-react/src/worker/PeerlessPptxSurface.tsx');
   expect([...seen].filter((path) => /\/worker\/(?:Peerless|peerless|createPeerless|usePeerless)/.test(path))).toEqual([]);
   expect(seen.has(resolve(root, 'shared/textSelection.ts'))).toBe(false);
+  for (const name of ['components/ProposalDetails.tsx', 'components/ProposalsPanel.tsx',
+    'components/proposalLabels.ts', 'worker/PeerlessReview.tsx']) {
+    expect(seen.has(resolve(root, `packages/pptx-react/src/${name}`))).toBe(false);
+  }
+  expect(deferred.has(resolve(root, 'packages/pptx-react/src/components/ProposalDetails.tsx'))).toBe(true);
   expect(deferred.has(resolve(root, 'packages/pptx-react/src/worker/PeerlessPptxSurface.tsx'))).toBe(true);
 });
 
@@ -93,6 +98,10 @@ test('default editor static chunks exclude the peerless core', async () => {
     /packages\/pptx-react\/src\/commands\/workerInputCoordinator\.ts$/,
     /packages\/pptx-react\/src\/PptxEditorContent\.tsx$/,
     /packages\/pptx-react\/src\/PptxLegacyEditorSession\.tsx$/,
+    /packages\/pptx-react\/src\/components\/ProposalDetails\.tsx$/,
+    /packages\/pptx-react\/src\/components\/ProposalsPanel\.tsx$/,
+    /packages\/pptx-react\/src\/components\/proposalLabels\.ts$/,
+    /packages\/pptx-react\/src\/worker\/PeerlessReview\.tsx$/,
     /packages\/pptx\/src\/session\/editorSession\.ts$/,
     /packages\/pptx\/src\/session\/editPeer\.ts$/,
     /packages\/pptx\/src\/session\/client\.ts$/,

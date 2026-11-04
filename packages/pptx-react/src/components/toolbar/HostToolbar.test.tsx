@@ -59,6 +59,32 @@ async function settle() {
 }
 
 describe('host-composed PPTX toolbar', () => {
+  test('loads proposal labels and selects a proposal through the lazy review picker', async () => {
+    const available = [
+      { id: 'p1', label: '1. Agent', stale: false },
+      { id: 'p2', label: '2. Agent', stale: false },
+    ];
+    const { harness } = mount(<ToolbarCommandSelect id="proposalSelect" />, {
+      proposals: { open: true, pending: available, canvas: { available, selectedId: 'p1', diff: false } },
+    });
+    const picker = await screen().findByRole('combobox', { name: 'Changes on this slide' });
+    expect((picker as HTMLSelectElement).value).toBe('p1');
+    expect(within(picker).getByRole('option', { name: '1. Agent' })).toBeDefined();
+    fireEvent.change(picker, { target: { value: 'p2' } });
+    await settle();
+    expect(harness.calls).toEqual([{ id: 'proposalSelect', args: { proposalId: 'p2' } }]);
+  });
+
+  test('the lazy review picker retains its disabled reason and refuses selection', async () => {
+    const { harness } = mount(<ToolbarCommandSelect id="proposalSelect" />, { proposals: null });
+    const picker = await screen().findByRole('combobox', { name: 'Changes on this slide' });
+    expect(picker.getAttribute('aria-disabled')).toBe('true');
+    expect(picker.title).toBe('Proposals are not available.');
+    fireEvent.change(picker, { target: { value: 'p1' } });
+    await settle();
+    expect(harness.calls).toEqual([]);
+  });
+
   test('arranges built-in controls and a host action from public exports only', async () => {
     let shared = 0;
     const { harness } = mount(
