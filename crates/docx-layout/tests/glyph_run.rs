@@ -4,7 +4,7 @@ use docx_layout::display_list::{
     DisplayList, GlyphRunPrimitive, Primitive, TextRunPrimitive, build_display_list_json,
     build_display_list_json_with_fonts,
 };
-use docx_layout::hit::{hit_test, range_rects};
+use docx_layout::hit::{caret_rect, hit_test, range_rects};
 use ooxml_text::{FontId, FontStore, ShapeDirection, kern_features, shape, shape_with_direction};
 
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -1502,6 +1502,69 @@ fn glyph_run_trailing_spacing_separates_adjacent_runs_and_tabs() {
             let last = runs[0].glyphs.last().unwrap();
             assert!((last.x + last.advance - runs[1].glyphs[0].x).abs() < 0.001);
             assert_tracking_width(&input, &list);
+        }
+    }
+}
+
+#[test]
+fn spaced_run_carets_hits_and_selection_follow_painted_glyphs() {
+    let store = store_with_liberation();
+    for twips in [40.0, -20.0] {
+        let spacing = twips / 1440.0 * 96.0;
+        let mut input = tracking_input(&store, "WimA", Some(spacing), FRAG_WIDTH, false);
+        input["measured"][0]["block"]["runs"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "kind": "text", "text": "BC", "pmStart": 5, "pmEnd": 7,
+                "fontFamily": "Liberation Sans", "fontSize": 12.0
+            }));
+        input["measured"][0]["block"]["pmEnd"] = serde_json::json!(8);
+        measure_tracking_input(&store, &mut input, FRAG_WIDTH);
+        for whole_runs in [false, true] {
+            let list = tracking_list(&store, &input, whole_runs, true);
+            let runs = glyph_runs(&list);
+            let mut origins = std::collections::BTreeMap::new();
+            for run in &runs {
+                for glyph in &run.glyphs {
+                    origins.insert(run.attrs.doc_start.unwrap() + glyph.cluster as i64, glyph.x);
+                }
+            }
+            assert_eq!(origins.len(), 6);
+            let baseline = runs[0].glyphs[0].y;
+            for position in 1..=5 {
+                let x = origins[&position];
+                let caret = caret_rect(&list, position).unwrap();
+                assert!((caret.x - x).abs() < 0.01, "{twips}: {position}");
+                assert_eq!(hit_test(&list, 0, x, baseline), Some(position));
+                if position < 5 {
+                    let next = origins[&(position + 1)];
+                    let midpoint = (x + next) / 2.0;
+                    assert_eq!(
+                        hit_test(&list, 0, midpoint, baseline),
+                        Some(position + 1),
+                        "{twips}: midpoint after {position}"
+                    );
+                    assert_eq!(hit_test(&list, 0, midpoint - 0.01, baseline), Some(position));
+                    assert_eq!(
+                        hit_test(&list, 0, midpoint + 0.01, baseline),
+                        Some(position + 1)
+                    );
+                }
+            }
+            let last = runs
+                .iter()
+                .find_map(|run| {
+                    run.glyphs.iter().find(|glyph| {
+                        run.attrs.doc_start.unwrap() + glyph.cluster as i64 == 4
+                    })
+                })
+                .unwrap();
+            assert!((last.x + last.advance - origins[&5]).abs() < 0.01);
+            let rects = range_rects(&list, 1, 5);
+            assert_eq!(rects.len(), 1);
+            assert!((rects[0].x - origins[&1]).abs() < 0.01);
+            assert!((rects[0].x + rects[0].width - origins[&5]).abs() < 0.01);
         }
     }
 }
