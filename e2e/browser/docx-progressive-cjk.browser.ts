@@ -63,8 +63,9 @@ async function open(browser: Browser, whole: boolean): Promise<Opened> {
       if (url.origin !== origin) return route.continue();
       if (whole && /\/slices(-[\w-]+)?\.json$/.test(url.pathname)) return route.abort();
       const { status, type, body } = await fromDist(url.pathname);
-      const policy = /html|javascript/.test(type) ? { 'content-security-policy': strictConnect } : {};
-      return route.fulfill({ status, body, headers: { 'content-type': type, ...policy } });
+      const headers: Record<string, string> = { 'content-type': type };
+      if (/html|javascript/.test(type)) headers['content-security-policy'] = strictConnect;
+      return route.fulfill({ status, body, headers });
     });
     context.on('request', (request) => {
       lastRequest = Date.now();
