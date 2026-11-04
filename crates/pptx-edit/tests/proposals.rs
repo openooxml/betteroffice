@@ -2821,3 +2821,353 @@ fn accepted_table_proposals_keep_remote_conflict_and_history_tracking() {
         1
     );
 }
+
+fn reorder_edit(slide: &str, shape: &str, to: &str) -> ProposalEdit {
+    serde_json::from_value(serde_json::json!({
+        "type": "reorderShape", "slideId": slide, "shapeId": shape, "to": to,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn reorder_variants_preview_accept_reject_and_undo() {
+    use pptx_edit::{ProposalChangeKind, ProposalShapeChangeKind, ProposalStripStatus};
+    for to in ["front", "back", "forward", "backward"] {
+        let session = DeckSession::open(SHAPE_DECK, 580).unwrap();
+        session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+        let original = session.snapshot().unwrap();
+        let slide_id = &original.slides[0].id;
+        session
+            .set_slide_notes(&EditCtx::local("human"), slide_id, "Earlier work")
+            .unwrap();
+        let before = session.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let from = usize::from(matches!(to, "back" | "backward"));
+        let shape_id = &slide.shapes[from].id;
+        let edit = reorder_edit(slide_id, shape_id, to);
+        let proposal = session.propose(request(vec![edit.clone()])).unwrap();
+        let preview = session.preview_proposal(&proposal.id).unwrap();
+        let expected: Vec<_> = slide.shapes.iter().rev().map(|shape| &shape.id).collect();
+        assert_eq!(
+            preview.snapshot.slides[0]
+                .shapes
+                .iter()
+                .map(|shape| &shape.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(proposal.changes[0].kind, Some(ProposalChangeKind::Content));
+        assert_eq!(proposal.changes[0].shape_id.as_ref(), Some(shape_id));
+        assert_eq!(proposal.changes[0].before_index, Some(Some(from)));
+        assert_eq!(proposal.changes[0].after_index, Some(Some(1 - from)));
+        let indexed = session
+            .preview_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        let by_id = session
+            .preview_proposal_diff_slide_by_id(&proposal.id, slide_id)
+            .unwrap();
+        assert_eq!(indexed, by_id);
+        assert_eq!(by_id.scope.slide.shapes, preview.snapshot.slides[0].shapes);
+        assert_eq!(by_id.shape_changes[0].shape_id, *shape_id);
+        assert_eq!(
+            by_id.shape_changes[0].kind,
+            ProposalShapeChangeKind::Reordered
+        );
+        assert_eq!(
+            session.proposal_slide_strip(&proposal.id).unwrap()[0].status,
+            ProposalStripStatus::Changed
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.reject_proposal(&proposal.id));
+        assert_eq!(session.snapshot().unwrap(), before);
+        let proposal = session.propose(request(vec![edit])).unwrap();
+        assert!(
+            session
+                .accept_proposal(&proposal.id, false)
+                .unwrap()
+                .applied
+        );
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+        let reopened = DeckSession::open(&session.save().unwrap(), 581).unwrap();
+        assert_eq!(
+            reopened.snapshot().unwrap().slides[0]
+                .shapes
+                .iter()
+                .map(|shape| shape.source_id)
+                .collect::<Vec<_>>(),
+            preview.snapshot.slides[0]
+                .shapes
+                .iter()
+                .map(|shape| shape.source_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), original);
+    }
+}
+
+#[test]
+fn reorder_proposals_resolve_created_slide_and_shape_refs() {
+    let session = DeckSession::open(SHAPE_DECK, 582).unwrap();
+    let before = session.snapshot().unwrap();
+    let proposal = session
+        .propose(request(vec![
+            ProposalEdit::InsertSlide {
+                reference: Some("slide".into()),
+                after_slide_id: None,
+                layout_part_path: None,
+            },
+            shape_edit("addShape", "@slide", ""),
+            ProposalEdit::AddShape {
+                reference: None,
+                slide_id: "@slide".into(),
+                draft: serde_json::from_value(serde_json::json!({
+                    "name": "Other", "geometry": "rect",
+                    "rect": {"x": 0, "y": 0, "width": 100000, "height": 100000},
+                }))
+                .unwrap(),
+            },
+            reorder_edit("@slide", "@created", "front"),
+        ]))
+        .unwrap();
+    let preview = session.preview_proposal(&proposal.id).unwrap();
+    assert_eq!(
+        preview.snapshot.slides[0].shapes[1].id,
+        proposal.refs["created"]
+    );
+    assert_eq!(session.snapshot().unwrap(), before);
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn reorder_proposals_stale_on_shape_capture_or_any_top_level_order_change() {
+    for change_shape in [false, true] {
+        let session = DeckSession::open(SHAPE_DECK, 583).unwrap();
+        let before = session.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let target = &slide.shapes[0].id;
+        let proposal = session
+            .propose(request(vec![reorder_edit(&slide.id, target, "front")]))
+            .unwrap();
+        if change_shape {
+            session
+                .set_shape_fill(&EditCtx::local("human"), &slide.id, target, Some("#123456"))
+                .unwrap();
+        } else {
+            session
+                .send_to_back(&EditCtx::local("human"), &slide.id, &slide.shapes[1].id)
+                .unwrap();
+        }
+        let changed = session.snapshot().unwrap();
+        assert_eq!(
+            session.proposals().unwrap()[0].stale_targets,
+            [target.clone()]
+        );
+        assert_eq!(
+            session
+                .preview_proposal_diff_slide(&proposal.id, 0)
+                .unwrap()
+                .proposal
+                .stale_targets,
+            [target.clone()]
+        );
+        assert_eq!(
+            session
+                .preview_proposal_diff_slide_by_id(&proposal.id, &slide.id)
+                .unwrap()
+                .proposal
+                .stale_targets,
+            [target.clone()]
+        );
+        assert!(matches!(
+            session.accept_proposal(&proposal.id, false),
+            Err(ProposalError::Stale(_))
+        ));
+        assert_eq!(session.snapshot().unwrap(), changed);
+        assert_eq!(session.proposals().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn reorder_boundary_proposals_are_accepted_without_changes_or_undo() {
+    for to in ["front", "back", "forward", "backward"] {
+        let session = DeckSession::open(SHAPE_DECK, 584).unwrap();
+        let before = session.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let index = usize::from(matches!(to, "front" | "forward"));
+        let proposal = session
+            .propose(request(vec![reorder_edit(
+                &slide.id,
+                &slide.shapes[index].id,
+                to,
+            )]))
+            .unwrap();
+        assert_eq!(
+            session.preview_proposal(&proposal.id).unwrap().snapshot,
+            before
+        );
+        assert!(
+            session
+                .preview_proposal_diff_slide(&proposal.id, 0)
+                .unwrap()
+                .shape_changes
+                .is_empty()
+        );
+        assert!(
+            !session
+                .accept_proposal(&proposal.id, false)
+                .unwrap()
+                .applied
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+}
+
+#[test]
+fn reorder_refusals_are_typed_and_atomic_including_grouped_children() {
+    let session = DeckSession::open(SHAPE_DECK, 585).unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0];
+    for (slide_id, shape_id, missing_slide) in [
+        ("missing", slide.shapes[0].id.as_str(), true),
+        (slide.id.as_str(), "missing", false),
+    ] {
+        let error = session
+            .propose(request(vec![
+                ProposalEdit::SetSlideNotes {
+                    slide_id: slide.id.clone(),
+                    text: "Staged only".into(),
+                },
+                reorder_edit(slide_id, shape_id, "front"),
+            ]))
+            .unwrap_err();
+        assert!(matches!(
+            (&error, missing_slide),
+            (
+                ProposalError::Edit(pptx_edit::EditError::SlideNotFound(_)),
+                true
+            ) | (
+                ProposalError::Edit(pptx_edit::EditError::ShapeNotFound(_)),
+                false
+            )
+        ));
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(session.proposals().unwrap().is_empty());
+        assert!(!session.can_undo());
+    }
+    let mut parts = ooxml_opc::unzip_parts(SHAPE_DECK).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    let xml = String::from_utf8(bytes.clone()).unwrap();
+    *bytes = xml.replacen("<p:sp>", "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"50\" name=\"Group\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp>", 1)
+        .replacen("</p:spTree>", "</p:grpSp></p:spTree>", 1).into_bytes();
+    let grouped = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 586).unwrap();
+    let before = grouped.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let child = &slide.shapes[0].children[0].id;
+    assert!(matches!(
+        grouped.propose(request(vec![reorder_edit(&slide.id, child, "front")])),
+        Err(ProposalError::Edit(pptx_edit::EditError::ShapeNotFound(_)))
+    ));
+    assert_eq!(grouped.snapshot().unwrap(), before);
+    assert!(grouped.proposals().unwrap().is_empty());
+    assert!(!grouped.can_undo());
+    for to in [
+        serde_json::json!("up"),
+        serde_json::Value::Null,
+        serde_json::json!(42),
+    ] {
+        assert!(
+            serde_json::from_value::<ProposalEdit>(serde_json::json!({
+                "type": "reorderShape", "slideId": slide.id, "shapeId": child, "to": to,
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn reorder_directions_distinguish_extremes_from_single_steps() {
+    for (to, from, target) in [
+        ("front", 0, 2),
+        ("forward", 0, 1),
+        ("back", 2, 0),
+        ("backward", 2, 1),
+    ] {
+        let session = DeckSession::open(SHAPE_DECK, 587).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        let ProposalEdit::AddShape { draft, .. } = shape_edit("addShape", &slide_id, "") else {
+            unreachable!()
+        };
+        session
+            .add_shape(&EditCtx::local("human"), &slide_id, &draft)
+            .unwrap();
+        let before = session.snapshot().unwrap();
+        let shape = &before.slides[0].shapes[from].id;
+        let mut expected: Vec<_> = before.slides[0]
+            .shapes
+            .iter()
+            .map(|shape| shape.id.clone())
+            .collect();
+        expected.remove(from);
+        expected.insert(target, shape.clone());
+        let proposal = session
+            .propose(request(vec![reorder_edit(&slide_id, shape, to)]))
+            .unwrap();
+        let preview = session.preview_proposal(&proposal.id).unwrap();
+        assert_eq!(
+            preview.snapshot.slides[0]
+                .shapes
+                .iter()
+                .map(|shape| shape.id.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+        session.accept_proposal(&proposal.id, false).unwrap();
+        assert_eq!(session.snapshot().unwrap(), preview.snapshot);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+    }
+}
+
+#[test]
+fn reorder_stales_when_other_shapes_swap_without_moving_the_target() {
+    let session = DeckSession::open(SHAPE_DECK, 588).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let ProposalEdit::AddShape { draft, .. } = shape_edit("addShape", &slide_id, "") else {
+        unreachable!()
+    };
+    session
+        .add_shape(&EditCtx::local("human"), &slide_id, &draft)
+        .unwrap();
+    let before = session.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let target = &slide.shapes[0].id;
+    let proposal = session
+        .propose(request(vec![reorder_edit(&slide_id, target, "front")]))
+        .unwrap();
+    session
+        .bring_to_front(&EditCtx::local("human"), &slide_id, &slide.shapes[1].id)
+        .unwrap();
+    assert_eq!(
+        session.snapshot().unwrap().slides[0].shapes[0],
+        slide.shapes[0]
+    );
+    assert_eq!(
+        session.proposals().unwrap()[0].stale_targets,
+        [target.clone()]
+    );
+    assert!(matches!(
+        session.accept_proposal(&proposal.id, false),
+        Err(ProposalError::Stale(_))
+    ));
+}

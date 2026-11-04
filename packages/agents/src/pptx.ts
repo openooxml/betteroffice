@@ -175,8 +175,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   }
 
   private slideChanges(proposal: Proposal): SlideTextChange[] {
+    const slides = new Map(this.handle.proposalSlideStrip(proposal.id).map(entry =>
+      [entry.slideId, (entry.previewIndex ?? entry.liveIndex ?? 0) + 1] as const));
     return proposal.changes.map(change => ({
-      ref: change.shapeId ?? change.slideId, slide: (change.afterIndex ?? change.beforeIndex ?? 0) + 1,
+      ref: change.shapeId ?? change.slideId, slide: change.shapeId ? slides.get(change.slideId) ?? 1 : (change.afterIndex ?? change.beforeIndex ?? 0) + 1,
       story: '', start: 0, oldText: change.oldText, newText: change.newText,
       kind: change.kind, slideId: change.slideId, beforeIndex: change.beforeIndex, afterIndex: change.afterIndex,
     }));

@@ -63,6 +63,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
       ['addShape', ['ref', 'slideId', 'draft']],
       ['addPicture', ['ref', 'slideId', 'draft']],
       ['removeShape', ['slideId', 'shapeId']],
+      ['reorderShape', ['slideId', 'shapeId', 'to']],
       ['insertTableRow', ['slideId', 'shapeId', 'index', 'position', 'cells']],
       ['deleteTableRow', ['slideId', 'shapeId', 'index']],
       ['insertTableColumn', ['slideId', 'shapeId', 'index', 'position', 'cells', 'width']],
@@ -119,7 +120,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!content.ok) return null;
     const steps: PptxEditStep[] = [];
     const canonicalEdits: ProposalEdit[] = [];
-    const staged = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape', 'setStoryParagraphs', 'setSlideLayout', 'setSlideBackground', 'insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn'].includes(edit?.type));
+    const staged = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape', 'reorderShape', 'setStoryParagraphs', 'setSlideLayout', 'setSlideBackground', 'insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn'].includes(edit?.type));
     for (const candidate of edits) {
       if (!candidate || typeof candidate !== 'object') return null;
       const keys = fields.get(candidate.type);
@@ -148,7 +149,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         else return null;
       } else {
         if (!['setShapeRect', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'setSlideNotes'].includes(edit.type)) return null;
-        if (edit.type === 'addTextBox' || edit.type === 'addShape' || edit.type === 'addPicture' || edit.type === 'removeShape') return null;
+        if (edit.type === 'addTextBox' || edit.type === 'addShape' || edit.type === 'addPicture' || edit.type === 'removeShape' || edit.type === 'reorderShape') return null;
         if (edit.type === 'setSlideLayout' || edit.type === 'setSlideBackground') return null;
         if (edit.type === 'insertTableRow' || edit.type === 'deleteTableRow' || edit.type === 'insertTableColumn' || edit.type === 'deleteTableColumn') return null;
         if (edit.type === 'insertSlide' || edit.type === 'duplicateSlide' || edit.type === 'deleteSlide' || edit.type === 'moveSlide') return null;

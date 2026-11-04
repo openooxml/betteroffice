@@ -319,3 +319,39 @@ def test_nonstructural_proposal_omits_indices_and_empty_refs(sample_bytes):
     assert "refs" not in wire
     assert "beforeIndex" not in wire["changes"][0]
     assert "afterIndex" not in wire["changes"][0]
+
+
+@pytest.mark.parametrize("to", ["front", "back", "forward", "backward"])
+def test_reorder_shape_proposal_dict_preview_accept_reject_and_undo(to, font_bytes):
+    path = Path(__file__).resolve().parents[3] / "crates/pptx-edit/tests/fixtures/proposal-shapes.pptx"
+    deck = bo.Presentation.open(path.read_bytes())
+    deck.register_font("Liberation Sans", font_bytes)
+    before = deck.read_content()["slides"]
+    slide = deck[0]
+    original_ids = [shape.id for shape in slide.shapes]
+    shape_id = original_ids[1 if to in ("back", "backward") else 0]
+    edit = {"type": "reorderShape", "slideId": slide.id, "shapeId": shape_id, "to": to}
+    proposal = deck.propose("python-agent", [edit])
+    assert proposal.changes[0].shape_id == shape_id
+    assert proposal.changes[0].kind == "content"
+    preview = deck.preview_proposal(proposal.id)
+    assert [shape["id"] for shape in preview.snapshot["slides"][0]["shapes"]] == original_ids[::-1]
+    diff = deck.layout_proposal_diff_slide_by_id(proposal.id, slide.id)
+    assert diff == deck.layout_proposal_diff_slide(proposal.id, 0)
+    assert diff["shapeChanges"] == [{"shapeId": shape_id, "kind": "reordered"}]
+    assert deck.read_content()["slides"] == before and not deck.can_undo
+    assert deck.reject_proposal(proposal.id)
+    proposal = deck.propose("python-agent", [edit])
+    assert deck.accept_proposal(proposal.id)
+    assert [shape.id for shape in deck[0].shapes] == original_ids[::-1]
+    assert deck.undo()
+    assert deck.read_content()["slides"] == before and not deck.can_undo
+    for invalid in [dict(edit, to="up"), dict(edit, slideId="missing"), dict(edit, shapeId="missing"), dict(edit, extra=True)]:
+        with pytest.raises((bo.PptxError, ValueError, KeyError)):
+            deck.propose("python-agent", [invalid])
+        assert deck.read_content()["slides"] == before and deck.proposals() == []
+    stale = deck.propose("python-agent", [edit])
+    deck.bring_shape_to_front(slide.id, original_ids[0])
+    with pytest.raises(bo.StaleProposalError) as error:
+        deck.accept_proposal(stale.id)
+    assert error.value.targets == [shape_id]

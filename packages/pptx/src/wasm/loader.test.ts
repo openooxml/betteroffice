@@ -1293,3 +1293,42 @@ test('table proposals can replace text in an inserted row and reject invalid tab
     }
   } finally { source.dispose(); }
 });
+
+test.each(['front', 'back', 'forward', 'backward'] as const)('reorderShape %s proposals preview stacking, accept, reject and undo', async to => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-shapes.pptx')), { fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const from = to === 'back' || to === 'backward' ? 1 : 0;
+    const shape = slide.shapes[from]!;
+    const edit = { type: 'reorderShape', slideId: slide.id, shapeId: shape.id, to } as const;
+    const proposal = source.propose('agent', null, [edit]);
+    expect(proposal.changes).toMatchObject([{ shapeId: shape.id, kind: 'content', beforeIndex: from, afterIndex: 1 - from }]);
+    const preview = source.previewProposal(proposal.id).snapshot;
+    expect(preview.slides[0]!.shapes.map(shape => shape.id)).toEqual(slide.shapes.map(shape => shape.id).reverse());
+    const diff = source.layoutProposalDiffSlideById(proposal.id, slide.id);
+    expect(source.layoutProposalDiffSlide(proposal.id, 0)).toEqual(diff);
+    expect(diff.snapshot.slides[0]!.shapes.map(shape => shape.id)).toEqual(preview.slides[0]!.shapes.map(shape => shape.id));
+    expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'reordered' }]);
+    const shapeIds = slide.shapes.map(shape => shape.id);
+    expect([...new Set(diff.frame.primitives.flatMap(primitive => primitive.shapeId && shapeIds.includes(primitive.shapeId) ? [primitive.shapeId] : [])))]).toEqual([...shapeIds].reverse());
+    expect(source.proposalSlideStrip(proposal.id)[0]!.status).toBe('changed');
+    expect(source.snapshot()).toEqual(before);
+    expect(source.rejectProposal(proposal.id)).toBe(true);
+    const accepted = source.propose('agent', null, [edit]);
+    source.acceptProposal(accepted.id);
+    expect(source.snapshot()).toEqual(preview);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+    expect(source.canUndo()).toBe(false);
+    for (const invalid of [{ ...edit, to: 'up' }, { ...edit, slideId: 'missing' }, { ...edit, shapeId: 'missing' }, { ...edit, extra: true }]) {
+      expect(() => source.propose('agent', null, [invalid as unknown as import('../proposals').ProposalEdit])).toThrow();
+      expect(source.snapshot()).toEqual(before);
+      expect(source.listProposals()).toHaveLength(0);
+    }
+    const stale = source.propose('agent', null, [edit]);
+    source.bringShapeToFront(slide.id, slide.shapes[0]!.id);
+    expect(source.listProposals()[0]!.staleTargets).toEqual([shape.id]);
+    expect(() => source.acceptProposal(stale.id)).toThrow(StaleProposalError);
+  } finally { source.dispose(); }
+});

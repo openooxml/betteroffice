@@ -40,6 +40,11 @@ pub enum ProposalEdit {
         slide_id: String,
         shape_id: String,
     },
+    ReorderShape {
+        slide_id: String,
+        shape_id: String,
+        to: ProposalShapeOrder,
+    },
     InsertTableRow {
         slide_id: String,
         shape_id: String,
@@ -187,6 +192,15 @@ pub enum ProposalChangeKind {
     Inserted,
     Deleted,
     Moved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProposalShapeOrder {
+    Front,
+    Back,
+    Forward,
+    Backward,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +463,7 @@ impl DeckSession {
                         | ProposalEdit::AddShape { .. }
                         | ProposalEdit::AddPicture { .. }
                         | ProposalEdit::RemoveShape { .. }
+                        | ProposalEdit::ReorderShape { .. }
                         | ProposalEdit::InsertTableRow { .. }
                         | ProposalEdit::DeleteTableRow { .. }
                         | ProposalEdit::InsertTableColumn { .. }
@@ -519,6 +534,7 @@ impl DeckSession {
                         | ProposalEdit::AddShape { .. }
                         | ProposalEdit::AddPicture { .. }
                         | ProposalEdit::RemoveShape { .. }
+                        | ProposalEdit::ReorderShape { .. }
                         | ProposalEdit::SetStoryParagraphs { .. }
                         | ProposalEdit::SetSlideLayout { .. }
                         | ProposalEdit::SetSlideBackground { .. }
@@ -762,6 +778,9 @@ fn resolve_edit(
         | ProposalEdit::SetShapeAdjust {
             slide_id, shape_id, ..
         }
+        | ProposalEdit::ReorderShape {
+            slide_id, shape_id, ..
+        }
         | ProposalEdit::RemoveShape { slide_id, shape_id }
         | ProposalEdit::InsertTableRow {
             slide_id, shape_id, ..
@@ -903,6 +922,18 @@ fn apply_structural_edit(
 pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
     let context = EditCtx::local("proposal");
     match edit {
+        ProposalEdit::ReorderShape {
+            slide_id,
+            shape_id,
+            to,
+        } => {
+            match to {
+                ProposalShapeOrder::Front => session.bring_to_front(&context, slide_id, shape_id),
+                ProposalShapeOrder::Back => session.send_to_back(&context, slide_id, shape_id),
+                ProposalShapeOrder::Forward => session.bring_forward(&context, slide_id, shape_id),
+                ProposalShapeOrder::Backward => session.send_backward(&context, slide_id, shape_id),
+            }?;
+        }
         ProposalEdit::InsertTableRow {
             slide_id,
             shape_id,
@@ -1147,7 +1178,10 @@ fn target(
                     .map(|shape| (slide.id.clone(), Some(shape.id.clone())))
             })
             .ok_or_else(|| EditError::StoryNotFound(story_id.clone())),
-        ProposalEdit::InsertTableRow {
+        ProposalEdit::ReorderShape {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::InsertTableRow {
             slide_id, shape_id, ..
         }
         | ProposalEdit::DeleteTableRow {
@@ -1347,6 +1381,26 @@ fn changes_for(
             change.after_index = Some(after_index);
         }
     }
+    for edit in edits {
+        if let ProposalEdit::ReorderShape {
+            slide_id, shape_id, ..
+        } = edit
+            && let Some(change) = changes.get_mut(&(slide_id.clone(), Some(shape_id.clone())))
+        {
+            let index = |snapshot: &DeckSnapshot| {
+                snapshot
+                    .slides
+                    .iter()
+                    .find(|slide| &slide.id == slide_id)
+                    .and_then(|slide| slide.shapes.iter().position(|shape| &shape.id == shape_id))
+            };
+            change.before_index = Some(index(before));
+            change.after_index = Some(index(after));
+            if change.before_index != change.after_index && change.kind.is_none() {
+                change.kind = Some(ProposalChangeKind::Content);
+            }
+        }
+    }
     Ok(changes.into_values().collect())
 }
 
@@ -1448,6 +1502,26 @@ fn stale_targets(
     let live = |id: &str| snapshot.slides.iter().find(|slide| slide.id == id);
     let mut stale = BTreeSet::new();
     for edit in &baseline.edits {
+        if let ProposalEdit::ReorderShape {
+            slide_id, shape_id, ..
+        } = edit
+            && let Some(before) = original(slide_id)
+            && live(slide_id).map(|slide| {
+                slide
+                    .shapes
+                    .iter()
+                    .map(|shape| &shape.id)
+                    .collect::<Vec<_>>()
+            }) != Some(
+                before
+                    .shapes
+                    .iter()
+                    .map(|shape| &shape.id)
+                    .collect::<Vec<_>>(),
+            )
+        {
+            stale.insert(shape_id.clone());
+        }
         if matches!(
             edit,
             ProposalEdit::AddTextBox { .. }
