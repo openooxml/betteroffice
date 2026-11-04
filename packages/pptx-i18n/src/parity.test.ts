@@ -75,6 +75,7 @@ test('package subpaths match the locale files and internal entry modules', () =>
     expect(manifest.exports[`./${code}`]).toEqual({
       types: `./dist/${code}.d.mts`,
       import: `./dist/${code}.mjs`,
+      default: `./dist/${code}.mjs`,
     });
   }
 });
