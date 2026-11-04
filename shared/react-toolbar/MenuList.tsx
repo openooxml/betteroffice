@@ -4,7 +4,6 @@ import type {
   MouseEvent as ReactMouseEvent,
   ReactNode,
 } from 'react';
-import { toolbarTheme } from './theme';
 import { useRovingFocus } from './useRovingFocus';
 
 /** One entry of an overflow menu; plain render data without behavior beyond `onSelect`. */
@@ -47,15 +46,7 @@ export interface OverflowMenuColors {
   focus: string;
 }
 
-export const DEFAULT_MENU_COLORS: OverflowMenuColors = {
-  surface: toolbarTheme.surface,
-  text: toolbarTheme.ink,
-  mutedText: toolbarTheme.inkMuted,
-  border: toolbarTheme.line,
-  hover: toolbarTheme.hover,
-  shadow: 'rgba(0, 0, 0, 0.12)',
-  focus: toolbarTheme.accent,
-};
+export { DEFAULT_MENU_COLORS } from './menuColors';
 
 const ITEM_SELECTOR = '[role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]';
 const VIEWPORT_MARGIN = 8;
