@@ -186,6 +186,12 @@ const PeerlessDefaultToolbar = memo(function PeerlessDefaultToolbar() {
   </EditorToolbar>;
 });
 
+function disableEntries(entries: readonly OverflowMenuEntry[]): OverflowMenuEntry[] {
+  return entries.map((entry) => entry.kind === 'item' ? { ...entry, disabled: true }
+    : entry.kind === 'submenu' ? { ...entry, disabled: true, entries: disableEntries(entry.entries) }
+      : entry.kind === 'group' ? { ...entry, entries: disableEntries(entry.entries) } : entry);
+}
+
 export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const { t } = useTranslation();
   const [cellClipboard] = useState(() => new CellClipboard());
@@ -1632,8 +1638,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     }
     return covers;
   };
-  const menuEntries = (entries: OverflowMenuEntry[], ready: () => boolean) => ready() ? entries
-    : entries.map((entry) => entry.kind === 'item' || entry.kind === 'submenu' ? { ...entry, disabled: true } : entry);
+  const menuEntries = (entries: OverflowMenuEntry[], ready: () => boolean) => ready() ? entries : disableEntries(entries);
   const gridMenu = useContextMenu({
     surface: scrollRef,
     subscribe: commands.store.subscribe,
