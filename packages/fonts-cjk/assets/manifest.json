@@ -16,9 +16,7 @@
       "slices": {
         "format": 1,
         "index": "NotoSansJP-Regular/slices.json",
-        "indexSha256": "9fd53a1857302a7d9b3dc2b9f3e8039b6d13c64e0a79d416ddbca8a692bc415d",
-        "byteLength": 5022464,
-        "sha256": "d0134b6ee52cc4a3bfee82673dae0b17749e1a58102729540228ffc16ef7b70d"
+        "indexSha256": "9fd53a1857302a7d9b3dc2b9f3e8039b6d13c64e0a79d416ddbca8a692bc415d"
       }
     },
     {
@@ -33,9 +31,7 @@
       "slices": {
         "format": 1,
         "index": "NotoSansKR-Regular/slices.json",
-        "indexSha256": "309e142311ef7c1b73b6052ba4ddb09f77a06d2ebc20243fbbed55cb872ce47d",
-        "byteLength": 5332528,
-        "sha256": "531a8102777356f09ae85eb357736bf6ec3d21ffa2c9535f9be4c67621dde820"
+        "indexSha256": "309e142311ef7c1b73b6052ba4ddb09f77a06d2ebc20243fbbed55cb872ce47d"
       }
     },
     {
@@ -50,9 +46,7 @@
       "slices": {
         "format": 1,
         "index": "NotoSansSC-Regular/slices.json",
-        "indexSha256": "73a0d2d52944be3db939ec12c1331521429d7ad2f7bff5b9342f6942fc671d90",
-        "byteLength": 8988332,
-        "sha256": "4224997d741712dcf1c7cadd96ce2378c7957e3c971d1f56717fe34ed55b089c"
+        "indexSha256": "73a0d2d52944be3db939ec12c1331521429d7ad2f7bff5b9342f6942fc671d90"
       }
     },
     {
@@ -67,9 +61,7 @@
       "slices": {
         "format": 1,
         "index": "NotoSansTC-Regular/slices.json",
-        "indexSha256": "e246aab5dbca74d596959ca46a6693733b137bacc0bda47e8dd6f3d02aeeb857",
-        "byteLength": 6114008,
-        "sha256": "1845c31c1c0b92bbfeacf0ab46dabfdf835257046de1bfdaabe2735841175932"
+        "indexSha256": "e246aab5dbca74d596959ca46a6693733b137bacc0bda47e8dd6f3d02aeeb857"
       }
     },
     {
@@ -84,9 +76,7 @@
       "slices": {
         "format": 1,
         "index": "NotoSerifSC-Regular/slices.json",
-        "indexSha256": "7e1cf89eaa36520084c6b74bb3fd6bcbe595bc674fed4d834db967abde54b675",
-        "byteLength": 13191940,
-        "sha256": "3a59d57d6390a334dd3e38db5cf1164bfeacda5a8705de607f37e7f3a63f1ccd"
+        "indexSha256": "7e1cf89eaa36520084c6b74bb3fd6bcbe595bc674fed4d834db967abde54b675"
       }
     }
   ]
