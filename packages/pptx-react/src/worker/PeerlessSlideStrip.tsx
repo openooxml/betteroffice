@@ -80,7 +80,7 @@ const Preview = memo(function Preview({ frame, run, fit, previewFit, current }: 
       return Boolean(token && token.scale === fit.scale && token.dpr === fit.dpr && latest.current.current(token, run));
     };
     if (!canvas.current) return;
-    const painter = peerlessPainterFactories.frame(canvas.current, { ...fit, images: run.thumbnailImages ?? run.images, current: valid });
+    const painter = peerlessPainterFactories.frame(canvas.current, { ...fit, images: run.thumbnailImages ?? run.images, current: valid, fontCoverage: run.fontCoverage?.thumbnails });
     const view: PeerlessViewSnapshot = { confirmed: frame, selection: null, focused: false, caret: null,
       selectionRects: [], composition: null, echo: null, activeLine: null, activeContextBytes: 0,
       pending: [], waitingInputCount: 0, appliedThroughSeq: frame.frame.coversThroughSeq,
@@ -234,7 +234,10 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, comman
   }, [store, client, run]);
   const view = useSyncExternalStore(subscribe, snapshot, snapshot);
   const readStrip = useCallback((id: string) => client.access!('proposalSlideStrip', id), [client, view]);
-  const loadProposalSlide = useCallback((slideId: string) => peerlessProposalFrameSource(run, proposalId!, slideId), [run, proposalId, view]);
+  const loadProposalSlide = useCallback(async (slideId: string) => {
+    await run.ensureWholeFonts?.();
+    return peerlessProposalFrameSource(run, proposalId!, slideId);
+  }, [run, proposalId, view]);
   return <div style={styles.strip}><aside ref={strip} style={{ overflowY: 'auto', flex: 1 }} aria-label={t('slides.panelLabel')}>
     {proposalId && onPreviewSlide ? <AsyncProposalSlideStrip id={proposalId} read={readStrip}
       load={loadProposalSlide} selectedSlideId={previewSlideId ?? view.active} onSelect={onPreviewSlide} />

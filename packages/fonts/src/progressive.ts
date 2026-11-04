@@ -1,5 +1,5 @@
 import type { FontDecoder } from './decode';
-import { chunkEntries, parseSkeleton, type SliceSkeleton } from './slices';
+import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
 
 /**
@@ -23,6 +23,10 @@ export interface ProgressiveFontFace {
    * the browser shapes itself, where the engine's glyph ids are not known.
    */
   ensureText(text: string): Promise<number>;
+  /** The chunks `ensureText` needs for this text. */
+  chunksOf(text: string): number[];
+  /** The chunks `bytes` holds right now; it grows as chunks load. */
+  loadedChunks(): ReadonlySet<number>;
   /** Calls `listener` with each new revision; returns an unsubscribe. */
   onUpdate(listener: (revision: number) => void): () => void;
   /** Whether every outline is loaded. */
@@ -208,21 +212,13 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       return ensure(chunks);
     },
     prefetch(text) {
-      const chunks: number[] = [];
-      for (const character of text) {
-        const chunk = skeleton.chunkOfCodepoint(character.codePointAt(0)!);
-        if (chunk !== undefined) chunks.push(chunk);
-      }
-      void ensure(chunks).catch(() => {});
+      void ensure(textChunks(text, skeleton.chunkOfCodepoint)).catch(() => {});
     },
     ensureText(text) {
-      const chunks: number[] = [];
-      for (const character of text) {
-        const chunk = skeleton.chunkOfCodepoint(character.codePointAt(0)!);
-        if (chunk !== undefined) chunks.push(chunk);
-      }
-      return ensure(chunks);
+      return ensure(textChunks(text, skeleton.chunkOfCodepoint));
     },
+    chunksOf: (text) => textChunks(text, skeleton.chunkOfCodepoint),
+    loadedChunks: () => loaded,
     onUpdate(listener) {
       listeners.add(listener);
       return () => {

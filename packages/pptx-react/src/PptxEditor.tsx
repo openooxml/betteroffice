@@ -236,6 +236,12 @@ export interface PptxAsyncPresentationProps {
    * false to fetch no default fonts. Defaults to true.
    */
   defaultFonts?: boolean;
+  /**
+   * Loads bundled Chinese, Japanese and Korean faces in slices as text needs them, instead of whole, in Chromium and
+   * Firefox. Defaults to false.
+   * @experimental
+   */
+  experimentalSlicedFonts?: boolean;
 }
 
 export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,

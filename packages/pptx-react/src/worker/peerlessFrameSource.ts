@@ -60,7 +60,7 @@ export async function peerlessProposalFrameSource(run: PeerlessPresentation, id:
 export async function peerlessExportPng(run: PeerlessPresentation): Promise<{ png: Blob; index: number }> {
   const source = await peerlessFrameSource(run);
   const canvas = document.createElement('canvas');
-  const painter = createCommandFramePainter(canvas, { images: run.images, scale: 1, dpr: 1, current: () => run.current });
+  const painter = createCommandFramePainter(canvas, { images: run.images, scale: 1, dpr: 1, current: () => run.current, fontCoverage: run.fontCoverage });
   try {
     painter.paintFrame(source.confirmed, { ...run.store.getSnapshot(), confirmed: source.confirmed, echo: null, caret: null,
       selection: null, selectionRects: [], composition: null });

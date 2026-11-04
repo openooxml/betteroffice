@@ -1,3 +1,4 @@
+import { textChunks } from './slices';
 import { expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import pack from '../../fonts-cjk/assets/manifest.json';
@@ -299,3 +300,28 @@ test('retain: false opens a fresh face each time instead of keeping one cached',
   expect(await openSlicedFace(dropped)).not.toBe(first);
   expect(await openSlicedFace(kept)).toBe(await openSlicedFace(kept));
 });
+
+test('text loads the chunks shaping composes into, and the parts of a character the face lacks', () => {
+  const map = new Map([[0x1100, 101], [0x1161, 101], [0x11a9, 102], [0xac02, 35], [0x304b, 3], [0x3099, 4], [0x304c, 9], [0x8c48, 60]]);
+  const chunks = (text: string) => [...new Set(textChunks(text, (codepoint) => map.get(codepoint)))].sort((a, b) => a - b);
+  expect(chunks('\u1100\u1161\u11a9')).toEqual([35, 101, 102]);
+  expect(chunks('\u304b\u3099')).toEqual([3, 4, 9]);
+  expect(chunks('\uf900')).toEqual([60]);
+  expect(chunks('\u304c')).toEqual([9]);
+});
+
+test('a base that composes with only some of its marks loads that composition', () => {
+  const map = new Map([[0x41, 0], [0x30a, 0], [0x301, 0], [0xc5, 41], [0xc1, 7]]);
+  const chunks = [...new Set(textChunks('A\u030a\u0301', (codepoint) => map.get(codepoint)))].sort((a, b) => a - b);
+  expect(chunks).toEqual([0, 7, 41]);
+});
+
+test('right-to-left text loads the mirrored characters it can be drawn with, and other text does not', () => {
+  const map = new Map([[0x2208, 5], [0x220b, 78], [0x5d0, 3]]);
+  const chunks = (text: string) => [...new Set(textChunks(text, (codepoint) => map.get(codepoint)))].sort((a, b) => a - b);
+  expect(chunks('\u202e\u2208\u202c')).toEqual([5, 78]);
+  expect(chunks('\u05d0\u2208')).toEqual([3, 5, 78]);
+  expect(chunks('\u2208')).toEqual([5]);
+  expect(chunks('\u05d0')).toEqual([3]);
+});
+

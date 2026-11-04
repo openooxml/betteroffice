@@ -10,6 +10,7 @@ import type {
   TextBoxPrimitive,
 } from '../types';
 import { applyImageEffects, paintSlide, sizeCanvasForSlide } from './canvas';
+import { prepareTextFamilies } from './textFamilies';
 
 test('sizes the backing store to cover a slide whose page is a fractional pixel', () => {
   const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
@@ -2850,7 +2851,7 @@ describe('font coverage before text paints', () => {
     await paintSlide(ctx, list(), 1, 1, { fontCoverage: {
       async prepare(family, text) {
         await Promise.resolve();
-        events.push(`prepare ${family} ${[...text].sort().join('')}`);
+        events.push(`prepare ${family} ${[...text.split('\n').join('')].sort().join('')}`);
         return family === 'Noto Sans JP' ? 'Noto Sans JP r2' : family;
       },
     } });
@@ -2868,11 +2869,25 @@ describe('font coverage before text paints', () => {
     expect(events.filter((event) => event.includes('Noto Sans JP')).every((event) => event.endsWith('"Noto Sans JP"'))).toBe(true);
   });
 
+  test('a style coverage does not cover draws under its own name and asks for nothing', async () => {
+    const run = (text: string, bold: boolean) => ({ text, fontFamily: 'Noto Sans JP', bold });
+    const list = { primitives: [{ kind: 'textBox', paragraphs: [], lines: [{ runs: [run('日本', false), run('Bold', true)] }] }] };
+    const asked: string[] = [];
+    const families = await prepareTextFamilies(list as never, {
+      prepare: async (family, text) => { asked.push(text); return `${family} r2`; },
+      covers: (_, bold) => !bold,
+    });
+    expect(asked).toEqual(['日本']);
+    expect(families('Noto Sans JP', false, false)).toBe('Noto Sans JP r2');
+    expect(families('Noto Sans JP', true, false)).toBe('Noto Sans JP');
+  });
+
   test('document text gets its font and is drawn only where the coverage families apply', async () => {
     const { readFile } = await import('node:fs/promises');
     const canvas = await readFile(new URL('./canvas.ts', import.meta.url), 'utf8');
     const fonts = [...canvas.matchAll(/ctx\.font = ([^;]+);/g)].map((match) => match[1]);
-    expect(fonts).toEqual(['`${style}${weight}${run.fontSizePx}px ${quoteFamily(families(run.fontFamily))}`', "'12px sans-serif'"]);
+    expect(canvas.includes('?? families(run.fontFamily, run.bold, run.italic);')).toBe(true);
+    expect(fonts).toEqual(['`${style}${weight}${run.fontSizePx}px ${quoteFamily(family)}`', "'12px sans-serif'"]);
     const chunks = await readFile(new URL('./textChunks.ts', import.meta.url), 'utf8');
     expect(chunks.includes('.font =')).toBe(false);
   });

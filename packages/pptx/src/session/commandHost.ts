@@ -24,6 +24,8 @@ import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseComm
 import type { WorkerSlideFrame, WorkerSlideRender } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
+import type { createSlicedFontFaces } from './commandSlicedFonts';
+import type { PaintFontCoverage } from '../render/canvas';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
 import type { DefaultFontFace, DefaultFontLanding, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
@@ -73,6 +75,8 @@ export interface PresentationCommandHostOptions {
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
   onPipeOutput?(): void;
   onDefaultFonts?(result: TransferResult<PresentationCommandAck & DefaultFontPayload>): void;
+  /** Sliced faces registered without an install, so paints already made may be stale. */
+  onSlicedFaces?(): void;
   installDefaultFonts?(faces: readonly DefaultFontFace[]): Promise<readonly DefaultFontFace[]>;
 }
 
@@ -82,6 +86,7 @@ export interface PresentationCommandRegistration {
   drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
   /** Lays out a slide for an ahead-of-time raster without activating it. */
   renderSlide(slideId: string): WorkerSlideRender | undefined;
+  fontCoverage(): PaintFontCoverage | undefined;
   dispose(): void;
 }
 
@@ -136,6 +141,7 @@ export function registerPresentationCommandHandlers(
   const slideIndices = new Map<string, number>();
   let disposed = false;
   let opening = false;
+  let slicedFonts: ReturnType<typeof createSlicedFontFaces> | undefined;
   let defaultFonts: ReturnType<typeof createCommandDefaultFonts> | undefined;
   let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
   let cancelDefaultFontImport: (() => void) | undefined;
@@ -265,11 +271,18 @@ export function registerPresentationCommandHandlers(
         defaultFonts = fonts.createCommandDefaultFonts(suppliedFonts, requestedFonts,
           (face) => {
             const font = { ...face, bytes: new Uint8Array(face.bytes) };
-            if (face.kind === 'coverage') presentation().registerFallbackFont(font);
-            else presentation().registerFont(font);
+            const opened = presentation();
+            if (face.kind === 'coverage') opened.registerFallbackFont(font);
+            else opened.registerFont(font);
+            slicedFonts?.upgradeRegistered(opened, font.family);
           },
           (faces) => {
             if (!faces.length || disposed) return;
+            if (slicedFonts) options.onSlicedFaces?.();
+            slicedFonts?.scheduleFill(() => {
+              const content = handle?.readCommandContent();
+              return content?.ok ? content.stories.map((story) => story.text).join('\n') : undefined;
+            });
             layouts.clear();
             for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
             for (const [id, revision] of revisions) revisions.set(id, revision + 1);
@@ -279,7 +292,7 @@ export function registerPresentationCommandHandlers(
               options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces }, result.transfer));
             }
           }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()),
-          sessionFontProvider(fonts));
+          sessionFontProvider(fonts), slicedFonts);
         finish(defaultFonts);
       }).catch(() => finish());
     });
@@ -807,7 +820,8 @@ export function registerPresentationCommandHandlers(
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
-      dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
+      dirtySlideIds, activeSlideId, historyThroughSeq, ...slicedFonts?.ack(),
+      ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
       frame: result?.value ?? null }, [...(result?.transfer ?? []), ...updates.map((update) => update.bytes)]);
     for (const { assetId } of reply.value.frame?.media ?? []) sentMedia.add(assetId);
@@ -1410,6 +1424,7 @@ export function registerPresentationCommandHandlers(
     if (admitted.kind === 'font') {
       const font = { ...admitted.font, bytes: new Uint8Array(admitted.font.bytes) };
       admitted.fontId = admitted.fallback ? opened.registerFallbackFont(font) : opened.registerFont(font);
+      slicedFonts?.forget(font.family, admitted.fontId);
       if (requestedFonts) suppliedFonts.push({ family: font.family });
       defaultFonts?.supply(font.family);
       layouts.clear();
@@ -1651,13 +1666,22 @@ export function registerPresentationCommandHandlers(
       const face = await sessionDecodeFontFace(bytes, input);
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
     },
-    prefetchCoverageFonts(_, scripts) {
+    prefetchCoverageFonts(_, scripts, sliced) {
       if (disposed || handle || opening || !Array.isArray(scripts)) return;
       const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
       if (!coverage.length) return;
       void commandDefaultFontModule.load().then((fonts) => {
-        if (!disposed) fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts));
+        if (!disposed) fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), sliced === true);
       }).catch(() => {});
+    },
+    readCoverageFont(_, family, text, have) {
+      if (!slicedFonts || disposed || typeof family !== 'string' || typeof text !== 'string') return null;
+      return deferReply(slicedFonts.read(family, text, typeof have === 'number' ? have : null).then((read) =>
+        transferable(read ?? null, read?.bytes ? [read.bytes] : [])));
+    },
+    wholeCoverageFonts(_, have) {
+      if (!slicedFonts) return [];
+      return deferReply(slicedFonts.wholeFonts(have).then((faces) => transferable(faces, faces.map((face) => face.bytes))));
     },
     async openCommandEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation command session is disposed');
@@ -1665,10 +1689,13 @@ export function registerPresentationCommandHandlers(
       if (!input || typeof input.session !== 'string' || !input.session ||
         typeof input.incarnation !== 'string' || !input.incarnation ||
         (input.readOnly !== undefined && typeof input.readOnly !== 'boolean') ||
-        (input.defaultFonts !== undefined && typeof input.defaultFonts !== 'boolean')) {
+        (input.defaultFonts !== undefined && typeof input.defaultFonts !== 'boolean') ||
+        (input.slicedFonts !== undefined && typeof input.slicedFonts !== 'boolean')) {
         throw new TypeError('Invalid presentation command open options');
       }
       opening = true;
+      const slicing = input.slicedFonts === true
+        ? import('./commandSlicedFonts').then((sliced) => sliced.createSlicedFontFaces(), () => undefined) : undefined;
       try {
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
         let openingMetafiles: Promise<void> | undefined;
@@ -1681,11 +1708,12 @@ export function registerPresentationCommandHandlers(
           else if (result.packageMetafile && !opening && !metafiles.ready()) idleMetafiles();
           if (input.defaultFonts !== false && result.scripts.length) {
             void commandDefaultFontModule.load().then((fonts) => {
-              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts));
+              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), input.slicedFonts === true);
             }).catch(() => {});
           }
         }).catch(() => {});
         await wasmReady;
+        if (slicing) slicedFonts = await slicing;
         if (disposed) throw new Error('Presentation command session is disposed');
         handle = openPresentation(new Uint8Array(bytes), { clientId: input.clientId,
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
@@ -1817,7 +1845,11 @@ export function registerPresentationCommandHandlers(
     },
     renderCommandPng(_, request, target, options) {
       fence(request);
-      return deferReply(presentation().renderPng(target, options ?? {}).then((bytes) => {
+      const opened = presentation();
+      const rendered = slicedFonts ? slicedFonts.completeExport(opened).then((byFamily) =>
+        opened.renderPng(target, { ...options, fonts: [...(options?.fonts ?? []), ...byFamily] }))
+        : opened.renderPng(target, options ?? {});
+      return deferReply(rendered.then((bytes) => {
         const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
           bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
         return transferable(buffer, [buffer]);
@@ -1876,6 +1908,7 @@ export function registerPresentationCommandHandlers(
   } satisfies MethodHandlers<PresentationCommandMethods & PresentationSharedMethods, null>;
 
   function dispose(): void {
+    slicedFonts?.dispose();
     if (disposed) return;
     disposed = true;
     if (fontTimer !== undefined) clearTimeout(fontTimer);
@@ -1918,6 +1951,8 @@ export function registerPresentationCommandHandlers(
   return { handlers, policies: {
     decodeFontFace: { lane: 'interactive' },
     prefetchCoverageFonts: { lane: 'interactive' },
+    readCoverageFont: { lane: 'interactive' },
+    wholeCoverageFonts: { lane: 'interactive' },
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
@@ -1932,7 +1967,7 @@ export function registerPresentationCommandHandlers(
     prepareCommandPicture: { lane: 'interactive' },
     accessCommandEditor: { lane: 'interactive' },
     checkpointCommandEditor: { lane: 'interactive' },
-  }, drainPipe: () => pipe?.drain(), renderSlide, dispose };
+  }, drainPipe: () => pipe?.drain(), renderSlide, fontCoverage: () => slicedFonts?.coverage, dispose };
 }
 
 function storyKey(value: PptxStoryTarget): string {

@@ -50,9 +50,13 @@ export interface PaintFontCoverage {
    * example a newer installed revision of the same face).
    */
   prepare(family: string, text: string): Promise<string>;
+  /** The newest family to draw prepared text with now; a newer revision holds everything an older one did. */
+  latest?(family: string): string | undefined;
+  /** False for a style that draws under its own name, whatever the family's other styles do. Defaults to true. */
+  covers?(family: string, bold: boolean, italic: boolean): boolean;
 }
 
-type TextFamilies = (family: string) => string;
+export type TextFamilies = (family: string, bold?: boolean, italic?: boolean) => string;
 const ownFamilies: TextFamilies = (family) => family;
 
 interface ShadowBudget {
@@ -100,7 +104,8 @@ export async function paintSlide(
   options: PaintSlideOptions = {}
 ): Promise<void> {
   const chunks = await textChunks;
-  const families = options.fontCoverage ? await prepareTextFamilies(list, options.fontCoverage) : ownFamilies;
+  const families = options.fontCoverage
+    ? await (await import('./textFamilies')).prepareTextFamilies(list, options.fontCoverage) : ownFamilies;
   const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
   if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
     throw new Error('invalid shadow pixel budget');
@@ -119,34 +124,6 @@ export async function paintSlide(
   } finally {
     try { ctx.restore(); } finally { images?.release?.(); }
   }
-}
-
-/** Every family a display list draws text with, mapped to the family its prepared face is installed under. */
-async function prepareTextFamilies(list: SlideDisplayList, coverage: PaintFontCoverage): Promise<TextFamilies> {
-  const texts = new Map<string, string[]>();
-  const visit = (primitives: readonly SlidePrimitive[]) => {
-    for (const primitive of primitives) {
-      if (primitive.kind === 'textBox') {
-        for (const line of primitive.lines) {
-          for (const run of line.runs) {
-            const parts = texts.get(run.fontFamily) ?? [];
-            parts.push(run.text);
-            texts.set(run.fontFamily, parts);
-          }
-        }
-      } else if (primitive.kind === 'chart' || primitive.kind === 'table') visit(primitive.primitives);
-    }
-  };
-  visit(list.primitives);
-  const prepared = new Map<string, string>();
-  await Promise.all([...texts].map(async ([family, parts]) => {
-    prepared.set(family, await coverage.prepare(family, parts.join('')));
-  }));
-  return (family) => {
-    const drawn = prepared.get(family);
-    if (drawn === undefined) throw new Error(`Text in ${family} was painted without preparing its font`);
-    return drawn;
-  };
 }
 
 async function paintPrimitive(
@@ -1025,7 +1002,7 @@ function paintTextRun(
 ): void {
   const style = run.italic ? 'italic ' : '';
   const weight = run.bold ? 'bold ' : '';
-  const family = fontFamily?.({ family: run.fontFamily, bold: run.bold === true, italic: run.italic === true, id: run.fontId }) ?? families(run.fontFamily);
+  const family = fontFamily?.({ family: run.fontFamily, bold: run.bold === true, italic: run.italic === true, id: run.fontId }) ?? families(run.fontFamily, run.bold, run.italic);
   ctx.font = `${style}${weight}${run.fontSizePx}px ${quoteFamily(family)}`;
   ctx.fillStyle = run.color;
   const spacing = run.letterSpacingPx ?? 0;

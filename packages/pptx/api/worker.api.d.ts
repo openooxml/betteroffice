@@ -571,7 +571,25 @@ export interface PaintSlideOptions {
         italic: boolean;
         id: number;
     }) => string | undefined;
+    /**
+     * Makes the faces a slide draws with ready before any text is painted. Without it, text draws with each run's own
+     * family, as the host installed it.
+     */
+    fontCoverage?: PaintFontCoverage;
 }
+/** Prepares the fonts a paint draws text with. */
+export interface PaintFontCoverage {
+    /**
+     * Resolves once every character of `text` can be drawn in `family`, with the family name to draw it with (for
+     * example a newer installed revision of the same face).
+     */
+    prepare(family: string, text: string): Promise<string>;
+    /** The newest family to draw prepared text with now; a newer revision holds everything an older one did. */
+    latest?(family: string): string | undefined;
+    /** False for a style that draws under its own name, whatever the family's other styles do. Defaults to true. */
+    covers?(family: string, bold: boolean, italic: boolean): boolean;
+}
+export type TextFamilies = (family: string, bold?: boolean, italic?: boolean) => string;
 export interface SlideCanvasLike {
     width: number;
     height: number;
@@ -768,6 +786,8 @@ import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
 import type { PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame } from './methods';
+import type { SlicedFontRead } from './commandSlicedFonts';
+import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 export type PresentationCommandAccessMethods = Pick<PresentationHandle, 'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
 export type PresentationCommandAccessMethod = keyof PresentationCommandAccessMethods;
 export type PresentationCommandAccessResult = ReturnType<PresentationCommandAccessMethods[PresentationCommandAccessMethod]>;
@@ -1073,6 +1093,10 @@ export interface PresentationCommandFrame extends PresentationWireFrame {
     incarnation: string;
 }
 export interface PresentationCommandAck extends PresentationCommandIdentity {
+    /** Families whose outlines load as text needs them; a paint prepares its text through `readCoverageFont`. */
+    slicedFamilies?: string[];
+    /** The styles of those families that draw under their own name, as `family|bold|italic`. */
+    slicedPlainStyles?: string[];
     epoch: number;
     throughSeq: number;
     version: string;
@@ -1108,6 +1132,7 @@ export interface PresentationCommandOpenOptions extends PresentationSessionOpenO
     collaboration?: boolean;
     observeChanges?: boolean;
     defaultFonts?: boolean;
+    slicedFonts?: boolean;
 }
 export interface PresentationCommandOpenResult extends PresentationCommandAck {
     recoveryBaseline?: 'source' | 'update';
@@ -1153,7 +1178,11 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
 }
 export type PresentationCommandMethods = FontDecoderMethods & {
     /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
-    prefetchCoverageFonts(scripts: string[]): void;
+    prefetchCoverageFonts(scripts: string[], sliced?: boolean): void;
+    /** A sliced face with `text` loaded, unless the caller's revision `have` is still current; null for other families. */
+    readCoverageFont(family: string, text: string, have: number | null): SlicedFontRead | null;
+    /** The complete sliced faces, for paints that do not prepare their text. */
+    wholeCoverageFonts(have: string[]): DefaultFontFace[];
     openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
     command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
     thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -1174,6 +1203,8 @@ export type PresentationCommandEvents = {
 };
 export interface PresentationCommandClient {
     readonly state: PresentationCommandOpenResult;
+    readCoverageFont?(family: string, text: string, have: number | null): Promise<SlicedFontRead | null>;
+    wholeCoverageFonts?(have: string[]): Promise<DefaultFontFace[]>;
     dispatch(intent: PresentationCommandIntent, basis?: PresentationCommandBasis): Promise<PresentationCommandAck>;
     flush(seq?: number): Promise<PresentationCommandAck>;
     save(): Promise<Uint8Array>;
@@ -1197,6 +1228,8 @@ export interface PresentationCommandClient {
 export declare const PRESENTATION_COMMAND_METHODS: {
     decodeFontFace: true;
     prefetchCoverageFonts: true;
+    readCoverageFont: true;
+    wholeCoverageFonts: true;
     openCommandEditor: true;
     command: true;
     thumbnailFrame: true;
@@ -1220,6 +1253,8 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
     activeSlideIndex?: number;
     /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
     defaultFonts?: boolean;
+    /** Opens CJK coverage faces in slices that load as text needs them. Defaults to false. */
+    slicedFonts?: boolean;
     collaboration?: {
         clientId: number;
         initialUpdate?: Uint8Array;
@@ -1259,6 +1294,95 @@ export declare const presentationSharedInputs: {
     set(client: PresentationCommandClient, input: PresentationSharedInput): void;
     delete(client: PresentationCommandClient): void;
 };
+
+// ---- session/commandSlicedFonts.d.ts ----
+import type { PaintFontCoverage } from '../render/canvas';
+/** What the session needs from a progressive face. */
+export interface SlicedFontFace {
+    readonly revision: number;
+    bytes(): ArrayBuffer;
+    ensureText(text: string): Promise<number>;
+    prefetch(text: string): void;
+    chunksOf(text: string): number[];
+    loadedChunks(): ReadonlySet<number>;
+}
+interface ExportFaceHandle {
+    replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: {
+        id: number;
+        bold?: boolean;
+        italic?: boolean;
+    }) => boolean): void;
+}
+/** A face's drawable bytes for a realm that keeps its own copy; `bytes` is absent when `have` is still current. */
+export interface SlicedFontRead {
+    revision: number;
+    bytes?: ArrayBuffer;
+}
+/**
+ * Sliced faces are verified in Chromium and Firefox. Safari, iOS browsers (all WebKit) and unknown engines
+ * use whole faces.
+ */
+export declare function slicedFacesSupported(userAgent?: string): boolean;
+/**
+ * The sliced faces of one session. A paint prepares its text first: the chunks it needs load, and when that
+ * changed the face a new revision is installed under its own family name, because a canvas in a worker never sees
+ * a replaced face under the same family. If a chunk cannot load the whole face takes over, so no glyph draws blank.
+ */
+export declare function createSlicedFontFaces(quietMs?: number): {
+    coverage: PaintFontCoverage;
+    fill: (text: string) => Promise<void>;
+    loadedWhole: (family: string) => ArrayBuffer | undefined;
+    wholeFaces: (names: readonly string[]) => Promise<{
+        family: string;
+        bytes: ArrayBuffer;
+    }[]>;
+    keepsExportFace: (family: string, face: {
+        id: number;
+        bold?: boolean;
+        italic?: boolean;
+    }) => boolean;
+    families: () => string[];
+    exportFamilies: () => string[];
+    plainStyles: () => string[];
+    supported: () => boolean;
+    /** What an acknowledgement carries, so a realm that paints too knows which families are sliced. */
+    ack: () => {
+        slicedFamilies: string[];
+        slicedPlainStyles: string[];
+    };
+    /** Fills from `read` a moment after fonts land, once for any number of calls. */
+    scheduleFill(read: () => string | undefined): void;
+    /** Upgrades a face that registered after its family's whole bytes loaded, whatever the ordering. */
+    upgradeRegistered(handle: ExportFaceHandle, family: string): void;
+    /** Gives export whole faces by font id, and by family for text measured with browser fonts. Rejects if one cannot load. */
+    completeExport(handle: ExportFaceHandle): Promise<{
+        family: string;
+        bold: boolean;
+        italic: boolean;
+        bytes: Uint8Array;
+    }[]>;
+    /** Whole faces of the families `have` lacks; one that cannot load is left out. */
+    wholeFonts(have: unknown): Promise<{
+        family: string;
+        bold: boolean;
+        italic: boolean;
+        bytes: ArrayBuffer;
+        kind: "coverage";
+    }[]>;
+    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>): void;
+    has: (family: string) => boolean;
+    prefetch(text: string): void;
+    /** The face with `text` loaded, for a realm that keeps its own copy at revision `have`. */
+    read(family: string, text: string, have: number | null): Promise<SlicedFontRead | undefined>;
+    /** The complete face, for paints that cannot wait on coverage. */
+    whole(family: string): Promise<ArrayBuffer> | undefined;
+    /** Records a style of `family` that loaded as its own whole face, so it draws under its own name. */
+    plain(family: string, bold: boolean, italic: boolean): void;
+    /** Stops slicing a family a host registered a face for; its older faces still need whole bytes to export. */
+    forget(family: string, fontId: number): void;
+    dispose(): void;
+};
+export {};
 
 // ---- session/editPeer.d.ts ----
 import type { PresentationEditorConnection } from './client';
@@ -1359,6 +1483,7 @@ interface PreparedFontWorker {
 export declare function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer, options?: {
     defaultFonts?: boolean;
     activeSlideIndex?: number;
+    slicedFonts?: boolean;
 }): PreparedFontWorker;
 /** The prepared worker for `source`, unless another editor still holds it; that editor's fonts keep loading. */
 export declare function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined;
@@ -2759,6 +2884,36 @@ export declare class SessionFailure extends Error {
     readonly code: SessionFailureCode;
     readonly diagnostics?: string | undefined;
     constructor(code: SessionFailureCode, message: string, diagnostics?: string | undefined);
+}
+
+// ---- shared/pptxDefaultFonts.d.ts ----
+export interface RequestedFontFace {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+    scripts?: string[];
+}
+export interface DefaultFontFace {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+    bytes: ArrayBuffer;
+    kind?: 'primary' | 'coverage';
+    /** A lighter family's regular face drawn at its own weight whatever weight the run claims. */
+    ownWeight?: boolean;
+}
+/** A default face the worker registered; its bytes reach the main thread only in the install request. */
+export type DefaultFontLanding = Omit<DefaultFontFace, 'bytes'>;
+export interface DefaultFontPayload {
+    defaultFonts?: DefaultFontLanding[];
+}
+export declare const defaultFontInstaller = "pptxDefaultFontInstaller";
+export type DefaultFontInstallation = {
+    [defaultFontInstaller]?: (faces: readonly DefaultFontFace[], allowed?: (family: string) => boolean) => Promise<readonly DefaultFontFace[] | void>;
+};
+export interface DefaultFontInstallRequest {
+    id: number;
+    faces: DefaultFontFace[];
 }
 
 // ---- structuredExport.d.ts ----
@@ -4276,6 +4431,12 @@ export interface PresentationHandle extends CollaborationReplica {
     registerFont(face: PptxFontFace): number;
     /** Registers a face drawn only where a run's own face has no glyph. */
     registerFallbackFont(face: PptxFontFace): number;
+    /** Gives PNG export the complete bytes of a family layout measured with only part of. */
+    replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: {
+        id: number;
+        bold?: boolean;
+        italic?: boolean;
+    }) => boolean): void;
     layoutSlide(slideIndex: number): SlideDisplayList;
     /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
     layoutSlideProfiled(slideIndex: number): ProfiledLayout;
