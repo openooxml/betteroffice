@@ -1,5 +1,6 @@
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { canvasPngAvailable, canvasUnavailable, slideListToPng, type PptxPngBackground } from '../render/png';
-import { decodeBrowserPresentationImage } from '../render/browserImage';
+import { browserPresentationImageBlob, decodeBrowserPresentationImage, needsElementDecode } from '../render/browserImage';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 
 /** What an engine needs to draw one slide. The presentation handle builds it; each engine reads what it uses. */
@@ -26,6 +27,10 @@ export interface PptxEnginePngOptions {
 /** Which engine this module draws with; the native package swaps in its own. */
 export const engineKind: 'wasm' | 'native' = 'wasm';
 
+function decodesOnlyWithDocument(bytes: Uint8Array): boolean {
+  try { return needsElementDecode(browserPresentationImageBlob(bytes)); } catch { return false; }
+}
+
 function assetIds(primitives: SlideDisplayList['primitives'], ids: Set<string>): Set<string> {
   for (const primitive of primitives) {
     if (primitive.kind === 'image' && primitive.assetId) ids.add(primitive.assetId);
@@ -43,6 +48,9 @@ export async function renderPng(engine: PptxPngEngine, target: { slide: number }
     for (const assetId of assetIds(list.primitives, new Set())) {
       options.signal?.throwIfAborted();
       const bytes = engine.media(assetId);
+      if (bytes?.byteLength && typeof Image === 'undefined' && decodesOnlyWithDocument(bytes)) {
+        throw new PngExportError('canvas-unavailable', 'This slide has SVG or metafile pictures, which decode only with a document. Export from the page, or use @betteroffice/pptx-native.');
+      }
       images.set(assetId, bytes?.byteLength ? await decodeBrowserPresentationImage(bytes, 'image could not decode').catch(() => null) : null);
     }
     return await slideListToPng(list, {

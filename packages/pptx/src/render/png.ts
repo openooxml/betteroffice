@@ -3,6 +3,9 @@ import { installPngFaces, type PngFontFace, type PngRunFont } from '../../../../
 import type { SlideDisplayList, SlidePrimitive } from '../types';
 import { type CanvasImageResolver, paintSlide, slideBackingStore } from './canvas';
 
+/** The font id layout gives text it measured with the browser's own fonts, which an export paints the same way. */
+export const BROWSER_FONT_ID = 0xffffffff;
+
 /** The engine's largest PNG side and area, in pixels. */
 export const MAX_SLIDE_PNG_SIDE = 16_384;
 export const MAX_SLIDE_PNG_PIXELS = 16_777_216;
@@ -65,8 +68,13 @@ export function slidePngRequest(
 export async function slideListToPng(list: SlideDisplayList, options: SlideListToPngOptions = {}): Promise<Uint8Array> {
   const { width, height, scale, background } = slidePngRequest(list, options);
   options.signal?.throwIfAborted();
+  const fonts = slideFonts(list);
+  const missing = fonts.find((font) => font.id !== undefined && font.id !== BROWSER_FONT_ID && !slideFace(options.fonts ?? [], font));
+  if (missing) {
+    throw new PngExportError('font-unavailable', `The slide's text was laid out with a ${JSON.stringify(missing.family)} face this export does not have.`);
+  }
   const faces = await installPngFaces({
-    prefix: 'bo-pptx-png', fonts: slideFonts(list), faces: options.fonts ?? [], choose: slideFace, subject: 'slide',
+    prefix: 'bo-pptx-png', fonts, faces: options.fonts ?? [], choose: slideFace, subject: 'slide',
     canvasFont: (font, family) => `${font.italic ? 'italic ' : ''}${font.bold ? 'bold ' : ''}16px ${JSON.stringify(family)}`,
   });
   try {

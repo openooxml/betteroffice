@@ -2,6 +2,7 @@ import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 import type { ShapeSnapshot } from '@betteroffice/pptx';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from './peerlessViewStore';
+import { createCommandFramePainter } from './commandFramePainter';
 
 export async function peerlessFrameSource(run: PeerlessPresentation, index?: number) {
   run.require();
@@ -57,13 +58,15 @@ export async function peerlessProposalFrameSource(run: PeerlessPresentation, id:
 }
 
 export async function peerlessExportPng(run: PeerlessPresentation): Promise<{ png: Blob; index: number }> {
-  run.require();
-  await run.store.fence();
-  run.require();
-  const slideId = run.client.state.activeSlideId;
-  const index = run.client.state.slides.findIndex((slide) => slide.id === slideId);
-  if (index < 0 || !slideId || !run.client.renderPng) throw new Error('Slide is unavailable');
-  const bytes = await run.client.renderPng({ slide: slideId }, { scale: 1 });
-  run.require();
-  return { png: new Blob([new Uint8Array(bytes)], { type: 'image/png' }), index };
+  const source = await peerlessFrameSource(run);
+  const canvas = document.createElement('canvas');
+  const painter = createCommandFramePainter(canvas, { images: run.images, scale: 1, dpr: 1, current: () => run.current });
+  try {
+    painter.paintFrame(source.confirmed, { ...run.store.getSnapshot(), confirmed: source.confirmed, echo: null, caret: null,
+      selection: null, selectionRects: [], composition: null });
+    if (!await painter.whenPainted()) throw new Error('Slide painting failed');
+    run.require();
+    const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('PNG encoding failed')), 'image/png'));
+    return { png, index: source.index };
+  } finally { painter.dispose(); source.release(); }
 }

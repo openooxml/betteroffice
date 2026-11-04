@@ -105,7 +105,9 @@ test('proposal preview reports a selection refusal', async () => {
 
 test('PNG export resolves the active slide after navigation acknowledgement', async () => {
   const value = await open();
-  const encode = spyOn(value.client, 'renderPng').mockImplementation(async () => new Uint8Array([137, 80, 78, 71]));
+  const slideId = value.client.state.slides[1]!.id;
+  const thumbnail = spyOn(value.client, 'thumbnail');
+  const encode = spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => callback(new Blob([], { type: 'image/png' })));
   const createUrl = spyOn(URL, 'createObjectURL').mockReturnValue('blob:slide');
   const revokeUrl = spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
   const download = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
@@ -116,9 +118,9 @@ test('PNG export resolves the active slide after navigation acknowledgement', as
     const exporting = value.api.commands.execute('exportPng', null);
     replyControl.release();
     await act(async () => { await navigation; expect(await exporting).toMatchObject({ ok: true }); });
-    expect(encode.mock.calls.map(([target]) => target)).toEqual([{ slide: value.client.state.slides[1]!.id }]);
+    expect(thumbnail.mock.calls[thumbnail.mock.calls.length - 1]?.[0]).toBe(slideId);
   } finally {
-    replyControl.release(); encode.mockRestore(); createUrl.mockRestore(); revokeUrl.mockRestore(); download.mockRestore();
+    replyControl.release(); thumbnail.mockRestore(); encode.mockRestore(); createUrl.mockRestore(); revokeUrl.mockRestore(); download.mockRestore();
   }
 });
 
@@ -162,16 +164,15 @@ test('async_review_export', async () => {
   expect(structured.ok).toBe(true);
   if (!structured.ok) throw new Error(structured.failure.message);
   expect(structured.content.slides).toHaveLength(2);
-  const png = new Uint8Array([137, 80, 78, 71]);
-  const encode = spyOn(value.client, 'renderPng').mockImplementation(async () => png);
+  const png = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
+  const encode = spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => callback(png));
   const createUrl = spyOn(URL, 'createObjectURL').mockReturnValue('blob:slide');
   const revokeUrl = spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
   const download = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
   try {
     await act(async () => { expect(await value.api.commands!.execute('exportPng', null)).toMatchObject({ ok: true }); });
-    expect(encode).toHaveBeenCalledWith({ slide: value.client.state.slides[0]!.id }, { scale: 1 });
-    const blob = createUrl.mock.calls[0]![0] as Blob;
-    expect([blob.type, [...new Uint8Array(await blob.arrayBuffer())]]).toEqual(['image/png', [...png]]);
+    expect(encode).toHaveBeenCalledWith(expect.any(Function), 'image/png');
+    expect(createUrl).toHaveBeenCalledWith(png);
     expect(download).toHaveBeenCalledTimes(1);
     expect(revokeUrl).toHaveBeenCalledWith('blob:slide');
   } finally { encode.mockRestore(); createUrl.mockRestore(); revokeUrl.mockRestore(); download.mockRestore(); }

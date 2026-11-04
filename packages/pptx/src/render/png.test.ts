@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { SlideDisplayList, SlidePrimitive } from '../types';
-import { pngBackground, slideFace, slideFonts, slideListToPng } from './png';
+import { BROWSER_FONT_ID, pngBackground, slideFace, slideFonts, slideListToPng } from './png';
 
 const card: SlidePrimitive = {
   kind: 'shape', objectId: 1, shapeId: 'shape:1', name: 'Card', x: 20, y: 20, w: 280, h: 140, geometry: 'rect',
@@ -8,14 +8,14 @@ const card: SlidePrimitive = {
   fill: { kind: 'solid', color: '#3b82f6' },
 } as SlidePrimitive;
 
-const run = (family: string, bold = false) => ({
-  text: 'Hello', start: 0, end: 5, x: 40, width: 60, fontId: 1, fontFamily: family, fontSizePx: 20,
+const run = (family: string, bold = false, fontId = 1) => ({
+  text: 'Hello', start: 0, end: 5, x: 40, width: 60, fontId, fontFamily: family, fontSizePx: 20,
   bold, italic: false, underline: false, color: '#000000', glyphs: [],
 });
 
-const textBox = (family: string, bold = false): SlidePrimitive => ({
+const textBox = (family: string, bold = false, fontId = 1): SlidePrimitive => ({
   kind: 'textBox', objectId: 2, shapeId: 'shape:2', storyId: 'story:2', x: 40, y: 50, w: 240, h: 80, anchor: 'top', paragraphs: [],
-  lines: [{ x: 40, y: 50, width: 60, height: 24, baseline: 68, start: 0, end: 5, caretStops: [], runs: [run(family, bold)] }],
+  lines: [{ x: 40, y: 50, width: 60, height: 24, baseline: 68, start: 0, end: 5, caretStops: [], runs: [run(family, bold, fontId)] }],
 } as unknown as SlidePrimitive);
 
 const list = (primitives: SlidePrimitive[] = [card]): SlideDisplayList => ({
@@ -97,7 +97,7 @@ describe('slideListToPng', () => {
 
   test('paints text with a supplied face under a private family and drops it afterwards', async () => {
     const calls = stub();
-    await slideListToPng(list([textBox('Brand Sans', true), textBox('Other')]), { fonts: [{ family: 'brand sans', bytes: new Uint8Array([1]) }] });
+    await slideListToPng(list([textBox('Brand Sans', true), textBox('Other', false, BROWSER_FONT_ID)]), { fonts: [{ family: 'brand sans', bytes: new Uint8Array([1]) }] });
     expect(calls.faces).toEqual([expect.stringMatching(/^bo-pptx-png-\d+-0$/)]);
     expect(calls.fonts.some((font) => /^bold 20px bo-pptx-png-\d+-0$/.test(font))).toBe(true);
     expect(calls.fonts.some((font) => font.endsWith('20px Other'))).toBe(true);
@@ -109,6 +109,13 @@ describe('slideListToPng', () => {
     await expect(slideListToPng(list([textBox('Brand Sans')]), { fonts: [{ family: 'Brand Sans', bytes: new Uint8Array([1]) }] }))
       .rejects.toMatchObject({ code: 'font-unavailable', message: expect.stringContaining('Brand Sans') });
     expect(calls.encoded).toBe(0);
+  });
+
+  test('text laid out with an engine face the export has no copy of rejects instead of painting by family name', async () => {
+    const calls = stub();
+    await expect(slideListToPng(list([textBox('Brand Sans', false, 7)]), { fonts: [{ id: 3, family: 'Brand Sans', bytes: new Uint8Array([1]) }] }))
+      .rejects.toMatchObject({ name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('Brand Sans') });
+    expect([calls.faces, calls.encoded]).toEqual([[], 0]);
   });
 
   test('stops without encoding when aborted', async () => {
