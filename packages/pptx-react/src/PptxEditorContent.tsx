@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from './bundledFonts';
 import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
@@ -375,7 +376,7 @@ export function PptxEditorContent({
   onPluginError,
   backend,
   onWorkerReady,
-}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'> & PptxAsyncPresentationProps & {
+}: ResolvedFontProps<Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'>> & PptxAsyncPresentationProps & {
   collaboration?: PptxContentCollaborationOptions;
   collaborationIdentity?: object;
   backend?: (changed: () => void) => EditablePresentation;
