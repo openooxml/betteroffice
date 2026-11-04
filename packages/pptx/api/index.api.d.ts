@@ -520,6 +520,31 @@ export type ProposalEdit = {
     slideId: string;
     shapeId: string;
 } | {
+    type: 'insertTableRow';
+    slideId: string;
+    shapeId: string;
+    index: number;
+    position: 'before' | 'after';
+    cells?: string[];
+} | {
+    type: 'deleteTableRow';
+    slideId: string;
+    shapeId: string;
+    index: number;
+} | {
+    type: 'insertTableColumn';
+    slideId: string;
+    shapeId: string;
+    index: number;
+    position: 'before' | 'after';
+    cells?: string[];
+    width?: 'split' | 'copy';
+} | {
+    type: 'deleteTableColumn';
+    slideId: string;
+    shapeId: string;
+    index: number;
+} | {
     type: 'insertSlide';
     ref?: string;
     afterSlideId: string | null;
