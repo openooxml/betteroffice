@@ -49,6 +49,10 @@ export type SavedDeck = Awaited<ReturnType<typeof inspectDeck>>;
 
 export const slideCanvas = (page: Page) => page.getByTestId('pptx-slide-canvas');
 
+export async function inputReady(page: Page) {
+  await expect(slideCanvas(page)).toHaveAttribute('data-pptx-input-ready', 'true');
+}
+
 export async function painted(page: Page) {
   return slideCanvas(page).evaluate((canvas: HTMLCanvasElement) => canvas.toDataURL());
 }
