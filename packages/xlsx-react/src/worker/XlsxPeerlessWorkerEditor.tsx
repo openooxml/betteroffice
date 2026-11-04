@@ -1611,7 +1611,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const entry = name === null ? undefined : catalog.find((sheet) => sheet.name.toLowerCase() === name);
     if (!entry) return;
     pendingActivation.current = null;
-    if (entry.index !== activeRef.current) navigate(entry.index);
+    if (entry.index !== activeRef.current || entry.id !== activeSheetId.current) navigate(entry.index);
   });
   const selectAtPoint = (request: { x: number; y: number }) => {
     const { cell, chart } = point({ clientX: request.x, clientY: request.y });

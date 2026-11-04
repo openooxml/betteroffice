@@ -329,7 +329,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
         case 'insertRows': case 'deleteRows': case 'insertColumns': case 'deleteColumns': {
           if (!cells || !target) return fail('cell-selection-required');
           const rows = id === 'insertRows' || id === 'deleteRows';
-          const after = argsRecord.position === 'below' || argsRecord.position === 'right';
+          const after = argsRecord?.position === 'below' || argsRecord?.position === 'right';
           const count = rows ? cells.bottom - cells.top + 1 : cells.right - cells.left + 1;
           const at = rows ? (after ? cells.bottom + 1 : cells.top) : (after ? cells.right + 1 : cells.left);
           const type = id === 'insertRows' ? 'insertRows' : id === 'deleteRows' ? 'deleteRows' : id === 'insertColumns' ? 'insertCols' : 'deleteCols';
