@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 const root = resolve(import.meta.dirname, '../..');
 const PAGES = 18;
 const FORCE_VISIBLE = '.paged-editor__page, .canvas-page { content-visibility: visible !important; }';
-const SETTLE = '[data-docx-caret] { visibility: hidden !important; } * { caret-color: transparent !important; }';
+const SETTLE = '[data-docx-caret], [data-testid="caret"] { visibility: hidden !important; } * { caret-color: transparent !important; }';
 type Rect = { x: number; y: number; width: number; height: number };
 
 async function longDocument(): Promise<Buffer> {
