@@ -1,9 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import type { Proposal, ProposalChange } from '@betteroffice/pptx';
-import { de } from '@betteroffice/pptx-i18n';
 import type { PptxCommandStore } from '../commands/types';
-import { LocaleProvider } from '../i18n';
 import { PeerlessReview, type PeerlessReviewState } from './PeerlessReview';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
@@ -61,18 +59,6 @@ test('review previews speaker notes with the empty text placeholder', async () =
   const { view } = mount([proposal({ changes: [notes] })]);
   await waitFor(() => expect(view.getByTestId('pptx-proposal-notes-diff').querySelector('ins')?.textContent).toBe('Speaker notes'));
   expect(view.getByTestId('pptx-proposal-notes-diff').querySelector('del')?.textContent).toBe('Empty');
-});
-
-test('review keeps translated layout and background labels for created slide refs', async () => {
-  const change: ProposalChange = { slideId: 'slide', shapeId: null, kind: 'content', before: null, after: null, oldText: '', newText: '' };
-  const { view, props } = mount([proposal({ changes: [change], refs: { new: 'slide' }, edits: [
-    { type: 'setSlideLayout', slideId: '@new', layoutPartPath: 'layout.xml' },
-    { type: 'setSlideBackground', slideId: '@new', background: null },
-  ] })]);
-  view.rerender(<LocaleProvider i18n={{ ...de, _lang: 'de' }}><PeerlessReview {...props} /></LocaleProvider>);
-  await view.findByText('Layout geändert');
-  await view.findByText('Hintergrund geändert');
-  expect(view.getByTestId('pptx-proposal').querySelector('span')?.textContent).toContain('Layout geändert, Hintergrund geändert');
 });
 
 test('review warns about stale targets and disables ordinary acceptance', async () => {

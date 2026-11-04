@@ -2,37 +2,9 @@ import type { CSSProperties } from 'react';
 import type { Proposal, ProposalChange } from '@betteroffice/pptx';
 import type { TFunction } from '@betteroffice/pptx-i18n';
 
-import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
-import { useTranslation } from '../i18n';
 import { proposalSlideLabels } from './proposalLabels';
 
 interface Props { change: ProposalChange; proposal?: Proposal; t: TFunction; lang?: string; textOnly?: boolean; testId?: string }
-
-export function ProposalPicker({ className }: { className?: string }) {
-  const store = usePptxCommands();
-  const state = usePptxCommandState('proposalSelect');
-  const { t } = useTranslation();
-  const disabled = !state.enabled;
-  return (
-    <select
-      className={className}
-      aria-label={t('proposals.canvasTitle')}
-      aria-disabled={disabled || undefined}
-      title={state.enabled ? undefined : state.disabledReason.message}
-      value={state.value ?? ''}
-      onChange={(event) => {
-        if (!disabled) void store.execute('proposalSelect', { proposalId: event.target.value });
-      }}
-      style={{ maxWidth: 220, font: '400 13px ui-sans-serif, system-ui, sans-serif' }}
-    >
-      {(state.options ?? []).map((option) => (
-        <option key={option.args.proposalId} value={option.args.proposalId}>
-          {option.label}
-        </option>
-      ))}
-    </select>
-  );
-}
 
 function ProposalTextDiff({ change, t, testId }: Props) {
   if (change.oldText === change.newText) return null;

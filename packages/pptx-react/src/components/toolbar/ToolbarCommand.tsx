@@ -1,4 +1,4 @@
-import { lazy, Suspense, useContext, useId, useRef } from 'react';
+import { useContext, useId, useRef } from 'react';
 import type { ComponentType, CSSProperties, ReactNode } from 'react';
 import type { ParagraphAlignment } from '@betteroffice/pptx';
 import type { TFunction, TranslationKey } from '@betteroffice/pptx-i18n';
@@ -33,8 +33,6 @@ import {
 } from '../ui/ToolbarPrimitives';
 import { runFromControl } from './activation';
 import { ToolbarOverflowContext, useOverflowSource, type OverflowPrompt } from './overflowRegistry';
-
-const ProposalPicker = lazy(() => import('../ProposalDetails').then((module) => ({ default: module.ProposalPicker })));
 
 const COMMAND_ICONS: Partial<Record<PptxCommandId, ToolbarIconName>> = {
   bold: 'bold',
@@ -833,6 +831,32 @@ function AdjustmentBox() {
   );
 }
 
+function ProposalPicker({ className }: { className?: string }) {
+  const store = usePptxCommands();
+  const state = usePptxCommandState('proposalSelect');
+  const { t } = useTranslation();
+  const disabled = !state.enabled;
+  return (
+    <select
+      className={className}
+      aria-label={t('proposals.canvasTitle')}
+      aria-disabled={disabled || undefined}
+      title={reasonOf(state as PptxCommandState)}
+      value={state.value ?? ''}
+      onChange={(event) => {
+        if (!disabled) void store.execute('proposalSelect', { proposalId: event.target.value });
+      }}
+      style={{ maxWidth: 220, font: '400 13px ui-sans-serif, system-ui, sans-serif' }}
+    >
+      {(state.options ?? []).map((option) => (
+        <option key={option.args.proposalId} value={option.args.proposalId}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 /**
  * The built-in picker of a selector command.
  * @experimental
@@ -874,7 +898,7 @@ export function ToolbarCommandSelect<K extends PptxSelectCommandId>({
       control = <ZoomBox />;
       break;
     case 'proposalSelect':
-      control = <Suspense fallback={null}><ProposalPicker /></Suspense>;
+      control = <ProposalPicker />;
       break;
   }
   if (id === 'tool') {
