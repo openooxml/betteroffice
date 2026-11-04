@@ -4,66 +4,66 @@
     "contents": []
   },
   "options": {
-    "pageGap": 24.0
+    "pageGap": 24
   },
   "regions": {
     "sections": [
       {
         "properties": {
-          "columnSpace": 720.0,
+          "columnSpace": 720,
           "docGrid": {
-            "linePitch": 360.0
+            "linePitch": 360
           },
-          "footerDistance": 720.0,
+          "footerDistance": 720,
           "footerReferences": [
             {
               "rId": "rId10",
               "type": "default"
             }
           ],
-          "gutter": 0.0,
-          "headerDistance": 720.0,
+          "gutter": 0,
+          "headerDistance": 720,
           "headerReferences": [
             {
               "rId": "rId9",
               "type": "default"
             }
           ],
-          "marginBottom": 1152.0,
-          "marginLeft": 1224.0,
-          "marginRight": 1224.0,
-          "marginTop": 1152.0,
-          "pageHeight": 15840.0,
-          "pageWidth": 12240.0
+          "marginBottom": 1152,
+          "marginLeft": 1224,
+          "marginRight": 1224,
+          "marginTop": 1152,
+          "pageHeight": 15840,
+          "pageWidth": 12240
         }
       },
       {
         "properties": {
-          "columnSpace": 720.0,
+          "columnSpace": 720,
           "docGrid": {
-            "linePitch": 360.0
+            "linePitch": 360
           },
-          "footerDistance": 720.0,
+          "footerDistance": 720,
           "footerReferences": [
             {
               "rId": "rId10",
               "type": "default"
             }
           ],
-          "gutter": 0.0,
-          "headerDistance": 720.0,
+          "gutter": 0,
+          "headerDistance": 720,
           "headerReferences": [
             {
               "rId": "rId9",
               "type": "default"
             }
           ],
-          "marginBottom": 1152.0,
-          "marginLeft": 1224.0,
-          "marginRight": 1224.0,
-          "marginTop": 1152.0,
-          "pageHeight": 15840.0,
-          "pageWidth": 12240.0
+          "marginBottom": 1152,
+          "marginLeft": 1224,
+          "marginRight": 1224,
+          "marginTop": 1152,
+          "pageHeight": 15840,
+          "pageWidth": 12240
         }
       }
     ],
@@ -79,7 +79,7 @@
         "suppressSpBfAfterPgBrk": false,
         "useWord97LineBreakRules": false
       },
-      "defaultTabStop": 720.0,
+      "defaultTabStop": 720,
       "themeFontLang": {
         "eastAsia": "ja-JP"
       }
@@ -98,8 +98,8 @@
       "useWord97LineBreakRules": false
     },
     "defaultParagraphStyleId": "Normal",
-    "defaultTabStopTwips": 720.0,
-    "docDefaultFontSize": 11.0,
+    "defaultTabStopTwips": 720,
+    "docDefaultFontSize": 11,
     "fontTheme": {
       "colorScheme": {
         "accent1": "4F81BD",
@@ -195,42 +195,42 @@
     },
     "numericIds": {},
     "paragraphStyleFontSizes": {
-      "BodyText": 11.0,
-      "BodyText2": 11.0,
-      "BodyText3": 8.0,
-      "Caption": 9.0,
-      "Footer": 11.0,
-      "Header": 11.0,
-      "Heading1": 14.0,
-      "Heading2": 13.0,
-      "Heading3": 11.0,
-      "Heading4": 11.0,
-      "Heading5": 11.0,
-      "Heading6": 11.0,
-      "Heading7": 11.0,
-      "Heading8": 10.0,
-      "Heading9": 10.0,
-      "IntenseQuote": 11.0,
-      "List": 11.0,
-      "List2": 11.0,
-      "List3": 11.0,
-      "ListBullet": 11.0,
-      "ListBullet2": 11.0,
-      "ListBullet3": 11.0,
-      "ListContinue": 11.0,
-      "ListContinue2": 11.0,
-      "ListContinue3": 11.0,
-      "ListNumber": 11.0,
-      "ListNumber2": 11.0,
-      "ListNumber3": 11.0,
-      "ListParagraph": 11.0,
-      "MacroText": 10.0,
-      "NoSpacing": 11.0,
-      "Normal": 11.0,
-      "Quote": 11.0,
-      "Subtitle": 12.0,
-      "TOCHeading": 14.0,
-      "Title": 26.0
+      "BodyText": 11,
+      "BodyText2": 11,
+      "BodyText3": 8,
+      "Caption": 9,
+      "Footer": 11,
+      "Header": 11,
+      "Heading1": 14,
+      "Heading2": 13,
+      "Heading3": 11,
+      "Heading4": 11,
+      "Heading5": 11,
+      "Heading6": 11,
+      "Heading7": 11,
+      "Heading8": 10,
+      "Heading9": 10,
+      "IntenseQuote": 11,
+      "List": 11,
+      "List2": 11,
+      "List3": 11,
+      "ListBullet": 11,
+      "ListBullet2": 11,
+      "ListBullet3": 11,
+      "ListContinue": 11,
+      "ListContinue2": 11,
+      "ListContinue3": 11,
+      "ListNumber": 11,
+      "ListNumber2": 11,
+      "ListNumber3": 11,
+      "ListParagraph": 11,
+      "MacroText": 10,
+      "NoSpacing": 11,
+      "Normal": 11,
+      "Quote": 11,
+      "Subtitle": 12,
+      "TOCHeading": 14,
+      "Title": 26
     },
     "showHiddenText": false,
     "themeColors": {

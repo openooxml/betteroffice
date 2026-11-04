@@ -4,18 +4,18 @@
     "contents": [
       {
         "height": 0,
-        "id": 1.0,
+        "id": 1,
         "noteKind": "footnote"
       },
       {
         "height": 0,
-        "id": 1.0,
+        "id": 1,
         "noteKind": "endnote"
       }
     ]
   },
   "options": {
-    "pageGap": 24.0
+    "pageGap": 24
   },
   "regions": {
     "sections": [
@@ -91,7 +91,7 @@
         "suppressSpBfAfterPgBrk": false,
         "useWord97LineBreakRules": false
       },
-      "defaultTabStop": 720.0
+      "defaultTabStop": 720
     }
   },
   "renderEnv": {
@@ -107,8 +107,8 @@
       "useWord97LineBreakRules": false
     },
     "defaultParagraphStyleId": "Normal",
-    "defaultTabStopTwips": 720.0,
-    "docDefaultFontSize": 10.0,
+    "defaultTabStopTwips": 720,
+    "docDefaultFontSize": 10,
     "fontTheme": {
       "colorScheme": {
         "accent1": "4472C4",
@@ -142,11 +142,11 @@
     },
     "numericIds": {},
     "paragraphStyleFontSizes": {
-      "Heading1": 10.0,
-      "Heading2": 10.0,
-      "Heading3": 10.0,
-      "Normal": 10.0,
-      "Title": 10.0
+      "Heading1": 10,
+      "Heading2": 10,
+      "Heading3": 10,
+      "Normal": 10,
+      "Title": 10
     },
     "showHiddenText": false,
     "themeColors": {
