@@ -33,7 +33,7 @@ function isBodyStory(story: string): boolean {
  * cell boxes the worker's frame geometry carries. Empty while that geometry
  * belongs to another frame or document version than the pages shown.
  */
-export function tableResizeHandles(geometry: PeerlessFrameGeometry | undefined, pageIndices: ReadonlySet<number>): TableResizeHandle[] {
+export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | undefined, pageIndices: ReadonlySet<number>): TableResizeHandle[] {
   const objects = geometry?.objects;
   if (!geometry || !objects || objects.version !== geometry.documentVersion ||
     objects.frameEpoch !== geometry.frameEpoch || objects.layoutRevision !== geometry.layoutRevision) return [];
@@ -87,7 +87,7 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | undefined, 
 }
 
 /** @internal The worker command for dragging `handle` by `deltaPx` layout px, or null for no change. */
-export function tableResizeIntent(geometry: PeerlessFrameGeometry | undefined, handle: TableResizeHandle, deltaPx: number): PeerlessPropertyIntent | null {
+export function tableResizeIntent(geometry: PeerlessFrameGeometry | null | undefined, handle: TableResizeHandle, deltaPx: number): PeerlessPropertyIntent | null {
   const current = tableResizeHandles(geometry, new Set([handle.pageIndex]))
     .find((candidate) => candidate.table === handle.table && candidate.columnEdge === handle.columnEdge);
   const deltaTwips = Math.round(Math.min(Math.max(deltaPx, handle.minDelta), handle.maxDelta) * TWIPS_PER_PX);

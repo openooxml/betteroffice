@@ -146,11 +146,16 @@ for (const arm of ARMS) {
         const [first] = await centers(page, COLUMN_HANDLE);
         return { x: (first!.x - box.x) / box.width, y: (first!.top - box.y) / box.height };
       };
+      const offset = async () => (await centers(page, COLUMN_HANDLE))[0]!.x - (await pageBox(page)).x;
       await setZoom(page, '100%');
       const width = (await pageBox(page)).width;
-      const base = await ratio();
+      const start = await offset();
       let expected = [COLUMN, COLUMN, COLUMN];
       for (const value of ['50%', '200%']) {
+        await setZoom(page, '100%');
+        await expect.poll(async () => (await pageBox(page)).width).toBeCloseTo(width, 0);
+        await expect.poll(offset).toBeCloseTo(start + (expected[0]! - COLUMN) / 15, 0);
+        const base = await ratio();
         await setZoom(page, value);
         const scale = parseFloat(value) / 100;
         await expect.poll(async () => (await pageBox(page)).width).toBeCloseTo(width * scale, 0);
