@@ -82,7 +82,7 @@ const CASES: Array<[string, string, Array<keyof typeof EDITS>, Array<[RegExp, nu
   ['a real run with alternate content in a cell', `${WORD_ROOT}<w:body>${text('Before')}${table(RUN_WITH_ALTERNATE_CONTENT)}${text('After')}`,
     ['clear'], [[/<mc:AlternateContent>/g, 1], [/<mc:Fallback>/g, 1]]],
   ['a real title with a page break and a drawing in a body ending with a page break', `${WORD_ROOT}<w:body>${text('Before')}${TITLE_WITH_PAGE_BREAK_AND_DRAWING}${text('After')}${PAGE_BREAK_END}`,
-    ['clear'], [[/<w:br w:type="page"\/>/g, 2], [/<mc:AlternateContent>/g, 2]]],
+    ['clear'], [[/<w:br\b[^>]*w:type="page"/g, 2], [/<mc:AlternateContent>/g, 2]]],
 ];
 for (const [saveName, save] of Object.entries(SAVES)) {
   for (const [name, body, edits, kept] of CASES) {

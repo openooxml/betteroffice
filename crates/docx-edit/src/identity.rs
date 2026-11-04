@@ -549,7 +549,12 @@ impl SourceIndex {
 
     /// Whether any of `ordinals` in `part` is a paragraph [`rewriting_loses_source_runs`]; an
     /// unreadable part or paragraph counts as one.
-    fn rewrite_loses_source_runs(&self, part: &SourcePart, ordinals: &[u32]) -> bool {
+    fn rewrite_loses_source_runs(
+        &self,
+        part: &SourcePart,
+        ordinals: &[u32],
+        loses: fn(&str) -> bool,
+    ) -> bool {
         if ordinals.is_empty() {
             return false;
         }
@@ -569,7 +574,7 @@ impl SourceIndex {
                 return true;
             };
             docx_parse::serializer::element_span(&xml[start..], &[])
-                .is_none_or(|span| rewriting_loses_source_runs(&xml[start..][span]))
+                .is_none_or(|span| loses(&xml[start..][span]))
         })
     }
 
@@ -3939,7 +3944,21 @@ impl EditingDoc {
                         .iter()
                         .map(|legacy| legacy.ordinal)
                         .collect();
-                    if !source.rewrite_loses_source_runs(part, &rewritten) {
+                    let reformatted: Vec<u32> = spliced
+                        .paragraph_patches
+                        .iter()
+                        .filter(|patch| !patch.run_edits.is_empty())
+                        .map(|patch| patch.ordinal)
+                        .collect();
+                    if !source.rewrite_loses_source_runs(
+                        part,
+                        &rewritten,
+                        rewriting_loses_source_runs,
+                    ) && !source.rewrite_loses_source_runs(
+                        part,
+                        &reformatted,
+                        reformatting_loses_fields,
+                    ) {
                         plan.spliced_parts.push(spliced);
                     }
                 } else if part.kind == SourceStoryKind::Body {
@@ -4624,6 +4643,47 @@ fn last_block_paragraph(
         &mut ordinals,
     )?;
     ordinals.into_iter().max()
+}
+
+/// Whether a run formatting patch of `xml`, one source paragraph, would drop field characters:
+/// the patch writer flattens a field nested in another field's result and field characters
+/// inside a hyperlink, as in a table of contents entry.
+fn reformatting_loses_fields(xml: &str) -> bool {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    for tag in xml.split('<').skip(1) {
+        let tag = tag.split('>').next().unwrap_or_default();
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        match name.rsplit_once(':').map_or(name, |(_, local)| local) {
+            "hyperlink" if !tag.ends_with('/') => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1)
+                } else {
+                    hyperlinks += 1
+                }
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return true;
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return true;
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether rewriting `xml`, one source paragraph, from the model would lose run content the
