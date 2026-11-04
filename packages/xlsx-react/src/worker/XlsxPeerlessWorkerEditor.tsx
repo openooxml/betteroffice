@@ -1857,7 +1857,8 @@ function cycleEditorRegion(root: HTMLElement, grid: HTMLElement | null, backward
   const toolbar = root.querySelector<HTMLElement>('[data-testid="xlsx-toolbar"]');
   const tabs = root.querySelector<HTMLElement>('[data-testid="xlsx-sheet-tabs"]');
   const focusable = toolbar ? [...toolbar.querySelectorAll<HTMLElement>('button, input, select, [tabindex]')]
-    .filter((element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled) : [];
+    .filter((element) => element.getAttribute('tabindex') !== '-1' && !(element as HTMLButtonElement).disabled &&
+      !element.closest('[inert], [aria-hidden="true"]')) : [];
   const targets = [
     focusable.find((element) => element.getAttribute('tabindex') === '0') ?? focusable[0] ?? null,
     grid,
@@ -1870,7 +1871,9 @@ function cycleEditorRegion(root: HTMLElement, grid: HTMLElement | null, backward
     const index = ((current < 0 ? (backwards ? 0 : regions.length - 1) : current) + (backwards ? -step : step) +
       regions.length * 2) % regions.length;
     const target = targets[index];
-    if (target) { target.focus(); return true; }
+    if (!target) continue;
+    target.focus();
+    if (root.ownerDocument.activeElement === target) return true;
   }
   return false;
 }
