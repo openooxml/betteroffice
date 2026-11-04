@@ -14,7 +14,7 @@ async function longDocument(): Promise<Buffer> {
   const body = Array.from({ length: PAGES }, (_, index) => {
     const number = String(index + 1).padStart(2, '0');
     const heading = `<w:p><w:pPr>${index ? '<w:pageBreakBefore/>' : ''}</w:pPr><w:r><w:t>Visibility page ${number}</w:t></w:r></w:p>`;
-    return heading + Array.from({ length: 34 }, (_, line) =>
+    return heading + Array.from({ length: 20 }, (_, line) =>
       `<w:p><w:r><w:t xml:space="preserve">Marker${number} line ${line + 1} keeps the quick brown fox jumping over the lazy dog.</w:t></w:r></w:p>`).join('');
   }).join('');
   zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`);
@@ -30,7 +30,8 @@ async function open(browser: Browser, worker: boolean) {
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     buffer: await longDocument(),
   });
-  await expect(page.locator(`.canvas-page[data-page-index="${PAGES - 1}"]`)).toBeAttached({ timeout: 60_000 });
+  await expect(page.locator('.canvas-page[data-page-index="1"] canvas')).toBeAttached({ timeout: 60_000 });
+  await expect(page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ })).toHaveText(`1 of ${PAGES}`, { timeout: 60_000 });
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
   if (worker) await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false');
   await page.addStyleTag({ content: SETTLE });
@@ -52,13 +53,21 @@ async function forceVisible(page: Page, on: boolean) {
   await frames(page);
 }
 
-/** Scrolls so the given page's top sits `offset` px below the scroller's top and waits for its raster. */
+/** Scrolls until the given page is mounted, puts its top `offset` px below the scroller's top and waits for its raster. */
 async function scrollToPage(page: Page, index: number, offset = 40) {
-  await page.evaluate(([index, offset]) => {
-    const target = document.querySelector(`.canvas-page[data-page-index="${index}"]`)!;
-    let scroller = target.parentElement;
+  await page.evaluate(async ([index, offset]) => {
+    const find = () => document.querySelector(`.canvas-page[data-page-index="${index}"]`);
+    let scroller = document.querySelector('.canvas-page[data-page-index]')!.parentElement;
     while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
     const element = scroller ?? document.scrollingElement!;
+    const frame = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 100))));
+    for (let attempt = 0; attempt < 200 && !find(); attempt++) {
+      const mounted = Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]')).map((page) => Number(page.dataset.pageIndex));
+      element.scrollTop += (Math.max(...mounted) < index ? 1 : -1) * element.clientHeight * 0.8;
+      await frame();
+    }
+    const target = find();
+    if (!target) throw new Error(`Page ${index + 1} never mounted`);
     element.scrollTop += target.getBoundingClientRect().top - element.getBoundingClientRect().top - offset;
   }, [index, offset] as const);
   await expect.poll(() => page.evaluate((index) => {
@@ -84,7 +93,9 @@ async function state(page: Page, worker: boolean) {
     };
   });
   const root = page.locator(worker ? '[data-docx-worker-editor]' : '.editor-stage').first();
-  return { ...layout, aria: await root.ariaSnapshot(), pixels: (await page.screenshot()).toString('base64') };
+  const text = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
+    .map((element) => `${element.dataset.pageIndex}:${element.textContent ?? ''}`));
+  return { ...layout, text, aria: await root.ariaSnapshot(), pixels: (await page.screenshot()).toString('base64') };
 }
 
 const selectionRects = (page: Page) => page.evaluate(() => {
@@ -162,7 +173,8 @@ for (const worker of [true, false]) {
         expect(skipped.scrollTop).toBe(shown.scrollTop);
         expect(skipped.pages).toEqual(shown.pages);
         expect(skipped.aria).toBe(shown.aria);
-        expect(skipped.aria).toContain(`Marker${String(index + 1).padStart(2, '0')} line 1 `);
+        expect(skipped.text).toEqual(shown.text);
+        expect(skipped.text.join(' '), 'page text in the document tree').toContain(`Marker${String(index + 1).padStart(2, '0')} line 1 `);
         expect(skipped.pixels === shown.pixels, `pixels at page ${index + 1}`).toBe(true);
       }
     } finally {
