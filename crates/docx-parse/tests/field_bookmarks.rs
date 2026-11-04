@@ -194,6 +194,89 @@ fn normalized_field_result(result: &str, expected_text: &str) -> String {
     xml
 }
 
+fn nested_result_bookmarks(result: &str, marker_paths: [&str; 2]) {
+    let source = fixture(&format!(
+        "<w:p>{BEGIN}{}{SEPARATE}{result}</w:p><w:p>{END}</w:p>",
+        instruction("QUOTE")
+    ));
+    let parsed = parse_docx_s9_wire(&source, S9ParseOptions::default()).unwrap();
+    assert_eq!(
+        paragraph_texts(&parsed.document.package.document.content),
+        ["BeforeABAfter", ""]
+    );
+    let mut package = serde_json::to_value(parsed.document.package).unwrap();
+    package["document"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sections");
+    let field = &package["document"]["content"][0]["content"][0];
+    assert!(field["structuredResult"]["blocks"].is_array());
+    for (path, kind) in marker_paths
+        .into_iter()
+        .zip(["bookmarkStart", "bookmarkEnd"])
+    {
+        assert_eq!(field.pointer(path).unwrap()["type"], kind);
+    }
+    for edited in [false, true] {
+        if edited {
+            package["document"]["content"][0]["content"][0]["fieldResult"] = json!([
+                {"type": "run", "content": [{"type": "text", "text": "Before"}]},
+                {"type": "run", "formatting": {"bold": true}, "content": [{"type": "text", "text": "AB"}]},
+                {"type": "run", "content": [{"type": "text", "text": "After"}]}
+            ]);
+        }
+        let saved = save_package(&source, &package);
+        let reopened = parse_docx_s9_wire(&saved, S9ParseOptions::default()).unwrap();
+        assert_eq!(
+            paragraph_texts(&reopened.document.package.document.content),
+            ["BeforeABAfter", ""]
+        );
+        let xml = document_xml(&saved);
+        assert_field(&xml, "QUOTE");
+        assert_eq!(xml.matches("<w:bookmarkStart").count(), 1, "{xml}");
+        assert_eq!(xml.matches("<w:bookmarkEnd").count(), 1, "{xml}");
+        if edited {
+            assert_order(&xml, &[">Before<", START, ">AB<", STOP, ">After<"]);
+        } else {
+            assert_order(&xml, &[">Before<", START, ">A<", ">B<", STOP, ">After<"]);
+        }
+    }
+}
+
+fn wrapped_result_bookmarks(open: &str, close: &str, marker_path: &str) {
+    let result = format!(
+        r#"<w:r><w:t>Before</w:t></w:r><w:fldSimple w:instr="QUOTE">{open}<w:hyperlink w:anchor="target">{START}</w:hyperlink>{close}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{open}<w:hyperlink w:anchor="target">{STOP}</w:hyperlink>{close}</w:fldSimple><w:r><w:t>After</w:t></w:r>"#
+    );
+    nested_result_bookmarks(
+        &result,
+        [
+            &format!("/structuredResult/inline/1/structuredResult/inline/0{marker_path}"),
+            &format!("/structuredResult/inline/1/structuredResult/inline/3{marker_path}"),
+        ],
+    );
+}
+
+fn tracked_result_bookmarks(tag: &str) {
+    wrapped_result_bookmarks(
+        &format!(r#"<w:sdt><w:sdtPr/><w:sdtContent><w:{tag} w:id="1" w:author="Reviewer">"#),
+        &format!("</w:{tag}></w:sdtContent></w:sdt>"),
+        "/content/0/content/0/children/0",
+    );
+}
+
+fn hyperlink_result_bookmarks(open: &str, close: &str) {
+    let result = format!(
+        r#"<w:r><w:t>Before</w:t></w:r>{open}<w:hyperlink w:anchor="target">{START}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{STOP}</w:hyperlink>{close}<w:r><w:t>After</w:t></w:r>"#
+    );
+    nested_result_bookmarks(
+        &result,
+        [
+            "/structuredResult/inline/1/children/0",
+            "/structuredResult/inline/1/children/3",
+        ],
+    );
+}
+
 fn assert_field(xml: &str, instruction: &str) {
     for kind in ["begin", "separate", "end"] {
         assert_eq!(
@@ -625,4 +708,95 @@ fn removed_reference_between_result_runs_keeps_the_bookmark_end_in_place() {
     );
     let xml = normalized_field_result(&result, "ABC");
     assert_order(&xml, &[START, ">A<", ">B<", STOP, ">C<"]);
+}
+
+#[test]
+fn hyperlink_children_keep_result_bookmarks_across_paragraphs() {
+    hyperlink_result_bookmarks("", "");
+}
+
+#[test]
+fn smart_tag_hyperlinks_keep_result_bookmarks_across_paragraphs() {
+    hyperlink_result_bookmarks(r#"<w:smartTag w:element="term">"#, "</w:smartTag>");
+}
+
+#[test]
+fn custom_xml_hyperlinks_keep_result_bookmarks_across_paragraphs() {
+    hyperlink_result_bookmarks(r#"<w:customXml w:element="term">"#, "</w:customXml>");
+}
+
+#[test]
+fn result_bookmarks_cross_hyperlink_boundaries_across_paragraphs() {
+    for (result, paths) in [
+        (
+            format!(
+                r#"<w:r><w:t>Before</w:t></w:r><w:hyperlink w:anchor="target">{START}<w:r><w:t>A</w:t></w:r></w:hyperlink><w:r><w:t>B</w:t></w:r>{STOP}<w:r><w:t>After</w:t></w:r>"#
+            ),
+            [
+                "/structuredResult/inline/1/children/0",
+                "/structuredResult/inline/3",
+            ],
+        ),
+        (
+            format!(
+                r#"<w:r><w:t>Before</w:t></w:r>{START}<w:r><w:t>A</w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>B</w:t></w:r>{STOP}</w:hyperlink><w:r><w:t>After</w:t></w:r>"#
+            ),
+            [
+                "/structuredResult/inline/1",
+                "/structuredResult/inline/3/children/1",
+            ],
+        ),
+    ] {
+        nested_result_bookmarks(&result, paths);
+    }
+}
+
+#[test]
+fn simple_field_children_keep_result_bookmarks_across_paragraphs() {
+    wrapped_result_bookmarks("", "", "/children/0");
+}
+
+#[test]
+fn inline_control_children_keep_result_bookmarks_across_paragraphs() {
+    wrapped_result_bookmarks(
+        "<w:sdt><w:sdtPr/><w:sdtContent>",
+        "</w:sdtContent></w:sdt>",
+        "/content/0/children/0",
+    );
+}
+
+#[test]
+fn insertion_children_keep_result_bookmarks_across_paragraphs() {
+    tracked_result_bookmarks("ins");
+}
+
+#[test]
+fn deletion_children_keep_result_bookmarks_across_paragraphs() {
+    tracked_result_bookmarks("del");
+}
+
+#[test]
+fn move_from_children_keep_result_bookmarks_across_paragraphs() {
+    tracked_result_bookmarks("moveFrom");
+}
+
+#[test]
+fn move_to_children_keep_result_bookmarks_across_paragraphs() {
+    tracked_result_bookmarks("moveTo");
+}
+
+#[test]
+fn nested_complex_field_results_keep_bookmarks_across_paragraphs() {
+    let result = format!(
+        "<w:r><w:t>Before</w:t></w:r>{BEGIN}{}{SEPARATE}{START}{END}<w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t></w:r>{BEGIN}{}{SEPARATE}{STOP}{END}<w:r><w:t>After</w:t></w:r>",
+        instruction("QUOTE"),
+        instruction("QUOTE"),
+    );
+    nested_result_bookmarks(
+        &result,
+        [
+            "/structuredResult/inline/1/structuredResult/inline/0",
+            "/structuredResult/inline/4/structuredResult/inline/0",
+        ],
+    );
 }
