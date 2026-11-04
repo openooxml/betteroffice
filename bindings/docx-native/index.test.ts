@@ -109,11 +109,12 @@ describe('@betteroffice/docx-native', () => {
 });
 
 describe('@betteroffice/docx-native allocator', () => {
-  test.each([
-    ['in load order', []],
-    ['in reverse load order', ['--reverse']],
-  ])('two images of the binary share a process and its threads, %s', (_order: string, flags: string[]) => {
-    const result = spawnSync(process.execPath, ['scripts/native-allocator-smoke.mjs', 'docx', ...flags], {
+  const runtimes = [process.execPath, Bun.which('node')].filter((runtime): runtime is string => Boolean(runtime));
+  test.each(runtimes.flatMap((runtime) => [
+    [runtime, 'in load order', []],
+    [runtime, 'in reverse load order', ['--reverse']],
+  ]) as [string, string, string[]][])('two images of the binary share a process and its threads under %s, %s', (runtime, _order, flags) => {
+    const result = spawnSync(runtime, ['scripts/native-allocator-smoke.mjs', 'docx', ...flags], {
       cwd: fileURLToPath(new URL('../..', import.meta.url)),
       encoding: 'utf8',
       timeout: 120_000,
