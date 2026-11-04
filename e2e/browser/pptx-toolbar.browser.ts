@@ -1,6 +1,7 @@
 import { test, expect, type Locator, type Page } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { inputReady } from './pptx-async-helpers';
 
 const root = resolve(import.meta.dirname, '../..');
 
@@ -215,6 +216,7 @@ test('pptx: long translations keep every toolbar action reachable through More',
 
 test('pptx: the slide shows the text, move and arrow cursors under the pointer', async ({ page }) => {
   await open(page);
+  await inputReady(page);
   const box = (await page.getByTestId('pptx-slide-canvas').boundingBox())!;
   const seen = new Set<string>();
   for (let row = 1; row < 16; row += 1) {

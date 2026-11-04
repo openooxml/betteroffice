@@ -1,6 +1,7 @@
 import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import { inputReady } from './pptx-async-helpers';
 
 const drawing = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const presentation = 'http://schemas.openxmlformats.org/presentationml/2006/main';
@@ -41,6 +42,7 @@ async function open(page: Page) {
 }
 
 async function editCell(page: Page, x: number, y: number) {
+  await inputReady(page);
   const bounds = await canvas(page).boundingBox();
   if (!bounds) throw new Error('Slide canvas is missing');
   await page.mouse.click(bounds.x + x * bounds.width / 960, bounds.y + y * bounds.height / 540);

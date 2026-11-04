@@ -1,6 +1,6 @@
 import { expect, test, type Page } from 'playwright/test';
 import JSZip from 'jszip';
-import { slideCanvas } from './pptx-async-helpers';
+import { inputReady, slideCanvas } from './pptx-async-helpers';
 
 const DARK_HOST = 'rgb(237, 237, 237)';
 
@@ -23,7 +23,7 @@ async function edit(page: Page, background: string | null, color: string, host: 
   await page.goto('/?format=pptx');
   if (host) await page.addStyleTag({ content: `body { color: ${DARK_HOST}; }` });
   await page.locator('input[type=file]').last().setInputFiles(await deck(background, color));
-  await expect(slideCanvas(page)).toHaveAttribute('data-pptx-input-ready', 'true');
+  await inputReady(page);
   const canvas = (await slideCanvas(page).boundingBox())!;
   await page.mouse.click(canvas.x + canvas.width * 0.15, canvas.y + canvas.height * 0.22);
   const input = page.getByRole('textbox', { name: 'Slide text', exact: true });
