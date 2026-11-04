@@ -27,6 +27,11 @@ import {
   type XlsxPluginEditorAccess,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineXlsxPlugin';
+import {
+  checkedRowDecorations,
+  type RowDecorationEntry,
+  type RowDecorationSet,
+} from './rowDecorations';
 import type { XlsxPluginDocumentAccess } from './createPluginDocumentAccess';
 import type {
   XlsxPlugin,
@@ -39,6 +44,7 @@ import type {
   XlsxPluginGeometry,
   XlsxPluginGrant,
   XlsxPluginLayout,
+  XlsxPluginRowDecorations,
   XlsxPluginSelection,
   XlsxPluginSnapshot,
 } from './types';
@@ -89,6 +95,17 @@ export interface XlsxPluginHost {
     fallback: T
   ): T;
   fail(pluginId: string, phase: XlsxPluginErrorPhase, error: unknown): void;
+  /**
+   * The row decoration sets computed at the current version, in installation order. Hooks run
+   * again only after a new activation, a state change or a document change; the result keeps
+   * its identity while no set changed.
+   */
+  rowDecorations(): readonly RowDecorationSet[];
+  /**
+   * Sends `row-decoration-activate` to the activation that showed `entry`, only while its
+   * current set, at the current version, still has that item on that row.
+   */
+  activateRowDecoration(entry: RowDecorationEntry): void;
 }
 
 const ENABLED = Object.freeze({ enabled: true as const });
@@ -160,6 +177,17 @@ export function createXlsxPluginHost(
     return id;
   };
   const unknownPlugins = new WeakSet<object>();
+  const decorationCache = new WeakMap<object, {
+    definition: Definition;
+    hook: Definition['rowDecorations'];
+    state: unknown;
+    version: string;
+    value: XlsxPluginRowDecorations | null;
+  }>();
+  let definitionsById = new Map<string, Definition>();
+  const definitionOf = (entry: XlsxPluginActivation): Definition =>
+    definitionsById.get(entry.pluginId) ?? entry.plugin;
+  let decorationSets: readonly RowDecorationSet[] = Object.freeze([]);
   const reportedConflicts = new Set<string>();
 
   const report = (error: XlsxPluginError): void => {
@@ -370,6 +398,7 @@ export function createXlsxPluginHost(
         });
       }
       installed = definitions.length > 0;
+      definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
       observe();
       runtime.setPlugins(definitions);
     },
@@ -511,6 +540,49 @@ export function createXlsxPluginHost(
 
     guard: (pluginId, phase, call, fallback) => runtime.guard(pluginId, phase, call, fallback),
     fail: (pluginId, phase, error) => runtime.fail(pluginId, phase, error),
+
+    rowDecorations() {
+      const next: RowDecorationSet[] = [];
+      for (const entry of runtime.activations()) {
+        const plugin = definitionOf(entry);
+        const hook = plugin.rowDecorations;
+        if (!hook) continue;
+        const current = entry.context.state;
+        let cached = decorationCache.get(entry.activation);
+        if (!cached || cached.definition !== plugin || cached.hook !== hook || cached.state !== current ||
+            cached.version !== state.version) {
+          const value = runtime.guard(entry.pluginId, 'row-decorations',
+            (context) => checkedRowDecorations(plugin.rowDecorations!(context)), null);
+          cached = { definition: plugin, hook, state: current, version: state.version, value };
+          decorationCache.set(entry.activation, cached);
+        }
+        const value = cached.value;
+        if (value && value.version === state.version && value.items.length) {
+          next.push({ pluginId: entry.pluginId, key: entry.key, items: value.items });
+        }
+      }
+      const same = next.length === decorationSets.length && next.every((set, index) =>
+        set.key === decorationSets[index].key && set.items === decorationSets[index].items);
+      if (!same) decorationSets = Object.freeze(next);
+      return decorationSets;
+    },
+
+    activateRowDecoration({ pluginId, key, item }) {
+      const current = binding.rowDecorations()
+        .find((set) => set.key === key && set.pluginId === pluginId)?.items
+        .find((candidate) => candidate.id === item.id);
+      if (!current || current.sheetId !== item.sheetId || current.row !== item.row) return;
+      const entry = runtime.activations().find((candidate) => candidate.key === key);
+      const plugin = entry && definitionOf(entry);
+      if (!entry || !plugin?.onEvent) return;
+      void runtime.invoke(pluginId, 'event', (context) => plugin.onEvent!(context, {
+        type: 'row-decoration-activate',
+        generation: entry.generation,
+        id: item.id,
+        sheetId: item.sheetId,
+        row: item.row,
+      }));
+    },
   };
   return binding;
 }

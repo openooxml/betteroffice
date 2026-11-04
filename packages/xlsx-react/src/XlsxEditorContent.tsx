@@ -95,6 +95,8 @@ import type {
   XlsxRevealAlignment,
 } from './plugins/createPluginClients';
 import { PluginOverlays } from './plugins/PluginOverlays';
+import { PluginRowGutter } from './plugins/PluginRowGutter';
+import { ROW_GUTTER_WIDTH } from './plugins/rowDecorations';
 import { frozenGridExtent, visibleGridRange } from './plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPanels';
 import type { XlsxPluginSelection } from './plugins/types';
@@ -2434,6 +2436,14 @@ export function XlsxEditorContent({
               }}
             />
           )}
+          {pluginHost.rowGutter && (
+            <PluginRowGutter
+              host={pluginHost.host}
+              index={pluginHost.rowGutter}
+              painted={pluginHost.painted}
+              zoom={zoom}
+            />
+          )}
 
           <div
             ref={scrollRef}
@@ -2451,6 +2461,7 @@ export function XlsxEditorContent({
               overflow: 'auto',
               minHeight: 0,
               outline: 'none',
+              ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}),
             }}
           >
             <div

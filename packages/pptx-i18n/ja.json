@@ -171,6 +171,8 @@
     "loadingDiff": "変更を読み込んでいます…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

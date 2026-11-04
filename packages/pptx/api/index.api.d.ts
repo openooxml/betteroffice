@@ -475,8 +475,8 @@ export type PptxFindResult = {
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
-export { StaleProposalError } from './proposals';
-export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalTextChange } from './proposals';
+export { ProposalPictureMediaTooLargeError, StaleProposalError } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalShapeChange, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { slideToPng } from './render/png';
 export type { SlideToPngOptions } from './render/png';
@@ -499,8 +499,27 @@ export { openPresentationSession } from './session/client';
 export { createPptxWorkerEditorSession } from './session/editorSession';
 
 // ---- proposals.d.ts ----
-import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextStyleSnapshot } from './types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextStyleSnapshot } from './types';
 export type ProposalEdit = {
+    type: 'addTextBox';
+    ref?: string;
+    slideId: string;
+    draft: ShapeDraft;
+} | {
+    type: 'addShape';
+    ref?: string;
+    slideId: string;
+    draft: PresetShapeDraft;
+} | {
+    type: 'addPicture';
+    ref?: string;
+    slideId: string;
+    draft: PictureDraft;
+} | {
+    type: 'removeShape';
+    slideId: string;
+    shapeId: string;
+} | {
     type: 'insertSlide';
     ref?: string;
     afterSlideId: string | null;
@@ -599,7 +618,12 @@ export interface ProposalTextChange {
     end: number;
     kind: 'insertion' | 'deletion';
 }
+export interface ProposalShapeChange {
+    shapeId: string;
+    kind: 'inserted' | 'deleted' | 'moved' | 'resized' | 'changed' | 'reordered';
+}
 export interface ProposalDiffSlide extends ProposalPreview {
+    shapeChanges?: ProposalShapeChange[];
     frame: SlideDisplayList;
     textChanges: ProposalTextChange[];
     media?: {
@@ -615,6 +639,12 @@ export interface ProposalAcceptance {
 export declare class StaleProposalError extends Error {
     readonly targets: string[];
     constructor(targets: string[]);
+}
+export declare class ProposalPictureMediaTooLargeError extends Error {
+    readonly totalBytes: number;
+    readonly limitBytes: number;
+    readonly code = "proposalPictureMediaTooLarge";
+    constructor(totalBytes: number, limitBytes?: number);
 }
 
 // ---- render/browserImage.d.ts ----
@@ -642,7 +672,7 @@ export declare function metafileImageBytes(bytes: Uint8Array, resolve?: () => Ui
 
 // ---- render/canvas.d.ts ----
 import type { ImageEffect, SlideDisplayList } from '../types';
-import type { ProposalTextChange } from '../proposals';
+import type { ProposalShapeChange, ProposalTextChange } from '../proposals';
 export type CanvasImageResolver = ((assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null) & {
     acquire?(): CanvasImageResolver;
     release?(): void;
@@ -651,6 +681,7 @@ export interface PaintSlideOptions {
     resolveImage?: CanvasImageResolver;
     maxShadowPixels?: number;
     textChanges?: readonly ProposalTextChange[];
+    shapeChanges?: readonly ProposalShapeChange[];
 }
 export interface SlideCanvasLike {
     width: number;

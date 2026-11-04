@@ -194,6 +194,7 @@
     "toolbarGroup": "外掛程式",
     "panelTabs": "外掛程式面板",
     "collapsePanel": "收合 {title}",
-    "expandPanel": "展開 {title}"
+    "expandPanel": "展開 {title}",
+    "rowGutter": "外掛程式列標記"
   }
 }

@@ -248,3 +248,44 @@ fn structural_proposal_strip_and_by_id_layout_reach_the_facade() {
     assert!(presentation.undo());
     assert_eq!(presentation.snapshot().unwrap(), before);
 }
+
+#[test]
+fn shape_proposals_reach_the_native_facade() {
+    let deck = Presentation::open(include_bytes!(
+        "../../pptx-edit/tests/fixtures/proposal-shapes.pptx"
+    ))
+    .unwrap();
+    let before = deck.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let proposal = deck.propose(ProposalRequest {
+        agent_id: "reviewer".into(), note: None,
+        edits: serde_json::from_value(serde_json::json!([
+            {"type": "addTextBox", "ref": "box", "slideId": slide.id, "draft": {"name": "New box", "rect": {"x": 0, "y": 0, "width": 1000000, "height": 500000}, "text": "", "style": {}}},
+            {"type": "replaceText", "storyId": "@box", "start": 0, "end": 0, "text": "Reviewed"},
+            {"type": "removeShape", "slideId": slide.id, "shapeId": slide.shapes[0].id}
+        ])).unwrap(),
+    }).unwrap();
+    let diff = deck
+        .layout_proposal_diff_slide_by_id(&proposal.id, &slide.id)
+        .unwrap();
+    assert!(
+        diff.shape_changes
+            .iter()
+            .any(|change| change.kind == betteroffice_pptx::ProposalShapeChangeKind::Inserted)
+    );
+    assert!(
+        diff.shape_changes
+            .iter()
+            .any(|change| change.kind == betteroffice_pptx::ProposalShapeChangeKind::Deleted)
+    );
+    assert!(
+        diff.snapshot.slides[0]
+            .shapes
+            .iter()
+            .any(|shape| shape.id == slide.shapes[0].id)
+    );
+    assert_eq!(deck.snapshot().unwrap(), before);
+    deck.accept_proposal(&proposal.id, false).unwrap();
+    deck.undo();
+    assert_eq!(deck.snapshot().unwrap(), before);
+}
