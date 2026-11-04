@@ -611,7 +611,9 @@ impl Filler<'_> {
                         max_fitting(remaining, t.letter_spacing, space_left)
                     };
                     if best == 0 {
-                        if self.cur.width > 0.0 {
+                        if self.cur.width > 0.0
+                            || (t.letter_spacing < 0.0 && !self.cur.contributions.is_empty())
+                        {
                             self.start_new_line(ri, utf16_at(t, char_idx + chunk_start))?;
                             continue;
                         }
