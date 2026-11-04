@@ -22,8 +22,8 @@ import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SelectionRect, CaretPosition } from '@betteroffice/docx/layout';
 import {
-  CANVAS_PAGE_GAP_PX,
   CANVAS_PAGES_PADDING_PX,
+  canvasPageStack,
   displayPageCanvas,
   effectiveZoom,
   type DisplayList,
@@ -137,10 +137,9 @@ function DirectCanvasSelectionOverlay({
     rectsByPage.set(rect.pageIndex, pageRects);
   }
 
-  let pageTop = CANVAS_PAGES_PADDING_PX;
-  const overlays = displayList.pages.flatMap((page) => {
-    const top = pageTop;
-    pageTop += page.height * zoom + CANVAS_PAGE_GAP_PX;
+  const boxes = canvasPageStack(displayList.pages, { zoom, padding: CANVAS_PAGES_PADDING_PX });
+  const overlays = displayList.pages.flatMap((page, index) => {
+    const top = boxes[index]!.top;
     const rects = rectsByPage.get(page.pageIndex) ?? [];
     const caret =
       caretPosition?.pageIndex === page.pageIndex

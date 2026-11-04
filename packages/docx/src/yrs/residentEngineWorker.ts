@@ -48,7 +48,7 @@ import type {
 import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import { createDisplayListQueries, onDisplayListQuerySourceFailure } from '../layout/render/displayListQueries';
-import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
+import { canvasPageStack } from '../layout/render/canvasPageMetrics';
 import {
   createResidentEngineSession,
   type ResidentEngineSession,
@@ -500,11 +500,11 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           }
           if (caret && caret.height > 0 && !frame.pages[caret.pageIndex]?.page.unbuilt) {
             if (distance !== undefined) {
-              let top = 0;
-              const entries = frame.pages.map(({ page, pageIndex }) => {
-                const entry = { pageIndex, top, bottom: top + page.height };
-                top += page.height + CANVAS_PAGE_GAP_PX;
-                return entry;
+              const rasterScale = offscreenDpr * offscreenZoom;
+              const boxes = canvasPageStack(frame.pages.map(({ page }) => page), { scale: { rasterScale, unitScale: rasterScale } });
+              const entries = frame.pages.map(({ pageIndex }, index) => {
+                const { top, height } = boxes[index]!;
+                return { pageIndex, top, bottom: top + height };
               });
               const origin = entries[caret.pageIndex]!.top + caret.y + caret.height / 2;
               const target = origin + (direction === 'down' ? distance : -distance);
@@ -523,7 +523,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
       }
       buildPages();
       if (selectionNavigation) selectionNavigation.queryFrame = { frame, version };
-      return { frame, layoutRevision };
+      return { frame, layoutRevision, rasterScale: offscreenDpr * offscreenZoom };
     },
   });
   const changes: NonNullable<typeof commandFrameChanges> = {

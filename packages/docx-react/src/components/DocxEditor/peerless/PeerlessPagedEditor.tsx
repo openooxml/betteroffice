@@ -888,8 +888,10 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     }
   }, []);
   const residentCanvasForPage = useCallback((page: DocxCommandPageIdentity) => canvases.current.get(page.pageId) ?? null, []);
+  const rasterScaleRef = useRef(rasterScale);
+  rasterScaleRef.current = rasterScale;
   const prepareGeometry = useCallback((frame: Parameters<UsePeerlessEditSessionOptions['prepareGeometry']>[0]) => {
-    const geometry = options.prepareGeometry(frame);
+    const geometry = options.prepareGeometry(frame, rasterScaleRef.current);
     if (geometry) {
       for (const { page } of frame.payload.stagedPresentation?.pages ?? []) {
         if (geometry.pages.some((candidate) => candidate.page.pageId === page.pageId && candidate.page.pageIndex === page.pageIndex)) {
@@ -906,6 +908,14 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   useLayoutEffect(() => {
     if (session.status === 'ready') onReady?.(session.binding);
   }, [session, onReady]);
+  useLayoutEffect(() => {
+    if (session.status !== 'ready') return;
+    const { viewStore } = session.binding;
+    const geometry = viewStore.getSnapshot().geometry;
+    if (!geometry || geometry.rasterScale === rasterScale) return;
+    const rescaled = options.rescaleGeometry?.(geometry, rasterScale);
+    if (rescaled) viewStore.rescaleFrameGeometry?.(rescaled);
+  }, [session, rasterScale, options.rescaleGeometry]);
   useLayoutEffect(() => {
     if (session.status !== 'ready') return;
     let installedGeometry: PeerlessFrameGeometry | null = null;
