@@ -47,6 +47,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     else if (textareaRef) textareaRef.current = element;
   }, [textareaRef]);
 
+  const focusOnMount = useRef(autoFocus);
+  useLayoutEffect(() => {
+    if (!focusOnMount.current) return;
+    focusOnMount.current = false;
+    textarea.current?.focus({ preventScroll: true });
+  }, []);
+
   useLayoutEffect(() => {
     const element = textarea.current;
     if (!element) return;
@@ -56,14 +63,17 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const cellFocus = !geometry?.caret && !geometry?.selectionFocus ? geometry?.selectionRects.at(-1) : undefined;
       const focus = geometry?.caret ?? geometry?.selectionFocus ?? cellFocus;
       if (composing.current || !geometry || !focus || geometry.coversThroughSeq < state.throughSeq) return;
-      const host = props.caretHostRef?.current;
+      const parent = element.parentElement;
+      const host = props.caretHostRef?.current ?? (parent?.hasAttribute('data-docx-caret-host') ? parent : null);
       const bounds = host?.getBoundingClientRect();
       const zoom = props.zoom ?? 1;
-      const scale = effectiveZoom(element);
+      const inHost = !!host && element.parentElement === host;
+      const scale = inHost ? 1 : effectiveZoom(element);
       const top = (bounds?.top ?? 0) + focus.y * zoom;
       const height = Math.max(1, focus.height * zoom);
-      element.style.left = `${((bounds?.left ?? 0) + focus.x * zoom) / scale}px`;
-      element.style.top = `${top / scale}px`;
+      element.style.position = inHost ? 'absolute' : 'fixed';
+      element.style.left = `${((inHost ? 0 : bounds?.left ?? 0) + focus.x * zoom) / scale}px`;
+      element.style.top = `${(inHost ? focus.y * zoom : top) / scale}px`;
       element.style.height = `${height / scale}px`;
       const selection = state.workerSelection;
       const key = selection ? JSON.stringify([selection.anchor.story, selection.anchor.paraId, selection.anchor.offset,
@@ -79,9 +89,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       if (delta) scroller.scrollTop += delta;
     };
     position();
-    window.addEventListener('scroll', position, true);
     window.addEventListener('resize', position);
-    return () => { window.removeEventListener('scroll', position, true); window.removeEventListener('resize', position); };
+    return () => { window.removeEventListener('resize', position); };
   }, [snapshot.geometry, snapshot.throughSeq, props.caretHostRef, props.zoom, viewStore]);
 
   useLayoutEffect(() => {
@@ -333,13 +342,12 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     ref={attach}
     className={className ?? 'paged-editor__input'}
     aria-label={ariaLabel ?? t('editor.documentInput')}
-    autoFocus={autoFocus}
     readOnly={readOnly}
     rows={1}
     spellCheck
     autoCapitalize="sentences"
     autoCorrect="on"
-    style={{ position: 'fixed', left: 0, top: 0, width: 1, height: 1, opacity: 0,
+    style={{ position: 'fixed', left: 0, top: 0, width: 1, height: 1, opacity: 0, pointerEvents: 'none',
       padding: 0, border: 0, resize: 'none', overflow: 'hidden', caretColor: 'transparent' }}
   />;
 }
