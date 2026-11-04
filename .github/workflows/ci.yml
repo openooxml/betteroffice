@@ -190,7 +190,7 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
         run: bunx next build
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
 
@@ -499,7 +499,7 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
 
@@ -628,7 +628,7 @@ jobs:
           workspaces: bindings
           key: native-hooks
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
 
