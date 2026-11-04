@@ -341,7 +341,9 @@ export function createPeerlessWorkerXlsxCommandBinding(
         if (id === 'proposalReject' && error.status.reason === 'missing-target') return fail('proposal-not-found');
         return fail(error.code);
       }
-      if (error instanceof XlsxCommandAdmissionError) return fail(error.code);
+      if (error instanceof XlsxCommandAdmissionError) {
+        return error.code === 'host-refused' ? { ok: false, failure: { code: error.code, message: error.message } } : fail(error.code);
+      }
       if (error instanceof Error && error.name === 'WorkbookPngUnavailableError') return fail('png-unavailable');
       return fail('command-failed');
     }
