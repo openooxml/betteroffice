@@ -1,6 +1,10 @@
 from __future__ import annotations
 from os import PathLike
-from typing import final
+from typing import TypedDict, final
+
+class PngTarget(TypedDict):
+    page: int
+
 
 def decode_font_face(
     data: bytes, codec: str, *, dict: bytes | None = None, max_output: int | None = None
@@ -50,6 +54,15 @@ class Page:
     connects: list[Connect]
 
 @final
+class Png:
+    bytes: bytes
+    width: int
+    height: int
+    skipped_images: int
+    def write(self, path: str | PathLike[str]) -> None: ...
+    def __len__(self) -> int: ...
+
+@final
 class Diagram:
     @staticmethod
     def open(data: bytes | bytearray | memoryview) -> Diagram: ...
@@ -58,3 +71,5 @@ class Diagram:
     @property
     def pages(self) -> list[Page]: ...
     def __len__(self) -> int: ...
+
+    def render_png(self, target: PngTarget, *, scale: float = ...) -> Png: ...

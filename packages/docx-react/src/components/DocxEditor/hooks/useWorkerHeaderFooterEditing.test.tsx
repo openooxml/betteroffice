@@ -17,7 +17,8 @@ function fixture() {
   const focus = mock(() => {});
   const onError = mock(() => {});
   const submit = mock(async () => ({ ok: true, status: 'noop' }));
-  const controller = { subscribe: () => () => {}, getSnapshot: () => state, query, applyQuery, submit, ref: { focus } } as unknown as ReturnType<typeof createPeerlessShellController>;
+  const controller = { subscribe: () => () => {}, getSnapshot: () => state, subscribeShell: () => () => {}, getShellSnapshot: () => state,
+    query, applyQuery, submit, ref: { focus } } as unknown as ReturnType<typeof createPeerlessShellController>;
   const hook = renderHook(() => useWorkerHeaderFooterEditing(controller, onError));
   return { hook, query, applyQuery, focus, onError };
 }

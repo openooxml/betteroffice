@@ -1,0 +1,288 @@
+{
+  "bodyStory": "body",
+  "notes": {
+    "contents": [
+      {
+        "height": 0,
+        "id": 1.0,
+        "noteKind": "footnote"
+      },
+      {
+        "height": 0,
+        "id": 2.0,
+        "noteKind": "footnote"
+      },
+      {
+        "height": 0,
+        "id": 3.0,
+        "noteKind": "footnote"
+      },
+      {
+        "height": 0,
+        "id": 4.0,
+        "noteKind": "footnote"
+      },
+      {
+        "height": 0,
+        "id": 1.0,
+        "noteKind": "endnote"
+      }
+    ]
+  },
+  "options": {
+    "pageGap": 24.0
+  },
+  "regions": {
+    "sections": [
+      {
+        "properties": {
+          "footerDistance": 300.0,
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "gutter": 0.0,
+          "headerDistance": 300.0,
+          "headerReferences": [
+            {
+              "rId": "rIdHeader2",
+              "type": "default"
+            },
+            {
+              "rId": "rIdHeader1",
+              "type": "first"
+            }
+          ],
+          "marginBottom": 720.0,
+          "marginLeft": 720.0,
+          "marginRight": 720.0,
+          "marginTop": 720.0,
+          "pageHeight": 5760.0,
+          "pageNumbering": {
+            "format": "lowerRoman",
+            "start": 1.0
+          },
+          "pageWidth": 7200.0,
+          "titlePg": true
+        }
+      },
+      {
+        "properties": {
+          "footerDistance": 300.0,
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "gutter": 0.0,
+          "headerDistance": 300.0,
+          "headerReferences": [
+            {
+              "rId": "rIdHeader2",
+              "type": "default"
+            },
+            {
+              "rId": "rIdHeader1",
+              "type": "first"
+            }
+          ],
+          "marginBottom": 720.0,
+          "marginLeft": 720.0,
+          "marginRight": 720.0,
+          "marginTop": 720.0,
+          "pageHeight": 5760.0,
+          "pageNumbering": {
+            "start": 1.0
+          },
+          "pageWidth": 7200.0,
+          "sectionStart": "nextPage",
+          "titlePg": true
+        }
+      },
+      {
+        "properties": {
+          "footerDistance": 300.0,
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "gutter": 0.0,
+          "headerDistance": 300.0,
+          "headerReferences": [
+            {
+              "rId": "rIdHeader2",
+              "type": "default"
+            },
+            {
+              "rId": "rIdHeader1",
+              "type": "first"
+            }
+          ],
+          "marginBottom": 720.0,
+          "marginLeft": 720.0,
+          "marginRight": 720.0,
+          "marginTop": 720.0,
+          "pageHeight": 5760.0,
+          "pageNumbering": {
+            "format": "upperLetter"
+          },
+          "pageWidth": 7200.0,
+          "sectionStart": "oddPage"
+        }
+      },
+      {
+        "properties": {
+          "footerDistance": 300.0,
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "gutter": 0.0,
+          "headerDistance": 300.0,
+          "headerReferences": [
+            {
+              "rId": "rIdHeader2",
+              "type": "default"
+            },
+            {
+              "rId": "rIdHeader1",
+              "type": "first"
+            }
+          ],
+          "marginBottom": 720.0,
+          "marginLeft": 720.0,
+          "marginRight": 720.0,
+          "marginTop": 720.0,
+          "pageHeight": 5760.0,
+          "pageNumbering": {
+            "format": "chineseCounting"
+          },
+          "pageWidth": 7200.0,
+          "sectionStart": "nextPage"
+        }
+      },
+      {
+        "properties": {
+          "footerDistance": 300.0,
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "gutter": 0.0,
+          "headerDistance": 300.0,
+          "headerReferences": [
+            {
+              "rId": "rIdHeader2",
+              "type": "default"
+            },
+            {
+              "rId": "rIdHeader1",
+              "type": "first"
+            }
+          ],
+          "marginBottom": 720.0,
+          "marginLeft": 720.0,
+          "marginRight": 720.0,
+          "marginTop": 720.0,
+          "pageHeight": 5760.0,
+          "pageNumbering": {
+            "format": "chineseCounting"
+          },
+          "pageWidth": 7200.0,
+          "sectionStart": "nextPage"
+        }
+      }
+    ],
+    "settings": {
+      "compatibilityFlags": {
+        "adjustLineHeightInTable": false,
+        "allowSpaceOfSameStyleInTable": false,
+        "balanceSingleByteDoubleByteWidth": false,
+        "compatibilityMode": 12,
+        "doNotExpandShiftReturn": false,
+        "doNotUseHTMLParagraphAutoSpacing": false,
+        "noLeading": false,
+        "suppressSpBfAfterPgBrk": false,
+        "useWord97LineBreakRules": false
+      },
+      "defaultTabStop": 720.0
+    }
+  },
+  "renderEnv": {
+    "compatibilityFlags": {
+      "adjustLineHeightInTable": false,
+      "allowSpaceOfSameStyleInTable": false,
+      "balanceSingleByteDoubleByteWidth": false,
+      "compatibilityMode": 12,
+      "doNotExpandShiftReturn": false,
+      "doNotUseHTMLParagraphAutoSpacing": false,
+      "noLeading": false,
+      "suppressSpBfAfterPgBrk": false,
+      "useWord97LineBreakRules": false
+    },
+    "defaultParagraphStyleId": "Normal",
+    "defaultTabStopTwips": 720.0,
+    "docDefaultFontSize": 10.0,
+    "fontTheme": {
+      "colorScheme": {
+        "accent1": "4472C4",
+        "accent2": "ED7D31",
+        "accent3": "A5A5A5",
+        "accent4": "FFC000",
+        "accent5": "5B9BD5",
+        "accent6": "70AD47",
+        "dk1": "000000",
+        "dk2": "44546A",
+        "folHlink": "954F72",
+        "hlink": "0563C1",
+        "lt1": "FFFFFF",
+        "lt2": "E7E6E6"
+      },
+      "fontScheme": {
+        "majorFont": {
+          "cs": "",
+          "ea": "",
+          "fonts": {},
+          "latin": "Calibri Light"
+        },
+        "minorFont": {
+          "cs": "",
+          "ea": "",
+          "fonts": {},
+          "latin": "Calibri"
+        }
+      },
+      "name": "Office Theme"
+    },
+    "numericIds": {},
+    "paragraphStyleFontSizes": {
+      "Heading1": 10.0,
+      "Normal": 10.0
+    },
+    "showHiddenText": false,
+    "themeColors": {
+      "accent1": "4472C4",
+      "accent2": "ED7D31",
+      "accent3": "A5A5A5",
+      "accent4": "FFC000",
+      "accent5": "5B9BD5",
+      "accent6": "70AD47",
+      "dk1": "000000",
+      "dk2": "44546A",
+      "folHlink": "954F72",
+      "hlink": "0563C1",
+      "lt1": "FFFFFF",
+      "lt2": "E7E6E6"
+    },
+    "tocStyleIds": []
+  }
+}

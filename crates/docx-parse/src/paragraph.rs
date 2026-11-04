@@ -633,15 +633,7 @@ fn parse_paragraph_contents(
                     watermark_claimed_separately,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs: Vec<Run> = hyperlink
-                        .children
-                        .iter()
-                        .filter_map(|node| match node {
-                            InlineNode::Run(run) => Some(run.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
                 } else {
                     output.push(ParagraphContent::Inline(InlineNode::Hyperlink(Box::new(
                         hyperlink,
@@ -654,7 +646,7 @@ fn parse_paragraph_contents(
                 }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(ParagraphContent::Inline(node)),
                 }
             }
@@ -664,7 +656,7 @@ fn parse_paragraph_contents(
                 }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(ParagraphContent::Inline(node)),
                 }
             }
@@ -683,8 +675,7 @@ fn parse_paragraph_contents(
                     watermark_claimed_separately,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs = field.content.clone();
-                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                    active.absorb(InlineNode::SimpleField(Box::new(field)));
                 } else {
                     output.push(ParagraphContent::Inline(InlineNode::SimpleField(Box::new(
                         field,
@@ -866,7 +857,7 @@ fn process_field_run(
             active.switch_to_result();
         }
         if !has_begin && !has_separate && !has_end {
-            active.absorb(InlineNode::Run(run.clone()), vec![run]);
+            active.absorb(InlineNode::Run(run));
         }
         if has_end {
             let completed = fields.pop().unwrap().finish();

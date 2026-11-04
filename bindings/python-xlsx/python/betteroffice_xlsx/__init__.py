@@ -7,7 +7,7 @@ import json
 import math
 import numbers
 import os
-from typing import Any, Iterable, Iterator, Mapping, Union
+from typing import Any, TypedDict, Iterable, Iterator, Mapping, Union
 
 from ._betteroffice_xlsx import (
     decode_font_face,
@@ -33,6 +33,7 @@ from ._betteroffice_xlsx import export_xlsx_markdown_json as _export_xlsx_markdo
 from ._betteroffice_xlsx import export_xlsx_structured_json as _export_xlsx_structured_json
 from ._betteroffice_xlsx import render_xlsx_markdown_json as _render_xlsx_markdown_json
 from .edits import (
+    RangeAddress,
     EditRequest,
     EditResult,
     EditStep,
@@ -53,7 +54,25 @@ from .exports import (
     StructuredResult,
 )
 
+class Viewport(TypedDict):
+    x: float
+    y: float
+    width: float
+    height: float
+
+class ViewportTarget(TypedDict):
+    sheet: "int | str"
+    viewport: Viewport
+
+class PngRangeTarget(TypedDict):
+    sheet: "int | str"
+    range: "str | RangeAddress"
+
+
 __all__ = [
+    "Viewport",
+    "ViewportTarget",
+    "PngRangeTarget",
     "decode_font_face",
     "Calculation",
     "CellError",
@@ -133,18 +152,27 @@ class Sheet:
 
     def render_png(
         self,
+        target: ViewportTarget | PngRangeTarget,
+        *,
+        scale: float = 1.0,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        return self._workbook.render_png(
+            target, scale=scale, max_width=max_width, max_height=max_height
+        )
+
+    def render_sheet(
+        self,
         *,
         scale: float = 1.0,
         range: "str | None" = None,
         max_width: "int | None" = None,
         max_height: "int | None" = None,
     ) -> Png:
-        return self._workbook.render_png(
-            self._index,
-            scale=scale,
-            range=range,
-            max_width=max_width,
-            max_height=max_height,
+        """Render this sheet to PNG, framing its used range when no range is given."""
+        return self._workbook.render_sheet(
+            self._index, scale=scale, range=range, max_width=max_width, max_height=max_height
         )
 
     def __repr__(self) -> str:
@@ -220,6 +248,19 @@ class Workbook:
 
     def render_png(
         self,
+        target: ViewportTarget | PngRangeTarget,
+        *,
+        scale: float = 1.0,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        """Render a viewport or range of a sheet to PNG."""
+        return self._inner.render_png(
+            target, scale=scale, max_width=max_width, max_height=max_height
+        )
+
+    def render_sheet(
+        self,
         sheet: SheetKey,
         *,
         scale: float = 1.0,
@@ -227,13 +268,9 @@ class Workbook:
         max_width: "int | None" = None,
         max_height: "int | None" = None,
     ) -> Png:
-        """Render a sheet to PNG."""
-        return self._inner.render_png(
-            sheet,
-            scale=scale,
-            range=range,
-            max_width=max_width,
-            max_height=max_height,
+        """Render a sheet to PNG, framing its used range when no range is given."""
+        return self._inner.render_sheet(
+            sheet, scale=scale, range=range, max_width=max_width, max_height=max_height
         )
 
     def save(self) -> bytes:

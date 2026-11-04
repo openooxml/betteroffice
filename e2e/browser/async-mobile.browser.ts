@@ -2,6 +2,7 @@ import { test, expect, devices, type Locator, type Page, type TestInfo } from 'p
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
+import { inputReady } from './pptx-async-helpers';
 
 type Format = 'docx' | 'xlsx' | 'pptx';
 const formats: Format[] = ['docx', 'xlsx', 'pptx'];
@@ -187,6 +188,7 @@ async function tapDocument(page: Page, format: Format, double = false) {
     x = box.x + Math.min(box.width / 2, 40);
     y = box.y + box.height / 2;
   } else {
+    if (format === 'pptx') await inputReady(page);
     target = canvas(page, format);
     const box = (await target.boundingBox())!;
     // Inside "Office", clear of the title's six-screen-pixel shape border.
@@ -255,6 +257,7 @@ const slidePixels = (page: Page) => canvas(page, 'pptx').screenshot({
 async function editRotateSave(page: Page, format: Format, info: TestInfo, double: boolean) {
   const before = await save(page, format, info, 'before');
   if (format === 'pptx') {
+    await inputReady(page);
     const box = (await canvas(page, format).boundingBox())!;
     await page.touchscreen.tap(box.x + box.width * 0.009375, box.y + box.height * 0.5);
     await expect(page.getByTestId('pptx-shape-selection')).toBeVisible();

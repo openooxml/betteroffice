@@ -1,4 +1,5 @@
 import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
+import type { ShapeSnapshot } from '@betteroffice/pptx';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from './peerlessViewStore';
 import { createCommandFramePainter } from './commandFramePainter';
@@ -27,6 +28,26 @@ export async function peerlessProposalFrameSource(run: PeerlessPresentation, id:
   const diff = targetId
     ? await run.client.access!('layoutProposalDiffSlideById', id, targetId)
     : await run.client.access!('layoutProposalDiffSlide', id, index);
+  run.require();
+  const prepareImages = async (shapes: ShapeSnapshot[]): Promise<void> => {
+    for (const shape of shapes) {
+      if (shape.pendingMedia?.contentType === 'image/tiff') {
+        const binary = atob(shape.pendingMedia.base64);
+        const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+        const converted = await run.client.preparePicture?.(bytes.buffer);
+        run.require();
+        if (!converted) throw new Error('Picture conversion unavailable');
+        const png = new Uint8Array(converted);
+        const chunks: string[] = [];
+        for (let start = 0; start < png.length; start += 0x8000) {
+          chunks.push(String.fromCharCode(...png.subarray(start, start + 0x8000)));
+        }
+        shape.pendingMedia = { contentType: 'image/png', base64: btoa(chunks.join('')) };
+      }
+      await prepareImages(shape.children);
+    }
+  };
+  for (const slide of diff.snapshot.slides) await prepareImages(slide.shapes);
   run.require();
   const lease = run.images.pin({ displayList: diff.frame, frame: { media: diff.media ?? [] } });
   try {

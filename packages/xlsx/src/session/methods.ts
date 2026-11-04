@@ -22,7 +22,8 @@ import type {
   XlsxValidationResult,
 } from '../edits';
 import type {
-  CalculationStatus, CapturedFormat, CellEdit, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport,
+  CalculationStatus, CapturedFormat, CellEdit, CellPoint, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo,
+  Viewport,
 } from '../wasm/loader';
 
 /** @internal */
@@ -181,6 +182,10 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
   sheetView(sheet: number): WorkbookSheetView;
   cellGeometry(sheet: number, row: number, col: number): WorkbookCellGeometry;
   cellInputs(sheet: number, range: string): WorkbookCellInputs;
+  /** @internal Formulas, without their `=`, moved between cells as a paste moves them. */
+  translateFormulas(
+    items: readonly { formula: string; from: CellPoint; to: CellPoint }[]
+  ): ({ ok: true; formula: string } | { ok: false; error: string })[];
   selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
   captureFormat(sheet: number, range: string): CapturedFormat;
   sheets(): WorkbookSheetSummary[];
@@ -214,6 +219,7 @@ export const WORKBOOK_SESSION_METHODS = {
   sheetView: true,
   cellGeometry: true,
   cellInputs: true,
+  translateFormulas: true,
   selectionData: true,
   captureFormat: true,
   sheets: true,
@@ -247,6 +253,7 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   sheetView: { lane: 'interactive' },
   cellGeometry: { lane: 'interactive' },
   cellInputs: { lane: 'interactive' },
+  translateFormulas: { lane: 'interactive' },
   selectionData: { lane: 'interactive', reorderable: false },
   captureFormat: { lane: 'interactive', reorderable: false },
   sheets: { lane: 'interactive' },

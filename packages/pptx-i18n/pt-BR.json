@@ -156,6 +156,8 @@
     "stalePreview": "Esta visualização usa o slide atualizado. Aplicar substituirá os destinos alterados.",
     "geometry": "Posição e tamanho (x, y, largura, altura)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Layout alterado",
+    "backgroundChanged": "Plano de fundo alterado",
     "appearance": "Aparência ou formatação do texto alterada",
     "changedAgain": "O destino mudou novamente. Revise a visualização atualizada antes de aplicar.",
     "canvasTitle": "Alterações neste slide",
@@ -171,6 +173,8 @@
     "loadingDiff": "Carregando alterações…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

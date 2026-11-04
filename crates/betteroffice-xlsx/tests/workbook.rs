@@ -3084,12 +3084,12 @@ fn edits_recalculate_render_and_round_trip() {
     #[cfg(feature = "raster")]
     {
         let png = workbook
-            .render_sheet(
-                SheetId(0),
-                &RenderOptions {
-                    range: Some(betteroffice_xlsx::CellRange::parse_a1("A1:B2").unwrap()),
-                    ..RenderOptions::default()
+            .render_png(
+                betteroffice_xlsx::PngTarget::Range {
+                    sheet: SheetId(0),
+                    range: betteroffice_xlsx::CellRange::parse_a1("A1:B2").unwrap(),
                 },
+                &RenderOptions::default(),
             )
             .unwrap();
         assert_eq!(
@@ -4485,12 +4485,18 @@ fn display_lists_degrade_excessive_cell_spans() {
 fn raster_rejects_excessive_total_pixel_area() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
     let error = workbook
-        .render_png(&Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: 5_000.0,
-            height: 5_000.0,
-        })
+        .render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 5_000.0,
+                    height: 5_000.0,
+                },
+            },
+            &betteroffice_xlsx::RenderOptions::default(),
+        )
         .unwrap_err();
     assert!(matches!(error, Error::RenderAreaTooLarge { .. }));
 }
@@ -10227,9 +10233,25 @@ fn an_imported_chart_follows_a_cell_edit_without_a_save() {
 
     let plot = chart_only_viewport(&workbook);
     let before = plotted(&workbook);
-    let before_png = workbook.render_png_for(SheetId(0), &plot).unwrap();
+    let before_png = workbook
+        .render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: plot,
+            },
+            &betteroffice_xlsx::RenderOptions::default(),
+        )
+        .unwrap();
     bump_b2(&mut workbook);
-    let after_png = workbook.render_png_for(SheetId(0), &plot).unwrap();
+    let after_png = workbook
+        .render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: plot,
+            },
+            &betteroffice_xlsx::RenderOptions::default(),
+        )
+        .unwrap();
 
     assert_ne!(before, plotted(&workbook));
     assert_ne!(before_png.bytes, after_png.bytes);
@@ -11293,4 +11315,190 @@ fn unrelated_currency_format_edits_refresh_formula_results() {
         workbook.model().sheets[0].cell(cell("B2")).unwrap().value,
         CellValue::Number { value: 13.0 }
     );
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_dimension_caps_hold_at_fractional_scales() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    for (scale, cap) in [(1.2, 52), (3.0, 10), (1.7, 33)] {
+        let options = RenderOptions {
+            scale,
+            max_width: Some(cap),
+            max_height: Some(cap),
+            ..Default::default()
+        };
+        for target in [
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+            },
+            betteroffice_xlsx::PngTarget::Range {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:D12").unwrap(),
+            },
+        ] {
+            let rendered = workbook.render_png(target, &options).unwrap();
+            assert!(
+                rendered.width <= cap && rendered.height <= cap,
+                "{scale} {cap}: {}x{}",
+                rendered.width,
+                rendered.height
+            );
+            let decoded = image_size(&rendered.bytes);
+            assert!(
+                decoded.0 <= cap && decoded.1 <= cap,
+                "{scale} {cap}: decoded {decoded:?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_caps_do_not_hide_an_invalid_viewport() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = RenderOptions {
+        max_width: Some(40),
+        max_height: Some(40),
+        ..Default::default()
+    };
+    for viewport in [
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: f32::NAN,
+            height: 64.0,
+        },
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: f32::INFINITY,
+            height: 64.0,
+        },
+        Viewport {
+            x: 3e38,
+            y: 0.0,
+            width: 3e38,
+            height: 64.0,
+        },
+    ] {
+        let error = workbook
+            .render_png(
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet: SheetId(0),
+                    viewport,
+                },
+                &options,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, betteroffice_xlsx::Error::InvalidViewport),
+            "{error:?}"
+        );
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_dimension_caps_apply_to_both_target_forms() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = RenderOptions {
+        max_width: Some(40),
+        max_height: Some(30),
+        ..Default::default()
+    };
+    for target in [
+        betteroffice_xlsx::PngTarget::Viewport {
+            sheet: SheetId(0),
+            viewport: Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 128.0,
+                height: 64.0,
+            },
+        },
+        betteroffice_xlsx::PngTarget::Range {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:D12").unwrap(),
+        },
+    ] {
+        let rendered = workbook.render_png(target, &options).unwrap();
+        assert_eq!((rendered.width, rendered.height), (40, 30));
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_targets_validate_sheets_and_scale_both_forms() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 128.0,
+        height: 64.0,
+    };
+    let range = CellRange::parse_a1("A1:B2").unwrap();
+    for target in [
+        betteroffice_xlsx::PngTarget::Viewport {
+            sheet: SheetId(0),
+            viewport,
+        },
+        betteroffice_xlsx::PngTarget::Range {
+            sheet: SheetId(0),
+            range,
+        },
+    ] {
+        let first = workbook
+            .render_png(target.clone(), &RenderOptions::default())
+            .unwrap();
+        let second = workbook
+            .render_png(
+                target,
+                &RenderOptions {
+                    scale: 2.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(second.width.abs_diff(first.width * 2) <= 1);
+        assert!(second.height.abs_diff(first.height * 2) <= 1);
+        assert_eq!(
+            u32::from_be_bytes(second.bytes[16..20].try_into().unwrap()),
+            second.width
+        );
+        assert_eq!(
+            u32::from_be_bytes(second.bytes[20..24].try_into().unwrap()),
+            second.height
+        );
+    }
+    for target in [
+        betteroffice_xlsx::PngTarget::Viewport {
+            sheet: SheetId(u32::MAX),
+            viewport,
+        },
+        betteroffice_xlsx::PngTarget::Range {
+            sheet: SheetId(u32::MAX),
+            range,
+        },
+    ] {
+        assert!(matches!(
+            workbook.render_png(target, &RenderOptions::default()),
+            Err(Error::SheetOutOfRange(_))
+        ));
+    }
+}
+
+#[cfg(feature = "raster")]
+fn image_size(png: &[u8]) -> (u32, u32) {
+    let header = &png[16..24];
+    (
+        u32::from_be_bytes(header[0..4].try_into().unwrap()),
+        u32::from_be_bytes(header[4..8].try_into().unwrap()),
+    )
 }

@@ -88,6 +88,16 @@ test('the shared read returns the one decoded buffer, which owned copies leave i
   expect(decode).toHaveBeenCalledTimes(2);
 });
 
+test('a shared decoded face that something transferred is decoded again', async () => {
+  const { face, manifest, resolveUrl } = fixture();
+  const shared = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  structuredClone(shared, { transfer: [shared] });
+  expect(shared.byteLength).toBe(0);
+  const again = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(new Uint8Array(again)).toEqual(bold);
+  expect(new Uint8Array(await loadPackedFontBytes(face, resolveUrl, undefined, undefined, manifest))).toEqual(bold);
+});
+
 test('ignores unknown manifest and face fields, including slices, while loading unchanged', async () => {
   const { manifest, face, resolveUrl } = fixture();
   const extended = {

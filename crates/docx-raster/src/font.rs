@@ -267,7 +267,7 @@ fn paint_clip_mask(
     let Some(clip) = clip else {
         return Ok(None);
     };
-    debug_assert!(context.base_transform.is_identity() || context.base_transform.is_translate());
+    debug_assert!(context.base_transform.kx == 0.0 && context.base_transform.ky == 0.0);
     let width = context.pixmap.width();
     let height = context.pixmap.height();
     let bytes = mask_bytes(width, height);
@@ -284,9 +284,11 @@ fn paint_clip_mask(
         .transpose()?
         .unwrap_or(0.0)
         .max(0.0);
-    let left = (f64::from(x) + f64::from(context.base_transform.tx)).clamp(0.0, f64::from(width));
-    let right = (f64::from(x) + f64::from(slot_width) + f64::from(context.base_transform.tx))
-        .clamp(0.0, f64::from(width));
+    let scale = f64::from(context.base_transform.sx);
+    let offset = f64::from(context.base_transform.tx);
+    let left = (f64::from(x) * scale + offset).clamp(0.0, f64::from(width));
+    let right =
+        ((f64::from(x) + f64::from(slot_width)) * scale + offset).clamp(0.0, f64::from(width));
     if right > left {
         let rect = Rect::from_xywh(left as f32, 0.0, (right - left) as f32, height as f32)
             .ok_or_else(|| "invalid text paint clip rectangle".to_string())?;
