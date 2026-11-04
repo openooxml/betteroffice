@@ -19,6 +19,8 @@ export interface ContextMenuProps {
   colors?: Partial<OverflowMenuColors>;
   className?: string;
   testId?: string;
+  /** Where Escape and choosing an item send focus; defaults to the element focused before the menu opened. */
+  returnFocus?(): void;
   onClose(reason: ContextMenuCloseReason): void;
 }
 
@@ -35,6 +37,7 @@ export function ContextMenu({
   colors,
   className,
   testId,
+  returnFocus,
   onClose,
 }: ContextMenuProps) {
   const [origin] = useState(() =>
@@ -45,13 +48,16 @@ export function ContextMenu({
   const menus = useRef(new Set<HTMLElement>());
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  const returnRef = useRef(returnFocus);
+  returnRef.current = returnFocus;
   const closed = useRef(false);
 
   const finish = useCallback(
     (reason: ContextMenuCloseReason, restore: boolean) => {
       if (closed.current) return;
       closed.current = true;
-      if (restore && origin?.isConnected) origin.focus({ preventScroll: true });
+      if (restore && returnRef.current) returnRef.current();
+      else if (restore && origin?.isConnected) origin.focus({ preventScroll: true });
       closeRef.current(reason);
     },
     [origin]

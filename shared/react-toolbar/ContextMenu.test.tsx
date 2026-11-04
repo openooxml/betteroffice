@@ -176,3 +176,13 @@ test('menu helpers', () => {
     state: { enabled: false, disabledReason: { message: 'Read only' } }, run: () => {} });
   expect(entry).toMatchObject({ kind: 'item', disabled: true, description: 'Read only', shortcut: 'Ctrl+V' });
 });
+
+test('returnFocus replaces the opener as the focus target on close', () => {
+  focusOrigin();
+  const editor = document.createElement('textarea');
+  document.body.append(editor);
+  mount(<ContextMenu label="Cell" modality="keyboard" point={{ x: 0, y: 0 }} entries={[item('Cut')]}
+    returnFocus={() => editor.focus()} onClose={() => {}} />);
+  key(document.activeElement!, { key: 'Escape' });
+  expect(document.activeElement).toBe(editor);
+});

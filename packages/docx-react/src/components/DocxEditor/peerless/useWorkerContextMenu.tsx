@@ -86,6 +86,7 @@ export function useWorkerContextMenu(options: {
   onPaste?: () => void;
   onError?: (error: Error) => void;
   beginAddComment?(): Promise<void>;
+  focusEditor?(): void;
 }) {
   const [menu, setMenu] = useState<{
     binding: PeerlessEditSessionBinding; snapshot: ReturnType<PeerlessEditSessionBinding['viewStore']['getSnapshot']>;
@@ -246,6 +247,7 @@ export function useWorkerContextMenu(options: {
     } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); return false; }
   };
   return { open, element: <>{menu && <TextContextMenu isOpen position={menu.position} hasSelection={hasSelection}
-    isEditable={!readOnly} items={items} onAction={(value) => { void action(value); }} onClose={close} />}
+    isEditable={!readOnly} items={items} onAction={(value) => { void action(value); }} onClose={close}
+    returnFocus={options.focusEditor} />}
     {dialog?.menu.object && <WorkerObjectDialog action={dialog.action} target={dialog.menu.object} apply={applyObject} close={() => setDialog(null)} />}</> };
 }

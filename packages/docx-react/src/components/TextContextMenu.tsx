@@ -81,6 +81,8 @@ export interface TextContextMenuProps {
   items?: TextContextMenuItem[];
   /** Additional className */
   className?: string;
+  /** Moves focus back to the document when the menu closes from the keyboard or an item */
+  returnFocus?: () => void;
 }
 
 /**
@@ -404,6 +406,7 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
   onClose,
   items,
   className = '',
+  returnFocus,
 }) => {
   const { t } = useTranslation();
 
@@ -452,6 +455,7 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
       point={position}
       colors={MENU_COLORS}
       className={`docx-text-context-menu ${className}`.trim()}
+      returnFocus={returnFocus}
       onClose={() => onClose()}
     />
   );
