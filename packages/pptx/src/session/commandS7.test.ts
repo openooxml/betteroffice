@@ -643,3 +643,67 @@ test.each(['insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTable
     }
   } finally { await session.dispose(); }
 });
+
+test.each(['front', 'back', 'forward', 'backward'] as const)('worker reorderShape %s proposals validate, preview, accept, reject and undo', async to => {
+  const session = await open(await readFile(new URL('../../../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url)));
+  try {
+    const before = session.handle().snapshot();
+    const slide = before.slides[0]!;
+    const from = to === 'back' || to === 'backward' ? 1 : 0;
+    const shape = slide.shapes[from]!;
+    const edit = { type: 'reorderShape', slideId: slide.id, shapeId: shape.id, to } as const;
+    let seq = 0;
+    let state = await session.command(session.state, ++seq, { kind: 'invoke', payload: { ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+    expect(state.outcomes[0]).toMatchObject({ status: 'applied', committed: false });
+    const proposal = session.handle().listProposals()[0]!;
+    const diff = await session.rpc.call.accessCommandEditor({ ...identity, seq }, 'layoutProposalDiffSlideById', [proposal.id, slide.id]) as import('../proposals').ProposalDiffSlide;
+    const indexed = await session.rpc.call.accessCommandEditor({ ...identity, seq }, 'layoutProposalDiffSlide', [proposal.id, 0]) as import('../proposals').ProposalDiffSlide;
+    expect(diff).toEqual(indexed);
+    expect(diff.snapshot.slides[0]!.shapes.map(shape => shape.id)).toEqual(slide.shapes.map(shape => shape.id).reverse());
+    expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'reordered' }]);
+    expect(session.handle().snapshot()).toEqual(before);
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'acceptProposal', args: [proposal.id] } });
+    expect(state.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(session.handle().snapshot()).toEqual(diff.snapshot);
+    state = await session.command(state, ++seq, { kind: 'undo', payload: input });
+    expect(session.handle().snapshot()).toEqual(before);
+    expect(session.handle().canUndo()).toBe(false);
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+    const rejected = session.handle().listProposals()[0]!;
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'rejectProposal', args: [rejected.id] } });
+    expect(session.handle().listProposals()).toHaveLength(0);
+    for (const invalid of [{ ...edit, to: 'up' }, { ...edit, extra: true }, { ...edit, slideId: 'missing' }, { ...edit, shapeId: 'missing' }]) {
+      state = await session.command(state, ++seq, { kind: 'invoke', payload: { ...input, method: 'propose', args: ['Writer', null, [invalid]] } });
+      expect(state.outcomes[0]!.status).toBe('refused');
+      expect(session.handle().snapshot()).toEqual(before);
+      expect(session.handle().listProposals()).toHaveLength(0);
+      expect(session.rpc.failure).toBeUndefined();
+    }
+  } finally { await session.dispose(); }
+});
+
+test('worker reorderShape resolves slide and shape refs created in the same proposal', async () => {
+  const session = await open(await readFile(new URL('../../../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url)));
+  try {
+    const before = session.handle().snapshot();
+    const edits: import('../proposals').ProposalEdit[] = [
+      { type: 'insertSlide', ref: 'slide', afterSlideId: null },
+      { type: 'addShape', ref: 'first', slideId: '@slide', draft: { name: 'First', geometry: 'rect', rect } },
+      { type: 'addShape', ref: 'second', slideId: '@slide', draft: { name: 'Second', geometry: 'rect', rect } },
+      { type: 'reorderShape', slideId: '@slide', shapeId: '@first', to: 'front' },
+    ];
+    let state = await session.command(session.state, 1, { kind: 'invoke', payload: { ...input, method: 'propose', args: ['Writer', null, edits] } });
+    expect(state.outcomes[0]!.status).toBe('applied');
+    const proposal = session.handle().listProposals()[0]!;
+    const preview = session.handle().previewProposal(proposal.id).snapshot;
+    expect(preview.slides[0]!.id).toBe(proposal.refs!.slide);
+    expect(preview.slides[0]!.shapes.map(shape => shape.id)).toEqual([proposal.refs!.second, proposal.refs!.first]);
+    expect(session.handle().snapshot()).toEqual(before);
+    state = await session.command(state, 2, { kind: 'invoke', payload: { ...input, method: 'acceptProposal', args: [proposal.id] } });
+    expect(state.outcomes[0]!.status).toBe('applied');
+    expect(session.handle().snapshot()).toEqual(preview);
+    await session.command(state, 3, { kind: 'undo', payload: input });
+    expect(session.handle().snapshot()).toEqual(before);
+    expect(session.handle().canUndo()).toBe(false);
+  } finally { await session.dispose(); }
+});

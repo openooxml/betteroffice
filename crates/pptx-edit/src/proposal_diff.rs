@@ -51,6 +51,7 @@ fn proposal_shape_changes(proposal: &Proposal, slide_id: &str) -> Vec<ProposalSh
                 | ProposalEdit::AddShape { .. }
                 | ProposalEdit::AddPicture { .. }
                 | ProposalEdit::RemoveShape { .. }
+                | ProposalEdit::ReorderShape { .. }
                 | ProposalEdit::InsertTableRow { .. }
                 | ProposalEdit::DeleteTableRow { .. }
                 | ProposalEdit::InsertTableColumn { .. }
@@ -75,6 +76,15 @@ fn proposal_shape_changes(proposal: &Proposal, slide_id: &str) -> Vec<ProposalSh
             let kind = match (&change.before, &change.after) {
                 (None, Some(_)) => ProposalShapeChangeKind::Inserted,
                 (Some(_), None) => ProposalShapeChangeKind::Deleted,
+                (Some(_), Some(_))
+                    if change.before_index != change.after_index
+                        && proposal
+                            .edits
+                            .iter()
+                            .any(|edit| matches!(edit, ProposalEdit::ReorderShape { .. })) =>
+                {
+                    ProposalShapeChangeKind::Reordered
+                }
                 (Some(before), Some(after))
                     if before != after && change.kind == Some(ProposalChangeKind::Content) =>
                 {
@@ -144,6 +154,7 @@ impl DeckSession {
                     | ProposalEdit::AddShape { .. }
                     | ProposalEdit::AddPicture { .. }
                     | ProposalEdit::RemoveShape { .. }
+                    | ProposalEdit::ReorderShape { .. }
                     | ProposalEdit::SetSlideLayout { .. }
                     | ProposalEdit::SetSlideBackground { .. }
                     | ProposalEdit::InsertTableRow { .. }
@@ -378,6 +389,9 @@ fn scoped_target<T: ReadTxn>(txn: &T, edit: &ProposalEdit) -> EditResult<(String
             slide_id, shape_id, ..
         }
         | ProposalEdit::SetShapeAdjust {
+            slide_id, shape_id, ..
+        }
+        | ProposalEdit::ReorderShape {
             slide_id, shape_id, ..
         }
         | ProposalEdit::InsertTableRow {

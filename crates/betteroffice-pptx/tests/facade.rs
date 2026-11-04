@@ -512,3 +512,57 @@ fn facade_table_proposals_preview_accept_reject_and_undo() {
         assert_eq!(presentation.snapshot().unwrap(), before);
     }
 }
+
+#[test]
+fn facade_reorder_proposals_preview_accept_reject_and_undo() {
+    use betteroffice_pptx::{
+        ProposalEdit, ProposalRequest, ProposalShapeChangeKind, ProposalShapeOrder,
+    };
+    let fixture = include_bytes!("../../pptx-edit/tests/fixtures/proposal-shapes.pptx");
+    for to in [
+        ProposalShapeOrder::Front,
+        ProposalShapeOrder::Back,
+        ProposalShapeOrder::Forward,
+        ProposalShapeOrder::Backward,
+    ] {
+        let presentation = Presentation::open(fixture).unwrap();
+        let before = presentation.snapshot().unwrap();
+        let slide = &before.slides[0];
+        let from = usize::from(matches!(
+            to,
+            ProposalShapeOrder::Back | ProposalShapeOrder::Backward
+        ));
+        let shape = &slide.shapes[from];
+        let request = || ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![ProposalEdit::ReorderShape {
+                slide_id: slide.id.clone(),
+                shape_id: shape.id.clone(),
+                to,
+            }],
+        };
+        let proposal = presentation.propose(request()).unwrap();
+        let preview = presentation.preview_proposal(&proposal.id).unwrap();
+        assert_eq!(preview.snapshot.slides[0].shapes[1 - from].id, shape.id);
+        let by_id = presentation
+            .layout_proposal_diff_slide_by_id(&proposal.id, &slide.id)
+            .unwrap();
+        let indexed = presentation
+            .layout_proposal_diff_slide(&proposal.id, 0)
+            .unwrap();
+        assert_eq!(by_id.frame, indexed.frame);
+        assert_eq!(
+            by_id.shape_changes[0].kind,
+            ProposalShapeChangeKind::Reordered
+        );
+        assert_eq!(presentation.snapshot().unwrap(), before);
+        assert!(presentation.reject_proposal(&proposal.id));
+        let proposal = presentation.propose(request()).unwrap();
+        presentation.accept_proposal(&proposal.id, false).unwrap();
+        assert_eq!(presentation.snapshot().unwrap(), preview.snapshot);
+        assert!(presentation.undo());
+        assert_eq!(presentation.snapshot().unwrap(), before);
+        assert!(!presentation.can_undo());
+    }
+}

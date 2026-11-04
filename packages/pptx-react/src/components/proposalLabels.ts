@@ -8,7 +8,14 @@ export function proposalSlideLabels(change: ProposalChange, proposal: Proposal |
     if (!('slideId' in edit)) continue;
     const slideId = edit.slideId.startsWith('@') ? proposal.refs?.[edit.slideId.slice(1)] : edit.slideId;
     if (slideId !== change.slideId) continue;
-    if (edit.type === 'insertTableRow' || edit.type === 'deleteTableRow' || edit.type === 'insertTableColumn' || edit.type === 'deleteTableColumn') {
+    if (edit.type === 'reorderShape') {
+      const shapeId = edit.shapeId.startsWith('@') ? proposal.refs?.[edit.shapeId.slice(1)] : edit.shapeId;
+      if (shapeId !== change.shapeId) continue;
+      const key = edit.to === 'front' ? 'proposals.broughtToFront'
+        : edit.to === 'back' ? 'proposals.sentToBack'
+          : edit.to === 'forward' ? 'proposals.broughtForward' : 'proposals.sentBackward';
+      labels.push(t(key));
+    } else if (edit.type === 'insertTableRow' || edit.type === 'deleteTableRow' || edit.type === 'insertTableColumn' || edit.type === 'deleteTableColumn') {
       const shapeId = edit.shapeId.startsWith('@') ? proposal.refs?.[edit.shapeId.slice(1)] : edit.shapeId;
       if (shapeId !== change.shapeId) continue;
       const key = edit.type === 'insertTableRow' ? 'proposals.rowInserted'

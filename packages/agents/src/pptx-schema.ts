@@ -109,6 +109,7 @@ export const pptxProposalShapeEditSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('addShape'), ref: proposalRef, slideId: id, draft: z.object({ name: id, rect: proposalRect, geometry: id, fill: color.nullable().optional() }).strict() }).strict(),
   z.object({ type: z.literal('addPicture'), ref: proposalRef, slideId: id, draft: z.object({ name: id, rect: proposalRect, contentType: z.enum(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp', 'image/tiff', 'image/webp', 'image/svg+xml']), mediaBase64: z.string().min(4).max(4 * Math.ceil(8 * 1024 * 1024 / 3)) }).strict() }).strict(),
   z.object({ type: z.literal('removeShape'), slideId: id, shapeId: id }).strict(),
+  z.object({ type: z.literal('reorderShape'), slideId: id, shapeId: id, to: z.enum(['front', 'back', 'forward', 'backward']) }).strict(),
   z.object({ type: z.literal('insertTableRow'), slideId: id, shapeId: id,
     index: z.number().int().nonnegative().max(4294967295), position: z.enum(['before', 'after']), cells: z.array(text).optional(),
   }).strict(),

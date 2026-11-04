@@ -18,6 +18,7 @@ export type ProposalEdit =
   | { type: 'addShape'; ref?: string; slideId: string; draft: PresetShapeDraft }
   | { type: 'addPicture'; ref?: string; slideId: string; draft: PictureDraft }
   | { type: 'removeShape'; slideId: string; shapeId: string }
+  | { type: 'reorderShape'; slideId: string; shapeId: string; to: 'front' | 'back' | 'forward' | 'backward' }
   | { type: 'insertTableRow'; slideId: string; shapeId: string; index: number; position: 'before' | 'after'; cells?: string[] }
   | { type: 'deleteTableRow'; slideId: string; shapeId: string; index: number }
   | { type: 'insertTableColumn'; slideId: string; shapeId: string; index: number; position: 'before' | 'after'; cells?: string[]; width?: 'split' | 'copy' }

@@ -131,7 +131,7 @@ Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
 `setStoryParagraphs`, `setShapeRect`, `setShapeFill`, `setShapeStroke`,
 `setShapeAdjust`, `setSlideNotes`, `setSlideLayout`, `setSlideBackground`,
 `addTextBox`, `addShape`, `addPicture`, `removeShape`, `insertSlide`,
-`duplicateSlide`, `moveSlide`, `deleteSlide`, `insertTableRow`, `deleteTableRow`,
+`duplicateSlide`, `moveSlide`, `deleteSlide`, `reorderShape`, `insertTableRow`, `deleteTableRow`,
 `insertTableColumn`, and `deleteTableColumn`. Table edits use `slideId`, `shapeId`,
 and a zero-based `index`. Inserts require `position` (`before` or `after`) and accept
 optional `cells`; column inserts accept `width` (`split` by default or `copy`).
