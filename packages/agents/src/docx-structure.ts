@@ -41,6 +41,8 @@ export interface StructureLoss {
 
 export interface StructureReport {
   ok: boolean;
+  /** One line for the reader; names unattributed drops even when `ok` is true. */
+  summary: string;
   lost: StructureLoss[];
   unattributed: StructureLoss[];
   counts: { part: string; element: string; source: number; saved: number }[];
@@ -268,6 +270,10 @@ const NET: [readonly string[], Pick][] = [
   [['footnoteReference', 'endnoteReference'], counts => counts.notes],
   [['sdt'], counts => counts.controls],
 ];
+const relsOf = (pkg: { xml: Map<string, string> }) => new Map([...pkg.xml].filter(([name]) => name.endsWith('.rels')).map(([name, xml]) => [ownerOf(name), relationships(xml)]));
+const NOTE_PARTS: Record<string, string> = { footnotes: 'word/footnotes.xml', endnotes: 'word/endnotes.xml' };
+/** Removing these can take content the model holds only as opaque data: text boxes, nested fields, merge continuations. */
+const CONTAINERS: Pick[] = [counts => counts.tables, counts => counts.rows, counts => counts.cells];
 const COMMENT_KEYS = ['commentRangeStart', 'commentRangeEnd', 'commentReference', 'comment'];
 const PROTECTED = new Set([
   ...['bookmarkStart', 'bookmarkEnd', 'sectPr', 'hyperlink', 'pPrChange', 'rPrChange', 'sectPrChange', 'tblPrChange', 'trPrChange', 'tcPrChange',
@@ -290,10 +296,23 @@ export async function compareDocxStructure(source: Uint8Array, saved: Uint8Array
   const scanned = (pkg: typeof from) => new Map([...pkg.xml].filter(([name]) => !name.endsWith('.rels') && name !== '[Content_Types].xml').map(([name, xml]) => [name, scan(xml)]));
   const sourceParts = scanned(from);
   const savedParts = scanned(to);
-  const partNames = new Set([...Object.keys(before.parts), ...Object.keys(after.parts), ...[...sourceParts.keys()].filter(name => !COMMENT_PART.test(name))]);
-  const model = (counts: DocxModelCounts, name: string) => counts.parts[name] ?? emptyPart();
+  const sourceRels = relsOf(from);
+  const savedRels = relsOf(to);
+  const aliases = new Map<string, string>();
+  const kind = (relationship: Relationship) => relationship.type.slice(relationship.type.lastIndexOf('/') + 1);
+  const main = sourceRels.get('')?.find(relationship => kind(relationship) === 'officeDocument' && !relationship.external);
+  if (main) {
+    const name = resolveTarget('', main.target);
+    aliases.set(name, MAIN_PART);
+    for (const relationship of sourceRels.get(name) ?? []) {
+      const canonical = NOTE_PARTS[kind(relationship)];
+      if (canonical && !relationship.external) aliases.set(resolveTarget(name, relationship.target), canonical);
+    }
+  }
+  const partNames = new Set([...sourceParts.keys()].filter(name => !COMMENT_PART.test(name)));
+  const model = (counts: DocxModelCounts, name: string) => counts.parts[aliases.get(name) ?? name] ?? emptyPart();
   const removedComments = Math.max(0, before.comments - after.comments);
-  const structural = removedComments > 0 || [...partNames].some(name =>
+  const structural = removedComments > 0 || [...new Set([...partNames, ...Object.keys(before.parts)])].some(name =>
     NET.some(([, pick]) => pick(model(before, name)) > pick(model(after, name))) ||
     Object.entries(model(before, name).fields).some(([key, value]) => value > (model(after, name).fields[key] ?? 0)));
 
@@ -305,26 +324,25 @@ export async function compareDocxStructure(source: Uint8Array, saved: Uint8Array
   }
 
   for (const name of partNames) {
-    if (name === '*') continue;
-    const was = sourceParts.get(name);
+    const was = sourceParts.get(name)!;
     const is = savedParts.get(name);
-    if (!was) continue;
+    const report = CONTAINERS.some(pick => pick(model(before, name)) > pick(model(after, name))) ? unattributed : lost;
     for (const [keys, pick] of NET) {
       const explained = pick(model(before, name)) - pick(model(after, name));
       const source = count(was, keys);
       const saved = count(is, keys);
-      if (source - saved > explained) lost.push({ part: name, kind: 'element', name: keys.map(key => `w:${key}`).join('|'), source, saved, explained });
+      if (source - saved > explained) report.push({ part: name, kind: 'element', name: keys.map(key => `w:${key}`).join('|'), source, saved, explained });
     }
     const drawingKeys = NET[4][0];
     const fallbackDrop = count(was, drawingKeys, 'fallback') - count(is, drawingKeys, 'fallback');
     const drawingsRemoved = Math.max(0, model(before, name).drawings - model(after, name).drawings);
-    if (fallbackDrop > drawingsRemoved) lost.push({ part: name, kind: 'element', name: 'mc:Fallback w:drawing|w:pict|w:object', source: count(was, drawingKeys, 'fallback'), saved: count(is, drawingKeys, 'fallback'), explained: drawingsRemoved });
+    if (fallbackDrop > drawingsRemoved) report.push({ part: name, kind: 'element', name: 'mc:Fallback w:drawing|w:pict|w:object', source: count(was, drawingKeys, 'fallback'), saved: count(is, drawingKeys, 'fallback'), explained: drawingsRemoved });
     const beforeFields = model(before, name).fields;
     const afterFields = model(after, name).fields;
     for (const [instruction, number] of Object.entries(was.fields)) {
       const kept = is?.fields[instruction] ?? 0;
       const explained = Math.max(0, (beforeFields[instruction] ?? 0) - (afterFields[instruction] ?? 0));
-      if (number - kept > explained) lost.push({ part: name, kind: 'field', name: instruction, source: number, saved: kept, explained });
+      if (number - kept > explained) report.push({ part: name, kind: 'field', name: instruction, source: number, saved: kept, explained });
     }
   }
   for (const [name, part] of sourceParts) {
@@ -369,9 +387,6 @@ export async function compareDocxStructure(source: Uint8Array, saved: Uint8Array
 
   let sourceRelationships = 0;
   let savedRelationships = 0;
-  const relsOf = (pkg: typeof from) => new Map([...pkg.xml].filter(([name]) => name.endsWith('.rels')).map(([name, xml]) => [ownerOf(name), relationships(xml)]));
-  const sourceRels = relsOf(from);
-  const savedRels = relsOf(to);
   const byId = (list: readonly Relationship[]) => new Map(list.map(relationship => [relationship.id, relationship]));
   for (const [owner, list] of sourceRels) {
     sourceRelationships += list.length;
@@ -408,8 +423,13 @@ export async function compareDocxStructure(source: Uint8Array, saved: Uint8Array
   const drawingKeys = ['drawing', 'pict', 'object'];
   const truncated = lost.length > LIMIT || unattributed.length > LIMIT || counts.length > LIMIT;
   counts.sort((left, right) => (right.source - right.saved) - (left.source - left.saved));
+  const summary = [
+    lost.length ? `${lost.length} structural ${lost.length === 1 ? 'loss' : 'losses'} the edits do not explain; see lost.` : '',
+    unattributed.length ? `${unattributed.length} structural ${unattributed.length === 1 ? 'element' : 'elements'} dropped after edits that removed content, such as rows or tables; could not attribute them to those edits, review unattributed.` : '',
+  ].filter(Boolean).join(' ') || 'Structure intact: every drop is explained by the edits.';
   return {
     ok: lost.length === 0,
+    summary,
     lost: lost.slice(0, LIMIT),
     unattributed: unattributed.slice(0, LIMIT),
     counts: counts.slice(0, LIMIT),

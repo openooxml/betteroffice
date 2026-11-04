@@ -64,6 +64,7 @@ async function open(bytes: Uint8Array) {
 test('an unchanged package compares clean', async () => {
   const bytes = await source();
   const report = await compareDocxStructure(bytes, bytes, counts(), counts());
+  expect(report.summary).toBe('Structure intact: every drop is explained by the edits.');
   expect(report).toMatchObject({ ok: true, lost: [], unattributed: [], fields: { source: 3, saved: 3 }, drawings: { source: 1, saved: 1 }, relationships: { source: 3, saved: 3 } });
 });
 
@@ -72,6 +73,7 @@ test('lost simple and complex field instructions are reported', async () => {
   const simple = await mutate(bytes, rewrite('word/document.xml', xml => xml.replace('<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>', '<w:r><w:t>1</w:t></w:r>')));
   const report = await compareDocxStructure(bytes, simple, counts(), counts());
   expect(report.ok).toBe(false);
+  expect(report.summary).toContain('the edits do not explain');
   expect(report.lost).toContainEqual(expect.objectContaining({ kind: 'field', name: 'PAGE', source: 1, saved: 0 }));
   const changed = await mutate(bytes, rewrite('word/document.xml', xml => xml.replace('_Ref1 \\h ', '_Ref2 \\h ')));
   const complex = await compareDocxStructure(bytes, changed, counts(), counts());
@@ -152,6 +154,61 @@ test('a field lost next to an unrelated deletion is still a loss', async () => {
   const report = await compareDocxStructure(bytes, saved, counts(), counts(undefined, { paragraphs: 6 }));
   expect(report.ok).toBe(false);
   expect(report.lost).toContainEqual(expect.objectContaining({ kind: 'field', name: 'PAGE', source: 1, saved: 0, explained: 0 }));
+});
+
+test('content nested in a removed row or merged cell is listed for review, not failed', async () => {
+  const cell = (inner: string) => `<w:tc><w:tcPr/>${inner}</w:tc>`;
+  const row = (inner: string) => `<w:tr>${cell(inner)}</w:tr>`;
+  const textBox = '<w:p><w:r><w:pict><w:txbxContent><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:txbxContent></w:pict></w:r></w:p>';
+  const nested = '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>';
+  const table = (rows: string) => `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>${rows}</w:tbl>`;
+  const kept = row('<w:p><w:r><w:t>Kept</w:t></w:r></w:p>');
+  const bytes = await source(table(row(textBox + nested) + kept));
+  const saved = await mutate(bytes, rewrite('word/document.xml', xml => xml.replace(row(textBox + nested), '')));
+  const shape = { tables: 1, drawings: 1, fields: {} };
+  const report = await compareDocxStructure(bytes, saved, counts({}, { ...shape, paragraphs: 3, rows: 2, cells: 2 }), counts({}, { ...shape, paragraphs: 1, rows: 1, cells: 1, drawings: 0 }));
+  expect(report).toMatchObject({ ok: true, lost: [] });
+  expect(report.summary).toContain('could not attribute');
+  expect(report.summary).toContain(`${report.unattributed.length} structural element`);
+  expect(report.unattributed).toContainEqual(expect.objectContaining({ kind: 'field', name: 'SEQ Figure' }));
+  expect(report.unattributed).toContainEqual(expect.objectContaining({ kind: 'element', name: 'w:p', source: 4, saved: 1, explained: 2 }));
+  const sameCounts = await compareDocxStructure(bytes, saved, counts({}, { ...shape, paragraphs: 3, rows: 2, cells: 2 }), counts({}, { ...shape, paragraphs: 2, rows: 2, cells: 2 }));
+  expect(sameCounts.ok).toBe(false);
+});
+
+test('model counts follow an alternate main part', async () => {
+  const bytes = await mutate(await source(), async zip => {
+    zip.file('word/document2.xml', await zip.file('word/document.xml')!.async('string'));
+    zip.remove('word/document.xml');
+    zip.file('word/_rels/document2.xml.rels', await zip.file('word/_rels/document.xml.rels')!.async('string'));
+    zip.remove('word/_rels/document.xml.rels');
+    await rewrite('_rels/.rels', xml => xml.replace('word/document.xml', 'word/document2.xml'))(zip);
+    await rewrite('[Content_Types].xml', xml => xml.replace('/word/document.xml', '/word/document2.xml'))(zip);
+  });
+  const saved = await mutate(bytes, rewrite('word/document2.xml', xml => xml.replace(BODY[6], '')));
+  const report = await compareDocxStructure(bytes, saved, counts(), counts(undefined, { paragraphs: 6 }));
+  expect(report.lost).toEqual([]);
+  expect(report.ok).toBe(true);
+});
+
+test('a glossary footnotes part keeps its own strict allowance', async () => {
+  const notes = (field: string) => `<w:footnotes xmlns:w="${W}"><w:footnote w:id="1"><w:p>${field}</w:p></w:footnote></w:footnotes>`;
+  const page = '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>';
+  const bytes = await mutate(await source(), async zip => {
+    zip.file('word/footnotes.xml', `<w:footnotes xmlns:w="${W}"><w:footnote w:id="1"><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:footnote></w:footnotes>`);
+    zip.file('word/glossary/document.xml', `<w:glossaryDocument xmlns:w="${W}"/>`);
+    zip.file('word/glossary/footnotes.xml', notes(page));
+    zip.file('word/glossary/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="n" Type="${R}/footnotes" Target="footnotes.xml"/></Relationships>`);
+    await rewrite('word/_rels/document.xml.rels', xml => xml.replace('</Relationships>', `<Relationship Id="n" Type="${R}/footnotes" Target="footnotes.xml"/><Relationship Id="g" Type="${R}/glossaryDocument" Target="glossary/document.xml"/></Relationships>`))(zip);
+  });
+  const saved = await mutate(bytes, async zip => {
+    zip.file('word/glossary/footnotes.xml', notes('<w:r><w:t>1</w:t></w:r>'));
+    await rewrite('word/footnotes.xml', xml => xml.replace('<w:tr><w:tc><w:p/></w:tc></w:tr>', ''))(zip);
+  });
+  const note = (rows: number) => ({ 'word/footnotes.xml': part({ paragraphs: rows, tables: 1, rows, cells: rows }) });
+  const report = await compareDocxStructure(bytes, saved, counts(undefined, {}, note(2)), counts(undefined, {}, note(1)));
+  expect(report.ok).toBe(false);
+  expect(report.lost).toContainEqual(expect.objectContaining({ part: 'word/glossary/footnotes.xml', kind: 'field', name: 'PAGE' }));
 });
 
 test('strict namespaces are compared like transitional ones', async () => {
