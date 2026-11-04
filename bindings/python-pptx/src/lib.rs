@@ -1419,6 +1419,10 @@ impl PyPresentation {
     fn resolve_slide_index(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
         Self::reject_bool(key)?;
         let ids = self.all_slide_ids()?;
+        Self::slide_index_in(key, &ids)
+    }
+
+    fn slide_index_in(key: &Bound<'_, PyAny>, ids: &[String]) -> PyResult<usize> {
         if let Ok(id) = key.extract::<String>() {
             return ids
                 .iter()
@@ -2665,6 +2669,14 @@ impl PyPresentation {
         serde_json::to_string(&preview).map_err(|error| PptxError::new_err(error.to_string()))
     }
 
+    fn proposal_slide_strip_json(&self, id: &str) -> PyResult<String> {
+        let entries = self
+            .presentation
+            .proposal_slide_strip(id)
+            .map_err(map_error)?;
+        serde_json::to_string(&entries).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
     #[pyo3(signature = (id, *, force = false, receipt = false))]
     fn accept_proposal(
         &self,
@@ -2786,7 +2798,15 @@ impl PyPresentation {
     }
 
     fn render_proposal(&self, id: &str, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {
-        let index = self.resolve_slide_index(slide)?;
+        Self::reject_bool(slide)?;
+        let preview = self.presentation.preview_proposal(id).map_err(map_error)?;
+        let ids: Vec<_> = preview
+            .snapshot
+            .slides
+            .into_iter()
+            .map(|slide| slide.id)
+            .collect();
+        let index = Self::slide_index_in(slide, &ids)?;
         let rendered = self
             .presentation
             .render_proposal(id, index)
@@ -2811,6 +2831,19 @@ impl PyPresentation {
         let result = self
             .presentation
             .layout_proposal_diff_slide(id, index)
+            .map_err(map_error)?;
+        json_result(py, serde_json::to_string(&result))
+    }
+
+    fn layout_proposal_diff_slide_by_id(
+        &self,
+        py: Python<'_>,
+        id: &str,
+        slide_id: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .presentation
+            .layout_proposal_diff_slide_by_id(id, slide_id)
             .map_err(map_error)?;
         json_result(py, serde_json::to_string(&result))
     }
