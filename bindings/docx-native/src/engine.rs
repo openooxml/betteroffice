@@ -856,7 +856,7 @@ impl EditSession {
                     &resources,
                     &mut docx_raster::GlyphCache::default(),
                     &mut docx_raster::ImageCache::default(),
-                    scale,
+                    scale as f32,
                 )
             })
             .map_err(|error| {
