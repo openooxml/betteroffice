@@ -1404,7 +1404,7 @@ import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/prot
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
 import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
-import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
 /** PNG options a session call carries; an abort signal stays on the caller's side. */
 export type WorkbookPngOptions = Omit<XlsxPngOptions, 'signal'>;
 import type { AwarenessPeer, CollaborationUpdateOrigin } from '../collaboration/types';
@@ -1566,6 +1566,11 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
     sheets(): WorkbookSheetSummary[];
     calculationStatus(): CalculationStatus;
     renderPng(target: XlsxPngTarget, options?: WorkbookPngOptions): ArrayBuffer;
+    /**
+     * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+     * @internal
+     */
+    renderPngFonts(target: XlsxPngTarget, options?: WorkbookPngOptions): XlsxPngFont[];
     exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
     exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
@@ -1597,6 +1602,7 @@ export declare const WORKBOOK_SESSION_METHODS: {
     sheets: true;
     calculationStatus: true;
     renderPng: true;
+    renderPngFonts: true;
     exportStructured: true;
     exportMarkdown: true;
     printDisplayList: true;
@@ -3223,8 +3229,8 @@ import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 export declare const decodeFontFace: FontDecoder;
-import type { XlsxPngOptions, XlsxPngTarget } from './pngTarget';
-export type { XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
+export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type { XlsxCellAddress, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
@@ -3702,6 +3708,11 @@ export interface WorkbookHandle extends CollaborationReplica {
      * `@betteroffice/xlsx-native`.
      */
     renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
+    /**
+     * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+     * @internal
+     */
+    renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
     /** serialize the workbook back to .xlsx bytes. */
     save(): Uint8Array;
     /**
@@ -3862,6 +3873,22 @@ export type XlsxPngTarget = {
     sheet: number | string;
     range: XlsxRangeAddress | 'used';
 };
+/** A font face an export paints with, the same shape as `VsdxFontFace`. */
+export interface XlsxFontFace {
+    family: string;
+    bold?: boolean;
+    italic?: boolean;
+    bytes: Uint8Array;
+}
+/**
+ * A family and style a PNG export paints, for callers that supply faces.
+ * @internal
+ */
+export interface XlsxPngFont {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+}
 export interface XlsxPngOptions {
     /** Device pixels per sheet pixel. Defaults to 1. */
     scale?: number;
@@ -3870,6 +3897,14 @@ export interface XlsxPngOptions {
     /** Largest PNG height in pixels; a taller target is cut at its bottom edge. */
     maxHeight?: number;
     signal?: AbortSignal;
+    /**
+     * Faces to paint the sheet's fonts with, matched by family and style. Each
+     * export installs them under private names and drops them afterwards; one
+     * that fails to load rejects with `PngExportError` `font-unavailable`. The
+     * editors pass the faces they paint with; without faces the export paints
+     * with the fonts the runtime has.
+     */
+    fonts?: ReadonlyArray<XlsxFontFace>;
 }
 
 // ---- worker.d.ts ----
@@ -3908,7 +3943,7 @@ export { createWorkbookEditSession } from './session/editSession';
 export { WorkbookPngUnavailableError } from './session/methods';
 export { PngExportError } from '../../../shared/office-session/pngExportError';
 export type { PngExportCode } from '../../../shared/office-session/pngExportError';
-export type { XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
+export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
 export type { WorkbookEditSession } from './session/editSession';
 /** @experimental */
 export type { WorkbookCellGeometry, WorkbookCellInputs, WorkbookFrame, WorkbookFrameOptions, WorkbookInitialPaint, WorkbookInitialPaintRequest, WorkbookSessionOpenReply, WorkbookSessionEvents, WorkbookSessionMethods, WorkbookSessionOpenOptions, WorkbookSessionState, WorkbookSheetSummary, WorkbookSheetView, WorkbookPngOptions, } from './session/methods';
