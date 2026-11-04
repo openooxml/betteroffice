@@ -30,8 +30,10 @@ let saved = workbook.save()?;
 
 PNG rendering is enabled by default. Set `default-features = false` to omit
 raster support. `PngTarget::Viewport { sheet, viewport }` renders a pixel window;
-`PngTarget::Range { sheet, range }` renders a cell range. Sheet indexes are
-zero-based and `RenderOptions::default()` uses scale 1.0 for both forms.
+`PngTarget::Range { sheet, range }` renders a cell range.
+`PngTarget::UsedRange { sheet }` delegates to `render_sheet` with the same options,
+framing the sheet's used range at call time by default. Sheet indexes are zero-based
+and `RenderOptions::default()` uses scale 1.0 for all forms.
 
 Saving preserves the source package: parts and sheets an edit did not touch are
 copied through byte for byte, and only what changed is reserialized.

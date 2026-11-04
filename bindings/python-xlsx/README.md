@@ -47,8 +47,9 @@ print(png.width, png.height)
 ```
 
 PNG targets take a sheet name or zero-based index, with either a `viewport` or a `range`
-(an A1 string or an address dictionary). `max_width` and `max_height` cap the output for
-both. `render_sheet(sheet)` frames the sheet's used range when no range is given.
+(the exact string `"used"`, an A1 string, or an address dictionary). `"used"` frames the
+sheet's used range at call time, like `render_sheet(sheet)`. Omitting both `range` and
+`viewport` is an error. `max_width` and `max_height` cap the output for both.
 
 
 Rendering is the same grid layout and display list the browser editor uses, so

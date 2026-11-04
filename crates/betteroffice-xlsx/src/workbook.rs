@@ -2816,6 +2816,13 @@ impl Workbook {
                     ..options.clone()
                 },
             ),
+            crate::PngTarget::UsedRange { sheet } => self.render_sheet(
+                sheet,
+                &RenderOptions {
+                    range: None,
+                    ..options.clone()
+                },
+            ),
         }
     }
 

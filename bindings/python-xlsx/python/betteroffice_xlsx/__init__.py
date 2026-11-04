@@ -65,6 +65,7 @@ class ViewportTarget(TypedDict):
     viewport: Viewport
 
 class PngRangeTarget(TypedDict):
+    """A required range: "used", an A1 string, or an address dictionary."""
     sheet: "int | str"
     range: "str | RangeAddress"
 
