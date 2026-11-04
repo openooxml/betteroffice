@@ -102,7 +102,7 @@ export function peerlessCaretPaint(page: DisplayPage | undefined, caret: DocxEch
     const color = over(value, fill, opacity);
     if (color) {
       fill = color;
-      if (opacity * (parseRgba(value)?.[3] ?? 0) >= 0.5) known = true;
+      if (opacity * (parseRgba(value)?.[3] ?? 0) >= 1) known = true;
     } else if (value && !/^(transparent|none)$/i.test(value.trim())) known = false;
   };
   for (const primitive of paintOrder(page)) {

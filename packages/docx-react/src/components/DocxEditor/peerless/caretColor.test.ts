@@ -114,3 +114,11 @@ test('translucent fills are composited over what is beneath them', () => {
   const half = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: '#000000', opacity: 0.5 } as DisplayPrimitive;
   expect(peerlessCaretPaint(page(half, run('#808080', 100, 160)), caret)).toEqual({ color: '#000' });
 });
+
+test('a translucent fill over an image keeps the fill unknown; an opaque one restores it', () => {
+  const image = { kind: 'image', x: 90, y: 90, w: 200, h: 40 } as DisplayPrimitive;
+  const veil = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: 'rgba(255, 255, 255, 0.6)' } as DisplayPrimitive;
+  expect(peerlessCaretPaint(page(image, veil, run('#ffffff', 100, 160)), caret)).toEqual({ color: '#ffffff', halo: '#000' });
+  const solid = { kind: 'rect', x: 90, y: 90, w: 200, h: 40, fill: '#202020' } as DisplayPrimitive;
+  expect(peerlessCaretPaint(page(image, solid, run('#ffffff', 100, 160)), caret)).toEqual({ color: '#ffffff' });
+});
