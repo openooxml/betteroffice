@@ -313,6 +313,26 @@ impl Lockstep {
     }
 
     fn assert_equal(&self, save: bool) {
+        let fast_events = std::mem::take(&mut *self.fast_events.lock().unwrap());
+        let oracle_events = std::mem::take(&mut *self.oracle_events.lock().unwrap());
+        assert_eq!(
+            fast_events.len(),
+            oracle_events.len(),
+            "published update count at step {}",
+            self.step
+        );
+        for (index, (fast, oracle)) in fast_events.iter().zip(&oracle_events).enumerate() {
+            assert_eq!(
+                fast.update, oracle.update,
+                "published update {index} bytes at step {}",
+                self.step
+            );
+            assert_eq!(
+                fast.origin, oracle.origin,
+                "published update {index} origin at step {}",
+                self.step
+            );
+        }
         assert_eq!(
             self.fast.model(),
             self.oracle.model(),
@@ -354,9 +374,6 @@ impl Lockstep {
             self.fast.sheet_info().unwrap(),
             self.oracle.sheet_info().unwrap()
         );
-        let fast_events = std::mem::take(&mut *self.fast_events.lock().unwrap());
-        let oracle_events = std::mem::take(&mut *self.oracle_events.lock().unwrap());
-        assert_eq!(fast_events, oracle_events, "events at step {}", self.step);
         if save {
             assert_eq!(
                 self.fast.save().unwrap(),
@@ -1148,86 +1165,107 @@ fn random_range_format_edit(
     RangeFormatSequenceEdit::Operation(Box::new(op))
 }
 
+fn run_seeded_range_format_sequence(sequence: u32, check_fast_path: bool) -> [bool; 11] {
+    let mut number_formats_used = [false; 11];
+    let seed = 0x5246_0001 + sequence;
+    let mut random = Random(seed);
+    let mut pair = Lockstep::from_model(range_format_sequence_model(seed));
+    pair.step = sequence as usize * 30;
+    let mut order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    for index in (1..order.len()).rev() {
+        order.swap(index, random.next((index + 1) as u32) as usize);
+    }
+    let mut first_number_format = true;
+    let mut operations = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for step in 0..30 {
+            let kind = if step < order.len() {
+                order[step]
+            } else {
+                random.next(17)
+            };
+            let number_kind = if kind == 1 {
+                let kind = if first_number_format {
+                    sequence % 11
+                } else {
+                    random.next(11)
+                };
+                first_number_format = false;
+                number_formats_used[kind as usize] = true;
+                kind
+            } else {
+                0
+            };
+            let edit = random_range_format_edit(&mut random, &pair.fast, kind, number_kind);
+            operations.push(format!("{step}: {edit:?}"));
+            pair.step(false, |workbook| {
+                let materializations = full_materializations();
+                let hydrations = local_hydrations();
+                let result = edit.apply(workbook);
+                if check_fast_path
+                    && edit.is_fast_format()
+                    && !crate::authority::force_full_materialization()
+                {
+                    assert_eq!(
+                        full_materializations(),
+                        materializations,
+                        "seed {seed:#x}, step {step}, {edit:?}"
+                    );
+                    assert_eq!(
+                        local_hydrations(),
+                        hydrations,
+                        "seed {seed:#x}, step {step}, {edit:?}"
+                    );
+                }
+                result
+            })
+            .unwrap_or_else(|error| panic!("seed {seed:#x}, step {step}, {edit:?}: {error}"));
+            if check_fast_path && edit.requires_projection_refresh() {
+                assert_eq!(
+                    pair.fast.authority.materialize().unwrap(),
+                    pair.oracle.authority.materialize().unwrap()
+                );
+            }
+        }
+        pair.assert_equal(true);
+    }));
+    if let Err(failure) = result {
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic");
+        panic!(
+            "seed {seed:#x}, step {}, global step {}: {message}\noperations:\n{}",
+            operations.len().saturating_sub(1),
+            pair.step,
+            operations.join("\n")
+        );
+    }
+    number_formats_used
+}
+
 fn run_seeded_range_format_sequences(check_fast_path: bool) {
     let mut number_formats_used = [false; 11];
     for sequence in 0..50 {
-        let seed = 0x5246_0001 + sequence;
-        let mut random = Random(seed);
-        let mut pair = Lockstep::from_model(range_format_sequence_model(seed));
-        pair.step = sequence as usize * 30;
-        let mut order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        for index in (1..order.len()).rev() {
-            order.swap(index, random.next((index + 1) as u32) as usize);
-        }
-        let mut first_number_format = true;
-        let mut operations = Vec::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for step in 0..30 {
-                let kind = if step < order.len() {
-                    order[step]
-                } else {
-                    random.next(17)
-                };
-                let number_kind = if kind == 1 {
-                    let kind = if first_number_format {
-                        sequence % 11
-                    } else {
-                        random.next(11)
-                    };
-                    first_number_format = false;
-                    number_formats_used[kind as usize] = true;
-                    kind
-                } else {
-                    0
-                };
-                let edit = random_range_format_edit(&mut random, &pair.fast, kind, number_kind);
-                operations.push(format!("{step}: {edit:?}"));
-                pair.step(false, |workbook| {
-                    let materializations = full_materializations();
-                    let hydrations = local_hydrations();
-                    let result = edit.apply(workbook);
-                    if check_fast_path
-                        && edit.is_fast_format()
-                        && !crate::authority::force_full_materialization()
-                    {
-                        assert_eq!(
-                            full_materializations(),
-                            materializations,
-                            "seed {seed:#x}, step {step}, {edit:?}"
-                        );
-                        assert_eq!(
-                            local_hydrations(),
-                            hydrations,
-                            "seed {seed:#x}, step {step}, {edit:?}"
-                        );
-                    }
-                    result
-                })
-                .unwrap_or_else(|error| panic!("seed {seed:#x}, step {step}, {edit:?}: {error}"));
-                if check_fast_path && edit.requires_projection_refresh() {
-                    assert_eq!(
-                        pair.fast.authority.materialize().unwrap(),
-                        pair.oracle.authority.materialize().unwrap()
-                    );
-                }
-            }
-            pair.assert_equal(true);
-        }));
-        if let Err(failure) = result {
-            let message = failure
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| failure.downcast_ref::<&str>().copied())
-                .unwrap_or("non-string panic");
-            panic!(
-                "seed {seed:#x}, step {}, global step {}: {message}\noperations:\n{}",
-                operations.len().saturating_sub(1),
-                pair.step,
-                operations.join("\n")
-            );
+        for (used, observed) in number_formats_used
+            .iter_mut()
+            .zip(run_seeded_range_format_sequence(sequence, check_fast_path))
+        {
+            *used |= observed;
         }
     }
     assert!(number_formats_used.into_iter().all(|used| used));
+}
+
+#[test]
+fn range_format_seed_52460004_step_117_regression() {
+    run_seeded_range_format_sequence(3, true);
+}
+
+#[test]
+fn range_format_seed_52460029_step_1225_regression() {
+    run_seeded_range_format_sequence(40, false);
 }
 
 #[test]
