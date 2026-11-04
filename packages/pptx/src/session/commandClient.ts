@@ -420,6 +420,19 @@ async function createCommandClient(
         return new Uint8Array(result.bytes);
       } catch (error) { return reject(error, position.seq); }
     },
+    async renderPng(target, options = {}) {
+      const error = unavailable();
+      if (error) throw error;
+      if (editSession) await editSession.flush();
+      const { signal, ...wire } = options;
+      signal?.throwIfAborted();
+      const position = fence();
+      try {
+        const bytes = new Uint8Array(await rpc.call.renderCommandPng(position, structuredClone(target), structuredClone(wire)));
+        signal?.throwIfAborted();
+        return bytes;
+      } catch (error) { return reject(error, position.seq); }
+    },
     async access(method, ...args) {
       const error = unavailable();
       if (error) throw error;
