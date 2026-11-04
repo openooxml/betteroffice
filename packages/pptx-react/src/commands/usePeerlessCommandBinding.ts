@@ -19,7 +19,7 @@ import type { PptxCommandArgs, PptxCommandFailureCode, PptxCommandId, PptxComman
 
 interface Origin extends PptxCommandOrigin { run: PeerlessPresentation; slideId: string | null; target: string | null; id: PptxCommandId }
 
-const supported = new Set<PptxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'fontSizeStep',
+const supported = new Set<PptxCommandId>(['bold', 'italic', 'underline', 'strikethrough', 'fontFamily', 'fontSize', 'fontSizeStep',
   'textColor', 'alignment', 'tool', 'insertImage', 'save', 'undo', 'redo', 'shapeFill', 'shapeStrokeColor', 'shapeStrokeWidth', 'shapeAdjustment', 'zOrder', 'insertSlide', 'zoom', 'proposalsPanel', 'proposalSelect', 'proposalDiff', 'proposalAccept', 'proposalReject', 'slideshow', 'exportPng']);
 
 function target(run: PeerlessPresentation): string | null {
@@ -52,7 +52,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
       const pending = view?.pending[view.pending.length - 1]?.intent;
       if (!text && executing && run && pending?.kind === 'selectAtPoint' &&
         hitConfirmedGeometry(run.store, pending.payload)?.kind === 'text') {
-        text = { kind: 'caret', bold: 'mixed', italic: 'mixed', underline: 'mixed',
+        text = { kind: 'caret', bold: 'mixed', italic: 'mixed', underline: 'mixed', strikethrough: 'mixed',
           fontFamily: null, fontSize: null, color: null, alignment: null };
       }
       const slideId = view?.confirmed?.frame.slideId;
@@ -120,7 +120,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
           case 'insertImage': openPicture(); return { ok: true, status: 'opened' };
           case 'save': await save(); return { ok: true, status: 'executed' };
           case 'undo': case 'redo': operation = peerlessHistory(run.store, id); break;
-          case 'bold': case 'italic': case 'underline': operation = text(id); break;
+          case 'bold': case 'italic': case 'underline': case 'strikethrough': operation = text(id); break;
           case 'fontFamily': operation = text({ type: 'fontFamily', value: (args as PptxCommandArgs['fontFamily']).family }); break;
           case 'fontSize': operation = text({ type: 'fontSize', value: (args as PptxCommandArgs['fontSize']).points }); break;
           case 'fontSizeStep': operation = text({ type: 'fontSizeStep', direction: (args as PptxCommandArgs['fontSizeStep']).direction, sizes: env.fontSizes }); break;

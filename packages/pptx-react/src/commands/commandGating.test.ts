@@ -33,7 +33,7 @@ describe('PPTX command gate', () => {
   });
 
   test('text toggle commands report false active state without a text environment', () => {
-    for (const id of ['bold', 'italic', 'underline'] as const) {
+    for (const id of ['bold', 'italic', 'underline', 'strikethrough'] as const) {
       const readOnly = evaluatePptxCommand(id, undefined, testEnvironment({ readOnly: true }));
       expect(readOnly.enabled).toBe(false);
       expect(readOnly.active).toBe(false);

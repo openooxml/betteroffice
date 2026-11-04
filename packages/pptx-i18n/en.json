@@ -52,6 +52,7 @@
     "decreaseFontSize": "Decrease font size",
     "increaseFontSize": "Increase font size",
     "underline": "Underline",
+    "strikethrough": "Strikethrough",
     "more": "More",
     "fillColor": "Fill color",
     "noFill": "No fill",

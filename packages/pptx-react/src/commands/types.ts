@@ -24,6 +24,7 @@ export interface PptxCommandArgs {
   bold: null;
   italic: null;
   underline: null;
+  strikethrough: null;
   fontFamily: { family: string };
   /** Size in points, 1 to 400. */
   fontSize: { points: number };
@@ -88,6 +89,7 @@ export interface PptxCommandValues {
   bold: null;
   italic: null;
   underline: null;
+  strikethrough: null;
   /** `null` when the selection mixes families. */
   fontFamily: string | null;
   /** Points; `null` when the selection mixes sizes. */

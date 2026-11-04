@@ -52,6 +52,7 @@
     "decreaseFontSize": "フォント サイズを小さくする",
     "increaseFontSize": "フォント サイズを大きくする",
     "underline": "下線",
+    "strikethrough": "取り消し線",
     "more": "その他",
     "fillColor": "塗りつぶしの色",
     "noFill": "塗りつぶしなし",

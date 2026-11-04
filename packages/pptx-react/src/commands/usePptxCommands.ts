@@ -9,6 +9,7 @@ import type {
   TextBoxPrimitive,
   TextStylePatch,
 } from '@betteroffice/pptx';
+import { presentationStoryFormatting } from '@betteroffice/pptx/worker';
 import type { TFunction, Translations } from '@betteroffice/pptx-i18n';
 import type { PptxEditorTool, PptxZoom, ShapeFormattingAction } from '../components/toolbarTypes';
 import { findShape } from '../interactions';
@@ -145,6 +146,7 @@ const TEXT_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
   'bold',
   'italic',
   'underline',
+  'strikethrough',
   'fontFamily',
   'fontSize',
   'fontSizeStep',
@@ -209,7 +211,16 @@ function textEnvironment(inputs: PptxCommandInputs): PptxTextEnvironment | 'unsu
   const storyId = selection?.storyId ?? shapeStoryId;
   if (!handle || !storyId) return null;
   try {
-    const story = handle.story(storyId);
+    const slide = currentSlide(inputs);
+    const shape = selection && slide ? findShape(slide.shapes, selection.shapeId) : selectedShape(inputs);
+    let story;
+    try {
+      story = slide && shape
+        ? presentationStoryFormatting(handle, { slideId: slide.id, shapeId: shape.id, storyId })
+        : handle.story(storyId);
+    } catch {
+      story = handle.story(storyId);
+    }
     const textBox = inputs.modelRef.current?.frame?.primitives.find(
       (primitive): primitive is TextBoxPrimitive =>
         primitive.kind === 'textBox' && primitive.storyId === storyId
@@ -224,6 +235,7 @@ function textEnvironment(inputs: PptxCommandInputs): PptxTextEnvironment | 'unsu
         bold: style.bold,
         italic: style.italic,
         underline: style.underline !== 'none',
+        strikethrough: style.strike === 'sngStrike' || style.strike === 'dblStrike',
         fontFamily: style.fontFamily,
         fontSize: style.fontSizePt,
         color: hexColor(style.color),
@@ -238,6 +250,7 @@ function textEnvironment(inputs: PptxCommandInputs): PptxTextEnvironment | 'unsu
       bold: mixed(formatting.bold),
       italic: mixed(formatting.italic),
       underline: mixed(formatting.underline),
+      strikethrough: mixed(formatting.strikethrough),
       fontFamily: formatting.fontFamily ?? null,
       fontSize: formatting.fontSize ?? null,
       color: hexColor(formatting.textColor),
@@ -389,6 +402,8 @@ export function usePptxCommandBinding(
           return guarded(() =>
             actions.format({ underline: text?.underline === true ? 'none' : 'sng' })
           );
+        case 'strikethrough':
+          return guarded(() => actions.format({ strike: text?.strikethrough === true ? 'noStrike' : 'sngStrike' }));
         case 'fontFamily':
           return guarded(() => actions.format({ fontFamily: args.family }));
         case 'fontSize':

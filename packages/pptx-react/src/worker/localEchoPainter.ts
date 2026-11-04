@@ -164,6 +164,11 @@ export function createLocalEchoPainter(
           ctx.fillRect(x, active.line.baseline + run.style.fontSizePx * 0.08,
             width, Math.max(1, run.style.fontSizePx * 0.05));
         }
+        const thickness = Math.max(1, run.style.fontSizePx * 0.05);
+        const strikeY = active.line.baseline - (run.style.baselineOffsetPx ?? 0) - run.style.fontSizePx * 0.3;
+        const offsets = run.style.strike === 'sngStrike' ? [0]
+          : run.style.strike === 'dblStrike' ? [-thickness, thickness] : [];
+        for (const offset of offsets) ctx.fillRect(x, strikeY + offset, width, thickness);
         x += width;
       }
       ctx.shadowColor = 'transparent';

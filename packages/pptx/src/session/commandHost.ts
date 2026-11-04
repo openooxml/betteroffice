@@ -12,7 +12,7 @@ import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../sh
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
 import type { ProposalDiffSlide } from '../proposals';
-import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
+import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun, insertionStyle, typingStyle } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
@@ -606,6 +606,8 @@ export function registerPresentationCommandHandlers(
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
           italic: run.style.italic ?? DEFAULT_EDITOR_TEXT_STYLE.italic,
           underline: run.style.underline ?? 'none',
+          ...(run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike) === undefined
+            ? {} : { strike: run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike },
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
@@ -633,7 +635,9 @@ export function registerPresentationCommandHandlers(
       formatting = { ...styles[0]! };
       const keys = new Set(styles.flatMap((style) => Object.keys(style))) as Set<keyof TextStyleSnapshot>;
       for (const key of keys) {
-        if (styles.some((style) => style[key] !== styles[0]![key])) formatting[key] = null;
+        if (styles.some((style) => key === 'strike'
+          ? (style.strike ?? 'noStrike') !== (styles[0]!.strike ?? 'noStrike')
+          : style[key] !== styles[0]![key])) formatting[key] = null;
       }
     }
     const value = alignments.size === 1 ? [...alignments][0] : null;
@@ -649,7 +653,8 @@ export function registerPresentationCommandHandlers(
     let echoRun: 'before' | 'after' | null = null;
     if (selection && selection.kind !== 'shape') {
       const cached = stories.get(storyKey(selection))!;
-      const neighbour = insertionEchoRun(cached.snapshot, selection.anchor, selection.focus, storedMarks);
+      const neighbour = insertionEchoRun(cached.formatting ??= presentationStoryFormatting(opened, selection),
+        selection.anchor, selection.focus, storedMarks);
       if (!readOnly && neighbour && cached.echoRanges.some((range) => range.start <= neighbour.start && range.end >= neighbour.end)
         && cached.text.paragraphs.some((paragraph) => paragraph.paragraphId === neighbour.paragraphId
           && paragraph.editable && paragraph.fields.length === 0)) echoRun = neighbour.neighbour;
@@ -666,7 +671,7 @@ export function registerPresentationCommandHandlers(
         storyId: selection.storyId } : null,
       textContext: selection ? selection.kind === 'shape' ? 'shape'
         : selection.anchor === selection.focus ? 'caret' : 'range' : null,
-      storedMarks: { ...storedMarks }, formatting, alignment,
+      storedMarks: Object.fromEntries(Object.entries(storedMarks).filter(([, value]) => value !== undefined)), formatting, alignment,
       hyperlink: null, table: null, canEditText: selection !== null && !readOnly, echoRun } };
     return lastEditState;
   }
@@ -1095,7 +1100,7 @@ export function registerPresentationCommandHandlers(
       }
       const { patch, toggle, fontSizeStep } = command.payload;
       if (patch === undefined || !validStyle(patch) || toggle !== undefined &&
-        !['bold', 'italic', 'underline'].includes(toggle)) return 'invalid-payload';
+        !['bold', 'italic', 'underline', 'strikethrough'].includes(toggle)) return 'invalid-payload';
       const resolved: TextStyle = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
       if (fontSizeStep !== undefined) {
         if (!fontSizeStep || typeof fontSizeStep !== 'object' || Array.isArray(fontSizeStep) || toggle !== undefined ||
@@ -1112,6 +1117,7 @@ export function registerPresentationCommandHandlers(
       if (toggle) {
         const current = formattingAt(at).formatting;
         if (toggle === 'underline') resolved.underline = current.underline !== null && current.underline !== 'none' ? 'none' : 'sng';
+        else if (toggle === 'strikethrough') resolved.strike = current.strike === 'sngStrike' || current.strike === 'dblStrike' ? 'noStrike' : 'sngStrike';
         else resolved[toggle] = current[toggle] !== true;
       }
       return { kind: 'format', selection: { ...at }, patch: resolved };
@@ -1142,6 +1148,7 @@ export function registerPresentationCommandHandlers(
         text = command.payload.text;
         style = command.payload.style;
         if (!validStyle(style)) return 'invalid-payload';
+        if (style) style = Object.fromEntries(Object.entries(style).filter(([, value]) => value !== undefined));
         break;
       case 'paragraphBreak':
         text = '\n';
@@ -1207,12 +1214,20 @@ export function registerPresentationCommandHandlers(
         }
       }
     }
+    let inheritMarks = false;
     if (style === undefined && (command.kind === 'insertText' || command.kind === 'replaceText' ||
       command.kind === 'compositionCommit')) {
+      inheritMarks = true;
       style = { ...DEFAULT_EDITOR_TEXT_STYLE,
         ...Object.fromEntries(Object.entries(formattingAt(at).formatting)
           .filter(([key, value]) => key !== 'caps' && value !== null && value !== undefined)),
         ...marksAt(at) };
+    }
+    if (style) {
+      style = typingStyle(style);
+      if (inheritMarks && Object.prototype.hasOwnProperty.call(marksAt(at), 'strike') && marksAt(at).strike === undefined) {
+        style = { ...style, strike: undefined };
+      }
     }
     return { kind: 'text', selection: { ...at }, start, end, text, style };
   }
@@ -1432,7 +1447,7 @@ export function registerPresentationCommandHandlers(
       const start = Math.min(at.anchor, at.focus);
       const end = at.kind === 'shape' ? stories.get(storyKey(at))!.snapshot.length : Math.max(at.anchor, at.focus);
       if (admitted.kind === 'format' && start === end && at.kind !== 'shape') {
-        Object.assign(storedMarks, admitted.patch);
+        Object.assign(storedMarks, typingStyle(admitted.patch));
         return false;
       }
       opened.addUndoBoundary();
@@ -1471,7 +1486,7 @@ export function registerPresentationCommandHandlers(
           offset += 1;
         }
         if (paragraph.length > 0) {
-          opened.insertText(at.storyId, offset, paragraph, style);
+          opened.insertText(at.storyId, offset, paragraph, style && insertionStyle(style));
           offset += paragraph.length;
         }
       }
@@ -1912,12 +1927,13 @@ function validStyle(value: unknown): value is TextStyle | undefined {
     'dash', 'dashHeavy', 'dashLong', 'dashLongHeavy', 'dotDash', 'dotDashHeavy',
     'dotDotDash', 'dotDotDashHeavy', 'wavy', 'wavyHeavy', 'wavyDbl'];
   return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
-    if (!['bold', 'italic', 'fontFamily', 'underline', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
+    if (!['bold', 'italic', 'fontFamily', 'underline', 'strike', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
     if (entry === undefined) return true;
     switch (key) {
       case 'bold':
       case 'italic': return typeof entry === 'boolean';
       case 'fontFamily': return validText(entry);
+      case 'strike': return typeof entry === 'string' && ['noStrike', 'sngStrike', 'dblStrike'].includes(entry);
       case 'underline': return typeof entry === 'string' && underlines.includes(entry);
       case 'color': return typeof entry === 'string' && /^#?[0-9a-f]{6}$/i.test(entry);
       case 'fontSizePt': return typeof entry === 'number' && Number.isFinite(entry) && entry >= MIN_FONT_SIZE_PT && entry <= MAX_FONT_SIZE_PT;

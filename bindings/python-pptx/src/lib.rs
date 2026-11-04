@@ -325,6 +325,7 @@ fn text_style(
     color: Option<String>,
     font_family: Option<String>,
     underline: Option<String>,
+    strike: Option<String>,
     spacing_pt: Option<f64>,
     baseline_pct: Option<f64>,
     kern_pt: Option<f64>,
@@ -343,6 +344,7 @@ fn text_style(
         color,
         font_family,
         underline,
+        strike,
         spacing_pt,
         baseline_pct,
         kern_pt,
@@ -358,6 +360,7 @@ fn text_style_patch(style: TextStyle) -> TextStylePatch {
         color: style.color,
         font_family: style.font_family,
         underline: style.underline,
+        strike: style.strike,
         spacing_pt: style.spacing_pt,
         baseline_pct: style.baseline_pct,
     }
@@ -494,6 +497,8 @@ pub struct PyTextRun {
     #[pyo3(get)]
     underline: Option<String>,
     #[pyo3(get)]
+    strike: Option<String>,
+    #[pyo3(get)]
     spacing_pt: Option<f64>,
     #[pyo3(get)]
     baseline_pct: Option<f64>,
@@ -513,6 +518,7 @@ impl PyTextRun {
             color: run.style.color.clone(),
             font_family: run.style.font_family.clone(),
             underline: run.style.underline.clone(),
+            strike: run.style.strike.clone(),
             spacing_pt: run.style.spacing_pt,
             baseline_pct: run.style.baseline_pct,
             kern_pt: run.style.kern_pt,
@@ -1857,7 +1863,7 @@ impl PyPresentation {
     #[pyo3(signature = (
         slide, *, x, y, width, height, text = String::new(), name = None,
         bold = None, italic = None, font_size = None,
-        color = None, font_family = None, underline = None,
+        color = None, font_family = None, underline = None, strike = None,
         spacing_pt = None, baseline_pct = None, kern_pt = None, caps = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -1876,6 +1882,7 @@ impl PyPresentation {
         color: Option<String>,
         font_family: Option<String>,
         underline: Option<String>,
+        strike: Option<String>,
         spacing_pt: Option<f64>,
         baseline_pct: Option<f64>,
         kern_pt: Option<f64>,
@@ -1893,6 +1900,7 @@ impl PyPresentation {
                 color,
                 font_family,
                 underline,
+                strike,
                 spacing_pt,
                 baseline_pct,
                 kern_pt,
@@ -2232,7 +2240,7 @@ impl PyPresentation {
     #[pyo3(signature = (
         story_id, index, text, *,
         bold = None, italic = None, font_size = None,
-        color = None, font_family = None, underline = None,
+        color = None, font_family = None, underline = None, strike = None,
         spacing_pt = None, baseline_pct = None, kern_pt = None, caps = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -2247,6 +2255,7 @@ impl PyPresentation {
         color: Option<String>,
         font_family: Option<String>,
         underline: Option<String>,
+        strike: Option<String>,
         spacing_pt: Option<f64>,
         baseline_pct: Option<f64>,
         kern_pt: Option<f64>,
@@ -2259,6 +2268,7 @@ impl PyPresentation {
             color,
             font_family,
             underline,
+            strike,
             spacing_pt,
             baseline_pct,
             kern_pt,
@@ -2314,7 +2324,7 @@ impl PyPresentation {
     #[pyo3(signature = (
         story_id, start, end, *,
         bold = None, italic = None, font_size = None,
-        color = None, font_family = None, underline = None,
+        color = None, font_family = None, underline = None, strike = None,
         spacing_pt = None, baseline_pct = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -2329,6 +2339,7 @@ impl PyPresentation {
         color: Option<String>,
         font_family: Option<String>,
         underline: Option<String>,
+        strike: Option<String>,
         spacing_pt: Option<f64>,
         baseline_pct: Option<f64>,
     ) -> PyResult<PyTextEdit> {
@@ -2339,6 +2350,7 @@ impl PyPresentation {
             color,
             font_family,
             underline,
+            strike,
             spacing_pt,
             baseline_pct,
             None,

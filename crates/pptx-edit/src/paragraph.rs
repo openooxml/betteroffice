@@ -14,10 +14,37 @@ use yrs::Transact;
 
 use crate::deck::{map_string, required_map, shape_base, shape_parts, slide_ref};
 use crate::{
-    DeckSession, EditError, EditResult, SHAPES, StorySnapshot, TextRunSnapshot, TextStyle,
+    DeckSession, EditError, EditResult, ParagraphSnapshot, SHAPES, ShapeSnapshot, SlideSnapshot,
+    StorySnapshot, TextRunSnapshot, TextStyle,
 };
 
 impl DeckSession {
+    pub(crate) fn inherited_story_strikes(&self, story_id: &str) -> EditResult<Vec<bool>> {
+        fn find_shape<'a>(
+            shapes: &'a [ShapeSnapshot],
+            story_id: &str,
+        ) -> Option<&'a ShapeSnapshot> {
+            shapes.iter().find_map(|shape| {
+                if shape.text_stories.iter().any(|story| story.id == story_id) {
+                    Some(shape)
+                } else {
+                    find_shape(&shape.children, story_id)
+                }
+            })
+        }
+        for slide in &self.snapshot()?.slides {
+            if let Some(shape) = find_shape(&slide.shapes, story_id) {
+                let story = shape
+                    .text_stories
+                    .iter()
+                    .find(|story| story.id == story_id)
+                    .unwrap();
+                return Ok(inherited_strikes(self.package(), slide, shape, story));
+            }
+        }
+        Err(EditError::StoryNotFound(story_id.to_owned()))
+    }
+
     pub fn story_formatting(
         &self,
         slide_id: &str,
@@ -70,8 +97,16 @@ impl DeckSession {
             };
         }
         let mut story = self.story(story_id)?;
+        let story_id = story.id.clone();
         for (index, paragraph) in story.paragraphs.iter_mut().enumerate() {
             let mut properties = cascade.properties(index, paragraph.level, None);
+            let strike = paragraph_strike(&cascade, &story_id, paragraph);
+            if properties.default_run.is_some() || strike.is_some() {
+                properties
+                    .default_run
+                    .get_or_insert_with(RunProperties::default)
+                    .strike = strike;
+            }
             paragraph.alignment = paragraph.alignment.clone().or(properties.alignment);
             if paragraph.runs.is_empty() {
                 let end = [cascade.primary, cascade.layout, cascade.master]
@@ -98,6 +133,92 @@ impl DeckSession {
         }
         Ok(story)
     }
+}
+
+pub(crate) fn inherited_strikes(
+    package: &PptxPackage,
+    slide: &SlideSnapshot,
+    shape: &ShapeSnapshot,
+    story: &StorySnapshot,
+) -> Vec<bool> {
+    let parents = SlideParents::resolve(
+        package,
+        slide.source_part_path.as_deref(),
+        slide.layout_part_path.as_deref(),
+    );
+    let node = parents
+        .slide
+        .and_then(|slide| find_source_node(&slide.shapes, shape.source_id));
+    let cell = cell_formatting(package, parents.master, node, shape, &story.id);
+    let cascade = if let Some((text, inherited)) = &cell {
+        ParagraphCascade {
+            primary: Some(text),
+            master: Some(inherited),
+            ..ParagraphCascade::default()
+        }
+    } else {
+        shape_cascade(
+            &parents,
+            &package.presentation,
+            shape.placeholder.as_ref(),
+            node.and_then(node_text),
+        )
+    };
+    story
+        .paragraphs
+        .iter()
+        .map(|paragraph| {
+            paragraph_strike(&cascade, &story.id, paragraph)
+                .is_some_and(|strike| matches!(strike.as_str(), "sngStrike" | "dblStrike"))
+        })
+        .collect()
+}
+
+fn paragraph_strike(
+    cascade: &ParagraphCascade<'_>,
+    story_id: &str,
+    paragraph: &ParagraphSnapshot,
+) -> Option<String> {
+    let source = paragraph.source_paragraphs.first();
+    let xml = match source {
+        Some(source) => source.xml.as_deref(),
+        None => paragraph.preserved_xml.as_deref(),
+    };
+    let source_index = source
+        .map(|source| source.id.as_str())
+        .unwrap_or(&paragraph.id)
+        .strip_prefix(&format!("para:{story_id}:"))
+        .and_then(|index| index.parse::<usize>().ok());
+    let own = if let Some(xml) = xml {
+        pptx_parse::text_paragraph_properties(xml).ok()
+    } else if source.is_none() {
+        cascade
+            .primary
+            .and_then(|body| source_index.and_then(|index| body.paragraphs.get(index)))
+            .map(|paragraph| paragraph.properties.clone())
+    } else {
+        None
+    };
+    let primary = TextBody {
+        list_style: cascade
+            .primary
+            .map(|body| body.list_style.clone())
+            .unwrap_or_default(),
+        default_list_style: cascade
+            .primary
+            .and_then(|body| body.default_list_style.clone()),
+        ..TextBody::default()
+    };
+    let inherited = ParagraphCascade {
+        primary: Some(&primary),
+        ..*cascade
+    }
+    .properties(source_index.unwrap_or(usize::MAX), paragraph.level, None)
+    .default_run
+    .and_then(|properties| properties.strike);
+    own.and_then(|properties| properties.default_run)
+        .and_then(|properties| properties.strike)
+        .or(inherited)
 }
 
 fn inherited_text_style(
@@ -138,6 +259,7 @@ fn inherited_text_style(
                 .or(fallback.underline)
                 .unwrap_or_else(|| "none".to_owned()),
         ),
+        strike: direct.strike.clone().or(fallback.strike),
         spacing_pt: direct.spacing_pt.or(fallback.spacing_pt),
         baseline_pct: direct.baseline_pct.or(fallback.baseline_pct),
         caps: direct.caps.or(fallback.caps),
@@ -174,7 +296,7 @@ fn placeholder_text<'a>(
         .and_then(node_text)
 }
 
-fn cell_formatting<'a>(
+pub(crate) fn cell_formatting<'a>(
     package: &'a PptxPackage,
     master: Option<&SlideMaster>,
     node: Option<&'a ShapeNode>,
@@ -832,6 +954,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     }
     if source.underline.is_some() {
         target.underline.clone_from(&source.underline);
+    }
+    if source.strike.is_some() {
+        target.strike.clone_from(&source.strike);
     }
     if source.font_family.is_some() {
         target.font_family.clone_from(&source.font_family);
