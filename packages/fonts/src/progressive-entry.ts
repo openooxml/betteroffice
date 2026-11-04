@@ -27,7 +27,7 @@ export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFont
     cache = engineFaces.get(decoder) ?? new Map();
     engineFaces.set(decoder, cache);
   }
-  const key = `${ref.sha256}|${base}|${timeoutMs ?? ''}`;
+  const key = `${ref.indexSha256}|${base}|${timeoutMs ?? ''}`;
   let pending = cache.get(key);
   if (pending === undefined) {
     pending = openProgressiveFace(ref, {
