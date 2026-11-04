@@ -2001,12 +2001,19 @@ fn merging_into_a_page_break_ending_the_body_does_not_splice() {
     let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
     let page_break = r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#;
     for direction in [MergeDirection::Forward, MergeDirection::Backward] {
-        let doc = seeded(&paragraphs_package(&format!("{}{}{page_break}", paragraph("A"), paragraph("B"))));
+        let doc = seeded(&paragraphs_package(&format!(
+            "{}{}{page_break}",
+            paragraph("A"),
+            paragraph("B")
+        )));
         let key = key_of(&doc, "body", "B");
         if doc.merge_paragraphs(&ctx(), &key, direction).is_err() {
             continue;
         }
-        assert!(spliced(&doc, "word/document.xml").is_none(), "{direction:?}");
+        assert!(
+            spliced(&doc, "word/document.xml").is_none(),
+            "{direction:?}"
+        );
     }
 }
 
