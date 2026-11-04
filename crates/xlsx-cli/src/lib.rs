@@ -40,8 +40,11 @@ pub fn resolve_sheet(wb: &Workbook, selector: Option<&str>) -> Result<SheetId, S
 }
 
 pub fn render(wb: &Workbook, sheet: SheetId, opts: &RenderOptions) -> Result<RenderedPng, String> {
-    wb.render_sheet(sheet, opts)
-        .map_err(|error| error.to_string())
+    let rendered = match opts.range {
+        Some(range) => wb.render_png(betteroffice_xlsx::PngTarget::Range { sheet, range }, opts),
+        None => wb.render_sheet(sheet, opts),
+    };
+    rendered.map_err(|error| error.to_string())
 }
 
 /// one summary per sheet, in workbook order.

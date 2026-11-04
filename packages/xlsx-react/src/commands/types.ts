@@ -171,6 +171,7 @@ export type XlsxCommandFailureCode =
   | XlsxCommandDisabledCode
   | 'input-failed'
   | 'sheet-protected'
+  | 'host-refused'
   | 'document-replaced'
   | 'target-changed'
   | 'gesture-active'

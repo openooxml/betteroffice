@@ -156,6 +156,8 @@
     "stalePreview": "このプレビューは更新後のスライドを使用しています。適用すると変更された対象が上書きされます。",
     "geometry": "位置とサイズ（x, y, 幅, 高さ）",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "レイアウトを変更",
+    "backgroundChanged": "背景を変更",
     "appearance": "外観またはテキスト書式が変更されました",
     "changedAgain": "対象が再び変更されました。適用する前に更新されたプレビューを確認してください。",
     "canvasTitle": "このスライドの変更",
@@ -171,6 +173,8 @@
     "loadingDiff": "変更を読み込んでいます…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

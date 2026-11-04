@@ -1,8 +1,8 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
-export { StaleProposalError } from './proposals';
-export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalTextChange } from './proposals';
+export { ProposalPictureMediaTooLargeError, StaleProposalError } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalShapeChange, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { slideToPng } from './render/png';
 export type { SlideToPngOptions } from './render/png';

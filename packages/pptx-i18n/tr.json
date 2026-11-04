@@ -156,6 +156,8 @@
     "stalePreview": "Bu önizleme güncellenmiş slaydı kullanıyor. Uygulama, değişen hedeflerin üzerine yazacak.",
     "geometry": "Konum ve boyut (x, y, genişlik, yükseklik)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Düzen değiştirildi",
+    "backgroundChanged": "Arka plan değiştirildi",
     "appearance": "Görünüm veya metin biçimlendirmesi değişti",
     "changedAgain": "Hedef yine değişti. Uygulamadan önce yenilenen önizlemeyi inceleyin.",
     "canvasTitle": "Bu slayttaki değişiklikler",
@@ -171,6 +173,8 @@
     "loadingDiff": "Değişiklikler yükleniyor…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

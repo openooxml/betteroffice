@@ -198,3 +198,26 @@ test('an unknown worker family gets no implicit substitute', async () => {
     }
   } finally { create.mockRestore(); }
 });
+
+test('a second document using the same face gets it whole after the first went to the worker', async () => {
+  const shared = new Uint8Array(4096).fill(7).buffer;
+  const copy = mock(async () => shared.slice(0));
+  const read = mock(async () => shared);
+  const load = Object.assign(copy, { readOnlyBytes: read });
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue({
+    resolve: () => load, resolveFamily: () => load, resolveScriptFallback: () => undefined, resolveLastResort: () => load,
+  });
+  const prepare = () => prepareWorkerFontEnvironment({ fonts: undefined, embedded: [],
+    requirements: [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }], families: ['Calibri'],
+    provider: fontManager.createFontProvider(), compat: undefined, signal: new AbortController().signal });
+  try {
+    const first = await prepare();
+    const sent = structuredClone(first);
+    expect(sent.faces.flatMap(face => 'data' in face ? [face.data.byteLength] : [])).toEqual([4096]);
+    expect(first.faces.flatMap(face => 'data' in face ? [face.data.buffer] : [])).toEqual([shared]);
+    const second = await prepare();
+    expect(second.faces.flatMap(face => 'data' in face ? [face.data] : [])).toEqual([new Uint8Array(4096).fill(7)]);
+    expect(shared.byteLength).toBe(4096);
+    expect(copy).not.toHaveBeenCalled();
+  } finally { create.mockRestore(); }
+});

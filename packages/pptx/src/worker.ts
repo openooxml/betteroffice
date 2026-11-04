@@ -7,6 +7,7 @@ export {
 export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatting';
 /** @internal */
 export { browserFrameImages } from './render/browserFrameImages';
+export { decodeBrowserPresentationImage } from './render/browserImage';
 /** @experimental */
 export { createPptxWorkerEditorSession } from './session/editorSession';
 export { preparePresentationFontDecoder } from './session/fontWorker';

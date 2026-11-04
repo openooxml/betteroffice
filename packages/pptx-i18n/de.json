@@ -156,6 +156,8 @@
     "stalePreview": "Diese Vorschau verwendet die aktualisierte Folie. Beim Übernehmen werden die geänderten Ziele überschrieben.",
     "geometry": "Position und Größe (x, y, Breite, Höhe)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Layout geändert",
+    "backgroundChanged": "Hintergrund geändert",
     "appearance": "Darstellung oder Textformatierung geändert",
     "changedAgain": "Das Ziel hat sich erneut geändert. Prüfen Sie vor dem Übernehmen die aktualisierte Vorschau.",
     "canvasTitle": "Änderungen auf dieser Folie",
@@ -171,6 +173,8 @@
     "loadingDiff": "Änderungen werden geladen…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

@@ -343,3 +343,19 @@ test('measurement forwards the document compatibility mode and defaults to 12', 
     );
   }
 });
+
+test('the shared read of an implicit script fallback passes the same presence check as its copy', async () => {
+  const latin = Uint8Array.of(1, 2).buffer;
+  const wrong = Uint8Array.of(3, 4, 5).buffer;
+  const fallback = Object.assign(async () => wrong.slice(0), { readOnlyBytes: async () => wrong });
+  const provider = { ...providerFor(latin), resolveScriptFallback: () => fallback };
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue(provider);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const registered: Uint8Array[] = [];
+  try {
+    const source = createRustMeasureSource({ engine: { registerFont: (bytes) => registered.push(bytes) - 1, clearFonts() {} } });
+    const requirement: ResidentFontRequirement = { ...regular, scripts: ['cjk-jp'] };
+    await source.prepareFontRequirements([requirement]);
+    expect(registered.map((bytes) => [...bytes])).toEqual([[1, 2]]);
+  } finally { create.mockRestore(); warn.mockRestore(); }
+});

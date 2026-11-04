@@ -156,6 +156,8 @@
     "stalePreview": "תצוגה מקדימה זו משתמשת בשקופית המעודכנת. ההחלה תדרוס את היעדים שהשתנו.",
     "geometry": "מיקום וגודל (x, y, רוחב, גובה)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "הפריסה השתנתה",
+    "backgroundChanged": "הרקע השתנה",
     "appearance": "המראה או עיצוב הטקסט השתנו",
     "changedAgain": "היעד השתנה שוב. בדוק את התצוגה המקדימה המעודכנת לפני ההחלה.",
     "canvasTitle": "שינויים בשקופית זו",
@@ -171,6 +173,8 @@
     "loadingDiff": "טוען שינויים…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

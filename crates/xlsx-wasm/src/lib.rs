@@ -568,6 +568,14 @@ impl XlsxDocument {
         self.inner.edit_cells_json(args).map_err(map_engine_error)
     }
 
+    /// @internal
+    #[wasm_bindgen(js_name = translateFormulasJson)]
+    pub fn translate_formulas_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner
+            .translate_formulas_json(args)
+            .map_err(map_engine_error)
+    }
+
     #[wasm_bindgen(js_name = moveRangeJson)]
     pub fn move_range_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.inner.move_range_json(args).map_err(map_engine_error)
