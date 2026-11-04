@@ -13,6 +13,26 @@ fn fixture(body: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+fn comment_fixture(body: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&fixture(body)).unwrap();
+    let (_, content_types) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "[Content_Types].xml")
+        .unwrap();
+    *content_types = std::str::from_utf8(content_types)
+        .unwrap()
+        .replace(
+            "</Types>",
+            r#"<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>"#,
+        )
+        .into_bytes();
+    parts.extend([
+        ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="comments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>"#.to_vec()),
+        ("word/comments.xml".to_owned(), format!(r#"<w:comments {NS} xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:comment w:id="99" w:author="Reviewer"><w:p w14:paraId="00000099"><w:r><w:t>Comment</w:t></w:r></w:p></w:comment></w:comments>"#).into_bytes()),
+    ]);
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn saved_docx(source: &[u8]) -> Vec<u8> {
     let parsed = parse_docx_s9_wire(source, S9ParseOptions::default()).unwrap();
     let mut package: Value = serde_json::to_value(parsed.document.package).unwrap();
@@ -116,10 +136,57 @@ fn rewritten_field_result(result: &str, runs: Value, expected_text: &str) -> Str
 
 fn normalized_field_result(result: &str, expected_text: &str) -> String {
     let body = format!(
-        "<w:p>{BEGIN}{}{SEPARATE}{result}<w:commentRangeEnd w:id=\"99\"/></w:p><w:p>{END}</w:p>",
+        "<w:p><w:commentRangeStart w:id=\"99\"/>{BEGIN}{}{SEPARATE}{result}<w:commentRangeEnd w:id=\"99\"/></w:p><w:p>{END}</w:p>",
         instruction("QUOTE")
     );
-    let xml = repacked_field_document(&body, &[expected_text, ""]);
+    let source = comment_fixture(&body);
+    let parsed = parse_docx_s9_wire(&source, S9ParseOptions::default()).unwrap();
+    assert_eq!(
+        paragraph_texts(&parsed.document.package.document.content),
+        [expected_text, ""]
+    );
+    let mut package = serde_json::to_value(parsed.document.package).unwrap();
+    assert!(
+        package["document"]["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|comment| comment["id"].as_f64() == Some(99.0))
+    );
+    let content = package["document"]["content"][0]["content"]
+        .as_array()
+        .unwrap();
+    assert!(
+        content
+            .iter()
+            .any(|node| { node["type"] == "commentRangeEnd" && node["id"].as_f64() == Some(99.0) })
+    );
+    let field = content
+        .iter()
+        .find(|node| node["type"] == "complexField")
+        .unwrap();
+    assert!(field["structuredResult"]["blocks"].is_array());
+    assert_eq!(
+        field["fieldResult"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|run| run["content"].as_array().unwrap())
+            .filter(|item| item["type"] == "commentReference")
+            .count(),
+        2
+    );
+    package["document"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sections");
+    let saved = save_package(&source, &package);
+    let reopened = parse_docx_s9_wire(&saved, S9ParseOptions::default()).unwrap();
+    assert_eq!(
+        paragraph_texts(&reopened.document.package.document.content),
+        [expected_text, ""]
+    );
+    let xml = document_xml(&saved);
     assert_field(&xml, "QUOTE");
     assert_eq!(xml.matches("<w:bookmarkStart").count(), 1, "{xml}");
     assert_eq!(xml.matches("<w:bookmarkEnd").count(), 1, "{xml}");
