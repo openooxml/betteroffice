@@ -304,6 +304,7 @@ impl DeckSession {
             source_run_properties::SourceProperty::Spacing,
             source_run_properties::SourceProperty::Kern,
             source_run_properties::SourceProperty::Caps,
+            source_run_properties::SourceProperty::Strike,
             source_run_properties::SourceProperty::Color,
         ] {
             source_run_properties::import_source(&self, &mut import, property)?;

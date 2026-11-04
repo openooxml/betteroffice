@@ -35,9 +35,9 @@ use crate::{
     SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 2.3;
+const SCHEMA_VERSION: f64 = 2.4;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 5] = [1.0, 2.0, 2.1, 2.2, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 6] = [1.0, 2.0, 2.1, 2.2, 2.3, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -1832,8 +1832,14 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
         migrate_doc_to_v2_1(doc)?
     } else if version < 2.2 {
         migrate_doc_to_v2_2(doc)?
-    } else if version < SCHEMA_VERSION {
+    } else if version < 2.3 {
         return migrate_doc_to_v2_3(doc);
+    } else if version < SCHEMA_VERSION {
+        let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+        let meta = required_map(&txn, META)?;
+        meta.insert(&mut txn, "strikePendingSource", true);
+        meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+        return Ok(());
     } else {
         return Ok(());
     };
@@ -1845,6 +1851,7 @@ fn migrate_doc_to_v2_3(doc: &Doc) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     meta.insert(&mut txn, "kernPendingSource", true);
+    meta.insert(&mut txn, "strikePendingSource", true);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
 }
@@ -1863,6 +1870,7 @@ fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<PptxPackage> {
         Any::Buffer(Arc::from(package_json)),
     );
     meta.insert(&mut txn, "kernPendingSource", true);
+    meta.insert(&mut txn, "strikePendingSource", true);
     defer_legacy_runs(&mut txn, &meta);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(package)
@@ -2047,6 +2055,7 @@ fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<PptxPackage> {
     backfill_tables(&mut txn, &package)?;
     meta.insert(&mut txn, "spacingPendingSource", true);
     meta.insert(&mut txn, "kernPendingSource", true);
+    meta.insert(&mut txn, "strikePendingSource", true);
     if package_needs_ole_source(&package) {
         meta.insert(&mut txn, "olePicturesPendingSource", true);
     }

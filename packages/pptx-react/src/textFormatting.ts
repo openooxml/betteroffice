@@ -123,6 +123,8 @@ export function effectiveStyleFromSelection(
 ): EffectiveTextStyle {
   const formatting = selectionFormattingFromStory(story, anchor, focus, fallback);
   const strike = commonValue(selectedStyles(story, anchor, focus, fallback), 'strike');
+  const selectedStrike = strike ?? (formatting.strikethrough === undefined ? fallback.strike
+    : formatting.strikethrough ? 'sngStrike' : undefined);
   return {
     bold: formatting.bold ?? fallback.bold,
     italic: formatting.italic ?? fallback.italic,
@@ -132,14 +134,17 @@ export function effectiveStyleFromSelection(
         : formatting.underline
           ? 'sng'
           : 'none',
-    ...((strike ?? (formatting.strikethrough === undefined ? fallback.strike
-      : formatting.strikethrough ? 'sngStrike' : undefined)) === undefined ? {}
-      : { strike: strike ?? (formatting.strikethrough === undefined ? fallback.strike
-        : formatting.strikethrough ? 'sngStrike' : undefined) }),
+    ...(selectedStrike === undefined ? {}
+      : { strike: selectedStrike === 'noStrike' ? undefined : selectedStrike }),
     fontSizePt: formatting.fontSize ?? fallback.fontSizePt,
     color: formatting.textColor ?? fallback.color,
     fontFamily: formatting.fontFamily ?? fallback.fontFamily,
   };
+}
+
+export function insertionStyle(style: EffectiveTextStyle): EffectiveTextStyle {
+  return Object.hasOwn(style, 'strike') && style.strike === undefined
+    ? { ...style, strike: 'noStrike' } : style;
 }
 
 function selectedStyles(

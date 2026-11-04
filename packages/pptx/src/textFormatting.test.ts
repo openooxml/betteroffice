@@ -3,8 +3,10 @@ import {
   DEFAULT_EDITOR_TEXT_STYLE,
   effectiveStyleFromSelection,
   insertionEchoRun,
+  insertionStyle,
   insertionStyleFromSelection,
   selectionFormattingFromStory,
+  typingStyle,
 } from './textFormatting';
 import type { StorySnapshot } from './types';
 
@@ -36,4 +38,14 @@ for (const strike of ['sngStrike', 'dblStrike']) {
 
 test('an explicit clear remains available at the caret', () => {
   expect(effectiveStyleFromSelection(story('noStrike'), 2, 2, DEFAULT_EDITOR_TEXT_STYLE).strike).toBe('noStrike');
+});
+
+
+test('typing keeps strike clears as an off mark until insertion', () => {
+  const off = typingStyle({ strike: 'noStrike' });
+  expect(off.strike).toBeUndefined();
+  expect(Object.hasOwn(off, 'strike')).toBe(true);
+  expect(insertionStyle(off).strike).toBe('noStrike');
+  expect(Object.hasOwn(typingStyle({ bold: true } as { bold: boolean; strike?: string }), 'strike')).toBe(false);
+  expect(insertionStyle({ strike: 'dblStrike' }).strike).toBe('dblStrike');
 });

@@ -2008,6 +2008,13 @@ fn parse_text_paragraph(
     })
 }
 
+pub fn text_paragraph_properties(xml: &str) -> Result<ParagraphProperties, PptxError> {
+    let limits = crate::xml::ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let paragraph = crate::xml::parse_xml(xml.as_bytes(), "paragraph", &mut budget)?;
+    Ok(parse_paragraph_properties(paragraph.child("pPr")))
+}
+
 pub(crate) fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
     let Some(element) = element else {
         return ParagraphProperties::default();

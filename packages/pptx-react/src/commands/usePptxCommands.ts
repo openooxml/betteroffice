@@ -210,7 +210,14 @@ function textEnvironment(inputs: PptxCommandInputs): PptxTextEnvironment | 'unsu
   const storyId = selection?.storyId ?? shapeStoryId;
   if (!handle || !storyId) return null;
   try {
-    const story = handle.story(storyId);
+    const slide = currentSlide(inputs);
+    const shape = selection && slide ? findShape(slide.shapes, selection.shapeId) : selectedShape(inputs);
+    let story;
+    try {
+      story = slide && shape ? handle.storyFormatting(slide.id, shape.id, storyId) : handle.story(storyId);
+    } catch {
+      story = handle.story(storyId);
+    }
     const textBox = inputs.modelRef.current?.frame?.primitives.find(
       (primitive): primitive is TextBoxPrimitive =>
         primitive.kind === 'textBox' && primitive.storyId === storyId

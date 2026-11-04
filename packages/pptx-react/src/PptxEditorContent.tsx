@@ -91,7 +91,7 @@ import {
   limitPresence,
   type BoundedPresence,
 } from './presence-rendering';
-import { effectiveStyleFromSelection } from './textFormatting';
+import { effectiveStyleFromSelection, insertionStyle } from './textFormatting';
 import { useSyncedState } from './useSyncedState';
 import type { EffectiveTextStyle } from './textFormatting';
 import {
@@ -1420,7 +1420,15 @@ export function PptxEditorContent({
     const handle = handleRef.current;
     if (!handle || !selection) return;
     try {
-      const story = handle.story(selection.storyId);
+      const current = modelRef.current;
+      const slide = current?.snapshot.slides[current.slideIndex];
+      let story;
+      try {
+        story = slide ? handle.storyFormatting(slide.id, selection.shapeId, selection.storyId)
+          : handle.story(selection.storyId);
+      } catch {
+        story = handle.story(selection.storyId);
+      }
       setTextStyle(
         effectiveStyleFromSelection(
           story,
@@ -2237,7 +2245,7 @@ export function PptxEditorContent({
       }
       if (isCharacter(input)) {
         if (start !== end) handle.deleteText(selection.storyId, start, end);
-        handle.insertText(selection.storyId, start, input.key, textStyleRef.current);
+        handle.insertText(selection.storyId, start, input.key, insertionStyle(textStyleRef.current));
         const next = start + input.key.length;
         return edited({ ...selection, anchor: next, focus: next });
       }
@@ -2264,7 +2272,8 @@ export function PptxEditorContent({
     const selection = selectionRef.current;
     const shapeStoryId = selection ? null : (selectedShapeNow()?.textStories[0]?.id ?? null);
     if (!handle || (!selection && !shapeStoryId)) return false;
-    setTextStyle((current) => ({ ...current, ...patch }));
+    setTextStyle((current) => ({ ...current, ...patch,
+      ...(patch.strike === 'noStrike' ? { strike: undefined } : {}) }));
     if (selection) {
       if (selection.anchor === selection.focus) return true;
       handle.formatText(

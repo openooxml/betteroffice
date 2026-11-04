@@ -4516,7 +4516,8 @@ fn resolve_style(
         strike: direct
             .strike
             .clone()
-            .or_else(|| fallback.and_then(|value| value.strike.clone())),
+            .or_else(|| fallback.and_then(|value| value.strike.clone()))
+            .filter(|strike| matches!(strike.as_str(), "sngStrike" | "dblStrike")),
         color,
         caps: direct
             .caps

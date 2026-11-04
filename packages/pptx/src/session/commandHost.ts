@@ -11,7 +11,7 @@ import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../sh
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
 import type { ProposalDiffSlide } from '../proposals';
-import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
+import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun, insertionStyle, typingStyle } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
@@ -669,7 +669,7 @@ export function registerPresentationCommandHandlers(
         storyId: selection.storyId } : null,
       textContext: selection ? selection.kind === 'shape' ? 'shape'
         : selection.anchor === selection.focus ? 'caret' : 'range' : null,
-      storedMarks: { ...storedMarks }, formatting, alignment,
+      storedMarks: Object.fromEntries(Object.entries(storedMarks).filter(([, value]) => value !== undefined)), formatting, alignment,
       hyperlink: null, table: null, canEditText: selection !== null && !readOnly, echoRun } };
     return lastEditState;
   }
@@ -1146,6 +1146,7 @@ export function registerPresentationCommandHandlers(
         text = command.payload.text;
         style = command.payload.style;
         if (!validStyle(style)) return 'invalid-payload';
+        if (style) style = Object.fromEntries(Object.entries(style).filter(([, value]) => value !== undefined));
         break;
       case 'paragraphBreak':
         text = '\n';
@@ -1211,12 +1212,20 @@ export function registerPresentationCommandHandlers(
         }
       }
     }
+    let inheritMarks = false;
     if (style === undefined && (command.kind === 'insertText' || command.kind === 'replaceText' ||
       command.kind === 'compositionCommit')) {
+      inheritMarks = true;
       style = { ...DEFAULT_EDITOR_TEXT_STYLE,
         ...Object.fromEntries(Object.entries(formattingAt(at).formatting)
           .filter(([key, value]) => key !== 'caps' && value !== null && value !== undefined)),
         ...marksAt(at) };
+    }
+    if (style) {
+      style = typingStyle(style);
+      if (inheritMarks && Object.hasOwn(marksAt(at), 'strike') && marksAt(at).strike === undefined) {
+        style = { ...style, strike: undefined };
+      }
     }
     return { kind: 'text', selection: { ...at }, start, end, text, style };
   }
@@ -1436,7 +1445,7 @@ export function registerPresentationCommandHandlers(
       const start = Math.min(at.anchor, at.focus);
       const end = at.kind === 'shape' ? stories.get(storyKey(at))!.snapshot.length : Math.max(at.anchor, at.focus);
       if (admitted.kind === 'format' && start === end && at.kind !== 'shape') {
-        Object.assign(storedMarks, admitted.patch);
+        Object.assign(storedMarks, typingStyle(admitted.patch));
         return false;
       }
       opened.addUndoBoundary();
@@ -1475,7 +1484,7 @@ export function registerPresentationCommandHandlers(
           offset += 1;
         }
         if (paragraph.length > 0) {
-          opened.insertText(at.storyId, offset, paragraph, style);
+          opened.insertText(at.storyId, offset, paragraph, style && insertionStyle(style));
           offset += paragraph.length;
         }
       }

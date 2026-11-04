@@ -548,7 +548,7 @@ test('strikethrough_toggles_ranges_and_inherited_caret_marks', async () => {
     expect(selected.editState.toolbar.formatting?.strike).toBe('dblStrike');
     const cleared = await session.command(selected, 2, { kind: 'formatText', payload: { ...input,
       at: { source: 'afterSeq', seq: 1 }, patch: {}, toggle: 'strikethrough' } }, 1);
-    expect(cleared.editState.toolbar.storedMarks).toEqual({ strike: 'noStrike' });
+    expect(cleared.editState.toolbar.storedMarks.strike).toBeUndefined();
     const marked = await session.command(cleared, 3, { kind: 'formatText', payload: { ...input,
       at: { source: 'afterSeq', seq: 2 }, patch: {}, toggle: 'strikethrough' } }, 2);
     expect(marked.editState.toolbar.storedMarks).toEqual({ strike: 'sngStrike' });
@@ -586,7 +586,7 @@ for (const strike of [undefined, 'sngStrike', 'dblStrike'] as const) {
         expect(runs.find((run) => run.text.includes('X'))?.style.strike).toBe(strike);
         const cleared = await session.command(typed, 3, { kind: 'formatText', payload: { ...input,
           at: { source: 'afterSeq', seq: 2 }, patch: {}, toggle: 'strikethrough' } }, 2);
-        expect(cleared.editState.toolbar.storedMarks).toEqual({ strike: 'noStrike' });
+        expect(cleared.editState.toolbar.storedMarks.strike).toBeUndefined();
         const plain = await session.command(cleared, 4, { kind: 'insertText', payload: { ...input,
           at: { source: 'afterSeq', seq: 3 }, text: 'Y' } }, 3);
         expect(plain.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
@@ -597,3 +597,32 @@ for (const strike of [undefined, 'sngStrike', 'dblStrike'] as const) {
     } finally { insert.mockRestore(); await session.dispose(); }
   });
 }
+
+test('caret_clear_and_neighbouring_no_strike_do_not_create_no_strike_runs_without_inheritance', async () => {
+  for (const strike of ['sngStrike', 'noStrike']) {
+    const zip = await JSZip.loadAsync(await deck(['alpha']));
+    const path = 'ppt/slides/slide1.xml';
+    zip.file(path, (await zip.file(path)!.async('string')).replace('<a:rPr ', `<a:rPr strike="${strike}" `));
+    const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      let state = await session.command(session.state, 1, { kind: 'setSelection', payload: {
+        ...input, selection: selection(session.story, 2) } });
+      if (strike === 'sngStrike') {
+        state = await session.command(state, 2, { kind: 'formatText', payload: { ...input,
+          at: { source: 'afterSeq', seq: 1 }, patch: {}, toggle: 'strikethrough' } }, 1);
+        expect(state.editState.toolbar.storedMarks.strike).toBeUndefined();
+      }
+      const seq = state.throughSeq + 1;
+      const typed = await session.command(state, seq, { kind: 'insertText', payload: { ...input,
+        at: { source: 'afterSeq', seq: state.throughSeq }, text: 'X' } }, state.throughSeq);
+      expect(typed.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+      expect(session.handle().story(session.story.storyId).paragraphs[0]!.runs
+        .find((run) => run.text.includes('X'))?.style.strike).toBeUndefined();
+      const saved = await JSZip.loadAsync(session.handle().save());
+      const xml = await saved.file(path)!.async('string');
+      const run = xml.split('<a:r>').find((run) => run.split('</a:r>')[0]!.includes('<a:t>X</a:t>'));
+      expect(run).toBeDefined();
+      expect(run!.split('</a:r>')[0]).not.toContain('strike=');
+    } finally { await session.dispose(); }
+  }
+});

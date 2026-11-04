@@ -14,8 +14,8 @@ use yrs::Transact;
 
 use crate::deck::{map_string, required_map, shape_base, shape_parts, slide_ref};
 use crate::{
-    DeckSession, EditError, EditResult, SHAPES, ShapeSnapshot, SlideSnapshot, StorySnapshot,
-    TextRunSnapshot, TextStyle,
+    DeckSession, EditError, EditResult, ParagraphSnapshot, SHAPES, ShapeSnapshot, SlideSnapshot,
+    StorySnapshot, TextRunSnapshot, TextStyle,
 };
 
 impl DeckSession {
@@ -97,8 +97,16 @@ impl DeckSession {
             };
         }
         let mut story = self.story(story_id)?;
+        let story_id = story.id.clone();
         for (index, paragraph) in story.paragraphs.iter_mut().enumerate() {
             let mut properties = cascade.properties(index, paragraph.level, None);
+            let strike = paragraph_strike(&cascade, &story_id, paragraph);
+            if properties.default_run.is_some() || strike.is_some() {
+                properties
+                    .default_run
+                    .get_or_insert_with(RunProperties::default)
+                    .strike = strike;
+            }
             paragraph.alignment = paragraph.alignment.clone().or(properties.alignment);
             if paragraph.runs.is_empty() {
                 let end = [cascade.primary, cascade.layout, cascade.master]
@@ -156,25 +164,61 @@ pub(crate) fn inherited_strikes(
             node.and_then(node_text),
         )
     };
-    let prefix = format!("para:{}:", story.id);
     story
         .paragraphs
         .iter()
-        .enumerate()
-        .map(|(index, paragraph)| {
-            let source_index = paragraph
-                .id
-                .strip_prefix(&prefix)
-                .and_then(|index| index.parse::<usize>().ok())
-                .filter(|_| paragraph.preserved_xml.is_none())
-                .unwrap_or(index);
-            cascade
-                .properties(source_index, paragraph.level, None)
-                .default_run
-                .and_then(|properties| properties.strike)
+        .map(|paragraph| {
+            paragraph_strike(&cascade, &story.id, paragraph)
                 .is_some_and(|strike| matches!(strike.as_str(), "sngStrike" | "dblStrike"))
         })
         .collect()
+}
+
+fn paragraph_strike(
+    cascade: &ParagraphCascade<'_>,
+    story_id: &str,
+    paragraph: &ParagraphSnapshot,
+) -> Option<String> {
+    let source = paragraph.source_paragraphs.first();
+    let xml = match source {
+        Some(source) => source.xml.as_deref(),
+        None => paragraph.preserved_xml.as_deref(),
+    };
+    let source_index = source
+        .map(|source| source.id.as_str())
+        .unwrap_or(&paragraph.id)
+        .strip_prefix(&format!("para:{story_id}:"))
+        .and_then(|index| index.parse::<usize>().ok());
+    let own = if let Some(xml) = xml {
+        pptx_parse::text_paragraph_properties(xml).ok()
+    } else if source.is_none() {
+        cascade
+            .primary
+            .and_then(|body| source_index.and_then(|index| body.paragraphs.get(index)))
+            .map(|paragraph| paragraph.properties.clone())
+    } else {
+        None
+    };
+    let primary = TextBody {
+        list_style: cascade
+            .primary
+            .map(|body| body.list_style.clone())
+            .unwrap_or_default(),
+        default_list_style: cascade
+            .primary
+            .and_then(|body| body.default_list_style.clone()),
+        ..TextBody::default()
+    };
+    let inherited = ParagraphCascade {
+        primary: Some(&primary),
+        ..*cascade
+    }
+    .properties(source_index.unwrap_or(usize::MAX), paragraph.level, None)
+    .default_run
+    .and_then(|properties| properties.strike);
+    own.and_then(|properties| properties.default_run)
+        .and_then(|properties| properties.strike)
+        .or(inherited)
 }
 
 fn inherited_text_style(

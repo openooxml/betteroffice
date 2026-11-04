@@ -680,3 +680,255 @@ fn replay_clear_and_history_preserve_literal_strike_values() {
         }
     }
 }
+
+#[test]
+fn inserted_explicit_clear_only_overrides_inherited_strike() {
+    for shape_index in 0..4 {
+        for authored in ["sngStrike", "noStrike"] {
+            let bytes = authored_deck(authored);
+            let session = DeckSession::open(&bytes, 6433).unwrap();
+            let snapshot = session.snapshot().unwrap();
+            let shape = &snapshot.slides[0].shapes[shape_index];
+            let story_id = &shape.text_stories[0].id;
+            let at = if shape_index == 3 { 6 } else { 1 };
+            session
+                .insert_text(
+                    &EditCtx::local("strike"),
+                    story_id,
+                    at,
+                    "X",
+                    &TextStyle {
+                        strike: Some("noStrike".to_owned()),
+                        ..TextStyle::default()
+                    },
+                )
+                .unwrap();
+            let expected = (shape_index != 3).then_some("noStrike");
+            let reopened = DeckSession::open(&session.save().unwrap(), 6434).unwrap();
+            for session in [&session, &reopened] {
+                let story = session.story(story_id).unwrap();
+                let inserted = story.paragraphs[0]
+                    .runs
+                    .iter()
+                    .find(|run| run.text.contains('X'))
+                    .unwrap();
+                assert_eq!(inserted.style.strike.as_deref(), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn replacement_runs_do_not_inherit_a_retained_prefix_strike() {
+    let session = DeckSession::open(&fixture::deck(), 6435).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = &snapshot.slides[0].shapes[3].text_stories[0].id;
+    let context = EditCtx::local("strike");
+    session
+        .format_text(
+            &context,
+            story_id,
+            0,
+            2,
+            &TextStylePatch {
+                strike: Some("sngStrike".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let drafts: Vec<pptx_edit::TextParagraphDraft> = serde_json::from_value(serde_json::json!([{
+        "runs": [
+            {"text": "P", "style": {"strike": "sngStrike"}},
+            {"text": "Q", "style": {}},
+        ],
+    }]))
+    .unwrap();
+    session
+        .set_story_paragraphs(&context, story_id, &drafts)
+        .unwrap();
+    let reopened = DeckSession::open(&session.save().unwrap(), 6436).unwrap();
+    for session in [&session, &reopened] {
+        assert_eq!(
+            session.story(story_id).unwrap().paragraphs[0]
+                .runs
+                .iter()
+                .map(|run| (run.text.clone(), run.style.strike.clone()))
+                .collect::<Vec<_>>(),
+            [
+                ("P".to_owned(), Some("sngStrike".to_owned())),
+                ("Q".to_owned(), None)
+            ]
+        );
+    }
+}
+
+fn paragraph_strike_deck(first_struck: bool) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&fixture::deck()).unwrap();
+    let properties = |struck| {
+        if struck {
+            r#"<a:pPr><a:defRPr strike="sngStrike"/></a:pPr>"#
+        } else {
+            ""
+        }
+    };
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            *bytes = String::from_utf8(bytes.clone())
+                .unwrap()
+                .replace(
+                    r#"<a:p><a:r><a:t>P</a:t></a:r><a:r><a:rPr strike="sngStrike"/><a:t>Q</a:t></a:r></a:p>"#,
+                    &format!(
+                        "<a:p>{}<a:r><a:t>AB</a:t></a:r></a:p><a:p>{}<a:r><a:t>C</a:t></a:r></a:p>",
+                        properties(first_struck),
+                        properties(!first_struck),
+                    ),
+                )
+                .into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn inserted_paragraph_uses_preserved_defaults_and_shifted_source_identity() {
+    for first_struck in [true, false] {
+        let session = DeckSession::open(&paragraph_strike_deck(first_struck), 6437).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let slide = &snapshot.slides[0];
+        let shape = &slide.shapes[3];
+        let story_id = &shape.text_stories[0].id;
+        let context = EditCtx::local("strike");
+        let drafts: Vec<pptx_edit::TextParagraphDraft> =
+            serde_json::from_value(serde_json::json!([
+                {"runs": [{"text": "AB"}]},
+                {"runs": [{"text": "X"}]},
+                {"runs": [{"text": "C"}]},
+            ]))
+            .unwrap();
+        session
+            .set_story_paragraphs(&context, story_id, &drafts)
+            .unwrap();
+        let formatted = session
+            .story_formatting(&slide.id, &shape.id, story_id)
+            .unwrap();
+        for (index, struck) in [first_struck, first_struck, !first_struck]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                formatted.paragraphs[index].runs[0].style.strike.as_deref(),
+                struck.then_some("sngStrike")
+            );
+        }
+        session
+            .format_text(
+                &context,
+                story_id,
+                3,
+                4,
+                &TextStylePatch {
+                    strike: Some("noStrike".to_owned()),
+                    ..TextStylePatch::default()
+                },
+            )
+            .unwrap();
+        let reopened = DeckSession::open(&session.save().unwrap(), 6438).unwrap();
+        for session in [&session, &reopened] {
+            let story = session.story(story_id).unwrap();
+            assert_eq!(
+                story.paragraphs[1].runs[0].style.strike.as_deref(),
+                first_struck.then_some("noStrike")
+            );
+            let formatted = session
+                .story_formatting(&slide.id, &shape.id, story_id)
+                .unwrap();
+            assert!(!matches!(
+                formatted.paragraphs[1].runs[0].style.strike.as_deref(),
+                Some("sngStrike" | "dblStrike")
+            ));
+        }
+    }
+}
+
+#[test]
+fn split_and_deleted_paragraphs_resolve_defaults_by_identity() {
+    for first_struck in [true, false] {
+        let bytes = paragraph_strike_deck(first_struck);
+        for split in [true, false] {
+            let session = DeckSession::open(&bytes, 6439).unwrap();
+            let snapshot = session.snapshot().unwrap();
+            let slide = &snapshot.slides[0];
+            let shape = &slide.shapes[3];
+            let story_id = &shape.text_stories[0].id;
+            let context = EditCtx::local("strike");
+            let (index, expected) = if split {
+                session
+                    .insert_paragraph_break(&context, story_id, 1)
+                    .unwrap();
+                (1, first_struck)
+            } else {
+                let drafts: Vec<pptx_edit::TextParagraphDraft> =
+                    serde_json::from_value(serde_json::json!([
+                        {"runs": [{"text": "C"}]},
+                    ]))
+                    .unwrap();
+                session
+                    .set_story_paragraphs(&context, story_id, &drafts)
+                    .unwrap();
+                (0, !first_struck)
+            };
+            let reopened = DeckSession::open(&session.save().unwrap(), 6440).unwrap();
+            for session in [&session, &reopened] {
+                let story = session
+                    .story_formatting(&slide.id, &shape.id, story_id)
+                    .unwrap();
+                assert_eq!(
+                    story.paragraphs[index].runs[0].style.strike.as_deref(),
+                    expected.then_some("sngStrike")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn typing_under_no_strike_paragraph_defaults_does_not_duplicate_the_override() {
+    let mut parts = ooxml_opc::unzip_parts(&paragraph_strike_deck(true)).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            *bytes = String::from_utf8(bytes.clone())
+                .unwrap()
+                .replace(
+                    r#"<a:pPr><a:defRPr strike="sngStrike"/></a:pPr>"#,
+                    r#"<a:pPr><a:defRPr strike="noStrike"/></a:pPr>"#,
+                )
+                .into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 6442).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = &snapshot.slides[0].shapes[3].text_stories[0].id;
+    session
+        .insert_text(
+            &EditCtx::local("strike"),
+            story_id,
+            1,
+            "X",
+            &TextStyle {
+                strike: Some("noStrike".to_owned()),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+    let reopened = DeckSession::open(&session.save().unwrap(), 6443).unwrap();
+    for session in [&session, &reopened] {
+        let story = session.story(story_id).unwrap();
+        assert!(
+            story.paragraphs[0]
+                .runs
+                .iter()
+                .all(|run| run.style.strike.is_none())
+        );
+        assert!(story.plain_text().contains('X'));
+    }
+}

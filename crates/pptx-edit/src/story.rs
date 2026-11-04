@@ -573,7 +573,13 @@ impl DeckSession {
                         .iter()
                         .map(|(character, _)| *character)
                         .collect();
-                    self.insert_text(context, story_id, offset, &text, style)?;
+                    self.insert_text_with_strike_inheritance(
+                        context,
+                        story_id,
+                        offset,
+                        &text,
+                        (style, false),
+                    )?;
                     offset += text.encode_utf16().count() as u32;
                     cursor += count;
                 }
@@ -698,6 +704,18 @@ impl DeckSession {
         text: &str,
         style: &TextStyle,
     ) -> EditResult<TextReceipt> {
+        self.insert_text_with_strike_inheritance(context, story_id, index, text, (style, true))
+    }
+
+    fn insert_text_with_strike_inheritance(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        index: u32,
+        text: &str,
+        insertion: (&TextStyle, bool),
+    ) -> EditResult<TextReceipt> {
+        let (style, inherit_strike) = insertion;
         validate_xml_text(text)?;
         validate_style_values(
             style.font_family.as_deref(),
@@ -709,6 +727,11 @@ impl DeckSession {
             style.baseline_pct,
             style.kern_pt,
         )?;
+        let inherited_strikes = if style.strike.as_deref() == Some("noStrike") {
+            self.inherited_story_strikes(story_id)?
+        } else {
+            Vec::new()
+        };
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -719,7 +742,23 @@ impl DeckSession {
             });
         }
         if !text.is_empty() {
-            insert_styled_text(&story, &mut txn, index, text, style, true);
+            let mut style = style.clone();
+            let clear_strike = style.strike.as_deref() == Some("noStrike")
+                && !inherited_strikes[paragraph_markers(&story, &txn)
+                    .iter()
+                    .position(|(offset, _)| *offset >= index)
+                    .unwrap()];
+            if clear_strike {
+                style.strike = None;
+            }
+            insert_styled_text(
+                &story,
+                &mut txn,
+                index,
+                text,
+                &style,
+                inherit_strike && !clear_strike,
+            );
         }
         let length = text.encode_utf16().count() as u32;
         Ok(TextReceipt {

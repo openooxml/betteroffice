@@ -89,10 +89,19 @@ export function effectiveStyleFromSelection(
   };
 }
 
+export function typingStyle<T extends { strike?: string | null }>(style: T): T {
+  return style.strike === 'noStrike' ? { ...style, strike: undefined } : style;
+}
+
+export function insertionStyle<T extends { strike?: string | null }>(style: T): T {
+  return Object.hasOwn(style, 'strike') && style.strike === undefined
+    ? { ...style, strike: 'noStrike' } : style;
+}
+
 export function insertionStyleFromSelection(
   story: StorySnapshot, anchor: number, focus: number, storedMarks: TextStyle,
 ): TextStyle {
-  return { ...effectiveStyleFromSelection(story, anchor, focus, DEFAULT_EDITOR_TEXT_STYLE), ...storedMarks };
+  return insertionStyle({ ...effectiveStyleFromSelection(story, anchor, focus, DEFAULT_EDITOR_TEXT_STYLE), ...storedMarks });
 }
 
 export function insertionEchoRun(

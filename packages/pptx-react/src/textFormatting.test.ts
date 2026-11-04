@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { StorySnapshot, TextBoxPrimitive, TextStyleSnapshot } from '@betteroffice/pptx';
 import {
   effectiveStyleFromSelection,
+  insertionStyle,
   paragraphAlignmentFromSelection,
   selectionFormattingFromStory,
   storyFormattingFromStory,
@@ -59,7 +60,8 @@ describe('pptx text formatting', () => {
     expect(selectionFormattingFromStory(marked, 0, 10, fallback).strikethrough).toBe(true);
     expect(effectiveStyleFromSelection(marked, 7, 7, fallback).strike).toBe('dblStrike');
     runs[1].style.strike = 'noStrike';
-    expect(effectiveStyleFromSelection(marked, 7, 7, fallback).strike).toBe('noStrike');
+    expect(effectiveStyleFromSelection(marked, 7, 7, fallback).strike).toBeUndefined();
+    expect(insertionStyle(effectiveStyleFromSelection(marked, 7, 7, fallback)).strike).toBe('noStrike');
     expect(selectionFormattingFromStory(marked, 7, 7, fallback).strikethrough).toBe(false);
     expect(selectionFormattingFromStory(marked, 0, 10, fallback).strikethrough).toBeUndefined();
   });
