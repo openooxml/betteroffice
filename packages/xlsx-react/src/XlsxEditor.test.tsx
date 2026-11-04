@@ -2131,14 +2131,6 @@ describe('XlsxEditor commands', () => {
       HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
         clicks.push(this.download);
       };
-      const toBlob = HTMLCanvasElement.prototype.toBlob;
-      HTMLCanvasElement.prototype.toBlob = function (callback: BlobCallback) {
-        callback(new Blob(['png'], { type: 'image/png' }));
-      };
-      const getContext = HTMLCanvasElement.prototype.getContext;
-      HTMLCanvasElement.prototype.getContext = (() => new Proxy(stubContext() as unknown as Record<string, unknown>, {
-        get: (target, property) => property in target ? target[property as string] : () => ({ addColorStop: () => {} }),
-      })) as unknown as HTMLCanvasElement['getContext'];
       try {
         const editor = await mountCommands({ fileName: 'report.xlsx' });
         const type = (value: string) =>
@@ -2171,13 +2163,21 @@ describe('XlsxEditor commands', () => {
         ]);
         expect(editor.api().commands.getState('borderStyle').value).toBe('dashed');
         type('Exported');
-        expect(await editor.execute('exportPng', null)).toEqual({ ok: true, status: 'executed' });
+        const exported: unknown[] = [];
+        const handle = editor.api().handle;
+        const renderPng = handle.renderPng;
+        handle.renderPng = (target, options) => {
+          exported.push({ target, input: handle.cell(0, 2, 0).input });
+          return Promise.resolve(Uint8Array.of(137, 80, 78, 71));
+        };
+        try {
+          expect(await editor.execute('exportPng', null)).toEqual({ ok: true, status: 'executed' });
+        } finally { handle.renderPng = renderPng; }
         expect(editor.input()).toBe('Exported');
         expect(clicks).toEqual(['report.png']);
+        expect(exported).toEqual([{ target: { sheet: 0, viewport: expect.any(Object) }, input: 'Exported' }]);
       } finally {
         HTMLAnchorElement.prototype.click = click;
-        HTMLCanvasElement.prototype.toBlob = toBlob;
-        HTMLCanvasElement.prototype.getContext = getContext;
       }
     });
   }
