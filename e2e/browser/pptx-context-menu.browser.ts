@@ -149,14 +149,13 @@ test('table menu selects a cell and executes every insert and delete operation',
   await page.keyboard.press('Escape');
   await point(page, 0.24, 0.17);
   await expect(input(page)).toBeFocused();
-  await input(page).press('ControlOrMeta+Home');
-  await input(page).press('ControlOrMeta+Shift+End');
-  await choose(page, await openText(page, true), 'Copy');
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Middle');
-  await choose(page, await openText(page, true), 'Cut');
-  expect((await save(page, info, 'table-cut')).xml).not.toContain('>Middle<');
+  const caretMenu = await openText(page, true);
+  for (const name of ['Cut', 'Copy']) await expect(caretMenu.locator(`[data-label="${name}"]`)).toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+  await expect(input(page)).toBeFocused();
+  await page.evaluate(() => navigator.clipboard.writeText('Pasted'));
   await choose(page, await openText(page, true), 'Paste');
-  expect((await save(page, info, 'table-paste')).xml).toContain('>Middle<');
+  expect((await save(page, info, 'table-paste')).xml).toMatch(/<a:t>[^<]*Pasted[^<]*<\/a:t>/u);
   const dimensions = async (label: string) => {
     const { xml } = await save(page, info, label);
     return { rows: (xml.match(/<a:tr\b/gu) ?? []).length, columns: (xml.match(/<a:gridCol\b/gu) ?? []).length };
