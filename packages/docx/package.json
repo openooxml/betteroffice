@@ -11,11 +11,7 @@
   "imports": {
     "#session-worker": {
       "node": "./dist/sessionWorker.node.mjs",
-      "default": "./dist/sessionWorker.browser.mjs"
-    },
-    "#session-scope": {
-      "node": "./dist/sessionScope.node.mjs",
-      "default": "./dist/sessionScope.browser.mjs"
+      "default": "./dist/sessionWorker.missing.mjs"
     }
   },
   "exports": {

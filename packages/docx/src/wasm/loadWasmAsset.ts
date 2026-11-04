@@ -21,7 +21,7 @@
  * package established the pattern).
  */
 
-import { readWasmSync as readAssetSync } from '#session-scope';
+import { readWasmSync as readAssetSync } from '../../../../shared/office-session/readWasmAsset';
 
 export type WasmSyncInput = BufferSource | WebAssembly.Module;
 export type WasmAsyncInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;

@@ -3,8 +3,7 @@ import { runInNewContext } from 'node:vm';
 import { createSessionClient } from './client';
 import { isHostMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
-import { compileWasm, createWorkerWasmInitializer } from './wasm';
-import { compileSessionWasm } from './nodeSessionScope';
+import { compileWasm, compileWasmAsset, createWorkerWasmInitializer } from './wasm';
 
 const WASM_BYTES = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
 const URL_INPUT = new URL('https://example.test/module.wasm');
@@ -277,7 +276,7 @@ describe('worker wasm compilation', () => {
       throw new Error(`Unexpected builtin ${name}`);
     } });
     try {
-      expect(await compileSessionWasm(url)).toBeInstanceOf(WebAssembly.Module);
+      expect(await compileWasmAsset(url)).toBeInstanceOf(WebAssembly.Module);
       expect(fileURLToPath).toHaveBeenCalledWith(url.href);
       expect(readFileSync).toHaveBeenCalledWith('/worker assets/module.wasm');
       expect(fetch).not.toHaveBeenCalled();

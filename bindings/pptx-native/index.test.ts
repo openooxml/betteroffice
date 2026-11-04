@@ -32,8 +32,7 @@ describe('@betteroffice/pptx-native', () => {
     expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({
       type: 'module',
       imports: {
-        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.browser.js' },
-        '#session-scope': { node: './sessionScope.node.js', default: './sessionScope.browser.js' },
+        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.missing.js' },
       },
     });
   });

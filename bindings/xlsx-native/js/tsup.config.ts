@@ -15,21 +15,20 @@ export default defineConfig({
     worker: `${source}/src/worker.ts`,
     collaboration: `${source}/src/collaboration/index.ts`,
     xlsxSessionWorker: `${source}/src/session/worker.ts`,
-    'sessionWorker.browser': `${source}/src/session/sessionWorker.browser.ts`,
-    'sessionScope.browser': `${source}/src/session/sessionScope.browser.ts`,
+    'xlsxSessionWorker.node': `${source}/src/session/worker.node.ts`,
     'sessionWorker.node': `${source}/src/session/sessionWorker.node.ts`,
-    'sessionScope.node': `${source}/src/session/sessionScope.node.ts`,
+    'sessionWorker.missing': `${source}/src/session/sessionWorker.missing.ts`,
   },
   outDir: dist,
   format: ['esm'],
   dts: {
     compilerOptions: {
-      paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/xlsx/src/session/sessionWorker.node.ts', import.meta.url))], '#session-scope': [fileURLToPath(new URL('../../../packages/xlsx/src/session/sessionScope.node.ts', import.meta.url))] },
+      paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/xlsx/src/session/sessionWorker.node.ts', import.meta.url))] },
     },
   },
   tsconfig: `${source}/tsconfig.json`,
   splitting: true,
-  external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker', '#session-scope'],
+  external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'],
   sourcemap: false,
   clean: true,
   treeshake: true,
@@ -40,11 +39,11 @@ export default defineConfig({
   },
   onSuccess: async () => {
     await rename(join(dist, 'xlsxSessionWorker.js'), join(dist, 'xlsxSessionWorker.mjs'));
+    await rename(join(dist, 'xlsxSessionWorker.node.js'), join(dist, 'xlsxSessionWorker.node.mjs'));
     await writeFile(join(dist, 'package.json'), JSON.stringify({
       type: 'module',
       imports: {
-        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.browser.js' },
-        '#session-scope': { node: './sessionScope.node.js', default: './sessionScope.browser.js' },
+        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.missing.js' },
       },
     }, null, 2) + '\n');
     await writeFile(join(dist, 'browser.js'), browser);

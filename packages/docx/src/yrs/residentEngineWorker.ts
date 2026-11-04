@@ -132,7 +132,6 @@ import {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 
-import { sessionWorkerScope } from '#session-scope';
 
 let scope: DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
@@ -1433,7 +1432,7 @@ function reportProgress(): void {
 }
 Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
 
-function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
+export function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
   scope = workerScope;
   scope.onmessage = (
     event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
@@ -1455,7 +1454,6 @@ function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
   scope.onmessageerror = () => resolveHostEditModule(null);
 }
 
-startWorker(sessionWorkerScope() as unknown as DedicatedWorkerGlobalScope);
 
 function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   if (!shipsWasmAsset) return Promise.resolve(null);
