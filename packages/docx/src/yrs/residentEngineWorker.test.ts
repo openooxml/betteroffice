@@ -142,7 +142,7 @@ beforeAll(async () => {
     `,
   };
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
+    entrypoints: [resolve(import.meta.dir, 'docxWorker.browser.ts')],
     target: 'bun',
     format: 'iife',
     plugins: [

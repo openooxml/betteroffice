@@ -1,7 +1,7 @@
 import { attachPptxWorkerRender, pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { createSessionWorker } from '#session-worker';
+import { createSessionWorker } from './sessionWorker';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { isWorkerEngineTrap } from '../../../../shared/office-session/trap';

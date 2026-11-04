@@ -4,7 +4,7 @@ import { createCommandFontInstallation } from './commandFontInstallation';
 import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { MethodHandlers } from '../../../../shared/office-session/types';
-import { compileSessionWasm } from '#session-scope';
+import { compileSessionWasm } from '../../../../shared/office-session/wasm';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import { wasmAssetUrl } from '../wasm/asset';

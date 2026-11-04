@@ -11,11 +11,10 @@ const sourceSessionWorker: Plugin = {
   name: 'source-session-worker',
   enforce: 'pre',
   resolveId(source, importer) {
-    const variant = source === '#session-worker' ? 'sessionWorker' : source === '#session-scope' ? 'sessionScope' : undefined;
-    if (!variant || !importer) return null;
+    if (source !== '#session-worker' || !importer) return null;
     const format = /\/packages\/(docx|pptx|xlsx)\/src\//.exec(importer)?.[1];
     if (!format) return null;
-    return resolve(root, 'packages', format, 'src', format === 'docx' ? 'yrs' : 'session', `${variant}.browser.ts`);
+    return resolve(root, 'packages', format, 'src', format === 'docx' ? 'yrs' : 'session', 'sessionWorker.missing.ts');
   },
 };
 
