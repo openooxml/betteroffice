@@ -54,9 +54,6 @@ struct SliceRef {
     format: u32,
     index: String,
     index_sha256: String,
-    /// Length and SHA-256 of the face reassembled from every chunk.
-    byte_length: usize,
-    sha256: String,
 }
 
 /// A face cut into a skeleton and outline chunks (`scripts/fonts/cjk-slices.py`),
@@ -420,7 +417,7 @@ fn write_slices(slices: &SliceSource, level: i32, staging: &Path) -> Result<Slic
         core: core.ok_or_else(|| invalid(format!("slices of {} have no core", slices.stem)))?,
         chunks: chunk_files,
         byte_length: full.len(),
-        sha256: full_sha256.clone(),
+        sha256: full_sha256,
     };
     let mut json = serde_json::to_vec_pretty(&index)?;
     json.push(b'\n');
@@ -430,8 +427,6 @@ fn write_slices(slices: &SliceSource, level: i32, staging: &Path) -> Result<Slic
         format,
         index: index_file,
         index_sha256: format!("{:x}", Sha256::digest(&json)),
-        byte_length: full.len(),
-        sha256: full_sha256,
     })
 }
 

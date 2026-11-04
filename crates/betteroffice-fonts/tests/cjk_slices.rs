@@ -43,7 +43,6 @@ fn shipped_cjk_slices_reassemble_to_their_recorded_faces() {
             pointer["indexSha256"].as_str().unwrap()
         );
         let slices: serde_json::Value = serde_json::from_slice(&index).unwrap();
-        assert_eq!(slices["sha256"], pointer["sha256"]);
         let skeleton_bytes = decode(slices["skeleton"]["file"].as_str().unwrap());
         let skeleton = Skeleton::parse(&skeleton_bytes).unwrap();
         let mut files = vec![decode(slices["core"]["file"].as_str().unwrap())];
