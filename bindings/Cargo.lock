@@ -316,6 +316,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
  "serde",
  "serde_json",
@@ -333,6 +334,8 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
