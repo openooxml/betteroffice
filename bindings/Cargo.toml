@@ -5,3 +5,7 @@ resolver = "3"
 [profile.release]
 opt-level = 3
 lto = true
+
+[profile.hooks]
+inherits = "release"
+lto = false
