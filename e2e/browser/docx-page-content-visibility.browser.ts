@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 const root = resolve(import.meta.dirname, '../..');
 const PAGES = 18;
 const FORCE_VISIBLE = '.paged-editor__page, .canvas-page { content-visibility: visible !important; }';
-const SETTLE = '[data-docx-caret], .paged-editor__input { visibility: hidden !important; } * { caret-color: transparent !important; }';
+const SETTLE = '[data-docx-caret] { visibility: hidden !important; } * { caret-color: transparent !important; }';
 type Rect = { x: number; y: number; width: number; height: number };
 
 async function longDocument(): Promise<Buffer> {
@@ -93,9 +93,27 @@ async function state(page: Page, worker: boolean) {
     };
   });
   const root = page.locator(worker ? '[data-docx-worker-editor]' : '.editor-stage').first();
+  const clip = await page.evaluate(() => {
+    let scroller = document.querySelector('.canvas-page[data-page-index]')!.parentElement;
+    while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+    const rect = (scroller ?? document.documentElement).getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: Math.min(rect.width, innerWidth - rect.x), height: Math.min(rect.height, innerHeight - rect.y) };
+  });
   const text = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
     .map((element) => `${element.dataset.pageIndex}:${element.textContent ?? ''}`));
-  return { ...layout, text, aria: await root.ariaSnapshot(), pixels: (await page.screenshot()).toString('base64') };
+  return { ...layout, text, aria: await root.ariaSnapshot(), pixels: await settledShot(page, clip) };
+}
+
+/** A screenshot of the document area once two consecutive captures agree. */
+async function settledShot(page: Page, clip: Rect): Promise<string> {
+  let previous = '';
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const shot = (await page.screenshot({ clip })).toString('base64');
+    if (shot === previous) return shot;
+    previous = shot;
+    await page.waitForTimeout(250);
+  }
+  throw new Error('Document area never settled');
 }
 
 const selectionRects = (page: Page) => page.evaluate(() => {
