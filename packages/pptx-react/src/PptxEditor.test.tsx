@@ -13,6 +13,7 @@ import JSZip from 'jszip';
 import type { ComponentProps } from 'react';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
+import { presentationStoryFormatting } from '@betteroffice/pptx/worker';
 import type {
   DeckSnapshot,
   PptxEditRequest,
@@ -1861,7 +1862,9 @@ describe('PptxEditor commands', () => {
         const format = spyOn(api.handle, 'formatText');
         try {
           expect(api.handle.story(story.id).paragraphs[0].runs[0].style.strike).toBeUndefined();
-          expect(api.handle.storyFormatting(slide.id, shape.id, story.id).paragraphs[0].runs[0].style.strike).toBe(strike);
+          expect(presentationStoryFormatting(api.handle, {
+            slideId: slide.id, shapeId: shape.id, storyId: story.id,
+          }).paragraphs[0].runs[0].style.strike).toBe(strike);
           await act(async () => {
             api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id,
               start: 0, end: target === 'caret' ? 0 : 1 });
@@ -1879,7 +1882,9 @@ describe('PptxEditor commands', () => {
           if (target !== 'caret') expect(format.mock.calls.some((call) => call[3].strike === 'noStrike')).toBe(true);
           const saved = pptx.openPresentation(api.save(), { fonts: faces() });
           try {
-            const resolved = saved.storyFormatting(slide.id, shape.id, story.id);
+            const resolved = presentationStoryFormatting(saved, {
+              slideId: slide.id, shapeId: shape.id, storyId: story.id,
+            });
             expect(resolved.paragraphs[0].runs[0].style.strike).toBe('noStrike');
             if (target === 'caret') expect(resolved.paragraphs[0].runs[0].text).toContain('X');
           } finally { saved.dispose(); }

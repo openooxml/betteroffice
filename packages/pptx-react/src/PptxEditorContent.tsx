@@ -10,7 +10,7 @@ import type {
   PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxPresencePeer, PresentationHandle, Proposal,
   ProposalDiffSlide, SlideDisplayList, StorySnapshot, TextBoxPrimitive, TextStylePatch,
 } from '@betteroffice/pptx';
-import type { PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
+import { presentationStoryFormatting, type PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
 import { useTranslation } from './i18n';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
@@ -1424,7 +1424,9 @@ export function PptxEditorContent({
       const slide = current?.snapshot.slides[current.slideIndex];
       let story;
       try {
-        story = slide ? handle.storyFormatting(slide.id, selection.shapeId, selection.storyId)
+        story = slide ? presentationStoryFormatting(handle, {
+          slideId: slide.id, shapeId: selection.shapeId, storyId: selection.storyId,
+        })
           : handle.story(selection.storyId);
       } catch {
         story = handle.story(selection.storyId);

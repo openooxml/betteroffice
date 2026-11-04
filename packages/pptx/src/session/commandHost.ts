@@ -1223,7 +1223,7 @@ export function registerPresentationCommandHandlers(
     }
     if (style) {
       style = typingStyle(style);
-      if (inheritMarks && Object.hasOwn(marksAt(at), 'strike') && marksAt(at).strike === undefined) {
+      if (inheritMarks && Object.prototype.hasOwnProperty.call(marksAt(at), 'strike') && marksAt(at).strike === undefined) {
         style = { ...style, strike: undefined };
       }
     }

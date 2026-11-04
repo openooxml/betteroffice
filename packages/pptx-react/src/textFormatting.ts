@@ -143,7 +143,7 @@ export function effectiveStyleFromSelection(
 }
 
 export function insertionStyle(style: EffectiveTextStyle): EffectiveTextStyle {
-  return Object.hasOwn(style, 'strike') && style.strike === undefined
+  return Object.prototype.hasOwnProperty.call(style, 'strike') && style.strike === undefined
     ? { ...style, strike: 'noStrike' } : style;
 }
 

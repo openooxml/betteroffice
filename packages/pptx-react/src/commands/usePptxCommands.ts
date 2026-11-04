@@ -9,6 +9,7 @@ import type {
   TextBoxPrimitive,
   TextStylePatch,
 } from '@betteroffice/pptx';
+import { presentationStoryFormatting } from '@betteroffice/pptx/worker';
 import type { TFunction, Translations } from '@betteroffice/pptx-i18n';
 import type { PptxEditorTool, PptxZoom, ShapeFormattingAction } from '../components/toolbarTypes';
 import { findShape } from '../interactions';
@@ -214,7 +215,9 @@ function textEnvironment(inputs: PptxCommandInputs): PptxTextEnvironment | 'unsu
     const shape = selection && slide ? findShape(slide.shapes, selection.shapeId) : selectedShape(inputs);
     let story;
     try {
-      story = slide && shape ? handle.storyFormatting(slide.id, shape.id, storyId) : handle.story(storyId);
+      story = slide && shape
+        ? presentationStoryFormatting(handle, { slideId: slide.id, shapeId: shape.id, storyId })
+        : handle.story(storyId);
     } catch {
       story = handle.story(storyId);
     }

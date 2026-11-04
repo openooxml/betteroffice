@@ -4394,6 +4394,8 @@ export { DEFAULT_EDITOR_TEXT_STYLE, effectiveStyleFromSelection, selectionFormat
 /** @internal */
 export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatting';
 /** @internal */
+export { presentationStoryFormatting } from './wasm/loader';
+/** @internal */
 export { browserFrameImages } from './render/browserFrameImages';
 export { decodeBrowserPresentationImage } from './render/browserImage';
 /** @experimental */

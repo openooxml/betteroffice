@@ -94,7 +94,7 @@ export function typingStyle<T extends { strike?: string | null }>(style: T): T {
 }
 
 export function insertionStyle<T extends { strike?: string | null }>(style: T): T {
-  return Object.hasOwn(style, 'strike') && style.strike === undefined
+  return Object.prototype.hasOwnProperty.call(style, 'strike') && style.strike === undefined
     ? { ...style, strike: 'noStrike' } : style;
 }
 

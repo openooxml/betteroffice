@@ -44,8 +44,8 @@ test('an explicit clear remains available at the caret', () => {
 test('typing keeps strike clears as an off mark until insertion', () => {
   const off = typingStyle({ strike: 'noStrike' });
   expect(off.strike).toBeUndefined();
-  expect(Object.hasOwn(off, 'strike')).toBe(true);
+  expect(Object.prototype.hasOwnProperty.call(off, 'strike')).toBe(true);
   expect(insertionStyle(off).strike).toBe('noStrike');
-  expect(Object.hasOwn(typingStyle({ bold: true } as { bold: boolean; strike?: string }), 'strike')).toBe(false);
+  expect(Object.prototype.hasOwnProperty.call(typingStyle({ bold: true } as { bold: boolean; strike?: string }), 'strike')).toBe(false);
   expect(insertionStyle({ strike: 'dblStrike' }).strike).toBe('dblStrike');
 });
