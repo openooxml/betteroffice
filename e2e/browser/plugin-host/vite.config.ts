@@ -77,6 +77,10 @@ export default defineConfig({
         find: /^@betteroffice\/pptx-i18n$/,
         replacement: resolve(root, 'packages/pptx-i18n/src/index.ts'),
       },
+      {
+        find: /^@betteroffice\/pptx-i18n\/(editor|proposals)$/,
+        replacement: resolve(root, 'packages/pptx-i18n/src/$1.ts'),
+      },
       { find: /^@betteroffice\/pptx$/, replacement: resolve(root, 'packages/pptx/src/index.ts') },
       { find: /^@betteroffice\/pptx\/(.*)$/, replacement: resolve(root, 'packages/pptx/src/$1') },
       {

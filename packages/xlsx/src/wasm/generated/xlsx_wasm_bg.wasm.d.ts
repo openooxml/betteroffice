@@ -89,6 +89,7 @@ export const xlsxdocument_sheetCount: (a: number) => number;
 export const xlsxdocument_sheetInfoForJson: (a: number, b: number) => [number, number, number, number];
 export const xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_startUpdateObservation: (a: number) => [number, number];
+export const xlsxdocument_translateFormulasJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_undoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_version: () => [number, number];

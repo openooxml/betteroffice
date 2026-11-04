@@ -6,7 +6,7 @@ export type { ProgressiveFontFace, SliceLocation } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { loadPackedFontBytes, isBaseLatinFont, isLatinFont, sliceDecoder, sliceRefOf } from './packed';
+import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, sliceDecoder, sliceRefOf } from './packed';
 import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
 import type { SliceLocation } from './progressive';
 
@@ -243,12 +243,21 @@ export function loadBundledFontBytes(
   options?: FontAssetOptions,
   runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<ArrayBuffer> {
+  return bundledFontBytes(face, loadPackedFontBytes, options, runtime);
+}
+
+function bundledFontBytes(
+  face: BundledFontFace,
+  packed: typeof loadPackedFontBytes,
+  options?: FontAssetOptions,
+  runtime?: Parameters<typeof loadBundledFontBytes>[2],
+): Promise<ArrayBuffer> {
   const baseUrl =
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
   const bytes = isBaseLatinFont(face.file) || isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
-    ? loadPackedFontBytes(
+    ? packed(
       face,
       (dependency) => assetUrl(dependency, baseUrl),
       undefined,
@@ -260,12 +269,13 @@ export function loadBundledFontBytes(
   if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
   return bytes.catch((error) => {
     if (!(error instanceof MissingCjkAddonError)) throw error;
-    return loadBundledFontBytes(
+    return bundledFontBytes(
       resolveMetricCompatFace(
         face.family.includes('Serif') ? 'Times New Roman' : 'Arial',
         face.weight === 700,
         face.style === 'italic',
       )!,
+      packed,
       options,
       runtime,
     );
@@ -333,6 +343,7 @@ export function createFontProvider(
       : { baseUrl: resolvedAssetBase(options.baseUrl) };
   return fontProvider(
     (face) => loadBundledFontBytes(face, resolvedOptions, runtime),
+    (face) => bundledFontBytes(face, readPackedFontBytes, resolvedOptions, runtime),
     (face) => sliceLocation(face, resolvedOptions?.baseUrl, runtime),
   );
 }

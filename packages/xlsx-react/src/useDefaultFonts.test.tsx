@@ -69,3 +69,39 @@ test('unmounting before the module arrives creates no painter', async () => {
   await act(async () => { module.release(); await Promise.resolve(); await Promise.resolve(); });
   expect(module.create).not.toHaveBeenCalled();
 });
+
+function ownerHook(initial: unknown) {
+  return renderHook(({ owner }) => useDefaultFonts(owner, decoder, undefined, () => {}), { initialProps: { owner: initial } });
+}
+
+const settleModule = (module: ReturnType<typeof painterModule>) =>
+  act(async () => { module.release(); await Promise.resolve(); await Promise.resolve(); });
+
+test('a frame painted before the workbook owner commits passes to the owner\'s painter', async () => {
+  const module = painterModule();
+  const { result, rerender } = ownerHook(null);
+  const text = frame('Calibri');
+  await settleModule(module);
+  result.current(text, () => {});
+  module.painter.adopt.mockClear();
+  rerender({ owner: 'workbook' });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(module.create).toHaveBeenCalledTimes(2);
+  expect(module.painter.adopt.mock.calls.map(([list]) => list)).toEqual([text]);
+});
+
+test('a frame from a replaced workbook does not pass to the next painter', async () => {
+  const module = painterModule();
+  const { result, rerender } = ownerHook('first');
+  await settleModule(module);
+  result.current(frame('Calibri'), () => {});
+  module.painter.adopt.mockClear();
+  rerender({ owner: 'second' });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  rerender({ owner: null });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  rerender({ owner: 'third' });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(module.create).toHaveBeenCalledTimes(4);
+  expect(module.painter.adopt).not.toHaveBeenCalled();
+});

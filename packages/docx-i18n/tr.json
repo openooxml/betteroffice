@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "Eklenen paragraf işareti",
     "paragraphMarkDeleted": "Silinen paragraf işareti",
     "paragraphPropertiesChanged": "Değiştirilen paragraf özellikleri",
+    "runPropertiesChanged": "Değiştirilen metin biçimlendirmesi",
     "rowInserted": "Eklenen satır",
     "rowDeleted": "Silinen satır",
     "rowPropertiesChanged": "Değiştirilen satır özellikleri",

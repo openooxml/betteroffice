@@ -130,7 +130,17 @@ async function loadFace(
     };
     pending.then(runtime?.retain === false ? forget : undefined, forget);
   }
-  return pending;
+  const shared = pending;
+  return shared.then((decoded) => intact(decoded, face) ? decoded : (cache.get(key) === shared && cache.delete(key),
+    loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)));
+}
+
+function intact(decoded: DecodedFace, face: BundledFontFace): boolean {
+  return decoded.font.byteLength === face.byteLength && decoded.payload?.byteLength !== 0;
+}
+
+function packFor(face: BundledFontFace): PackManifest {
+  return isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl;
 }
 
 /** @internal Decodes slice files the way a provider decodes its whole faces. */
@@ -150,8 +160,16 @@ export async function loadPackedFontBytes(
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
   timeoutMs?: number,
   wasmUrl?: URL,
-  manifest: PackManifest = isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl,
+  manifest: PackManifest = packFor(face),
   runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<ArrayBuffer> {
   return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font.slice(0);
+}
+
+/** @internal The cached decoded face, shared with every caller: read it, never change or transfer it. */
+export async function readPackedFontBytes(
+  ...args: Parameters<typeof loadPackedFontBytes>
+): Promise<ArrayBuffer> {
+  const [face, resolveUrl, timeoutMs, wasmUrl, manifest = packFor(face), runtime] = args;
+  return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font;
 }

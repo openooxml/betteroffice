@@ -445,7 +445,7 @@ export async function createWorkbookSession(
   }
   const {
     version, listDefinedNames, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry, selectionData,
-    cellInputs, captureFormat, sheets, calculationStatus, save,
+    cellInputs, translateFormulas, captureFormat, sheets, calculationStatus, save,
     renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList,
     collaborationStateVector, collaborationStateAsUpdate,
   } = calls;
@@ -570,7 +570,7 @@ export async function createWorkbookSession(
     call: {
       decodeFontFace: (bytes, options) => calls.decodeFontFace(bytes as ArrayBuffer, options),
       version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
-      captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
+      translateFormulas, captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
       collaborationStateVector, collaborationStateAsUpdate,
       renderPng: (viewport, options) => pngBytes(renderPng(viewport, options)),
       renderRangePng: (options, frameOptions) => pngBytes(renderRangePng(options, frameOptions)),

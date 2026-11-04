@@ -106,7 +106,20 @@ pub mod work_counters;
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::{
+    build_display_list_json_str as build_display_list_json,
+    clear_measure_fonts_module as clear_measure_fonts_wasm,
+    measure_paragraph_json_str as measure_paragraph_json,
+    outline_glyph_json_str as outline_glyph_json,
+    range_rects_on_pages_by_handle_str as range_rects_on_pages_by_handle,
+    range_rects_on_pages_json_str as range_rects_on_pages_json,
+    register_measure_font_module as register_measure_font,
+    register_substitute_measure_font_module as register_substitute_measure_font,
+};
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -210,11 +223,13 @@ pub fn layout_document_json_str(input: &str) -> Result<String, String> {
     with_module_fonts(|| layout_to_json(input))
 }
 
+#[cfg(target_arch = "wasm32")]
 fn js_error(error: String) -> JsValue {
     JsValue::from_str(&error)
 }
 
 /// wasm wrapper over [`layout_to_json`].
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn layout_document_json(input: &str) -> Result<String, JsValue> {
     layout_document_json_str(input).map_err(js_error)
@@ -571,6 +586,7 @@ pub fn build_display_list_json_str(input: &str) -> Result<String, String> {
 
 /// wasm compatibility wrapper. Resident engine users call
 /// [`build_display_list_value`] and keep the typed result.
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
     build_display_list_json_str(input).map_err(js_error)
@@ -578,6 +594,7 @@ pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
 
 /// wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
 /// point in, document position (or `null`) as JSON out.
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn hit_test_json(
     display_list: &str,
@@ -588,6 +605,7 @@ pub fn hit_test_json(
     hit::hit_test_json(display_list, page_index as usize, x, y).map_err(|e| JsValue::from_str(&e))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn vertical_move_json(
     display_list: &str,
@@ -601,6 +619,7 @@ pub fn vertical_move_json(
 
 /// wasm wrapper over [`hit::range_rects_json`]: display-list JSON + document range
 /// in, JSON array of page-local rects out.
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String, JsValue> {
     hit::range_rects_json(display_list, from as i64, to as i64).map_err(|e| JsValue::from_str(&e))
@@ -620,6 +639,7 @@ pub fn range_rects_on_pages_json_str(
 }
 
 /// @internal
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn range_rects_on_pages_json(
     display_list: &str,
@@ -636,6 +656,7 @@ pub fn range_rects_on_pages_json(
 /// `part_id` scopes a header/footer to one HF part (empty for body / match-any)
 /// and names the note id for a note region. The `from`/`to` refer to that
 /// region's doc. The plain `range_rects_json` export stays body-only.
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn range_rects_region_json(
     display_list: &str,
@@ -652,6 +673,7 @@ pub fn range_rects_region_json(
 /// `{"region":"body"|"header"|"footer"|"footnote"|"endnote","rId"?,"noteId"?,`
 /// `"pos":n|null,"target":"text"|"image"|"none"}` (or `"null"` for an
 /// out-of-range page). The plain `hit_test_json` export stays body-only.
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn hit_test_regions_json(
     display_list: &str,
@@ -678,6 +700,7 @@ pub fn hit_test_regions_json(
 /// and return a handle the by-handle query exports reuse (no per-query
 /// re-parse). The caller frees it with [`close_display_list`]. `Err` on
 /// malformed JSON — the caller then stays on the JSON-arg path.
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn open_display_list(display_list: &str) -> Result<u32, JsValue> {
     session::open_display_list(display_list).map_err(|e| JsValue::from_str(&e))
@@ -685,6 +708,7 @@ pub fn open_display_list(display_list: &str) -> Result<u32, JsValue> {
 
 /// wasm wrapper over [`session::close_display_list`]: drop a handle so its
 /// parsed display list is freed. Idempotent.
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn close_display_list(handle: u32) {
     session::close_display_list(handle);
@@ -694,6 +718,7 @@ pub fn close_display_list(handle: u32) {
 /// update to a stored display list so an incremental rebuild re-parses only
 /// its changed pages. `Err` closes the handle first, so the caller's fallback
 /// (a fresh [`open_display_list`]) can never race a half-updated list.
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn update_display_list(handle: u32, update: &str) -> Result<(), JsValue> {
     session::update_display_list(handle, update).map_err(|e| JsValue::from_str(&e))
@@ -702,6 +727,7 @@ pub fn update_display_list(handle: u32, update: &str) -> Result<(), JsValue> {
 /// wasm wrapper over [`session::hit_test_regions_by_handle`]: region-aware hit
 /// test against a stored display list. `Err` on an unknown/closed handle so the
 /// caller can fall back to [`hit_test_regions_json`].
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn hit_test_regions_by_handle(
     handle: u32,
@@ -713,6 +739,7 @@ pub fn hit_test_regions_by_handle(
         .map_err(|e| JsValue::from_str(&e))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn vertical_move_by_handle(
     handle: u32,
@@ -727,6 +754,7 @@ pub fn vertical_move_by_handle(
 /// wasm wrapper over [`session::range_rects_by_handle`]: range rects against a
 /// stored display list. `Err` on an unknown/closed handle so the caller can
 /// fall back to [`range_rects_json`].
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn range_rects_by_handle(handle: u32, from: f64, to: f64) -> Result<String, JsValue> {
     session::range_rects_by_handle(handle, from as i64, to as i64)
@@ -747,6 +775,7 @@ pub fn range_rects_on_pages_by_handle_str(
 }
 
 /// @internal
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn range_rects_on_pages_by_handle(
     handle: u32,
@@ -764,6 +793,7 @@ pub fn range_rects_on_pages_by_handle(
 /// header/footer to one HF part and names the note id for a note region.
 /// `Err` on an unknown/closed handle so the caller can fall back to
 /// [`range_rects_region_json`].
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn range_rects_region_by_handle(
     handle: u32,
@@ -872,6 +902,7 @@ pub fn register_measure_font_module(bytes: &[u8]) -> Result<u32, String> {
 /// that `measure_paragraph_json` inputs reference in their `fontChains`.
 /// Malformed bytes (attacker-controlled embedded fonts) are rejected as an
 /// error at this boundary, mirroring `FontStore::register`.
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     register_measure_font_module(bytes).map_err(js_error)
@@ -890,6 +921,7 @@ pub fn register_substitute_measure_font_module(
 /// this for a face they substituted, and put the result at the head of that
 /// family's chain. Pagination, the display list and glyph outlines all read
 /// this one store, so a widened view measures and paints at one pitch.
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
     register_substitute_measure_font_module(base, requested_family).map_err(js_error)
@@ -925,6 +957,7 @@ pub fn clear_measure_fonts_module() -> Result<(), String> {
 
 /// Drop every registered measurement font (ids restart at 0). Callers must
 /// re-register before the next `measure_paragraph_json`.
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(
     not(feature = "wasm-query"),
     wasm_bindgen(js_name = clear_measure_fonts)
@@ -1016,6 +1049,7 @@ pub fn measure_paragraph_json_str(input: &str) -> Result<String, String> {
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
 /// out. An `Err` whose message starts with `"UNSUPPORTED"` means the caller
 /// must fall back to browser measurement for that block.
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
     measure_paragraph_json_str(input).map_err(js_error)
@@ -1113,6 +1147,7 @@ pub fn outline_glyph_json_str(font_id: u32, glyph_id: u32) -> Result<String, Str
 /// {"t":"C","c1x":..,"c1y":..,"c2x":..,"c2y":..,"x":..,"y":..},{"t":"Z"}]}`.
 /// The canvas caches this per `(fontId, glyphId)` and scales by `size/upem`,
 /// flipping y at draw time. `cmds` is empty for a blank glyph (space).
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
     outline_glyph_json_str(font_id, glyph_id).map_err(js_error)

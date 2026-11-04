@@ -1,0 +1,9 @@
+{
+  "theme-accent": "crates/docx-edit/tests/fixtures/layout-request/theme-accent.docx",
+  "comprehensive": "crates/betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx",
+  "comment-structure": "packages/docx/src/yrs/__fixtures__/comment-ranges/structure.docx",
+  "content-controls": "packages/docx/src/yrs/__fixtures__/content-controls/template.docx",
+  "linked-header": "packages/docx-react/src/components/DocxEditor/hooks/__fixtures__/probe-linked-header.docx",
+  "structured-export": "crates/docx-edit/tests/fixtures/structured-export/principal.docx",
+  "page-fragments": "crates/docx-edit/tests/fixtures/page-fragments/pages.docx"
+}

@@ -6,7 +6,7 @@ and OOXML pipelines.
 
 ```rust
 use betteroffice_xlsx::{
-    CalculationOptions, CellRef, RenderOptions, SheetId, Workbook,
+    CalculationOptions, CellRange, CellRef, PngTarget, RenderOptions, SheetId, Workbook,
 };
 
 let mut workbook = Workbook::open_recalculated(
@@ -21,9 +21,17 @@ workbook.edit_cell(
     CalculationOptions::default(),
 )?;
 
-let png = workbook.render_sheet(SheetId(0), &RenderOptions::default())?;
+let png = workbook.render_png(
+    PngTarget::Range { sheet: SheetId(0), range: CellRange::parse_a1("A1:B2").unwrap() },
+    &RenderOptions::default(),
+)?;
 let saved = workbook.save()?;
 ```
+
+PNG rendering is enabled by default. Set `default-features = false` to omit
+raster support. `PngTarget::Viewport { sheet, viewport }` renders a pixel window;
+`PngTarget::Range { sheet, range }` renders a cell range. Sheet indexes are
+zero-based and `RenderOptions::default()` uses scale 1.0 for both forms.
 
 Saving preserves the source package: parts and sheets an edit did not touch are
 copied through byte for byte, and only what changed is reserialized.

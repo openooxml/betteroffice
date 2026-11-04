@@ -23,12 +23,19 @@ import type {
 /** Why work queued behind accepted input could not run. */
 export type XlsxCommandAdmissionCode = Extract<
   XlsxCommandFailureCode,
-  'input-failed' | 'sheet-protected' | 'document-replaced' | 'target-changed' | 'gesture-active' | 'editor-unavailable'
+  | 'input-failed'
+  | 'sheet-protected'
+  | 'host-refused'
+  | 'document-replaced'
+  | 'target-changed'
+  | 'gesture-active'
+  | 'editor-unavailable'
 >;
 
 const ADMISSION_MESSAGES: Record<XlsxCommandAdmissionCode, string> = {
   'input-failed': 'Input accepted earlier could not be written',
   'sheet-protected': 'This cell is on a protected sheet.',
+  'host-refused': 'This edit is not allowed.',
   'document-replaced': 'The workbook was replaced',
   'target-changed': 'The selection changed',
   'gesture-active': 'Finish the chart drag first',
@@ -43,6 +50,14 @@ export class XlsxCommandAdmissionError extends Error {
   constructor(readonly code: XlsxCommandAdmissionCode) {
     super(ADMISSION_MESSAGES[code]);
     this.name = 'XlsxCommandAdmissionError';
+  }
+}
+
+/** A typed edit a plugin refused; the message is the plugin's own. */
+export class XlsxHostRefusalError extends XlsxCommandAdmissionError {
+  constructor(message: string) {
+    super('host-refused');
+    this.message = message;
   }
 }
 
@@ -172,6 +187,7 @@ function disabledCode(code: XlsxCommandFailureCode): XlsxCommandDisabledCode {
   switch (code) {
     case 'input-failed':
     case 'sheet-protected':
+    case 'host-refused':
     case 'target-changed':
     case 'gesture-active':
     case 'proposal-stale':
@@ -371,7 +387,9 @@ export function createXlsxCommandController(): XlsxCommandController {
     } catch (error) {
       assertCurrent?.();
       if (error instanceof XlsxCommandAdmissionError) {
-        const result = failure(error.code, environment(false));
+        const result: XlsxCommandResult = error.code === 'host-refused'
+          ? { ok: false, failure: { code: error.code, message: error.message } }
+          : failure(error.code, environment(false));
         if (!result.ok) current.refuse?.(result.failure);
         return result;
       }

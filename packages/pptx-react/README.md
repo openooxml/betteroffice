@@ -28,9 +28,20 @@ export function Presentation({ file, fontBytes }: {
 }
 ```
 
-`fonts` is required. Each entry is a family name and the bytes of a TTF or OTF file, for example
+`fonts` is required. Byte faces supply a family name and the bytes of a TTF or OTF file, for example
 fetched from your server or loaded with `loadBundledFontBytes` from
 [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts).
+You can also pass a bundled face from `@betteroffice/fonts` as a descriptor; the editor decodes it in its
+worker without loading the main-thread decoder. The face serves the font it substitutes
+(`face.metricCompatWith`, here Arial), or its own family when it substitutes none. `baseUrl` is where you self-host the font assets; omit it
+when your bundler emits the package's assets:
+
+```tsx
+import { resolveMetricCompatFace } from '@betteroffice/fonts';
+
+const arial = resolveMetricCompatFace('Arial', false, false)!;
+<PptxEditor file={file} fonts={[{ face: arial, baseUrl }]} />
+```
 
 ## Key options
 
@@ -40,7 +51,7 @@ optional except `fonts`.
 | prop | type | description |
 | --- | --- | --- |
 | `file` | `Uint8Array \| ArrayBuffer` | Presentation bytes to open. |
-| `fonts` | `ReadonlyArray<PptxFontFace>` | Font families and bytes for text layout. |
+| `fonts` | `ReadonlyArray<PptxFontFace \| PptxBundledFont>` | Font bytes or bundled face descriptors for text layout. |
 | `readOnly` | `boolean` | Block user edits while retaining navigation and selection. |
 | `initialSlide` | `number` | Initial slide, numbered from 1 and clamped to the deck. |
 | `fileName` | `string` | Download name; defaults to `presentation.pptx`. |

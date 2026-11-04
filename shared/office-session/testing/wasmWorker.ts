@@ -80,6 +80,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const openWorkbookRecoveryCheckpoint = () => { throw new Error('openWorkbookRecoveryCheckpoint is not stubbed'); };
               export const adoptWorkbookPeerVersion = () => { throw new Error('adoptWorkbookPeerVersion is not stubbed'); };
               export const createWorkbookSnapshotBuilder = () => { throw new Error('createWorkbookSnapshotBuilder is not stubbed'); };
+              export const translateFormulasOn = () => { throw new Error('translateFormulasOn is not stubbed'); };
             `,
             loader: 'js',
           }));

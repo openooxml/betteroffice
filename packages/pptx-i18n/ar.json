@@ -156,6 +156,8 @@
     "stalePreview": "تستخدم هذه المعاينة الشريحة المحدّثة. سيؤدي التطبيق إلى تجاوز الأهداف المتغيّرة.",
     "geometry": "الموضع والحجم (x، y، العرض، الارتفاع)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "تم تغيير التخطيط",
+    "backgroundChanged": "تم تغيير الخلفية",
     "appearance": "تغيّر المظهر أو تنسيق النص",
     "changedAgain": "تغيّر الهدف مرة أخرى. راجع المعاينة المحدّثة قبل التطبيق.",
     "canvasTitle": "التغييرات على هذه الشريحة",
@@ -171,6 +173,8 @@
     "loadingDiff": "جارٍ تحميل التغييرات…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

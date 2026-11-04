@@ -580,7 +580,7 @@ ops = {
     "open": lambda: bo.Presentation.open(saved),
     "register_font": lambda: holder["deck"].register_font("Probe", heavy_font),
     "render_slide": lambda: holder["deck"].render_slide(0),
-    "render_png": lambda: holder["deck"].render_png(0),
+    "render_png": lambda: holder["deck"].render_png({"slide": 0}),
     "save": lambda: holder["deck"].save(),
     "apply_update": lambda: holder["peer"].apply_update(holder["update"]),
 }
