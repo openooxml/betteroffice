@@ -989,6 +989,13 @@ function paintTextRun(
       Math.max(1, run.fontSizePx * 0.05)
     );
   }
+  const thickness = Math.max(1, run.fontSizePx * 0.05);
+  const strikeY = runBaseline - run.fontSizePx * 0.3;
+  const offsets = run.strike === 'sngStrike' ? [0]
+    : run.strike === 'dblStrike' ? [-thickness, thickness] : [];
+  for (const offset of offsets) {
+    ctx.fillRect(run.x, strikeY + offset, run.width, thickness);
+  }
 }
 
 function quoteFamily(family: string): string {

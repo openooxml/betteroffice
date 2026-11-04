@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolveReservations, validReservationsPayload } from './reservations';
+import { canvasPageStack } from '../layout/render/canvasPageMetrics';
 import * as queryModule from '../layout/render/displayListQueries';
 import * as rustQueries from '../layout/render/rustDisplayList';
 import type { DisplayPage, TextRunPrimitive } from '../layout/render/displayList';
@@ -535,7 +536,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
   const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     session: {
       ...arm.engine, proposalEngine: { version: () => arm.engine.geometryReader.version() },
       selection: () => ({ anchor: arm.state.selection!.anchor, head: arm.state.selection!.focus }),
@@ -917,7 +918,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     session: arm.engine, commandHooksFactory: factory, collaboration: null,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,

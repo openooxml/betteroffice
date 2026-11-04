@@ -23,6 +23,7 @@ pub(crate) enum SourceProperty {
     Spacing,
     Kern,
     Caps,
+    Strike,
     Color,
 }
 
@@ -34,6 +35,7 @@ impl SourceProperty {
             Self::Spacing => ("spacingPendingSource", &["spacingPt"], "spacing"),
             Self::Kern => ("kernPendingSource", &["kernPt"], "kern"),
             Self::Caps => ("capsPendingSource", &["caps"], "caps"),
+            Self::Strike => ("strikePendingSource", &["strike"], "strike"),
             Self::Color => (
                 "colorsPendingSource",
                 &["colorMap", "colorMapOverride"],
@@ -54,6 +56,7 @@ impl SourceProperty {
             Self::Spacing => style.spacing_pt.map(Any::Number),
             Self::Kern => style.kern_pt.map(Any::Number),
             Self::Caps => style.caps.map(|caps| Any::from(caps.as_attribute())),
+            Self::Strike => style.strike.as_deref().map(Any::from),
             Self::Color => style.color.as_deref().map(Any::from),
         }
     }
@@ -868,5 +871,69 @@ fn has_property(value: &Value, key: &str) -> bool {
         }
         Value::Array(array) => array.iter().any(|value| has_property(value, key)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod strike_tests {
+    use super::*;
+
+    mod fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pptx-parse/tests/common/strikethrough.rs"
+        ));
+    }
+
+    fn remove_strike(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("strike");
+                for value in object.values_mut() {
+                    remove_strike(value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    remove_strike(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn pre_strike_seed_recovers_authored_strike_without_rewriting_source() {
+        let bytes = fixture::deck();
+        let source = DeckSession::open(&bytes, 6430).unwrap();
+        let mut json = serde_json::to_value(source.package()).unwrap();
+        remove_strike(&mut json);
+        let package = serde_json::from_value(json).unwrap();
+        for version in [1.0, 2.0, 2.1, 2.2, 2.3] {
+            let doc = crate::doc_with_client_id(BOOTSTRAP_CLIENT_ID);
+            crate::deck::seed_doc(
+                &doc,
+                &package,
+                &crate::deck::fingerprint_from_doc(&source.doc).unwrap(),
+            )
+            .unwrap();
+            {
+                let mut txn = doc.transact_mut();
+                let meta = txn.get_map(META).unwrap();
+                meta.insert(&mut txn, "schemaVersion", version);
+            }
+            let update = doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
+            let restored =
+                DeckSession::open_from_update_with_source(&update, &bytes, 6431).unwrap();
+            assert_eq!(restored.snapshot().unwrap(), source.snapshot().unwrap());
+            assert_eq!(restored.save().unwrap(), bytes);
+            let persisted = restored.encode_state_as_update_v1();
+            let reopened =
+                DeckSession::open_from_update_with_source(&persisted, &bytes, 6432).unwrap();
+            assert_eq!(reopened.encode_state_as_update_v1(), persisted);
+            assert_eq!(reopened.save().unwrap(), bytes);
+        }
     }
 }

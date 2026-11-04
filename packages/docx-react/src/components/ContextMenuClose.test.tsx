@@ -49,3 +49,24 @@ test('link popup closes on a press outside right after it opens', () => {
   pressOutside();
   expect(closed).toBe(1);
 });
+
+test('text context menu takes focus, moves with arrows and returns focus on Escape', async () => {
+  const { fireEvent } = await import('@testing-library/react');
+  const origin = document.createElement('textarea');
+  document.body.append(origin);
+  origin.focus();
+  let closed = 0;
+  const actions: string[] = [];
+  const view = render(<TextContextMenu isOpen position={{ x: 10, y: 10 }} hasSelection isEditable
+    onAction={(action) => actions.push(action)} onClose={() => { closed += 1; }} />);
+  const menu = view.getByRole('menu', { name: 'Text editing menu' });
+  expect(document.activeElement).toBe(menu);
+  fireEvent.keyDown(menu, { key: 'ArrowDown' });
+  expect(document.activeElement?.getAttribute('role')).toBe('menuitem');
+  expect(document.activeElement?.textContent).toContain('Cut');
+  fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  expect(closed).toBe(1);
+  expect(actions).toEqual([]);
+  expect(document.activeElement).toBe(origin);
+  origin.remove();
+});

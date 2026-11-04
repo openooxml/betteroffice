@@ -1656,7 +1656,7 @@ pub(crate) fn rounddown(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     directional(args, ctx, |scaled| scaled.trunc())
 }
 
-/// ROUND(number, digits): half away from zero.
+/// ROUND(number, digits): half away from zero on the 15 digit value.
 pub(crate) fn round(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
@@ -1666,15 +1666,140 @@ pub(crate) fn round(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     let digits = match nth_int(args, ctx, 1) {
-        Ok(d) => d as i32,
+        Ok(d) => d,
         Err(e) => return err(e),
     };
-    finite(round_number(x, digits))
+    finite(round_fifteen(x, digits))
 }
 
 pub(crate) fn round_number(value: f64, digits: i32) -> f64 {
     let factor = fmath::powi(10.0, digits);
     (value * factor).round() / factor
+}
+
+/// excel's ROUND: the operand is taken at 15 significant digits, then rounded
+/// half away from zero at `digits` decimals, both steps in exact decimal. an
+/// operand already exact at `digits` comes back unchanged, so a 16 digit
+/// integer keeps its last digit; one whose 15 digit result overflows keeps
+/// the binary rule.
+pub(crate) fn round_fifteen(value: f64, digits: i64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    if value == 0.0 {
+        return 0.0;
+    }
+    if exact_at(value, digits) {
+        return value;
+    }
+    let (m, e) = fifteen_digits(value.abs());
+    let cut = digits.saturating_neg().saturating_sub(e);
+    let (q, p) = match cut {
+        ..=0 => (m, e),
+        1..=15 => {
+            let unit = 10u64.pow(cut as u32);
+            let half_up = 2 * (m % unit) >= unit;
+            (m / unit + u64::from(half_up), e + cut)
+        }
+        _ => (0, 0),
+    };
+    if q == 0 {
+        return 0.0;
+    }
+    let magnitude = decimal_to_f64(q, p);
+    if !magnitude.is_finite() {
+        return round_number(value, digits.clamp(i32::MIN.into(), i32::MAX.into()) as i32);
+    }
+    if value < 0.0 { -magnitude } else { magnitude }
+}
+
+/// whether finite, nonzero `value` is an exact multiple of `10^-digits`.
+fn exact_at(value: f64, digits: i64) -> bool {
+    let bits = value.to_bits();
+    let fraction = bits & ((1 << 52) - 1);
+    let biased = ((bits >> 52) & 0x7ff) as i64;
+    let (mantissa, exponent) = if biased == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1 << 52), biased - 1075)
+    };
+    let zeros = mantissa.trailing_zeros();
+    let (odd, twos) = (mantissa >> zeros, exponent + i64::from(zeros));
+    if digits >= 0 {
+        return twos.saturating_add(digits) >= 0;
+    }
+    let n = digits.saturating_neg();
+    n <= 22 && twos >= n && odd % 5u64.pow(n as u32) == 0
+}
+
+/// `a` (finite, > 0) at 15 significant digits, half away from zero, exactly:
+/// `(m, e)` with `a ~ m * 10^e` and `m < 10^15`.
+fn fifteen_digits(a: f64) -> (u64, i64) {
+    use std::fmt::Write;
+    let mut text = DigitBuf::default();
+    let _ = write!(text, "{a:.15e}");
+    let (sixteen, exponent) = scientific(text.as_str());
+    let mut m = sixteen / 10;
+    let up = match sixteen % 10 {
+        0..=4 => false,
+        5 => format!("{a:.800e}").as_bytes()[16] >= b'5',
+        _ => true,
+    };
+    let mut e = exponent - 14;
+    if up {
+        m += 1;
+        if m == 1_000_000_000_000_000 {
+            m = 100_000_000_000_000;
+            e += 1;
+        }
+    }
+    (m, e)
+}
+
+/// mantissa digits and exponent of rust's `d.ddde[-]x` form.
+fn scientific(text: &str) -> (u64, i64) {
+    let (mantissa, exponent) = text.split_once('e').unwrap_or((text, "0"));
+    let digits = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .fold(0u64, |acc, b| acc * 10 + u64::from(b - b'0'));
+    (digits, exponent.parse().unwrap_or(0))
+}
+
+/// `q * 10^p` as the nearest double; `q < 2^53` keeps the short paths exact.
+fn decimal_to_f64(q: u64, p: i64) -> f64 {
+    const POW10: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
+    match p {
+        0..=22 => q as f64 * POW10[p as usize],
+        -22..=-1 => q as f64 / POW10[(-p) as usize],
+        _ => format!("{q}e{p}").parse().unwrap_or(f64::NAN),
+    }
+}
+
+/// stack buffer for one `{:.15e}` rendering.
+#[derive(Default)]
+struct DigitBuf {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl DigitBuf {
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl std::fmt::Write for DigitBuf {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len + s.len();
+        let slot = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        slot.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 /// MROUND(number, multiple): nearest multiple, half away from zero. opposite
@@ -2144,4 +2269,215 @@ fn from_celsius(name: &str, value: f64) -> Option<f64> {
         "K" | "kel" => value + 273.15,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod round_fifteen_tests {
+    use super::round_fifteen;
+
+    /// independent oracle: `x` itself when its full exact decimal expansion
+    /// ends at or before `digits`, else that expansion rounded half up to 15
+    /// significant digits, then half up at `digits` decimals.
+    fn oracle(x: f64, digits: i64) -> f64 {
+        if x == 0.0 {
+            return 0.0;
+        }
+        let text = format!("{:.1100e}", x.abs());
+        let (mantissa, exponent) = text.split_once('e').unwrap();
+        let top: i64 = exponent.parse().unwrap();
+        let all: Vec<u8> = mantissa
+            .bytes()
+            .filter(u8::is_ascii_digit)
+            .map(|b| b - b'0')
+            .collect();
+        let exact_from = top + digits + 1;
+        if exact_from > 0
+            && all
+                .iter()
+                .skip(exact_from.min(4000) as usize)
+                .all(|&d| d == 0)
+        {
+            return x;
+        }
+        let (sig, top) = half_up(&all, 15, top);
+        let keep = top + digits + 1;
+        let (kept, top) = if keep <= 0 {
+            let mut padded = vec![0u8; (1 - keep).min(4000) as usize];
+            padded.extend_from_slice(&sig);
+            half_up(&padded, 1, top + 1 - keep)
+        } else {
+            half_up(&sig, keep.min(4000) as usize, top)
+        };
+        let digits: String = kept.iter().map(|d| char::from(b'0' + d)).collect();
+        if digits.bytes().all(|b| b == b'0') {
+            return 0.0;
+        }
+        let exponent = top - kept.len() as i64 + 1;
+        let magnitude: f64 = format!("{digits}e{exponent}").parse().unwrap();
+        if x < 0.0 { -magnitude } else { magnitude }
+    }
+
+    /// first `n` digits of `d` (leading digit at 10^top), half up; the
+    /// result's leading digit position comes back too.
+    fn half_up(d: &[u8], n: usize, top: i64) -> (Vec<u8>, i64) {
+        let mut out: Vec<u8> = d
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(0))
+            .take(n)
+            .collect();
+        if d.get(n).copied().unwrap_or(0) >= 5 {
+            let mut i = n;
+            loop {
+                if i == 0 {
+                    out.insert(0, 1);
+                    out.pop();
+                    return (out, top + 1);
+                }
+                i -= 1;
+                if out[i] == 9 {
+                    out[i] = 0;
+                } else {
+                    out[i] += 1;
+                    break;
+                }
+            }
+        }
+        (out, top)
+    }
+
+    fn same(x: f64, digits: i64) {
+        let got = round_fifteen(x, digits);
+        let want = oracle(x, digits);
+        assert!(
+            got.to_bits() == want.to_bits() || (got == 0.0 && want == 0.0),
+            "ROUND({x:e},{digits}) = {got:e}, oracle {want:e}"
+        );
+    }
+
+    struct Bits(u64);
+
+    impl Bits {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn random_doubles_match_the_exact_decimal_oracle() {
+        let mut bits = Bits(0x9e37_79b9_7f4a_7c15);
+        let mut checked = 0;
+        while checked < 3000 {
+            let x = f64::from_bits(bits.next());
+            if !x.is_finite() || x == 0.0 || x.abs() >= 1.7e308 {
+                continue;
+            }
+            let magnitude = x.abs().log10().floor() as i64;
+            let spread = (bits.next() % 24) as i64 - 4;
+            let digits = spread - magnitude;
+            same(x, digits);
+            let once = round_fifteen(x, digits);
+            assert_eq!(
+                round_fifteen(once, digits).to_bits(),
+                once.to_bits(),
+                "ROUND(ROUND({x:e},{digits}),{digits})"
+            );
+            checked += 1;
+        }
+    }
+
+    #[test]
+    fn values_one_ulp_around_decimal_ties_match_the_oracle() {
+        let mut bits = Bits(0x2545_f491_4f6c_dd1d);
+        for _ in 0..1500 {
+            let digits = (bits.next() % 30) as i64 - 10;
+            let n = bits.next() % 1_000_000_000;
+            let tie: f64 = format!("{n}5e{}", -digits - 1).parse().unwrap();
+            for x in [tie, -tie] {
+                for step in [-2i64, -1, 0, 1, 2] {
+                    let y = f64::from_bits((x.to_bits() as i64 + step) as u64);
+                    if y.is_finite() {
+                        same(y, digits);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tiny_and_subnormal_operands_match_the_oracle() {
+        for x in [5e-324, -5e-324, 1e-310, f64::MIN_POSITIVE, 1e-300, -1e-300] {
+            for digits in [0, 300, 307, 308, 309, 310, 320, 323, 324, 330, 400, 2000] {
+                same(x, digits);
+            }
+        }
+        assert_eq!(round_fifteen(5e-324, 330), 5e-324);
+        assert_eq!(round_fifteen(5e-324, 323), 0.0);
+        assert_eq!(round_fifteen(1e-300, 310), 1e-300);
+    }
+
+    #[test]
+    fn huge_operands_and_extreme_digits_match_the_oracle() {
+        for x in [
+            1e308,
+            -1e308,
+            5e307,
+            1e200,
+            -1e200,
+            1e19 + 2048.0,
+            2f64.powi(53),
+        ] {
+            for digits in [-400, -309, -308, -307, -300, -200, -19, -3, 0, 5] {
+                same(x, digits);
+            }
+        }
+        assert_eq!(round_fifteen(2.675, i64::MAX), 2.675);
+        assert_eq!(round_fifteen(2.675, i64::MIN), 0.0);
+        assert_eq!(round_fifteen(f64::MAX, 0), f64::MAX);
+        assert_eq!(round_fifteen(f64::MAX, 5), f64::MAX);
+        assert_eq!(
+            round_fifteen(f64::MAX, -1).to_bits(),
+            super::round_number(f64::MAX, -1).to_bits()
+        );
+    }
+
+    #[test]
+    fn operands_exact_at_digits_come_back_unchanged() {
+        let big = 2f64.powi(53);
+        for (x, digits) in [
+            (big, 0),
+            (big + 2.0, 0),
+            (-big, 0),
+            (1e16 + 2.0, 0),
+            (1e15 + 0.75, 2),
+            (1e15 + 0.75, 3),
+            (1200.0, -2),
+            (-0.25, 2),
+            (5e-324, 1074),
+        ] {
+            assert_eq!(
+                round_fifteen(x, digits).to_bits(),
+                x.to_bits(),
+                "{x:e},{digits}"
+            );
+            same(x, digits);
+        }
+        assert_eq!(round_fifteen(1e15 + 0.75, 0), 1e15);
+        assert_eq!(round_fifteen(1e15 + 0.75, 1), 1e15);
+        assert_eq!(round_fifteen(0.5, 0), 1.0);
+        assert_eq!(round_fifteen(2.5, 0), 3.0);
+        assert_eq!(round_fifteen(-2.5, 0), -3.0);
+        assert_eq!(round_fifteen(1250.0, -2), 1300.0);
+    }
+
+    #[test]
+    fn zero_results_are_positive_zero() {
+        for (x, digits) in [(-0.0, 0), (-0.4, 0), (-1e-200, 199), (-5e-324, 0)] {
+            let got = round_fifteen(x, digits);
+            assert!(got == 0.0 && got.is_sign_positive(), "{x:e} -> {got:e}");
+        }
+    }
 }

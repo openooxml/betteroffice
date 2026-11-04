@@ -1039,6 +1039,8 @@ pub struct RunProperties {
     pub italic: Option<bool>,
     pub underline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<TextCaps>,
     pub font_family: Option<String>,
     pub color: Option<ColorValue>,

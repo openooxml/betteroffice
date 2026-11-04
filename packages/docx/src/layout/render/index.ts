@@ -135,7 +135,17 @@ export {
   type ResidentDisplayListQueryEngine,
 } from './displayListQueries';
 
-export { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX, canvasPageTops } from './canvasPageMetrics';
+export {
+  CANVAS_PAGE_GAP_PX,
+  CANVAS_PAGES_PADDING_PX,
+  canvasPageLength,
+  canvasPageStack,
+  canvasPageTops,
+  snapCanvasLength,
+  type CanvasPageBox,
+  type CanvasPageScale,
+  type CanvasPageStackOptions,
+} from './canvasPageMetrics';
 
 export {
   bindDisplayPageRegistry,

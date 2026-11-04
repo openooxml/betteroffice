@@ -976,11 +976,16 @@ def test_touching_a_presentation_off_its_thread_escapes_except_exception(deck):
 
 def test_dropping_a_presentation_off_its_thread_leaks_it(sample_bytes, monkeypatch):
     """pyo3 skips the Rust destructor and writes an unraisable error instead."""
+    gc.collect()
     unraisable: list = []
     monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
     holder = [bo.Presentation.open(sample_bytes)]
 
-    _on_a_worker_thread(holder.clear)
+    gc.disable()
+    try:
+        _on_a_worker_thread(holder.clear)
+    finally:
+        gc.enable()
 
     assert [type(hook.exc_value).__name__ for hook in unraisable] == ["RuntimeError"]
     assert "unsendable" in str(unraisable[0].exc_value)

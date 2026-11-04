@@ -556,7 +556,7 @@ impl DeckSession {
                         .and_then(|paragraph| paragraph.runs.first())
                         .map(|run| run.style.clone())
                         .unwrap_or_default();
-                    crate::story::insert_styled_text(&story, &mut txn, 0, text, &style);
+                    crate::story::insert_styled_text(&story, &mut txn, 0, text, &style, false);
                 }
                 let snapshot = snapshot_story(&story, &txn, key)?;
                 new_cell_refs.push(project_paragraph_id(

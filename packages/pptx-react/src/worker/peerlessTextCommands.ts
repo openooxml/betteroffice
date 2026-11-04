@@ -12,6 +12,7 @@ export function peerlessTextContext(view: PeerlessViewSnapshot): PptxTextEnviron
       : view.selection.anchor === view.selection.focus ? 'caret' : 'range',
     bold: formatting?.bold ?? 'mixed', italic: formatting?.italic ?? 'mixed',
     underline: formatting?.underline == null ? 'mixed' : formatting.underline !== 'none',
+    strikethrough: formatting == null || formatting.strike === null ? 'mixed' : formatting.strike === 'sngStrike' || formatting.strike === 'dblStrike',
     fontFamily: formatting?.fontFamily ?? null, fontSize: formatting?.fontSizePt ?? null,
     color: formatting?.color ?? null, alignment,
   };
@@ -37,6 +38,7 @@ export function formatPeerlessText(store: PeerlessViewStore, action: FormattingA
     case 'bold': patch = { bold: formatting?.bold !== true }; break;
     case 'italic': patch = { italic: formatting?.italic !== true }; break;
     case 'underline': patch = { underline: formatting?.underline != null && formatting.underline !== 'none' ? 'none' : 'sng' }; break;
+    case 'strikethrough': patch = { strike: formatting?.strike === 'sngStrike' || formatting?.strike === 'dblStrike' ? 'noStrike' : 'sngStrike' }; break;
     default:
       switch (action.type) {
         case 'fontFamily': patch = { fontFamily: action.value }; break;
