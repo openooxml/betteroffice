@@ -1,4 +1,5 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
+import { fontUnavailable, installPngFaces, pngFontSet, type PngFontFace, type PngRunFont } from '../../../../shared/office-session/pngFonts';
 import type { DisplayList, TextCmd } from '../display-list/types';
 import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../wasm/pngResolve';
 import { paintDisplayList } from './canvas2d';
@@ -11,6 +12,8 @@ export interface DisplayListToPngOptions {
   width: number;
   height: number;
   signal?: AbortSignal;
+  /** Faces to paint with, matched to the sheet's fonts by family and style. */
+  fonts?: ReadonlyArray<PngFontFace>;
 }
 
 type ExportCanvas = HTMLCanvasElement | OffscreenCanvas;
@@ -29,20 +32,26 @@ export async function displayListToPng(list: DisplayList, options: DisplayListTo
     throw new PngExportError('canvas-too-large', `A ${width}x${height}px PNG is over the ${MAX_PNG_SIDE}px side or ${MAX_PNG_PIXELS} pixel limit; lower the scale or set maxWidth and maxHeight.`);
   }
   options.signal?.throwIfAborted();
-  await loadFonts(list);
-  options.signal?.throwIfAborted();
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
-  if (!ctx) throw new PngExportError('canvas-unavailable', 'PNG export needs a 2d canvas context.');
-  paintDisplayList(ctx, list, dpr);
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = 'destination-over';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, width, height);
-  ctx.restore();
-  options.signal?.throwIfAborted();
-  return new Uint8Array(await (await encode(canvas)).arrayBuffer());
+  const faces = await installPngFaces({
+    prefix: 'bo-xlsx-png', fonts: sheetFonts(list), faces: options.fonts ?? [], choose: sheetFace, subject: 'sheet',
+    canvasFont: (font, family) => fontString({ op: 'text', x: 0, y: 0, text: '', color: '#000000', fontSize: 12, fontFamily: family, bold: font.bold, italic: font.italic }),
+  });
+  try {
+    await loadChartFonts(list);
+    options.signal?.throwIfAborted();
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
+    if (!ctx) throw new PngExportError('canvas-unavailable', 'PNG export needs a 2d canvas context.');
+    paintDisplayList(ctx, withFaces(list, faces.family), dpr);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.restore();
+    options.signal?.throwIfAborted();
+    return new Uint8Array(await (await encode(canvas)).arrayBuffer());
+  } finally { faces.release(); }
 }
 
 /** The error for a runtime that can draw the PNG neither on a canvas nor with a rasterizer. */
@@ -69,26 +78,47 @@ function encode(canvas: ExportCanvas): Promise<Blob> {
   });
 }
 
-function fontSet(): FontFaceSet | undefined {
-  return typeof document !== 'undefined' ? document.fonts : (globalThis as { fonts?: FontFaceSet }).fonts;
+const runFont = (cmd: TextCmd): PngRunFont => ({ family: cmd.fontFamily!, bold: cmd.bold === true, italic: cmd.italic === true });
+const isCellText = (cmd: DisplayList['commands'][number]): cmd is TextCmd => cmd.op === 'text' && !!cmd.fontFamily && !cmd.chart;
+
+/** The families and styles the sheet's cell text paints with. */
+export function sheetFonts(list: DisplayList): PngRunFont[] {
+  const fonts = new Map<string, PngRunFont>();
+  for (const cmd of list.commands) if (isCellText(cmd)) fonts.set(JSON.stringify(runFont(cmd)), runFont(cmd));
+  return [...fonts.values()];
 }
 
-/**
- * Waits for every face the sheet paints with, as the editor names them, so the
- * export never paints a fallback while the real face is still loading.
- */
-async function loadFonts(list: DisplayList): Promise<void> {
-  const set = fontSet();
+const familyName = (family: string) => family.trim().toLowerCase();
+
+/** The supplied face for a cell font: its family, dropping bold before italic, as the editor resolves faces. */
+export function sheetFace(faces: ReadonlyArray<PngFontFace>, font: PngRunFont): PngFontFace | undefined {
+  for (const [bold, italic] of [[font.bold, font.italic], [font.bold, false], [false, font.italic], [false, false]]) {
+    let found: PngFontFace | undefined;
+    for (const face of faces) {
+      if (familyName(face.family) === familyName(font.family) && (face.bold ?? false) === bold && (face.italic ?? false) === italic) found = face;
+    }
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function withFaces(list: DisplayList, family: (font: PngRunFont) => string | undefined): DisplayList {
+  let changed = false;
+  const commands = list.commands.map((cmd) => {
+    if (!isCellText(cmd)) return cmd;
+    const alias = family(runFont(cmd));
+    if (!alias) return cmd;
+    changed = true;
+    return { ...cmd, fontFamily: alias };
+  });
+  return changed ? { ...list, commands } : list;
+}
+
+/** Chart text names CSS font lists of its own; wait for them as the editor would. */
+async function loadChartFonts(list: DisplayList): Promise<void> {
+  const set = pngFontSet();
   if (!set || typeof set.load !== 'function') return;
   const fonts = new Map<string, string>();
-  for (const cmd of list.commands) {
-    if (cmd.op !== 'text') continue;
-    const font = fontString(cmd as TextCmd);
-    fonts.set(font, (cmd as TextCmd).fontFamily ?? 'sans-serif');
-  }
-  for (const [font, family] of fonts) {
-    await set.load(font).catch(() => {
-      throw new PngExportError('font-unavailable', `The font "${family}" could not load, so the sheet was not exported with a substitute.`);
-    });
-  }
+  for (const cmd of list.commands) if (cmd.op === 'text' && (cmd.chart || !cmd.fontFamily)) fonts.set(fontString(cmd), cmd.fontFamily ?? 'sans-serif');
+  for (const [font, family] of fonts) await set.load(font).catch(() => { throw fontUnavailable(family, 'sheet'); });
 }

@@ -16,7 +16,7 @@ import {
   type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
 import type { XlsxPngTarget } from '../wasm/pngTarget';
-import { pngRasterizers } from '../wasm/pngDisplayList';
+import { pngRasterizers, workbookPngFonts } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
@@ -592,6 +592,7 @@ export function createWorkbookSessionHost(
       ...(commands?.throughSeq ? { sheetIds: commands.sheetIds } : {}) }),
     calculationStatus: () => workbook().calculationStatus(),
     renderPng: (_, target, pngOptions = {}) => renderPng(target, pngOptions),
+    renderPngFonts: (_, target, pngOptions = {}) => workbookPngFonts(workbook(), target, { ...pngOptions, fonts: undefined }),
     exportStructured: (_, options) => exported(options),
     exportMarkdown(_, options, markdownOptions) {
       const opened = workbook();

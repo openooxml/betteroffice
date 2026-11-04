@@ -30,12 +30,12 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
-import { pngRasterizers } from './pngDisplayList';
+import { pngFontReaders, pngRasterizers, workbookPngFonts } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
-import { resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
-import type { XlsxPngOptions, XlsxPngTarget } from './pngTarget';
-import { canvasPngAvailable } from '../render/png';
-export type { XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
+import { pngDisplayList, resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
+import { canvasPngAvailable, sheetFonts } from '../render/png';
+export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -626,6 +626,8 @@ export interface WorkbookHandle extends CollaborationReplica {
    * `@betteroffice/xlsx-native`.
    */
   renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
+  /** The fonts `renderPng` would paint for the same target, so a caller can supply their faces. */
+  renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
   /** serialize the workbook back to .xlsx bytes. */
   save(): Uint8Array;
   /**
@@ -1059,6 +1061,20 @@ function wrapWorkbookDocument(
     return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
   }
 
+  function pngEngine(): XlsxPngEngine {
+    return {
+      doc: doc as unknown as XlsxPngEngine['doc'],
+      rasterAvailable: rasterPngAvailable(),
+      rasterize: pngRasterizers.get(handle),
+      onSheet: (sheet, read) => {
+        const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
+        if (sheet === active) return wasmCall(read);
+        mutatingWasmCall(() => doc.setActiveSheet(sheet));
+        try { return wasmCall(read); } finally { mutatingWasmCall(() => doc.setActiveSheet(active)); }
+      },
+    };
+  }
+
   function displayListJson(viewport: Viewport, sheet?: number): string {
     const json = JSON.stringify(viewport);
     return sheet === undefined ? doc.displayListJson(json) : doc.displayListForJson(sheet, json);
@@ -1317,18 +1333,9 @@ function wrapWorkbookDocument(
       } catch (error) {
         return Promise.reject(error);
       }
-      return renderEnginePng({
-        doc: doc as unknown as XlsxPngEngine['doc'],
-        rasterAvailable: rasterPngAvailable(),
-        rasterize: pngRasterizers.get(handle),
-        onSheet: (sheet, read) => {
-          const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
-          if (sheet === active) return wasmCall(read);
-          mutatingWasmCall(() => doc.setActiveSheet(sheet));
-          try { return wasmCall(read); } finally { mutatingWasmCall(() => doc.setActiveSheet(active)); }
-        },
-      }, resolved, options);
+      return renderEnginePng(pngEngine(), resolved, options);
     },
+    renderPngFonts: (target: XlsxPngTarget, options: XlsxPngOptions = {}): XlsxPngFont[] => workbookPngFonts(handle, target, options),
     save(): Uint8Array {
       return wasmCall(() => doc.saveBytes());
     },
@@ -1474,6 +1481,8 @@ function wrapWorkbookDocument(
     }
     return json;
   });
+  pngFontReaders.set(handle, (target, options) => sheetFonts(pngDisplayList(pngEngine(),
+    resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames), options).list));
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));

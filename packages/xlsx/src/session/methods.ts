@@ -4,7 +4,7 @@ import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/prot
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
 import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
-import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
 
 /** PNG options a session call carries; an abort signal stays on the caller's side. */
 export type WorkbookPngOptions = Omit<XlsxPngOptions, 'signal'>;
@@ -190,6 +190,8 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
   sheets(): WorkbookSheetSummary[];
   calculationStatus(): CalculationStatus;
   renderPng(target: XlsxPngTarget, options?: WorkbookPngOptions): ArrayBuffer;
+  /** The fonts `renderPng` would paint for the same target, so a caller can supply their faces. */
+  renderPngFonts(target: XlsxPngTarget, options?: WorkbookPngOptions): XlsxPngFont[];
   exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
   exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
   printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
@@ -222,6 +224,7 @@ export const WORKBOOK_SESSION_METHODS = {
   sheets: true,
   calculationStatus: true,
   renderPng: true,
+  renderPngFonts: true,
   exportStructured: true,
   exportMarkdown: true,
   printDisplayList: true,
@@ -254,6 +257,7 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   sheets: { lane: 'interactive' },
   calculationStatus: { lane: 'interactive' },
   renderPng: { lane: 'interactive', reorderable: false },
+  renderPngFonts: { lane: 'interactive', reorderable: false },
   exportStructured: { lane: 'interactive', reorderable: false },
   exportMarkdown: { lane: 'interactive', reorderable: false },
   printDisplayList: { lane: 'interactive', reorderable: false },

@@ -1,4 +1,5 @@
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
+import { editorExportFaces } from './useDefaultFonts';
 import type { XlsxEditorApi } from './XlsxEditor.types';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import { guardAsyncEditorApi } from './worker/guardAsyncEditorApi';
@@ -89,7 +90,10 @@ export function createInThreadAsyncEditorApi(
       const { signal, ...rest } = options;
       const captured = structuredClone(target);
       const wire = structuredClone(rest);
-      return await read(() => handle.renderPng(captured, { ...wire, signal }));
+      return await read(async () => {
+        const fonts = wire.fonts ?? await editorExportFaces(handle.renderPngFonts(captured, wire), null, undefined);
+        return handle.renderPng(captured, { ...wire, fonts, signal });
+      });
     },
     exportStructured(options) {
       const captured = structuredClone(options);

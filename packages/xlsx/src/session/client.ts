@@ -445,7 +445,7 @@ export async function createWorkbookSession(
   const {
     version, listDefinedNames, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry, selectionData,
     cellInputs, captureFormat, sheets, calculationStatus, save,
-    renderPng, exportStructured, exportMarkdown, printDisplayList,
+    renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList,
     collaborationStateVector, collaborationStateAsUpdate,
   } = calls;
   const commandIdentity: CommandIdentity = Object.freeze(commandContext ? {
@@ -575,6 +575,11 @@ export async function createWorkbookSession(
         const { signal, ...wire } = options;
         if (signal?.aborted) return Promise.reject(signal.reason);
         return pngBytes(renderPng(target, wire)).then((bytes) => { signal?.throwIfAborted(); return bytes; });
+      },
+      renderPngFonts: (target, options = {}) => {
+        const { fonts: _fonts, ...wire } = options as XlsxPngOptions;
+        delete (wire as XlsxPngOptions).signal;
+        return renderPngFonts(target, wire);
       },
       printDisplayList: async (...args) => JSON.parse(new TextDecoder().decode(await printDisplayList(...args))),
       frame: async (viewport, options) => decodeFrame(await frame(viewport, options)),

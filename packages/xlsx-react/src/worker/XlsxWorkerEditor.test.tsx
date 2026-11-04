@@ -2038,7 +2038,8 @@ describe('XlsxEditor async API', () => {
           commands: [{ op: 'text', text: read(), x: 8, y: 18, fontSize: 11, color: '#000000' }],
         }));
         Object.assign(host.session, { pngExport: true });
-        Object.assign(host.session.call, { renderPng, exportStructured, exportMarkdown, printDisplayList });
+        const renderPngFonts = mock<WorkbookSession['call']['renderPngFonts']>(async () => []);
+        Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
         for (const name of ['createObjectURL', 'revokeObjectURL'] as const) {
           const descriptor = Object.getOwnPropertyDescriptor(URL, name);
           Object.defineProperty(URL, name, { configurable: true, value: () => 'blob:png' });
@@ -2119,7 +2120,8 @@ describe('XlsxEditor async API', () => {
     const list: DisplayList = { width: 120, height: 48, commands: [] };
     const printDisplayList = mock(async (_sheet: number, _range: string, _metrics: xlsx.PrintMetrics, _gridlines: boolean) => list);
     Object.assign(host.session, { pngExport: true });
-    Object.assign(host.session.call, { renderPng, exportStructured, exportMarkdown, printDisplayList });
+    const renderPngFonts = mock(async (_target: xlsx.XlsxPngTarget, _options?: xlsx.XlsxPngOptions) => [] as xlsx.XlsxPngFont[]);
+    Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
     const createUrl = mock((_blob: Blob) => 'blob:png');
     const revokeUrl = mock((_url: string) => {});
     for (const [name, value] of [['createObjectURL', createUrl], ['revokeObjectURL', revokeUrl]] as const) {
@@ -2144,7 +2146,8 @@ describe('XlsxEditor async API', () => {
     expect(api.commands.getState('exportPng').enabled).toBe(true);
     await act(async () => fireEvent.click(view.getByTestId('xlsx-export-png')));
     await waitFor(() => expect(downloads).toEqual([{ name: 'Report.png', href: 'blob:png' }]));
-    expect(renderPng.mock.calls[0]).toEqual([{ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } }]);
+    expect(renderPng.mock.calls[0]).toEqual([{ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } }, {}]);
+    expect(renderPngFonts.mock.calls[0]![0]).toEqual({ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } });
     const blob = createUrl.mock.calls[0]![0];
     expect(blob.type).toBe('image/png');
     expect(new Uint8Array(await blob.arrayBuffer())).toEqual(png);

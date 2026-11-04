@@ -19,7 +19,7 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
   try {
     options.signal?.throwIfAborted();
     const doc = engine.doc as unknown as NativePngDocument;
-    const { signal: _signal, ...native } = options;
+    const { signal: _signal, fonts: _fonts, ...native } = options;
     return Promise.resolve(doc.renderPngTarget(JSON.stringify(target), JSON.stringify(native)));
   } catch (error) {
     return Promise.reject(error);

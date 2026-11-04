@@ -17,6 +17,21 @@ export type XlsxPngTarget =
   | { sheet: number | string; viewport: Viewport }
   | { sheet: number | string; range: XlsxRangeAddress | 'used' };
 
+/** A font face an export paints with, the same shape as `VsdxFontFace`. */
+export interface XlsxFontFace {
+  family: string;
+  bold?: boolean;
+  italic?: boolean;
+  bytes: Uint8Array;
+}
+
+/** A family and style a PNG export paints, for callers that supply faces. */
+export interface XlsxPngFont {
+  family: string;
+  bold: boolean;
+  italic: boolean;
+}
+
 export interface XlsxPngOptions {
   /** Device pixels per sheet pixel. Defaults to 1. */
   scale?: number;
@@ -25,4 +40,12 @@ export interface XlsxPngOptions {
   /** Largest PNG height in pixels; a taller target is cut at its bottom edge. */
   maxHeight?: number;
   signal?: AbortSignal;
+  /**
+   * Faces to paint the sheet's fonts with, matched by family and style. Each
+   * export installs them under private names and drops them afterwards; one
+   * that fails to load rejects with `PngExportError` `font-unavailable`. The
+   * editors pass the faces they paint with; without faces the export paints
+   * with the fonts the runtime has.
+   */
+  fonts?: ReadonlyArray<XlsxFontFace>;
 }

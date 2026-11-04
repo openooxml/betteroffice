@@ -2,6 +2,7 @@ import type {
   Proposal, ProposalEdit, WorkbookHandle, XlsxPngOptions, XlsxPngTarget, XlsxReadRequest, XlsxReadResult, XlsxFindRequest,
   XlsxFindResult, XlsxEditRequest, XlsxEditResult, XlsxValidationResult,
 } from '@betteroffice/xlsx';
+import { editorExportFaces } from '../useDefaultFonts';
 import type { XlsxPluginDocumentAccess } from '../plugins/createPluginDocumentAccess';
 import type { XlsxAdmission } from '../plugins/createPluginClients';
 import { guardAsyncEditorApi } from './guardAsyncEditorApi';
@@ -64,6 +65,8 @@ export interface XlsxAsyncExportBridge {
   editorDocument?(): XlsxPluginDocumentAccess | null;
   saved?(bytes: Uint8Array): void;
   exportCoordinator(): PeerlessWorkerInputCoordinator | null;
+  /** The editor's `defaultFonts` setting, which decides the faces a PNG export forwards. */
+  defaultFonts?(): boolean | undefined;
 }
 
 export function createAsyncEditorApi(
@@ -243,7 +246,12 @@ export function createAsyncEditorApi(
       const { signal, ...rest } = options;
       const captured = structuredClone(target);
       const wire = structuredClone(rest);
-      return () => session.session.call.renderPng(captured, { ...wire, signal });
+      const defaultFonts = bridge().defaultFonts?.();
+      return async () => {
+        const call = session.session.call;
+        const fonts = wire.fonts ?? await editorExportFaces(await call.renderPngFonts(captured, wire), call.decodeFontFace, defaultFonts);
+        return call.renderPng(captured, { ...wire, fonts, signal });
+      };
     }),
     exportStructured: (options) => exported(() => {
       const captured = structuredClone(options);

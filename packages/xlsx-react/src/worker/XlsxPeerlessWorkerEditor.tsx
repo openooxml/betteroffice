@@ -11,7 +11,7 @@ import type {
   CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary, XlsxRangeTarget,
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
-import { useDefaultFonts } from '../useDefaultFonts';
+import { editorExportFaces, useDefaultFonts } from '../useDefaultFonts';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
@@ -232,7 +232,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
     coordinator: () => null, readOnly: () => propsRef.current.readOnly ?? false,
     allowHostProposals: () => propsRef.current.allowHostProposals ?? false, focus,
-    exportCoordinator: () => exportInput.current,
+    exportCoordinator: () => exportInput.current, defaultFonts: () => propsRef.current.defaultFonts,
     editorDocument: () => pluginAccess, saved: (bytes) => propsRef.current.onSave?.(bytes),
     clearSelection: () => {}, refreshProposals: () => {}, recoverInput: async () => {},
     selectCells: () => false, selectCellsAsync: async () => false, apply: () => {},
@@ -1475,6 +1475,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
       }
     },
+    exportFonts: (fonts) => editorExportFaces(fonts, run?.session.call.decodeFontFace, propsRef.current.defaultFonts),
     deliverPng(bytes) {
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
       const anchor = document.createElement('a');

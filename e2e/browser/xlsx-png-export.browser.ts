@@ -21,7 +21,7 @@ async function workbook(): Promise<Buffer> {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-interface Export { width: number; height: number; redAtB2: boolean; inkInA1: number; error?: string }
+interface Export { width: number; height: number; redAtB2: boolean; inkInA1: number; ink: string; error?: string }
 
 async function exports(page: Page): Promise<Record<string, Export>> {
   const doc = await workbook();
@@ -30,6 +30,7 @@ async function exports(page: Page): Promise<Record<string, Export>> {
     try {
       if (path === '/') return response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>png</title>');
       if (path === '/__fixture/doc') return response.writeHead(200).end(doc);
+      if (path === '/__fixture/font') return response.writeHead(200).end(await readFile(resolve(root, 'packages/fonts/assets/ComicRelief-Regular.ttf')));
       const file = path.replace('/__xlsx/', '');
       let body: Buffer | string = await readFile(resolve(root, 'packages/xlsx/dist', file));
       if (/\.m?js$/.test(file)) {
@@ -64,8 +65,13 @@ function evaluate(page: Page): Promise<Record<string, Export>> {
       const red = at((b2.x - a1.x + b2.w / 2) * scale, (b2.y - a1.y + b2.h / 2) * scale);
       const cell = ctx.getImageData(0, 0, Math.ceil(a1.w * scale), Math.ceil(a1.h * scale)).data;
       let ink = 0;
-      for (let index = 0; index < cell.length; index += 4) if (cell[index] < 128 && cell[index + 1] < 128 && cell[index + 2] < 128) ink++;
-      return { width: bitmap.width, height: bitmap.height, redAtB2: red[0] > 200 && red[1] < 60 && red[2] < 60, inkInA1: ink };
+      let mask = '';
+      for (let index = 0; index < cell.length; index += 4) {
+        const dark = cell[index] < 128 && cell[index + 1] < 128 && cell[index + 2] < 128;
+        if (dark) ink++;
+        mask += dark ? '1' : '0';
+      }
+      return { width: bitmap.width, height: bitmap.height, redAtB2: red[0] > 200 && red[1] < 60 && red[2] < 60, inkInA1: ink, ink: mask };
     };
     const out: Record<string, unknown> = {};
     const run = async (name: string, render: () => Promise<Uint8Array>) => {
@@ -74,6 +80,9 @@ function evaluate(page: Page): Promise<Record<string, Export>> {
     };
     await run('thread range', () => handle.renderPng({ sheet: 0, range: 'A1:D9' }, { scale }));
     await run('thread used', () => handle.renderPng({ sheet: 'Report', range: 'used' }, { scale }));
+    const face = new Uint8Array(await (await fetch('/__fixture/font')).arrayBuffer());
+    out.fonts = handle.renderPngFonts({ sheet: 0, range: 'A1:D9' });
+    await run('thread range with a supplied face', () => handle.renderPng({ sheet: 0, range: 'A1:D9' }, { scale, fonts: [{ family: 'Arial', bytes: face }] }));
     const expected = { width: Math.ceil((handle.cellRect(0, 8, 3).x + handle.cellRect(0, 8, 3).w - a1.x) * scale), height: Math.ceil((handle.cellRect(0, 8, 3).y + handle.cellRect(0, 8, 3).h - a1.y) * scale) };
     handle.dispose();
     const worker = await import(`${location.origin}/__xlsx/worker.js`);
@@ -88,7 +97,8 @@ function evaluate(page: Page): Promise<Record<string, Export>> {
 
 test('an xlsx range exports through the canvas, in the page and in a worker session', async ({ page }) => {
   const result = await exports(page) as unknown as Record<string, Export> & { expected: { width: number; height: number } };
-  for (const name of ['thread range', 'thread used', 'worker range', 'worker used']) {
+  expect((result as unknown as { fonts: unknown }).fonts).toEqual([{ family: 'Arial', bold: false, italic: false }]);
+  for (const name of ['thread range', 'thread used', 'worker range', 'worker used', 'thread range with a supplied face']) {
     const png = result[name];
     expect(png.error, name).toBeUndefined();
     expect(Math.abs(png.width - result.expected.width), `${name}: width ${png.width} vs ${result.expected.width}`).toBeLessThanOrEqual(1);
@@ -97,4 +107,5 @@ test('an xlsx range exports through the canvas, in the page and in a worker sess
     expect(png.inkInA1, `${name}: A1 paints its text`).toBeGreaterThan(20);
   }
   expect(result['worker range']).toEqual(result['thread range']);
+  expect(result['thread range with a supplied face'].ink, 'the supplied face, not the runtime font, paints A1').not.toBe(result['thread range'].ink);
 });

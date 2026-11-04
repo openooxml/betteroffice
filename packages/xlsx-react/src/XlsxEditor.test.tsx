@@ -2132,7 +2132,7 @@ describe('XlsxEditor commands', () => {
         clicks.push(this.download);
       };
       try {
-        const editor = await mountCommands({ fileName: 'report.xlsx' });
+        const editor = await mountCommands({ fileName: 'report.xlsx', defaultFonts: false });
         const type = (value: string) =>
           source === 'cell'
             ? editor.typeInCell(value)

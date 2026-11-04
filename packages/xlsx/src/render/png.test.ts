@@ -6,13 +6,13 @@ import { displayListToPng } from './png';
 const text = { op: 'text', x: 4, y: 12, text: 'Total', fontSize: 11, color: '#000000', fontFamily: 'Brand Sans' } as const;
 const list = (commands: DisplayList['commands'] = [text]): DisplayList => ({ width: 120.5, height: 40, commands });
 
-interface Calls { sizes: [number, number][]; ctx: string[]; encoded: number; loads: string[]; transforms: number[][]; }
+interface Calls { sizes: [number, number][]; ctx: string[]; encoded: number; loads: string[]; transforms: number[][]; painted: string[]; faces: { family: string; weight: string; style: string }[]; held: unknown[]; }
 
 let undo: (() => void) | undefined;
 afterEach(() => { undo?.(); undo = undefined; });
 
-function stubBrowser(options: { loadFails?: boolean; canvas?: boolean } = {}) {
-  const calls: Calls = { sizes: [], ctx: [], encoded: 0, loads: [], transforms: [] };
+function stubBrowser(options: { loadFails?: boolean; canvas?: boolean; faceFails?: boolean } = {}) {
+  const calls: Calls = { sizes: [], ctx: [], encoded: 0, loads: [], transforms: [], painted: [], faces: [], held: [] };
   class StubCanvas {
     constructor(width: number, height: number) { calls.sizes.push([width, height]); }
     getContext() {
@@ -23,18 +23,30 @@ function stubBrowser(options: { loadFails?: boolean; canvas?: boolean } = {}) {
           if (property in target) return target[property as string];
           return () => { calls.ctx.push(String(property)); };
         },
-        set(target, property, value) { target[property as string] = value; return true; },
+        set(target, property, value) { if (property === 'font') calls.painted.push(String(value)); target[property as string] = value; return true; },
       });
     }
     convertToBlob(request: { type: string }) { calls.encoded += 1; return Promise.resolve(new Blob(['png'], { type: request.type })); }
   }
   const scope = globalThis as Record<string, unknown>;
-  const saved = { OffscreenCanvas: scope.OffscreenCanvas, fonts: scope.fonts };
+  class StubFace {
+    family: string;
+    constructor(family: string, _bytes: ArrayBuffer, descriptors: { weight: string; style: string }) {
+      this.family = family;
+      calls.faces.push({ family, ...descriptors });
+    }
+    load() { return options.faceFails ? Promise.reject(new Error('bad font')) : Promise.resolve(this); }
+  }
+  const saved = { OffscreenCanvas: scope.OffscreenCanvas, fonts: scope.fonts, FontFace: scope.FontFace };
   scope.OffscreenCanvas = options.canvas === false ? undefined : StubCanvas;
+  scope.FontFace = StubFace;
   scope.fonts = {
+    add(face: unknown) { calls.held.push(face); },
+    delete(face: unknown) { calls.held.splice(calls.held.indexOf(face), 1); return true; },
     load(font: string) {
       calls.loads.push(font);
-      return options.loadFails ? Promise.reject(new Error('network')) : Promise.resolve([]);
+      if (options.loadFails) return Promise.reject(new Error('network'));
+      return Promise.resolve(calls.held.filter((face) => font.includes(`"${(face as StubFace).family}"`)));
     },
   };
   undo = () => { Object.assign(scope, saved); };
@@ -77,6 +89,36 @@ describe('displayListToPng', () => {
     controller.abort();
     await expect(displayListToPng(list(), { dpr: 1, width: 121, height: 40, signal: controller.signal })).rejects.toBeDefined();
     expect(calls.encoded).toBe(0);
+  });
+});
+
+describe('supplied faces', () => {
+  const calibri = { op: 'text', x: 4, y: 12, text: 'Total', fontSize: 11, color: '#000000', fontFamily: 'Calibri' } as const;
+
+  test('paint cell text under a private family, matched by family and style, and are dropped afterwards', async () => {
+    const calls = stubBrowser();
+    const regular = { family: 'calibri', bytes: new Uint8Array([1]) };
+    await displayListToPng(list([calibri, { ...calibri, bold: true }, { ...text, fontFamily: 'Cambria' }]), { dpr: 1, width: 121, height: 40, fonts: [regular] });
+    expect(calls.faces).toEqual([{ family: expect.stringMatching(/^bo-xlsx-png-\d+-0$/), weight: '400', style: 'normal' }]);
+    const fills = calls.painted.filter((font) => font.includes('px'));
+    expect(fills.filter((font) => /"bo-xlsx-png-\d+-0", sans-serif$/.test(font))).toHaveLength(2);
+    expect(fills.some((font) => font.endsWith('"Cambria", sans-serif'))).toBe(true);
+    expect(calls.held).toEqual([]);
+  });
+
+  test('a supplied face that cannot load rejects instead of painting a substitute', async () => {
+    const calls = stubBrowser({ faceFails: true });
+    await expect(displayListToPng(list([calibri]), { dpr: 1, width: 121, height: 40, fonts: [{ family: 'Calibri', bytes: new Uint8Array([1]) }] }))
+      .rejects.toMatchObject({ name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('Calibri') });
+    expect(calls.encoded).toBe(0);
+  });
+
+  test('a bold run takes the bold face when one is supplied', async () => {
+    const calls = stubBrowser();
+    await displayListToPng(list([{ ...calibri, bold: true }]), { dpr: 1, width: 121, height: 40, fonts: [
+      { family: 'Calibri', bytes: new Uint8Array([1]) }, { family: 'Calibri', bold: true, bytes: new Uint8Array([2]) },
+    ] });
+    expect(calls.faces.map((face) => face.weight)).toEqual(['700']);
   });
 });
 

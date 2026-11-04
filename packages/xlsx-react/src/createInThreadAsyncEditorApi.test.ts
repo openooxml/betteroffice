@@ -56,7 +56,7 @@ for (const method of ['renderPng', 'exportStructured', 'exportMarkdown', 'printD
     const original = structuredClone(args);
     const operation = mock((...captured: unknown[]) => captured);
     const sync = { commands: createXlsxCommandController().store, flushPendingInput: () => pending,
-      handle: { [method]: operation } } as unknown as XlsxEditorApi;
+      handle: { [method]: operation, renderPngFonts: () => [] } } as unknown as XlsxEditorApi;
     const api = createInThreadAsyncEditorApi(sync, false, () => {});
     const work = Reflect.apply(api[method], api, args);
     expect(operation).not.toHaveBeenCalled();

@@ -1,3 +1,4 @@
+import type { DisplayList } from '../display-list/types';
 import type { Viewport } from './loader';
 import type { XlsxPngOptions } from './pngTarget';
 
@@ -104,4 +105,43 @@ export function cappedExtent(extent: number, cap: number | undefined, scale: num
   let limit = Math.fround(Math.fround(cap) / s);
   while (limit > 0 && Math.ceil(Math.fround(limit * s)) > cap) limit = nextDownF32(limit);
   return Math.min(Math.fround(extent), limit);
+}
+
+/** What a display-list read needs: sheet switching and the engine document's PNG list calls. */
+export interface PngListSource {
+  onSheet<T>(sheet: number, read: () => T): T;
+  doc: { pngDisplayListJson(viewportJson: string): string; rangePngDisplayListJson(argsJson: string): string };
+}
+
+/** A viewport target cut to the size caps, as the engine cuts it. */
+export function cappedViewport(viewport: Viewport, options: XlsxPngOptions): Viewport {
+  const scale = options.scale ?? 1;
+  return {
+    ...viewport,
+    width: cappedExtent(viewport.width, options.maxWidth, scale),
+    height: cappedExtent(viewport.height, options.maxHeight, scale),
+  };
+}
+
+/** The engine's range arguments; `'used'` leaves the range out, which is the engine's used range. */
+export function rangeArgs(range: string, options: XlsxPngOptions): string {
+  return JSON.stringify({ range: range === 'used' ? undefined : range, scale: options.scale ?? 1, maxWidth: options.maxWidth, maxHeight: options.maxHeight });
+}
+
+/** The display list a canvas export of `target` paints, with its device scale and PNG size. */
+export function pngDisplayList(source: PngListSource, target: ResolvedPngTarget, options: XlsxPngOptions): {
+  list: DisplayList; dpr: number; width: number; height: number;
+} {
+  const scale = options.scale ?? 1;
+  if ('viewport' in target) {
+    const viewport = cappedViewport(target.viewport, options);
+    const list = JSON.parse(source.onSheet(target.sheet, () => source.doc.pngDisplayListJson(JSON.stringify(viewport)))) as DisplayList;
+    return {
+      list, dpr: scale,
+      width: Math.max(1, Math.ceil(Math.fround(viewport.width * scale))),
+      height: Math.max(1, Math.ceil(Math.fround(viewport.height * scale))),
+    };
+  }
+  const list = JSON.parse(source.onSheet(target.sheet, () => source.doc.rangePngDisplayListJson(rangeArgs(target.range, options)))) as DisplayList;
+  return { list, dpr: 1, width: Math.max(1, Math.ceil(list.width)), height: Math.max(1, Math.ceil(list.height)) };
 }
