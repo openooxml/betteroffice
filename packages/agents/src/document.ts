@@ -158,6 +158,7 @@ export class DocxAgentDocument {
   private readonly editorDecisionRevisions = new Map<string, number>();
   private paragraphs: Paragraph[] = [];
   private readonly identities = new Map<string, Paragraph>();
+  private readonly runRevisions = new Map<string, { fingerprint: string; revision: number }>();
   private readonly proposals = new Map<string, HeldProposal>();
   private readonly matches = new Map<string, Omit<ExactTextEdit, 'newText'>>();
   private readonly cursors = new Map<string, { epoch: number; signature: string; paragraph: number; offset: number }>();
@@ -365,7 +366,7 @@ export class DocxAgentDocument {
         }
         return { id, text, f };
       });
-      paragraphs.push({ ref: p.ref, revision: p.revision, text: p.text, runs });
+      paragraphs.push({ ref: p.ref, revision: this.runRevision(p), text: p.text, runs });
       size += p.text.length;
     }
     const next = offset + paragraphs.length;
@@ -388,6 +389,9 @@ export class DocxAgentDocument {
     for (const edit of edits) if (edit.op === 'set_runs') {
       if (paragraphs.has(edit.paragraph)) throw new DocumentToolError('INVALID_ARGUMENT', 'Use one set_runs operation per paragraph in a batch.');
       paragraphs.add(edit.paragraph);
+    }
+    for (const edit of edits) if ('match' in edit && paragraphs.has(this.matches.get(edit.match)?.ref ?? '')) {
+      throw new DocumentToolError('INVALID_ARGUMENT', 'set_runs moves text offsets, so a match in the same paragraph needs its own batch. Run grep again after set_runs.');
     }
     const outcomes = await this.commit(version, edits);
     this.index();
@@ -697,6 +701,7 @@ export class DocxAgentDocument {
     this.cursors.clear();
     this.matches.clear();
     this.identities.clear();
+    this.runRevisions.clear();
     this.paragraphs = [];
     if (this.ownsSession) this.session.destroy();
   }
@@ -837,6 +842,14 @@ export class DocxAgentDocument {
       }
       return draft;
     } catch (error) { draft.destroy(); throw error; }
+  }
+
+  private runRevision(p: Paragraph) {
+    const key = JSON.stringify([p.story, p.paraId]);
+    const held = this.runRevisions.get(key);
+    if (!held) { this.runRevisions.set(key, { fingerprint: p.fingerprint, revision: p.revision }); return p.revision; }
+    if (held.fingerprint !== p.fingerprint) { held.fingerprint = p.fingerprint; held.revision++; }
+    return held.revision;
   }
 
   private captureReferences() {
@@ -1335,7 +1348,7 @@ export class DocxAgentDocument {
   private async plan(edit: DocxAgentEdit): Promise<EditStep> {
     if (edit.op === 'set_runs') {
       const p = this.get(edit.paragraph);
-      if (p.revision !== edit.revision) throw new DocumentToolError('STALE_TARGET', 'The paragraph changed. Read its runs again.', { refs: [p.ref] });
+      if (this.runRevision(p) !== edit.revision) throw new DocumentToolError('STALE_TARGET', 'The paragraph changed. Read its runs again.', { refs: [p.ref] });
       if (new Set(edit.runs.map(run => run.run)).size !== edit.runs.length) throw new DocumentToolError('INVALID_ARGUMENT', 'Run IDs must be unique within set_runs.');
       const ids = new Map(p.runs.map((run, index) => [`${p.ref}.${index + 1}`, run]));
       const replacements = edit.runs.map(({ run: id, text }) => {

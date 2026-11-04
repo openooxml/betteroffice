@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { openDocx, type DocxAgentDocument, type DocxAgentEdit } from '../src';
+import { attachDocx, openDocx, type DocxAgentDocument, type DocxAgentEdit } from '../src';
 import { createOfficeMcpServer } from '../src/mcp';
 import { PrototypeDocument } from '../src/prototype';
 import { cliEnv } from './cli-env';
@@ -214,6 +214,42 @@ test('set_runs rolls back if an earlier step removed its target and supports tab
   await doc.edit({ version: page.version, edits: [setRuns(cell), setRuns(header)] });
   expect(await xml(await doc.export())).toBe((await xml(bytes)).replace('>Cell<', '>CELL<'));
   expect(await xml(await doc.export(), 'word/header1.xml')).toBe((await xml(bytes, 'word/header1.xml')).replace('>Header<', '>HEADER<'));
+});
+
+test('run ids go stale when an accepted proposal changes the paragraph, even with its revision preserved', async () => {
+  const owner = await open();
+  const agent = attachDocx(owner.session);
+  try {
+    const page = agent.readRuns();
+    const p = page.paragraphs[0];
+    const proposal = agent.propose({ author: 'agent', edits: [{ match: agent.grep({ query: 'Alpha' }).matches[0].match, newText: '' }] });
+    await agent.accept(proposal.id);
+    await expect(agent.edit({ version: agent.list().version, edits: [{ op: 'set_runs', paragraph: p.ref, revision: p.revision, runs: [{ run: p.runs[0].id, text: 'Wrong' }] }] }))
+      .rejects.toMatchObject({ code: 'STALE_TARGET' });
+    const fresh = agent.readRuns().paragraphs[0];
+    expect(fresh.revision).not.toBe(p.revision);
+    await agent.edit({ version: agent.list().version, edits: [{ op: 'set_runs', paragraph: fresh.ref, revision: fresh.revision, runs: [{ run: fresh.runs[0].id, text: 'Right' }] }] });
+    expect(agent.readRuns().paragraphs[0].text.startsWith('Right')).toBe(true);
+  } finally { agent.close(); }
+});
+
+test('set_runs refuses a batch with an offset based edit in the same paragraph', async () => {
+  const doc = await open();
+  const page = doc.readRuns();
+  const p = page.paragraphs[0];
+  const match = doc.grep({ query: 'Beta' }).matches[0].match;
+  const source = await xml(await doc.export());
+  await expect(doc.edit({ version: page.version, edits: [
+    { op: 'set_runs', paragraph: p.ref, revision: p.revision, runs: [{ run: p.runs[0].id, text: 'Much longer alpha' }] },
+    { op: 'format_text', match, bold: true },
+  ] })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  expect(await xml(await doc.export())).toBe(source);
+  const other = page.paragraphs.find(paragraph => paragraph.text === 'Cell')!;
+  const applied = await doc.edit({ version: page.version, edits: [
+    { op: 'set_runs', paragraph: other.ref, revision: other.revision, runs: [{ run: other.runs[0].id, text: 'Zelle' }] },
+    { op: 'format_text', match, bold: true },
+  ] });
+  expect(applied.applied).toBe(true);
 });
 
 test('100 sequential proposals succeed while the 65th pending proposal refuses', async () => {
