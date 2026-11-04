@@ -164,15 +164,16 @@ test('async_review_export', async () => {
   expect(structured.ok).toBe(true);
   if (!structured.ok) throw new Error(structured.failure.message);
   expect(structured.content.slides).toHaveLength(2);
-  const png = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
-  const encode = spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => callback(png));
+  const png = new Uint8Array([137, 80, 78, 71]);
+  const encode = spyOn(value.client, 'renderPng').mockImplementation(async () => png);
   const createUrl = spyOn(URL, 'createObjectURL').mockReturnValue('blob:slide');
   const revokeUrl = spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
   const download = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
   try {
     await act(async () => { expect(await value.api.commands!.execute('exportPng', null)).toMatchObject({ ok: true }); });
-    expect(encode).toHaveBeenCalledWith(expect.any(Function), 'image/png');
-    expect(createUrl).toHaveBeenCalledWith(png);
+    expect(encode).toHaveBeenCalledWith({ slide: 0 }, { scale: 1 });
+    const blob = createUrl.mock.calls[0]![0] as Blob;
+    expect([blob.type, [...new Uint8Array(await blob.arrayBuffer())]]).toEqual(['image/png', [...png]]);
     expect(download).toHaveBeenCalledTimes(1);
     expect(revokeUrl).toHaveBeenCalledWith('blob:slide');
   } finally { encode.mockRestore(); createUrl.mockRestore(); revokeUrl.mockRestore(); download.mockRestore(); }
