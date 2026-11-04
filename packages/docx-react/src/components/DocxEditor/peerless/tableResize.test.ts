@@ -64,7 +64,7 @@ test('a drag becomes one clamped twips delta against the latest geometry', () =>
   expect(tableResizeIntent(before, first!, 1000)?.payload).toMatchObject({ deltaTwips: 188 * 15 });
   expect(tableResizeIntent(before, right!, -1000)?.payload).toMatchObject({ columnEdge: 3, deltaTwips: -188 * 15 });
   expect(tableResizeIntent(before, first!, 0.01)).toBeNull();
-  const later = geometry(grid(0, 140), { version: 'v2' });
+  const later = { ...geometry(grid(0, 140), { version: 'v2' }), documentVersion: 'v2' };
   expect(tableResizeIntent(later, first!, 60)?.payload).toMatchObject({ expectVersion: 'v2', handle: 'cell-0' });
   expect(tableResizeIntent(geometry(grid(0, 100), { table: 'body#1' }), first!, 60)).toBeNull();
 });

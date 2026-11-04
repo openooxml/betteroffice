@@ -1057,6 +1057,10 @@ function applyPreparedDocxCommand(
       engine.addUndoBoundary();
       engine.setColumnWidth({ ...at.cell, column: edge - 1 }, left + delta);
       if (right !== undefined) engine.setColumnWidth({ ...at.cell, column: edge }, right - delta);
+      const table = { story: at.cell.story, tableIndex: at.cell.tableIndex };
+      const total = (grid as number[]).reduce((sum, width) => sum + width, 0) + delta;
+      engine.setTableProperties(table, right === undefined
+        ? { tableLayout: 'fixed', width: Math.round(total), widthType: 'dxa' } : { tableLayout: 'fixed' });
       engine.addUndoBoundary();
       return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
     }

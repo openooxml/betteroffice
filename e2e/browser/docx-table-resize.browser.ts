@@ -36,6 +36,8 @@ async function open(page: Page, arm: Arm): Promise<Locator> {
 interface SavedTable {
   grid: number[];
   cellWidths: number[][];
+  layout: string | null;
+  width: number | null;
 }
 
 async function savedTable(page: Page, info: TestInfo, name: string): Promise<SavedTable> {
@@ -54,7 +56,9 @@ async function savedTable(page: Page, info: TestInfo, name: string): Promise<Sav
     const rows = children(table, 'tr');
     const cellWidths = rows.map((row) => children(row, 'tc').map((cell) =>
       Number(attr(cell.getElementsByTagNameNS('*', 'tcW')[0], 'w'))));
-    return { grid, cellWidths };
+    const properties = children(table, 'tblPr')[0]!;
+    const width = attr(children(properties, 'tblW')[0], 'w');
+    return { grid, cellWidths, layout: attr(children(properties, 'tblLayout')[0], 'type'), width: width === null ? null : Number(width) };
   }, xml);
 }
 
@@ -120,6 +124,8 @@ for (const arm of ARMS) {
       const saved = await savedTable(page, info, 'column');
       expect(saved.grid).toEqual([COLUMN + 900, COLUMN - 900, COLUMN]);
       for (const row of saved.cellWidths) expect(row).toEqual([COLUMN + 900, COLUMN - 900, COLUMN]);
+      expect(saved.layout).toBe('fixed');
+      expect(saved.width).toBe(COLUMN * 3);
 
       await input.focus();
       await input.press('ControlOrMeta+z');
@@ -136,6 +142,8 @@ for (const arm of ARMS) {
       const saved = await savedTable(page, info, 'right');
       expect(saved.grid).toEqual([COLUMN, COLUMN, COLUMN - 900]);
       for (const row of saved.cellWidths) expect(row).toEqual([COLUMN, COLUMN, COLUMN - 900]);
+      expect(saved.layout).toBe('fixed');
+      if (arm.name === 'worker') expect(saved.width).toBe(COLUMN * 3 - 900);
     });
 
     test('handles follow the borders and drags keep twips under zoom', async ({ page }, info) => {

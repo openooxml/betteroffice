@@ -976,6 +976,7 @@ export interface YrsTablePropertiesPatch {
   width?: number | null;
   widthType?: string | null;
   justification?: 'left' | 'center' | 'right' | null;
+  tableLayout?: 'fixed' | 'autofit' | null;
 }
 
 /** Undo grouping for tracked local transactions. */

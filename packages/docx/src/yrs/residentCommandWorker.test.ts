@@ -2276,6 +2276,8 @@ test('worker column edge drags move one border in one undo step and clamp at the
     const first = await drag(1, 0, initial.frame.payload.documentVersion!, 1, 600);
     expect(first.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr).toMatchObject({ tableLayout: 'fixed' });
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.width ?? null).toBeNull();
     const clamped = await drag(2, 1, version(first), 2, 5000);
     expect(clamped.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
@@ -2284,16 +2286,23 @@ test('worker column edge drags move one border in one undo step and clamp at the
     const widened = await drag(4, 2, version(clamped), 3, 900);
     expect(widened.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 1200]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr).toMatchObject({ tableLayout: 'fixed', width: 5220, widthType: 'dxa' });
     const undone = await client.edit(intent(5, 3, 'undo', {}));
     expect(undone.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.width ?? null).toBeNull();
     expect((await client.edit(intent(6, 4, 'undo', {}))).outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    expect((await client.edit(intent(7, 5, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1440, 1440, 1440]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.tableLayout ?? null).toBeNull();
+    expect((await client.edit(intent(8, 6, 'redo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
     const current = engine.proposalEngine.version();
-    expect((await drag(7, 5, current, 4, 100)).outcomes[0]).toMatchObject({ status: 'refused', reason: 'unsupported-object' });
+    expect((await drag(9, 5, current, 4, 100)).outcomes[0]).toMatchObject({ status: 'refused', reason: 'unsupported-object' });
     for (const [index, payload] of [{ columnEdge: 0, deltaTwips: 100 }, { columnEdge: 1, deltaTwips: 1.5 }, { columnEdge: 1 },
       { columnEdge: 1, deltaTwips: 100, widthTwips: 2000 }].entries()) {
-      expect((await client.edit(intent(8 + index, 5, 'resizeObject', { handle: cells[0]!.handle, expectVersion: current, ...payload } as never))).outcomes[0])
+      expect((await client.edit(intent(10 + index, 5, 'resizeObject', { handle: cells[0]!.handle, expectVersion: current, ...payload } as never))).outcomes[0])
         .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
     }
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
