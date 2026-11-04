@@ -59,3 +59,5 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
     width: Math.max(1, Math.ceil(list.width)), height: Math.max(1, Math.ceil(list.height)),
   });
 }
+
+export default renderPng;

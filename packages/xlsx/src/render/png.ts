@@ -15,16 +15,11 @@ export interface DisplayListToPngOptions {
 
 type ExportCanvas = HTMLCanvasElement | OffscreenCanvas;
 
-let documentCanvas: boolean | undefined;
-
 /** Whether this runtime can paint and encode a PNG on a canvas: one with a 2d context, not only a document. */
 export function canvasPngAvailable(): boolean {
   if (typeof OffscreenCanvas === 'function') return true;
   if (typeof document === 'undefined') return false;
-  if (documentCanvas === undefined) {
-    try { documentCanvas = document.createElement('canvas').getContext('2d') !== null; } catch { documentCanvas = false; }
-  }
-  return documentCanvas;
+  try { return document.createElement('canvas').getContext('2d') !== null; } catch { return false; }
 }
 
 /** Paints a sheet display list with the editor's painter on a white canvas and encodes it. */
@@ -84,7 +79,7 @@ function fontSet(): FontFaceSet | undefined {
  */
 async function loadFonts(list: DisplayList): Promise<void> {
   const set = fontSet();
-  if (!set) return;
+  if (!set || typeof set.load !== 'function') return;
   const fonts = new Map<string, string>();
   for (const cmd of list.commands) {
     if (cmd.op !== 'text') continue;

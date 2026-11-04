@@ -25,3 +25,5 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
     return Promise.reject(error);
   }
 }
+
+export default renderPng;

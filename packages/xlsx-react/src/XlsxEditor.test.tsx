@@ -2131,6 +2131,10 @@ describe('XlsxEditor commands', () => {
       HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
         clicks.push(this.download);
       };
+      const toBlob = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function (callback: BlobCallback) {
+        callback(new Blob(['png'], { type: 'image/png' }));
+      };
       try {
         const editor = await mountCommands({ fileName: 'report.xlsx' });
         const type = (value: string) =>
@@ -2168,6 +2172,7 @@ describe('XlsxEditor commands', () => {
         expect(clicks).toEqual(['report.png']);
       } finally {
         HTMLAnchorElement.prototype.click = click;
+        HTMLCanvasElement.prototype.toBlob = toBlob;
       }
     });
   }
