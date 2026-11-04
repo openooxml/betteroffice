@@ -60,7 +60,14 @@ function stubBrowser() {
   return { sizes, sources, held };
 }
 
-describe.skipIf(engineKind === 'native')('PresentationHandle.renderPng', () => {
+const native = engineKind === 'native';
+const isPng = (bytes: Uint8Array) => bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+const pngSize = (bytes: Uint8Array) => {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return [view.getUint32(16), view.getUint32(20)];
+};
+
+describe('PresentationHandle.renderPng', () => {
   test('draws a slide by index or ID without moving the slide hit testing reads', async () => {
     const browser = stubBrowser();
     const handle = openPresentation(fixture, { clientId: 7101, fonts: [{ family: 'Liberation Sans', bytes: font }] });
@@ -68,14 +75,19 @@ describe.skipIf(engineKind === 'native')('PresentationHandle.renderPng', () => {
       const shown = handle.layoutSlide(0);
       const point = { x: shown.width / 2, y: shown.height / 2 };
       const before = handle.hitTest(point.x, point.y);
-      expect(new TextDecoder().decode(await handle.renderPng({ slide: 1 }, { scale: 2 }))).toBe('png');
+      const scaled = await handle.renderPng({ slide: 1 }, { scale: 2 });
       expect(handle.hitTest(point.x, point.y)).toEqual(before);
       const id = handle.snapshot().slides[1].id;
-      await handle.renderPng({ slide: id });
+      const plain = await handle.renderPng({ slide: id });
       const second = handle.layoutSlide(1);
-      expect(browser.sizes).toEqual([
-        [Math.ceil(second.width * 2), Math.ceil(second.height * 2)], [Math.ceil(second.width), Math.ceil(second.height)],
-      ]);
+      const expected = [[Math.ceil(second.width * 2), Math.ceil(second.height * 2)], [Math.ceil(second.width), Math.ceil(second.height)]];
+      if (native) {
+        expect([scaled, plain].every(isPng)).toBe(true);
+        expect([pngSize(scaled), pngSize(plain)]).toEqual(expected);
+      } else {
+        expect(new TextDecoder().decode(scaled)).toBe('png');
+        expect(browser.sizes).toEqual(expected);
+      }
       expect(browser.held).toEqual([]);
     } finally { handle.dispose(); }
   });
@@ -90,6 +102,9 @@ describe.skipIf(engineKind === 'native')('PresentationHandle.renderPng', () => {
       await expect(handle.renderPng({ slide: 1.5 })).rejects.toThrow('slide must be an ID (string) or an index (number)');
       await expect(handle.renderPng({ slide: 0, extra: 1 } as never)).rejects.toThrow('target must be { slide } with a slide index or ID');
       await expect(handle.renderPng({ slide: 0 }, { background: 'red' as never })).rejects.toThrow('background must be');
+      await expect(handle.renderPng({ slide: 0 }, { scale: 0 })).rejects.toThrow('scale must be finite and positive');
+      await expect(handle.renderPng({ slide: 0 }, { scale: 100 })).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-too-large' });
+      await expect(handle.renderPng({ slide: 0 }, { maxShadowPixels: -1 })).rejects.toThrow('invalid shadow pixel budget');
     } finally { handle.dispose(); }
   });
 
@@ -101,9 +116,12 @@ describe.skipIf(engineKind === 'native')('PresentationHandle.renderPng', () => {
       const later = { family: 'Liberation Sans', bold: true, bytes: font.slice() };
       handle.registerFont(later);
       for (const face of [opened, later]) { face.bytes.fill(0); face.family = 'Changed'; }
-      await handle.renderPng({ slide: 0 });
-      expect(browser.sources.length).toBeGreaterThan(0);
-      for (const source of browser.sources) expect(source).toEqual(font);
+      const png = await handle.renderPng({ slide: 0 });
+      if (native) expect(isPng(png)).toBe(true);
+      else {
+        expect(browser.sources.length).toBeGreaterThan(0);
+        for (const source of browser.sources) expect(source).toEqual(font);
+      }
     } finally { handle.dispose(); }
   });
 });

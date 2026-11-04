@@ -129,6 +129,40 @@ impl Renderer {
         result
     }
 
+    /// Rasterizes one slide with the faces layout measured with and the deck's
+    /// media, leaving hit testing on the slide it had.
+    #[cfg(feature = "raster")]
+    pub fn render_png(
+        &mut self,
+        session: &pptx_edit::DeckSession,
+        slide_index: u32,
+        options: &pptx_raster::RenderOptions,
+    ) -> Result<pptx_raster::RenderedSlide, EngineError> {
+        let last_slide = self.last_slide.clone();
+        let laid_out = slide_scope(session, slide_index).and_then(|scope| {
+            let version = Rc::new(session.version());
+            self.sync_package(session);
+            self.cache_slide(session, &scope, &version)?;
+            Ok(scope.slide.id)
+        });
+        self.last_slide = last_slide;
+        let id = laid_out?;
+        let display_list = &self.rendered[&id].rendered.display_list;
+        let mut assets = Vec::new();
+        collect_assets(&display_list.primitives, &mut assets);
+        let media: Vec<(String, Vec<u8>)> = assets
+            .into_iter()
+            .filter_map(|asset| session.media_bytes(&asset).ok().map(|bytes| (asset, bytes)))
+            .collect();
+        let images: pptx_raster::AssetMap<'_> = media
+            .iter()
+            .map(|(asset, bytes)| (asset.as_str(), bytes.as_slice()))
+            .collect();
+        let resources = pptx_raster::RenderResources::new(self.renderer.fonts(), &images)
+            .with_label_font(self.renderer.fallback_font());
+        pptx_raster::render_slide(display_list, &resources, options).map_err(engine_error)
+    }
+
     /// Enables browser metrics for uncovered characters. Off by default.
     pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
         if self.renderer.set_browser_coverage_fallback(enabled) {
@@ -535,6 +569,23 @@ impl Renderer {
     }
 }
 
+#[cfg(feature = "raster")]
+fn collect_assets(primitives: &[pptx_render::Primitive], assets: &mut Vec<String>) {
+    for primitive in primitives {
+        match primitive {
+            pptx_render::Primitive::Image {
+                asset_id: Some(asset),
+                ..
+            } if !assets.contains(asset) => assets.push(asset.clone()),
+            pptx_render::Primitive::Chart { primitives, .. }
+            | pptx_render::Primitive::Table { primitives, .. } => {
+                collect_assets(primitives, assets)
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()
@@ -620,6 +671,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn native_png_renders_the_export_slide_and_keeps_the_hit_test_slide() {
+        let document = pptx_edit::DeckSession::open(DECK, 915).unwrap();
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        renderer.layout_slide_json(&document, 0).unwrap();
+        let shown = renderer.last_slide.clone();
+        let options = pptx_raster::RenderOptions {
+            scale: 2.0,
+            ..Default::default()
+        };
+        let rendered = renderer.render_png(&document, 1, &options).unwrap();
+        assert_eq!(renderer.last_slide, shown);
+        assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let list: serde_json::Value =
+            serde_json::from_str(&renderer.export_slide_json(&document, 1).unwrap()).unwrap();
+        let width = u32::from_be_bytes(rendered.bytes[16..20].try_into().unwrap());
+        assert_eq!(
+            width,
+            (list["width"].as_f64().unwrap() as f32 * 2.0).ceil() as u32
+        );
     }
 
     #[test]

@@ -135,6 +135,49 @@ fn throw_error(env: &Env, message: &str) -> Error {
     }
 }
 
+/// `{ slide }` and `{ scale, background, maxShadowPixels }` as the JS handle sends them.
+fn png_request(
+    target_json: &str,
+    options_json: &str,
+) -> std::result::Result<(u32, pptx_engine::PngOptions), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Target {
+        slide: u32,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Options {
+        scale: Option<f32>,
+        background: Option<String>,
+        max_shadow_pixels: Option<u64>,
+    }
+    let target: Target = serde_json::from_str(target_json)
+        .map_err(|_| "target must be { slide } with a slide index or ID".to_owned())?;
+    let options: Options =
+        serde_json::from_str(options_json).map_err(|error| format!("bad options: {error}"))?;
+    let mut png = pptx_engine::PngOptions::default();
+    if let Some(scale) = options.scale {
+        png.scale = scale;
+    }
+    if let Some(budget) = options.max_shadow_pixels {
+        png.max_shadow_pixels = budget;
+    }
+    png.background = match options.background.as_deref() {
+        None | Some("slide") => pptx_engine::PngBackground::Slide,
+        Some("transparent") => pptx_engine::PngBackground::Transparent,
+        Some(color) if color.starts_with('#') => {
+            pptx_engine::PngBackground::Color(color.to_owned())
+        }
+        Some(other) => {
+            return Err(format!(
+                "background must be \"slide\", \"transparent\", or a #rrggbb color, not {other:?}"
+            ));
+        }
+    };
+    Ok((target.slide, png))
+}
+
 fn map_error(env: Env, error: EngineError) -> Error {
     let result = (|| -> Result<()> {
         let (name, code) = match error.kind {
@@ -1097,6 +1140,42 @@ impl PptxRenderer {
         renderer
             .layout_slide_json(document.session(), slide_index)
             .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn export_slide_json(
+        &mut self,
+        env: Env,
+        document: &PptxDocument,
+        slide_index: u32,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        let renderer = self.renderer_mut(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        renderer
+            .export_slide_json(document.session(), slide_index)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn render_png_target(
+        &mut self,
+        env: Env,
+        document: &PptxDocument,
+        target_json: String,
+        options_json: String,
+    ) -> Result<Uint8Array> {
+        let _call = EngineCall::new(env);
+        let (slide, options) = png_request(&target_json, &options_json)
+            .map_err(|message| map_error(env, EngineError::message(message)))?;
+        let renderer = self.renderer_mut(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        renderer
+            .render_png(document.session(), slide, &options)
+            .map_err(|error| map_error(env, error))
+            .and_then(|rendered| byte_result(env, rendered.bytes))
     }
 
     #[napi(catch_unwind)]

@@ -45,14 +45,25 @@ export function pngBackground(value: unknown): PptxPngBackground {
  * `fonts` are installed for this export under private names; one that cannot
  * load rejects with `PngExportError` rather than paint a substitute.
  */
-export async function slideListToPng(list: SlideDisplayList, options: SlideListToPngOptions = {}): Promise<Uint8Array> {
+/** Checks a slide export's options and size the way every engine does, and returns the PNG size. */
+export function slidePngRequest(
+  list: Pick<SlideDisplayList, 'width' | 'height'>, options: Pick<SlideListToPngOptions, 'scale' | 'background' | 'maxShadowPixels'>,
+): { width: number; height: number; scale: number; background: PptxPngBackground } {
   const scale = options.scale ?? 1;
   if (typeof scale !== 'number' || !Number.isFinite(scale) || scale <= 0) throw new RangeError('scale must be finite and positive');
   const background = pngBackground(options.background);
+  if (options.maxShadowPixels !== undefined && (!Number.isSafeInteger(options.maxShadowPixels) || options.maxShadowPixels < 0)) {
+    throw new RangeError('invalid shadow pixel budget');
+  }
   const { width, height } = slideBackingStore(list, 1, scale);
   if (width > MAX_SLIDE_PNG_SIDE || height > MAX_SLIDE_PNG_SIDE || width * height > MAX_SLIDE_PNG_PIXELS) {
     throw new PngExportError('canvas-too-large', `A ${width}x${height}px slide is over the ${MAX_SLIDE_PNG_SIDE}px side or ${MAX_SLIDE_PNG_PIXELS} pixel limit; lower the scale.`);
   }
+  return { width, height, scale, background };
+}
+
+export async function slideListToPng(list: SlideDisplayList, options: SlideListToPngOptions = {}): Promise<Uint8Array> {
+  const { width, height, scale, background } = slidePngRequest(list, options);
   options.signal?.throwIfAborted();
   const faces = await installPngFaces({
     prefix: 'bo-pptx-png', fonts: slideFonts(list), faces: options.fonts ?? [], choose: slideFace, subject: 'slide',
