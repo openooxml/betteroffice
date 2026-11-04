@@ -146,6 +146,19 @@ fn render_environment(package: &Value) -> Value {
         if let Some(style) = default {
             env.insert("defaultParagraphStyleId".into(), style["styleId"].clone());
         }
+        let language: Map<String, Value> = definitions["docDefaults"]["rPr"]["language"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, value)| {
+                matches!(key.as_str(), "latin" | "eastAsia" | "bidi")
+                    && value.as_str().is_some_and(|tag| !tag.is_empty())
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !language.is_empty() {
+            env.insert("docDefaultLanguage".into(), Value::Object(language));
+        }
         let doc_default = definitions["docDefaults"]["rPr"]["fontSize"]
             .as_f64()
             .unwrap_or(20.0);

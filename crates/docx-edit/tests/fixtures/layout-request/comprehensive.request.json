@@ -193,6 +193,11 @@
     "defaultParagraphStyleId": "Normal",
     "defaultTabStopTwips": 708,
     "docDefaultFontSize": 11,
+    "docDefaultLanguage": {
+      "bidi": "ar-SA",
+      "eastAsia": "ja-JP",
+      "latin": "en-US"
+    },
     "fontTheme": {
       "colorScheme": {
         "accent1": "4472C4",

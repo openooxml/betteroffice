@@ -132,7 +132,7 @@ export function buildResidentRegionLayoutRequest(
 function chainFontSizeEnv(
   document: Document | null,
   renderEnv: YrsRenderEnv
-): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'hyperlinkStyleFontSizes' | 'docDefaultFontSize'> {
+): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'hyperlinkStyleFontSizes' | 'docDefaultFontSize' | 'docDefaultLanguage'> {
   const styles = document?.package.styles;
   if (!styles) return {};
   const docDefault = styles.docDefaults?.rPr?.fontSize ?? 20;
@@ -165,7 +165,19 @@ function chainFontSizeEnv(
     ...(renderEnv.docDefaultFontSize == null
       ? { docDefaultFontSize: docDefault / 2 }
       : {}),
+    ...(renderEnv.docDefaultLanguage == null ? docDefaultLanguage(styles.docDefaults?.rPr?.language) : {}),
   };
+}
+
+function docDefaultLanguage(
+  language: { latin?: string; eastAsia?: string; bidi?: string } | undefined
+): Pick<YrsRenderEnv, 'docDefaultLanguage'> {
+  const slots = Object.fromEntries(
+    (['latin', 'eastAsia', 'bidi'] as const)
+      .filter((slot) => typeof language?.[slot] === 'string' && language[slot] !== '')
+      .map((slot) => [slot, language![slot]])
+  );
+  return Object.keys(slots).length > 0 ? { docDefaultLanguage: slots } : {};
 }
 
 function defaultParagraphStyleEnv(
