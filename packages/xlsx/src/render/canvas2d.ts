@@ -17,11 +17,11 @@ import type {
   TextAlign,
   TextCmd,
 } from '../display-list/types';
+import { fontSizePx, fontString } from './fontString';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
 import { wrapLines, wrappedLineY } from './wrap';
 
-const PX_PER_PT = 96 / 72;
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
 
@@ -423,23 +423,6 @@ function paintRun(
   if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, cmd, text, x, align);
 }
 
-// css font shorthand: `[italic] [bold] <size>px <family>`. Workbook fonts are
-// often not installed on the host (Calibri on macOS); without a fallback the
-// browser's unknown-family default is serif.
-export function fontString(cmd: TextCmd): string {
-  const style = cmd.italic ? 'italic ' : '';
-  const weight = cmd.bold ? 'bold ' : '';
-  const family = cmd.fontFamily
-    ? cmd.chart
-      ? cmd.fontFamily
-      : `"${cmd.fontFamily.replace(/"/g, '\\"')}", sans-serif`
-    : 'sans-serif';
-  return `${style}${weight}${fontSizePx(cmd)}px ${family}`;
-}
-
-function fontSizePx(cmd: TextCmd): number {
-  return cmd.fontSize * PX_PER_PT;
-}
 
 function paintDecorations(
   ctx: CanvasRenderingContext2D,

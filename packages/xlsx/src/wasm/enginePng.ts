@@ -1,7 +1,8 @@
 import type { DisplayList } from '../display-list/types';
 import { canvasPngAvailable, canvasUnavailable, displayListToPng } from '../render/png';
 import type { Viewport } from './loader';
-import { cappedExtent, type ResolvedPngTarget, type XlsxPngOptions } from './pngTarget';
+import { cappedExtent, type ResolvedPngTarget } from './pngResolve';
+import type { XlsxPngOptions } from './pngTarget';
 
 /** What an engine needs to draw one PNG. The workbook handle builds it; each engine reads what it uses. */
 export interface XlsxPngEngine {

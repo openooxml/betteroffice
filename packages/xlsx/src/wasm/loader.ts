@@ -32,7 +32,8 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
 import { wasmAssetUrl } from './asset';
 import { pngRasterizers } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
-import { resolvePngTarget, type ResolvedPngTarget, type XlsxPngOptions, type XlsxPngTarget } from './pngTarget';
+import { resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
+import type { XlsxPngOptions, XlsxPngTarget } from './pngTarget';
 import { canvasPngAvailable } from '../render/png';
 export type { XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';

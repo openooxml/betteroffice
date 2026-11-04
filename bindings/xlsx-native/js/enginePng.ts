@@ -1,5 +1,6 @@
 import type { XlsxPngEngine } from '../../../packages/xlsx/src/wasm/enginePng';
-import type { ResolvedPngTarget, XlsxPngOptions } from '../../../packages/xlsx/src/wasm/pngTarget';
+import type { ResolvedPngTarget } from '../../../packages/xlsx/src/wasm/pngResolve';
+import type { XlsxPngOptions } from '../../../packages/xlsx/src/wasm/pngTarget';
 
 export type { XlsxPngEngine } from '../../../packages/xlsx/src/wasm/enginePng';
 

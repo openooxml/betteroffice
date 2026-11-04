@@ -1,7 +1,8 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList, TextCmd } from '../display-list/types';
-import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../wasm/pngTarget';
-import { fontString, paintDisplayList } from './canvas2d';
+import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../wasm/pngResolve';
+import { paintDisplayList } from './canvas2d';
+import { fontString } from './fontString';
 
 export interface DisplayListToPngOptions {
   /** Device pixels per display-list pixel. */

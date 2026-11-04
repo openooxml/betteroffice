@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
-import { cappedExtent } from '../../packages/xlsx/src/wasm/pngTarget';
+import { cappedExtent } from '../../packages/xlsx/src/wasm/pngResolve';
 
 const native = require('./index.js');
 

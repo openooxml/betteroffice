@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { cappedExtent, rangeA1, resolvePngTarget, sheetIndex } from './pngTarget';
+import { cappedExtent, rangeA1, resolvePngTarget, sheetIndex } from './pngResolve';
 
 const names = ['Data', 'Other'];
 const viewport = { x: 0, y: 0, width: 300, height: 120 };
