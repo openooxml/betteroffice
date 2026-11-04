@@ -396,8 +396,6 @@ impl Lockstep {
         &mut self,
         apply: impl Fn(&mut Workbook) -> Result<MutationResult>,
     ) -> std::result::Result<MutationResult, String> {
-        self.fast.authority.materialize().unwrap();
-        self.oracle.authority.materialize().unwrap();
         let result = self.step(true, apply)?;
         let input = self.step.to_string();
         assert!(self.edit(0, r("C1"), &input)?.applied);
@@ -444,6 +442,95 @@ fn bounded_number_format_avoids_materialization_and_hydration() {
         range: CellRange::parse_a1("B2:C3").unwrap(),
         format: NumberFormatMutation::Currency,
     });
+}
+
+#[test]
+fn consecutive_range_formats_and_cell_edit_avoid_materialization_and_hydration() {
+    for observed in [false, true] {
+        for synthesized in [false, true] {
+            let mut workbook = if synthesized {
+                Workbook::from_model(plain_style_synthesis_model()).unwrap()
+            } else {
+                open_identical(&workbook_bytes(), false, None)
+            };
+            let _subscription = observed.then(|| workbook.observe_update_v1(|_| {}).unwrap());
+            let materializations = full_materializations();
+            let hydrations = local_hydrations();
+            let formats = fast_range_format_count();
+            let cells = fast_set_cell_count();
+            let (range, patch) = if synthesized {
+                (
+                    "A1:B1",
+                    StylePatch {
+                        bold: Some(false),
+                        ..StylePatch::default()
+                    },
+                )
+            } else {
+                (
+                    "A1:C3",
+                    StylePatch {
+                        bold: Some(true),
+                        fill_color: Some("#123456".into()),
+                        ..StylePatch::default()
+                    },
+                )
+            };
+            workbook
+                .patch_range_style(
+                    SheetId(0),
+                    CellRange::parse_a1(range).unwrap(),
+                    patch,
+                    options(),
+                )
+                .unwrap();
+            workbook
+                .set_range_number_format(
+                    SheetId(0),
+                    CellRange::parse_a1("B2").unwrap(),
+                    NumberFormatMutation::Currency,
+                    options(),
+                )
+                .unwrap();
+            workbook.edit_cell(SheetId(0), r("H9"), "5", options()).unwrap();
+            assert_eq!(full_materializations(), materializations);
+            assert_eq!(local_hydrations(), hydrations);
+            assert_eq!(fast_range_format_count(), formats + 2);
+            assert_eq!(fast_set_cell_count(), cells + 1);
+        }
+    }
+}
+
+#[test]
+fn consecutive_range_formats_then_cell_edit_match_full_materialization() {
+    let mut pair = Lockstep::new(false);
+    let formats = fast_range_format_count();
+    let cells = fast_set_cell_count();
+    pair.step(true, |workbook| {
+        workbook.patch_range_style(
+            SheetId(0),
+            CellRange::parse_a1("A1:C3").unwrap(),
+            StylePatch {
+                bold: Some(true),
+                fill_color: Some("#123456".into()),
+                ..StylePatch::default()
+            },
+            options(),
+        )
+    })
+    .unwrap();
+    pair.step(true, |workbook| {
+        workbook.set_range_number_format(
+            SheetId(0),
+            CellRange::parse_a1("B2").unwrap(),
+            NumberFormatMutation::Currency,
+            options(),
+        )
+    })
+    .unwrap();
+    pair.edit(0, r("H9"), "5").unwrap();
+    assert_eq!(fast_range_format_count(), formats + 2);
+    assert_eq!(fast_set_cell_count(), cells + 1);
 }
 
 #[test]
@@ -563,8 +650,7 @@ fn range_formats_match_full_materialization_and_history() {
     }
 }
 
-#[test]
-fn range_style_then_cell_edit_preserves_synthesized_plain_catalog() {
+fn plain_style_synthesis_model() -> WorkbookModel {
     use xlsx_model::{Cell, Font, Xf};
 
     let mut model = WorkbookModel::default();
@@ -601,41 +687,63 @@ fn range_style_then_cell_edit_preserves_synthesized_plain_catalog() {
         );
     }
     model.sheets.push(sheet);
-    let mut pair = Lockstep::from_model(model);
-    assert_eq!(pair.fast.model.styles.cell_xfs.len(), 2);
-    assert!(pair.fast.model.sheets[0].cell(r("C1")).is_none());
-    let formats = fast_range_format_count();
-    let cells = fast_set_cell_count();
-    pair.format_step(|workbook| {
-        let result = workbook.patch_range_style(
-            SheetId(0),
-            CellRange::parse_a1("A1:B1").unwrap(),
-            StylePatch {
-                bold: Some(false),
-                ..StylePatch::default()
-            },
-            options(),
-        )?;
-        assert_eq!(workbook.model.styles.cell_xfs.len(), 4);
+    model
+}
+
+#[test]
+fn range_style_then_cell_edit_preserves_synthesized_plain_catalog() {
+    for consecutive in [false, true] {
+        let mut pair = Lockstep::from_model(plain_style_synthesis_model());
+        assert_eq!(pair.fast.model.styles.cell_xfs.len(), 2);
+        assert!(pair.fast.model.sheets[0].cell(r("C1")).is_none());
+        let formats = fast_range_format_count();
+        let cells = fast_set_cell_count();
+        pair.step(true, |workbook| {
+            let result = workbook.patch_range_style(
+                SheetId(0),
+                CellRange::parse_a1("A1:B1").unwrap(),
+                StylePatch {
+                    bold: Some(false),
+                    ..StylePatch::default()
+                },
+                options(),
+            )?;
+            assert_eq!(workbook.model.styles.cell_xfs.len(), 4);
+            assert_eq!(
+                workbook.model.sheets[0].cell(r("A1")).unwrap().style,
+                Some(2)
+            );
+            assert_eq!(
+                workbook.model.sheets[0].cell(r("B1")).unwrap().style,
+                Some(3)
+            );
+            assert_eq!(
+                workbook.model.styles.cell_format(Some(2)),
+                CellFormat::default()
+            );
+            assert!(workbook.model.styles.cell_format(Some(3)).font.italic);
+            Ok(result)
+        })
+        .unwrap();
+        if consecutive {
+            pair.step(true, |workbook| {
+                workbook.set_range_number_format(
+                    SheetId(0),
+                    CellRange::parse_a1("B2").unwrap(),
+                    NumberFormatMutation::Currency,
+                    options(),
+                )
+            })
+            .unwrap();
+        }
+        pair.edit(0, r("C1"), "1").unwrap();
         assert_eq!(
-            workbook.model.sheets[0].cell(r("A1")).unwrap().style,
-            Some(2)
+            fast_range_format_count(),
+            formats + if consecutive { 2 } else { 1 }
         );
-        assert_eq!(
-            workbook.model.sheets[0].cell(r("B1")).unwrap().style,
-            Some(3)
-        );
-        assert_eq!(
-            workbook.model.styles.cell_format(Some(2)),
-            CellFormat::default()
-        );
-        assert!(workbook.model.styles.cell_format(Some(3)).font.italic);
-        Ok(result)
-    })
-    .unwrap();
-    assert_eq!(fast_range_format_count(), formats + 1);
-    assert_eq!(fast_set_cell_count(), cells);
-    assert_eq!(pair.fast.cell(SheetId(0), r("C1")).unwrap().input, "1");
+        assert_eq!(fast_set_cell_count(), cells + 1);
+        assert_eq!(pair.fast.cell(SheetId(0), r("C1")).unwrap().input, "1");
+    }
 }
 
 #[test]
