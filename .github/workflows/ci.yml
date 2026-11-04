@@ -609,7 +609,7 @@ jobs:
           timeout 300 bun scripts/node-worker-sessions-smoke.mjs
           timeout 300 deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi scripts/node-worker-sessions-smoke.mjs
           bun scripts/worker-bundling-smoke.mjs
-          node scripts/check-webpack-exports.mjs $(node scripts/native-bindings.mjs --paths)
+          node scripts/check-webpack-exports.mjs --node-import $(node scripts/native-bindings.mjs --paths)
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "$smoke_dir"' EXIT

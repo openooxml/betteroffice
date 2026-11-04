@@ -1,6 +1,7 @@
 // Resolves every export of every library package with the webpack that Next.js bundles, through a
 // static import, import() and require.resolveWeak (what next/dynamic emits). Run after
-// `bun run build:packages`; pass package directories to check other packages instead.
+// `bun run build:packages`; pass package directories to check other packages instead, and
+// --node-import to also check that ESM imports for a node target land on each `import` file.
 import { readFileSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -58,13 +59,22 @@ export function nextWebpack() {
   return compiled.webpack;
 }
 
-async function resolveAll(specifiers, packages) {
+/** The file the `import` condition of `specifier`'s export entry names, if it is a plain path. */
+export function importTarget(manifest, specifier) {
+  const map = manifest.exports;
+  const subpath = '.' + specifier.slice(manifest.name.length);
+  const conditional = typeof map === 'string' || Object.keys(map).some((key) => !key.startsWith('.'));
+  const entry = conditional ? (subpath === '.' ? map : undefined) : map[subpath];
+  return typeof entry?.import === 'string' ? entry.import : undefined;
+}
+
+async function resolveAll(specifiers, packages, { target, entries }) {
   const directory = await mkdtemp(join(tmpdir(), 'webpack-exports-'));
   try {
     await linkPackages(directory, packages);
     await writeFile(join(directory, 'package.json'), JSON.stringify({ private: true }));
-    for (const [name, source] of Object.entries(ENTRIES)) {
-      await writeFile(join(directory, `${name}.js`), source(specifiers));
+    for (const name of entries) {
+      await writeFile(join(directory, `${name}.js`), ENTRIES[name](specifiers));
     }
     const wanted = new Set(specifiers);
     const resolved = new Map();
@@ -84,10 +94,10 @@ async function resolveAll(specifiers, packages) {
       webpack(
         {
           mode: 'production',
-          target: 'web',
+          target,
           devtool: false,
           context: directory,
-          entry: Object.fromEntries(Object.keys(ENTRIES).map((name) => [name, `./${name}.js`])),
+          entry: Object.fromEntries(entries.map((name) => [name, `./${name}.js`])),
           output: { path: join(directory, 'dist') },
           optimization: { minimize: false },
           plugins: [record],
@@ -95,23 +105,49 @@ async function resolveAll(specifiers, packages) {
         (error, result) => (error ? fail(error) : done(result))
       )
     );
-    const failures = stats.compilation.errors.map((error) => error.message.split('\n').slice(0, 3).join(' '));
-    for (const entry of Object.keys(ENTRIES)) {
+    const failures = stats.compilation.errors.map((error) => `${target}: ${error.message.split('\n').slice(0, 3).join(' ')}`);
+    for (const entry of entries) {
       for (const specifier of specifiers) {
-        if (!resolved.has(`${entry} ${specifier}`)) failures.push(`${specifier}: not resolved from the ${entry} entry`);
+        if (!resolved.has(`${entry} ${specifier}`)) failures.push(`${specifier}: not resolved from the ${target} ${entry} entry`);
       }
     }
-    return { failures, resolved: resolved.size };
+    return { failures, resolved };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 }
 
+/** Resolves ESM imports of every export for a node target and checks each lands on its `import` file. */
+async function resolveNodeImports(packages) {
+  const expected = new Map();
+  for (const { directory, manifest } of packages) {
+    for (const specifier of exportSpecifiers(manifest)) {
+      const target = importTarget(manifest, specifier);
+      if (target) expected.set(specifier, realpathSync(join(directory, target)));
+    }
+  }
+  const specifiers = [...expected.keys()];
+  if (!specifiers.length) return { failures: ['no export with an import condition to resolve for node'], checked: 0 };
+  const entries = ['static', 'lazy'];
+  const { failures, resolved } = await resolveAll(specifiers, packages, { target: 'node', entries });
+  for (const entry of entries) {
+    for (const [specifier, file] of expected) {
+      const resource = resolved.get(`${entry} ${specifier}`);
+      if (resource && resource !== file) failures.push(`${specifier}: the node ${entry} entry resolved ${resource}, not its import file ${file}`);
+    }
+  }
+  return { failures, checked: specifiers.length };
+}
+
 async function main() {
-  const packages = packageManifests(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  const nodeImports = args.includes('--node-import');
+  const packages = packageManifests(args.filter((arg) => arg !== '--node-import'));
   const specifiers = packages.flatMap(({ manifest }) => exportSpecifiers(manifest));
   if (!specifiers.length) throw new Error('no package exports to resolve');
-  const { failures, resolved } = await resolveAll(specifiers, packages);
+  const web = await resolveAll(specifiers, packages, { target: 'web', entries: Object.keys(ENTRIES) });
+  const node = nodeImports ? await resolveNodeImports(packages) : { failures: [], checked: 0 };
+  const failures = [...web.failures, ...node.failures];
   if (failures.length) {
     console.error(`${failures.length} package exports failed to resolve with webpack:\n`);
     for (const failure of failures) console.error(`- ${failure}`);
@@ -119,8 +155,9 @@ async function main() {
   }
   console.log(
     `${specifiers.length} exports of ${packages.length} packages resolve with webpack ` +
-      `(${resolved} static, import() and require.resolveWeak references).`
+      `(${web.resolved.size} static, import() and require.resolveWeak references).`
   );
+  if (nodeImports) console.log(`${node.checked} exports resolve to their import file for a node target.`);
 }
 
 const invoked = process.argv[1] ? realpathSync(process.argv[1]) : null;

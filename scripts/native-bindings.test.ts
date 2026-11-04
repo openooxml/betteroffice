@@ -544,7 +544,7 @@ describe('native package release wiring', () => {
     expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs\n');
     expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs --keep-alive');
     expect(smoke.run).toContain('bun scripts/worker-bundling-smoke.mjs');
-    expect(smoke.run).toContain('node scripts/check-webpack-exports.mjs $(node scripts/native-bindings.mjs --paths)');
+    expect(smoke.run).toContain('node scripts/check-webpack-exports.mjs --node-import $(node scripts/native-bindings.mjs --paths)');
     expect(smoke.run).toContain('\ntimeout 300 bun scripts/node-worker-sessions-smoke.mjs\n');
     expect(smoke.run).toContain('\ntimeout 300 deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi scripts/node-worker-sessions-smoke.mjs\n');
     expect(smoke.run).not.toMatch(/(?:^|\n)(?:bun|deno run)[^\n]*node-worker-sessions-smoke/);
