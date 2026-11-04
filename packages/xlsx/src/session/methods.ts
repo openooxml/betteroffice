@@ -190,7 +190,10 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
   sheets(): WorkbookSheetSummary[];
   calculationStatus(): CalculationStatus;
   renderPng(target: XlsxPngTarget, options?: WorkbookPngOptions): ArrayBuffer;
-  /** The fonts `renderPng` would paint for the same target, so a caller can supply their faces. */
+  /**
+   * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+   * @internal
+   */
   renderPngFonts(target: XlsxPngTarget, options?: WorkbookPngOptions): XlsxPngFont[];
   exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
   exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;

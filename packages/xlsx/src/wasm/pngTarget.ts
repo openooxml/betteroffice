@@ -25,7 +25,10 @@ export interface XlsxFontFace {
   bytes: Uint8Array;
 }
 
-/** A family and style a PNG export paints, for callers that supply faces. */
+/**
+ * A family and style a PNG export paints, for callers that supply faces.
+ * @internal
+ */
 export interface XlsxPngFont {
   family: string;
   bold: boolean;

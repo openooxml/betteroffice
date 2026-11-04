@@ -626,7 +626,10 @@ export interface WorkbookHandle extends CollaborationReplica {
    * `@betteroffice/xlsx-native`.
    */
   renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
-  /** The fonts `renderPng` would paint for the same target, so a caller can supply their faces. */
+  /**
+   * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+   * @internal
+   */
   renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
   /** serialize the workbook back to .xlsx bytes. */
   save(): Uint8Array;
