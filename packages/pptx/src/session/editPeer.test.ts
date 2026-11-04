@@ -29,7 +29,7 @@ beforeAll(async () => {
 
 afterAll(restoreFinalizationRegistry);
 
-async function setup() {
+async function setup(bytes = source) {
   const pair = createInProcessPair();
   const calls: { method: string; args: unknown[] }[] = [];
   const held: (() => void)[] = [];
@@ -64,7 +64,7 @@ async function setup() {
   } }, { initEditorWasm: async () => module });
   let errors = 0;
   const faces = [{ family: 'Liberation Sans', bytes: font }];
-  const owner = createPresentationEditorSession(source, { wasm: module, clientId: 7201, fonts: faces,
+  const owner = createPresentationEditorSession(bytes, { wasm: module, clientId: 7201, fonts: faces,
     fallbackFonts: faces, onError: () => { errors += 1; } }, {
     ...pair.client,
     onError(listener) { crash = listener; return pair.client.onError(listener); },
@@ -473,4 +473,32 @@ test('worker editor access reads structural proposal strips and frames by ID', a
     await owner.flush();
     expect(access.snapshot()).toEqual(before);
   } finally { await context.owner.dispose(); }
+});
+
+test('in-thread paragraph proposals replay, preview and undo with the worker replica', async () => {
+  const bytes = await readFile(new URL('../../../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url));
+  const context = await setup(bytes);
+  const { access, owner } = context;
+  try {
+    const before = access.snapshot();
+    const shape = before.slides[0]!.shapes[0]!;
+    access.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id, paragraphs: [
+      { alignment: 'ctr', bullet: true, runs: [{ text: 'First', style: { bold: true } }] },
+      { bullet: false, runs: [{ text: 'Second', style: {} }] },
+    ] }]);
+    await owner.flush();
+    expect(access.snapshot()).toEqual(before);
+    expect(access.listProposals()).toHaveLength(1);
+    const proposal = access.listProposals()[0]!;
+    expect(JSON.parse(context.workerDoc.listProposalsJson())).toEqual([proposal]);
+    const diff = access.layoutProposalDiffSlideById(proposal.id, before.slides[0]!.id);
+    expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
+    expect(diff.textChanges.some(change => change.kind === 'deletion')).toBe(true);
+    access.acceptProposal(proposal.id);
+    await equal(context);
+    expect(access.story(shape.textStories[0]!.id).paragraphs).toHaveLength(2);
+    access.undo();
+    await equal(context);
+    expect(access.snapshot()).toEqual(before);
+  } finally { await owner.dispose(); }
 });

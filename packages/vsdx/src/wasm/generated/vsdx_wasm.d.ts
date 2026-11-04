@@ -59,7 +59,6 @@ export class VsdxRenderer {
     [Symbol.dispose](): void;
     clearLayerVisibility(): void;
     exportPdf(document: VsdxDocument): Uint8Array;
-    exportPng(document: VsdxDocument, page_index: number, scale: number): Uint8Array;
     exportSvgJson(document: VsdxDocument): string;
     hitTestJson(x: number, y: number): string;
     layoutPageJson(document: VsdxDocument, page_index: number): string;
@@ -68,6 +67,10 @@ export class VsdxRenderer {
      */
     masterPreviewsJson(document: VsdxDocument): string;
     constructor();
+    /**
+     * The page's display list, leaving the page `hitTestJson` reads untouched.
+     */
+    pageDisplayListJson(document: VsdxDocument, page_index: number): string;
     pageLayersJson(document: VsdxDocument, page_index: number): string;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     setLayerVisible(page_part: string, index: number, visible: boolean): void;
@@ -147,12 +150,12 @@ export interface InitOutput {
     readonly vsdxdocument_version: () => [number, number];
     readonly vsdxrenderer_clearLayerVisibility: (a: number) => void;
     readonly vsdxrenderer_exportPdf: (a: number, b: number) => [number, number, number, number];
-    readonly vsdxrenderer_exportPng: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly vsdxrenderer_exportSvgJson: (a: number, b: number) => [number, number, number, number];
     readonly vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_masterPreviewsJson: (a: number, b: number) => [number, number, number, number];
     readonly vsdxrenderer_new: () => number;
+    readonly vsdxrenderer_pageDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_pageLayersJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly vsdxrenderer_setLayerVisible: (a: number, b: number, c: number, d: number, e: number) => void;

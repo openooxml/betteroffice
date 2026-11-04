@@ -4,10 +4,12 @@ import type {
   ShapeDraft,
   PresetShapeDraft,
   PictureDraft,
+  ShapeFill,
   ShapeRect,
   ShapeSnapshot,
   ShapeStroke,
   SlideDisplayList,
+  TextParagraphDraft,
   TextStyleSnapshot,
 } from './types';
 
@@ -42,6 +44,7 @@ export type ProposalEdit =
       end: number;
       alignment: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
     }
+  | { type: 'setStoryParagraphs'; storyId: string; paragraphs: TextParagraphDraft[] }
   | { type: 'setShapeRect'; slideId: string; shapeId: string; rect: ShapeRect }
   | {
       type: 'setShapeFill';
@@ -61,6 +64,8 @@ export type ProposalEdit =
       shapeId: string;
       adjustments: Record<string, number>;
     }
+  | { type: 'setSlideLayout'; slideId: string; layoutPartPath: string; mapping?: [string, number][] }
+  | { type: 'setSlideBackground'; slideId: string; background: ShapeFill | null }
   | { type: 'setSlideNotes'; slideId: string; text: string };
 
 export interface ProposalStripEntry {

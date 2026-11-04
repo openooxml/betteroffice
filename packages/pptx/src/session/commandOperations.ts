@@ -70,10 +70,13 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
       ['replaceText', ['storyId', 'start', 'end', 'text', 'style']],
       ['formatText', ['storyId', 'start', 'end', 'patch']],
       ['setParagraphAlignment', ['storyId', 'start', 'end', 'alignment']],
+      ['setStoryParagraphs', ['storyId', 'paragraphs']],
       ['setShapeRect', ['slideId', 'shapeId', 'rect']],
       ['setShapeFill', ['slideId', 'shapeId', 'color']],
       ['setShapeStroke', ['slideId', 'shapeId', 'stroke']],
       ['setShapeAdjust', ['slideId', 'shapeId', 'adjustments']],
+      ['setSlideLayout', ['slideId', 'layoutPartPath', 'mapping']],
+      ['setSlideBackground', ['slideId', 'background']],
       ['setSlideNotes', ['slideId', 'text']],
     ]);
     const onlyKeys = (value: unknown, keys: readonly string[]) => Boolean(value && typeof value === 'object' &&
@@ -112,7 +115,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!content.ok) return null;
     const steps: PptxEditStep[] = [];
     const canonicalEdits: ProposalEdit[] = [];
-    const structural = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape'].includes(edit?.type));
+    const staged = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape', 'setStoryParagraphs', 'setSlideLayout', 'setSlideBackground'].includes(edit?.type));
     for (const candidate of edits) {
       if (!candidate || typeof candidate !== 'object') return null;
       const keys = fields.get(candidate.type);
@@ -126,10 +129,11 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         edit.type === 'setShapeRect' && !onlyKeys(edit.rect, ['x', 'y', 'width', 'height']) ||
         edit.type === 'setShapeStroke' && !onlyKeys(edit.stroke, ['color', 'widthPt'])) return null;
       canonicalEdits.push(edit);
-      if (structural) continue;
+      if (staged) continue;
       if ('storyId' in edit) {
         const story = content.stories.find((story) => story.storyId === edit.storyId);
         if (!story) return null;
+        if (edit.type === 'setStoryParagraphs') return null;
         const target = { kind: 'range' as const, slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: edit.start, end: edit.end };
         if (edit.type === 'replaceText') steps.push({ op: 'replaceText', target, text: edit.text });
         else if (edit.type === 'formatText') {
@@ -141,6 +145,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
       } else {
         if (!['setShapeRect', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'setSlideNotes'].includes(edit.type)) return null;
         if (edit.type === 'addTextBox' || edit.type === 'addShape' || edit.type === 'addPicture' || edit.type === 'removeShape') return null;
+        if (edit.type === 'setSlideLayout' || edit.type === 'setSlideBackground') return null;
         if (edit.type === 'insertSlide' || edit.type === 'duplicateSlide' || edit.type === 'deleteSlide' || edit.type === 'moveSlide') return null;
         const { type, ...fields } = edit;
         const { slideId, ...rest } = fields;
@@ -151,7 +156,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     }
     if (JSON.stringify(canonicalEdits.map(edit => edit.type === 'addPicture'
       ? { ...edit, draft: { ...edit.draft, mediaBase64: undefined } } : edit)).length > 1e6) return null;
-    if (structural) {
+    if (staged) {
       const context = presentationContexts.get(handle);
       if (!context || typeof context.doc.validateProposalJson !== 'function') return null;
       try { context.jsonWasmCall(() => context.doc.validateProposalJson(JSON.stringify({ agentId: agent, note, edits: canonicalEdits }))); }

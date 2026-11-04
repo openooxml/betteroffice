@@ -593,3 +593,78 @@ test('shape proposal refs, deleted frames, and picture cap match wasm', () => {
     for (const doc of docs) doc.free();
   }
 });
+
+test('paragraph proposal JSON, preview, acceptance and undo match wasm', async () => {
+  const fixture = new Uint8Array(readFileSync(new URL('../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url)));
+  const docs = [wasm.PptxDocument.openCollaborative(fixture, 9), native.PptxDocument.openCollaborative(fixture, 9)];
+  const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+  try {
+    const before = docs.map(doc => JSON.parse(doc.snapshotJson()));
+    const slide = before[0].slides[0];
+    const request = JSON.stringify({ agentId: 'parity', edits: [
+      { type: 'setStoryParagraphs', storyId: slide.shapes[0].textStories[0].id, paragraphs: [
+        { alignment: 'ctr', bullet: true, runs: [{ text: 'First', style: { bold: true } }] },
+        { alignment: 'r', bullet: false, runs: [{ text: 'Second', style: {} }] },
+      ] },
+      { type: 'addTextBox', ref: 'box', slideId: slide.id, draft: { name: 'Box', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'setStoryParagraphs', storyId: '@box', paragraphs: [{ bullet: true, runs: [{ text: 'From ref', style: {} }] }] },
+    ] });
+    expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+    const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+    expect(proposals[0]).toEqual(proposals[1]);
+    const diffs = renderers.map((renderer, index) => JSON.parse(renderer.layoutProposalDiffSlideJson(docs[index], proposals[index].id, 0)));
+    expect(diffs[0]).toEqual(diffs[1]);
+    expect(diffs[0].textChanges.some((change: { kind: string }) => change.kind === 'deletion')).toBe(true);
+    expect(diffs[0].shapeChanges).toContainEqual({ shapeId: slide.shapes[0].id, kind: 'changed' });
+    for (const [index, doc] of docs.entries()) {
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+      doc.acceptProposalJson(JSON.stringify({ id: proposals[index].id }));
+    }
+    expect(JSON.parse(docs[0].snapshotJson())).toEqual(JSON.parse(docs[1].snapshotJson()));
+    await expectSavedPartsEqual(docs[0].saveBytes(), docs[1].saveBytes());
+    for (const [index, doc] of docs.entries()) {
+      doc.undoJson();
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+    }
+    const invalid = JSON.stringify({ agentId: 'parity', edits: [{ type: 'setStoryParagraphs', storyId: slide.shapes[0].textStories[0].id, paragraphs: [] }] });
+    expectThrownParity(() => docs[0].proposeJson(invalid), () => docs[1].proposeJson(invalid));
+  } finally {
+    for (const renderer of renderers) renderer.free();
+    for (const doc of docs) doc.free();
+  }
+});
+
+test.each(['setSlideLayout', 'setSlideBackground'] as const)('%s proposal JSON, preview and undo match wasm', async type => {
+  const fixture = new Uint8Array(readFileSync(new URL('../../crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx', import.meta.url)));
+  const docs = [wasm.PptxDocument.openCollaborative(fixture, 10), native.PptxDocument.openCollaborative(fixture, 10)];
+  const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+  try {
+    const before = docs.map(doc => JSON.parse(doc.snapshotJson()));
+    const slide = before[0].slides[0];
+    const edit = type === 'setSlideLayout'
+      ? { type, slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml', mapping: [[slide.shapes[0].id, 8]] }
+      : { type, slideId: slide.id, background: { type: 'solid', color: { rgb: '123456' } } };
+    const request = JSON.stringify({ agentId: 'parity', edits: [edit] });
+    expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+    const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+    expect(proposals[0]).toEqual(proposals[1]);
+    const diffs = renderers.map((renderer, index) => JSON.parse(renderer.layoutProposalDiffSlideJson(docs[index], proposals[index].id, 0)));
+    expect(diffs[0]).toEqual(diffs[1]);
+    expect(JSON.stringify(diffs[0].frame)).toContain('#123456');
+    for (const [index, doc] of docs.entries()) {
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+      expect(JSON.parse(doc.proposalSlideStripJson(proposals[index].id))[0].status).toBe('changed');
+      const byId = JSON.parse(renderers[index].layoutProposalDiffSlideByIdJson(doc, proposals[index].id, slide.id));
+      expect(byId.frame).toEqual(diffs[index].frame);
+      doc.acceptProposalJson(JSON.stringify({ id: proposals[index].id }));
+    }
+    await expectSavedPartsEqual(docs[0].saveBytes(), docs[1].saveBytes());
+    for (const [index, doc] of docs.entries()) {
+      doc.undoJson();
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+    }
+  } finally {
+    for (const renderer of renderers) renderer.free();
+    for (const doc of docs) doc.free();
+  }
+});

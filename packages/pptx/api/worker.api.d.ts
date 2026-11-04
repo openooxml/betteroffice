@@ -315,7 +315,7 @@ export type PptxFindResult = {
 } | PptxEditRefusal;
 
 // ---- proposals.d.ts ----
-import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextStyleSnapshot } from './types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextParagraphDraft, TextStyleSnapshot } from './types';
 export type ProposalEdit = {
     type: 'addTextBox';
     ref?: string;
@@ -372,6 +372,10 @@ export type ProposalEdit = {
     end: number;
     alignment: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
 } | {
+    type: 'setStoryParagraphs';
+    storyId: string;
+    paragraphs: TextParagraphDraft[];
+} | {
     type: 'setShapeRect';
     slideId: string;
     shapeId: string;
@@ -393,6 +397,15 @@ export type ProposalEdit = {
     slideId: string;
     shapeId: string;
     adjustments: Record<string, number>;
+} | {
+    type: 'setSlideLayout';
+    slideId: string;
+    layoutPartPath: string;
+    mapping?: [string, number][];
+} | {
+    type: 'setSlideBackground';
+    slideId: string;
+    background: ShapeFill | null;
 } | {
     type: 'setSlideNotes';
     slideId: string;
@@ -3648,7 +3661,7 @@ export interface UpdateEvent {
 }
 export interface TextParagraphDraft {
     bullet?: boolean;
-    alignment?: ParagraphAlignment | null;
+    alignment?: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
     runs: Array<{
         text: string;
         style?: TextStyle;

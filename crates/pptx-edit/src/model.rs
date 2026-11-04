@@ -539,7 +539,7 @@ fn legal_xml_character(character: char) -> bool {
         || ('\u{10000}'..='\u{10ffff}').contains(&character)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextParagraphDraft {
     pub alignment: Option<String>,
@@ -548,7 +548,7 @@ pub struct TextParagraphDraft {
     pub runs: Vec<TextRunDraft>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextRunDraft {
     pub text: String,

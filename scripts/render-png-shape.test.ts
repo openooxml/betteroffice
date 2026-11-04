@@ -82,7 +82,6 @@ const PENDING = [
   'docx native renderPng',
   'pptx js',
   'pptx native renderPng',
-  'vsdx js',
   'vsdx native renderPng',
 ];
 

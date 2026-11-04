@@ -52,7 +52,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
 
   overview() {
     const read = this.content();
-    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements and slide structure', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, office_outline with story comments for discussion IDs and office_read for full comment text, pptx_edit with the current version for atomic edits including add_comment/reply_comment/resolve_comment, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
+    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements and slide structure; shape edits and whole-story paragraph rewrites with bullets, alignment and styled runs; slide layout and background proposals with @ref targets', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, office_outline with story comments for discussion IDs and office_read for full comment text, pptx_edit with the current version for atomic edits including add_comment/reply_comment/resolve_comment, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
   }
 
   list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
@@ -117,7 +117,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const version = this.currentVersion();
     const changes: SlideTextChange[] = [];
     const steps: PptxEditStep[] = [];
-    const structural = input.edits.some(edit => 'type' in edit);
+    const typed = input.edits.some(edit => 'type' in edit);
     const proposalEdits: ProposalEdit[] = [];
     const matchIndices = new Set<number>();
     for (const edit of input.edits) {
@@ -138,7 +138,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       changes.push({ ref: hit.ref, slide: hit.slide, story: hit.target.storyId, start: hit.start - hit.paragraphStart, oldText: hit.text, newText: edit.newText });
       steps.push({ op: 'replaceText', target: { kind: 'range', ...hit.target, start: hit.start, end: hit.start + hit.text.length }, text: edit.newText, expect: { text: hit.text } });
     }
-    if (structural) {
+    if (typed) {
       if (steps.length) this.validate(steps, version);
       const ranges = new Map<number, { storyId: string; start: number; end: number }>();
       for (const [index, edit] of proposalEdits.entries()) {

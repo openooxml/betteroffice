@@ -671,7 +671,7 @@ export class TextMeasureFontRegistry {
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
-      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes, face, loader));
+      pending = Promise.resolve().then(() => (loader.readOnlyBytes ?? loader)()).then((bytes) => this.registerBuffer(bytes, face, loader));
       evictFailedPromise(ids, loader, pending, () => false);
       ids.set(loader, pending);
     }

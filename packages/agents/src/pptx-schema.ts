@@ -67,11 +67,35 @@ export const pptxBatchSchema = z.object({ version: z.string().min(1).max(256), e
 export type PptxAgentEdit = z.infer<typeof pptxEditSchema>;
 export type PptxAgentBatch = z.infer<typeof pptxBatchSchema>;
 
+const proposalColor = z.object({
+  rgb: z.string().regex(/^[0-9a-fA-F]{6}$/).optional(), themeColor: id.optional(),
+  themeTint: z.string().optional(), themeShade: z.string().optional(), auto: z.boolean().optional(),
+  luminanceModulation: z.number().finite().optional(), luminanceOffset: z.number().finite().optional(),
+  saturationModulation: z.number().finite().optional(), alpha: z.number().finite().optional(),
+  transforms: z.array(z.union([
+    z.object({ kind: z.enum(['tint', 'shade', 'lum', 'lumMod', 'lumOff', 'sat', 'satMod', 'satOff', 'hue', 'hueMod', 'hueOff',
+      'red', 'redMod', 'redOff', 'green', 'greenMod', 'greenOff', 'blue', 'blueMod', 'blueOff', 'alpha', 'alphaMod', 'alphaOff']), value: z.number().finite() }).strict(),
+    z.object({ kind: z.enum(['comp', 'inv', 'gray', 'gamma', 'invGamma']) }).strict(),
+  ])).optional(),
+}).strict();
+const proposalBackground = z.object({
+  type: z.enum(['none', 'solid', 'gradient']), color: proposalColor.optional(),
+  gradient: z.object({ type: id, angle: z.number().finite().optional(),
+    stops: z.array(z.object({ position: z.number().finite(), color: proposalColor }).strict()),
+  }).strict().optional(),
+}).strict();
+
 export const pptxProposalSlideEditSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('insertSlide'), ref: id.optional(), afterSlideId: id.nullable(), layoutPartPath: id.optional() }).strict(),
   z.object({ type: z.literal('duplicateSlide'), ref: id.optional(), slideId: id, afterSlideId: id.nullable().optional() }).strict(),
   z.object({ type: z.literal('deleteSlide'), slideId: id }).strict(),
   z.object({ type: z.literal('moveSlide'), slideId: id, afterSlideId: id.nullable() }).strict(),
+  z.object({ type: z.literal('setSlideLayout'), slideId: id.describe('Slide ID or @ref of a slide created earlier in this proposal.'), layoutPartPath: id,
+    mapping: z.array(z.tuple([id, z.number().int().nonnegative().max(4294967295)])).optional().describe('Pairs of slide placeholder shape ID and target layout placeholder numeric ID.'),
+  }).strict(),
+  z.object({ type: z.literal('setSlideBackground'), slideId: id.describe('Slide ID or @ref of a slide created earlier in this proposal.'),
+    background: proposalBackground.nullable().describe('Solid or gradient fill with RGB hex without # or theme colors. Null removes the slide background and inherits from the layout or master.'),
+  }).strict(),
 ]);
 export type PptxProposalSlideEdit = z.infer<typeof pptxProposalSlideEditSchema>;
 
@@ -92,6 +116,11 @@ export const pptxProposalEditSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('replaceText'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text, style: pptxRunStyleSchema.nullable().optional() }).strict(),
   z.object({ type: z.literal('formatText'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), patch: pptxRunStyleSchema }).strict(),
   z.object({ type: z.literal('setParagraphAlignment'), storyId: proposalStory, start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), alignment: z.enum(['l', 'ctr', 'r', 'just', 'justLow', 'dist', 'thaiDist']).nullable() }).strict(),
+  z.object({ type: z.literal('setStoryParagraphs'), storyId: proposalStory, paragraphs: z.array(z.object({
+    alignment: z.enum(['l', 'ctr', 'r', 'just', 'justLow', 'dist', 'thaiDist']).nullable().optional(),
+    bullet: z.boolean().optional().describe('true adds a bullet, false removes it; omitted preserves the existing bullet.'),
+    runs: z.array(z.object({ text, style: pptxRunStyleSchema.optional() }).strict()).max(64),
+  }).strict()).min(1).max(100).refine(paragraphs => paragraphs.reduce((total, paragraph) => total + paragraph.runs.reduce((length, run) => length + run.text.length, 0), 0) <= 16000, 'Text exceeds the 16000-character limit.') }).strict(),
   z.object({ type: z.literal('setShapeRect'), slideId: id, shapeId: id, rect: proposalRect }).strict(),
   z.object({ type: z.literal('setShapeFill'), slideId: id, shapeId: id, color: color.nullable() }).strict(),
   z.object({ type: z.literal('setShapeStroke'), slideId: id, shapeId: id, stroke: z.object({ color: color.nullable().optional(), widthPt: z.number().nonnegative().nullable().optional() }).strict() }).strict(),

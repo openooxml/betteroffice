@@ -156,6 +156,8 @@
     "stalePreview": "此预览使用更新后的幻灯片，应用后将覆盖已更改的目标",
     "geometry": "位置和大小 (x, y, 宽度, 高度)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "布局已更改",
+    "backgroundChanged": "背景已更改",
     "appearance": "外观或文本格式已更改",
     "changedAgain": "目标再次发生了变化，请在应用前查看更新后的预览",
     "canvasTitle": "此幻灯片上的更改",

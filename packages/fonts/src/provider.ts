@@ -76,10 +76,8 @@ export function fontProvider(
     let loader = loaders.get(key);
     if (loader === undefined) {
       const coverage = knownCoverage(face.file);
-      loader = Object.assign(() => loadBytes(face), options, coverage === undefined ? undefined : {
-        coverage,
-        ...(readBytes && { readOnlyBytes: () => readBytes(face) }),
-      });
+      loader = Object.assign(() => loadBytes(face), options, coverage === undefined ? undefined : { coverage },
+        readBytes && { readOnlyBytes: () => readBytes(face) });
       loaders.set(key, loader);
     }
     return loader;
