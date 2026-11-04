@@ -2166,7 +2166,7 @@ describe('XlsxEditor commands', () => {
         const exported: unknown[] = [];
         const handle = editor.api().handle;
         const renderPng = handle.renderPng;
-        handle.renderPng = (target, options) => {
+        handle.renderPng = (target) => {
           exported.push({ target, input: handle.cell(0, 2, 0).input });
           return Promise.resolve(Uint8Array.of(137, 80, 78, 71));
         };
