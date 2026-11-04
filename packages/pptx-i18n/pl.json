@@ -156,6 +156,8 @@
     "stalePreview": "Ten podgląd używa zaktualizowanego slajdu. Zastosowanie nadpisze zmienione elementy docelowe.",
     "geometry": "Położenie i rozmiar (x, y, szerokość, wysokość)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Zmieniono układ",
+    "backgroundChanged": "Zmieniono tło",
     "appearance": "Zmieniono wygląd lub formatowanie tekstu",
     "changedAgain": "Element docelowy zmienił się ponownie. Przed zastosowaniem sprawdź odświeżony podgląd.",
     "canvasTitle": "Zmiany na tym slajdzie",
@@ -171,6 +173,8 @@
     "loadingDiff": "Ładowanie zmian…",
     "slideStrip": null,
     "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
     "insertedSlide": null,
     "deletedSlide": null,
     "movedFrom": null

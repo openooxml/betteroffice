@@ -43,7 +43,7 @@ const tick = async (times = 5) => {
   for (let index = 0; index < times; index += 1) await Promise.resolve();
 };
 
-function setup() {
+function setup(validate?: (plugin: Plugin) => unknown) {
   const state = { version: 'v1' };
   const errors: PluginError<string>[] = [];
   const runtime = createPluginRuntime<Plugin, Context, Event, Snapshot, 'render' | 'command'>({
@@ -68,6 +68,7 @@ function setup() {
     report: (error) => {
       errors.push(error);
     },
+    validate,
   });
   const change = (version: string) => {
     state.version = version;
@@ -517,6 +518,21 @@ describe('plugin runtime lifecycle', () => {
     await tick();
     expect(runtime.activations()).not.toBe(first);
     expect(runtime.activations()[0].context).not.toBe(first[0].context);
+  });
+
+  test('registered holds only the definitions setPlugins accepted', () => {
+    const broken = new WeakSet<Plugin>();
+    const { runtime, errors } = setup((plugin) => (broken.has(plugin) ? new Error('broken') : null));
+    const accepted = recorder('x').plugin;
+    const rejected = recorder('x').plugin;
+    broken.add(rejected);
+    runtime.setPlugins([accepted, rejected, recorder('twin').plugin, recorder('twin').plugin]);
+    expect([...runtime.registered().keys()]).toEqual(['x']);
+    expect(runtime.registered().get('x')).toBe(accepted);
+    expect(errors.map((error) => error.pluginId).sort()).toEqual(['twin', 'x']);
+    const replacement = recorder('x').plugin;
+    runtime.setPlugins([replacement]);
+    expect(runtime.registered().get('x')).toBe(replacement);
   });
 });
 

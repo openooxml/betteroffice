@@ -97,6 +97,29 @@ struct CellEditInput {
 }
 
 #[derive(Deserialize)]
+struct FormulaMove {
+    formula: String,
+    from: CellRef,
+    to: CellRef,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum MovedFormula {
+    Moved { ok: bool, formula: String },
+    Refused { ok: bool, error: &'static str },
+}
+
+/// A formula, without its `=`, copied from `origin` to `cell` as a paste moves it.
+fn moved_formula(formula: &str, origin: CellRef, cell: CellRef) -> Result<String, &'static str> {
+    if origin.row >= betteroffice_xlsx::MAX_ROWS || origin.col >= betteroffice_xlsx::MAX_COLS {
+        return Err("bad edit args: copy origin is outside the grid");
+    }
+    betteroffice_xlsx::translate_formula(formula, origin, cell)
+        .map_err(|_| "formula exceeds the length limit")
+}
+
+#[derive(Deserialize)]
 struct OpsArgs {
     ops: Vec<Op>,
 }
@@ -580,7 +603,13 @@ impl Session {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
         self.workbook
-            .render_png(&viewport)
+            .render_png(
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet: self.workbook.active_sheet(),
+                    viewport,
+                },
+                &RenderOptions::default(),
+            )
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
@@ -607,8 +636,15 @@ impl Session {
     #[cfg(feature = "raster")]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, String> {
         let options = range_png_options(args)?;
-        self.workbook
-            .render_sheet(self.workbook.active_sheet(), &options)
+        let sheet = self.workbook.active_sheet();
+        let rendered = match options.range {
+            Some(range) => self.workbook.render_png(
+                betteroffice_xlsx::PngTarget::Range { sheet, range },
+                &options,
+            ),
+            None => self.workbook.render_sheet(sheet, &options),
+        };
+        rendered
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
@@ -731,14 +767,7 @@ impl Session {
                 let cell = CellRef::new(edit.row, edit.col);
                 let input = match (edit.copy_from, edit.input.strip_prefix('=')) {
                     (Some(origin), Some(formula)) => {
-                        if origin.row >= betteroffice_xlsx::MAX_ROWS
-                            || origin.col >= betteroffice_xlsx::MAX_COLS
-                        {
-                            return Err("bad edit args: copy origin is outside the grid".to_owned());
-                        }
-                        let formula = betteroffice_xlsx::translate_formula(formula, origin, cell)
-                            .map_err(|_| "formula exceeds the length limit".to_owned())?;
-                        format!("={formula}")
+                        format!("={}", moved_formula(formula, origin, cell)?)
                     }
                     _ => edit.input,
                 };
@@ -754,6 +783,23 @@ impl Session {
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
+    }
+
+    /// Formulas, without their `=`, moved from one cell to another as a paste moves them: per
+    /// item `{ ok: true, formula }`, or `{ ok: false, error }` when the paste would refuse it.
+    pub fn translate_formulas_json(args: &str) -> Result<String, String> {
+        let moves: Vec<FormulaMove> =
+            serde_json::from_str(args).map_err(|error| format!("bad translate args: {error}"))?;
+        let moved: Vec<MovedFormula> = moves
+            .into_iter()
+            .map(
+                |item| match moved_formula(&item.formula, item.from, item.to) {
+                    Ok(formula) => MovedFormula::Moved { ok: true, formula },
+                    Err(error) => MovedFormula::Refused { ok: false, error },
+                },
+            )
+            .collect();
+        serde_json::to_string(&moved).map_err(|error| error.to_string())
     }
 
     pub fn move_range_json(

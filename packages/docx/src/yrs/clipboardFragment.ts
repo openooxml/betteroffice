@@ -158,7 +158,7 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
         (fontFamily.hAnsi === undefined || typeof fontFamily.hAnsi === 'string'))) return false;
     const other = format.other;
     if (other !== undefined &&
-      !(plainObject(other) && !('ins' in other) && !('del' in other) && !('hyperlink' in other))) return false;
+      !(plainObject(other) && !('ins' in other) && !('del' in other) && !('hyperlink' in other) && !('rPrChange' in other))) return false;
     return true;
   };
   const segment = (entry: unknown, depth: number): boolean => {

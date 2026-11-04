@@ -51,7 +51,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
       fade = setTimeout(() => update(false), 600);
     };
     update();
-    const unsubscribe = controller.subscribe(() => update());
+    const unsubscribe = controller.subscribe(() => update(null));
     element.addEventListener('scroll', scroll, { passive: true });
     window.addEventListener('resize', resize);
     return () => { unsubscribe(); clearTimeout(fade); if (frame !== null) cancelAnimationFrame(frame); element.removeEventListener('scroll', scroll); window.removeEventListener('resize', resize); };

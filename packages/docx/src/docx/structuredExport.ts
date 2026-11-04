@@ -79,8 +79,11 @@ export async function renderDocxMarkdown(
   return unwrap(wasm.renderDocxMarkdownJson(JSON.stringify(content), JSON.stringify(options)));
 }
 
-/** The render environment the editor lays `document` out with, with `overrides` applied. */
-function renderEnvironment(
+/**
+ * The render environment the editor lays `document` out with, with `overrides` applied.
+ * @internal
+ */
+export function renderEnvironment(
   document: Document,
   overrides: DocxHeadlessLayoutOptions['renderEnvironment']
 ): YrsRenderEnv {

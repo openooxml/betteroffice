@@ -4,7 +4,7 @@ import JSZip from 'jszip';
 const wordNamespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const root = '[data-docx-worker-editor]';
-const caretSelector = `${root} div[aria-hidden="true"][style*="currentcolor" i]`;
+const caretSelector = `${root} [data-docx-caret]`;
 const selectionSelector = `${root} div[aria-hidden="true"][style*="rgba(59, 130, 246"]`;
 const input = (page: Page) => page.locator('.paged-editor__input');
 const compactPage = { width: 7200, height: 4320, margin: 720 };

@@ -5,12 +5,26 @@ use betteroffice_vsdx::{Diagram as CoreDiagram, Error as CoreError};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyMemoryView};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyMemoryView};
 
 create_exception!(betteroffice_vsdx, VsdxError, PyException);
 create_exception!(betteroffice_vsdx, ParseError, VsdxError);
 create_exception!(betteroffice_vsdx, RangeError, VsdxError);
 create_exception!(betteroffice_vsdx, RenderError, VsdxError);
+
+fn png_target_index(target: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let invalid =
+        || RangeError::new_err("target must be a dict containing only a nonnegative page index");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    let index = target.get_item("page")?.ok_or_else(invalid)?;
+    if index.is_instance_of::<PyBool>() {
+        return Err(invalid());
+    }
+    index.extract::<usize>().map_err(|_| invalid())
+}
 
 fn map_error(error: CoreError) -> PyErr {
     match error {
@@ -18,6 +32,43 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::Resolve(error) => RenderError::new_err(error.to_string()),
         CoreError::Render(reason) => RenderError::new_err(reason),
         CoreError::Policy(error) => RangeError::new_err(error),
+    }
+}
+
+#[pyclass(module = "betteroffice_vsdx", name = "Png", frozen)]
+pub struct PyPng {
+    data: Vec<u8>,
+    #[pyo3(get)]
+    width: u32,
+    #[pyo3(get)]
+    height: u32,
+    #[pyo3(get)]
+    skipped_images: usize,
+}
+
+#[pymethods]
+impl PyPng {
+    #[getter]
+    fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.data)
+    }
+
+    fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        py.detach(|| fs::write(&path, &self.data))
+            .map_err(|error| python_common::map_io_error(&error, &path))
+    }
+
+    fn __len__(&self) -> usize {
+        self.data.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Png(width={}, height={}, bytes={})",
+            self.width,
+            self.height,
+            self.data.len()
+        )
     }
 }
 
@@ -211,6 +262,23 @@ impl PyDiagram {
         })
     }
 
+    #[pyo3(signature = (target, *, scale = 1.0))]
+    fn render_png(&self, py: Python<'_>, target: &Bound<'_, PyAny>, scale: f32) -> PyResult<PyPng> {
+        let target = betteroffice_vsdx::PngTarget {
+            page: png_target_index(target)?,
+        };
+        let options = betteroffice_vsdx::RenderOptions { scale };
+        let rendered = py
+            .detach(|| self.diagram.render_png(target, &options))
+            .map_err(map_error)?;
+        Ok(PyPng {
+            data: rendered.bytes,
+            width: rendered.width,
+            height: rendered.height,
+            skipped_images: rendered.skipped_images,
+        })
+    }
+
     #[getter]
     fn pages(&self) -> Vec<PyPage> {
         let package = self.diagram.package();
@@ -263,6 +331,7 @@ fn _betteroffice_vsdx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyDiagram>()?;
+    module.add_class::<PyPng>()?;
     module.add_class::<PyPage>()?;
     module.add_class::<PyShape>()?;
     module.add_class::<PyCell>()?;

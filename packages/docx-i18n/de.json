@@ -528,6 +528,7 @@
     "paragraphMarkInserted": "Absatzmarke eingefügt",
     "paragraphMarkDeleted": "Absatzmarke gelöscht",
     "paragraphPropertiesChanged": "Absatzeigenschaften geändert",
+    "runPropertiesChanged": "Zeichenformatierung geändert",
     "rowInserted": "Zeile eingefügt",
     "rowDeleted": "Zeile gelöscht",
     "rowPropertiesChanged": "Zeileneigenschaften geändert",

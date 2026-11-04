@@ -6,6 +6,7 @@ import type { CollaborationAwareness } from '@betteroffice/xlsx/collaboration';
 import { useTranslation } from '../i18n';
 import { expandRangeToMergedCells, scaledRect } from '../viewer/sessionGeometry';
 import { PeerlessWorkerCellInput, usePeerlessReadOnly } from './PeerlessWorkerInputs';
+import { cellEditorColors } from '../viewer/cellEditorColors';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerDraftController } from './WorkerDraftController';
 import { WorkerPresentationStore, useWorkerPresentation } from './WorkerPresentationStore';
@@ -53,6 +54,8 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   const chartRect = selectedChart ? painted?.displayList.charts?.find((chart) => chart.id === selectedChart.id)?.rect : null;
   const rect = useCallback((row: number, col: number, sheet: number) =>
     painted?.geometry && painted.request.sheet === sheet ? cellRect(painted.geometry, row, col) : null, [painted]);
+  const colors = useCallback((sheet: number, bounds: { x: number; y: number; w: number; h: number }) =>
+    cellEditorColors(painted?.request.sheet === sheet ? painted.displayList : null, bounds), [painted]);
   const outline = (bounds: NonNullable<typeof selectionRect>, border: string, background?: string): CSSProperties => {
     const scaled = scaledRect(bounds, scale);
     return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
@@ -65,7 +68,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
     {focusRect && !selectedChart && <div style={outline(focusRect, '2px solid #217346')} />}
     {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
       style={{ ...outline(chartRect, '2px solid #217346'), transform: `translate(${chartOffset?.x ?? 0}px, ${chartOffset?.y ?? 0}px)` }} />}
-    <PeerlessWorkerCellInput controller={controller} zoom={scale} disabled={unavailable} rect={rect} />
+    <PeerlessWorkerCellInput controller={controller} zoom={scale} disabled={unavailable} rect={rect} colors={colors} />
   </div>;
 });
 

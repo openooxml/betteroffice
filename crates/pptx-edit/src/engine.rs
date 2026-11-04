@@ -1514,6 +1514,11 @@ fn proposal_error(error: crate::ProposalError) -> EngineError {
             })
             .to_string(),
         ),
+        crate::ProposalError::PictureMediaTooLarge { total_bytes, limit_bytes } => EngineError::message(
+            serde_json::json!({
+                "code": "proposalPictureMediaTooLarge", "totalBytes": total_bytes, "limitBytes": limit_bytes,
+            }).to_string(),
+        ),
         other => message_error(other),
     }
 }

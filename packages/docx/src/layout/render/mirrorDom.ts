@@ -1673,10 +1673,11 @@ function applyDocAttrs(el: HTMLElement, p: DocAttrs): void {
     el.dataset.changeAuthor = p.revision.author;
     el.dataset.changeDate = p.revision.date;
     el.dataset.revisionId = p.revision.revisionId;
-    el.classList.add(p.revision.kind === 'ins' ? 'docx-insertion' : 'docx-deletion');
+    el.classList.add(p.revision.kind === 'format' ? 'docx-format-change'
+      : p.revision.kind === 'ins' ? 'docx-insertion' : 'docx-deletion');
     // ARIA 1.1 insertion/deletion roles (the ins/del element semantics) so
     // tracked changes are announced; never clobber a stronger role (img)
-    if (!el.hasAttribute('role')) {
+    if (!el.hasAttribute('role') && p.revision.kind !== 'format') {
       el.setAttribute('role', p.revision.kind === 'ins' ? 'insertion' : 'deletion');
     }
     const description = [p.revision.author, p.revision.date].filter(Boolean).join(', ');

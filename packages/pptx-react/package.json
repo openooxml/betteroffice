@@ -40,6 +40,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
+    "@betteroffice/fonts": "workspace:^",
     "@betteroffice/pptx": "workspace:*",
     "@betteroffice/pptx-i18n": "workspace:*"
   },

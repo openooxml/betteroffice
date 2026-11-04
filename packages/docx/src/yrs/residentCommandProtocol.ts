@@ -303,7 +303,7 @@ export interface DocxCommandPayloads {
   openPart: DocxPartTarget;
   ensurePart: DocxPartTarget;
   removePart: DocxPartTarget;
-  setHyperlink: { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; displayText?: string; expectVersion: string };
+  setHyperlink: DocxSelectionIntent & { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; displayText?: string; expectVersion: string };
   setObjectProperties: { handle: string; patch: Record<string, unknown>; expectVersion: string };
   setSectionProperties: { section: string; patch: Partial<SectionProperties>; expectVersion: string };
   setNoteProperties: { section: string; footnotePr: FootnoteProperties; endnotePr: EndnoteProperties; expectVersion: string };

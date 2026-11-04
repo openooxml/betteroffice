@@ -14,6 +14,16 @@ import { LEGACY_SYNC_API } from './runtimeOptions';
 import { warnPptxEngine } from './engineWarnings';
 import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 import { PresentationFailure } from './components/PresentationFailure';
+import type { PptxBundledFont, ResolvedFontProps } from './bundledFonts';
+
+export const pptxBundledFontsLoader = {
+  load: () => {
+    void import('./bundledFontsLoad').catch(() => {});
+    return import('./bundledFonts');
+  },
+};
+type BundledFontsModule = Awaited<ReturnType<typeof pptxBundledFontsLoader.load>>;
+type BundledFontsChunk = { module?: BundledFontsModule; error?: Error };
 
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 export const pptxLegacyEditorLoader = { load: () => import('./PptxLegacyEditorSession') };
@@ -156,7 +166,7 @@ export interface PptxEditorCollaborationOptions {
 export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   file?: Uint8Array;
   /** Font faces; equivalent inline arrays do not reopen the presentation. */
-  fonts: ReadonlyArray<PptxFontFace>;
+  fonts: ReadonlyArray<PptxFontFace | PptxBundledFont>;
   clientId?: number;
   /** Uses the deprecated in-thread engine when set. */
   collaboration?: PptxEditorCollaborationOptions;
@@ -239,7 +249,7 @@ export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
   onReady?: (api: PptxAsyncEditorApi) => void | (() => void);
 };
 
-export type PptxAsyncEditorInternalProps = Omit<PptxAsyncEditorProps, 'file'> & { file?: Uint8Array };
+export type PptxAsyncEditorInternalProps = ResolvedFontProps<Omit<PptxAsyncEditorProps, 'file'>> & { file?: Uint8Array };
 
 /** @deprecated Removed in 0.6.0. Use PptxAsyncEditorProps. */
 export type PptxLegacyEditorProps = PptxInThreadEditorProps & {
@@ -274,24 +284,62 @@ export function PptxEditor(props: WorkerEditorSessionProps & { plugins: readonly
 export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
 export function PptxEditor(props: WorkerSessionProps): JSX.Element;
 export function PptxEditor(props: PptxEditorProps): JSX.Element;
-export function PptxEditor({ i18n, ...props }:
+export function PptxEditor(props:
   PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
   CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
   const legacy = props[LEGACY_SYNC_API] === true;
+  const descriptors = props.fonts.some((font) => 'face' in font);
   return (
-    <LocaleProvider i18n={i18n}>
-      {legacy ? (
-        <PptxLegacySessionLoader editorProps={{ ...props as GeneralEditorSessionProps, i18n }} />
+    <LocaleProvider i18n={props.i18n}>
+      {descriptors ? <PptxBundledFontsEditor {...props} legacy={legacy} /> : legacy ? (
+        <PptxLegacySessionLoader editorProps={props as ResolvedFontProps<GeneralEditorSessionProps>} />
       ) : (
-        <PptxAsyncEditorRoot {...props as PptxAsyncEditorProps} i18n={i18n} />
+        <PptxAsyncEditorRoot {...props as ResolvedFontProps<PptxAsyncEditorProps>} />
       )}
     </LocaleProvider>
   );
 }
 
-function PptxAsyncEditorRoot(props: PptxAsyncEditorProps) {
+function PptxAsyncEditorRoot(props: ResolvedFontProps<PptxAsyncEditorProps>) {
   const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
   return <PptxAsyncEditorSession {...props} file={file} />;
+}
+
+function useBundledFontsChunk(): BundledFontsChunk | undefined {
+  const [chunk, setChunk] = useState<BundledFontsChunk>();
+  useEffect(() => {
+    pptxBundledFontsLoader.load().then(
+      (module) => setChunk({ module }),
+      (cause: unknown) => setChunk({ error: new PptxWorkerEditorChunkLoadError(cause) }),
+    );
+  }, []);
+  return chunk;
+}
+
+function ChunkError({ error }: { error: Error }): never {
+  throw error;
+}
+
+function PptxBundledFontsEditor({ legacy, ...props }: (PptxEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps |
+  WorkerSessionProps | CollaborationSessionProps | PptxLegacyEditorProps) & { legacy: boolean }) {
+  const chunk = useBundledFontsChunk();
+  const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
+  const fallback = <PptxEditorFallback {...props} file={file} />;
+  return (
+    <PeerlessEditorBoundary onError={props.onError} className={props.className}
+      style={(props as { style?: CSSProperties }).style}>
+      {chunk?.error ? <ChunkError error={chunk.error} /> : chunk?.module ? (
+        <chunk.module.BundledFontsResolver file={file} fonts={props.fonts} fallback={fallback} session={props}
+          onReady={props.onReady as ((api: never) => unknown) | undefined} onError={props.onError}>
+          {(fonts, onReady, onError) => {
+            const resolved = { ...props, file, fonts, onReady, onError };
+            return legacy ? <PptxLegacySessionLoader editorProps={resolved as ResolvedFontProps<GeneralEditorSessionProps>} />
+              : <PptxAsyncEditorSession {...resolved as PptxAsyncEditorInternalProps} />;
+          }}
+        </chunk.module.BundledFontsResolver>
+      ) : fallback}
+    </PeerlessEditorBoundary>
+  );
 }
 
 function PptxInThreadSessionLoader({ fallback, editorProps }: { fallback: ReactNode; editorProps: PptxAsyncEditorInternalProps }) {
@@ -326,7 +374,7 @@ function PptxEditorFallback(props: Pick<PptxAsyncEditorProps, 'file' | 'loadingI
   </div>;
 }
 
-function PptxLegacySessionLoader({ editorProps }: { editorProps: GeneralEditorSessionProps }) {
+function PptxLegacySessionLoader({ editorProps }: { editorProps: ResolvedFontProps<GeneralEditorSessionProps> }) {
   const [Session] = useState(() => lazy(() => pptxLegacyEditorLoader.load().then(
     (module) => ({ default: module.PptxEditorSession }),
     (cause: unknown) => { throw new PptxWorkerEditorChunkLoadError(cause); })));

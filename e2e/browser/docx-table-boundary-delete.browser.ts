@@ -58,7 +58,7 @@ async function targetParagraphStart(page: Page) {
   const box = await renderedBox(run);
   await page.mouse.click(box.x + Math.min(box.width / 2, 2), box.y + box.height / 2);
   await input(page).press('Home');
-  const caret = page.locator(`${root} div[aria-hidden="true"][style*="currentcolor" i]`);
+  const caret = page.locator(`${root} [data-docx-caret]`);
   await expect(caret).toHaveCount(1);
   await expect.poll(async () => {
     const bounds = await caret.boundingBox();

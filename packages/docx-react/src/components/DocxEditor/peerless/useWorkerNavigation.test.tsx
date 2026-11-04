@@ -126,6 +126,10 @@ for (const event of ['window resize', 'width change', 'height change', 'plain sc
       fireEvent.scroll(scroller);
       flushFrame();
       expect(navigation.pageInfo.visible).toBe(true);
+      const shown = navigation.pageInfo;
+      const geometry = viewStore.getSnapshot().geometry!;
+      act(() => { viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 1 }); });
+      expect(navigation.pageInfo).toBe(shown);
       act(() => { jest.advanceTimersByTime(300); });
       if (event === 'width change') { width = 160; fireEvent.scroll(scroller); }
       else if (event === 'height change') { height = 100; fireEvent.scroll(scroller); }

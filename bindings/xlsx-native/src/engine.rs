@@ -660,6 +660,15 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
+    /// @internal
+    #[napi(catch_unwind)]
+    pub fn translate_formulas_json(&self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .translate_formulas_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind)]
     pub fn move_range_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
