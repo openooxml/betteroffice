@@ -63,7 +63,7 @@ impl DeckSession {
         }
         let autofit = resolve(&current, &baseline)?;
         let copy_origins = comment_copy_origins(&self.doc.transact())?;
-        let deck = deck_write(&current, &baseline, &self.package, &autofit, &copy_origins)?;
+        let deck = deck_write(&current, &baseline, self, &autofit, &copy_origins)?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
@@ -72,10 +72,11 @@ impl DeckSession {
 fn deck_write(
     current: &DeckSnapshot,
     baseline: &DeckSnapshot,
-    package: &PptxPackage,
+    session: &DeckSession,
     autofit: &HashMap<String, TextAutofit>,
     copy_origins: &HashMap<String, String>,
 ) -> EditResult<DeckWrite> {
+    let package = session.package();
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
         .slides
         .iter()
@@ -100,7 +101,7 @@ fn deck_write(
                     source_shapes(package, slide),
                     autofit,
                     &context,
-                    package,
+                    session,
                 )?,
                 background: background_write(slide, base),
                 layout_part_path: changed_layout(slide, base),
@@ -124,7 +125,7 @@ fn deck_write(
                         source_shapes(package, slide),
                         autofit,
                         &context,
-                        package,
+                        session,
                     )?,
                     background: background_write(slide, &base),
                     layout_part_path: changed_layout(slide, &base),
@@ -517,7 +518,7 @@ fn shape_writes(
     source: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
     context: &SlideParents<'_>,
-    package: &PptxPackage,
+    session: &DeckSession,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -540,7 +541,7 @@ fn shape_writes(
                         group_children(source, index),
                         autofit,
                         context,
-                        package,
+                        session,
                     )?),
                 }
             }
@@ -587,8 +588,9 @@ fn shape_patch(
     source_children: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
     context: &SlideParents<'_>,
-    package: &PptxPackage,
+    session: &DeckSession,
 ) -> EditResult<ShapePatch> {
+    let package = session.package();
     let mut patch = ShapePatch::default();
     if shape.placeholder != base.placeholder {
         patch.placeholder = shape.placeholder.clone();
@@ -705,7 +707,7 @@ fn shape_patch(
         patch.texts.push(TextWrite {
             target,
             autofit,
-            paragraphs: paragraph_writes(story, base_story, Some(&cascade))?,
+            paragraphs: paragraph_writes(story, base_story, Some(&cascade), Some(session))?,
         });
     }
     if shape.children != base.children {
@@ -715,7 +717,7 @@ fn shape_patch(
             source_children,
             autofit,
             context,
-            package,
+            session,
         )?;
     }
     Ok(patch)
@@ -777,7 +779,12 @@ fn paragraph_writes(
     story: &StorySnapshot,
     baseline: Option<&StorySnapshot>,
     cascade: Option<&ParagraphCascade<'_>>,
+    session: Option<&DeckSession>,
 ) -> EditResult<Vec<ParagraphWrite>> {
+    let explicit_clears = session
+        .map(|session| crate::story::explicit_strike_clears(session, &story.id))
+        .transpose()?
+        .unwrap_or_default();
     let baseline_paragraphs: HashMap<&str, &ParagraphSnapshot> = baseline
         .into_iter()
         .flat_map(|story| &story.paragraphs)
@@ -820,29 +827,6 @@ fn paragraph_writes(
             .map(serde_json::from_str::<Bullet>)
             .transpose()
             .map_err(|error| EditError::Json(error.to_string()))?;
-        let source_strikes = base.map(|base| {
-            let mut offset = 0;
-            base.runs
-                .iter()
-                .map(|run| {
-                    let start = offset;
-                    offset += run.text.len();
-                    (start, offset, run.style.strike.as_deref())
-                })
-                .collect::<Vec<_>>()
-        });
-        let same_text = base.is_some_and(|base| {
-            base.runs
-                .iter()
-                .map(|run| run.text.as_str())
-                .collect::<String>()
-                == paragraph
-                    .runs
-                    .iter()
-                    .map(|run| run.text.as_str())
-                    .collect::<String>()
-        });
-        let mut offset = 0;
         let inherited_strike = cascade
             .map(|cascade| cascade.properties(source_index.unwrap_or(index), paragraph.level, None))
             .and_then(|properties| properties.default_run)
@@ -864,34 +848,20 @@ fn paragraph_writes(
             runs: paragraph
                 .runs
                 .iter()
-                .map(|run| {
+                .enumerate()
+                .map(|(run_index, run)| {
                     let mut write = run_write(run);
-                    let start = offset;
-                    offset += run.text.len();
                     if cascade.is_some()
                         && !inherited_strike
                         && run.style.strike.as_deref() == Some("noStrike")
+                        && explicit_clears
+                            .get(index)
+                            .and_then(|runs| runs.get(run_index))
+                            .copied()
+                            .unwrap_or(false)
                     {
-                        let unchanged = if same_text {
-                            source_strikes.as_ref().is_some_and(|strikes| {
-                                let first = strikes.partition_point(|(_, end, _)| *end <= start);
-                                strikes[first..]
-                                    .iter()
-                                    .take_while(|(from, _, _)| *from < offset)
-                                    .all(|(_, _, strike)| *strike == Some("noStrike"))
-                            })
-                        } else {
-                            base.is_some_and(|base| {
-                                base.runs.iter().any(|source| {
-                                    source.style.strike == run.style.strike
-                                        && source.text.contains(&run.text)
-                                })
-                            })
-                        };
-                        if !unchanged {
-                            write.properties.strike = None;
-                            write.clear_strike = true;
-                        }
+                        write.properties.strike = None;
+                        write.clear_strike = true;
                     }
                     write
                 })
@@ -949,7 +919,7 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     let paragraphs = shape
         .text_stories
         .first()
-        .map(|story| paragraph_writes(story, None, None))
+        .map(|story| paragraph_writes(story, None, None, None))
         .transpose()?;
     Ok(ShapeAdd {
         name: shape.name.clone(),

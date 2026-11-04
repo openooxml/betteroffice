@@ -40,6 +40,7 @@ const UNDERLINE_TYPES: [&str; 18] = [
 ];
 
 const ALIGNMENTS: [&str; 7] = ["l", "ctr", "r", "just", "justLow", "dist", "thaiDist"];
+const STRIKE_CLEARED: &str = "strikeCleared";
 
 /// The values land in schema-typed attributes, so junk must fail the edit
 /// rather than the file.
@@ -882,12 +883,18 @@ impl DeckSession {
         for (segment_start, segment_end) in paragraph_text_segments(&story, &txn, start, end) {
             for (key, value) in patch_values(patch) {
                 if let Some(value) = value {
-                    story.format(
-                        &mut txn,
-                        segment_start,
-                        segment_end - segment_start,
-                        Attrs::from([(Arc::from(key), value)]),
-                    );
+                    let mut attrs = Attrs::from([(Arc::from(key), value)]);
+                    if key == "strike" {
+                        attrs.insert(
+                            Arc::from(STRIKE_CLEARED),
+                            if patch.strike.as_deref() == Some("noStrike") {
+                                Any::Bool(true)
+                            } else {
+                                Any::Null
+                            },
+                        );
+                    }
+                    story.format(&mut txn, segment_start, segment_end - segment_start, attrs);
                 }
             }
         }
@@ -1295,6 +1302,29 @@ pub(crate) fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextR
         .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
 }
 
+pub(crate) fn explicit_strike_clears(
+    session: &DeckSession,
+    story_id: &str,
+) -> EditResult<Vec<Vec<bool>>> {
+    let txn = session.doc.transact();
+    let story = story_ref(&txn, story_id)?;
+    let mut paragraphs = Vec::new();
+    let mut runs = Vec::new();
+    for diff in story.diff(&txn, YChange::identity) {
+        match diff.insert {
+            Out::Any(Any::String(_)) => runs.push(
+                diff.attributes
+                    .as_ref()
+                    .and_then(|attrs| any_bool(attrs.get(STRIKE_CLEARED)))
+                    == Some(true),
+            ),
+            Out::YMap(_) => paragraphs.push(std::mem::take(&mut runs)),
+            _ => {}
+        }
+    }
+    Ok(paragraphs)
+}
+
 fn final_pilcrow_index<T: ReadTxn>(story: &TextRef, txn: &T) -> EditResult<u32> {
     validate_story(story, txn, "requested")?;
     Ok(story.len(txn) - 1)
@@ -1563,7 +1593,11 @@ pub(crate) fn insert_styled_text(
         if key == "strike" && inherit_strike && style.strike.is_none() {
             continue;
         }
-        story.format(txn, index, length, Attrs::from([(Arc::from(key), value)]));
+        let mut attrs = Attrs::from([(Arc::from(key), value)]);
+        if key == "strike" {
+            attrs.insert(Arc::from(STRIKE_CLEARED), Any::Null);
+        }
+        story.format(txn, index, length, attrs);
     }
 }
 
