@@ -98,6 +98,8 @@ export type InvokeOutcome<T> =
 export interface PluginRuntime<Plugin, Context, Event, Phase extends string> {
   /** Reconciles registrations by id and revision; call after the host commits. */
   setPlugins(plugins: readonly Plugin[]): void;
+  /** @internal The definitions the last setPlugins accepted, by id in registration order. */
+  registered(): ReadonlyMap<string, Plugin>;
   /** Rereads every grant, including one changed in place, and notifies the plugins it changed. */
   setGrants(grants: Readonly<Record<string, PluginGrant<string>>> | null | undefined): void;
   grant(pluginId: string): PluginGrant<string>;
@@ -596,6 +598,8 @@ export function createPluginRuntime<
       }
       changed();
     },
+
+    registered: () => new Map([...registrations].map(([id, registration]) => [id, registration.plugin])),
 
     setGrants(next) {
       const before = new Map(

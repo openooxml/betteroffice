@@ -17,6 +17,7 @@ import {
   type XlsxPlugin,
   type XlsxPluginCellCommit,
   type XlsxPluginCellRef,
+  type XlsxPluginCommand,
   type XlsxPluginCommitDecision,
   type XlsxPluginContext,
   type XlsxPluginEditGateContext,
@@ -102,6 +103,7 @@ interface Gate {
   cleanup?(): void;
   onLoad?(): void;
   createState?(): unknown;
+  commands?: XlsxPluginCommand<unknown>[];
   cellEditable?(cell: XlsxPluginCellRef, context: XlsxPluginEditGateContext<unknown>): unknown;
   beforeCellCommit?(commit: XlsxPluginCellCommit, context: XlsxPluginEditGateContext<unknown>): unknown;
 }
@@ -113,6 +115,7 @@ function gatePlugin(id: string, gate: Gate, log: GateLog): XlsxPlugin {
     id,
     ...(gate.revision !== undefined && { revision: gate.revision }),
     createState: gate.createState ?? (() => null),
+    ...(gate.commands && { commands: gate.commands }),
     initialize(context) {
       log.contexts[id] = context;
       context.onCleanup((reason) => { log.cleanups.push(`${id}:${reason}`); gate.cleanup?.(); });
@@ -159,6 +162,14 @@ interface Book {
 }
 
 const A1 = ['A1', 'B1', 'C1'];
+
+const noop: XlsxPluginCommand<unknown> = {
+  id: 'noop', label: 'Noop', mutatesDocument: false, execute: () => ({ ok: true, status: 'executed' }),
+};
+/** A definition error: two commands share one id. */
+const DUPLICATE_COMMANDS = [noop, noop];
+
+const reported = (errors: readonly XlsxPluginError[]) => [...new Set(errors.map((error) => `${error.pluginId}:${error.phase}`))];
 
 /** Queues animation frames, stubs painting and returns a pump that runs the queued frames. */
 function stubFrames(): () => Promise<void> {
@@ -461,6 +472,52 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       await waitFor(async () => expect(await book.input(0)).toBe('9'));
       expect(book.refusal()).toBeNull();
     });
+
+    for (const rejected of [false, true]) {
+      const variant = rejected ? ' beside a rejected definition under its id' : '';
+      const rejectedGate = (): Record<string, Gate> => rejected ? { rejected: { id: 'x', commands: DUPLICATE_COMMANDS } } : {};
+
+      it(`a gating plugin${variant} refuses a typed commit`, async () => {
+        const commits: string[] = [];
+        const book = await mountGated(editor, {
+          rule: { id: 'x', beforeCellCommit: (commit) => {
+            commits.push(commit.input);
+            return commit.input === 'no' ? { action: 'refuse', message: 'Rule' } : { action: 'accept' };
+          } },
+          ...rejectedGate(),
+        }, { starting: rejected ? 1 : 0 });
+        await book.select(0);
+        await book.type('no');
+        await waitFor(() => expect(book.refusal()).toBe('Rule'));
+        expect(await book.input(0)).toBe('1');
+        expect(commits).toEqual(['no']);
+        expect(reported(book.errors)).toEqual(rejected ? ['x:definition'] : []);
+      });
+
+      it(`a gating plugin${variant} refuses edits while it starts`, async () => {
+        let ready!: () => void;
+        const held = new Promise<void>((done) => { ready = done; });
+        const commits: string[] = [];
+        const book = await mountGated(editor, {
+          rule: { id: 'x', initialize: () => held, beforeCellCommit: (commit) => {
+            commits.push(commit.input);
+            return { action: 'accept' };
+          } },
+          ...rejectedGate(),
+        }, { starting: rejected ? 2 : 1 });
+        await book.select(0);
+        await book.type('9');
+        await waitFor(() => expect(book.refusal()).toBe(STARTING));
+        await waitFor(() => expect(book.editor()?.value).toBe('9'));
+        expect(await book.input(0)).toBe('1');
+        expect(commits).toEqual([]);
+        await act(async () => { ready(); });
+        await waitFor(() => expect(book.log.loaded.has('x')).toBe(true));
+        fireEvent.keyDown(book.editor()!, { key: 'Enter' });
+        await waitFor(async () => expect(await book.input(0)).toBe('9'));
+        expect(commits).toEqual(['9']);
+      });
+    }
 
     it('a gating plugin whose initialize throws is ended and does not hold edits', async () => {
       const book = await mountGated(editor, { broken: {
@@ -790,7 +847,7 @@ for (const editor of ['in-thread', 'peerless'] as const) {
 async function mountLegacy(gates: Record<string, Gate>) {
   const errors: XlsxPluginError[] = [];
   const log: GateLog = { loaded: new Set<string>(), cleanups: [], contexts: {} };
-  const plugins = Object.entries(gates).map(([id, gate]) => gatePlugin(id, gate, log));
+  const plugins = Object.entries(gates).map(([id, gate]) => gatePlugin(gate.id ?? id, gate, log));
   const file = await book();
   for (const name of ['Worker', 'OffscreenCanvas'] as const) {
     const original = Object.getOwnPropertyDescriptor(globalThis, name);
@@ -847,6 +904,18 @@ describe('XlsxEditor plugin cell-edit gate (legacy worker editor)', () => {
       expect(legacy.errors).toHaveLength(1);
     });
   }
+
+  it('a rejected gating definition does not end the accepted plugin under its id', async () => {
+    const legacy = await mountLegacy({
+      plain: { id: 'x' },
+      rejected: { id: 'x', commands: DUPLICATE_COMMANDS, beforeCellCommit: () => ({ action: 'refuse', message: 'never' }) },
+    });
+    await waitFor(() => expect(legacy.log.loaded.has('x')).toBe(true), MOUNTED);
+    await legacy.type(0, 'abc');
+    await waitFor(async () => expect(await legacy.input(0)).toBe('abc'));
+    expect(reported(legacy.errors)).toEqual(['x:definition']);
+    expect(legacy.log.cleanups).toEqual([]);
+  });
 
   it('a plugin without gate hooks still runs and typing commits', async () => {
     const legacy = await mountLegacy({ plain: {} });

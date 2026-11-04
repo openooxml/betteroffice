@@ -242,7 +242,7 @@ export function createXlsxPluginHost(
     version: string;
     value: XlsxPluginRowDecorations | null;
   }>();
-  let definitionsById = new Map<string, Definition>();
+  let definitionsById: ReadonlyMap<string, Definition> = new Map();
   const definitionOf = (entry: XlsxPluginActivation): Definition =>
     definitionsById.get(entry.pluginId) ?? entry.plugin;
   let decorationSets: readonly RowDecorationSet[] = Object.freeze([]);
@@ -513,12 +513,12 @@ export function createXlsxPluginHost(
         });
       }
       installed = definitions.length > 0;
-      gatingPlugins = definitions
-        .filter((definition) => definition.cellEditable !== undefined || definition.beforeCellCommit !== undefined)
-        .map((definition) => definition.id);
-      definitionsById = new Map(definitions.map((definition) => [definition.id, definition]));
       observe();
       runtime.setPlugins(definitions);
+      definitionsById = runtime.registered();
+      gatingPlugins = [...definitionsById.values()]
+        .filter((definition) => definition.cellEditable !== undefined || definition.beforeCellCommit !== undefined)
+        .map((definition) => definition.id);
       refuseEditGate();
     },
 
