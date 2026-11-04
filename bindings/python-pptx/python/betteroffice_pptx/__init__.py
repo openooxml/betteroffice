@@ -46,7 +46,7 @@ from .exports import (
     PptxStructuredContent,
     PptxStructuredResult,
 )
-from .proposals import Proposal, ProposalChange, ProposalPreview
+from .proposals import Proposal, ProposalChange, ProposalPreview, ProposalStripEntry
 from .render import (
     HitTestResult,
     MediaContent,
@@ -174,6 +174,7 @@ __all__ = [
     "ProposalDiffSlide",
     "ProposalPreview",
     "ProposalShapeChange",
+    "ProposalStripEntry",
     "ProposalTextChange",
     "StaleProposalError",
     "RangeError",
@@ -778,8 +779,15 @@ class Presentation:
             json.loads(self._inner.preview_proposal_json(proposal_id))
         )
 
+    def proposal_slide_strip(self, proposal_id: str) -> list[ProposalStripEntry]:
+        """Read proposed slide order, including deleted slide ghosts."""
+        return [
+            ProposalStripEntry._from_dict(value)
+            for value in json.loads(self._inner.proposal_slide_strip_json(proposal_id))
+        ]
+
     def render_proposal(self, proposal_id: str, slide: SlideKey) -> DisplayList:
-        """Render one proposed slide without changing the presentation."""
+        """Render a proposed slide by ID or zero-based preview index."""
         return self._inner.render_proposal(proposal_id, slide)
 
     def layout_proposal_diff_slide(
@@ -787,6 +795,12 @@ class Presentation:
     ) -> ProposalDiffSlide:
         """Lay out proposal changes against the current slide."""
         return self._inner.layout_proposal_diff_slide(proposal_id, slide)
+
+    def layout_proposal_diff_slide_by_id(
+        self, proposal_id: str, slide_id: str,
+    ) -> ProposalDiffSlide:
+        """Lay out changes for a live, inserted, or deleted slide ID."""
+        return self._inner.layout_proposal_diff_slide_by_id(proposal_id, slide_id)
 
     @overload
     def accept_proposal(
