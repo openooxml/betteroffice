@@ -7,7 +7,7 @@ const cell = (shading: string, run: string) => '<w:tbl><w:tblPr><w:tblW w:w="576
 const DARK_CELL = cell('1F1F1F', '<w:r><w:rPr><w:color w:val="FFFFFF"/></w:rPr><w:t>Dark</w:t></w:r>');
 const HIGHLIGHT = '<w:p><w:r><w:rPr><w:color w:val="FFFFFF"/><w:highlight w:val="darkBlue"/></w:rPr><w:t>Highlighted</w:t></w:r></w:p>';
 
-async function open(page: Page, arm: string, body: string, host?: string, back = 0) {
+async function open(page: Page, arm: string, body: string, host?: string, back = 0, dark = false) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
@@ -18,6 +18,7 @@ async function open(page: Page, arm: string, body: string, host?: string, back =
   const surface = page.locator('.canvas-page, .paged-editor__page').first();
   await expect(surface.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
   if (host) await page.evaluate((color) => { (document.querySelector('.oox-root')!.parentElement as HTMLElement).style.color = color; }, host);
+  if (dark) await page.evaluate(() => { for (const root of document.querySelectorAll('.oox-root')) root.classList.add('dark'); });
   await surface.click({ position: { x: 140, y: 100 } });
   const input = page.locator('[data-testid=yrs-input], .paged-editor__input').first();
   await expect(input).toBeEditable();
@@ -104,3 +105,20 @@ test('docx worker caret stays visible right after a dark highlight', async ({ pa
   await open(page, '', HIGHLIGHT);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
+
+test('docx non-worker caret follows white text in a dark-shaded table cell', async ({ page }) => {
+  await open(page, '&peerless=0', DARK_CELL);
+  expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
+});
+
+test('docx non-worker caret follows white text on a dark highlight', async ({ page }) => {
+  await open(page, '&peerless=0', HIGHLIGHT, undefined, 4);
+  expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
+});
+
+for (const [arm, label] of [['', 'worker'], ['&peerless=0', 'non-worker']] as const) {
+  test(`docx caret stays visible on the page in dark mode (${label})`, async ({ page }) => {
+    await open(page, arm, PLAIN, undefined, 0, true);
+    expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
+  });
+}
