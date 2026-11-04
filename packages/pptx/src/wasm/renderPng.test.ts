@@ -62,7 +62,7 @@ function stubBrowser() {
 
 const native = engineKind === 'native';
 const isPng = (bytes: Uint8Array) => bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
-const pngSize = (bytes: Uint8Array) => {
+const pngSize = (bytes: Uint8Array): [number, number] => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return [view.getUint32(16), view.getUint32(20)];
 };
@@ -80,7 +80,7 @@ describe('PresentationHandle.renderPng', () => {
       const id = handle.snapshot().slides[1].id;
       const plain = await handle.renderPng({ slide: id });
       const second = handle.layoutSlide(1);
-      const expected = [[Math.ceil(second.width * 2), Math.ceil(second.height * 2)], [Math.ceil(second.width), Math.ceil(second.height)]];
+      const expected: [number, number][] = [[Math.ceil(second.width * 2), Math.ceil(second.height * 2)], [Math.ceil(second.width), Math.ceil(second.height)]];
       if (native) {
         expect([scaled, plain].every(isPng)).toBe(true);
         expect([pngSize(scaled), pngSize(plain)]).toEqual(expected);

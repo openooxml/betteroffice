@@ -281,7 +281,7 @@ impl Default for PptxRenderer {
 #[cfg(feature = "test-hooks")]
 #[napi]
 impl PptxRenderer {
-    #[napi(js_name = "panicNextPngForTest")]
+    #[napi(catch_unwind, js_name = "panicNextPngForTest")]
     pub fn panic_next_png_for_test(&self) {
         self.panic_next_png.set(true);
     }
@@ -1201,7 +1201,7 @@ impl PptxRenderer {
     ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         let (slide, options) = png_request(&target_json, &options_json)
-            .map_err(|message| map_error(env, EngineError::message(message)))?;
+            .map_err(|message| throw_error(&env, &message))?;
         #[cfg(feature = "test-hooks")]
         let panic_next = self.panic_next_png.replace(false);
         let renderer = self.renderer_mut(env)?;
@@ -1214,9 +1214,7 @@ impl PptxRenderer {
         renderer
             .render_png(document.session(), slide, &options)
             .map_err(|error| match error.kind {
-                ErrorKind::Message => {
-                    map_error(env, EngineError::message(png_error(&error.message)))
-                }
+                ErrorKind::Message => throw_error(&env, &png_error(&error.message)),
                 _ => map_error(env, error),
             })
             .and_then(|rendered| byte_result(env, rendered.bytes))

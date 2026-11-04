@@ -105,9 +105,7 @@ test('proposal preview reports a selection refusal', async () => {
 
 test('PNG export resolves the active slide after navigation acknowledgement', async () => {
   const value = await open();
-  const slideId = value.client.state.slides[1]!.id;
-  const thumbnail = spyOn(value.client, 'thumbnail');
-  const encode = spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => callback(new Blob([], { type: 'image/png' })));
+  const encode = spyOn(value.client, 'renderPng').mockImplementation(async () => new Uint8Array([137, 80, 78, 71]));
   const createUrl = spyOn(URL, 'createObjectURL').mockReturnValue('blob:slide');
   const revokeUrl = spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
   const download = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
@@ -118,9 +116,9 @@ test('PNG export resolves the active slide after navigation acknowledgement', as
     const exporting = value.api.commands.execute('exportPng', null);
     replyControl.release();
     await act(async () => { await navigation; expect(await exporting).toMatchObject({ ok: true }); });
-    expect(thumbnail.mock.calls[thumbnail.mock.calls.length - 1]?.[0]).toBe(slideId);
+    expect(encode.mock.calls.map(([target]) => target)).toEqual([{ slide: 1 }]);
   } finally {
-    replyControl.release(); thumbnail.mockRestore(); encode.mockRestore(); createUrl.mockRestore(); revokeUrl.mockRestore(); download.mockRestore();
+    replyControl.release(); encode.mockRestore(); createUrl.mockRestore(); revokeUrl.mockRestore(); download.mockRestore();
   }
 });
 
