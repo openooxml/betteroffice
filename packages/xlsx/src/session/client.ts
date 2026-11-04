@@ -1,4 +1,5 @@
 import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
+import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
 import { pipeOpBuffers, type PipeCommandPayload, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
@@ -6,7 +7,7 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { createSessionWorker } from '#session-worker';
+import { createSessionWorker } from './sessionWorker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
@@ -103,10 +104,9 @@ export interface WorkbookSession {
   whenPresented(seq: number): Promise<void>;
   readonly call: Promisified<Omit<WorkbookSessionMethods,
     'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' |
-    'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    'renderPng' | 'printDisplayList'>> & {
     decodeFontFace: FontDecoder;
-    renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
-    renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
+    renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
     printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
     command(command: WorkbookCommand): Promise<WorkbookAck>;
     /**
@@ -432,21 +432,20 @@ export async function createWorkbookSession(
       }
       const call = client.call[method] as (...args: unknown[]) => Promise<unknown>;
       try {
-        if (method === 'renderPng' || method === 'renderRangePng') {
-          const options = args[1] as WorkbookFrameOptions | undefined;
-          args = structuredClone([args[0], { ...options, sheet: options?.sheet ?? state.activeSheet }]);
+        if (method === 'renderPng') {
+          args = structuredClone([args[0], args[1] ?? {}]);
         } else if (method === 'exportStructured' || method === 'exportMarkdown' || method === 'printDisplayList') {
           args = structuredClone(args);
         }
       } catch (error) { return Promise.reject(error); }
-      if (method === 'renderPng' || method === 'renderRangePng') return runAfterEditsUntilPosted(edits, () => call(...args));
+      if (method === 'renderPng') return runAfterEditsUntilPosted(edits, () => call(...args));
       return edits.runAfterEdits(() => call(...args));
     } });
   }
   const {
     version, listDefinedNames, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry, selectionData,
     cellInputs, translateFormulas, captureFormat, sheets, calculationStatus, save,
-    renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList,
+    renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList,
     collaborationStateVector, collaborationStateAsUpdate,
   } = calls;
   const commandIdentity: CommandIdentity = Object.freeze(commandContext ? {
@@ -572,8 +571,16 @@ export async function createWorkbookSession(
       version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
       translateFormulas, captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
       collaborationStateVector, collaborationStateAsUpdate,
-      renderPng: (viewport, options) => pngBytes(renderPng(viewport, options)),
-      renderRangePng: (options, frameOptions) => pngBytes(renderRangePng(options, frameOptions)),
+      renderPng: (target, options = {}) => {
+        const { signal, ...wire } = options;
+        if (signal?.aborted) return Promise.reject(signal.reason);
+        return pngBytes(renderPng(target, wire)).then((bytes) => { signal?.throwIfAborted(); return bytes; });
+      },
+      renderPngFonts: (target, options = {}) => {
+        const { fonts: _fonts, ...wire } = options as XlsxPngOptions;
+        delete (wire as XlsxPngOptions).signal;
+        return renderPngFonts(target, wire);
+      },
       printDisplayList: async (...args) => JSON.parse(new TextDecoder().decode(await printDisplayList(...args))),
       frame: async (viewport, options) => decodeFrame(await frame(viewport, options)),
     },

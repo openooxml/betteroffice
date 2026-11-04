@@ -1017,11 +1017,13 @@ pub fn with_private_measure_fonts<T>(run: impl FnOnce() -> T) -> T {
 }
 
 /// Registers raw sfnt bytes in the current measurement font store.
-pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
+pub fn register_measure_font_bytes<'a>(
+    bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
+) -> Result<u32, String> {
     with_measure_fonts(|store| {
         store
             .borrow_mut()
-            .register_slice(bytes)
+            .register_cow(bytes.into())
             .map(|id| id.to_u32())
             .map_err(|error| error.to_string())
     })

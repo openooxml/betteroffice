@@ -212,6 +212,10 @@ pub enum PngTarget {
         sheet: SheetId,
         range: CellRange,
     },
+    /// The sheet's used range at render time.
+    UsedRange {
+        sheet: SheetId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

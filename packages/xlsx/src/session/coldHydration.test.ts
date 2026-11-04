@@ -41,13 +41,13 @@ test.skipIf(engineKind === 'native')('cold retained hydration preserves main-thr
     expect(peer.save()).toEqual(await session.save());
     expect(isPngExportAvailable()).toBe(true);
     const viewport = { x: 0, y: 0, width: 240, height: 120 };
-    const png = peer.renderPng(viewport);
+    const png = await peer.renderPng({ sheet: 0, viewport });
     expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
-    expect(png).toEqual(await session.call.renderPng(viewport));
+    expect(png).toEqual(await session.call.renderPng({ sheet: 0, viewport }));
     const later = openWorkbook(bytes);
     try {
       expect(isPngExportAvailable()).toBe(true);
-      expect([...later.renderPng(viewport).subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      expect([...(await later.renderPng({ sheet: 0, viewport })).subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
     } finally { later.dispose(); }
     const cells = peer.readCells({
       ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B1' } }],

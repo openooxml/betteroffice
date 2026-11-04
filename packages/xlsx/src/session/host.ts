@@ -15,7 +15,8 @@ import {
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
   type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
-import { workbookPngDisplayListJson, workbookRangePngDisplayListJson } from '../wasm/pngDisplayList';
+import type { XlsxPngTarget } from '../wasm/pngTarget';
+import { pngRasterizers, workbookPngFonts } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
@@ -23,6 +24,7 @@ import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './command
 import {
   WORKBOOK_SESSION_POLICIES,
   WorkbookPngUnavailableError,
+  type WorkbookPngOptions,
   type WorkbookCollaborationPipeReply,
   type WorkbookSessionEvents,
   type WorkbookSessionMethods,
@@ -160,22 +162,11 @@ export function createWorkbookSessionHost(
     return isPngExportAvailable() || options.renderPng !== undefined;
   }
 
-  function renderPng(
-    sheet: number, render: (opened: WorkbookHandle) => Uint8Array,
-    displayList: (opened: WorkbookHandle) => string
-  ) {
+  function renderPng(target: XlsxPngTarget, pngOptions: WorkbookPngOptions) {
     const opened = workbook();
     if (!pngExportAvailable()) throw new WorkbookPngUnavailableError();
-    checkSheet(opened, sheet);
-    const active = opened.sheetInfo().activeSheet;
-    try {
-      if (sheet !== active) opened.setActiveSheet(sheet);
-      if (isPngExportAvailable()) return transferBytes(render(opened));
-      const json = displayList(opened);
-      return deferReply(options.renderPng!(json).then(transferBytes));
-    } finally {
-      if (sheet !== active) opened.setActiveSheet(active);
-    }
+    if (options.renderPng && !pngRasterizers.has(opened)) pngRasterizers.set(opened, options.renderPng);
+    return deferReply(opened.renderPng(target, pngOptions).then(transferBytes));
   }
 
   function transferBytes(bytes: Uint8Array) {
@@ -601,14 +592,8 @@ export function createWorkbookSessionHost(
     sheets: () => sheets({ ...workbook().sheetInfo(),
       ...(commands?.throughSeq ? { sheetIds: commands.sheetIds } : {}) }),
     calculationStatus: () => workbook().calculationStatus(),
-    renderPng(_, viewport, options = {}) {
-      return renderPng(options.sheet ?? workbook().sheetInfo().activeSheet,
-        (opened) => opened.renderPng(viewport), (opened) => workbookPngDisplayListJson(opened, viewport));
-    },
-    renderRangePng(_, options, frameOptions = {}) {
-      return renderPng(frameOptions.sheet ?? workbook().sheetInfo().activeSheet,
-        (opened) => opened.renderRangePng(options), (opened) => workbookRangePngDisplayListJson(opened, options));
-    },
+    renderPng: (_, target, pngOptions = {}) => renderPng(target, pngOptions),
+    renderPngFonts: (_, target, pngOptions = {}) => workbookPngFonts(workbook(), target, { ...pngOptions, fonts: undefined }),
     exportStructured: (_, options) => exported(options),
     exportMarkdown(_, options, markdownOptions) {
       const opened = workbook();

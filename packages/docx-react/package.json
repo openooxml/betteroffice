@@ -8,7 +8,8 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
     },
     "./styles.css": "./dist/styles.css"
   },

@@ -129,8 +129,12 @@ explicit null indices.
 
 Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
 `setStoryParagraphs`, `setShapeRect`, `setShapeFill`, `setShapeStroke`,
-`setShapeAdjust`, `setSlideNotes`, `addTextBox`, `addShape`, `addPicture`,
-`removeShape`, `insertSlide`, `duplicateSlide`, `moveSlide`, and `deleteSlide`.
+`setShapeAdjust`, `setSlideNotes`, `setSlideLayout`, `setSlideBackground`,
+`addTextBox`, `addShape`, `addPicture`, `removeShape`, `insertSlide`,
+`duplicateSlide`, `moveSlide`, `deleteSlide`, `reorderShape`, `insertTableRow`, `deleteTableRow`,
+`insertTableColumn`, and `deleteTableColumn`. Table edits use `slideId`, `shapeId`,
+and a zero-based `index`. Inserts require `position` (`before` or `after`) and accept
+optional `cells`; column inserts accept `width` (`split` by default or `copy`).
 They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
 Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
 geometry uses EMU. A group has 1 to 256 edits, applied in order, with up to 64

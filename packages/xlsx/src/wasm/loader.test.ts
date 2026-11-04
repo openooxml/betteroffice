@@ -454,11 +454,11 @@ describe('wasm loader', () => {
     expect(() => openWorkbook(new Uint8Array([1, 2, 3]))).toThrow();
   });
 
-  it('renders the fixture viewport to png bytes', () => {
+  it('renders the fixture viewport to png bytes', async () => {
     expect(isPngExportAvailable()).toBe(true);
     const handle = openWorkbook(sampleBytes());
     try {
-      const png = handle.renderPng({ x: 0, y: 0, width: 400, height: 300 });
+      const png = await handle.renderPng({ sheet: 0, viewport: { x: 0, y: 0, width: 400, height: 300 } });
       expect(png.length).toBeGreaterThan(100);
       expect(Array.from(png.subarray(0, 8))).toEqual(PNG_MAGIC);
     } finally {

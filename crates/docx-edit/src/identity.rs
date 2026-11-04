@@ -547,6 +547,37 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    /// Whether any of `ordinals` in `part` is a paragraph [`rewriting_loses_source_runs`]; an
+    /// unreadable part or paragraph counts as one.
+    fn rewrite_loses_source_runs(
+        &self,
+        part: &SourcePart,
+        ordinals: &[u32],
+        loses: fn(&str) -> bool,
+    ) -> bool {
+        if ordinals.is_empty() {
+            return false;
+        }
+        let read = || -> Option<String> {
+            let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+            let position = package.parts().position(|(path, _)| path == part.path())?;
+            String::from_utf8(package.read(position).ok()?).ok()
+        };
+        let Some(xml) = read() else {
+            return true;
+        };
+        ordinals.iter().any(|&ordinal| {
+            let Some(start) = part
+                .occurrence(ordinal)
+                .map(|occurrence| occurrence.tag.start)
+            else {
+                return true;
+            };
+            docx_parse::serializer::element_span(&xml[start..], &[])
+                .is_none_or(|span| loses(&xml[start..][span]))
+        })
+    }
+
     fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
         let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
         let position = package.parts().position(|(path, _)| path == part.path())?;
@@ -3908,7 +3939,30 @@ impl EditingDoc {
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
-                    plan.spliced_parts.push(spliced);
+                    let rewritten: Vec<u32> = spliced
+                        .legacy_paragraphs
+                        .iter()
+                        .map(|legacy| legacy.ordinal)
+                        .collect();
+                    let reformatted: Vec<u32> = spliced
+                        .paragraph_patches
+                        .iter()
+                        .filter(|patch| !patch.run_edits.is_empty())
+                        .map(|patch| patch.ordinal)
+                        .collect();
+                    if !ends_with_inline_tail(seeded, part)
+                        || (!source.rewrite_loses_source_runs(
+                            part,
+                            &rewritten,
+                            rewriting_loses_source_runs,
+                        ) && !source.rewrite_loses_source_runs(
+                            part,
+                            &reformatted,
+                            reformatting_loses_fields,
+                        ))
+                    {
+                        plan.spliced_parts.push(spliced);
+                    }
                 } else if part.kind == SourceStoryKind::Body {
                     plan.section_spliced_parts.push(spliced);
                 }
@@ -4371,7 +4425,9 @@ fn spliced_part(
         let (is_units, is_tail) = split_tail(&now.units);
         match (was_tail, is_tail) {
             (None, None) => {}
-            (Some(was), Some(is)) if was.content_digest == is.content_digest && !is.inline => {}
+            (Some(was), Some(is))
+                if was.content_digest == is.content_digest
+                    && (!is.inline || was.digest == is.digest) => {}
             _ => return None,
         }
         let was_keys: HashMap<&str, &UnitState> = was_units
@@ -4382,6 +4438,12 @@ fn spliced_part(
             .iter()
             .map(|unit| unit.key.as_deref())
             .collect::<Option<_>>()?;
+        if was_tail.is_some_and(|tail| tail.inline)
+            && (was_keys.len() != is_keys.len()
+                || was_keys.keys().any(|key| !is_keys.contains(key)))
+        {
+            return None;
+        }
         fn kept<'u>(units: &'u [UnitState], keep: impl Fn(&str) -> bool) -> Vec<&'u str> {
             units
                 .iter()
@@ -4585,7 +4647,122 @@ fn last_block_paragraph(
     ordinals.into_iter().max()
 }
 
+/// Whether a run formatting patch of `xml`, one source paragraph, would drop field characters:
+/// the patch writer flattens a field nested in another field's result and field characters
+/// inside a hyperlink, as in a table of contents entry.
+fn reformatting_loses_fields(xml: &str) -> bool {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    for tag in xml.split('<').skip(1) {
+        let tag = tag.split('>').next().unwrap_or_default();
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        match name.rsplit_once(':').map_or(name, |(_, local)| local) {
+            "hyperlink" if !tag.ends_with('/') => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1)
+                } else {
+                    hyperlinks += 1
+                }
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return true;
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return true;
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether rewriting `xml`, one source paragraph, from the model would lose run content the
+/// model does not round-trip: alternate content with its fallback, a page or column break (also
+/// one inside a tracked insertion), a bookmark or permission anchor inside a hyperlink, a
+/// field nested in another field's result, or a hyperlink holding field characters. A part where
+/// such a paragraph would be rewritten from the model (a legacy paragraph) is written whole, as
+/// a part that cannot splice is.
+fn rewriting_loses_source_runs(xml: &str) -> bool {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    let mut rest = xml;
+    'scan: while let Some(at) = rest.find('<') {
+        rest = &rest[at..];
+        for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
+            if rest.starts_with(open) {
+                let Some(end) = rest.find(close) else {
+                    return true;
+                };
+                rest = &rest[end + close.len()..];
+                continue 'scan;
+            }
+        }
+        let Some(end) = rest.find('>') else {
+            return true;
+        };
+        let tag = &rest[1..end];
+        rest = &rest[end + 1..];
+        let closing = tag.starts_with('/');
+        let empty = tag.ends_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
+        match local {
+            "AlternateContent" => return true,
+            "br" if tag.contains("\"page\"") || tag.contains("\"column\"") => return true,
+            "hyperlink" if !empty => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1);
+                } else {
+                    hyperlinks += 1;
+                }
+            }
+            "bookmarkStart" | "bookmarkEnd" | "permStart" | "permEnd" if hyperlinks > 0 => {
+                return true;
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return true;
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return true;
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// `units` without, and then with, the segments after the last pilcrow.
+/// Whether a story of `part` ends with inline content after its last pilcrow. Such a part
+/// splices only since the unchanged tail is accepted; before, it was always written whole.
+fn ends_with_inline_tail(seeded: &HashMap<String, Arc<StoryState>>, part: &SourcePart) -> bool {
+    part_stories(seeded, part)
+        .values()
+        .any(|state| split_tail(&state.units).1.is_some_and(|tail| tail.inline))
+}
+
 fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
     match units.split_last() {
         Some((tail, rest)) if tail.key.is_none() => (rest, Some(tail)),

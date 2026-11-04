@@ -193,7 +193,7 @@ test('XLSX export is byte-identical with or without a preview', async () => {
     const book = await openXlsx(await xlsxFixture());
     try {
       book.formatRanges({ version: book.overview().version, edits: [{ sheet: 'sheet:0', range: 'A3:C6', fill: '#FF0000' }] });
-      if (preview) for (const sheet of ['sheet:0', 'sheet:1']) book.previewRange({ sheet, range: 'A1:C6' });
+      if (preview) for (const sheet of ['sheet:0', 'sheet:1']) await book.previewRange({ sheet, range: 'A1:C6' });
       const zip = await JSZip.loadAsync(await book.export());
       saved.push(Object.fromEntries(await Promise.all(Object.values(zip.files).map(async file => [file.name, await file.async('string')] as const))));
     } finally { book.close(); }
@@ -204,17 +204,17 @@ test('XLSX export is byte-identical with or without a preview', async () => {
 test('XLSX previews return real PNG ranges, restore the active sheet and bound allocation', async () => {
   const book = await openXlsx(await xlsxFixture());
   try {
-    const before = book.previewRange({ sheet: 'sheet:0', range: 'A3:C6' });
+    const before = await book.previewRange({ sheet: 'sheet:0', range: 'A3:C6' });
     expect([...before.png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
     expect(before.width).toBeGreaterThan(0);
     expect(before.height).toBeGreaterThan(0);
     book.formatRanges({ version: before.version, edits: [{ sheet: 'sheet:0', range: 'A3:C6', fill: '#FF0000' }] });
-    expect(book.previewRange({ sheet: 'sheet:0', range: 'A3:C6' }).png).not.toEqual(before.png);
+    expect((await book.previewRange({ sheet: 'sheet:0', range: 'A3:C6' })).png).not.toEqual(before.png);
     book.handle.setActiveSheet(1);
-    book.previewRange({ sheet: 'sheet:0', range: 'A3:C6' });
+    await book.previewRange({ sheet: 'sheet:0', range: 'A3:C6' });
     expect(book.handle.sheetInfo().activeSheet).toBe(1);
-    expect(() => book.previewRange({ sheet: 'sheet:0', range: 'A1:XFD1048576' })).toThrow('10000');
-    expect(() => book.previewRange({ sheet: 'sheet:0', range: 'A1', scale: 100 })).toThrow('scale');
+    await expect(book.previewRange({ sheet: 'sheet:0', range: 'A1:XFD1048576' })).rejects.toThrow('10000');
+    await expect(book.previewRange({ sheet: 'sheet:0', range: 'A1', scale: 100 })).rejects.toThrow('scale');
   } finally { book.close(); }
 });
 

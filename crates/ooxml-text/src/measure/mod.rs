@@ -58,9 +58,7 @@
 //!   line before the cut.
 //! - **`allCaps` uppercases before shaping**, `smallCaps` shapes lowercase
 //!   as small capitals, and `horizontalScale` multiplies glyph advances:
-//!   measurement reflects what a painter draws. `letterSpacing` is added
-//!   once per gap between shaped clusters within a word — never between
-//!   words, and not scaled by `horizontalScale`.
+//!   measurement reflects what a painter draws.
 //! - **Line height** follows `spacing.lineRule` (`exact` / `atLeast` /
 //!   `auto`) and `lineUnit` (`multiplier` / `px`), defaulting to single
 //!   spacing. An empty paragraph floors at 1.15 × the font size under the

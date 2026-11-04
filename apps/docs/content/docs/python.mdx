@@ -55,9 +55,10 @@ png = wb.render_png({"sheet": "Sheet1", "range": "A1:H40"}, scale=2.0)
 png.write("preview.png")
 ```
 
-The target takes a sheet name or index, with an A1 `range` or a `viewport`;
-`max_width` and `max_height` cap the output. `render_sheet("Sheet1")` frames the
-sheet's used range.
+The target takes a sheet name or index, with a `range` (the exact string `"used"`, an
+A1 string, or an address dictionary) or a `viewport`. `"used"` frames the sheet's used
+range at call time, like `render_sheet("Sheet1")`. Omitting both `range` and `viewport`
+is an error. `max_width` and `max_height` cap the output.
 
 Spreadsheet rendering uses the bundled fonts. Opening, recalculating,
 rendering, and saving release the GIL, allowing these operations to run across

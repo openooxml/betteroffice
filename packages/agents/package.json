@@ -9,15 +9,18 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./mcp": {
       "types": "./dist/mcp.d.ts",
-      "import": "./dist/mcp.js"
+      "import": "./dist/mcp.js",
+      "default": "./dist/mcp.js"
     },
     "./render": {
       "types": "./dist/render.d.ts",
-      "import": "./dist/render.js"
+      "import": "./dist/render.js",
+      "default": "./dist/render.js"
     }
   },
   "bin": {

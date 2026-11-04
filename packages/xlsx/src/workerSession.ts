@@ -8,6 +8,9 @@ export { workbookSessionRecovery, WorkbookRecoveryReplayError } from './session/
 export type { WorkbookSessionRecovery } from './session/clientRecovery';
 export { createWorkbookEditSession } from './session/editSession';
 export { WorkbookPngUnavailableError } from './session/methods';
+export { PngExportError } from '../../../shared/office-session/pngExportError';
+export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
 export type { WorkbookEditSession } from './session/editSession';
 /** @experimental */
 export type {
@@ -24,4 +27,5 @@ export type {
   WorkbookSessionState,
   WorkbookSheetSummary,
   WorkbookSheetView,
+  WorkbookPngOptions,
 } from './session/methods';

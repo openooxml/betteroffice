@@ -1050,7 +1050,7 @@ impl PptxRenderer {
         let renderer = self.renderer_mut(env)?;
         let bytes = bytes.to_vec();
         renderer
-            .register_font(&family, bold, italic, &bytes)
+            .register_font(&family, bold, italic, bytes)
             .map_err(|error| map_error(env, error))
     }
 
@@ -1067,7 +1067,7 @@ impl PptxRenderer {
         let renderer = self.renderer_mut(env)?;
         let bytes = bytes.to_vec();
         renderer
-            .register_fallback_font(&family, bold, italic, &bytes)
+            .register_fallback_font(&family, bold, italic, bytes)
             .map_err(|error| map_error(env, error))
     }
 

@@ -2,6 +2,7 @@ import type { BundledFontScript } from '@betteroffice/fonts';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
+import { sessionFontDecoder } from './sessionFontDecoder';
 
 type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean }
@@ -9,10 +10,10 @@ type FontRequest =
 
 let decoderReady: Promise<unknown> = Promise.resolve();
 
-const sessionDecoder: typeof decodeFontFace = async (bytes, options) => {
+const sessionDecoder = sessionFontDecoder(async (bytes, options) => {
   await decoderReady.catch(() => {});
   return decodeFontFace(bytes, options);
-};
+});
 
 export const commandFontProvider = {
   async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: sessionDecoder }); },

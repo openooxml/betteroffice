@@ -1226,3 +1226,109 @@ test('slide property proposal stale targets survive loader preview and forced ac
     } finally { source.dispose(); }
   }
 });
+
+test.each(['insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn'] as const)('%s proposals preview table structure by ID and index, accept, reject and undo', async type => {
+  const zip = await JSZip.loadAsync(await readFile(resolve(root, 'crates/pptx-render/tests/fixtures/table-basic.pptx')));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace(/ (gridSpan|rowSpan|hMerge|vMerge)="[^"]*"/gu, ''));
+  const source = openPresentation(await zip.generateAsync({ type: 'uint8array' }), { fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const shape = slide.shapes[0]!;
+    const edit: import('../proposals').ProposalEdit = type === 'insertTableRow' || type === 'insertTableColumn'
+      ? { type, slideId: slide.id, shapeId: shape.id, index: 0, position: 'after', cells: ['New cell'] }
+      : { type, slideId: slide.id, shapeId: shape.id, index: 0 };
+    const proposal = source.propose('agent', null, [edit]);
+    expect(proposal.changes).toMatchObject([{ slideId: slide.id, shapeId: shape.id, kind: 'content' }]);
+    expect(source.proposalSlideStrip(proposal.id)[0]!.status).toBe('changed');
+    const diff = source.layoutProposalDiffSlideById(proposal.id, slide.id);
+    expect(source.layoutProposalDiffSlide(proposal.id, 0).frame).toEqual(diff.frame);
+    expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'changed' }]);
+    const table = diff.snapshot.slides[0]!.shapes[0]!.graphic as { rows: unknown[]; grid: number[] };
+    const rows = type === 'insertTableRow' ? 4 : type === 'deleteTableRow' ? 2 : 3;
+    const columns = type === 'insertTableColumn' ? 4 : type === 'deleteTableColumn' ? 2 : 3;
+    expect([table.rows.length, table.grid.length]).toEqual([rows, columns]);
+    expect(diff.snapshot.slides[0]!.shapes[0]!.textStories).toHaveLength(rows * columns);
+    if (type.startsWith('insert')) expect(JSON.stringify(diff.frame)).toContain('New cell');
+    expect(source.snapshot()).toEqual(before);
+    source.rejectProposal(proposal.id);
+    expect(source.listProposals()).toHaveLength(0);
+    const accepted = source.propose('agent', null, [edit]);
+    const preview = source.previewProposal(accepted.id).snapshot;
+    source.acceptProposal(accepted.id);
+    expect(source.snapshot()).toEqual(preview);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+    expect(source.canUndo()).toBe(false);
+    const stale = source.propose('agent', null, [edit]);
+    source.insertTableRow(slide.id, shape.id, 0, 'before');
+    expect(source.listProposals()[0]!.staleTargets).toEqual([shape.id]);
+    expect(() => source.acceptProposal(stale.id)).toThrow(StaleProposalError);
+  } finally { source.dispose(); }
+});
+
+test('table proposals can replace text in an inserted row and reject invalid table edits atomically', async () => {
+  const zip = await JSZip.loadAsync(await readFile(resolve(root, 'crates/pptx-render/tests/fixtures/table-basic.pptx')));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace(/ (gridSpan|rowSpan|hMerge|vMerge)="[^"]*"/gu, ''));
+  const source = openPresentation(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const shape = slide.shapes[0]!;
+    const insert: import('../proposals').ProposalEdit = { type: 'insertTableRow', slideId: slide.id, shapeId: shape.id, index: 0, position: 'after' };
+    const draft = source.propose('agent', null, [insert]);
+    const storyId = source.previewProposal(draft.id).snapshot.slides[0]!.shapes[0]!.textStories[3]!.id;
+    source.rejectProposal(draft.id);
+    const proposal = source.propose('agent', null, [insert, { type: 'replaceText', storyId, start: 0, end: 0, text: 'Reviewed cell' }]);
+    expect(source.layoutProposalDiffSlide(proposal.id, 0).snapshot.slides[0]!.shapes[0]!.textStories[3]!.paragraphs[0]!.runs.map(run => run.text).join('')).toBe('Reviewed cell');
+    source.acceptProposal(proposal.id);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+    for (const edit of [{ ...insert, index: 99 }, { ...insert, cells: ['A', 'B', 'C', 'D'] }]) {
+      expect(() => source.propose('agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Must not stage' }, edit])).toThrow();
+      expect(source.snapshot()).toEqual(before);
+      expect(source.listProposals()).toHaveLength(0);
+    }
+  } finally { source.dispose(); }
+});
+
+test.each(['front', 'back', 'forward', 'backward'] as const)('reorderShape %s proposals preview stacking, accept, reject and undo', async to => {
+  const source = openPresentation(await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-shapes.pptx')), { fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0]!;
+    const from = to === 'back' || to === 'backward' ? 1 : 0;
+    const shape = slide.shapes[from]!;
+    const edit = { type: 'reorderShape', slideId: slide.id, shapeId: shape.id, to } as const;
+    const proposal = source.propose('agent', null, [edit]);
+    expect(proposal.changes).toMatchObject([{ shapeId: shape.id, kind: 'content', beforeIndex: from, afterIndex: 1 - from }]);
+    const preview = source.previewProposal(proposal.id).snapshot;
+    expect(preview.slides[0]!.shapes.map(shape => shape.id)).toEqual(slide.shapes.map(shape => shape.id).reverse());
+    const diff = source.layoutProposalDiffSlideById(proposal.id, slide.id);
+    expect(source.layoutProposalDiffSlide(proposal.id, 0)).toEqual(diff);
+    expect(diff.snapshot.slides[0]!.shapes.map(shape => shape.id)).toEqual(preview.slides[0]!.shapes.map(shape => shape.id));
+    expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'reordered' }]);
+    const shapeIds = slide.shapes.map(shape => shape.id);
+    expect([...new Set(diff.frame.primitives.flatMap(primitive => primitive.shapeId && shapeIds.includes(primitive.shapeId) ? [primitive.shapeId] : []))]).toEqual([...shapeIds].reverse());
+    expect(source.proposalSlideStrip(proposal.id)[0]!.status).toBe('changed');
+    expect(source.snapshot()).toEqual(before);
+    expect(source.rejectProposal(proposal.id)).toBe(true);
+    const accepted = source.propose('agent', null, [edit]);
+    source.acceptProposal(accepted.id);
+    expect(source.snapshot()).toEqual(preview);
+    source.undo();
+    expect(source.snapshot()).toEqual(before);
+    expect(source.canUndo()).toBe(false);
+    for (const invalid of [{ ...edit, to: 'up' }, { ...edit, slideId: 'missing' }, { ...edit, shapeId: 'missing' }, { ...edit, extra: true }]) {
+      expect(() => source.propose('agent', null, [invalid as unknown as import('../proposals').ProposalEdit])).toThrow();
+      expect(source.snapshot()).toEqual(before);
+      expect(source.listProposals()).toHaveLength(0);
+    }
+    const stale = source.propose('agent', null, [edit]);
+    source.bringShapeToFront(slide.id, slide.shapes[0]!.id);
+    expect(source.listProposals()[0]!.staleTargets).toEqual([shape.id]);
+    expect(() => source.acceptProposal(stale.id)).toThrow(StaleProposalError);
+  } finally { source.dispose(); }
+});

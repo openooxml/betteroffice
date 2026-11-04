@@ -52,7 +52,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
 
   overview() {
     const read = this.content();
-    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements and slide structure; shape edits and whole-story paragraph rewrites with bullets, alignment and styled runs; slide layout and background proposals with @ref targets', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, office_outline with story comments for discussion IDs and office_read for full comment text, pptx_edit with the current version for atomic edits including add_comment/reply_comment/resolve_comment, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
+    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements and slide structure; shape edits and whole-story paragraph rewrites with bullets, alignment and styled runs; slide layout and background proposals with @ref targets; table row and column insertion and deletion proposals', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, office_outline with story comments for discussion IDs and office_read for full comment text, pptx_edit with the current version for atomic edits including add_comment/reply_comment/resolve_comment, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
   }
 
   list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
@@ -175,8 +175,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   }
 
   private slideChanges(proposal: Proposal): SlideTextChange[] {
+    const slides = new Map(this.handle.proposalSlideStrip(proposal.id).map(entry =>
+      [entry.slideId, (entry.previewIndex ?? entry.liveIndex ?? 0) + 1] as const));
     return proposal.changes.map(change => ({
-      ref: change.shapeId ?? change.slideId, slide: (change.afterIndex ?? change.beforeIndex ?? 0) + 1,
+      ref: change.shapeId ?? change.slideId, slide: change.shapeId ? slides.get(change.slideId) ?? 1 : (change.afterIndex ?? change.beforeIndex ?? 0) + 1,
       story: '', start: 0, oldText: change.oldText, newText: change.newText,
       kind: change.kind, slideId: change.slideId, beforeIndex: change.beforeIndex, afterIndex: change.afterIndex,
     }));

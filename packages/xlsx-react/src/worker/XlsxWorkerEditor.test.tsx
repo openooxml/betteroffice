@@ -2002,7 +2002,7 @@ describe('XlsxEditor async API', () => {
     await expect(host.replica.async.encodeStateVector()).resolves.toEqual(Uint8Array.of(1));
   });
 
-  for (const route of ['renderPng', 'renderRangePng', 'exportStructured', 'exportMarkdown', 'printDisplayList', 'exportPng'] as const) {
+  for (const route of ['renderPng', 'renderPngRange', 'exportStructured', 'exportMarkdown', 'printDisplayList', 'exportPng'] as const) {
     for (const status of ['applied', 'refused'] as const) {
       it(`exports acknowledged composition and preserves input refusals (${route}, ${status})`, async () => {
         const host = peerlessHarness(true);
@@ -2014,7 +2014,6 @@ describe('XlsxEditor async API', () => {
         };
         const sheet = { sheetId: 'sheet:0', index: 0, name: 'First' };
         const renderPng = mock<WorkbookSession['call']['renderPng']>(async () => new TextEncoder().encode(read()));
-        const renderRangePng = mock<WorkbookSession['call']['renderRangePng']>(async () => new TextEncoder().encode(read()));
         const exportStructured = mock<WorkbookSession['call']['exportStructured']>(async () => {
           const value = read();
           return { ok: true, version: 'v1', content: {
@@ -2039,7 +2038,8 @@ describe('XlsxEditor async API', () => {
           commands: [{ op: 'text', text: read(), x: 8, y: 18, fontSize: 11, color: '#000000' }],
         }));
         Object.assign(host.session, { pngExport: true });
-        Object.assign(host.session.call, { renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList });
+        const renderPngFonts = mock<WorkbookSession['call']['renderPngFonts']>(async () => []);
+        Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
         for (const name of ['createObjectURL', 'revokeObjectURL'] as const) {
           const descriptor = Object.getOwnPropertyDescriptor(URL, name);
           Object.defineProperty(URL, name, { configurable: true, value: () => 'blob:png' });
@@ -2062,8 +2062,8 @@ describe('XlsxEditor async API', () => {
         fireEvent.change(input, { target: { value: 'composed' } });
         const invoke = (): Promise<unknown> => {
           switch (route) {
-            case 'renderPng': return api.renderPng({ x: 0, y: 0, width: 120, height: 48 });
-            case 'renderRangePng': return api.renderRangePng({ range: 'A1' });
+            case 'renderPng': return api.renderPng({ sheet: 0, viewport: { x: 0, y: 0, width: 120, height: 48 } });
+            case 'renderPngRange': return api.renderPng({ sheet: 0, range: 'A1' });
             case 'exportStructured': return api.exportStructured();
             case 'exportMarkdown': return api.exportMarkdown();
             case 'printDisplayList': return api.printDisplayList(0, 'A1', {
@@ -2090,7 +2090,7 @@ describe('XlsxEditor async API', () => {
         } else {
           expect(values).toEqual(['composed']);
           const result = await exporting;
-          if (route === 'renderPng' || route === 'renderRangePng') expect(new TextDecoder().decode(result as Uint8Array)).toBe('composed');
+          if (route === 'renderPng' || route === 'renderPngRange') expect(new TextDecoder().decode(result as Uint8Array)).toBe('composed');
           else if (route === 'exportStructured') expect(result).toMatchObject({ content: { sheets: [{ cells: [{ displayText: 'composed' }] }] } });
           else if (route === 'exportMarkdown') expect(result).toMatchObject({ content: { markdown: 'composed' } });
           else if (route === 'printDisplayList') expect(result).toMatchObject({ commands: [{ text: 'composed' }] });
@@ -2105,8 +2105,7 @@ describe('XlsxEditor async API', () => {
   it('opens the worker lean, downloads viewport PNG and resolves the export API', async () => {
     const host = peerlessHarness(true);
     const png = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10);
-    const renderPng = mock(async (_viewport: xlsx.Viewport, _options?: { sheet?: number }) => png);
-    const renderRangePng = mock(async (_range?: { range?: string; scale?: number }, _options?: { sheet?: number }) => png);
+    const renderPng = mock(async (_target: xlsx.XlsxPngTarget, _options?: xlsx.XlsxPngOptions) => png);
     const structured: xlsx.XlsxExportResult<xlsx.XlsxStructuredContent> = { ok: true, version: 'v1', content: {
       schemaVersion: 1, anchorScope: 'session', dateSystem: '1900', truncated: false,
       calculation: { policy: 'asStored', freshness: 'unverified' },
@@ -2121,7 +2120,8 @@ describe('XlsxEditor async API', () => {
     const list: DisplayList = { width: 120, height: 48, commands: [] };
     const printDisplayList = mock(async (_sheet: number, _range: string, _metrics: xlsx.PrintMetrics, _gridlines: boolean) => list);
     Object.assign(host.session, { pngExport: true });
-    Object.assign(host.session.call, { renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList });
+    const renderPngFonts = mock(async (_target: xlsx.XlsxPngTarget, _options?: xlsx.XlsxPngOptions) => [] as xlsx.XlsxPngFont[]);
+    Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
     const createUrl = mock((_blob: Blob) => 'blob:png');
     const revokeUrl = mock((_url: string) => {});
     for (const [name, value] of [['createObjectURL', createUrl], ['revokeObjectURL', revokeUrl]] as const) {
@@ -2146,7 +2146,8 @@ describe('XlsxEditor async API', () => {
     expect(api.commands.getState('exportPng').enabled).toBe(true);
     await act(async () => fireEvent.click(view.getByTestId('xlsx-export-png')));
     await waitFor(() => expect(downloads).toEqual([{ name: 'Report.png', href: 'blob:png' }]));
-    expect(renderPng).toHaveBeenCalledWith({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
+    expect(renderPng.mock.calls[0]).toEqual([{ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } }, {}]);
+    expect(renderPngFonts.mock.calls[0]![0]).toEqual({ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } });
     const blob = createUrl.mock.calls[0]![0];
     expect(blob.type).toBe('image/png');
     expect(new Uint8Array(await blob.arrayBuffer())).toEqual(png);
@@ -2155,13 +2156,13 @@ describe('XlsxEditor async API', () => {
     const options = { scope: [{ sheet: 1, range: 'A1:B2' }], maxCells: 2 };
     const metrics = { dpi: 144, maxDigitWidth: 9, defaultRowHeightPt: 18,
       fontSizePt: 12, fontFamily: 'Arial', fontAscent: 12, fontDescent: 4 };
-    await expect(api.renderPng(viewport)).resolves.toEqual(png);
-    await expect(api.renderRangePng({ range: 'A1:B2', scale: 2 })).resolves.toEqual(png);
+    await expect(api.renderPng({ sheet: 0, viewport })).resolves.toEqual(png);
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 0, viewport }, {}]);
+    await expect(api.renderPng({ sheet: 'First', range: 'A1:B2' }, { scale: 2 })).resolves.toEqual(png);
     await expect(api.exportStructured(options)).resolves.toEqual(structured);
     await expect(api.exportMarkdown(options, { maxRows: 1 })).resolves.toEqual(markdown);
     await expect(api.printDisplayList(1, 'A1:B2', metrics, false)).resolves.toEqual(list);
-    expect(renderPng).toHaveBeenLastCalledWith(viewport, { sheet: 0 });
-    expect(renderRangePng).toHaveBeenCalledWith({ range: 'A1:B2', scale: 2 }, { sheet: 0 });
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 'First', range: 'A1:B2' }, { scale: 2 }]);
     expect(exportStructured).toHaveBeenCalledWith(options);
     expect(exportMarkdown).toHaveBeenCalledWith(options, { maxRows: 1 });
     expect(printDisplayList).toHaveBeenCalledWith(1, 'A1:B2', metrics, false);

@@ -662,10 +662,10 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   };
   return <>
     <CanvasA11yLiveRegion active getSelectionContext={getSelectionContext} notifyRef={notify} />
-    <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
-      onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
-      caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
-    <div ref={column} style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
+    <div ref={column} data-docx-caret-host style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
+      <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
+        onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
+        caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
       <div data-docx-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
           if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();

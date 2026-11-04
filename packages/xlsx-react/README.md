@@ -77,7 +77,7 @@ workbook, and its command store is shared with the toolbar and host controls.
 | `validateEdits`, `applyEdits` | Validate or apply version-checked batches; refuse while read-only. |
 | `save()` | Commit input, return bytes and call `onSave` without downloading or consulting `onSaveRequest`. |
 | `focus()` | Focus the editor. |
-| `renderPng`, `renderRangePng`, `printDisplayList` | Render asynchronously. |
+| `renderPng`, `printDisplayList` | Render asynchronously. `renderPng` takes `{ sheet, viewport }` or `{ sheet, range }`. |
 | `exportStructured`, `exportMarkdown` | Export content asynchronously. |
 | `proposeChanges` | Optional method for staging tracked cell edits on worker editors. |
 | `collaboration` | Asynchronous collaboration replica, or `null`. |

@@ -1,12 +1,15 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import JSZip from 'jszip';
 import { initWasm, openPresentation } from '@betteroffice/pptx';
 import type { ProposalDiffSlide, TextParagraphDraft } from '@betteroffice/pptx';
 import { createT, en, de, deepMerge, type LocaleStrings } from '@betteroffice/pptx-i18n';
 import { ProposalChangeDetails } from './ProposalDetails';
 import { ProposalSlideStrip } from './ProposalSlideStrip';
 import { ProposalCanvasOverlay, useProposalCanvas } from './ProposalCanvas';
+import { LocaleProvider } from '../i18n/LocaleContext';
+import { useProposalTranslation } from '../i18n/useProposalTranslation';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -132,4 +135,144 @@ test('slide review labels resolve created slide refs and keep both property chan
   const view = render(<ProposalChangeDetails change={change} proposal={proposal} t={createT(deepMerge(en, de) as LocaleStrings, 'de')} textOnly />);
   expect(view.getByText('Layout geändert')).toBeTruthy();
   expect(view.getByText('Hintergrund geändert')).toBeTruthy();
+});
+
+test.each([
+  ['insertTableRow', 'Row inserted'], ['deleteTableRow', 'Row deleted'],
+  ['insertTableColumn', 'Column inserted'], ['deleteTableColumn', 'Column deleted'],
+] as const)('canvas previews %s table structure and loads its review label lazily', async (type, label) => {
+  const zip = await JSZip.loadAsync(await readFile(new URL('../../../../crates/pptx-render/tests/fixtures/table-basic.pptx', import.meta.url)));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace(/ (gridSpan|rowSpan|hMerge|vMerge)="[^"]*"/gu, ''));
+  const handle = openPresentation(await zip.generateAsync({ type: 'uint8array' }), { fonts: [{ family: 'Liberation Sans', bytes: font }] });
+  const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    return new Proxy({ canvas: this, measureText: (text: string) => ({ width: text.length * 8 }) }, {
+      get: (target, key) => Reflect.get(target, key) ?? (() => {}),
+    }) as unknown as CanvasRenderingContext2D;
+  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  try {
+    const before = handle.snapshot();
+    const slide = before.slides[0]!;
+    const shape = slide.shapes[0]!;
+    handle.propose('agent', null, [type === 'insertTableRow' || type === 'insertTableColumn'
+      ? { type, slideId: slide.id, shapeId: shape.id, index: 0, position: 'after', cells: ['Review cell'] }
+      : { type, slideId: slide.id, shapeId: shape.id, index: 0 }]);
+    const review = renderHook(() => useProposalCanvas(handle, handle.listProposals(), before, 0));
+    expect(review.result.current.error).toBeNull();
+    const diff = review.result.current.diff!;
+    expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'changed' }]);
+    const table = diff.snapshot.slides[0]!.shapes[0]!.graphic as { rows: unknown[]; grid: unknown[] };
+    expect(table.rows.length).toBe(type === 'insertTableRow' ? 4 : type === 'deleteTableRow' ? 2 : 3);
+    expect(table.grid.length).toBe(type === 'insertTableColumn' ? 4 : type === 'deleteTableColumn' ? 2 : 3);
+    function Details() {
+      const { t } = useProposalTranslation();
+      return <ProposalChangeDetails change={diff.proposal.changes[0]!} proposal={diff.proposal} t={t} />;
+    }
+    let painted: ProposalDiffSlide | null = null;
+    const view = render(<LocaleProvider>
+      <ProposalCanvasOverlay diff={diff} current={before} frame={diff.frame} slideIndex={0} scale={1}
+        resolveImage={() => null} onTarget={() => {}} onPainted={value => { painted = value; }} />
+      <Details />
+    </LocaleProvider>);
+    await waitFor(() => expect(painted).toBe(diff));
+    expect(view.getByText(label)).toBeTruthy();
+    expect(view.getByTestId('pptx-proposal-canvas-target').getAttribute('data-shape-change')).toBe('changed');
+    expect(handle.snapshot()).toEqual(before);
+  } finally { cleanup(); context.mockRestore(); handle.dispose(); }
+});
+
+test('table review labels resolve slide and shape refs, preserve each edit and use locale translations', () => {
+  const change: import('@betteroffice/pptx').ProposalChange = {
+    slideId: 'created-slide', shapeId: 'created-table', kind: 'content', before: null, after: null, oldText: '', newText: '',
+  };
+  const proposal: import('@betteroffice/pptx').Proposal = {
+    id: 'p1', agentId: 'agent', note: null, staleTargets: [], refs: { slide: change.slideId, table: change.shapeId! }, changes: [change], edits: [
+      { type: 'insertTableRow', slideId: '@slide', shapeId: '@table', index: 0, position: 'before' },
+      { type: 'insertTableRow', slideId: '@slide', shapeId: '@table', index: 1, position: 'after' },
+      { type: 'deleteTableRow', slideId: '@slide', shapeId: '@table', index: 0 },
+      { type: 'insertTableColumn', slideId: '@slide', shapeId: '@table', index: 0, position: 'after' },
+      { type: 'deleteTableColumn', slideId: '@slide', shapeId: '@table', index: 0 },
+      { type: 'insertTableRow', slideId: 'other-slide', shapeId: '@table', index: 0, position: 'before' },
+      { type: 'deleteTableRow', slideId: '@slide', shapeId: 'other-table', index: 0 },
+    ],
+  };
+  function Details() {
+    const { t } = useProposalTranslation();
+    return <ProposalChangeDetails change={change} proposal={proposal} t={t} textOnly />;
+  }
+  const view = render(<LocaleProvider i18n={de}><Details /></LocaleProvider>);
+  expect(view.getAllByText('Zeile eingefügt')).toHaveLength(2);
+  expect(view.getAllByText('Zeile gelöscht')).toHaveLength(1);
+  expect(view.getByText('Spalte eingefügt')).toBeTruthy();
+  expect(view.getByText('Spalte gelöscht')).toBeTruthy();
+});
+
+test.each([
+  ['front', 'Brought to front'], ['back', 'Sent to back'],
+  ['forward', 'Brought forward'], ['backward', 'Sent backward'],
+] as const)('canvas previews reorderShape %s with a z-order badge and lazy review label', async (to, label) => {
+  const handle = openPresentation(fixture, { fonts: [{ family: 'Liberation Sans', bytes: font }] });
+  const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    return new Proxy({ canvas: this, measureText: (text: string) => ({ width: text.length * 8 }) }, {
+      get: (target, key) => Reflect.get(target, key) ?? (() => {}),
+    }) as unknown as CanvasRenderingContext2D;
+  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  try {
+    const before = handle.snapshot();
+    const slide = before.slides[0]!;
+    const shape = slide.shapes[to === 'back' || to === 'backward' ? 1 : 0]!;
+    handle.propose('agent', null, [{ type: 'reorderShape', slideId: slide.id, shapeId: shape.id, to }]);
+    const review = renderHook(() => useProposalCanvas(handle, handle.listProposals(), before, 0));
+    expect(review.result.current.error).toBeNull();
+    const diff = review.result.current.diff!;
+    expect(diff.snapshot.slides[0]!.shapes.map(shape => shape.id)).toEqual(slide.shapes.map(shape => shape.id).reverse());
+    expect(diff.shapeChanges).toEqual([{ shapeId: shape.id, kind: 'reordered' }]);
+    const shapeIds = slide.shapes.map(shape => shape.id);
+    expect([...new Set(diff.frame.primitives.flatMap(primitive => primitive.shapeId && shapeIds.includes(primitive.shapeId) ? [primitive.shapeId] : []))]).toEqual([...shapeIds].reverse());
+    function Details() {
+      const { t } = useProposalTranslation();
+      return <ProposalChangeDetails change={diff.proposal.changes[0]!} proposal={diff.proposal} t={t} />;
+    }
+    let painted: ProposalDiffSlide | null = null;
+    const onTarget = mock((_slideId: string, _shapeId: string) => {});
+    const view = render(<LocaleProvider>
+      <ProposalCanvasOverlay diff={diff} current={before} frame={diff.frame} slideIndex={0} scale={1}
+        resolveImage={() => null} onTarget={onTarget} onPainted={value => { painted = value; }} />
+      <Details />
+    </LocaleProvider>);
+    await waitFor(() => expect(painted).toBe(diff));
+    expect(view.getByText(label)).toBeTruthy();
+    expect(view.getByText('Stacking order changed')).toBeTruthy();
+    const target = view.getByTestId('pptx-proposal-canvas-target');
+    expect(target.getAttribute('data-shape-change')).toBe('reordered');
+    fireEvent.click(target);
+    expect(onTarget).toHaveBeenCalledWith(slide.id, shape.id);
+    expect(handle.snapshot()).toEqual(before);
+  } finally { cleanup(); context.mockRestore(); handle.dispose(); }
+});
+
+test('z-order review labels resolve both refs and preserve every edit in the selected locale', () => {
+  const change: import('@betteroffice/pptx').ProposalChange = {
+    slideId: 'created-slide', shapeId: 'created-shape', kind: 'content', before: null, after: null, oldText: '', newText: '',
+  };
+  const proposal: import('@betteroffice/pptx').Proposal = {
+    id: 'p1', agentId: 'agent', note: null, staleTargets: [], refs: { slide: change.slideId, shape: change.shapeId! }, changes: [change], edits: [
+      { type: 'reorderShape', slideId: '@slide', shapeId: '@shape', to: 'front' },
+      { type: 'reorderShape', slideId: '@slide', shapeId: '@shape', to: 'front' },
+      { type: 'reorderShape', slideId: '@slide', shapeId: '@shape', to: 'back' },
+      { type: 'reorderShape', slideId: '@slide', shapeId: '@shape', to: 'forward' },
+      { type: 'reorderShape', slideId: '@slide', shapeId: '@shape', to: 'backward' },
+      { type: 'reorderShape', slideId: 'other-slide', shapeId: '@shape', to: 'front' },
+      { type: 'reorderShape', slideId: '@slide', shapeId: 'other-shape', to: 'back' },
+    ],
+  };
+  function Details() {
+    const { t } = useProposalTranslation();
+    return <ProposalChangeDetails change={change} proposal={proposal} t={t} textOnly />;
+  }
+  const view = render(<LocaleProvider i18n={de}><Details /></LocaleProvider>);
+  expect(view.getAllByText('In den Vordergrund gebracht')).toHaveLength(2);
+  expect(view.getAllByText('In den Hintergrund verschoben')).toHaveLength(1);
+  expect(view.getByText('Eine Ebene nach vorne gebracht')).toBeTruthy();
+  expect(view.getByText('Eine Ebene nach hinten verschoben')).toBeTruthy();
 });

@@ -2132,7 +2132,7 @@ describe('XlsxEditor commands', () => {
         clicks.push(this.download);
       };
       try {
-        const editor = await mountCommands({ fileName: 'report.xlsx' });
+        const editor = await mountCommands({ fileName: 'report.xlsx', defaultFonts: false });
         const type = (value: string) =>
           source === 'cell'
             ? editor.typeInCell(value)
@@ -2163,9 +2163,19 @@ describe('XlsxEditor commands', () => {
         ]);
         expect(editor.api().commands.getState('borderStyle').value).toBe('dashed');
         type('Exported');
-        expect(await editor.execute('exportPng', null)).toEqual({ ok: true, status: 'executed' });
+        const exported: unknown[] = [];
+        const handle = editor.api().handle;
+        const renderPng = handle.renderPng;
+        handle.renderPng = (target) => {
+          exported.push({ target, input: handle.cell(0, 2, 0).input });
+          return Promise.resolve(Uint8Array.of(137, 80, 78, 71));
+        };
+        try {
+          expect(await editor.execute('exportPng', null)).toEqual({ ok: true, status: 'executed' });
+        } finally { handle.renderPng = renderPng; }
         expect(editor.input()).toBe('Exported');
         expect(clicks).toEqual(['report.png']);
+        expect(exported).toEqual([{ target: { sheet: 0, viewport: expect.any(Object) }, input: 'Exported' }]);
       } finally {
         HTMLAnchorElement.prototype.click = click;
       }

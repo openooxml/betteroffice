@@ -288,6 +288,12 @@ pub enum Primitive {
 pub struct CanvasTextCluster {
     pub text: String,
     pub offset: Number,
+    #[serde(
+        rename = "sourceRange",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_range: Option<std::ops::Range<usize>>,
 }
 
 /// Everything a primitive carries about the document content it came from:
@@ -5000,11 +5006,21 @@ fn text_canvas_clusters(
     let font = *chain.ids.first()?;
     let coverage_only = chain.coverage_only;
     fonts.store.family_widths(font).ok()??;
-    let text = if fmt.all_caps == Some(true) {
-        text.to_uppercase()
-    } else {
-        text.to_owned()
-    };
+    let mut painted = String::new();
+    let mut source_ranges = Vec::new();
+    for (start, ch) in text.char_indices() {
+        let end = start + ch.len_utf8();
+        let transformed = if fmt.all_caps == Some(true) {
+            ch.to_uppercase().collect::<String>()
+        } else {
+            ch.to_string()
+        };
+        for painted_ch in transformed.chars() {
+            source_ranges.push((painted.len(), start..end));
+            painted.push(painted_ch);
+        }
+    }
+    let text = painted;
     if text.chars().any(|ch| {
         ooxml_text::covered_character(fonts.store, font, ch)
             .ok()
@@ -5045,10 +5061,6 @@ fn text_canvas_clusters(
         .copied()
         .chain(std::iter::once(text.len()))
         .collect();
-    let breaks: std::collections::HashSet<_> = ooxml_text::break_opportunities(&text)
-        .into_iter()
-        .map(|boundary| boundary.byte_index)
-        .collect();
     let horizontal = fmt.horizontal_scale.unwrap_or(100.0) / 100.0;
     let mut pen = 0.0;
     let mut clusters = Vec::new();
@@ -5056,10 +5068,15 @@ fn text_canvas_clusters(
         let index = bounds.binary_search(&start).ok()?;
         let end = *bounds.get(index + 1)?;
         let cluster = text.get(start..end)?;
+        let source_start = source_ranges.partition_point(|(offset, _)| *offset <= start) - 1;
+        let source_end = source_ranges.partition_point(|(offset, _)| *offset < end) - 1;
         clusters.push(CanvasTextCluster {
             text: text_paint_override(Some(fonts), cluster, fmt)
                 .unwrap_or_else(|| cluster.to_owned()),
             offset: px(pen),
+            source_range: Some(
+                source_ranges[source_start].1.start..source_ranges[source_end].1.end,
+            ),
         });
         pen += if fmt.small_caps == Some(true) {
             painted_text_width(
@@ -5077,9 +5094,7 @@ fn text_canvas_clusters(
         if horizontal > 0.0 {
             pen +=
                 word_spacing * cluster.chars().filter(|&ch| ch == ' ').count() as f64 / horizontal;
-            if end < text.len() && !breaks.contains(&end) {
-                pen += fmt.letter_spacing.unwrap_or(0.0) / horizontal;
-            }
+            pen += fmt.letter_spacing.unwrap_or(0.0) * cluster.chars().count() as f64 / horizontal;
             if !ooxml_text::level_is_rtl(bidi_level)
                 && let (Some(left), Some(right)) =
                     (cluster.chars().next_back(), text[end..].chars().next())
@@ -7173,8 +7188,13 @@ fn emit_line(
             if let Some(items) = &authoritative_items {
                 space_count = items
                     .iter()
-                    .filter(|item| matches!(item, LinePaintItem::Text(text) if text.text == " "))
-                    .count();
+                    .map(|item| match item {
+                        LinePaintItem::Text(text) => {
+                            text.text.chars().filter(|&ch| ch == ' ').count()
+                        }
+                        _ => 0,
+                    })
+                    .sum();
             } else {
                 for seg in &segments {
                     let text = match seg.run {
@@ -7367,8 +7387,9 @@ fn emit_line(
                     0.0
                 } else {
                     item.width
-                        + if item.exact_advance && item.text == " " {
+                        + if item.exact_advance {
                             word_space_extra
+                                * item.text.chars().filter(|&ch| ch == ' ').count() as f64
                         } else {
                             0.0
                         }
@@ -8259,6 +8280,7 @@ fn try_emit_glyph_runs(
     let size_px = effective_font_px_of(fmt);
     let features = kern_features_of(fmt, size_px);
     let ws_px = word_spacing.as_ref().map(num_f64).unwrap_or(0.0);
+    let letter_spacing = fmt.letter_spacing.unwrap_or(0.0);
     let direction = shape_direction_for_level(bidi_level);
     let rtl = if direction == ooxml_text::ShapeDirection::Rtl {
         Some(true)
@@ -8389,7 +8411,6 @@ fn try_emit_glyph_runs(
             Err(_) => return false,
         };
 
-        let sub_bytes = sub_text.as_bytes();
         let auto_gaps: Vec<(usize, f64)> = if auto_space_active {
             let mut gaps = Vec::new();
             let mut chars = sub_text.char_indices().peekable();
@@ -8408,21 +8429,34 @@ fn try_emit_glyph_runs(
         } else {
             Vec::new()
         };
+        let has_extra_advance = letter_spacing != 0.0 || ws_px != 0.0 || !auto_gaps.is_empty();
+        let cluster_bounds = if has_extra_advance {
+            let mut bounds: Vec<usize> =
+                glyphs.iter().map(|glyph| glyph.cluster as usize).collect();
+            bounds.sort_unstable();
+            bounds.dedup();
+            bounds.push(sub_text.len());
+            bounds
+        } else {
+            Vec::new()
+        };
         let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(glyphs.len());
         for (index, g) in glyphs.iter().enumerate() {
-            // Fold the justified U+0020 stretch into the glyph advance.
             let mut advance = g.x_advance as f64;
-            if ws_px != 0.0 && sub_bytes.get(g.cluster as usize) == Some(&b' ') {
-                advance += ws_px;
-            }
-            if !auto_gaps.is_empty() {
-                let cluster_end = glyphs
+            if has_extra_advance
+                && glyphs
                     .get(index + 1)
-                    .map(|next| next.cluster as usize)
-                    .unwrap_or(sub_bytes.len());
+                    .is_none_or(|next| next.cluster != g.cluster)
+            {
+                let start = g.cluster as usize;
+                let boundary = cluster_bounds.binary_search(&start).unwrap();
+                let end = cluster_bounds[boundary + 1];
+                let cluster = &sub_text[start..end];
+                advance += letter_spacing * cluster.chars().count() as f64;
+                advance += ws_px * cluster.chars().filter(|&ch| ch == ' ').count() as f64;
                 advance += auto_gaps
                     .iter()
-                    .filter(|(offset, _)| *offset >= g.cluster as usize && *offset < cluster_end)
+                    .filter(|(offset, _)| *offset >= start && *offset < end)
                     .map(|(_, extra)| extra)
                     .sum::<f64>();
             }

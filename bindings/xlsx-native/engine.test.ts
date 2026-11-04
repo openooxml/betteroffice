@@ -8,6 +8,7 @@ import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
+import { cappedExtent } from '../../packages/xlsx/src/wasm/pngResolve';
 
 const native = require('./index.js');
 
@@ -32,8 +33,8 @@ type EngineDocument = {
   encodeStateAsUpdate(): Uint8Array;
   encodeDiff(stateVector: Uint8Array): Uint8Array;
   recoveryCheckpoint(throughSeq: number): Uint8Array;
-  renderPng(viewportJson: string): Uint8Array;
-  renderRangePng(args: string): Uint8Array;
+  renderPngTarget(targetJson: string, optionsJson: string): Uint8Array;
+  rangePngDisplayListJson(args: string): string;
   startUpdateObservation(): void;
   drainUpdateEvent(): Uint8Array;
   undoJson(): string;
@@ -151,8 +152,8 @@ describe('xlsx native engine parity', () => {
         const doc = XlsxDocument.open(new Uint8Array(readFileSync(0)));
         try {
           process.stdout.write(JSON.stringify({
-            png: Buffer.from(doc.renderPng(${JSON.stringify(JSON.stringify(view))})).toString('base64'),
-            ranges: ${JSON.stringify(ranges)}.map(range => Buffer.from(doc.renderRangePng(JSON.stringify({ range, scale: 2 }))).toString('base64')),
+            png: Buffer.from(doc.renderPngTarget(${JSON.stringify(JSON.stringify({ sheet: 0, viewport: view }))}, '{}')).toString('base64'),
+            ranges: ${JSON.stringify(ranges)}.map(range => Buffer.from(doc.renderPngTarget(JSON.stringify({ sheet: 0, range }), JSON.stringify({ scale: 2 }))).toString('base64')),
           }));
         } finally { doc.free(); }
       `);
@@ -163,13 +164,13 @@ describe('xlsx native engine parity', () => {
       await entry.initWasm();
       const workbook = entry.openWorkbook(source);
       try {
-        expect(Buffer.from(workbook.renderPng(view))).not.toEqual(Buffer.from(withoutPacks.png, 'base64'));
+        expect(Buffer.from(await workbook.renderPng({ sheet: 0, viewport: view }))).not.toEqual(Buffer.from(withoutPacks.png, 'base64'));
         for (const [row, range] of ranges.entries()) {
-          const rendered = workbook.renderRangePng({ range, scale: 2 });
+          const rendered = await workbook.renderPng({ sheet: 0, range }, { scale: 2 });
           const pixels = pngPixels(rendered);
           expect(Buffer.from(rendered)).not.toEqual(Buffer.from(withoutPacks.ranges[row], 'base64'));
           workbook.editCell(0, row, 0, '\u{10ffff}'.repeat(5));
-          const placeholder = pngPixels(workbook.renderRangePng({ range, scale: 2 }));
+          const placeholder = pngPixels(await workbook.renderPng({ sheet: 0, range }, { scale: 2 }));
           expect(pixels.length).toBe(placeholder.length);
           let ink = 0;
           let changed = 0;
@@ -229,8 +230,8 @@ describe('xlsx native engine parity', () => {
         doc.encodeStateAsUpdate(),
         doc.encodeDiff(new Uint8Array([0])),
         doc.recoveryCheckpoint(0),
-        doc.renderPng(viewport),
-        doc.renderRangePng(JSON.stringify({ range: 'A1:B2' })),
+        doc.renderPngTarget(JSON.stringify({ sheet: 0, viewport: JSON.parse(viewport) }), '{}'),
+        doc.renderPngTarget(JSON.stringify({ sheet: 0, range: 'A1:B2' }), '{}'),
         doc.saveBytes(),
       ]) expectPlainBytes(bytes);
       expect(drained.byteLength).toBeGreaterThan(0);
@@ -495,6 +496,63 @@ describe('xlsx native engine parity', () => {
         wasmDoc.free();
         nativeDoc.free();
       }
+    }
+  });
+
+  test('renderPngTarget draws both target forms, scales and caps them, and refuses bad input', () => {
+    const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    const size = (bytes: Uint8Array) => {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return [view.getUint32(16), view.getUint32(20)];
+    };
+    const render = (target: unknown, options: unknown = {}) => doc.renderPngTarget(JSON.stringify(target), JSON.stringify(options));
+    const box = { x: 0, y: 0, width: 300, height: 120 };
+    try {
+      expect(size(render({ sheet: 0, viewport: box }))).toEqual([300, 120]);
+      expect(size(render({ sheet: 0, viewport: box }, { scale: 2 }))).toEqual([600, 240]);
+      const [width, height] = size(render({ sheet: 0, range: 'A1:D8' }));
+      const [doubleWidth, doubleHeight] = size(render({ sheet: 0, range: 'a1:d8' }, { scale: 2 }));
+      expect(doubleWidth).toBeGreaterThanOrEqual(2 * width - 2);
+      expect(doubleWidth).toBeLessThanOrEqual(2 * width);
+      expect(doubleHeight).toBeGreaterThanOrEqual(2 * height - 2);
+      expect(doubleHeight).toBeLessThanOrEqual(2 * height);
+      for (const target of [{ sheet: 0, viewport: box }, { sheet: 0, range: 'A1:D8' }]) {
+        for (const scale of [1, 1.3, 2.7]) {
+          const [cappedWidth, cappedHeight] = size(render(target, { scale, maxWidth: 37, maxHeight: 23 }));
+          expect(cappedWidth).toBeLessThanOrEqual(37);
+          expect(cappedWidth).toBeGreaterThanOrEqual(36);
+          expect(cappedHeight).toBeLessThanOrEqual(23);
+          expect(cappedHeight).toBeGreaterThanOrEqual(22);
+        }
+      }
+      const used = JSON.parse(doc.rangePngDisplayListJson('{"scale":2}')) as { width: number; height: number };
+      expect(size(render({ sheet: 0, range: 'used' }, { scale: 2 }))).toEqual([Math.ceil(used.width), Math.ceil(used.height)]);
+      expect(() => render({ sheet: 99, viewport: box })).toThrow('sheet index 99 out of range');
+      expect(() => render({ sheet: 0, range: 'not a range' })).toThrow('invalid range');
+      expect(() => doc.renderPngTarget('{"sheet":0,"viewport":{"x":0,"y":0,"width":1e999,"height":1}}', '{}')).toThrow();
+      expect(() => render({ sheet: 0, viewport: box }, { scale: 1, dpi: 2 })).toThrow('bad options');
+      expect(() => render({ sheet: 0, viewport: box, extra: true })).toThrow('target must be');
+      expect(() => render({ sheet: 0, viewport: { ...box, z: 1 } })).toThrow('target must be');
+    } finally {
+      doc.free();
+    }
+  });
+
+  test('the canvas path caps a viewport to the same PNG size as the native engine', () => {
+    const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    try {
+      for (const [extent, cap, scale] of [
+        [300, 37, 1], [300, 37, 1.3], [300, 37, 2.7], [300, 100, 3], [300, 391, 1.3], [300, 390, 1.3],
+        [300, 810, 2.7], [300, 811, 2.7], [120.5, 23, 1.3], [64.75, 97, 0.75], [300, 1, 2.7],
+      ] as const) {
+        const bytes = doc.renderPngTarget(JSON.stringify({ sheet: 0, viewport: { x: 0, y: 0, width: extent, height: 40 } }),
+          JSON.stringify({ scale, maxWidth: cap }));
+        const nativeWidth = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(16);
+        const canvasWidth = Math.max(1, Math.ceil(Math.fround(cappedExtent(extent, cap, scale) * Math.fround(scale))));
+        expect(canvasWidth, `extent ${extent}, cap ${cap}, scale ${scale}`).toBe(nativeWidth);
+      }
+    } finally {
+      doc.free();
     }
   });
 

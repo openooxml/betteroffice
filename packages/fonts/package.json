@@ -10,12 +10,14 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
     "./cdn": {
       "types": "./dist/cdn.d.ts",
-      "import": "./dist/cdn.js"
+      "import": "./dist/cdn.js",
+      "default": "./dist/cdn.js"
     }
   },
   "files": [

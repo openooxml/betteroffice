@@ -11806,7 +11806,7 @@ impl EngineSession {
     {
         docx_layout::with_private_measure_fonts(|| {
             for (index, bytes) in fonts.iter().enumerate() {
-                let id = docx_layout::register_measure_font_bytes(bytes)
+                let id = docx_layout::register_measure_font_bytes(*bytes)
                     .map_err(|error| format!("font {index}: {error}"))?;
                 if id as usize != index {
                     return Err(format!("font {index} was registered as font {id}"));

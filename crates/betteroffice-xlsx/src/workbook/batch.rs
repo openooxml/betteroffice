@@ -1031,7 +1031,10 @@ impl Workbook {
         };
         if !self
             .authority
-            .rehearse_local_update(&baseline, prepared.update())
+            .rehearse_local_update(
+                &baseline,
+                prepared.update().expect("batch commits stage an update"),
+            )
             .map_err(authority_error)?
         {
             return Err(Error::CollaborativeState(
