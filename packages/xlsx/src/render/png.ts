@@ -14,9 +14,16 @@ export interface DisplayListToPngOptions {
 
 type ExportCanvas = HTMLCanvasElement | OffscreenCanvas;
 
-/** Whether this runtime can paint and encode a PNG on a canvas. */
+let documentCanvas: boolean | undefined;
+
+/** Whether this runtime can paint and encode a PNG on a canvas: one with a 2d context, not only a document. */
 export function canvasPngAvailable(): boolean {
-  return typeof OffscreenCanvas === 'function' || typeof document !== 'undefined';
+  if (typeof OffscreenCanvas === 'function') return true;
+  if (typeof document === 'undefined') return false;
+  if (documentCanvas === undefined) {
+    try { documentCanvas = document.createElement('canvas').getContext('2d') !== null; } catch { documentCanvas = false; }
+  }
+  return documentCanvas;
 }
 
 /** Paints a sheet display list with the editor's painter on a white canvas and encodes it. */
@@ -42,11 +49,14 @@ export async function displayListToPng(list: DisplayList, options: DisplayListTo
   return new Uint8Array(await (await encode(canvas)).arrayBuffer());
 }
 
+/** The error for a runtime that can draw the PNG neither on a canvas nor with a rasterizer. */
+export function canvasUnavailable(detail = 'PNG export needs a canvas, and this environment has none.'): PngExportError {
+  return new PngExportError('canvas-unavailable', `${detail} Use @betteroffice/xlsx-native.`);
+}
+
 function createCanvas(width: number, height: number): ExportCanvas {
   if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(width, height);
-  if (typeof document === 'undefined') {
-    throw new PngExportError('canvas-unavailable', 'PNG export needs a canvas, and this environment has none. Use @betteroffice/xlsx-native.');
-  }
+  if (typeof document === 'undefined') throw canvasUnavailable();
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;

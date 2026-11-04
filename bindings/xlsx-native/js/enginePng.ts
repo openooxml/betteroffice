@@ -3,6 +3,8 @@ import type { ResolvedPngTarget, XlsxPngOptions } from '../../../packages/xlsx/s
 
 export type { XlsxPngEngine } from '../../../packages/xlsx/src/wasm/enginePng';
 
+export const engineKind: 'wasm' | 'native' = 'native';
+
 interface NativePngDocument {
   renderPngTarget(targetJson: string, optionsJson: string): Uint8Array;
 }

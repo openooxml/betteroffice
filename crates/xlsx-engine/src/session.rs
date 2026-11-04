@@ -593,7 +593,11 @@ impl Session {
 
     /// Renders `{ sheet, viewport }` or `{ sheet, range }` with `{ scale, maxWidth, maxHeight }`.
     #[cfg(feature = "raster")]
-    pub fn render_png_target(&self, target_json: &str, options_json: &str) -> Result<Vec<u8>, String> {
+    pub fn render_png_target(
+        &self,
+        target_json: &str,
+        options_json: &str,
+    ) -> Result<Vec<u8>, String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ViewportTarget {
@@ -628,9 +632,8 @@ impl Session {
             max_height: Option<u32>,
         }
 
-        let target: Target = serde_json::from_str(target_json).map_err(|_| {
-            "target must be { sheet, viewport } or { sheet, range }".to_owned()
-        })?;
+        let target: Target = serde_json::from_str(target_json)
+            .map_err(|_| "target must be { sheet, viewport } or { sheet, range }".to_owned())?;
         let options: Options =
             serde_json::from_str(options_json).map_err(|error| format!("bad options: {error}"))?;
         let count = self.workbook.sheet_count();
@@ -638,7 +641,9 @@ impl Session {
             if (index as usize) < count {
                 Ok(SheetId(index))
             } else {
-                Err(format!("sheet index {index} out of range for {count} sheet(s)"))
+                Err(format!(
+                    "sheet index {index} out of range for {count} sheet(s)"
+                ))
             }
         };
         let target = match target {

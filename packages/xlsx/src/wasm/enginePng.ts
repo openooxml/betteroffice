@@ -1,6 +1,5 @@
-import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList } from '../display-list/types';
-import { canvasPngAvailable, displayListToPng } from '../render/png';
+import { canvasPngAvailable, canvasUnavailable, displayListToPng } from '../render/png';
 import type { Viewport } from './loader';
 import { cappedExtent, type ResolvedPngTarget, type XlsxPngOptions } from './pngTarget';
 
@@ -21,12 +20,15 @@ export interface XlsxPngEngine {
   rasterize?: (displayListJson: string) => Promise<Uint8Array>;
 }
 
+/** Which engine this module draws with; the native package swaps in its own. */
+export const engineKind: 'wasm' | 'native' = 'wasm';
+
 /** Draws a resolved target through the canvas, or the build's rasterizer where no canvas exists. */
 export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, options: XlsxPngOptions): Promise<Uint8Array> {
   const scale = options.scale ?? 1;
   const canvas = canvasPngAvailable();
   if (!canvas && !engine.rasterAvailable && !engine.rasterize) {
-    return Promise.reject(new PngExportError('canvas-unavailable', 'PNG export needs a canvas, and this environment has none. Use @betteroffice/xlsx-native.'));
+    return Promise.reject(canvasUnavailable());
   }
   if ('viewport' in target) {
     const viewport: Viewport = {
@@ -35,7 +37,7 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
       height: cappedExtent(target.viewport.height, options.maxHeight, scale),
     };
     if (!canvas) {
-      if (scale !== 1) return Promise.reject(new PngExportError('canvas-unavailable', 'A scaled viewport PNG needs a canvas here. Use @betteroffice/xlsx-native.'));
+      if (scale !== 1) return Promise.reject(canvasUnavailable('A scaled viewport PNG needs a canvas here.'));
       const json = JSON.stringify(viewport);
       if (engine.rasterAvailable) return Promise.resolve(engine.onSheet(target.sheet, () => engine.doc.renderPng!(json).slice()));
       return engine.rasterize!(engine.onSheet(target.sheet, () => engine.doc.pngDisplayListJson(json)));
