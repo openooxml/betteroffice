@@ -82,3 +82,21 @@ for (const [saveName, save] of Object.entries(SAVES)) {
     });
   }
 }
+
+for (const [saveName, save] of Object.entries(SAVES)) {
+  test(`${saveName}: merging the last text paragraph into a final page break keeps the break`, async () => {
+    const source = documentOf(`${RICH}${TARGET}${PAGE_BREAK}`);
+    const session = await createYrsSession();
+    open.push(session);
+    session.seedFromDocx(makeDocx(source));
+    const range = targetRange(session);
+    const segments = session.storySegments('body') as Array<{ kind: string; paraId?: string }>;
+    const at = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === range.start.paraId);
+    const next = segments.slice(at + 1).find(segment => segment.kind === 'pilcrow');
+    if (next) session.replaceRange({ story: 'body', start: { paraId: range.start.paraId, offset: 6 }, end: { paraId: next.paraId!, offset: 0 } }, '');
+    else session.replaceRange({ story: 'body', start: { paraId: range.start.paraId, offset: 5 }, end: { paraId: range.start.paraId, offset: 6 } }, '');
+    const saved = partOf(await save(session));
+    expect(saved).toContain('<w:br w:type="page"/>');
+    expect(saved).toContain('Targe');
+  });
+}

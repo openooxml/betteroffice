@@ -4384,6 +4384,12 @@ fn spliced_part(
             .iter()
             .map(|unit| unit.key.as_deref())
             .collect::<Option<_>>()?;
+        if was_tail.is_some_and(|tail| tail.inline)
+            && (was_keys.len() != is_keys.len()
+                || was_keys.keys().any(|key| !is_keys.contains(key)))
+        {
+            return None;
+        }
         fn kept<'u>(units: &'u [UnitState], keep: impl Fn(&str) -> bool) -> Vec<&'u str> {
             units
                 .iter()
