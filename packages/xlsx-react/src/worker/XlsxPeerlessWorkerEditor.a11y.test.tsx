@@ -109,7 +109,8 @@ describe('peerless grid screen reader support', () => {
   it('labels the grid focus target with the sheet', async () => {
     const { view } = await mount();
     const grid = view.getByTestId('xlsx-scroll');
-    expect(grid.getAttribute('role')).toBe('application');
+    expect(grid.getAttribute('role')).toBe('group');
+    expect(view.getAllByRole('application')).toHaveLength(1);
     expect(grid.getAttribute('aria-roledescription')).toBe('worksheet');
     expect(grid.getAttribute('aria-label')).toBe('Data');
     const region = view.getByTestId('xlsx-live-region');

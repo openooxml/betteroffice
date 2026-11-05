@@ -34,7 +34,8 @@ test('xlsx screen reader: the grid is a labelled focus target and announces the 
   await open(page);
   const grid = page.getByTestId('xlsx-scroll');
   await info.attach('aria-before.yml', { body: await page.locator('body').ariaSnapshot(), contentType: 'text/yaml' });
-  await expect(grid).toMatchAriaSnapshot('- application "Budget"');
+  await expect(grid).toMatchAriaSnapshot('- group "Budget"');
+  await expect(page.getByRole('application')).toHaveCount(1);
   await expect(grid).toHaveAttribute('aria-roledescription', 'worksheet');
   await grid.focus();
   await heard(page, 'A1, 21');

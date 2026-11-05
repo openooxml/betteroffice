@@ -9111,7 +9111,7 @@ it('peerless host props set initial zoom and root style and notify versions', as
   const view = await host.mount(undefined, false, { initialZoom: 2, style: { height: 321 },
     onDocumentChange: ({ version }) => changes.push(version) });
   expect(host.commands().getState('zoom').value).toBe(2);
-  expect(view.getByRole('application', { name: 'Spreadsheet editor' }).style.height).toBe('321px');
+  expect(view.getByRole('application').style.height).toBe('321px');
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x' });
   fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'host change' } });
   fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });

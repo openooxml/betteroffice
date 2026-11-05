@@ -1936,7 +1936,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
             painted={pluginHost.painted} zoom={zoom} />}
           <div ref={scrollRef} id={gridId} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
-            role="application" aria-roledescription={t('a11y.gridRoleDescription')}
+            role="group" aria-roledescription={t('a11y.gridRoleDescription')}
             aria-label={sheets.find((sheet) => sheet.index === active)?.name || t('a11y.gridLabel')}
             onFocus={(event) => { if (event.target === event.currentTarget) announceRef.current?.(); }}
             onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
