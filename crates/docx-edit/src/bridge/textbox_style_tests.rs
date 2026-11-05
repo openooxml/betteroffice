@@ -386,3 +386,22 @@ fn edited_text_box_content_keeps_direct_formatting_over_cached_styles() {
         assert_eq!(doc.story_segments("body").unwrap(), stored);
     }
 }
+
+#[test]
+fn text_box_paragraphs_leave_borders_out_of_the_paragraph_only_renderer() {
+    let content = r#"<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="24" w:space="8" w:color="99CB38"/><w:bottom w:val="single" w:sz="24" w:space="8" w:color="99CB38"/></w:pBdr></w:pPr><w:r><w:t>Boxed</w:t></w:r></w:p>"#;
+    let bytes = fixture::Package::new(&drawing(content))
+        .styles(STYLES)
+        .bytes();
+    let doc = EditingDoc::new(75305);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    let boxed = blocks
+        .iter()
+        .find_map(|block| match block {
+            LayoutBlock::Shape(shape) => shape.inner_text.as_ref()?.first(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(boxed.attrs.as_ref().unwrap().borders.is_none());
+}

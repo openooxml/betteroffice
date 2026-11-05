@@ -570,30 +570,32 @@ fn shape_paragraph(
             .collect();
         (values, None)
     };
-    let attrs = if env.shape_styles.0.is_some() {
-        super::lower_paragraph_attrs(
+    let alignment =
+        super::value_string(values.get("alignment")).and_then(|value| match value.as_str() {
+            "both" => Some("justify".to_owned()),
+            "left" | "center" | "right" => Some(value),
+            _ => None,
+        });
+    let mut attrs = ParagraphAttrs {
+        alignment,
+        ..ParagraphAttrs::default()
+    };
+    super::lower_paragraph_spacing(&values, &mut attrs, env, false);
+    super::lower_paragraph_indent(&values, &mut attrs);
+    if env.shape_styles.0.is_some() {
+        let styled = super::lower_paragraph_attrs(
             &values,
             None,
             env,
             &mut crate::list_marker::ListState::default(),
             false,
-        )
+        );
+        attrs.shading = styled.shading;
+        attrs.default_font_size = styled.default_font_size;
+        attrs.default_font_family = styled.default_font_family;
     } else {
-        let alignment =
-            super::value_string(values.get("alignment")).and_then(|value| match value.as_str() {
-                "both" => Some("justify".to_owned()),
-                "left" | "center" | "right" => Some(value),
-                _ => None,
-            });
-        let mut attrs = ParagraphAttrs {
-            alignment,
-            ..ParagraphAttrs::default()
-        };
-        super::lower_paragraph_spacing(&values, &mut attrs, env, false);
-        super::lower_paragraph_indent(&values, &mut attrs);
         attrs.shading = shape_shading(field(paragraph, "formatting"), env);
-        attrs
-    };
+    }
     let defaults = if env.shape_styles.0.is_some() {
         super::paragraph_run_defaults(&values, super::paragraph_chain_size(env, &values), env)
     } else {
