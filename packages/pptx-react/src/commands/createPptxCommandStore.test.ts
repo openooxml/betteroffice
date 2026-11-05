@@ -16,6 +16,16 @@ function mounted(overrides = {}) {
 }
 
 describe('PPTX command store', () => {
+  test('clipboard executes during the click without waiting for admission', async () => {
+    const { harness, store } = mounted();
+    harness.state.admission = () => new Promise<void>(() => {});
+    for (const id of ['cut', 'copy', 'paste'] as const) {
+      const result = store.execute(id, null);
+      expect(harness.calls[harness.calls.length - 1]?.id).toBe(id);
+      expect(await result).toEqual({ ok: true, status: 'executed' });
+    }
+  });
+
   test('keeps a snapshot until its state changes and notifies only then', () => {
     const { harness, controller, store } = mounted();
     let notified = 0;

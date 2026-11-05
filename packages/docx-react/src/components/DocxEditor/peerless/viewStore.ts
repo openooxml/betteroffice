@@ -36,6 +36,8 @@ export interface PeerlessFrameGeometry {
   layoutProvisional?: boolean;
   /** The reservation set the layout includes. */
   reservations?: DocxFrameReservations;
+  /** The canvas backing scale the page boxes are snapped to. */
+  rasterScale?: number;
   pages: readonly {
     page: DocxCommandPageIdentity;
     bounds: DocxEchoRect;
@@ -92,6 +94,8 @@ export interface PeerlessViewStore {
     state: EditSessionState<DocxCommandSelection | null, DocxEditState>
   ): void;
   installFrameGeometry(geometry: PeerlessFrameGeometry): void;
+  /** Replaces the installed geometry with the same frame's geometry at another raster scale. */
+  rescaleFrameGeometry?(geometry: PeerlessFrameGeometry): void;
   setProvisionalCaret(caret: PeerlessProvisionalCaret | null): void;
   subscribeProvisionalCaret?(listener: () => void): () => void;
   getProvisionalCaret?(): PeerlessProvisionalCaret | null;
@@ -171,6 +175,13 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
             (geometry.documentVersion !== provisionalRevision.documentVersion ||
               (provisionalRevision.layoutRevision !== undefined && geometry.layoutRevision > provisionalRevision.layoutRevision)))
           ? null : snapshot.provisionalCaret });
+    },
+    rescaleFrameGeometry(geometry) {
+      const current = snapshot.geometry;
+      if (disposed || !current || current === geometry || !sameIdentity(geometry.identity) ||
+        geometry.frameEpoch !== current.frameEpoch || geometry.coversThroughSeq !== current.coversThroughSeq ||
+        geometry.layoutRevision !== current.layoutRevision) return;
+      publish({ ...snapshot, geometry });
     },
     setProvisionalCaret(caret) {
       if (disposed || snapshot.provisionalCaret === caret ||

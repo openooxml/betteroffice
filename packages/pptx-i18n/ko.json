@@ -52,6 +52,7 @@
     "decreaseFontSize": "글꼴 크기 줄이기",
     "increaseFontSize": "글꼴 크기 늘리기",
     "underline": "밑줄",
+    "strikethrough": "취소선",
     "more": "더 보기",
     "fillColor": "채우기 색",
     "noFill": "채우기 없음",
@@ -230,8 +231,24 @@
       "permissionDenied": "호스트 애플리케이션이 이 추가 기능의 명령 사용을 허용하지 않았습니다.",
       "unsupportedPolicy": "추가 기능은 아직 이 명령을 실행할 수 없습니다. 대신 편집 배치를 사용하세요.",
       "pluginUnavailable": "추가 기능이 더 이상 활성화되어 있지 않습니다.",
-      "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다."
-    }
+      "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다.",
+      "clipboardUnavailable": "클립보드에 접근할 수 없거나 접근이 거부되었습니다.",
+      "tableRequired": "먼저 표의 셀에 커서를 놓으세요.",
+      "lastSlide": "마지막 슬라이드는 삭제할 수 없습니다."
+    },
+    "cut": "잘라내기",
+    "copy": "복사",
+    "paste": "붙여넣기",
+    "insert": "삽입",
+    "delete": "삭제",
+    "deleteTable": "표 삭제",
+    "duplicateSlide": "슬라이드 복제",
+    "insertRowsAbove": "위에 행 삽입",
+    "insertRowsBelow": "아래에 행 삽입",
+    "insertColumnsLeft": "왼쪽에 열 삽입",
+    "insertColumnsRight": "오른쪽에 열 삽입",
+    "deleteRows": "행 삭제",
+    "deleteColumns": "열 삭제"
   },
   "plugins": {
     "toolbarGroup": "추가 기능",
@@ -243,5 +260,11 @@
     "label": "공동 작업자",
     "moreCollaborators": "{count, plural, other {공동 작업자 #명 더}}",
     "moreSelections": "+{count, plural, other {#개의 선택}}"
+  },
+  "contextMenu": {
+    "text": "텍스트 메뉴",
+    "shape": "도형 메뉴",
+    "table": "표 메뉴",
+    "slide": "슬라이드 메뉴"
   }
 }

@@ -27,6 +27,7 @@ import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessPainterFactories, peerlessSessionOpener, type PeerlessPresentation } from './usePeerlessPresentation';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
+import { UNAVAILABLE_PPTX_COMMANDS } from '../commands/createPptxCommandStore';
 import { commandFrameRaster, createCommandFrameImages, createCommandFramePainter,
   retainCommandFrameRaster } from './commandFramePainter';
 import { isCommandAck, isCommandEnvelope } from '../../../../shared/office-session/commands/types';
@@ -2824,7 +2825,7 @@ describe('peerless stage fit', () => {
     const images = createCommandFrameImages();
     const run = { client, store, images, current: true, failure: undefined,
       fileGeneration: {}, session: {} } as unknown as PeerlessPresentation;
-    const strip = (value = run) => <PeerlessSlideStrip run={value}
+    const strip = (value = run) => <PeerlessSlideStrip run={value} commands={UNAVAILABLE_PPTX_COMMANDS}
       previewFit={() => ({ scale: 0.25, dpr: 2, generation: 1 })} current={() => true} onNavigate={() => {}} />;
     return { run, strip, store, dispose() { store.dispose(); images.dispose(); },
       confirm(slideId: string, slideRevision: number) {
@@ -2864,7 +2865,7 @@ describe('peerless stage fit', () => {
     } finally { view.unmount(); value.dispose(); }
   });
 
-  test.each([false, true])('strip_switches_immediately_and_keeps_the_departing_latest_revision (%s)', async (batched) => {
+  test.each([false, true])('strip_switches_immediately_repaints_the_new_thumbnail_after_a_frame_and_keeps_the_departing_latest_revision (%s)', async (batched) => {
     const clock = stripClock();
     const value = stripRun();
     const view = render(value.strip());
@@ -2884,10 +2885,12 @@ describe('peerless stage fit', () => {
         await flushStage(() => { next = value.confirm('other', 3); });
       }
       expect(value.store.getSnapshot().thumbnails.has('slide')).toBe(false);
-      expect(paints.slice(initial)).toHaveLength(2);
-      expect(paints.slice(initial)).toContain(latest);
-      expect(paints.slice(initial)).toContain(next);
+      expect(paints.slice(initial)).toEqual([latest]);
       expect(view.container.querySelector('[aria-current="page"]')?.textContent).toBe('2');
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 60)); });
+      await flushStage();
+      expect(paints.slice(initial)).toHaveLength(2);
+      expect(paints.slice(initial)).toContain(next);
       expect(clock.active.size).toBe(0);
       const settled = paints.length;
       await flushStage(() => { clock.advance(1000); });
@@ -3172,6 +3175,54 @@ describe('peerless stage fit', () => {
     }
   });
 
+  test('strip_prerenders_on_press_presents_on_click_before_activation_and_drops_on_cancel', async () => {
+    const value = stripRun();
+    const calls: string[] = [];
+    Object.assign(value.run, {
+      prerenderSlide: (slideId: string) => { calls.push(`prerender ${slideId}`); },
+      dropPrerender: () => { calls.push('drop'); },
+      presentPrerendered: (slideId: string) => { calls.push(`present ${slideId}`); return true; },
+      settlePrerendered: (slideId: string) => { calls.push(`settle ${slideId}`); },
+    });
+    const dispatch = spyOn(value.store, 'dispatch').mockImplementation((async () => {
+      calls.push('activate');
+      return undefined;
+    }) as unknown as typeof value.store.dispatch);
+    const view = render(value.strip());
+    try {
+      await flushStage();
+      const [active, other] = [...view.container.querySelectorAll('aside button')] as HTMLButtonElement[];
+      fireEvent.pointerDown(active!, { button: 0, isPrimary: true });
+      fireEvent.pointerDown(other!, { button: 2, isPrimary: true });
+      fireEvent.pointerDown(other!, { button: 0, isPrimary: false });
+      expect(calls).toEqual([]);
+      fireEvent.pointerDown(other!, { button: 0, isPrimary: true });
+      fireEvent.pointerCancel(other!);
+      fireEvent.pointerDown(other!, { button: 0, isPrimary: true });
+      fireEvent.click(other!);
+      await flushStage();
+      expect(calls).toEqual(['prerender other', 'drop', 'prerender other', 'present other', 'activate', 'settle other']);
+      calls.length = 0;
+      fireEvent.click(active!);
+      expect(calls).toEqual(['activate']);
+    } finally { dispatch.mockRestore(); view.unmount(); value.dispose(); }
+  });
+
+  test('strip_paints_a_newly_active_thumbnail_only_after_the_next_frame', async () => {
+    const value = stripRun();
+    const view = render(value.strip());
+    try {
+      await flushStage();
+      const initial = paints.length;
+      let switched!: PeerlessConfirmedFrame;
+      await flushStage(() => { switched = value.confirm('other', 1); });
+      expect(paints.slice(initial)).not.toContain(switched);
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 60)); });
+      await flushStage();
+      expect(paints.slice(initial)).toContain(switched);
+    } finally { view.unmount(); value.dispose(); }
+  });
+
   test('strip_freezes_refits_and_resumed_paints_only_after_success', async () => {
     const clock = stripClock();
     const images = heldBitmaps();
@@ -3183,7 +3234,7 @@ describe('peerless stage fit', () => {
     const run = { client, store, images: media, current: true, failure: undefined } as unknown as PeerlessPresentation;
     let fit = { scale: 0.25, dpr: 2, generation: 1 };
     let valid = true;
-    const strip = () => <PeerlessSlideStrip run={run} previewFit={() => fit}
+    const strip = () => <PeerlessSlideStrip run={run} commands={UNAVAILABLE_PPTX_COMMANDS} previewFit={() => fit}
       current={(token) => valid && token.generation === fit.generation} onNavigate={() => {}} />;
     const view = render(strip());
     try {
@@ -3234,7 +3285,7 @@ describe('peerless stage fit', () => {
     const images = createCommandFrameImages();
     const run = { client, store, images, current: true, failure: undefined } as unknown as PeerlessPresentation;
     const previewFit = mock((_frame: PeerlessConfirmedFrame, _run: PeerlessPresentation) => ({ scale: 0.25, dpr: 2, generation: 1 }));
-    const view = render(<PeerlessSlideStrip run={run} previewFit={previewFit} current={() => true} onNavigate={() => {}} />);
+    const view = render(<PeerlessSlideStrip run={run} commands={UNAVAILABLE_PPTX_COMMANDS} previewFit={previewFit} current={() => true} onNavigate={() => {}} />);
     try {
       await flushStage();
       previewFit.mockClear();

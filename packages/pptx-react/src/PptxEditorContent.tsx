@@ -3,14 +3,14 @@ import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
   decodePresentationImage, initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
-  slideToPng, StaleProposalError, PptxPeerNotReadyError,
+  StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver, DeckSnapshot, HitTestResult, ParagraphAlignment, PptxCaretAnchor,
   PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxPresencePeer, PresentationHandle, Proposal,
   ProposalDiffSlide, SlideDisplayList, StorySnapshot, TextBoxPrimitive, TextStylePatch,
 } from '@betteroffice/pptx';
-import type { PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
+import { presentationStoryFormatting, type PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
 import { useTranslation } from './i18n';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
@@ -91,7 +91,7 @@ import {
   limitPresence,
   type BoundedPresence,
 } from './presence-rendering';
-import { effectiveStyleFromSelection } from './textFormatting';
+import { effectiveStyleFromSelection, insertionStyle } from './textFormatting';
 import { useSyncedState } from './useSyncedState';
 import type { EffectiveTextStyle } from './textFormatting';
 import {
@@ -1420,7 +1420,17 @@ export function PptxEditorContent({
     const handle = handleRef.current;
     if (!handle || !selection) return;
     try {
-      const story = handle.story(selection.storyId);
+      const current = modelRef.current;
+      const slide = current?.snapshot.slides[current.slideIndex];
+      let story;
+      try {
+        story = slide ? presentationStoryFormatting(handle, {
+          slideId: slide.id, shapeId: selection.shapeId, storyId: selection.storyId,
+        })
+          : handle.story(selection.storyId);
+      } catch {
+        story = handle.story(selection.storyId);
+      }
       setTextStyle(
         effectiveStyleFromSelection(
           story,
@@ -2237,7 +2247,7 @@ export function PptxEditorContent({
       }
       if (isCharacter(input)) {
         if (start !== end) handle.deleteText(selection.storyId, start, end);
-        handle.insertText(selection.storyId, start, input.key, textStyleRef.current);
+        handle.insertText(selection.storyId, start, input.key, insertionStyle(textStyleRef.current));
         const next = start + input.key.length;
         return edited({ ...selection, anchor: next, focus: next });
       }
@@ -2264,7 +2274,8 @@ export function PptxEditorContent({
     const selection = selectionRef.current;
     const shapeStoryId = selection ? null : (selectedShapeNow()?.textStories[0]?.id ?? null);
     if (!handle || (!selection && !shapeStoryId)) return false;
-    setTextStyle((current) => ({ ...current, ...patch }));
+    setTextStyle((current) => ({ ...current, ...patch,
+      ...(patch.strike === 'noStrike' ? { strike: undefined } : {}) }));
     if (selection) {
       if (selection.anchor === selection.focus) return true;
       handle.formatText(
@@ -2642,30 +2653,20 @@ export function PptxEditorContent({
   // with, so the png matches what is on screen. Only capturing the slide waits
   // for accepted input; painting runs outside the input queue.
   const exportPng = async (): Promise<PptxExportOutcome> => {
-    let captured: { frame: SlideDisplayList; slideIndex: number; handle: PresentationHandle };
+    let captured: { slideIndex: number; handle: PresentationHandle };
     try {
       captured = await coordinator.run(() => {
         const current = modelRef.current;
         const handle = handleRef.current;
         if (!current?.frame || !handle) throw new PptxInputStale();
-        return { frame: current.frame, slideIndex: current.slideIndex, handle };
+        return { slideIndex: current.slideIndex, handle };
       });
     } catch (value) {
       return value instanceof PptxInputFailure ? 'input-failed' : 'replaced';
     }
-    const { frame, slideIndex, handle } = captured;
-    // Painting is async, so the deck can be replaced or disposed mid-export.
-    // Pin the handle the frame came from, behind its own decode cache, rather
-    // than reading whichever deck `handleRef` holds by the time an asset
-    // resolves.
-    const pinned = { current: handle };
-    const cache = { current: frameImages() };
+    const { slideIndex, handle } = captured;
     try {
-      const blob = await slideToPng(frame, {
-        scale: window.devicePixelRatio || 1,
-        resolveImage: resolveImages(pinned, cache, decodeImageError),
-      });
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const bytes = await handle.renderPng({ slide: slideIndex }, { scale: window.devicePixelRatio || 1 });
       if (handleRef.current !== handle) return 'replaced';
       downloadBytes(bytes, pngName(fileName, slideIndex), 'image/png');
       return 'exported';
@@ -2673,8 +2674,6 @@ export function PptxEditorContent({
       if (handleRef.current !== handle) return 'replaced';
       reportError(value);
       return 'failed';
-    } finally {
-      cache.current.dispose();
     }
   };
   const shapeDragDelta =

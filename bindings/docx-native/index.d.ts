@@ -12,6 +12,7 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 export declare class EditSession {
   free(): void
   register_measure_font(bytes: Uint8Array): number
+  update_measure_font_outlines(fontId: number, bytes: Uint8Array): void
   decode_font(bytes: Uint8Array): Uint8Array
   take_base_latin_miss(): boolean
   register_substitute_measure_font(base: number, requestedFamily: string): number
@@ -33,6 +34,7 @@ export declare class EditSession {
   retained_kernel_inputs_json(): string
   reset_frame_base(): void
   build_display_list_json(input: string): string
+  renderPngTarget(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array
   build_display_list_frame(input: string, expectedFrameEpoch: number): Uint8Array
   set_display_window(start: number, end: number): void
   set_display_retain_built_pages(retain: boolean): void
@@ -196,6 +198,9 @@ export declare class EditSession {
   set_content_control_value_at(story: string, paraId: string, offset: number, valueJson: string): void
   set_content_control_value(embedId: string, valueJson: string): void
   set_content_control_value_index(story: string, index: number, json: string): void
+  style_languages_json(): string
+  set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
+  patch_style_languages_xml(source: string): string
   set_document_property(key: string, json: string): boolean
   set_header_footer_aliases(json: string): void
   set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void

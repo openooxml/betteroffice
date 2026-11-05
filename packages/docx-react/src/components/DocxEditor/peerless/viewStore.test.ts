@@ -225,3 +225,23 @@ test('selection acks ahead of their deferred frames keep the installed selection
   expect(geometryMatchesDocument(store.getSnapshot())).toBe(false);
   store.dispose();
 });
+
+test('a rescaled geometry replaces only the installed frame', () => {
+  const identity = { session: 'view', incarnation: 1, epoch: 1 };
+  const geometry = (frameEpoch: number, rasterScale: number): PeerlessFrameGeometry => ({
+    identity, coversThroughSeq: frameEpoch, frameEpoch, layoutRevision: frameEpoch, rasterScale,
+    pages: [], caret: null, selectionRects: [],
+  });
+  const installed = geometry(2, 1);
+  const store = createPeerlessViewStore({ identity, version: 2, throughSeq: 2, presentedThroughSeq: 2,
+    workerSelection: undefined, anchors: null, editState: undefined, geometry: installed });
+  store.rescaleFrameGeometry!(geometry(1, 2));
+  store.rescaleFrameGeometry!(geometry(3, 2));
+  store.rescaleFrameGeometry!({ ...geometry(2, 2), identity: { ...identity, epoch: 2 } });
+  expect(store.getSnapshot().geometry).toBe(installed);
+  const rescaled = geometry(2, 1.5);
+  store.rescaleFrameGeometry!(rescaled);
+  expect(store.getSnapshot().geometry).toBe(rescaled);
+  expect(store.getSnapshot().presentedThroughSeq).toBe(2);
+  store.dispose();
+});

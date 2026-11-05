@@ -114,6 +114,7 @@ export const pptxdocument_undoReceiptJson: (a: number) => [number, number, numbe
 export const pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_version: () => [number, number];
+export const pptxrenderer_exportSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const pptxrenderer_layoutProposalDiffSlideByIdJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

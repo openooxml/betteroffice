@@ -52,6 +52,7 @@
     "decreaseFontSize": "Perkecil ukuran font",
     "increaseFontSize": "Perbesar ukuran font",
     "underline": "Garis Bawah",
+    "strikethrough": "Coret",
     "more": "Lainnya",
     "fillColor": "Warna Isian",
     "noFill": "Tanpa Isian",
@@ -230,8 +231,24 @@
       "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
       "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
       "pluginUnavailable": "Plugin tidak lagi aktif.",
-      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan."
-    }
+      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan.",
+      "clipboardUnavailable": "Akses papan klip tidak tersedia atau ditolak.",
+      "tableRequired": "Letakkan kursor di sel tabel terlebih dahulu.",
+      "lastSlide": "Slide terakhir tidak dapat dihapus."
+    },
+    "cut": "Potong",
+    "copy": "Salin",
+    "paste": "Tempel",
+    "insert": "Sisipkan",
+    "delete": "Hapus",
+    "deleteTable": "Hapus Tabel",
+    "duplicateSlide": "Duplikasikan slide",
+    "insertRowsAbove": "Sisipkan baris di atas",
+    "insertRowsBelow": "Sisipkan baris di bawah",
+    "insertColumnsLeft": "Sisipkan kolom di kiri",
+    "insertColumnsRight": "Sisipkan kolom di kanan",
+    "deleteRows": "Hapus baris",
+    "deleteColumns": "Hapus kolom"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
@@ -243,5 +260,11 @@
     "label": "Kolaborator",
     "moreCollaborators": "{count, plural, other {# kolaborator lainnya}}",
     "moreSelections": "+{count, plural, other {# pilihan}}"
+  },
+  "contextMenu": {
+    "text": "Menu teks",
+    "shape": "Menu bentuk",
+    "table": "Menu tabel",
+    "slide": "Menu slide"
   }
 }

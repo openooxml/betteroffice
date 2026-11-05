@@ -10,6 +10,8 @@ mod proposals;
 mod remap;
 mod undo;
 
+#[doc(hidden)]
+pub use apply::InPlaceBatch;
 pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
 pub use conditional_formats::{
     ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_move,

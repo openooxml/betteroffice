@@ -225,6 +225,7 @@ describe('host-composed PPTX toolbar', () => {
     expect(props.currentFormatting).toEqual({
       italic: true,
       underline: false,
+      strikethrough: false,
       fontFamily: 'Arial',
       textColor: '#112233',
       align: 'ctr',
@@ -346,4 +347,26 @@ describe('host-composed PPTX toolbar', () => {
     expect(bold.getAttribute('aria-disabled')).toBe('true');
     expect(bold.title).toContain('The editor is not ready.');
   });
+});
+
+test('strikethrough dispatches through the command store and projects active state', async () => {
+  const { harness, controller } = mount(<ToolbarCommandButton id="strikethrough" />);
+  fireEvent.click(screen().getByTestId('pptx-strikethrough'));
+  await settle();
+  expect(harness.calls).toEqual([{ id: 'strikethrough', args: null }]);
+  expect(screen().getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('false');
+  await act(async () => {
+    const text = harness.state.env.text;
+    if (!text || text === 'unsupported') throw new Error('Missing text environment');
+    harness.update({ text: { ...text, strikethrough: true } });
+    controller.refresh();
+  });
+  expect(screen().getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('true');
+  await act(async () => {
+    const text = harness.state.env.text;
+    if (!text || text === 'unsupported') throw new Error('Missing text environment');
+    harness.update({ text: { ...text, strikethrough: undefined } });
+    controller.refresh();
+  });
+  expect(screen().getByTestId('pptx-strikethrough').getAttribute('aria-pressed')).toBe('false');
 });

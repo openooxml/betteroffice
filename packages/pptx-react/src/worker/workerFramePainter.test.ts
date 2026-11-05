@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import type { SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxRenderReply, PptxWorkerRenderClient } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { commandFrameRaster, retainCommandFrameRaster } from './commandFramePainter';
-import { createWorkerFramePainter } from './workerFramePainter';
+import { createWorkerFramePainter, peerlessPrerenders } from './workerFramePainter';
 import { createCommandFrameImages } from './commandFramePainter';
 import { slideRasterCache } from '../../../../shared/office-session/render/pptxSlideRaster';
 import { createLocalEchoPainter } from './localEchoPainter';
@@ -22,10 +22,12 @@ class Client implements PptxWorkerRenderClient {
   resyncs = 0;
   idles = 0;
   views: number[][] = [];
+  prerenders: string[] = [];
   listeners = new Set<(reply: PptxRenderReply) => void>();
   view(scale: number, dpr: number) { this.views.push([scale, dpr]); }
   fonts() {}
   resync() { this.resyncs += 1; }
+  prerender(slideId: string) { this.prerenders.push(slideId); return this.prerenders.length; }
   idle() { this.idles += 1; }
   subscribe(listener: (reply: PptxRenderReply) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   dispose() {}
@@ -654,3 +656,101 @@ test('a stale full raster of the committed epoch never replaces newer pixels', a
   await Promise.resolve();
   expect(pixels.get(h.canvas)).toBe('worker'); expect(closed(stale)).toBe(1); expect(h.commits).toEqual([first]);
 });
+
+function prerendered(token: number, extra: Partial<Extract<PptxRenderReply, { kind: 'prerender' }>> = {}) {
+  const bitmap = new Bitmap(160, 120, 'ahead');
+  return { kind: 'prerender' as const, slideId: 'next', token, version: '1', fonts: 0, factor: 1, width: 160, height: 120,
+    bitmap: bitmap as unknown as ImageBitmap, ...extra };
+}
+const prerenderClosed = (reply: ReturnType<typeof prerendered>) => (reply.bitmap as unknown as Bitmap).closed;
+
+test('a prerendered slide paints the stage at once while the deck and stage geometry match, and only once', async () => {
+  const h = host(); await commit(h);
+  const ahead = peerlessPrerenders.get(h.painter)!;
+  ahead.request('next');
+  expect(h.client.prerenders).toEqual(['next']);
+  const reply = prerendered(1); h.client.send(reply);
+  expect(ahead.present('next', '1')).toBe(true);
+  expect(pixels.get(h.canvas)).toBe('ahead');
+  expect(prerenderClosed(reply)).toBe(1);
+  expect(ahead.present('next', '1')).toBe(false);
+});
+
+test('a stale prerender never paints: an edit since it was rastered, another slide, a new zoom or stage size', async () => {
+  const cases: [string, ReturnType<typeof prerendered>, string, string][] = [
+    ['edited between press and click', prerendered(1), 'next', '2'],
+    ['another slide', prerendered(1), 'third', '1'],
+    ['zoom', prerendered(1, { factor: 2, width: 320, height: 240 }), 'next', '1'],
+    ['stage size', prerendered(1, { width: 150 }), 'next', '1'],
+  ];
+  for (const [label, reply, slideId, version] of cases) {
+    const h = host(); await commit(h);
+    const ahead = peerlessPrerenders.get(h.painter)!;
+    ahead.request('next'); h.client.send(reply);
+    const drawn = draws.length;
+    expect([label, ahead.present(slideId, version)]).toEqual([label, false]);
+    expect([label, draws.length, pixels.get(h.canvas)]).toEqual([label, drawn, 'worker']);
+    expect([label, prerenderClosed(reply)]).toEqual([label, 1]);
+  }
+});
+
+test('a superseded or dropped prerender never paints and its bitmap is released', async () => {
+  const h = host(); await commit(h);
+  const ahead = peerlessPrerenders.get(h.painter)!;
+  ahead.request('next'); ahead.request('third');
+  const superseded = prerendered(1); h.client.send(superseded);
+  expect(ahead.present('next', '1')).toBe(false);
+  ahead.request('next');
+  const dropped = prerendered(3); h.client.send(dropped);
+  ahead.drop();
+  expect(prerenderClosed(dropped)).toBe(1);
+  expect(ahead.present('next', '1')).toBe(false);
+  expect(pixels.get(h.canvas)).toBe('worker');
+});
+
+test('an unsupported worker raster drops the prerender and paints through the main thread only', async () => {
+  const h = host(); await commit(h);
+  const ahead = peerlessPrerenders.get(h.painter)!;
+  ahead.request('next');
+  const reply = prerendered(1); h.client.send(reply);
+  h.client.send({ kind: 'unsupported' });
+  expect(prerenderClosed(reply)).toBe(1);
+  ahead.request('next');
+  expect(h.client.prerenders).toEqual(['next']);
+  expect(ahead.present('next', '1')).toBe(false);
+});
+
+test('a font change after a prerender drops it, and an older font generation is never stashed', async () => {
+  const h = host(); await commit(h);
+  const ahead = peerlessPrerenders.get(h.painter)!;
+  ahead.request('next');
+  const reply = prerendered(1); h.client.send(reply);
+  h.client.send({ kind: 'font-generation', fonts: 1 });
+  expect(prerenderClosed(reply)).toBe(1);
+  expect(ahead.present('next', '1')).toBe(false);
+  ahead.request('next');
+  h.client.send(prerendered(2));
+  expect(ahead.present('next', '1')).toBe(false);
+  ahead.request('next');
+  const current = prerendered(3, { fonts: 1 }); h.client.send(current);
+  expect(ahead.present('next', '1')).toBe(true);
+  expect(pixels.get(h.canvas)).toBe('ahead');
+});
+
+test('a presented prerender is replaced by the next committed frame, or restored to the displayed frame', async () => {
+  const h = host(); await commit(h);
+  const ahead = peerlessPrerenders.get(h.painter)!;
+  ahead.request('next'); h.client.send(prerendered(1));
+  expect(ahead.present('next', '1')).toBe(true);
+  expect(ahead.presented()).toBe(true);
+  expect(ahead.restore()).toBe(true);
+  expect(ahead.presented()).toBe(false);
+  expect(pixels.get(h.canvas)).toBe('worker');
+  expect(ahead.restore()).toBe(false);
+  ahead.request('next'); h.client.send(prerendered(2));
+  expect(ahead.present('next', '1')).toBe(true);
+  await commit(h, frame(2, 'next'));
+  expect(ahead.presented()).toBe(false);
+  expect(ahead.restore()).toBe(false);
+});
+

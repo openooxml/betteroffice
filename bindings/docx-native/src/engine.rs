@@ -59,6 +59,39 @@ fn throw_message(env: &Env, message: String) -> Error {
     }
 }
 
+/// `{ page }` and `{ scale }` as the JS handle sends them; other keys are refused.
+fn png_request(target_json: &str, options_json: &str) -> std::result::Result<(usize, f64), String> {
+    let object = |json: &str, keys: &[&str]| {
+        let value: serde_json::Value = serde_json::from_str(json).ok()?;
+        let object = value.as_object()?.clone();
+        object
+            .keys()
+            .all(|key| keys.contains(&key.as_str()))
+            .then_some(object)
+    };
+    let page = object(target_json, &["page"])
+        .and_then(|target| target.get("page")?.as_u64())
+        .and_then(|page| usize::try_from(page).ok())
+        .ok_or("png-invalid: target must be { page } with a page index")?;
+    let options = object(options_json, &["scale"])
+        .ok_or("png-invalid: options may only hold a numeric scale")?;
+    let scale = match options.get("scale") {
+        None => 1.0,
+        Some(scale) => scale
+            .as_f64()
+            .ok_or("png-invalid: scale must be finite and positive")?,
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("png-invalid: scale must be finite and positive".to_owned());
+    }
+    if !(scale as f32).is_finite() {
+        return Err(format!(
+            "png-too-large: scale {scale} is past any page size"
+        ));
+    }
+    Ok((page, scale))
+}
+
 fn throw_error(env: &Env, message: &str) -> Error {
     let result = (|| -> Result<()> {
         let mut exception = env.create_error(Error::from_reason(message))?;
@@ -122,6 +155,24 @@ fn byte_result(env: Env, bytes: Vec<u8>) -> Result<Uint8Array> {
     let mut buffer = ArrayBuffer::copy_from(&env, &bytes)?;
     unsafe { buffer.as_mut() }.copy_from_slice(&bytes);
     Uint8ArraySlice::from_arraybuffer(&buffer, 0, bytes.len())?.into_typed_array(&env)
+}
+
+fn collect_png_images(
+    document: &Document,
+    primitives: &[docx_layout::display_list::Primitive],
+    scope: docx_raster::ImageScope<'_>,
+    images: &mut docx_raster::ImageMap,
+) {
+    for primitive in primitives {
+        if let docx_layout::display_list::Primitive::Image(image) = primitive {
+            let key = docx_raster::scoped_image_key(scope, &image.rel_id);
+            if let std::collections::hash_map::Entry::Vacant(entry) = images.entry(key)
+                && let Some(bytes) = document.media_bytes(&image.rel_id)
+            {
+                entry.insert(bytes);
+            }
+        }
+    }
 }
 
 fn optional_result<T>(value: Option<T>) -> Either<T, Undefined> {
@@ -363,6 +414,8 @@ pub struct EditSession {
     core: RefCell<Option<Document>>,
     clock: JsClock,
     failure: Failure,
+    #[cfg(feature = "test-hooks")]
+    panic_png: Cell<bool>,
 }
 
 impl EditSession {
@@ -469,6 +522,14 @@ impl EditSession {
 #[cfg(feature = "test-hooks")]
 #[napi]
 impl EditSession {
+    #[napi(catch_unwind, js_name = "panicNextPngForTest")]
+    pub fn panic_next_png_for_test(&self, env: Env) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let _document = self.document(env)?;
+        self.panic_png.set(true);
+        Ok(())
+    }
+
     #[napi(catch_unwind, js_name = "panicForTest")]
     pub fn panic_for_test(&self, env: Env) -> Result<()> {
         let _call = EngineCall::new(env);
@@ -509,6 +570,19 @@ impl EditSession {
         let _call = EngineCall::new(env);
         self.document_unclocked(env)?
             .register_measure_font(&bytes[..])
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "update_measure_font_outlines")]
+    pub fn update_measure_font_outlines(
+        &self,
+        env: Env,
+        font_id: u32,
+        bytes: Uint8Array,
+    ) -> Result<()> {
+        let _call = EngineCall::new(env);
+        self.document_unclocked(env)?
+            .update_measure_font_outlines(font_id, &bytes)
             .map_err(|error| map_error(env, error))
     }
 
@@ -709,6 +783,125 @@ impl EditSession {
         self.document(env)?
             .build_display_list_json(&input)
             .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "renderPngTarget")]
+    pub fn render_png_target(
+        &self,
+        env: Env,
+        display_list_json: String,
+        target_json: String,
+        options_json: String,
+    ) -> Result<Uint8Array> {
+        let _call = EngineCall::new(env);
+        let document = self.document(env)?;
+        #[cfg(feature = "test-hooks")]
+        if self.panic_png.replace(false) {
+            panic!("renderPngTarget");
+        }
+        let (page, scale) = png_request(&target_json, &options_json)
+            .map_err(|message| throw_error(&env, &message))?;
+        let value: serde_json::Value = serde_json::from_str(&display_list_json)
+            .map_err(|error| throw_error(&env, &format!("png-invalid: {error}")))?;
+        let chains: std::collections::HashMap<String, Vec<u32>> = match value.get("fontChains") {
+            Some(chains) => serde_json::from_value(chains.clone())
+                .map_err(|error| throw_error(&env, &format!("png-invalid: {error}")))?,
+            None => std::collections::HashMap::new(),
+        };
+        let list: docx_layout::display_list::DisplayList = serde_json::from_value(value)
+            .map_err(|error| throw_error(&env, &format!("png-invalid: {error}")))?;
+        let display_page = list
+            .pages
+            .get(page)
+            .filter(|page| !page.unbuilt)
+            .ok_or_else(|| throw_error(&env, "png-invalid: page is unavailable"))?;
+        let dimension = |number: &serde_json::Number| -> Result<u32> {
+            let value = number
+                .as_f64()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| {
+                    throw_error(&env, "png-invalid: page dimensions must be positive")
+                })?;
+            let scaled = (value * scale).ceil();
+            if !scaled.is_finite() || scaled > f64::from(docx_raster::MAX_PAGE_DIM) {
+                return Err(throw_error(
+                    &env,
+                    "png-too-large: page exceeds the dimension limit",
+                ));
+            }
+            Ok(scaled.max(1.0) as u32)
+        };
+        let width = dimension(&display_page.width)?;
+        let height = dimension(&display_page.height)?;
+        if u64::from(width) * u64::from(height) > docx_raster::MAX_PAGE_PIXELS {
+            return Err(throw_error(
+                &env,
+                "png-too-large: page exceeds the pixel limit",
+            ));
+        }
+        let chains = chains
+            .into_iter()
+            .map(|(key, ids)| {
+                (
+                    key,
+                    ids.into_iter().map(ooxml_text::FontId::from_u32).collect(),
+                )
+            })
+            .collect();
+        let mut images = docx_raster::ImageMap::new();
+        collect_png_images(
+            &document,
+            &display_page.primitives,
+            docx_raster::ImageScope::Body,
+            &mut images,
+        );
+        for region in [&display_page.header, &display_page.footer]
+            .into_iter()
+            .flatten()
+        {
+            collect_png_images(
+                &document,
+                &region.primitives,
+                docx_raster::ImageScope::HeaderFooter(&region.r_id),
+                &mut images,
+            );
+        }
+        for area in &display_page.note_areas {
+            let kind = if area.kind.as_deref() == Some("endnote") {
+                docx_raster::NoteKind::Endnote
+            } else {
+                docx_raster::NoteKind::Footnote
+            };
+            let scope = docx_raster::ImageScope::Notes(kind);
+            collect_png_images(&document, &area.separator_primitives, scope, &mut images);
+            collect_png_images(&document, &area.primitives, scope, &mut images);
+        }
+        document
+            .with_measure_fonts_ref(|fonts| {
+                let resources = docx_raster::RenderResources::new(fonts, &chains, &images);
+                docx_raster::render_page_cached_scaled(
+                    &list,
+                    page,
+                    &resources,
+                    &mut docx_raster::GlyphCache::default(),
+                    &mut docx_raster::ImageCache::default(),
+                    scale as f32,
+                )
+            })
+            .map_err(|error| {
+                let prefix = if error.contains("unknown FontId")
+                    || error.starts_with("missing font chain")
+                    || (error.starts_with("font chain") && error.contains("empty"))
+                {
+                    "png-font-unavailable:"
+                } else if error.contains("past the") || error.contains("budget") {
+                    "png-too-large:"
+                } else {
+                    "png-invalid:"
+                };
+                throw_error(&env, &format!("{prefix} {error}"))
+            })
+            .and_then(|page| byte_result(env, page.bytes))
     }
 
     #[napi(catch_unwind, js_name = "build_display_list_frame")]
@@ -1975,6 +2168,8 @@ impl EditSession {
             core: RefCell::new(Some(Document::new(client_id as u64, clock.host()))),
             clock,
             failure: RefCell::new(None),
+            #[cfg(feature = "test-hooks")]
+            panic_png: Cell::new(false),
         })
     }
 
@@ -2522,6 +2717,33 @@ impl EditSession {
         let _call = EngineCall::new(env);
         self.document(env)?
             .set_content_control_value_index(&story, index, &json)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "style_languages_json")]
+    pub fn style_languages_json(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        Ok(self.document(env)?.style_languages_json())
+    }
+
+    #[napi(catch_unwind, js_name = "set_style_language")]
+    pub fn set_style_language(
+        &self,
+        env: Env,
+        style_id: Option<String>,
+        slots_json: String,
+    ) -> Result<bool> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .set_style_language(style_id.as_deref(), &slots_json)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "patch_style_languages_xml")]
+    pub fn patch_style_languages_xml(&self, env: Env, source: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .patch_style_languages_xml(&source)
             .map_err(|error| map_error(env, error))
     }
 

@@ -2,7 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellAddress, CellRange, CellRef, MutationResult, SheetId, Workbook,
+    CalculationOptions, CapturedFormat, CellAddress, CellRange, CellRef, ChartMutation,
+    MutationResult, Op, SheetId, Workbook,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,10 +17,13 @@ struct Calculation {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Step {
     op: String,
     args: Value,
     targets: Option<Vec<String>>,
+    #[serde(default)]
+    expect_error: bool,
 }
 
 impl Step {
@@ -178,6 +182,113 @@ fn mutation_result(workbook: &Workbook, result: MutationResult) -> Value {
     })
 }
 
+#[derive(Deserialize)]
+struct OpsArgs {
+    ops: Vec<Op>,
+}
+
+/// The ops path the TypeScript handle takes: `JSON.stringify({ ops })`, decoded with its
+/// `bad ops:` message.
+fn apply_ops_json(
+    workbook: &mut Workbook,
+    ops: &Value,
+    calculation: CalculationOptions,
+) -> Result<Value, String> {
+    let args: OpsArgs = serde_json::from_str(&json!({ "ops": ops }).to_string())
+        .map_err(|error| format!("bad ops: {error}"))?;
+    let result = workbook
+        .apply_ops(args.ops, calculation)
+        .map_err(|error| error.to_string())?;
+    Ok(mutation_result(workbook, result))
+}
+
+fn wire_range(range: &Value) -> Result<CellRange, String> {
+    CellRange::parse_a1(range.as_str().unwrap()).map_err(|error| format!("bad range: {error}"))
+}
+
+fn sheet_arg(args: &Value) -> SheetId {
+    SheetId(serde_json::from_value(args["sheet"].clone()).unwrap())
+}
+
+/// The calls that can fail, with the message the TypeScript handle throws; `None` for any
+/// other op.
+fn attempt(
+    workbook: &mut Workbook,
+    op: &str,
+    args: &Value,
+    calculation: CalculationOptions,
+) -> Option<Result<Value, String>> {
+    let engine = |error: betteroffice_xlsx::Error| error.to_string();
+    let outcome = match op {
+        "applyOps" => apply_ops_json(workbook, &args["ops"], calculation),
+        "moveRange" => (|| {
+            let source = wire_range(&args["source"])?;
+            let destination = CellRef::parse_a1(args["destination"].as_str().unwrap())
+                .map_err(|error| format!("bad move destination: {error}"))?;
+            let result = workbook
+                .move_range(sheet_arg(args), source, destination, calculation)
+                .map_err(engine)?;
+            Ok(mutation_result(workbook, result))
+        })(),
+        "setHyperlink" => {
+            let hyperlink = &args["hyperlink"];
+            let field = |key: &str| hyperlink.get(key).cloned().unwrap_or(Value::Null);
+            let op = json!({
+                "type": "setHyperlink",
+                "sheet": args["sheet"],
+                "hyperlink": {
+                    "range": hyperlink["range"],
+                    "external_target": field("externalTarget"),
+                    "location": field("location"),
+                    "tooltip": field("tooltip"),
+                    "display": field("display"),
+                },
+            });
+            apply_ops_json(workbook, &json!([op]), calculation)
+        }
+        "removeHyperlink" => {
+            let op = json!({ "type": "removeHyperlink", "sheet": args["sheet"], "range": args["range"] });
+            apply_ops_json(workbook, &json!([op]), calculation)
+        }
+        "editCharts" => (|| {
+            let edits: Vec<ChartMutation> = serde_json::from_str(&args["edits"].to_string())
+                .map_err(|error| format!("bad chart edits: {error}"))?;
+            let result = workbook.edit_charts(edits, calculation).map_err(engine)?;
+            Ok(mutation_result(workbook, result))
+        })(),
+        "moveChart" => (|| {
+            let result = workbook
+                .move_chart(
+                    sheet_arg(args),
+                    args["chart"].as_str().unwrap(),
+                    serde_json::from_value(args["dx"].clone()).unwrap(),
+                    serde_json::from_value(args["dy"].clone()).unwrap(),
+                    calculation,
+                )
+                .map_err(engine)?;
+            Ok(mutation_result(workbook, result))
+        })(),
+        "captureFormat" => (|| {
+            let range = wire_range(&args["range"])?;
+            let format = workbook
+                .capture_format(sheet_arg(args), range)
+                .map_err(engine)?;
+            Ok(serialized(&format))
+        })(),
+        "applyFormat" => (|| {
+            let format: CapturedFormat = serde_json::from_str(&args["format"].to_string())
+                .map_err(|error| format!("bad format args: {error}"))?;
+            let range = wire_range(&args["range"])?;
+            let result = workbook
+                .apply_format(sheet_arg(args), range, format, calculation)
+                .map_err(engine)?;
+            Ok(mutation_result(workbook, result))
+        })(),
+        _ => return None,
+    };
+    Some(outcome)
+}
+
 fn serialized(value: &impl Serialize) -> Value {
     serde_json::from_str(&serde_json::to_string(value).unwrap()).unwrap()
 }
@@ -309,15 +420,6 @@ fn execute(
         "findText" => wire(workbook.find_text_json(&args.to_string())),
         "validateEdits" => wire(workbook.validate_edits_json(&args.to_string())),
         "applyEdits" => wire(workbook.apply_edits_json(&args.to_string())),
-        "applyOps" => {
-            let result = workbook
-                .apply_ops(
-                    serde_json::from_value(args["ops"].clone()).unwrap(),
-                    calculation,
-                )
-                .unwrap();
-            mutation_result(workbook, result)
-        }
         "historyState" => serialized(&workbook.history_state()),
         "undo" => {
             let result = workbook.undo(calculation).unwrap();
@@ -336,7 +438,10 @@ fn execute(
             let bytes = workbook.save().unwrap();
             json!({ "sha256": format!("{:x}", Sha256::digest(&bytes)), "byteLength": bytes.len() })
         }
-        _ => panic!("unknown parity op {op}"),
+        _ => match attempt(workbook, op, args, calculation) {
+            Some(result) => result.unwrap_or_else(|error| panic!("parity op {op}: {error}")),
+            None => panic!("unknown parity op {op}"),
+        },
     }
 }
 
@@ -438,14 +543,25 @@ fn scripted_api_parity_matches_shared_golden() {
                 .clone(),
             None => value.to_owned(),
         });
+        let fixture = || fs::read(root.join(args["fixture"].as_str().unwrap())).unwrap();
         let result = if step.op == "open" {
             workbook = Workbook::open_recalculated_with_seed(
-                &fs::read(root.join(args["fixture"].as_str().unwrap())).unwrap(),
+                &fixture(),
                 calculation,
                 Some(script.calculation.rand_seed),
             )
             .unwrap();
             Value::Null
+        } else if step.op == "openCollaborative" {
+            let client_id = serde_json::from_value(args["clientId"].clone()).unwrap();
+            workbook = Workbook::open_collaborative(&fixture(), client_id).unwrap();
+            Value::Null
+        } else if step.expect_error {
+            match attempt(&mut workbook, &step.op, &args, calculation) {
+                Some(Err(error)) => json!({ "error": error }),
+                Some(Ok(_)) => panic!("parity step {index} ({}) did not fail", step.op),
+                None => panic!("unknown parity op {}", step.op),
+            }
         } else {
             execute(&mut workbook, &step.op, &args, calculation)
         };

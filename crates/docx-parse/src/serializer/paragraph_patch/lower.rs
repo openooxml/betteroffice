@@ -211,6 +211,7 @@ pub(super) fn lower(
     source: &str,
     context: &PatchContext,
     units: &[UnitV1],
+    language_only: bool,
 ) -> Result<Lowered, Failure> {
     let xml = Xml::parse(source, &context.namespaces)?;
     if !xml.nodes[0].word("p") {
@@ -223,7 +224,7 @@ pub(super) fn lower(
         if node.span.start < drawing_end {
             continue;
         }
-        if drawing(node) {
+        if drawing(node) || (language_only && node.word("rPrChange")) {
             drawing_end = node.span.end;
             continue;
         }

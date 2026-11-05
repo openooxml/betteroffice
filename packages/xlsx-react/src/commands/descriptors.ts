@@ -51,7 +51,32 @@ export const XLSX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   proposalsPanel: descriptor('proposalsPanel', 'proposals.panelLabel', false),
   proposalAccept: descriptor('proposalAccept', 'proposals.accept', true),
   proposalReject: descriptor('proposalReject', 'proposals.reject', false),
+  cut: descriptor('cut', 'commands.cut', true),
+  copy: descriptor('copy', 'commands.copy', false),
+  paste: descriptor('paste', 'commands.paste', true),
+  pastePlainText: descriptor('pastePlainText', 'commands.pastePlainText', true),
+  clearContents: descriptor('clearContents', 'commands.clearContents', true),
+  insertRows: descriptor('insertRows', 'commands.insertRowsAbove', true),
+  insertColumns: descriptor('insertColumns', 'commands.insertColumnsLeft', true),
+  deleteRows: descriptor('deleteRows', 'commands.deleteRows', true),
+  deleteColumns: descriptor('deleteColumns', 'commands.deleteColumns', true),
+  insertSheet: descriptor('insertSheet', 'commands.insertSheet', true),
+  deleteSheet: descriptor('deleteSheet', 'commands.deleteSheet', true),
+  renameSheet: descriptor('renameSheet', 'commands.renameSheet', true),
+  moveSheet: descriptor('moveSheet', 'commands.moveSheetLeft', true),
 });
+
+/**
+ * Chords the grid handles itself before command shortcuts run (the clipboard
+ * needs the native event), shown next to their commands in menus.
+ */
+const GRID_SHORTCUTS: Partial<Record<XlsxCommandId, string>> = {
+  cut: 'Mod+X',
+  copy: 'Mod+C',
+  paste: 'Mod+V',
+  pastePlainText: 'Mod+Shift+V',
+  clearContents: 'Delete',
+};
 
 export const XLSX_COMMAND_IDS = Object.freeze(
   Object.keys(XLSX_COMMAND_DESCRIPTORS) as XlsxCommandId[]
@@ -100,6 +125,12 @@ export function commandLabelKey<K extends XlsxCommandId>(
         return `toolbar.verticalAlign.${value}` as TranslationKey;
       case 'textWrapping':
         return `toolbar.wrapping.${value}` as TranslationKey;
+      case 'insertRows':
+        return bound.position === 'below' ? 'commands.insertRowsBelow' : 'commands.insertRowsAbove';
+      case 'insertColumns':
+        return bound.position === 'right' ? 'commands.insertColumnsRight' : 'commands.insertColumnsLeft';
+      case 'moveSheet':
+        return direction === 'right' ? 'commands.moveSheetRight' : 'commands.moveSheetLeft';
       default:
         break;
     }
@@ -165,7 +196,7 @@ export function matchesChord(chord: string, event: ChordEvent, mac = isMacPlatfo
 /** A chord as people read it on the current platform (`Ctrl+B`, `⌘B`). */
 export function formatChord(chord: string, mac = isMacPlatform()): string {
   const parsed = parseChord(chord);
-  const key = parsed.key.length === 1 ? parsed.key.toUpperCase() : parsed.key;
+  const key = parsed.key.length === 1 ? parsed.key.toUpperCase() : parsed.key.charAt(0).toUpperCase() + parsed.key.slice(1);
   if (mac) {
     return `${parsed.mod ? '⌘' : ''}${parsed.alt ? '⌥' : ''}${parsed.shift ? '⇧' : ''}${key}`;
   }
@@ -182,7 +213,8 @@ export function commandShortcut<K extends XlsxCommandId>(
   const shortcuts = XLSX_COMMAND_DESCRIPTORS[id].shortcuts as readonly XlsxCommandShortcut<K>[];
   const key = JSON.stringify(args ?? null);
   const match = shortcuts.find((shortcut) => JSON.stringify(shortcut.args) === key);
-  return match ? formatChord(match.chord) : null;
+  const grid = GRID_SHORTCUTS[id];
+  return match ? formatChord(match.chord) : grid ? formatChord(grid) : null;
 }
 
 /** Every shortcut binding, in descriptor order. */

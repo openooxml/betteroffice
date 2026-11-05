@@ -4,46 +4,46 @@
     "contents": []
   },
   "options": {
-    "pageGap": 24.0
+    "pageGap": 24
   },
   "regions": {
     "sections": [
       {
         "properties": {
-          "footerDistance": 720.0,
-          "gutter": 0.0,
-          "headerDistance": 720.0,
+          "footerDistance": 720,
+          "gutter": 0,
+          "headerDistance": 720,
           "headerReferences": [
             {
               "rId": "rIdHeader",
               "type": "default"
             }
           ],
-          "marginBottom": 1440.0,
-          "marginLeft": 1440.0,
-          "marginRight": 1440.0,
-          "marginTop": 1440.0,
-          "pageHeight": 15840.0,
-          "pageWidth": 12240.0
+          "marginBottom": 1440,
+          "marginLeft": 1440,
+          "marginRight": 1440,
+          "marginTop": 1440,
+          "pageHeight": 15840,
+          "pageWidth": 12240
         }
       },
       {
         "properties": {
-          "footerDistance": 720.0,
-          "gutter": 0.0,
-          "headerDistance": 720.0,
+          "footerDistance": 720,
+          "gutter": 0,
+          "headerDistance": 720,
           "headerReferences": [
             {
               "rId": "rIdHeader",
               "type": "default"
             }
           ],
-          "marginBottom": 1440.0,
-          "marginLeft": 1440.0,
-          "marginRight": 1440.0,
-          "marginTop": 1440.0,
-          "pageHeight": 15840.0,
-          "pageWidth": 12240.0
+          "marginBottom": 1440,
+          "marginLeft": 1440,
+          "marginRight": 1440,
+          "marginTop": 1440,
+          "pageHeight": 15840,
+          "pageWidth": 12240
         }
       }
     ],
@@ -59,7 +59,7 @@
         "suppressSpBfAfterPgBrk": false,
         "useWord97LineBreakRules": false
       },
-      "defaultTabStop": 720.0
+      "defaultTabStop": 720
     }
   },
   "renderEnv": {
@@ -75,8 +75,8 @@
       "useWord97LineBreakRules": false
     },
     "defaultParagraphStyleId": "Normal",
-    "defaultTabStopTwips": 720.0,
-    "docDefaultFontSize": 11.0,
+    "defaultTabStopTwips": 720,
+    "docDefaultFontSize": 11,
     "fontTheme": {
       "colorScheme": {
         "accent1": "4472C4",
@@ -110,8 +110,8 @@
     },
     "numericIds": {},
     "paragraphStyleFontSizes": {
-      "Normal": 11.0,
-      "Title": 20.0
+      "Normal": 11,
+      "Title": 20
     },
     "showHiddenText": false,
     "themeColors": {

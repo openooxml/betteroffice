@@ -14,11 +14,13 @@ from ._betteroffice_xlsx import (
     Calculation,
     CellError,
     CollaborativeStateError,
+    CollaborativeStructureError,
     History,
     InvalidUpdateError,
     MAX_COLLABORATION_BYTES,
     Mutation,
     NotCollaborativeError,
+    OperationError,
     Proposal,
     ProposedEdit,
     ParseError,
@@ -43,6 +45,13 @@ from .edits import (
     ReadRequest,
     ReadResult,
     ValidationResult,
+)
+from .ops import (
+    CapturedFormat,
+    CellRange,
+    ChartMutation,
+    WorkbookHyperlink,
+    XlsxOp,
 )
 from .exports import (
     ExportOptions,
@@ -76,9 +85,13 @@ __all__ = [
     "PngRangeTarget",
     "decode_font_face",
     "Calculation",
+    "CapturedFormat",
     "CellError",
+    "CellRange",
     "CellValue",
+    "ChartMutation",
     "CollaborativeStateError",
+    "CollaborativeStructureError",
     "EditRequest",
     "EditResult",
     "EditStep",
@@ -94,6 +107,7 @@ __all__ = [
     "MarkdownResult",
     "Mutation",
     "NotCollaborativeError",
+    "OperationError",
     "Proposal",
     "ProposedEdit",
     "ParseError",
@@ -110,7 +124,9 @@ __all__ = [
     "StructuredResult",
     "ValidationResult",
     "Workbook",
+    "WorkbookHyperlink",
     "XlsxError",
+    "XlsxOp",
     "__version__",
     "export_xlsx_markdown",
     "export_xlsx_structured",
@@ -367,6 +383,106 @@ class Workbook:
         return self._inner.set_many(
             sheet,
             [(address, _as_input(value)) for address, value in pairs],
+            now_serial=now_serial,
+        )
+
+    def apply_ops(
+        self,
+        ops: "Iterable[XlsxOp]",
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Apply raw edit ops (rows, columns, sheets, merges, names...) as one undo step.
+
+        Takes the op objects TypeScript's ``applyOps`` takes; see :mod:`betteroffice_xlsx.ops`.
+        An op that does not decode raises ``ValueError``, a missing sheet or cell
+        :class:`RangeError`, a refused op :class:`OperationError` (also a ``ValueError``), and a
+        structural op on a collaborative workbook :class:`CollaborativeStructureError`, each with
+        the message TypeScript throws.
+        """
+        return self._inner.apply_ops_json(_wire({"ops": list(ops)}), now_serial=now_serial)
+
+    def move_range(
+        self,
+        sheet: int,
+        source: str,
+        destination: str,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Move ``source`` (A1) so its top-left lands on ``destination``, rewriting references."""
+        return self._inner.move_range_json(
+            _wire({"sheet": sheet, "source": source, "destination": destination}),
+            now_serial=now_serial,
+        )
+
+    def set_hyperlink(
+        self,
+        sheet: int,
+        hyperlink: WorkbookHyperlink,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Link a range to ``externalTarget`` or an in-workbook ``location``."""
+        link = {"range": hyperlink["range"]} if "range" in hyperlink else {}
+        link.update(
+            external_target=hyperlink.get("externalTarget"),
+            location=hyperlink.get("location"),
+            tooltip=hyperlink.get("tooltip"),
+            display=hyperlink.get("display"),
+        )
+        op = {"type": "setHyperlink", "sheet": sheet, "hyperlink": link}
+        return self._inner.apply_ops_json(_wire({"ops": [op]}), now_serial=now_serial)
+
+    def remove_hyperlink(
+        self,
+        sheet: int,
+        range: CellRange,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        op = {"type": "removeHyperlink", "sheet": sheet, "range": range}
+        return self._inner.apply_ops_json(_wire({"ops": [op]}), now_serial=now_serial)
+
+    def edit_charts(
+        self,
+        edits: "Iterable[ChartMutation]",
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Retitle charts or repoint their series, 1 to 32 edits as one undo step."""
+        return self._inner.edit_charts_json(_wire(list(edits)), now_serial=now_serial)
+
+    def move_chart(
+        self,
+        sheet: int,
+        chart: str,
+        dx: float,
+        dy: float,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Slide chart frame ``chart`` (a chart ``id``) by content pixels, clamped to the grid."""
+        return self._inner.move_chart_json(
+            _wire({"sheet": sheet, "chart": chart, "dx": dx, "dy": dy}),
+            now_serial=now_serial,
+        )
+
+    def capture_format(self, sheet: int, range: str) -> CapturedFormat:
+        """The formats of an A1 range, for :meth:`apply_format`."""
+        return json.loads(self._inner.capture_format_json(_wire({"sheet": sheet, "range": range})))
+
+    def apply_format(
+        self,
+        sheet: int,
+        range: str,
+        format: CapturedFormat,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Paint a captured format over an A1 range, tiling it."""
+        return self._inner.apply_format_json(
+            _wire({"sheet": sheet, "range": range, "format": format}),
             now_serial=now_serial,
         )
 
@@ -685,6 +801,26 @@ def _export_options(
     if scope is not None:
         options["scope"] = list(scope)
     return json.dumps(options)
+
+
+def _wire(value: object) -> str:
+    """JSON as JavaScript's ``JSON.stringify`` writes it, so the engine reads what TypeScript sends.
+
+    Integral floats are written as integers; NaN and infinities raise ``ValueError``.
+    """
+    return json.dumps(
+        _js_numbers(value), separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+
+
+def _js_numbers(value: object) -> object:
+    if type(value) is float and value.is_integer() and abs(value) < 1e21:
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _js_numbers(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_js_numbers(item) for item in value]
+    return value
 
 
 def _as_input(value: object) -> str:

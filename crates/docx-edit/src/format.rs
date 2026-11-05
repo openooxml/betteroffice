@@ -98,6 +98,90 @@ pub struct FontFamilyPatch {
     pub h_ansi: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LanguagePatch {
+    pub latin: Patch<String>,
+    pub east_asia: Patch<String>,
+    pub bidi: Patch<String>,
+}
+
+impl LanguagePatch {
+    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+        let object = value.as_object().ok_or("language must be an object")?;
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "lang" | "eastAsia" | "bidi"))
+        {
+            return Err("unknown language slot".to_owned());
+        }
+        let slot = |key: &str| match object.get(key) {
+            None => Ok(Patch::Keep),
+            Some(Value::Null) => Ok(Patch::Clear),
+            Some(Value::String(tag)) if valid_language_tag(tag) => Ok(Patch::Set(tag.clone())),
+            _ => Err(format!("invalid language tag for {key}")),
+        };
+        Ok(Self {
+            latin: slot("lang")?,
+            east_asia: slot("eastAsia")?,
+            bidi: slot("bidi")?,
+        })
+    }
+
+    pub(crate) fn attrs(&self) -> Any {
+        let mut slots = HashMap::new();
+        for (key, patch) in [
+            ("latin", &self.latin),
+            ("eastAsia", &self.east_asia),
+            ("bidi", &self.bidi),
+        ] {
+            match patch {
+                Patch::Keep => {}
+                Patch::Clear => {
+                    slots.insert(key.to_owned(), Any::Null);
+                }
+                Patch::Set(tag) => {
+                    slots.insert(key.to_owned(), Any::from(tag.as_str()));
+                }
+            }
+        }
+        Any::Map(Arc::new(slots))
+    }
+}
+
+fn valid_language_tag(tag: &str) -> bool {
+    let mut parts = tag.split('-');
+    let first = parts.next().unwrap_or_default();
+    tag.len() <= 35
+        && (2..=8).contains(&first.len())
+        && first.bytes().all(|c| c.is_ascii_alphabetic())
+        && parts.all(|part| {
+            (1..=8).contains(&part.len()) && part.bytes().all(|c| c.is_ascii_alphanumeric())
+        })
+}
+
+pub(crate) fn merge_language(previous: Option<&Any>, patch: &Any) -> Any {
+    let mut slots = match previous {
+        Some(Any::Map(slots)) => slots.as_ref().clone(),
+        _ => HashMap::new(),
+    };
+    if let Some(value) = slots.remove("val") {
+        slots.entry("latin".to_owned()).or_insert(value);
+    }
+    if let Any::Map(patch) = patch {
+        for (key, value) in patch.iter() {
+            slots.insert(
+                if key == "val" {
+                    "latin".to_owned()
+                } else {
+                    key.clone()
+                },
+                value.clone(),
+            );
+        }
+    }
+    Any::Map(Arc::new(slots))
+}
+
 /// Tri-state inline formatting patch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlineFormatDelta {
@@ -111,6 +195,7 @@ pub struct InlineFormatDelta {
     /// Points; written as half-points into both `size` and `sizeCs` (`w:sz` + `w:szCs`).
     pub font_size: Patch<f64>,
     pub font_family: Patch<FontFamilyPatch>,
+    pub language: Patch<LanguagePatch>,
     pub other: BTreeMap<String, Option<Any>>,
 }
 
@@ -124,6 +209,7 @@ impl InlineFormatDelta {
             && self.highlight == Patch::Keep
             && self.font_size == Patch::Keep
             && self.font_family == Patch::Keep
+            && self.language == Patch::Keep
             && self.other.is_empty()
     }
 
@@ -227,6 +313,30 @@ impl InlineFormatDelta {
                         ("hAnsi".into(), Any::from(h_ansi)),
                     ]))),
                 );
+            }
+        }
+        match &self.language {
+            Patch::Keep => {}
+            Patch::Clear => put(
+                "language",
+                LanguagePatch {
+                    latin: Patch::Clear,
+                    east_asia: Patch::Clear,
+                    bidi: Patch::Clear,
+                }
+                .attrs(),
+            ),
+            Patch::Set(patch) => {
+                for slot in [&patch.latin, &patch.east_asia, &patch.bidi] {
+                    if let Patch::Set(tag) = slot
+                        && !valid_language_tag(tag)
+                    {
+                        return Err(OpError::InvalidFormatValue(
+                            "invalid language tag".to_owned(),
+                        ));
+                    }
+                }
+                put("language", patch.attrs());
             }
         }
         for (key, value) in &self.other {
@@ -399,6 +509,11 @@ pub(crate) fn parse_inline_format_delta(
         highlight,
         font_size,
         font_family,
+        language: match object.get("language") {
+            None => Patch::Keep,
+            Some(Value::Null) => Patch::Clear,
+            Some(value) => Patch::Set(LanguagePatch::parse(value)?),
+        },
         other,
     })
 }
@@ -661,7 +776,30 @@ impl EditingDoc {
     ) -> OpResult<Vec<String>> {
         if !ctx.is_suggesting() {
             if !delta.is_empty() {
-                story.format(txn, range.start, range.end - range.start, delta);
+                if let Some(language @ Any::Map(_)) = delta.get("language") {
+                    let chunks = crate::ops::snapshot_range(story, txn, range.start, range.end);
+                    for chunk in chunks {
+                        let start = chunk.start.max(range.start);
+                        let end = chunk.end().min(range.end);
+                        if start >= end {
+                            continue;
+                        }
+                        let mut patch = delta.clone();
+                        if matches!(chunk.kind, crate::ops::ChunkKind::Text(_)) {
+                            patch.insert(
+                                Arc::from("language"),
+                                merge_language(chunk.attrs.get("language"), language),
+                            );
+                        } else {
+                            patch.remove("language");
+                        }
+                        if !patch.is_empty() {
+                            story.format(txn, start, end - start, patch);
+                        }
+                    }
+                } else {
+                    story.format(txn, range.start, range.end - range.start, delta);
+                }
             }
             return Ok(Vec::new());
         }
@@ -687,6 +825,13 @@ impl EditingDoc {
                         && crate::map_string(map, txn, "modelKind").as_deref() == Some("commentReference"))
             {
                 continue;
+            }
+            let mut delta = delta.clone();
+            if let Some(language @ Any::Map(_)) = delta.get("language").cloned() {
+                delta.insert(
+                    Arc::from("language"),
+                    merge_language(chunk.attrs.get("language"), &language),
+                );
             }
             let mut current = chunk.attrs.clone();
             for (key, value) in &delta {

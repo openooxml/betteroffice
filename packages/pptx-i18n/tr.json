@@ -52,6 +52,7 @@
     "decreaseFontSize": "Yazı tipi boyutunu küçült",
     "increaseFontSize": "Yazı tipi boyutunu büyüt",
     "underline": "Altı Çizili",
+    "strikethrough": "Üstü Çizili",
     "more": "Diğer",
     "fillColor": "Dolgu Rengi",
     "noFill": "Dolgu Yok",
@@ -230,8 +231,24 @@
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
       "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
-      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
-    }
+      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi.",
+      "clipboardUnavailable": "Pano erişimi kullanılamıyor veya reddedildi.",
+      "tableRequired": "Önce imleci bir tablo hücresine yerleştirin.",
+      "lastSlide": "Son slayt silinemez."
+    },
+    "cut": "Kes",
+    "copy": "Kopyala",
+    "paste": "Yapıştır",
+    "insert": "Ekle",
+    "delete": "Sil",
+    "deleteTable": "Tabloyu Sil",
+    "duplicateSlide": "Slaydı çoğalt",
+    "insertRowsAbove": "Üste satır ekle",
+    "insertRowsBelow": "Alta satır ekle",
+    "insertColumnsLeft": "Sola sütun ekle",
+    "insertColumnsRight": "Sağa sütun ekle",
+    "deleteRows": "Satırları sil",
+    "deleteColumns": "Sütunları sil"
   },
   "plugins": {
     "toolbarGroup": "Eklentiler",
@@ -243,5 +260,11 @@
     "label": "Katkıda Bulunanlar",
     "moreCollaborators": "{count, plural, one {# katkıda bulunan daha} other {# katkıda bulunan daha}}",
     "moreSelections": "+{count, plural, one {# seçim} other {# seçim}}"
+  },
+  "contextMenu": {
+    "text": "Metin menüsü",
+    "shape": "Şekil menüsü",
+    "table": "Tablo menüsü",
+    "slide": "Slayt menüsü"
   }
 }

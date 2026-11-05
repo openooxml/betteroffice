@@ -149,8 +149,31 @@
       "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
       "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
       "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
-      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।"
-    }
+      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।",
+      "clipboardUnavailable": "यह ब्राउज़र मेनू से चिपकाने की अनुमति नहीं देता। कीबोर्ड शॉर्टकट का उपयोग करें।",
+      "lastSheet": "वर्कबुक में कम से कम एक शीट होनी चाहिए।",
+      "sheetAtEdge": "शीट को और आगे नहीं ले जाया जा सकता।",
+      "sheetNameInvalid": "शीट के नाम में 1 से 31 वर्ण होने चाहिए, वह अद्वितीय होना चाहिए और उसमें : \\ / ? * [ ] नहीं हो सकते।",
+      "clipboardDenied": "ब्राउज़र ने क्लिपबोर्ड तक पहुँच की अनुमति नहीं दी।"
+    },
+    "cut": "काटें",
+    "copy": "कॉपी करें",
+    "paste": "पेस्ट करें",
+    "pastePlainText": "सादे टेक्स्ट के रूप में पेस्ट करें",
+    "clearContents": "सामग्री साफ़ करें",
+    "insert": "डालें",
+    "delete": "हटाएं",
+    "insertRowsAbove": "ऊपर पंक्तियाँ डालें",
+    "insertRowsBelow": "नीचे पंक्तियाँ डालें",
+    "insertColumnsLeft": "बाईं ओर स्तंभ डालें",
+    "insertColumnsRight": "दाईं ओर स्तंभ डालें",
+    "deleteRows": "पंक्तियाँ हटाएं",
+    "deleteColumns": "स्तंभ हटाएं",
+    "insertSheet": "शीट डालें",
+    "deleteSheet": "शीट हटाएं",
+    "renameSheet": "नाम बदलें",
+    "moveSheetLeft": "बाईं ओर ले जाएँ",
+    "moveSheetRight": "दाईं ओर ले जाएँ"
   },
   "editor": {
     "appLabel": "स्प्रेडशीट संपादक",
@@ -165,7 +188,11 @@
     "showDetails": "विवरण दिखाएं",
     "openPrompt": "XLSX फ़ाइल खोलें",
     "sheetTabsLabel": "शीट",
-    "clearExceedsLimit": "साफ़ करना सेल सीमा से अधिक है"
+    "clearExceedsLimit": "साफ़ करना सेल सीमा से अधिक है",
+    "cellMenuLabel": "सेल मेनू",
+    "sheetTabMenuLabel": "शीट टैब मेनू",
+    "renameSheetLabel": "शीट का नाम बदलें",
+    "sheetNamePrefix": "शीट"
   },
   "presence": {
     "label": "सहयोगी",

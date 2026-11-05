@@ -302,6 +302,46 @@ test('undoing_a_deleted_slide_reselects_it', async () => {
   } finally { await session.dispose(); }
 });
 
+test('duplicate_slide_validates_its_target_and_index_and_publishes_the_new_active_slide', async () => {
+  const session = await open();
+  try {
+    const [first, second] = session.stories as [PptxStoryText, PptxStoryText];
+    let state: PresentationCommandAck = await session.command(session.state, 1, { kind: 'setSelection', payload: {
+      ...input, selection: selection(first, 1, 3) } });
+    let seq = 1;
+    for (const args of [[first.slideId, -1], [first.slideId, 3], [first.slideId, 0.5],
+      [first.slideId, Number.NaN], ['missing', 1], [first.slideId], [first.slideId, 1, 'extra']]) {
+      const refused = await session.command(state, ++seq, { kind: 'invoke', payload: {
+        ...input, method: 'duplicateSlide', args } });
+      expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload', committed: false });
+      expect(refused.version).toBe(state.version);
+      expect(refused.selection).toEqual(state.selection);
+      state = refused;
+    }
+    const duplicated = await session.command(state, ++seq, { kind: 'invoke', payload: {
+      ...input, method: 'duplicateSlide', args: [first.slideId, 1] } });
+    const id = (duplicated.mutationResult as { slideId: string }).slideId;
+    expect(duplicated.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(duplicated.slides?.map((slide) => slide.id)).toEqual([first.slideId, id, second.slideId]);
+    expect(duplicated.activeSlideId).toBe(id);
+    expect(duplicated.frame?.slideId).toBe(id);
+    expect(duplicated.selection).toBeNull();
+    expect(duplicated.editState.object ?? null).toBeNull();
+    const text = (index: number) => session.handle().snapshot().slides[index]!.shapes[0]!.textStories[0]!.paragraphs
+      .map((paragraph) => paragraph.runs.map((run) => run.text).join('')).join('\n');
+    expect(text(1)).toBe(text(0));
+    const undone = await session.command(duplicated, ++seq, { kind: 'undo', payload: input });
+    expect(undone.slides?.map((slide) => slide.id)).toEqual([first.slideId, second.slideId]);
+    const redone = await session.command(undone, ++seq, { kind: 'redo', payload: input });
+    expect(redone.slides?.map((slide) => slide.id)).toEqual([first.slideId, id, second.slideId]);
+    const appended = await session.command(redone, ++seq, { kind: 'invoke', payload: {
+      ...input, method: 'duplicateSlide', args: [second.slideId, 3] } });
+    expect(appended.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(appended.slides).toHaveLength(4);
+    expect(appended.activeSlideId).toBe(appended.slides?.[3]?.id);
+  } finally { await session.dispose(); }
+});
+
 test('slide_changing_invocations_drop_the_previous_slides_selection', async () => {
   const session = await open();
   try {

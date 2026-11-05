@@ -16,6 +16,11 @@ fn base_latin_misses_follow_transformed_text_and_font_chains() {
 }
 
 impl EditSessionCore {
+    pub fn with_measure_fonts_ref<T>(&self, read: impl FnOnce(&ooxml_text::FontStore) -> T) -> T {
+        let _fonts = self.fonts.enter();
+        docx_layout::with_measure_fonts_ref(read)
+    }
+
     /// Registers raw sfnt bytes in this session's resident measurement store
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
@@ -39,6 +44,14 @@ impl EditSessionCore {
         let _fonts = self.fonts.enter();
         docx_layout::register_substitute_measure_font_id(base, requested_family)
             .map_err(EngineError::message)
+    }
+
+    /// Replaces the outlines of measurement font `font_id` with `bytes`, a face
+    /// whose every table but `CFF ` is unchanged (a sliced face reassembled
+    /// with more chunks). Errors, leaving the font as it was, for other bytes.
+    pub fn update_measure_font_outlines(&self, font_id: u32, bytes: &[u8]) -> EngineResult<()> {
+        let _fonts = self.fonts.enter();
+        docx_layout::update_measure_font_outlines(font_id, bytes).map_err(EngineError::message)
     }
 
     /// The outline of one glyph as JSON in font units, y-up. Errors when the

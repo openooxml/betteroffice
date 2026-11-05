@@ -24,7 +24,7 @@ const PARAGRAPH_PROPERTIES = new Set([
   'beforeAutospacing', 'afterAutospacing', 'lineSpacing', 'lineSpacingRule', 'spacingExplicit',
   'indentLeft', 'indentRight', 'indentFirstLine', 'hangingIndent', 'borders', 'shading', 'tabs',
   'pageBreakBefore', 'keepNext', 'keepLines', 'widowControl', 'contextualSpacing', 'snapToGrid',
-  'autoSpaceDE', 'autoSpaceDN', 'outlineLevel', 'bidi',
+  'autoSpaceDE', 'autoSpaceDN', 'outlineLevel', 'bidi', 'language',
 ]);
 const ONE_OFF = new Set(['pageBreakBefore', 'frame']);
 const LIST_PROPERTIES = [...PARAGRAPH_PROPERTIES,
@@ -242,7 +242,7 @@ function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
   return { content: segments.slice(start, end), mark: segments[end] as Pilcrow };
 }
 
-function formatParagraph(draft: YrsSession, target: DocxParagraphTarget, delta: Parameters<YrsSession['formatTextTarget']>[1]) {
+export function formatParagraph(draft: YrsSession, target: DocxParagraphTarget, delta: Parameters<YrsSession['formatTextTarget']>[1]) {
   const result = draft.formatTextTarget({ kind: 'paragraph', story: target.story, paraId: target.paraId }, delta);
   if (!result.ok) throw new DocumentToolError(result.failure.code.toUpperCase().replaceAll('-', '_'), result.failure.message);
 }

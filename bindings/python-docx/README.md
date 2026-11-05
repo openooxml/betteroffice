@@ -165,7 +165,7 @@ Without the font wheels (installed with `--no-deps`), text whose family has no
 registered face raises `RenderError` naming the chain it wanted
 (``missing font chain for `calibri|0|0` ``).
 
-`png.skipped_images` counts unresolved references. Register image bytes under
+`png.skipped_images` counts unresolved references, and `png.skipped_effects` maps each effect kind the renderer could not draw yet (for example `text.textOutline`) to how often it was left out. Register image bytes under
 the relationship ID and owning part:
 
 ```python

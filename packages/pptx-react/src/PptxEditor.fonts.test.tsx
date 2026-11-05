@@ -9,6 +9,7 @@ import { PptxEditor, pptxBundledFontsLoader, pptxPeerlessEditorLoader, PptxWorke
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import { peerlessSessionOpener } from './worker/usePeerlessPresentation';
 import { FONT_FALLBACK_MESSAGE } from './fontFaces';
+import { MOUNTED } from './__fixtures__/mounted';
 
 const face: BundledFontFace = { family: 'Liberation Sans', weight: 400, style: 'normal',
   file: 'LiberationSans-Regular.ttf.zst', byteLength: 1 };
@@ -64,7 +65,7 @@ test('bundled descriptors wait for the prepared decoder and open with byte faces
   expect(ready).not.toHaveBeenCalled();
   expect(view.getByRole('status').textContent).toBe('Loading fonts');
   await act(async () => { pending.resolve(fontBytes.slice().buffer as ArrayBuffer); });
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(opener).toHaveBeenCalledWith(file, expect.objectContaining({ fonts: [
     { family: face.family, bold: true, italic: true, bytes: fontBytes },
   ] }));
@@ -75,7 +76,7 @@ test('bundled descriptors wait for the prepared decoder and open with byte faces
 test('byte faces pass through unchanged without preparing a font decoder', async () => {
   const fonts = [{ family: face.family, bytes: fontBytes }];
   const { ready } = await mount(fonts);
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(opener.mock.calls[0]![1]!.fonts).toBe(fonts);
   expect(opener.mock.calls[0]![1]!.fonts![0]).toBe(fonts[0]);
   expect(prepare).not.toHaveBeenCalled();
@@ -92,7 +93,7 @@ test('equivalent inline descriptors stay stable during loading and after opening
   expect(prepare).toHaveBeenCalledTimes(1);
   expect(load).toHaveBeenCalledTimes(1);
   await act(async () => { pending.resolve(fontBytes.slice().buffer as ArrayBuffer); });
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   await act(async () => { view.rerender(ui()); });
   expect(ready).toHaveBeenCalledTimes(1);
   expect(opener).toHaveBeenCalledTimes(1);
@@ -103,7 +104,7 @@ test('equivalent inline descriptors stay stable during loading and after opening
 test('mixed byte and bundled faces preserve both in input order', async () => {
   const byteFace = { family: 'Host Sans', bytes: fontBytes };
   const { ready } = await mount([byteFace, { face, baseUrl }]);
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   const fonts = opener.mock.calls[0]![1]!.fonts!;
   expect(fonts).toEqual([byteFace, { family: face.family, bold: false, italic: false, bytes: fontBytes }]);
   expect(fonts[0]).toBe(byteFace);
@@ -112,14 +113,14 @@ test('mixed byte and bundled faces preserve both in input order', async () => {
 
 test('the prepared decoder gets the default fonts and opening slide the editor will use', async () => {
   const { ready, file } = await mount([{ face, baseUrl }], { defaultFonts: undefined, initialSlide: 3 });
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: undefined, activeSlideIndex: 2 });
 });
 
 test('metric-compatible descriptors open as the font they substitute', async () => {
   const arial = { ...face, metricCompatWith: 'Arial', weight: 700 as const };
   const { ready } = await mount([{ face: arial, baseUrl }]);
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(opener.mock.calls[0]![1]!.fonts).toEqual([{ family: 'Arial', bold: true, italic: false, bytes: fontBytes }]);
 });
 
@@ -130,7 +131,7 @@ test('failed descriptors warn once and the presentation opens with the remaining
   load.mockRejectedValueOnce(new Error('Font download failed')).mockRejectedValueOnce(new Error('Another font failed'));
   const byteFace = { family: face.family, bytes: fontBytes };
   const { ready } = await mount([{ face, baseUrl }, { face: { ...face, file: 'missing.ttf.zst' } }, byteFace], { onError });
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(warn).toHaveBeenCalledTimes(1);
   expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
   expect(onError).not.toHaveBeenCalled();
@@ -174,7 +175,7 @@ test('changing the file releases the old worker and ignores its pending fonts', 
   await act(async () => { first.resolve(fontBytes.slice().buffer as ArrayBuffer); });
   expect(opener).not.toHaveBeenCalled();
   await act(async () => { second.resolve(fontBytes.slice().buffer as ArrayBuffer); });
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(opener.mock.calls[0]![0]).toBe(nextFile);
   expect(secondRelease).toHaveBeenCalledTimes(1);
 });
@@ -196,7 +197,7 @@ test('two editors on one file each release their own handle, so unmounting one k
   expect(firstRelease).toHaveBeenCalledTimes(1);
   expect(secondRelease).not.toHaveBeenCalled();
   await act(async () => { pending.resolve(fontBytes.slice().buffer as ArrayBuffer); });
-  await waitFor(() => expect(secondReady).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(secondReady).toHaveBeenCalledTimes(1), MOUNTED);
   expect(opener.mock.calls[opener.mock.calls.length - 1]![1]!.fonts).toEqual([{ family: face.family, bold: false, italic: false, bytes: fontBytes }]);
   expect(firstReady).not.toHaveBeenCalled();
   second.unmount();
@@ -206,7 +207,7 @@ test('an in-thread editor releases the prepared worker after decoding', async ()
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   restorers.push(() => warn.mockRestore());
   const { ready } = await mount([{ face, baseUrl }], { experimentalWorkerOpen: false });
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(load).toHaveBeenCalledWith(face, { baseUrl }, { decoder });
   expect(release).toHaveBeenCalledTimes(1);
   expect(opener).not.toHaveBeenCalled();
@@ -270,7 +271,7 @@ test('decoder preparation failures warn and preserve host byte faces', async () 
   restorers.push(() => warn.mockRestore());
   const byteFace = { family: face.family, bytes: fontBytes };
   const { ready } = await mount([byteFace, { face, baseUrl }]);
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
   expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
   expect(load).not.toHaveBeenCalled();
   expect(opener.mock.calls[0]![1]!.fonts).toEqual([byteFace]);

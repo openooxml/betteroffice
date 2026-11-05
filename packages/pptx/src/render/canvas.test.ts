@@ -2781,3 +2781,38 @@ test('deleted proposal shapes fade once while surviving shapes keep their opacit
   expect(painted).toEqual([0.4, 1]);
   expect(alpha).toBe(1);
 });
+
+test('paints strike rules with raster geometry, colour, clip and transform', async () => {
+  const rules: { args: number[]; color: unknown; clipped: boolean; transformed: boolean }[] = [];
+  let clipped = false;
+  let transformed = false;
+  const ctx = new Proxy({
+    clip: () => { clipped = true; },
+    rotate: () => { transformed = true; },
+    fillRect: (...args: number[]) => rules.push({ args, color: ctx.fillStyle, clipped, transformed }),
+  } as Record<string, unknown>, {
+    get: (target, key) => target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const list: SlideDisplayList = {
+    contractVersion: 1, width: 200, height: 100,
+    primitives: [{
+      kind: 'textBox', objectId: 1, x: 0, y: 0, w: 200, h: 100,
+      transform: { rotationDeg: 90 },
+      anchor: 'top', paragraphs: [], lines: [{
+        x: 10, y: 20, width: 80, height: 50, baseline: 50, start: 0, end: 4,
+        caretStops: [], runs: ['sngStrike', 'dblStrike', 'noStrike', undefined].map((strike, i) => ({
+          text: 'x', start: i, end: i + 1, x: 10 + i * 20, width: 20,
+          fontId: 1, fontFamily: 'Arial', fontSizePx: i === 0 ? 10 : 40, bold: false, italic: false,
+          underline: false, strike, color: '#475467', baselineOffsetPx: 6, glyphs: [],
+        })),
+      }],
+    }],
+  };
+  await paintSlide(ctx, list, 1);
+  expect(rules).toEqual([
+    { args: [10, 41, 20, 1], color: '#475467', clipped: true, transformed: true },
+    { args: [30, 30, 20, 2], color: '#475467', clipped: true, transformed: true },
+    { args: [30, 34, 20, 2], color: '#475467', clipped: true, transformed: true },
+  ]);
+});

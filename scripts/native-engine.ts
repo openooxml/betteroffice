@@ -13,10 +13,10 @@ export const NATIVE_ENGINES = {
     { engine: 'packages/xlsx/src/wasm/engineRaster.ts', native: 'bindings/xlsx-native/js/engineRaster.ts' },
     { engine: 'packages/xlsx/src/wasm/enginePng.ts', native: 'bindings/xlsx-native/js/enginePng.ts' },
   ],
-  pptx: {
-    engine: 'packages/pptx/src/wasm/engine.ts',
-    native: 'bindings/pptx-native/js/engine.ts',
-  },
+  pptx: [
+    { engine: 'packages/pptx/src/wasm/engine.ts', native: 'bindings/pptx-native/js/engine.ts' },
+    { engine: 'packages/pptx/src/wasm/enginePng.ts', native: 'bindings/pptx-native/js/enginePng.ts' },
+  ],
   docx: [
     { engine: 'packages/docx/src/wasm/engineEdit.ts', native: 'bindings/docx-native/js/engineEdit.ts' },
     { engine: 'packages/docx/src/wasm/engineParse.ts', native: 'bindings/docx-native/js/engineParse.ts' },

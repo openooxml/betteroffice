@@ -10,9 +10,10 @@ description = "The single wasm-bindgen boundary: coarse JSON-string calls over t
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["raster", "peer-snapshot"]
+default = ["raster", "peer-snapshot", "structured-render"]
 raster = ["betteroffice-xlsx/raster", "betteroffice-xlsx-engine/raster"]
 peer-snapshot = []
+structured-render = []
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
@@ -27,3 +28,6 @@ betteroffice-xlsx-engine = { path = "../xlsx-engine", default-features = false }
 ooxml-opc.workspace = true
 xlsx-model.workspace = true
 xlsx-parse.workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Os"]

@@ -278,6 +278,15 @@ impl EditSession {
         self.core.decode_font(bytes).map_err(JsValue::from)
     }
 
+    /// Replaces the outlines of measurement font `font_id` with `bytes`, a face
+    /// whose every table but `CFF ` is unchanged. Errors, leaving the font as
+    /// it was, for other bytes.
+    pub fn update_measure_font_outlines(&self, font_id: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        self.core
+            .update_measure_font_outlines(font_id, bytes)
+            .map_err(JsValue::from)
+    }
+
     pub fn take_base_latin_miss(&self) -> bool {
         self.core.take_base_latin_miss()
     }
@@ -1255,6 +1264,29 @@ impl EditSession {
     pub fn set_document_property(&self, key: &str, json: &str) -> Result<bool, JsValue> {
         self.core
             .set_document_property(key, json)
+            .map_err(JsValue::from)
+    }
+
+    /// Current style and document-default language overrides as JSON.
+    pub fn style_languages_json(&self) -> String {
+        self.core.style_languages_json()
+    }
+
+    /// Sets language slots; no style ID selects document defaults. Null clears a slot.
+    pub fn set_style_language(
+        &self,
+        style_id: Option<String>,
+        slots_json: &str,
+    ) -> Result<bool, JsValue> {
+        self.core
+            .set_style_language(style_id.as_deref(), slots_json)
+            .map_err(JsValue::from)
+    }
+
+    /// Patches styles XML with the session's language overrides.
+    pub fn patch_style_languages_xml(&self, source: &str) -> Result<String, JsValue> {
+        self.core
+            .patch_style_languages_xml(source)
             .map_err(JsValue::from)
     }
 

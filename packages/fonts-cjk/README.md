@@ -68,7 +68,10 @@ serve `node_modules/@betteroffice/fonts/dist/decoder/fontpack.wasm` at
 ## Licensing
 
 Loader code is Apache-2.0 (see `LICENSE`). Fonts use the SIL Open Font License
-1.1; `LICENSES/OFL-NotoCJK.txt` carries the license and copyright notices.
+1.1; `LICENSES/OFL-NotoCJK.txt` carries the license and copyright notices. The order of
+the outline chunks in `assets/<face>/` comes from Google's CJK slicing strategies
+(googlefonts/nam-files), Apache License 2.0, in
+`LICENSES/Apache-2.0-nam-files.txt`.
 Static `SubsetOTF` Regulars come from
 [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk), with Sans pinned to
 `523d033d6cb47f4a80c58a35753646f5c3608a78` and Serif to

@@ -197,6 +197,8 @@ function disabledCode(code: XlsxCommandFailureCode): XlsxCommandDisabledCode {
     case 'document-replaced':
     case 'aborted':
       return 'plugin-unavailable';
+    case 'clipboard-denied':
+      return 'clipboard-unavailable';
     default:
       return code;
   }

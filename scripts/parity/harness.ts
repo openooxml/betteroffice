@@ -12,7 +12,12 @@ export interface StepResult {
 
 export interface Script {
   fixture: string;
-  steps: { op: string; args: Record<string, unknown>; targets?: ('ts' | 'rust' | 'python')[] }[];
+  steps: {
+    op: string;
+    args: Record<string, unknown>;
+    targets?: ('ts' | 'rust' | 'python')[];
+    expectError?: boolean;
+  }[];
   [key: string]: unknown;
 }
 
@@ -42,6 +47,15 @@ export function readExpected(format: string): StepResult[] {
 export function compareOrWrite(format: string, results: StepResult[], write = false): void {
   if (write) writeFileSync(expectedPath(format), `${JSON.stringify(results, null, 2)}\n`);
   deepStrictEqual(results, readExpected(format));
+}
+
+async function refusal(call: () => unknown): Promise<{ error: string }> {
+  try {
+    await call();
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  throw new Error('expected the call to fail');
 }
 
 function mapStrings(value: unknown, transform: (value: string) => string): unknown {
@@ -80,12 +94,13 @@ export async function run(format: string): Promise<StepResult[]> {
   };
   const results: StepResult[] = [];
   try {
-    for (const [index, { op, args }] of script.steps.entries()) {
+    for (const [index, { op, args, expectError }] of script.steps.entries()) {
       if (!Object.hasOwn(target.operations, op)) {
         throw new Error(`Unknown parity op ${op} at step ${index}`);
       }
       try {
-        let result = await target.operations[op](mapStrings(args, resolve) as Record<string, unknown>);
+        const call = () => target.operations[op](mapStrings(args, resolve) as Record<string, unknown>);
+        let result = expectError === true ? await refusal(call) : await call();
         if (op === 'save') {
           if (!(result instanceof Uint8Array)) throw new TypeError('save must return bytes');
           result = {

@@ -12,11 +12,14 @@ import type {
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import { editorExportFaces, useDefaultFonts } from '../useDefaultFonts';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError, XlsxHostRefusalError } from '../commands/createXlsxCommandStore';
-import { commandForEvent } from '../commands/descriptors';
+import { commandForEvent, isMacPlatform } from '../commands/descriptors';
+import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
+import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
+import { xlsxContextMenuEntries } from '../contextMenu/menus';
 import { commandReason, initialZoomScale } from '../commands/evaluate';
 import type { XlsxCommandFailureCode } from '../commands/types';
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
@@ -119,6 +122,12 @@ function rangeA1(range: CellRange): string {
   return `${address({ row: range.top, col: range.left })}:${address({ row: range.bottom, col: range.right })}`;
 }
 
+function handledRejection(error: unknown): Promise<never> {
+  const rejected = Promise.reject(error);
+  rejected.catch(() => {});
+  return rejected;
+}
+
 function fromPlugin(event: SyntheticEvent): boolean {
   return pluginEventStore(event.nativeEvent) !== null || inPluginChrome(event.target);
 }
@@ -177,6 +186,14 @@ const PeerlessDefaultToolbar = memo(function PeerlessDefaultToolbar() {
   </EditorToolbar>;
 });
 
+function guardEntries(entries: readonly OverflowMenuEntry[], ready: () => boolean): OverflowMenuEntry[] {
+  const live = ready();
+  return entries.map((entry) => entry.kind === 'item'
+    ? { ...entry, disabled: entry.disabled || !live, onSelect: () => { if (ready()) entry.onSelect(); } }
+    : entry.kind === 'submenu' ? { ...entry, disabled: entry.disabled || !live, entries: guardEntries(entry.entries, ready) }
+      : entry.kind === 'group' ? { ...entry, entries: guardEntries(entry.entries, ready) } : entry);
+}
+
 export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const { t } = useTranslation();
   const [cellClipboard] = useState(() => new CellClipboard());
@@ -198,6 +215,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [refusal, setRefusal] = useState<{ code: XlsxCommandFailureCode; detail?: string; message?: string } | null>(null);
   const [selectedChart, setSelectedChart, chartRef] = useSyncedState<{ id: string; movable: boolean } | null>(null);
   const [chartOffset, setChartOffset] = useState<{ x: number; y: number } | null>(null);
+  const [renaming, setRenaming] = useState<number | null>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const pendingActivation = useRef<string | null>(null);
+  const [, bumpActivation] = useReducer((count: number) => count + 1, 0);
   const [formatToken, setFormatTokenState, formatTokenRef] = useSyncedState<string | null>(null);
   const formatSource = useRef<string | null>(null);
   const formatRevision = useRef(0);
@@ -230,6 +251,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const flushNudgeRef = useRef<(retained?: boolean) => void>(() => {});
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const nameNavigation = useRef<(cell: CellAddr) => void>(() => {});
+  const sheetNavigation = useRef<(sheet: number) => void>(() => {});
+  const sheetLayout = useRef(0);
   const navigateFromNameBox = useCallback((cell: CellAddr) => nameNavigation.current(cell), []);
   const exportInput = useRef<ReturnType<typeof createPeerlessWorkerInputCoordinator> | null>(null);
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
@@ -394,9 +417,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (revealing.current?.generation === owner.generation && revealing.current.navigation === at) return;
     const request = { generation: owner.generation, navigation: at };
     revealing.current = request;
+    const layout = sheetLayout.current;
     void owner.session.call.cellGeometry(sheet, cell.row, cell.col).then((geometry) => {
       const scroll = scrollRef.current;
-      if (!owner.current || ownerRef.current !== owner || navigation.current !== at || !scroll) return;
+      if (!owner.current || ownerRef.current !== owner || navigation.current !== at || sheetLayout.current !== layout || !scroll) return;
       if (previousZoom !== undefined && !cellInViewport(scroll, geometry.rect, previousZoom)) return;
       const view = viewRef.current;
       const id = sheetId(sheet);
@@ -423,7 +447,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       scroll.scrollTop = target.y * scale;
       sourceRef.current?.schedule();
     }).catch((error) => {
-      if (owner.current && ownerRef.current === owner && navigation.current === at) owner.fail(error);
+      if (owner.current && ownerRef.current === owner && navigation.current === at && sheetLayout.current === layout) owner.fail(error);
     }).finally(() => { if (revealing.current === request) revealing.current = null; });
   };
   const revealedZoom = useRef(zoom);
@@ -773,7 +797,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (changedSheet) restoreSheetScroll(view);
       if (paint || changedSheet) sourceRef.current?.schedule();
     }).catch((error) => {
-      if (ownerRef.current === owner && owner.current && !owner.failure) owner.fail(error);
+      if (ownerRef.current === owner && owner.current && !owner.failure && revision === geometryRevision.current) owner.fail(error);
     });
   }, [setView, viewRef, sheetScrolls]);
   const selectionKey = () => {
@@ -882,13 +906,32 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       }
       commands.refresh();
     }
-    if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
-      setCatalog(ack.editState.sheets);
-    }
     const latestSelection = Math.max(0, ...selectionCommands);
     const reconcile = !selectionNavigation.isPending(navigationContext()) && latestSelection > 0 && ack.throughSeq >= latestSelection &&
       selectionRevisions.get(latestSelection) === navigation.current &&
       !draftController.ownsFocus;
+    if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
+      const sheets = ack.editState.sheets;
+      setCatalog(sheets);
+      const kept = sheets.find((entry) => entry.id === activeSheetId.current);
+      if (!kept || kept.index !== activeRef.current) sheetLayout.current += 1;
+      if (kept && kept.index !== activeRef.current) {
+        const previous = activeRef.current;
+        geometryRevision.current += 1;
+        if (viewRef.current?.sheet === previous) setView({ ...viewRef.current, sheet: kept.index });
+        if (revealedExtent.current?.sheet === previous) revealedExtent.current = { ...revealedExtent.current, sheet: kept.index };
+        setActive(kept.index);
+        sourceRef.current?.schedule();
+      } else if (!kept && sheets.length > 0) {
+        const acknowledged = reconcile && ack.selection ? ack.selection : undefined;
+        const fallback = (acknowledged && sheets.find((entry) => entry.id === acknowledged.sheetId)) ??
+          sheets.find((entry) => entry.index === run.session.editState.activeSheet) ??
+          sheets.find((entry) => entry.index === Math.min(activeRef.current, sheets.length - 1)) ?? sheets[0]!;
+        const restored = acknowledged?.sheetId === fallback.id ? commandSelection(acknowledged, selectionRef.current) : null;
+        placeSelection(fallback.index, restored ?? sheetSelection(fallback.index));
+        queueMicrotask(() => sheetNavigation.current(fallback.index));
+      }
+    }
     if (ack.selection && reconcile) {
       const target = ack.selection;
       const sheet = run.session.editState.sheets?.find((entry) => entry.id === target.sheetId)?.index;
@@ -1261,9 +1304,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const target = selectedTarget();
     const owner = ownerRef.current;
     const selected = selectionRef.current;
-    if (!editable() || !target || !owner || !selected) return;
+    if (!editable() || !target || !owner || !selected) return undefined;
     const cleared: PeerlessWorkerCommandInput = { kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } };
-    if (!editGate.gatesEdits()) { command(cleared); return; }
+    if (!editGate.gatesEdits()) { command(cleared); return undefined; }
     const sheet = activeRef.current;
     const range = normalizeRange(selected);
     const gated = coordinator.runAfterPendingInput(async () => {
@@ -1276,6 +1319,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       ? { kind: 'editCells', payload: { args: [sheet, edits], target, selection: target } } : cleared,
     { frame: sourceRef.current?.captureCommandFrame() ?? undefined, selectionRevision: navigation.current });
     void ticket.result.catch(report);
+    return ticket.result;
   };
   const clipboardAllowed = (kind: 'copy' | 'cut' | 'paste') => {
     const owner = ownerRef.current;
@@ -1306,8 +1350,12 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     } catch (error) { refused = { error }; }
     return { write, resolve, reject, refused, marker };
   };
-  const clipboard = (kind: 'copy' | 'cut' | 'paste', access: ReturnType<typeof clipboardAccess>) => {
-    if (!clipboardAllowed(kind)) { access.reject?.(new XlsxCommandAdmissionError('editor-unavailable')); return; }
+  const clipboard = (kind: 'copy' | 'cut' | 'paste', access: ReturnType<typeof clipboardAccess>): Promise<unknown> => {
+    if (!clipboardAllowed(kind)) {
+      const refusal = new XlsxCommandAdmissionError('editor-unavailable');
+      access.reject?.(refusal);
+      return handledRejection(refusal);
+    }
     const owner = ownerRef.current!;
     const selected = selectionRef.current!;
     const sheet = activeRef.current;
@@ -1341,15 +1389,16 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           !selectionNavigation.isPending(navigationContext())) predict(sheet, next, false, true);
         return { kind: 'editCells', payload: { args: [sheet, edits], target, selection: rangeTarget(sheet, next) } };
       });
-      void ticket.result.then((status) => { if (pasted) cellClipboard.consume(pasted, status.status === 'applied' && status.committed === true); }).catch(report);
-      return;
+      const settled = ticket.result.then((status) => { if (pasted) cellClipboard.consume(pasted, status.status === 'applied' && status.committed === true); });
+      void settled.catch(report);
+      return settled;
     }
     const checkOwner = () => {
       if (ownerRef.current !== owner || !owner.current || owner.retiring) throw new XlsxCommandAdmissionError('document-replaced');
       if (owner.failure) throw owner.failure;
     };
     const { write, resolve, reject, refused, marker } = access;
-    if (refused) { reject!(refused.error); report(refused.error); return; }
+    if (refused) { reject!(refused.error); report(refused.error); return handledRejection(refused.error); }
     const token = cellClipboard.begin(undefined, marker);
     const copied = coordinator.runAfterPendingInput(async () => {
       checkOwner();
@@ -1374,7 +1423,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         cleared?.length ? { kind: 'editCells', payload: { args: [sheet, cleared], target, selection: target } }
           : { kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } });
       void ticket.result.catch((error) => { reject!(error); report(error); });
-    } else void written.catch((error) => { reject!(error); report(error); });
+      return ticket.result;
+    }
+    void written.catch((error) => { reject!(error); report(error); });
+    return written;
+  };
+  const menuClipboard = (kind: 'copy' | 'cut' | 'paste' | 'pastePlainText'): Promise<unknown> => {
+    const base = kind === 'pastePlainText' ? 'paste' : kind;
+    if (!clipboardAllowed(base) || draftController.getSnapshot().cell) {
+      return handledRejection(new XlsxCommandAdmissionError('editor-unavailable'));
+    }
+    let access: ReturnType<typeof clipboardAccess>;
+    if (kind === 'pastePlainText') {
+      const read = navigator.clipboard.readText().then((text) => ({ text, html: null }));
+      void read.catch(() => {});
+      access = { read };
+    } else access = clipboardAccess(base);
+    return clipboard(base, access);
   };
   const settledFor = (owner: NonNullable<typeof run>) => ownerRef.current === owner && owner.ready && owner.current &&
     !owner.retiring && !owner.failure && !coordinator.pending && !draftController.ownsFocus &&
@@ -1460,6 +1525,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     } }, sheet, true);
   };
   nameNavigation.current = (cell) => { navigate(activeRef.current, selectionAt(cell)); focus(); };
+  sheetNavigation.current = (sheet) => { if (sheet === activeRef.current) navigate(sheet); };
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false, generation = run?.generation) => {
     if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure ||
       !retained && !editable() || dx === 0 && dy === 0) return;
@@ -1541,8 +1607,95 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
     },
     focusGrid: focus, refuse: (reason) => setRefusal({ code: reason.code as XlsxCommandFailureCode }),
+    menu: {
+      clipboard: menuClipboard,
+      clear: () => clear() ?? Promise.resolve(),
+      beginRename: () => setRenaming(activeRef.current),
+      activate: (name) => { pendingActivation.current = name.toLowerCase(); bumpActivation(); },
+    },
   });
   useCommandShortcuts(commands, rootRef);
+  useEffect(() => {
+    const name = pendingActivation.current;
+    const entry = name === null ? undefined : catalog.find((sheet) => sheet.name.toLowerCase() === name);
+    if (!entry) return;
+    pendingActivation.current = null;
+    if (entry.index !== activeRef.current || entry.id !== activeSheetId.current) navigate(entry.index);
+  });
+  const selectAtPoint = (request: { x: number; y: number }) => {
+    const { cell, chart } = point({ clientX: request.x, clientY: request.y });
+    if (chart) { setSelectedChart({ id: chart.id, movable: chart.movable }); return null; }
+    if (!cell) return null;
+    const sheet = activeRef.current;
+    const covers = () => {
+      const range = selectionRef.current ? normalizeRange(selectionRef.current) : null;
+      return !chartRef.current && range !== null && activeRef.current === sheet &&
+        cell.row >= range.top && cell.row <= range.bottom && cell.col >= range.left && cell.col <= range.right;
+    };
+    if (!covers()) {
+      setSelectedChart(null);
+      const next = selectionAt(mergeAnchorCell(cell, merges()));
+      predict(sheet, next, true);
+      command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
+    }
+    return covers;
+  };
+
+  const gridMenu = useContextMenu({
+    surface: scrollRef,
+    subscribe: commands.store.subscribe,
+    keyboardPoint: () => {
+      const selected = selectionRef.current;
+      const frame = sourceRef.current?.painted;
+      const canvas = canvasRef.current;
+      const rect = selected && frame?.geometry ? cellRect(frame.geometry, selected.focus.row, selected.focus.col) : null;
+      if (!rect || !canvas || !frame) return null;
+      const box = canvas.getBoundingClientRect();
+      return { x: box.left + (rect.x + rect.w / 2) * frame.request.zoom, y: box.top + (rect.y + rect.h) * frame.request.zoom };
+    },
+    resolve: (request) => {
+      if (!run?.ready || run.failure || inPluginChrome(request.target)) return null;
+      if (draftController.cellInput?.contains(request.target as Node)) return null;
+      let ready = () => true;
+      if (request.modality === 'pointer') {
+        const covers = selectAtPoint(request);
+        if (!covers) return null;
+        ready = covers;
+      } else if (chartRef.current) return null;
+      return { label: t('editor.cellMenuLabel'), testId: 'xlsx-cell-menu',
+        entries: () => guardEntries(xlsxContextMenuEntries('cell', commands.store, t), ready) };
+    },
+  });
+  const tabMenu = useContextMenu({
+    surface: tabsRef,
+    subscribe: commands.store.subscribe,
+    keyboardPoint: () => {
+      const tab = tabsRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+      const box = tab?.getBoundingClientRect();
+      return box ? { x: box.left, y: box.top } : null;
+    },
+    resolve: (request) => {
+      if (!run?.ready || run.failure || renaming !== null) return null;
+      const tab = request.target instanceof Element ? request.target.closest<HTMLElement>('[role="tab"]') : null;
+      const index = Number(tab?.dataset.sheetIndex);
+      if (!tab || !Number.isInteger(index)) return null;
+      const id = sheetId(index);
+      if (index !== activeRef.current || id !== activeSheetId.current) navigate(index);
+      const ready = () => activeRef.current === index && activeSheetId.current === id;
+      return { label: t('editor.sheetTabMenuLabel'), testId: 'xlsx-sheet-tab-menu',
+        entries: () => guardEntries(xlsxContextMenuEntries('sheetTab', commands.store, t), ready) };
+    },
+  });
+  const renameDone = useRef(false);
+  const finishRename = (input: HTMLInputElement | null, commit: boolean) => {
+    if (renameDone.current) return;
+    renameDone.current = true;
+    const name = input?.value ?? '';
+    setRenaming(null);
+    requestAnimationFrame(() => tabsRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus());
+    if (commit) void commands.store.execute('renameSheet', { name });
+  };
+  useLayoutEffect(() => { if (renaming !== null) renameDone.current = false; }, [renaming]);
   const applySelectionFormat = useCallback(() => {
     const selection = selectionRef.current;
     const active = activeRef.current;
@@ -1564,7 +1717,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     });
   }, [formatToken, run, coordinator, selectionFinished]);
 
-  const point = (event: MouseEvent) => {
+  const point = (event: Pick<MouseEvent, 'clientX' | 'clientY'>) => {
     const frame = sourceRef.current?.painted;
     const canvas = canvasRef.current;
     if (!frame || frame.request.sheet !== activeRef.current || !canvas) return { cell: null, chart: null };
@@ -1584,6 +1737,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (fromPlugin(event) || !run?.ready || run.failure || draftController.cellInput?.contains(event.target as Node) ||
       draftController.isComposing('cell') || draftController.isComposing('formula')) return;
     draftController.commit('cell'); draftController.commit('formula'); flushNudge();
+    if (event.button === 2 || (event.button === 0 && event.ctrlKey && isMacPlatform())) return;
     const { cell, chart } = point(event);
     clickStart.current = null;
     if (chart) {
@@ -1750,7 +1904,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       cellEditable={typingAllowed} gateRevision={pluginHost.activations}>
       <div dir="ltr" ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
         onKeyDownCapture={(event) => {
-          if (!fromPlugin(event) && event.key === 'Escape') { cellClipboard.cancelCut(); setFormatToken(null); commands.refresh(); }
+          if (!fromPlugin(event) && event.key === 'Escape' && !(event.target instanceof Element && event.target.closest('[role="menu"]'))) {
+            cellClipboard.cancelCut(); setFormatToken(null); commands.refresh();
+          }
         }}
         style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
           minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif', ...props.style }}>
@@ -1800,10 +1956,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {refusal.message ?? <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>}
         </div>}
         {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
-        {sheets.length > 0 && <div data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
+        {gridMenu.element}{tabMenu.element}
+        {sheets.length > 0 && <div ref={tabsRef} data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
           style={{ display: 'flex', gap: 2, padding: '4px 6px', borderTop: '1px solid #e0e0e0', background: '#fafafa', overflowX: 'auto' }}>
-          {sheets.map((sheet) => <button key={sheet.id} role="tab" aria-selected={sheet.index === active} disabled={Boolean(error)}
+          {sheets.map((sheet) => renaming === sheet.index ? <input key={sheet.id} data-testid="xlsx-sheet-rename"
+            aria-label={t('editor.renameSheetLabel')} defaultValue={sheet.name} maxLength={31} autoFocus
+            onFocus={(event) => event.currentTarget.select()}
+            onKeyDown={(event) => {
+              if (event.key === 'F6') event.stopPropagation();
+              if (event.key === 'Enter') { event.preventDefault(); finishRename(event.currentTarget, true); }
+              else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finishRename(event.currentTarget, false); }
+            }}
+            onBlur={(event) => finishRename(event.currentTarget, true)}
+            style={{ border: `1px solid ${BRAND}`, padding: '3px 8px', font: 'inherit', width: Math.max(80, sheet.name.length * 9) }} />
+            : <button key={sheet.id} role="tab" aria-selected={sheet.index === active} disabled={Boolean(error)}
+            data-sheet-index={sheet.index}
             onClick={() => navigate(sheet.index)}
+            onDoubleClick={() => { if (commands.store.getState('renameSheet').enabled) void commands.store.execute('renameSheet', null); }}
             style={{ border: 'none', padding: '4px 12px', cursor: 'pointer', background: sheet.index === active ? '#ffffff' : 'transparent',
               borderBottom: sheet.index === active ? `2px solid ${BRAND}` : '2px solid transparent', fontWeight: sheet.index === active ? 600 : 400 }}>
             {sheet.name}

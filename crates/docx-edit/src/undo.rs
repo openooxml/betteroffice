@@ -196,6 +196,12 @@ impl DocUndoManager {
             .get_map(crate::document_properties::DOCUMENT_PROPERTIES)
             .expect("document properties root is declared");
         inner.expand_scope(doc.yrs_doc(), &properties);
+        let languages = doc
+            .yrs_doc()
+            .transact()
+            .get_map(crate::style_languages::STYLE_LANGUAGES)
+            .expect("style languages root is declared");
+        inner.expand_scope(doc.yrs_doc(), &languages);
         let margins = doc
             .yrs_doc()
             .transact()

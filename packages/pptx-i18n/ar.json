@@ -52,6 +52,7 @@
     "decreaseFontSize": "إنقاص حجم الخط",
     "increaseFontSize": "زيادة حجم الخط",
     "underline": "تسطير",
+    "strikethrough": "يتوسطه خط",
     "more": "المزيد",
     "fillColor": "لون التعبئة",
     "noFill": "بلا تعبئة",
@@ -230,8 +231,24 @@
       "permissionDenied": "لم يسمح التطبيق المضيف لهذا المكون الإضافي باستخدام هذا الأمر.",
       "unsupportedPolicy": "لا تستطيع المكونات الإضافية تشغيل هذا الأمر بعد. استخدم دفعة تحرير بدلًا من ذلك.",
       "pluginUnavailable": "لم يعد المكون الإضافي نشطًا.",
-      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر."
-    }
+      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر.",
+      "clipboardUnavailable": "الوصول إلى الحافظة غير متاح أو تم رفضه.",
+      "tableRequired": "ضع المؤشر في خلية جدول أولاً.",
+      "lastSlide": "لا يمكن حذف الشريحة الأخيرة."
+    },
+    "cut": "قص",
+    "copy": "نسخ",
+    "paste": "لصق",
+    "insert": "إدراج",
+    "delete": "حذف",
+    "deleteTable": "حذف جدول",
+    "duplicateSlide": "تكرار الشريحة",
+    "insertRowsAbove": "إدراج صفوف لأعلى",
+    "insertRowsBelow": "إدراج صفوف لأسفل",
+    "insertColumnsLeft": "إدراج أعمدة إلى اليسار",
+    "insertColumnsRight": "إدراج أعمدة إلى اليمين",
+    "deleteRows": "حذف صفوف",
+    "deleteColumns": "حذف أعمدة"
   },
   "plugins": {
     "toolbarGroup": "المكونات الإضافية",
@@ -243,5 +260,11 @@
     "label": "المتعاونون",
     "moreCollaborators": "{count, plural, zero {لا متعاونين آخرين} one {متعاون إضافي واحد} two {متعاونان إضافيان} few {# متعاونين إضافيين} many {# متعاونًا إضافيًا} other {# متعاون إضافي}}",
     "moreSelections": "+{count, plural, zero {لا تحديدات إضافية} one {تحديد إضافي واحد} two {تحديدان إضافيان} few {# تحديدات إضافية} many {# تحديدًا إضافيًا} other {# تحديد إضافي}}"
+  },
+  "contextMenu": {
+    "text": "قائمة النص",
+    "shape": "قائمة الشكل",
+    "table": "قائمة الجدول",
+    "slide": "قائمة الشريحة"
   }
 }

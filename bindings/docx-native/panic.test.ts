@@ -79,3 +79,21 @@ for (const swallowed of [false, true]) {
     }
   });
 }
+
+test.skipIf(process.env.BETTEROFFICE_NATIVE_TEST_HOOKS !== '1')('a panic inside renderPngTarget poisons the raw docx session', () => {
+  const document = new EditSession(4);
+  const hooks = document as unknown as { panicNextPngForTest(): void };
+  try {
+    document.open_docx(fixture, true);
+    hooks.panicNextPngForTest();
+    const panic = thrown(() => document.renderPngTarget('{}', '{"page":0}', '{"scale":1}'));
+    expect(panic).toBeInstanceOf(Error);
+    expect(panic).toHaveProperty('code', 'GenericFailure');
+    const failure = thrown(() => document.version());
+    expect((failure as Error).message).toBe(failedObject);
+    expect(failure).not.toHaveProperty('code');
+    expect((thrown(() => document.renderPngTarget('{}', '{"page":0}', '{"scale":1}')) as Error).message).toBe(failedObject);
+  } finally {
+    expect(() => document.free()).not.toThrow();
+  }
+});

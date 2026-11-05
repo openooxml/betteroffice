@@ -28,6 +28,44 @@ test('the same public package script returns equal results and saved parts', asy
   expect(await saved.file('custom/untouched.bin')!.async('uint8array')).toEqual(new Uint8Array([0, 127, 255]));
 });
 
+test('language edits share native and wasm state, paragraph patches and styles XML', async () => {
+  const zip = await JSZip.loadAsync(await documentFixture());
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const properties = '<w:rFonts w:ascii="Arial"/><w:b/><w:sz w:val="24"/><w:lang w:val="en-US" w:eastAsia="ja-JP" w:bidi="ar-SA"/>';
+  zip.file('word/document.xml', `<w:document xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:pPr><w:rPr>${properties}</w:rPr></w:pPr><w:r><w:rPr>${properties}</w:rPr><w:t>Package text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`);
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'));
+  zip.file('word/styles.xml', `<w:styles xmlns:w="${w}"><w:docDefaults><w:rPrDefault><w:rPr>${properties}</w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr>${properties}</w:rPr></w:style></w:styles>`);
+  zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const exercise = async (api: typeof wasmYrs) => {
+    const session = await api.createYrsSession({ clientId: 74 });
+    try {
+      session.seedFromDocx(bytes);
+      const paraId = session.paragraphs('body')[0].paraId;
+      expect(session.formatTextTarget({ kind: 'paragraph', story: 'body', paraId }, { language: { lang: 'de-DE' } }).ok).toBe(true);
+      session.formatRange({ story: 'body', start: { paraId, offset: 8 }, end: { paraId, offset: 12 } }, { language: { eastAsia: null } });
+      expect(session.setStyleLanguage('Normal', { lang: 'de-DE' })).toBe(true);
+      expect(session.setStyleLanguage(null, { lang: 'de-DE', bidi: null })).toBe(true);
+      const state = session.styleLanguages();
+      const styles = session.patchStyleLanguagesXml(await zip.file('word/styles.xml')!.async('string'));
+      const saved = await api.saveYrsDocx(session, { updateModifiedDate: false });
+      return { bytes: saved.bytes, state, styles, segments: session.storySegments('body') };
+    } finally { session.destroy(); }
+  };
+  const actual = await exercise(nativeYrs);
+  const expected = await exercise(wasmYrs);
+  expect(actual.state).toEqual({ Normal: { lang: 'de-DE' }, '': { lang: 'de-DE', bidi: null } });
+  expect(actual.state).toEqual(expected.state);
+  expect(actual.styles).toEqual(expected.styles);
+  expect(actual.segments).toEqual(expected.segments);
+  await expectSavedPartsEqual(actual.bytes, expected.bytes);
+  const saved = await JSZip.loadAsync(actual.bytes);
+  expect(await saved.file('word/styles.xml')!.async('string')).toBe(actual.styles);
+  const document = await saved.file('word/document.xml')!.async('string');
+  expect(document).not.toContain('w:val="en-US"');
+  expect(document).toContain('<w:lang w:val="de-DE" w:bidi="ar-SA"/>');
+});
+
 test('structured exports and content controls match through the package API', async () => {
   for (const fixture of [
     '../../crates/docx-edit/tests/fixtures/structured-export/principal.docx',

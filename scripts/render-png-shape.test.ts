@@ -8,7 +8,7 @@ type Format = (typeof FORMATS)[number];
 
 const JS_TARGET: Record<Format, RegExp> = {
   docx: /^\{\s*page: number;?\s*\}$/,
-  pptx: /^\{\s*slide: number;?\s*\}$/,
+  pptx: /^\{\s*slide: number(?: \| string)?;?\s*\}$/,
   vsdx: /^\{\s*page: number;?\s*\}$/,
   xlsx: /^\|?\s*\{\s*sheet: number(?: \| string)?;\s*viewport: \w+;?\s*\}\s*\|\s*\{\s*sheet: number(?: \| string)?;\s*range: (?!number\b|boolean\b)\w+(?: \| '\w+')?;?\s*\}$/,
 };
@@ -79,9 +79,6 @@ const CHECKS: Record<string, () => boolean> = Object.fromEntries(FORMATS.flatMap
 
 const PENDING = [
   'docx js',
-  'docx native renderPng',
-  'pptx js',
-  'pptx native renderPng',
   'vsdx native renderPng',
 ];
 
@@ -92,6 +89,8 @@ describe('the shape checks tell right from wrong', () => {
     ['vsdx', js, true],
     ['pptx', js, false],
     ['pptx', 'renderPng(target: { slide: number }, options?: RenderPngOptions): Promise<Uint8Array>;', true],
+    ['pptx', 'type T = { slide: number | string };\nrenderPng(target: T, options?: RenderPngOptions): Promise<Uint8Array>;', true],
+    ['pptx', 'renderPng(target: { slide: boolean }, options?: RenderPngOptions): Promise<Uint8Array>;', false],
     ['docx', 'renderPng(index: number, options?: RenderPngOptions): Promise<Uint8Array>;', false],
     ['docx', 'renderPng(target: { page: number }): Promise<Uint8Array>;', false],
     ['docx', 'renderPng(target: { page: number }, options?: RenderPngOptions): Uint8Array;', false],

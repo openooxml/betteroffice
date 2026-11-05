@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
-import { createT, editorEn, en, proposalEn, type LocaleStrings, type TranslationKey } from './index';
+import { createT, editorEn, en, menuEn, proposalEn, type LocaleStrings, type TranslationKey } from './index';
 import enDefault, { en as enSubpath } from './en';
 import { editorEn as editorTable, createT as createEditorT, deepMerge as mergeEditor } from './editor';
 import { proposalEn as proposalTable } from './proposals';
+import { menuEn as menuTable } from './menus';
 
 const originalProposals = {
   "title": "Agent proposals",
@@ -81,6 +82,7 @@ test('the root and en subpath retain the full English table across separate entr
   const fullTable = {
     ...editorTable,
     proposals: { ...editorTable.proposals, ...proposalTable.proposals },
+    contextMenu: menuTable.contextMenu,
   };
   for (const english of [en, enSubpath, enDefault]) {
     expect(english).toEqual(fullTable);
@@ -88,5 +90,13 @@ test('the root and en subpath retain the full English table across separate entr
   }
   expect(editorEn).toBe(editorTable);
   expect(proposalEn).toBe(proposalTable);
-  expect(mergeEditor(editorTable, proposalTable)).toEqual(fullTable);
+  expect(menuEn).toBe(menuTable);
+  expect(mergeEditor(mergeEditor(editorTable, proposalTable), menuTable)).toEqual(fullTable);
+});
+
+test('the default editor table leaves context menu names to the lazy menu table', () => {
+  expect(editorEn).not.toHaveProperty('contextMenu');
+  expect(Object.keys(menuEn)).toEqual(['contextMenu']);
+  expect(createT(en)('contextMenu.table')).toBe('Table menu');
+  expect(createT(editorEn as LocaleStrings)('commands.cut')).toBe('Cut');
 });

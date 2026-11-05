@@ -845,6 +845,10 @@ fn with_measure_fonts<T>(read: impl FnOnce(&std::cell::RefCell<ooxml_text::FontS
     read(&store)
 }
 
+pub fn with_measure_fonts_ref<T>(read: impl FnOnce(&ooxml_text::FontStore) -> T) -> T {
+    with_measure_fonts(|store| read(&store.borrow()))
+}
+
 pub fn take_base_latin_miss() -> bool {
     with_measure_fonts(|store| store.borrow().take_base_latin_miss())
 }
@@ -1025,6 +1029,18 @@ pub fn register_measure_font_bytes<'a>(
             .borrow_mut()
             .register_cow(bytes.into())
             .map(|id| id.to_u32())
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Replaces the outlines of measurement font `id` (and every id sharing its
+/// bytes) with `bytes`, a face whose other tables are unchanged, such as a
+/// sliced face reassembled with more outline chunks. Layout is unaffected.
+pub fn update_measure_font_outlines(id: u32, bytes: &[u8]) -> Result<(), String> {
+    with_measure_fonts(|store| {
+        store
+            .borrow_mut()
+            .update_outlines(ooxml_text::FontId::from_u32(id), bytes.to_vec())
             .map_err(|error| error.to_string())
     })
 }

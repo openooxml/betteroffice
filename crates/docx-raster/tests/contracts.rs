@@ -570,31 +570,262 @@ fn invalid_page_and_page_selector_are_errors() {
     );
 }
 
+fn carlito_text(extra: Value) -> Value {
+    let mut run = json!({
+        "kind":"text",
+        "text":"Hex",
+        "x":4,
+        "baselineY":20,
+        "width":24,
+        "font":"400 16px Carlito, sans-serif",
+        "color":"#000000"
+    });
+    for (key, value) in extra.as_object().expect("fields") {
+        run[key] = value.clone();
+    }
+    run
+}
+
 #[test]
-fn small_caps_is_refused_instead_of_synthesized() {
-    let mut fonts = FontStore::new();
-    let font = fonts.register(FONT.to_vec()).expect("font");
-    let chains = FontChains::from([("carlito|0|0".to_string(), vec![font])]);
-    let images = ImageMap::new();
+fn small_caps_text_runs_are_synthesized_and_drawn() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let small = render_page(
+        &list(
+            60.0,
+            30.0,
+            vec![carlito_text(json!({"text":"abc","smallCaps":true}))],
+        ),
+        0,
+        &resources,
+    )
+    .expect("small caps");
+    let lower = render_page(
+        &list(60.0, 30.0, vec![carlito_text(json!({"text":"abc"}))]),
+        0,
+        &resources,
+    )
+    .expect("lowercase");
+    let upper = render_page(
+        &list(60.0, 30.0, vec![carlito_text(json!({"text":"ABC"}))]),
+        0,
+        &resources,
+    )
+    .expect("uppercase");
+    assert!(small.skipped_effects.is_empty());
+    let (small, lower, upper) = (
+        ink_bounds(&small.bytes).expect("small ink"),
+        ink_bounds(&lower.bytes).expect("lower ink"),
+        ink_bounds(&upper.bytes).expect("upper ink"),
+    );
+    assert!(
+        small.1 - small.0 < upper.1 - upper.0,
+        "small caps narrower than capitals"
+    );
+    assert!(
+        small.3 - small.2 < upper.3 - upper.2,
+        "small caps shorter than capitals"
+    );
+    assert_ne!(small, lower);
+}
+
+#[test]
+fn text_effects_this_backend_cannot_draw_are_counted_and_the_text_drawn() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let plain = render_page(
+        &list(40.0, 30.0, vec![carlito_text(json!({}))]),
+        0,
+        &resources,
+    )
+    .expect("plain");
+    let outlined = render_page(
+        &list(
+            40.0,
+            30.0,
+            vec![carlito_text(
+                json!({"textOutline":true,"emphasisMark":"dot"}),
+            )],
+        ),
+        0,
+        &resources,
+    )
+    .expect("outlined");
+    assert_eq!(outlined.bytes, plain.bytes);
+    assert_eq!(
+        outlined.skipped_effects,
+        std::collections::BTreeMap::from([
+            ("text.emphasisMark".to_string(), 1),
+            ("text.textOutline".to_string(), 1)
+        ])
+    );
+}
+
+#[test]
+fn glyph_runs_draw_the_glyphs_layout_shaped_whatever_their_casing() {
+    let (fonts, chains, images) = carlito_resources();
+    let font = chains["carlito|0|0"][0];
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let glyphs: Vec<Value> = shape(&fonts, font, "Hex", 16.0, &[])
+        .expect("shape")
+        .iter()
+        .scan(4.0_f32, |pen, glyph| {
+            let placed = json!({"id":glyph.glyph_id,"x":*pen,"y":20,"cluster":glyph.cluster,"advance":glyph.x_advance});
+            *pen += glyph.x_advance;
+            Some(placed)
+        })
+        .collect();
+    let run = |extra: Value| {
+        let mut run = json!({"kind":"glyphRun","fontId":font.to_u32(),"size":16,"color":"#000000","text":"Hex","glyphs":glyphs});
+        for (key, value) in extra.as_object().expect("fields") {
+            run[key] = value.clone();
+        }
+        list(40.0, 30.0, vec![run])
+    };
+    let plain = render_page(&run(json!({})), 0, &resources).expect("plain");
+    for casing in [json!({"allCaps":true}), json!({"smallCaps":true})] {
+        let page = render_page(&run(casing), 0, &resources).expect("cased");
+        assert_eq!(page.bytes, plain.bytes);
+        assert!(page.skipped_effects.is_empty());
+    }
+    let outlined = render_page(&run(json!({"textOutline":true})), 0, &resources).expect("outlined");
+    assert_eq!(outlined.bytes, plain.bytes);
+    assert_eq!(
+        outlined.skipped_effects,
+        std::collections::BTreeMap::from([("glyphRun.textOutline".to_string(), 1)])
+    );
+}
+
+#[test]
+fn a_text_shadow_is_drawn_below_and_right_of_the_text() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let plain = render_page(
+        &list(40.0, 30.0, vec![carlito_text(json!({}))]),
+        0,
+        &resources,
+    )
+    .expect("plain");
+    let shadowed = render_page(
+        &list(
+            40.0,
+            30.0,
+            vec![carlito_text(json!({"textShadow":"shadow"}))],
+        ),
+        0,
+        &resources,
+    )
+    .expect("shadowed");
+    assert!(shadowed.skipped_effects.is_empty());
+    let (left, right, top, bottom) = ink_bounds(&plain.bytes).expect("plain ink");
+    let mut grey = 0;
+    for y in top..=(bottom + 3).min(29) {
+        for x in left..=(right + 3).min(39) {
+            let (before, after) = (pixel(&plain.bytes, x, y), pixel(&shadowed.bytes, x, y));
+            if before == [255, 255, 255, 255] && after != before {
+                assert!(
+                    after[0] > 100,
+                    "the shadow is a light grey, not ink: {after:?}"
+                );
+                grey += 1;
+            }
+        }
+    }
+    assert!(grey > 0, "the shadow paints where the text leaves white");
+    let shadow_right = ink_bounds(&shadowed.bytes).expect("shadowed ink").1;
+    assert!(shadow_right > right, "the shadow extends right of the text");
+}
+
+#[test]
+fn a_text_shadow_neither_backend_draws_is_counted() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let plain = render_page(
+        &list(40.0, 30.0, vec![carlito_text(json!({}))]),
+        0,
+        &resources,
+    )
+    .expect("plain");
+    let embossed = render_page(
+        &list(
+            40.0,
+            30.0,
+            vec![carlito_text(json!({"textShadow":"emboss"}))],
+        ),
+        0,
+        &resources,
+    )
+    .expect("embossed");
+    assert_eq!(embossed.bytes, plain.bytes);
+    assert_eq!(
+        embossed.skipped_effects,
+        std::collections::BTreeMap::from([("text.textShadow".to_string(), 1)])
+    );
+}
+
+#[test]
+fn a_shape_shadow_with_an_unbounded_blur_still_renders() {
+    let (fonts, chains, images) = empty_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
     let scene = list(
-        30.0,
-        20.0,
+        40.0,
+        40.0,
         vec![json!({
-            "kind":"text",
-            "text":"abc",
-            "x":2,
-            "baselineY":15,
-            "width":20,
-            "font":"small-caps 400 12px Carlito, sans-serif",
-            "color":"#000000",
-            "smallCaps":true
+            "kind":"shape","x":4,"y":4,"w":20,"h":20,"fill":"#3366ff",
+            "geometryPath":[
+                {"type":"move","x":4,"y":4},{"type":"line","x":24,"y":4},
+                {"type":"line","x":24,"y":24},{"type":"close"}
+            ],
+            "effects":[{"kind":"glow","color":"#ff0000","blurRadius":1e20}]
         })],
     );
-    assert_eq!(
-        render_png(&scene, 0, &resources).unwrap_err(),
-        "unsupported text field: smallCaps"
+    assert!(
+        render_page(&scene, 0, &resources)
+            .expect("glow")
+            .skipped_effects
+            .is_empty()
     );
+}
+
+#[test]
+fn a_shape_shadow_is_drawn_and_other_shape_effects_are_counted() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let shape = |effects: Value| {
+        list(
+            40.0,
+            40.0,
+            vec![json!({
+                "kind":"shape","x":4,"y":4,"w":20,"h":20,"fill":"#3366ff",
+                "geometryPath":[
+                    {"type":"move","x":4,"y":4},{"type":"line","x":24,"y":4},
+                    {"type":"line","x":24,"y":24},{"type":"line","x":4,"y":24},{"type":"close"}
+                ],
+                "effects": effects
+            })],
+        )
+    };
+    let plain = render_page(&shape(json!([])), 0, &resources).expect("plain");
+    let shadowed = render_page(
+        &shape(json!([
+            {"kind":"outerShadow","color":"#000000","blurRadius":2,"distance":6,"direction":45},
+            {"kind":"softEdge","radius":3}
+        ])),
+        0,
+        &resources,
+    )
+    .expect("shadowed shape");
+    assert_eq!(
+        shadowed.skipped_effects,
+        std::collections::BTreeMap::from([("shape.effects".to_string(), 1)])
+    );
+    assert_eq!(pixel(&plain.bytes, 28, 28), [255, 255, 255, 255]);
+    let below_right = pixel(&shadowed.bytes, 28, 28);
+    assert!(
+        below_right[0] < 255 && below_right[3] == 255,
+        "shadow below right: {below_right:?}"
+    );
+    assert_eq!(pixel(&shadowed.bytes, 14, 14), pixel(&plain.bytes, 14, 14));
 }
 
 #[test]

@@ -250,6 +250,7 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   }
   ctx.fillStyle = cmd.color;
   ctx.font = fontString(cmd);
+  (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
   if (cmd.stacked) {
     paintStackedText(ctx, cmd);

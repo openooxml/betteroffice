@@ -52,6 +52,7 @@
     "decreaseFontSize": "הקטן גופן",
     "increaseFontSize": "הגדל גופן",
     "underline": "קו תחתון",
+    "strikethrough": "קו חוצה",
     "more": "עוד",
     "fillColor": "צבע מילוי",
     "noFill": "ללא מילוי",
@@ -230,8 +231,24 @@
       "permissionDenied": "היישום המארח לא התיר לתוסף זה להשתמש בפקודה זו.",
       "unsupportedPolicy": "תוספים עדיין לא יכולים להריץ פקודה זו. השתמש במקום זאת באצוות עריכה.",
       "pluginUnavailable": "התוסף אינו פעיל עוד.",
-      "aborted": "פעולת התוסף בוטלה לפני שהפקודה רצה."
-    }
+      "aborted": "פעולת התוסף בוטלה לפני שהפקודה רצה.",
+      "clipboardUnavailable": "הגישה ללוח אינה זמינה או נדחתה.",
+      "tableRequired": "יש למקם תחילה את הסמן בתא בטבלה.",
+      "lastSlide": "לא ניתן למחוק את השקופית האחרונה."
+    },
+    "cut": "גזור",
+    "copy": "העתק",
+    "paste": "הדבק",
+    "insert": "הוספה",
+    "delete": "מחק",
+    "deleteTable": "מחק טבלה",
+    "duplicateSlide": "שכפול שקופית",
+    "insertRowsAbove": "הוספת שורות מעל",
+    "insertRowsBelow": "הוספת שורות מתחת",
+    "insertColumnsLeft": "הוספת עמודות משמאל",
+    "insertColumnsRight": "הוספת עמודות מימין",
+    "deleteRows": "מחיקת שורות",
+    "deleteColumns": "מחיקת עמודות"
   },
   "plugins": {
     "toolbarGroup": "תוספים",
@@ -243,5 +260,11 @@
     "label": "משתפי פעולה",
     "moreCollaborators": "{count, plural, one {# משתף פעולה נוסף} two {# משתפי פעולה נוספים} other {# משתפי פעולה נוספים}}",
     "moreSelections": "+{count, plural, one {# בחירה נוספת} two {# בחירות נוספות} other {# בחירות נוספות}}"
+  },
+  "contextMenu": {
+    "text": "תפריט טקסט",
+    "shape": "תפריט צורה",
+    "table": "תפריט טבלה",
+    "slide": "תפריט שקופית"
   }
 }

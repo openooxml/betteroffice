@@ -854,6 +854,10 @@ export class EditSession {
     paragraphs(story: string): string;
     part_metadata_json(): string;
     /**
+     * Patches styles XML with the session's language overrides.
+     */
+    patch_style_languages_xml(source: string): string;
+    /**
      * Gives every paragraph that saves without a Word paragraph ID a fresh
      * one and repairs duplicates; see [`EditingDoc::persist_paragraph_ids`].
      * Receipt: `{"status":"applied","assignments":[{"paragraph",
@@ -1217,6 +1221,10 @@ export class EditSession {
      * with text inserted at it.
      */
     set_selection(story: string, anchor_para: string, anchor_offset: number, head_para: string, head_offset: number): void;
+    /**
+     * Sets language slots; no style ID selects document defaults. Null clears a slot.
+     */
+    set_style_language(style_id: string | null | undefined, slots_json: string): boolean;
     set_table_properties(table_json: string, patch_json: string): string;
     /**
      * Sets the preferred width, in twips, of the table `table_json`
@@ -1333,6 +1341,10 @@ export class EditSession {
      */
     story_segments(story: string): string;
     /**
+     * Current style and document-default language overrides as JSON.
+     */
+    style_languages_json(): string;
+    /**
      * The `payload` of the story's `table_index`-th table embed, as
      * `story_segments` gives it, or `None` when the story has no such
      * table. Errors on an unknown story.
@@ -1366,6 +1378,12 @@ export class EditSession {
      */
     undo(): boolean;
     update_comment_metadata_json(comment_id: string, patch_json: string): void;
+    /**
+     * Replaces the outlines of measurement font `font_id` with `bytes`, a face
+     * whose every table but `CFF ` is unchanged. Errors, leaving the font as
+     * it was, for other bytes.
+     */
+    update_measure_font_outlines(font_id: number, bytes: Uint8Array): void;
     /**
      * Runs every check of [`EditSession::apply_edits_json`], staging included,
      * without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
@@ -1897,6 +1915,7 @@ export interface InitOutput {
     readonly editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_part_metadata_json: (a: number) => [number, number];
+    readonly editsession_patch_style_languages_xml: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
     readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
     readonly editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
@@ -1961,6 +1980,7 @@ export interface InitOutput {
     readonly editsession_set_partial_document: (a: number, b: number) => void;
     readonly editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+    readonly editsession_set_style_language: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_set_table_properties: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
@@ -1979,6 +1999,7 @@ export interface InitOutput {
     readonly editsession_story_segment_unit_digests: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_segment_units: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_style_languages_json: (a: number) => [number, number];
     readonly editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_take_base_latin_miss: (a: number) => number;
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
@@ -1986,6 +2007,7 @@ export interface InitOutput {
     readonly editsession_undo: (a: number) => number;
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly editsession_update_measure_font_outlines: (a: number, b: number, c: number, d: number) => [number, number];
     readonly editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_validate_table_fragment: (a: number, b: number, c: number) => [number, number];
     readonly editsession_version: (a: number) => [number, number];

@@ -52,6 +52,7 @@
     "decreaseFontSize": "Zmniejsz rozmiar czcionki",
     "increaseFontSize": "Zwiększ rozmiar czcionki",
     "underline": "Podkreślenie",
+    "strikethrough": "Przekreślenie",
     "more": "Więcej",
     "fillColor": "Kolor wypełnienia",
     "noFill": "Brak wypełnienia",
@@ -230,8 +231,24 @@
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
       "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
-      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
-    }
+      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia.",
+      "clipboardUnavailable": "Dostęp do schowka jest niedostępny lub został odrzucony.",
+      "tableRequired": "Najpierw umieść kursor w komórce tabeli.",
+      "lastSlide": "Nie można usunąć ostatniego slajdu."
+    },
+    "cut": "Wytnij",
+    "copy": "Kopiuj",
+    "paste": "Wklej",
+    "insert": "Wstawianie",
+    "delete": "Usuń",
+    "deleteTable": "Usuń tabelę",
+    "duplicateSlide": "Duplikuj slajd",
+    "insertRowsAbove": "Wstaw wiersze powyżej",
+    "insertRowsBelow": "Wstaw wiersze poniżej",
+    "insertColumnsLeft": "Wstaw kolumny z lewej",
+    "insertColumnsRight": "Wstaw kolumny z prawej",
+    "deleteRows": "Usuń wiersze",
+    "deleteColumns": "Usuń kolumny"
   },
   "plugins": {
     "toolbarGroup": "Wtyczki",
@@ -243,5 +260,11 @@
     "label": "Współpracownicy",
     "moreCollaborators": "{count, plural, one {jeszcze # współpracownik} few {jeszcze # współpracownicy} many {jeszcze # współpracowników} other {jeszcze # współpracownika}}",
     "moreSelections": "+{count, plural, one {# zaznaczenie} few {# zaznaczenia} many {# zaznaczeń} other {# zaznaczenia}}"
+  },
+  "contextMenu": {
+    "text": "Menu tekstu",
+    "shape": "Menu kształtu",
+    "table": "Menu tabeli",
+    "slide": "Menu slajdu"
   }
 }

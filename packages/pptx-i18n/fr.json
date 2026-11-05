@@ -52,6 +52,7 @@
     "decreaseFontSize": "Réduire la taille de police",
     "increaseFontSize": "Augmenter la taille de police",
     "underline": "Souligné",
+    "strikethrough": "Barré",
     "more": "Plus",
     "fillColor": "Couleur de remplissage",
     "noFill": "Aucun remplissage",
@@ -230,8 +231,24 @@
       "permissionDenied": "L'application hôte n'a pas autorisé ce plugin à utiliser cette commande.",
       "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
       "pluginUnavailable": "Le plugin n'est plus actif.",
-      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande."
-    }
+      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande.",
+      "clipboardUnavailable": "L’accès au presse-papiers est indisponible ou a été refusé.",
+      "tableRequired": "Placez d’abord le curseur dans une cellule du tableau.",
+      "lastSlide": "Impossible de supprimer la dernière diapositive."
+    },
+    "cut": "Couper",
+    "copy": "Copier",
+    "paste": "Coller",
+    "insert": "Insérer",
+    "delete": "Supprimer",
+    "deleteTable": "Supprimer le tableau",
+    "duplicateSlide": "Dupliquer la diapositive",
+    "insertRowsAbove": "Insérer des lignes au-dessus",
+    "insertRowsBelow": "Insérer des lignes en dessous",
+    "insertColumnsLeft": "Insérer des colonnes à gauche",
+    "insertColumnsRight": "Insérer des colonnes à droite",
+    "deleteRows": "Supprimer les lignes",
+    "deleteColumns": "Supprimer les colonnes"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
@@ -243,5 +260,11 @@
     "label": "Collaborateurs",
     "moreCollaborators": "{count, plural, one {# collaborateur supplémentaire} many {# collaborateurs supplémentaires} other {# collaborateurs supplémentaires}}",
     "moreSelections": "+{count, plural, one {# sélection} many {# sélections} other {# sélections}}"
+  },
+  "contextMenu": {
+    "text": "Menu du texte",
+    "shape": "Menu de la forme",
+    "table": "Menu du tableau",
+    "slide": "Menu de la diapositive"
   }
 }

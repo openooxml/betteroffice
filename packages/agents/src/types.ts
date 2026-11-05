@@ -12,6 +12,15 @@ export interface TextRun {
   end: number;
   formatting: Record<string, unknown>;
   protected: boolean;
+  kind?: string;
+}
+
+export interface DocxRunPage {
+  version: number;
+  paragraphs: Array<{ ref: string; revision: number; text: string; runs: Array<{ id: string; text: string; f?: string } | { id: string; kind: string }> }>;
+  formats: Record<string, Record<string, unknown>>;
+  nextOffset: number | null;
+  total: number;
 }
 
 /** A table cell paragraph's place: parent story, one-based table index, row and column, the table's size, and the cell's spans when merged. */
@@ -99,6 +108,7 @@ export interface DocxProposalPeer {
 
 export interface DocumentOptions {
   name?: string;
+  maxEdits?: number;
   renderer?: DocumentRenderer;
   editPeer?: DocxProposalPeer;
 }

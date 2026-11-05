@@ -129,6 +129,8 @@ pub struct RenderEnv {
     /// The docDefaults font size in pt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_default_font_size: Option<f64>,
+    /// The docDefaults run language, which runs that name none inherit.
+    pub doc_default_language: Option<RunLanguageSlots>,
     /// Lower the `data:` image sources seeding wrote as the `media:{n}`
     /// tokens of their parts, which the host then resolves.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -5741,9 +5743,11 @@ fn paragraph_run_defaults(
         font_size: Some(chain_size.unwrap_or(10.0)),
         ..RunFormatting::default()
     };
-    let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
-        return result;
-    };
+    let empty = HashMap::new();
+    let defaults = values
+        .get("defaultTextFormatting")
+        .and_then(any_map)
+        .unwrap_or(&empty);
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
         let mut slots = RunFontSlots {
             ascii: map_string(fonts, "ascii"),
@@ -5778,6 +5782,18 @@ fn paragraph_run_defaults(
             east_asia: map_string(language, "eastAsia"),
             bidi: map_string(language, "bidi"),
         });
+    }
+    if let Some(Any::Map(language)) = values.get("language") {
+        let slots = result.language.get_or_insert_with(Default::default);
+        for (key, slot) in [
+            ("latin", &mut slots.latin),
+            ("eastAsia", &mut slots.east_asia),
+            ("bidi", &mut slots.bidi),
+        ] {
+            if language.contains_key(key) {
+                *slot = map_string(language, key);
+            }
+        }
     }
     result
 }
