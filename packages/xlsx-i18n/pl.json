@@ -218,7 +218,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, zaznaczono",
     "emptyCellLabel": "{address}, pusta",
-    "emptyCellLabelSelected": "{address}, pusta, zaznaczono"
+    "emptyCellLabelSelected": "{address}, pusta, zaznaczono",
+    "hasFormula": "{label}, zawiera formułę",
+    "rangeSelected": "Zaznaczono {start} do {end}, {rows, plural, one {# wiersz} few {# wiersze} many {# wierszy} other {# wiersza}} na {columns, plural, one {# kolumnę} few {# kolumny} many {# kolumn} other {# kolumny}}",
+    "sheetActivated": "{name}, arkusz {index} z {count}",
+    "cellInputLabel": "Edytuj komórkę {address}",
+    "gridRoleDescription": "arkusz"
   },
   "plugins": {
     "toolbarGroup": "Wtyczki",

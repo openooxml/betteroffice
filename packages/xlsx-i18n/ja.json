@@ -218,7 +218,12 @@
     "cellLabel": "{address}、{value}",
     "cellLabelSelected": "{address}、{value}、選択中",
     "emptyCellLabel": "{address}、空白",
-    "emptyCellLabelSelected": "{address}、空白、選択中"
+    "emptyCellLabelSelected": "{address}、空白、選択中",
+    "hasFormula": "{label}、数式あり",
+    "rangeSelected": "{start} から {end} を選択、{rows} 行 × {columns} 列",
+    "sheetActivated": "{name}、シート {index}/{count}",
+    "cellInputLabel": "セル {address} を編集",
+    "gridRoleDescription": "ワークシート"
   },
   "plugins": {
     "toolbarGroup": "プラグイン",

@@ -218,7 +218,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, selezionata",
     "emptyCellLabel": "{address}, vuota",
-    "emptyCellLabelSelected": "{address}, vuota, selezionata"
+    "emptyCellLabelSelected": "{address}, vuota, selezionata",
+    "hasFormula": "{label}, contiene una formula",
+    "rangeSelected": "Da {start} a {end} selezionato, {rows, plural, one {# riga} many {# righe} other {# righe}} per {columns, plural, one {# colonna} many {# colonne} other {# colonne}}",
+    "sheetActivated": "{name}, foglio {index} di {count}",
+    "cellInputLabel": "Modifica cella {address}",
+    "gridRoleDescription": "foglio di lavoro"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
