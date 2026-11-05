@@ -1,6 +1,7 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { installPngFaces, type PngFontFace, type PngRunFont } from '../../../../shared/office-session/pngFonts';
 import type { SlideDisplayList, SlidePrimitive } from '../types';
+import { metafileImageBytes } from './browserImage';
 import { type CanvasImageResolver, paintSlide, slideBackingStore } from './canvas';
 
 /** The font id layout gives text it measured with the browser's own fonts, which an export paints the same way. */
@@ -40,6 +41,18 @@ export function pictureUnavailable(kind: 'svg' | 'metafile'): PngExportError {
   return new PngExportError('canvas-unavailable', kind === 'svg'
     ? 'This slide has SVG pictures, which decode only with a document. Export from the page, or use @betteroffice/pptx-native.'
     : 'This slide has EMF or WMF pictures this engine cannot convert. Use @betteroffice/pptx-native.');
+}
+
+/**
+ * A picture's bytes for an export. A metafile that will not convert is left out
+ * where a document exists, as on screen and natively; without one, conversion
+ * may simply be absent, so it rejects rather than lose the picture.
+ */
+export function exportPictureBytes(source: Uint8Array, convert: () => Uint8Array | undefined): Uint8Array | undefined {
+  const bytes = metafileImageBytes(source, convert);
+  if (bytes.byteLength) return bytes;
+  if (source.byteLength && typeof Image === 'undefined') throw pictureUnavailable('metafile');
+  return undefined;
 }
 
 /** Checks a PNG background the way the native renderer does. */

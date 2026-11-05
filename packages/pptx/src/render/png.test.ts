@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { SlideDisplayList, SlidePrimitive } from '../types';
-import { BROWSER_FONT_ID, pngBackground, slideFace, slideFonts, slideListToPng } from './png';
+import { BROWSER_FONT_ID, exportPictureBytes, pngBackground, slideFace, slideFonts, slideListToPng } from './png';
 
 const card: SlidePrimitive = {
   kind: 'shape', objectId: 1, shapeId: 'shape:1', name: 'Card', x: 20, y: 20, w: 280, h: 140, geometry: 'rect',
@@ -124,6 +124,26 @@ describe('slideListToPng', () => {
     controller.abort();
     await expect(slideListToPng(list(), { signal: controller.signal })).rejects.toBeDefined();
     expect(calls.encoded).toBe(0);
+  });
+});
+
+describe('export pictures', () => {
+  const metafile = new Uint8Array(44);
+  new DataView(metafile.buffer).setUint32(0, 1, true);
+  new DataView(metafile.buffer).setUint32(40, 0x464d4520, true);
+  const scope = globalThis as Record<string, unknown>;
+
+  test('a metafile that will not convert is left out where a document exists and rejects where none does', () => {
+    const saved = scope.Image;
+    try {
+      scope.Image = class {};
+      expect(exportPictureBytes(metafile, () => undefined)).toBeUndefined();
+      scope.Image = undefined;
+      expect(() => exportPictureBytes(metafile, () => undefined)).toThrow(expect.objectContaining({ name: 'PngExportError', code: 'canvas-unavailable' }));
+      const svg = new Uint8Array([1, 2, 3]);
+      expect(exportPictureBytes(metafile, () => svg)).toBe(svg);
+      expect(exportPictureBytes(svg, () => undefined)).toBe(svg);
+    } finally { scope.Image = saved; }
   });
 });
 
