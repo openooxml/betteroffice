@@ -894,7 +894,7 @@ impl EditSession {
                     || (error.starts_with("font chain") && error.contains("empty"))
                 {
                     "png-font-unavailable:"
-                } else if error.contains("past the") || error.contains("render work budget") {
+                } else if error.contains("past the") || error.contains("budget") {
                     "png-too-large:"
                 } else {
                     "png-invalid:"

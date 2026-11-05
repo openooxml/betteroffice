@@ -1119,6 +1119,8 @@ test('native docx PNG refuses invalid input, missing fonts and oversized surface
       () => session.renderPngTarget(list, '{"page":0.5}', '{}'),
       () => session.renderPngTarget(list, '{}', '{}'),
       () => session.renderPngTarget(list, '{"page":0}', '['),
+      () => session.renderPngTarget(list, '{"page":18446744073709551615}', '{}'),
+      () => pagePng(session, JSON.stringify({ pages: [{ ...JSON.parse(list).pages[0], unbuilt: true }] }), 0, 1),
     ]) {
       const error = caughtValue(call);
       expect(error).toBeInstanceOf(Error);
