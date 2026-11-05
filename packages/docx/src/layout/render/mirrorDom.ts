@@ -1044,9 +1044,10 @@ function populateParagraphBlock(
   let open: HTMLElement | null = null;
   for (const p of inLogicalOrder(prims)) {
     const child = renderMirrorPrimitive(p, doc, offsetY, ctx);
-    if (p.kind === 'glyphRun' && open && joinGlyphRunElement(open, child)) continue;
+    const textRun = p.kind === 'glyphRun' || p.kind === 'text';
+    if (textRun && open && joinTextRunElement(open, child)) continue;
     el.appendChild(child);
-    if (p.kind === 'glyphRun') open = child;
+    if (textRun) open = child;
     else if (p.kind !== 'decoration' && p.kind !== 'rect') open = null;
   }
   const pmarkRevision = findStructuralRevision(prims, 'pmark');
@@ -1073,12 +1074,12 @@ function coversItsText(run: HTMLElement, text: Text): boolean {
 }
 
 /**
- * Appends glyph run `next` to the touching run `open` on the same line when
+ * Appends text run `next` to the touching run `open` on the same line when
  * nothing else tells them apart, so a line shaped cluster by cluster reads as
  * one text node: screen readers otherwise hear each positioned cluster as its
  * own word. Returns false, touching nothing, when they differ.
  */
-function joinGlyphRunElement(open: HTMLElement, next: HTMLElement): boolean {
+function joinTextRunElement(open: HTMLElement, next: HTMLElement): boolean {
   if (open.tagName !== next.tagName || open.id || next.id) return false;
   const openText = open.firstChild;
   const nextText = next.firstChild;

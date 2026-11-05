@@ -85,6 +85,17 @@ test('paint-only primitives between clusters do not split the text, an image doe
   expect(runs(split).map((run) => run.textContent)).toEqual(['ab', 'c']);
 });
 
+test('browser-shaped runs split by cluster join too, and a differing font stays apart', () => {
+  const run = (start: number, text: string, x: number, font = '16px Arial') => ({
+    kind: 'text', text, x, baselineY: 140, width: ADVANCE, font, color: '#000000',
+    blockKey: 'p1', docStart: start, docEnd: start + text.length, logicalOrder: start,
+  }) as DisplayPrimitive;
+  const mirror = buildMirrorPage(page([
+    run(10, 'a', 96), run(11, 'b', 96 + ADVANCE), run(12, 'c', 96 + 2 * ADVANCE, '16px Georgia'),
+  ]), options);
+  expect(runs(mirror).map((item) => item.textContent)).toEqual(['ab', 'c']);
+});
+
 test('right-to-left clusters join in logical order', () => {
   const mirror = buildMirrorPage(page(clusters('p1', 10, 'שלום', 200, 140, undefined, true)), options);
   const [run, ...rest] = runs(mirror);
