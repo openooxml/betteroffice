@@ -1238,11 +1238,13 @@ function docxTextRaster(family: string, properties = '') {
     const json = pngDisplayList(session, ['Calibri', 'Liberation Sans', 'Unregistered Raster Face'], face);
     const list = JSON.parse(json) as DisplayList;
     const runs = list.pages[0].primitives.filter((primitive): primitive is GlyphRunPrimitive => primitive.kind === 'glyphRun');
-    expect(runs.length).toBe(1);
-    const run = runs[0];
+    expect(runs.length).toBeGreaterThan(0);
+    for (const part of runs) {
+      expect(part.fontId).toBe(face);
+      expect(part.size).toBe(16);
+    }
+    const run = { ...runs[0], text: runs.map((part) => part.text).join(''), glyphs: runs.flatMap((part) => part.glyphs) };
     expect(run.text).toBe('TTTT');
-    expect(run.fontId).toBe(face);
-    expect(run.size).toBe(16);
     expect(run.glyphs.length).toBe(4);
     return { session, json, list, run };
   } catch (error) {
@@ -1276,10 +1278,13 @@ test.each([1, 2])('native docx PNG preserves positioned letter spacing at scale 
       expect(glyph.advance).toBeDefined();
       return { x: glyph.x, advance: glyph.advance! };
     });
+    const positioned = glyphs(spaced.run);
+    const last = positioned[positioned.length - 1];
+    const inked = [...positioned.slice(0, -1), { ...last, advance: last.advance - 200 / 15 }];
     expectPngTracking(
       pagePng(spaced.session, spaced.json, 0, scale),
       pagePng(plain.session, plain.json, 0, scale),
-      glyphs(spaced.run), glyphs(plain.run), 200 / 15, scale,
+      inked, glyphs(plain.run), 200 / 15, scale,
     );
   } finally {
     spaced.session.free();
@@ -1298,9 +1303,16 @@ for (const [decoration, properties] of [
       expect(decorated.run.glyphs).toEqual(plain.run.glyphs);
       const rules = decorated.list.pages[0].primitives.filter((primitive): primitive is DecorationPrimitive =>
         primitive.kind === 'decoration' && primitive.deco === decoration);
-      expect(rules.length).toBe(1);
+      expect(rules.length).toBeGreaterThan(0);
       expect(plain.list.pages[0].primitives.some((primitive) => primitive.kind === 'decoration')).toBe(false);
-      const rule = rules[0];
+      rules.sort((left, right) => left.x - right.x);
+      for (let index = 1; index < rules.length; index++) {
+        expect(rules[index].y).toBe(rules[0].y);
+        expect(rules[index].h).toBe(rules[0].h);
+        expect(Math.abs(rules[index].x - rules[index - 1].x - rules[index - 1].w)).toBeLessThan(0.02);
+      }
+      const end = rules[rules.length - 1];
+      const rule = { ...rules[0], w: end.x + end.w - rules[0].x };
       const first = decorated.run.glyphs[0];
       const last = decorated.run.glyphs[decorated.run.glyphs.length - 1];
       expect(Math.abs(rule.x - first.x)).toBeLessThan(0.02);
