@@ -11,7 +11,7 @@ const output = new URL('../../../crates/betteroffice-fonts/data/', import.meta.u
 const source = readFileSync(new URL('../src/manifest.ts', import.meta.url), 'utf8');
 const privateNames = [
   'UNVENDORED_NOTO_SERIF', 'WIDTH_MATCHED_SUBSTITUTES',
-  'LIGHTER_THAN_REGULAR', 'HEAVIER_THAN_REGULAR', 'looksSerif', 'looksMono',
+  'LIGHTER_THAN_REGULAR', 'HEAVIER_THAN_REGULAR', 'EMULATED_SYMBOL_FAMILIES', 'looksSerif', 'looksMono',
 ];
 const compiled = ts.transpileModule(`${source}\nexport { ${privateNames.join(', ')} };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
@@ -21,6 +21,7 @@ const tables = {} as {
   WIDTH_MATCHED_SUBSTITUTES: Map<string, { family: string; digitAdvances: Record<string, number> }>;
   LIGHTER_THAN_REGULAR: Set<string>;
   HEAVIER_THAN_REGULAR: Set<string>;
+  EMULATED_SYMBOL_FAMILIES: Set<string>;
   looksSerif: (family: string) => boolean;
   looksMono: (family: string) => boolean;
 };
@@ -61,6 +62,7 @@ export function exportCatalog(): Record<string, string> {
     monoMarkers: markers(tables.looksMono),
     monoPattern: pattern(tables.looksMono),
     widthMatchedSubstitutes: Object.fromEntries(tables.WIDTH_MATCHED_SUBSTITUTES),
+    emulatedSymbolFamilies: [...tables.EMULATED_SYMBOL_FAMILIES],
     scriptFallbackOrder: Object.fromEntries(scripts.map((script) => [
       script, faces.filter((face) => face.script === script).map((face) => face.file),
     ])),
@@ -82,7 +84,8 @@ export function exportCatalog(): Record<string, string> {
     ...[...tables.HEAVIER_THAN_REGULAR].flatMap((weight) => [`Calibri ${weight}`, `Segoe UI ${weight}`]),
     ...['Calibri Light', 'Inter-Thin', 'Segoe UI Light', 'Segoe UI Semilight', 'Calibri Black',
       'Arial Heavy', 'Segoe UI Heavy', 'Unknown', 'Unknown Serif', 'Unknown Mono',
-      'Consolas', 'Baskerville', 'Sans-serif', 'Verdana', 'Calibri Unknown', ''],
+      'Consolas', 'Baskerville', 'Sans-serif', 'Verdana', 'Calibri Unknown', '',
+      'Wingdings', 'Wingdings 2', 'Wingdings 3', 'Webdings'],
   ])];
   const cases: object[] = [];
   for (const family of [...families, '  CALIBRI  ', '  ＭＳ ゴシック ', 'not-a-family', 'Calibri\tLight',
