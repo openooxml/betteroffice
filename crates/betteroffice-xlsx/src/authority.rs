@@ -3152,8 +3152,9 @@ impl WorkbookAuthority {
         // merge and hyperlink edits into the baselines peers build on.
         let full_sync = ops.iter().any(requires_full_semantic_sync)
             || (!collaborative
-                && ((ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
-                    && ops.iter().any(|op| matches!(op, Op::SetCell { .. })))
+                && (ops.iter().any(|op| matches!(op, Op::SetChartAnchor { .. }))
+                    || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
+                        && ops.iter().any(|op| matches!(op, Op::SetCell { .. })))
                     || (ops
                         .iter()
                         .any(|op| matches!(op, Op::AddSheet { .. } | Op::RemoveSheet { .. }))
@@ -3198,6 +3199,7 @@ impl WorkbookAuthority {
         let mut merges = HashSet::new();
         let mut hyperlinks = HashSet::new();
         let mut conditional_formats = HashSet::new();
+        let mut chart_anchors = BTreeSet::new();
         if !full_sync {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
@@ -3244,6 +3246,9 @@ impl WorkbookAuthority {
                     ) => {
                         conditional_formats.insert(key);
                     }
+                    (Op::SetChartAnchor { frame, .. }, Some(key)) => {
+                        chart_anchors.insert((key, frame.clone()));
+                    }
                     (
                         Op::PatchRangeStyle { range, .. }
                         | Op::SetRangeNumberFormat { range, .. }
@@ -3288,6 +3293,7 @@ impl WorkbookAuthority {
             && freeze_panes.is_empty()
             && merges.is_empty()
             && hyperlinks.is_empty()
+            && chart_anchors.is_empty()
             && conditional_formats.is_empty()
             && names_before.is_none()
         {
@@ -3467,6 +3473,15 @@ impl WorkbookAuthority {
                 let json = serde_json::to_string(&sheet_model.auto_filter)
                     .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
                 sheet_map.try_update(&mut txn, AUTO_FILTER, json);
+            }
+            for (key, frame) in chart_anchors {
+                let (sheet_map, sheet_model) =
+                    sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                let fallback = base_sheet_index(&key)
+                    .and_then(|base| self.base.charts.get(base))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                sync_chart_anchor(&sheet_map, &mut txn, sheet_model, &frame, fallback)?;
             }
         }
         drop(txn);
@@ -4737,7 +4752,6 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
-            | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
             | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
@@ -5062,6 +5076,32 @@ fn sync_map(map: &MapRef, txn: &mut TransactionMut<'_>, desired: BTreeMap<String
     for (key, value) in desired {
         map.try_update(txn, key, value);
     }
+}
+
+/// Repins one frame in a sheet's stored chart state. The model's other anchors
+/// can be projections of another sheet's, so only this frame takes its value.
+fn sync_chart_anchor(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    frame: &str,
+    fallback: &[SheetChart],
+) -> Result<(), String> {
+    let mut stored = match sheet_map.get(txn, CHARTS) {
+        Some(Out::Any(Any::String(json))) => decode_charts(&json)?,
+        Some(_) => return Err("sheet charts are not a string".to_string()),
+        None => fallback.to_vec(),
+    };
+    let moved = sheet.charts.iter().find(|chart| chart.frame_id() == frame);
+    let held = stored.iter_mut().find(|chart| chart.frame_id() == frame);
+    let (Some(moved), Some(held)) = (moved, held) else {
+        return Err(format!("sheet does not store chart {frame}"));
+    };
+    held.anchor = moved.anchor;
+    let charts = serde_json::to_string(&stored)
+        .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
+    sheet_map.try_update(txn, CHARTS, charts);
+    Ok(())
 }
 
 fn sync_authored_cell(
@@ -11937,6 +11977,88 @@ mod tests {
             "one undo must consume exactly the one entry, not drain a longer stack"
         );
         let _ = merged;
+    }
+
+    /// One drawing anchor held by two sheets reads as the first sheet's value,
+    /// so a model carries projections of what later sheets store. Moving another
+    /// frame must keep the stored value, or the projection turns into a write.
+    #[test]
+    fn collaborative_chart_move_keeps_a_projected_anchor_out_of_the_store() {
+        let mut shared = sliding_chart("Report");
+        let mut second = shared.charts[0].clone();
+        second.anchor_index = 1;
+        shared.charts.push(second);
+        let mut model = WorkbookModel::default();
+        model.sheets.push(shared.clone());
+        shared.name = "Mirror".to_owned();
+        model.sheets.push(shared);
+        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 71).unwrap();
+        let frozen = authority.structure().unwrap();
+
+        let stored_charts = |authority: &WorkbookAuthority, key: &str| {
+            let txn = authority.doc.transact();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            match sheet.get(&txn, CHARTS) {
+                Some(Out::Any(Any::String(json))) => decode_charts(&json).unwrap(),
+                other => panic!("sheet {key} has no chart state: {other:?}"),
+            }
+        };
+
+        let mut hidden = stored_charts(&authority, "sheet:1");
+        hidden[0].anchor = slid_anchor(3);
+        let peer = Doc::with_client_id(72);
+        hydrate_doc(&peer, &authority.encode_state_as_update_v1()).unwrap();
+        let before = peer.transact().state_vector();
+        {
+            let mut txn = peer.transact_mut_with("test:peer-charts");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:1")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(&mut txn, CHARTS, serde_json::to_string(&hidden).unwrap());
+        }
+        let update = peer.transact().encode_diff_v1(&before);
+        let staged = authority.stage_updates_v1(&[&update], None).unwrap();
+        assert_eq!(staged.structure, frozen);
+        authority
+            .apply_staged_update_v1(&staged.commit_update)
+            .unwrap();
+        let projected = authority.materialize().unwrap();
+        assert_eq!(
+            projected.sheets[1].charts[0].anchor, projected.sheets[0].charts[0].anchor,
+            "the first sheet decides what a shared frame shows"
+        );
+        assert_ne!(projected.sheets[1].charts[0].anchor, slid_anchor(3));
+
+        let frame = projected.sheets[0].charts[1].frame_id();
+        let from = projected.sheets[0].charts[1].anchor;
+        let ops = [SheetId(0), SheetId(1)].map(|sheet| Op::SetChartAnchor {
+            sheet,
+            frame: frame.clone(),
+            part: "xl/charts/chart1.xml".to_owned(),
+            from,
+            to: slid_anchor(5),
+        });
+        let local = authority
+            .stage_local_ops_v1(&ops, SyncOrigin::User, &Stylesheet::default())
+            .unwrap();
+        authority
+            .apply_local_update_v1(&local.update, SyncOrigin::User)
+            .unwrap();
+
+        let stored = stored_charts(&authority, "sheet:1");
+        assert_eq!(stored[0].anchor, slid_anchor(3));
+        assert_eq!(stored[1].anchor, slid_anchor(5));
+        assert_eq!(
+            stored_charts(&authority, "sheet:0")[1].anchor,
+            slid_anchor(5)
+        );
     }
 
     fn tall_sheet(name: &str, rows: u32) -> Sheet {
