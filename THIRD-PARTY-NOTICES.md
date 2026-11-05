@@ -234,3 +234,18 @@ License: MIT. The unmodified upstream licence is included under
 `packages/fonts/LICENSES/MIT-wuff.txt`, in the docx, pptx, xlsx and vsdx packages,
 in each native platform package and in each Python wheel, which link it through
 `betteroffice-fonts`.
+
+---
+
+## mimalloc
+
+The `@betteroffice/docx-native` and `@betteroffice/pptx-native` binaries
+statically link mimalloc 2.3.2 as their memory allocator,
+https://github.com/microsoft/mimalloc, through the `mimalloc` 0.1.52 and
+`libmimalloc-sys` 0.1.49 Rust crates, https://github.com/purpleprotocol/mimalloc_rust.
+
+Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen.
+Copyright 2019 Octavian Oncescu.
+
+License: MIT. Both unmodified upstream licences are included as
+`MIT-mimalloc.txt` in each docx-native and pptx-native platform package.

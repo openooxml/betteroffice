@@ -681,6 +681,13 @@ describe('native package public names', () => {
     }
   });
 
+  test('the mimalloc notice carries both upstream copyrights', () => {
+    const notice = read('bindings/docx-native/npm/linux-x64-gnu/MIT-mimalloc.txt');
+    expect(notice).toContain('Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen');
+    expect(notice).toContain('Copyright 2019 Octavian Oncescu');
+    expect(notice.match(/THE SOFTWARE IS PROVIDED "AS IS"/gi)).toHaveLength(2);
+  });
+
   test('platform packages match the root binary and version', () => {
     for (const path of NATIVE_PACKAGES) {
       const manifest = JSON.parse(read(`${path}/package.json`));
@@ -692,7 +699,11 @@ describe('native package public names', () => {
         const triple = platform.name.replace(`@betteroffice/${format}-native-`, '');
         expect(identity).toBe(triple);
         expect(platform.main).toBe(`${manifest.napi.binaryName}.${triple}.node`);
-        expect(platform.files).toEqual([platform.main, 'BSD-3-Clause-Zstandard.txt', 'MIT-wuff.txt']);
+        const allocator = format === 'xlsx' ? [] : ['MIT-mimalloc.txt'];
+        expect(platform.files).toEqual([platform.main, 'BSD-3-Clause-Zstandard.txt', 'MIT-wuff.txt', ...allocator]);
+        for (const notice of allocator) {
+          expect(read(`${path}/npm/${identity}/${notice}`)).toBe(read('bindings/docx-native/npm/linux-x64-gnu/MIT-mimalloc.txt'));
+        }
         expect(read(`${path}/npm/${identity}/BSD-3-Clause-Zstandard.txt`))
           .toBe(read('crates/betteroffice-fonts/vendor/zstd/LICENSE'));
         expect(read(`${path}/npm/${identity}/MIT-wuff.txt`)).toBe(read('packages/fonts/LICENSES/MIT-wuff.txt'));

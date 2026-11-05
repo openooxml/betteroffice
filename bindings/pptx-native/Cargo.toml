@@ -12,9 +12,12 @@ publish = false
 crate-type = ["cdylib"]
 
 [features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 test-hooks = []
 
 [dependencies]
+mimalloc = { version = "0.1.52", optional = true, default-features = false, features = ["v2", "local_dynamic_tls"] }
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 betteroffice-pptx-engine = { path = "../../crates/pptx-engine" }
 getrandom = "0.3"
